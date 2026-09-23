@@ -4323,10 +4323,10 @@ function _viewTemplate(viewId) {
   <div class="flex items-center justify-between gap-3 mb-2 flex-wrap">
     <div class="flex items-center gap-2">
       <label class="text-xs text-slate-500 uppercase font-bold">Tenant</label>
-      <select id="ldap-tenant-select" onchange="onLDAPTenantChange()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500"><option>Loading…</option></select>
+      <select id="ldap-tenant-select" onchange="onLDAPTenantChange()" title="Select tenant scope for directory objects" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500"><option>Loading…</option></select>
       <span id="ldap-ou-hint" class="text-xs text-slate-400 font-mono"></span>
     </div>
-    ${(isAdmin() || isTenantAdmin()) ? `<button onclick="showLDAPModal(currentSubView)" class="${btn}">+ Add</button>` : ''}
+    ${(isAdmin() || isTenantAdmin()) ? `<button onclick="showLDAPModal(currentSubView)" title="Add new directory entity (user or group)" class="${btn}">+ Add</button>` : ''}
   </div>
   <div id="ldap-status-row" class="flex items-center gap-6 flex-wrap text-xs">
     <div class="flex items-center gap-2">
@@ -4438,21 +4438,21 @@ function _viewTemplate(viewId) {
   <div id="le-status-bar" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500"></div>
   <div class="space-y-2">
     <div class="flex items-center gap-2 flex-nowrap">
-      <button onclick="showLeIssueModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">＋ Issue certificate</button>
-      ${isAdmin() ? `<button onclick="leRenewAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
-      <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>` : ''}
+      <button onclick="showLeIssueModal()" title="Issue a new Let's Encrypt / ACME TLS certificate for a domain" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">＋ Issue certificate</button>
+      ${isAdmin() ? `<button onclick="leRenewAll()" title="Renew all eligible managed certificates nearing expiry" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
+      <button onclick="leDistributeNow()" title="Immediately push all managed certificates to their configured distribution targets" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>` : ''}
       <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned AppBuilder cert check">🔒 mTLS status</button>
       <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200 whitespace-nowrap" title="Manage this tenant's DNS credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-based certificate issuance">🔑 DNS Credentials</button>
     </div>
     <div class="flex items-center gap-4 flex-wrap">
       <label class="flex items-center gap-1 text-xs text-amber-700 cursor-pointer select-none" title="When ON, a wildcard cert (*.domain) is pushed to EVERY connected cert-capable spoke + the hub on each distribution, not just its explicit targets. OFF by default while cert distribution is being tested — flip on once explicit-target distribution is confirmed working.">
-        <input type="checkbox" id="le-wildcard-all-spokes" class="w-4 h-4 rounded" onchange="saveLeWildcardAllSpokes(this.checked)">
+        <input type="checkbox" id="le-wildcard-all-spokes" title="Fan wildcard certificates to all connected spokes" class="w-4 h-4 rounded" onchange="saveLeWildcardAllSpokes(this.checked)">
         Fan wildcard → all spokes
       </label>
       <button onclick="showLeWildcardCoverage()" class="text-xs text-slate-500 hover:text-slate-700 underline decoration-dotted" title="See which spokes would (eligible) and would not (ineligible + why) receive a wildcard cert via fan-out">Coverage</button>
       <label class="flex items-center gap-1 text-xs text-slate-600 select-none" title="How soon the hub retries a FAILED cert distribution to a target. The hub sweeps on this cadence and re-pushes any target whose last push errored (successful targets are skipped). Default 1 hour. Lower = faster retry but more hub→spoke chatter.">
         Retry failed every
-        <input type="number" id="le-distribution-retry-hours" min="1" step="1" value="1" class="w-14 px-1 py-0.5 rounded border border-slate-300 text-xs" onchange="saveLeRetryInterval(this.value)">
+        <input type="number" id="le-distribution-retry-hours" min="1" step="1" value="1" title="Hours between retry attempts for failed distributions" class="w-14 px-1 py-0.5 rounded border border-slate-300 text-xs" onchange="saveLeRetryInterval(this.value)">
         hrs
       </label>
     </div>
@@ -8449,18 +8449,18 @@ function _renderSetupLdapConfigTile(content) {
                 </div>
                 <p class="text-xs text-slate-400 mb-3">The directory <b>server connection</b> the hub pushes to the Directory (LDAP) spoke(s): base DN, the admin bind account, the server URL, and any mirror peers. Saving stores it and pushes <code>UPDATE_CONFIG</code> to every connected directory spoke immediately — these values take precedence over the install-time defaults. <b>Global Admin only.</b> This is the server config, not per-tenant: each tenant is still its own OU under the base DN.</p>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div class="space-y-1"><label class="${labelCls}">Base DN</label><input id="ldapcfg-base-dn" type="text" placeholder="dc=example,dc=org" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
-                    <div class="space-y-1"><label class="${labelCls}">Admin DN</label><input id="ldapcfg-admin-dn" type="text" placeholder="cn=admin,dc=example,dc=org" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
-                    <div class="space-y-1"><label class="${labelCls}">Admin Password <span class="text-slate-400 normal-case font-normal">(blank = keep existing)</span></label><input id="ldapcfg-admin-pw" type="password" placeholder="•••••••• (unset)" autocomplete="new-password" class="${inputCls} font-mono text-xs"></div>
-                    <div class="space-y-1"><label class="${labelCls}">Server URL</label><input id="ldapcfg-server-url" type="text" placeholder="ldap://localhost:389" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
-                    <div class="space-y-1"><label class="${labelCls}">Server ID <span class="text-slate-400 normal-case font-normal">(mirror replication id, optional)</span></label><input id="ldapcfg-server-id" type="text" placeholder="1" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
-                    <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Mirror Peers <span class="text-slate-400 normal-case font-normal">(other node URLs — comma or newline separated; blank for a single node)</span></label><textarea id="ldapcfg-peers" rows="2" placeholder="ldap://ldap-2.example.org:389" class="${inputCls} font-mono text-xs"></textarea></div>
+                    <div class="space-y-1"><label class="${labelCls}">Base DN</label><input id="ldapcfg-base-dn" type="text" placeholder="dc=example,dc=org" autocomplete="off" title="LDAP root search base DN (e.g. dc=example,dc=org)" class="${inputCls} font-mono text-xs"></div>
+                    <div class="space-y-1"><label class="${labelCls}">Admin DN</label><input id="ldapcfg-admin-dn" type="text" placeholder="cn=admin,dc=example,dc=org" autocomplete="off" title="Distinguished Name (DN) of directory administrator bind account" class="${inputCls} font-mono text-xs"></div>
+                    <div class="space-y-1"><label class="${labelCls}">Admin Password <span class="text-slate-400 normal-case font-normal">(blank = keep existing)</span></label><input id="ldapcfg-admin-pw" type="password" placeholder="•••••••• (unset)" autocomplete="new-password" title="Password for administrator bind account (leave blank to keep existing)" class="${inputCls} font-mono text-xs"></div>
+                    <div class="space-y-1"><label class="${labelCls}">Server URL</label><input id="ldapcfg-server-url" type="text" placeholder="ldap://localhost:389" autocomplete="off" title="Directory server LDAP URL and port (e.g. ldap://localhost:389)" class="${inputCls} font-mono text-xs"></div>
+                    <div class="space-y-1"><label class="${labelCls}">Server ID <span class="text-slate-400 normal-case font-normal">(mirror replication id, optional)</span></label><input id="ldapcfg-server-id" type="text" placeholder="1" autocomplete="off" title="Unique mirror server identifier for multi-master replication" class="${inputCls} font-mono text-xs"></div>
+                    <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Mirror Peers <span class="text-slate-400 normal-case font-normal">(other node URLs — comma or newline separated; blank for a single node)</span></label><textarea id="ldapcfg-peers" rows="2" placeholder="ldap://ldap-2.example.org:389" title="List of mirror replication peer URLs (comma or newline separated)" class="${inputCls} font-mono text-xs"></textarea></div>
                 </div>
                 <div class="mt-4 flex items-center justify-between gap-3">
                     <span id="ldapcfg-msg" class="text-xs text-slate-400"></span>
                     <div class="flex items-center gap-2">
-                        <button type="button" onclick="pushLdapConfig()" id="ldapcfg-push-btn" class="${btnSecCls}">Push to spokes now</button>
-                        <button type="button" onclick="saveLdapConfig()" id="ldapcfg-save-btn" class="${btnCls}">Save</button>
+                        <button type="button" onclick="pushLdapConfig()" id="ldapcfg-push-btn" title="Immediately push directory configuration to all connected LDAP spokes" class="${btnSecCls}">Push to spokes now</button>
+                        <button type="button" onclick="saveLdapConfig()" id="ldapcfg-save-btn" title="Save directory server configuration" class="${btnCls}">Save</button>
                     </div>
                 </div>
             </div>`;
@@ -8788,7 +8788,7 @@ function _renderSetupModuleMgmtTile(content) {
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">TrueNAS Appliances ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                    <button onclick="showAddTruenasApplianceModal()" class="${btnCls}">+ Add Appliance</button>
+                    <button onclick="showAddTruenasApplianceModal()" class="${btnCls}" title="Register a new TrueNAS appliance with Lab Manager">+ Add Appliance</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">TrueNAS storage appliances polled over the official WebSocket JSON-RPC client. Each appliance is bound to a tenant + owning storage spoke; the spoke polls on its cycle (pools, datasets, shares, disks, alerts, services, capacity) and warms the hub cache. Use a per-appliance API key (created in TrueNAS → Settings → API Keys); self-signed boxes set Verify SSL off.</p>
                 <div id="truenas-appliances-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
@@ -8797,7 +8797,7 @@ function _renderSetupModuleMgmtTile(content) {
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">TrueNAS — Auto-Poll Default</h3>
                 <p class="text-xs text-slate-400 mb-3">Module-level poll cadence applied to every TrueNAS appliance that inherits it. An appliance's own Auto-Poll Interval always overrides this. The storage spoke polls on this cycle to warm the hub cache.</p>
                 <div class="flex items-center gap-3">
-                    <select id="truenas-module-poll-default" class="bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <select id="truenas-module-poll-default" class="bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Default polling interval applied to all TrueNAS appliances">
                         <option value="">Built-in default (15 minutes)</option>
                         <option value="0">Off (no auto-poll)</option>
                         <option value="60">Every 1 minute</option>
@@ -8808,7 +8808,7 @@ function _renderSetupModuleMgmtTile(content) {
                         <option value="21600">Every 6 hours</option>
                         <option value="86400">Every day</option>
                     </select>
-                    <button onclick="saveTruenasPollConfig(this)" class="${btnCls} ml-auto">Save</button>
+                    <button onclick="saveTruenasPollConfig(this)" class="${btnCls} ml-auto" title="Save TrueNAS default auto-poll cadence">Save</button>
                 </div>
             </div>`;
     loadAllDevices();
@@ -9475,18 +9475,18 @@ function _renderSetupSimulationsTile(content) {
                         <p class="${labelCls} mb-1">Certified globally</p>
                         <div id="global-usb-certified" class="space-y-2 mb-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                         <div class="flex gap-1">
-                            <input id="gusbc-vp" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${inputCls} px-2 py-1">
-                            <input id="gusbc-label" placeholder="label" class="flex-1 text-xs ${inputCls} px-2 py-1">
-                            <select id="gusbc-type" class="text-xs ${inputCls} px-2 py-1"><option>wireless</option><option>wired</option><option>storage</option><option>other</option></select>
-                            <button onclick="addGlobalUsbCert()" class="${btnCls} text-xs px-3 py-1">+ Add</button>
+                            <input id="gusbc-vp" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${inputCls} px-2 py-1" title="Vendor ID and Product ID (e.g. 1a2b:3c4d)">
+                            <input id="gusbc-label" placeholder="label" class="flex-1 text-xs ${inputCls} px-2 py-1" title="Friendly device description label">
+                            <select id="gusbc-type" class="text-xs ${inputCls} px-2 py-1" title="USB device classification type"><option>wireless</option><option>wired</option><option>storage</option><option>other</option></select>
+                            <button onclick="addGlobalUsbCert()" class="${btnCls} text-xs px-3 py-1" title="Add device to global certified USB list">+ Add</button>
                         </div>
                     </div>
                     <div>
                         <p class="${labelCls} mb-1">Ignored globally</p>
                         <div id="global-usb-ignored" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                         <div class="flex gap-1">
-                            <input id="gusbi-vp" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${inputCls} px-2 py-1">
-                            <button onclick="addGlobalUsbIgnore()" class="${btnCls} text-xs px-3 py-1">+ Add</button>
+                            <input id="gusbi-vp" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${inputCls} px-2 py-1" title="Vendor ID and Product ID to ignore">
+                            <button onclick="addGlobalUsbIgnore()" class="${btnCls} text-xs px-3 py-1" title="Add device to global ignored USB list">+ Add</button>
                         </div>
                     </div>
                 </div>
@@ -9506,16 +9506,16 @@ function _renderSetupSimulationsTile(content) {
                         <p class="${labelCls} mb-1">T1 PCI (never torn down)</p>
                         <div id="global-t1-pci" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                         <div class="flex gap-1">
-                            <input id="gt1-vp" placeholder="1912:0015" class="w-28 font-mono text-xs ${inputCls} px-2 py-1">
-                            <button onclick="addGlobalTierPci('t1')" class="${btnCls} text-xs px-3 py-1">+ Add</button>
+                            <input id="gt1-vp" placeholder="1912:0015" class="w-28 font-mono text-xs ${inputCls} px-2 py-1" title="PCI vendor:product ID for T1 base hardware">
+                            <button onclick="addGlobalTierPci('t1')" class="${btnCls} text-xs px-3 py-1" title="Register T1 physical PCI passthrough device">+ Add</button>
                         </div>
                     </div>
                     <div>
                         <p class="${labelCls} mb-1">T3 PCI (never torn down)</p>
                         <div id="global-t3-pci" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                         <div class="flex gap-1">
-                            <input id="gt3-vp" placeholder="168c:0034" class="w-28 font-mono text-xs ${inputCls} px-2 py-1">
-                            <button onclick="addGlobalTierPci('t3')" class="${btnCls} text-xs px-3 py-1">+ Add</button>
+                            <input id="gt3-vp" placeholder="168c:0034" class="w-28 font-mono text-xs ${inputCls} px-2 py-1" title="PCI vendor:product ID for T3 IoT hardware">
+                            <button onclick="addGlobalTierPci('t3')" class="${btnCls} text-xs px-3 py-1" title="Register T3 IoT adapter PCI device">+ Add</button>
                         </div>
                     </div>
                 </div>
@@ -9533,14 +9533,14 @@ function _renderSetupSimulationsTile(content) {
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sim Quota Defaults ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide default templates a tenant inherits unless it overrides per alert/insight + site in Config → Sim Quotas. Site blank = "all sites". The engine (Chunk 2) merges these with each tenant's overrides. Sims come from the full primitive catalog; a tenant's simulation.conf may offer a subset.</p>
                 <div class="flex justify-end flex-wrap gap-2 mb-3">
-                    <button onclick="addSimQuotaDefault()" class="${btnCls} text-xs px-3 py-1">+ Add Default</button>
+                    <button onclick="addSimQuotaDefault()" class="${btnCls} text-xs px-3 py-1" title="Define new platform-wide simulation quota default">+ Add Default</button>
                 </div>
                 <div id="sim-quota-defaults-rows" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
                 <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
                   <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Dongle Quarantine — Exclusion Sims</h3>
-                  <button onclick="saveQtExcludeSims()" class="${btnCls} text-xs px-3 py-1">Save</button>
+                  <button onclick="saveQtExcludeSims()" class="${btnCls} text-xs px-3 py-1" title="Save quarantine exclusion simulations">Save</button>
                 </div>
                 <p class="text-xs text-slate-500 mb-3">Sims whose no-IP / no-SSID outcome is the <b>point</b> of the sim (e.g. <span class="font-mono">dhcp_fail</span>, <span class="font-mono">assoc_fail</span>). A T2 (USB-dongle) client running <b>only</b> these past the 1h grace window is <b>not</b> quarantined. A client running any non-excluded sim (or none) that never connects is shed: its bus is struck + the VM destroyed + re-cloned. Per-tenant override: a tenant's Config → Sim Quotas csc <span class="font-mono">qt_exclude_sims</span> overrides this default.</p>
                 <div id="qt-exclude-sims-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
@@ -18432,7 +18432,7 @@ async function loadOpnsenseManagement() {
     const actions = document.getElementById('top-nav-actions');
     if (actions) {
         if (writable.includes(subMenu) && canEdit()) {
-            actions.innerHTML = `<button onclick="showOpnsenseAddModal('${subMenu}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add ${subMenu.replace(/s$/, '')}</button>`;
+            actions.innerHTML = `<button onclick="showOpnsenseAddModal('${subMenu}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm" title="Create a new ${subMenu.replace(/s$/, '')} on the firewall">+ Add ${subMenu.replace(/s$/, '')}</button>`;
         } else {
             actions.innerHTML = '';
         }
@@ -18578,10 +18578,10 @@ async function loadOpnsenseManagement() {
             const delCell = showDelete ? `
                 <td class="px-4 py-3 text-right">
                     <div class="flex items-center justify-end gap-1">
-                        <button onclick="showOpnsenseEditModal('${item._fwId}','${subMenu}',${idx})" class="p-1 text-slate-400 hover:text-blue-600 transition-colors" title="Edit">
+                        <button onclick="showOpnsenseEditModal('${item._fwId}','${subMenu}',${idx})" class="p-1 text-slate-400 hover:text-blue-600 transition-colors" title="Edit ${subMenu.replace(/s$/, '')}">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
                         </button>
-                        <button onclick="deleteOpnsenseItem('${item._fwId}','${subMenu}','${escJsAttr(rawId)}')" class="p-1 text-slate-400 hover:text-red-600 transition-colors" title="Delete">
+                        <button onclick="deleteOpnsenseItem('${item._fwId}','${subMenu}','${escJsAttr(rawId)}')" class="p-1 text-slate-400 hover:text-red-600 transition-colors" title="Delete ${subMenu.replace(/s$/, '')}">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                         </button>
                     </div>
@@ -18594,15 +18594,15 @@ async function loadOpnsenseManagement() {
         if (subMenu === 'Firewall Rules' && hiddenRules.length > 0) {
             footerHtml = `<div class="pt-3 flex items-center gap-4">
                 <span class="text-xs text-slate-400">${hiddenRules.length} rules manually hidden</span>
-                <button onclick="toggleHiddenFirewallRules()" class="text-xs font-medium text-blue-600 hover:text-blue-800">${showHiddenOnlyFirewallRules ? 'Show All' : 'View Hidden'}</button>
-                <button onclick="unhideAllFirewallRules()" class="text-xs font-medium text-blue-600 hover:text-blue-800">Unhide All</button>
+                <button onclick="toggleHiddenFirewallRules()" class="text-xs font-medium text-blue-600 hover:text-blue-800" title="Toggle visibility of hidden firewall rules">${showHiddenOnlyFirewallRules ? 'Show All' : 'View Hidden'}</button>
+                <button onclick="unhideAllFirewallRules()" class="text-xs font-medium text-blue-600 hover:text-blue-800" title="Reset and unhide all hidden firewall rules">Unhide All</button>
             </div>`;
         }
 
         const moduleKey = subMenu === 'Firewall Rules' ? 'rules' : subMenu === 'NAT Policies' ? 'nat'
             : subMenu === 'DHCP Leases' ? 'dhcp' : subMenu === 'DNS Records' ? 'dns' : 'interfaces';
         const refreshBtn = !isAdmin() ? `<button onclick="refreshModuleCache('${moduleKey}').then(()=>loadOpnsenseManagement())"
-            class="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1" title="Refresh from cache">
+            class="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1" title="Refresh ${subMenu} from firewall cache">
             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
             Refresh</button>` : '';
 
@@ -18932,7 +18932,7 @@ function _renderNwOverview(devices, counts) {
     // Per-category cards → click navigates to that category tab.
     const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'Other'];
     const catCard = c => `
-        <div onclick="setSubView('${c}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-[#01A982] hover:shadow-md transition-all">
+        <div onclick="setSubView('${c}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-[#01A982] hover:shadow-md transition-all" title="Filter network devices by ${c}">
             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">${c}</p>
             <p class="text-3xl font-bold text-[#263040]">${counts[c] || 0}</p>
         </div>`;
@@ -18949,7 +18949,7 @@ function _renderNwOverview(devices, counts) {
             : isDown(it)
                 ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
                 : '<span class="text-slate-400 text-xs">—</span>';
-        return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer">
+        return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer" title="View device details">
             <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${(it.serial || it.mac) ? `<div class="text-[10px] font-mono font-normal text-slate-400 mt-0.5">${it.serial ? 'SN ' + escapeHtml(String(it.serial)) : ''}${(it.serial && it.mac) ? ' · ' : ''}${it.mac ? escapeHtml(String(it.mac)) : ''}</div>` : ''}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(category)}</td>
@@ -19084,9 +19084,9 @@ async function _renderNwScanTab() {
           <div><label class="${lblCls}">Concurrency</label><input type="number" id="nwt-concurrency" min="1" max="128" value="${escapeHtml(String(scan.concurrency || 32))}" class="${inCls}"></div>
         </div>
         <div class="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
-          <button onclick="saveNwTenantScanConfig(this)" class="px-4 py-2 rounded-md bg-[#01A982] text-white text-sm font-bold hover:bg-[#018f6f]">Save config</button>
-          <button onclick="runNwTenantScan(this, true)" class="px-4 py-2 rounded-md bg-slate-100 text-slate-700 text-sm font-bold hover:bg-slate-200">Preview scan</button>
-          <button onclick="runNwTenantScan(this, false)" class="px-4 py-2 rounded-md bg-blue-600 text-white text-sm font-bold hover:bg-blue-700">Scan &amp; add</button>
+          <button onclick="saveNwTenantScanConfig(this)" class="px-4 py-2 rounded-md bg-[#01A982] text-white text-sm font-bold hover:bg-[#018f6f]" title="Save tenant network scan configuration">Save config</button>
+          <button onclick="runNwTenantScan(this, true)" class="px-4 py-2 rounded-md bg-slate-100 text-slate-700 text-sm font-bold hover:bg-slate-200" title="Run discovery scan in preview mode without adding devices to inventory">Preview scan</button>
+          <button onclick="runNwTenantScan(this, false)" class="px-4 py-2 rounded-md bg-blue-600 text-white text-sm font-bold hover:bg-blue-700" title="Execute discovery scan and automatically enroll discovered devices">Scan &amp; add</button>
         </div>
         <div id="nwt-results" class="text-xs mt-3"></div>
       </div>
@@ -19111,7 +19111,7 @@ async function _renderNwScanTab() {
           <div><label class="${lblCls}">Max Concurrent Polls</label><select id="nwt-poll-maxconc" class="${selCls}">${opt([['', 'Inherit global'], ['2', '2'], ['5', '5'], ['10', '10'], ['20', '20'], ['50', '50']], pollVal('max_concurrency'))}</select></div>
         </div>
         <div class="pt-3 mt-3 border-t border-slate-100">
-          <button onclick="saveNwTenantPollSchedule(this)" class="px-4 py-2 rounded-md bg-[#01A982] text-white text-sm font-bold hover:bg-[#018f6f]">Save schedule &amp; cadence</button>
+          <button onclick="saveNwTenantPollSchedule(this)" class="px-4 py-2 rounded-md bg-[#01A982] text-white text-sm font-bold hover:bg-[#018f6f]" title="Save recurring scan schedule and polling cadence">Save schedule &amp; cadence</button>
         </div>
       </div>
     </div>`;
@@ -19293,10 +19293,10 @@ function _renderNwDeviceList(category, devices, counts) {
         // event.stopPropagation() keeps the Poll/Configure buttons from also
         // triggering the row's drill-into-detail click.
         const cfg = (isAdmin() || isTenantAdmin())
-            ? `<button onclick="event.stopPropagation();pollNwDevice('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3">Poll Now</button>` +
-              `<button onclick="event.stopPropagation();showNwConfigModal('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>`
+            ? `<button onclick="event.stopPropagation();pollNwDevice('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3" title="Poll device interfaces and status now">Poll Now</button>` +
+              `<button onclick="event.stopPropagation();showNwConfigModal('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium" title="Configure device connection parameters">Configure</button>`
             : '';
-        return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer">
+        return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer" title="View device details">
             <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${(it.serial || it.mac) ? `<div class="text-[10px] font-mono font-normal text-slate-400 mt-0.5">${it.serial ? 'SN ' + escapeHtml(String(it.serial)) : ''}${(it.serial && it.mac) ? ' · ' : ''}${it.mac ? escapeHtml(String(it.mac)) : ''}</div>` : ''}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(transport)}</td>
@@ -19396,7 +19396,7 @@ async function loadTruenasData(subMenu) {
                         ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">offline</span>'
                         : `<span class="text-slate-400 text-xs">—</span>`;
                 const poll = isAdmin()
-                    ? `<button onclick="pollTruenasAppliance('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3">Poll Now</button>`
+                    ? `<button onclick="pollTruenasAppliance('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3" title="Trigger immediate polling of pools, datasets, and disks">Poll Now</button>`
                     : '';
                 return `<tr class="hover:bg-slate-50 transition-colors">
                     <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}</td>
@@ -19739,7 +19739,7 @@ window.pxmxToggleVmActionMenu = function (evt, uid, isTpl) {
     // applies, mirroring the prior per-row button filtering for templates.
     const specs = PXMX_VM_ACTIONS.filter(s => s.action !== 'destroy' && (!isTpl || s.action === 'backup'));
     menu.innerHTML = specs.map(s =>
-        `<button onclick="event.stopPropagation(); document.getElementById('pxmx-vm-action-menu').classList.add('hidden'); pxmxVmAction('${uid}','${s.action}')" class="w-full text-left px-3 py-1.5 hover:bg-slate-50 font-medium text-slate-700 flex items-center gap-1.5">${s.label}</button>`
+        `<button onclick="event.stopPropagation(); document.getElementById('pxmx-vm-action-menu').classList.add('hidden'); pxmxVmAction('${uid}','${s.action}')" class="w-full text-left px-3 py-1.5 hover:bg-slate-50 font-medium text-slate-700 flex items-center gap-1.5" title="${s.label} virtual machine">${s.label}</button>`
     ).join('');
     const r = evt.currentTarget.getBoundingClientRect();
     menu.style.top = (r.bottom + 4) + 'px';
@@ -19782,7 +19782,7 @@ function pxmxVmTableHtml(vms) {
             if (spec.action === 'destroy' && vm.protected) {
                 return `<button disabled title="Protected from deletion — remove the safeguard in Setup → Hypervisors" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-400 cursor-not-allowed">🔒 Delete</button>`;
             }
-            return `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${spec.action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${spec.cls}">${spec.label}</button>`;
+            return `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${spec.action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${spec.cls}" title="${spec.label} this virtual machine">${spec.label}</button>`;
         };
         const consoleBtn = !canAct ? ''
             : (isLxc || tpl)
@@ -19793,14 +19793,14 @@ function pxmxVmTableHtml(vms) {
         // buttons (delete-protection and console-availability need their own
         // always-visible state, not a menu item you might miss).
         const destroySpec = PXMX_VM_ACTIONS.find(s => s.action === 'destroy');
-        const menuBtn = !canAct ? '' : `<button onclick="event.stopPropagation(); pxmxToggleVmActionMenu(event, '${uid}', ${tpl})" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 hover:bg-slate-200">⋯ Actions ▾</button>`;
+        const menuBtn = !canAct ? '' : `<button onclick="event.stopPropagation(); pxmxToggleVmActionMenu(event, '${uid}', ${tpl})" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 hover:bg-slate-200" title="Open VM actions menu">⋯ Actions ▾</button>`;
         const actions = `<div class="flex flex-wrap gap-1 justify-end">
             ${consoleBtn}
             ${menuBtn}
             ${act(destroySpec)}
         </div>`;
         return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer" data-unique-id="${escapeHtml(vm.unique_id || '')}" onclick="openVmDetail('${uid}')">
-            <td class="px-4 py-2 font-mono text-xs font-bold" onclick="event.stopPropagation()"><input type="checkbox" class="pxmx-vm-sel" value="${escapeHtml(vm.unique_id || '')}"/> ${escapeHtml(vm.vmid)}</td>
+            <td class="px-4 py-2 font-mono text-xs font-bold" onclick="event.stopPropagation()"><input type="checkbox" class="pxmx-vm-sel" value="${escapeHtml(vm.unique_id || '')}" title="Select VM ${escapeHtml(vm.name || vm.vmid)} for bulk operations"/> ${escapeHtml(vm.vmid)}</td>
             <td class="px-4 py-2 text-sm font-medium">${escapeHtml(vm.name || '—')}</td>
             <td class="px-4 py-2 text-slate-500">${escapeHtml(pxmxOs(vm))}</td>
             <td class="px-4 py-2">${pxmxVmStatusBadge(vm)}</td>
@@ -19826,7 +19826,7 @@ function pxmxVmTabsHtml() {
         { numeric: true, sensitivity: 'base' });
     const sortedNodes = nodes.slice().sort((a, b) => _cmp(a.cluster, b.cluster) || _cmp(a.node, b.node));
     const tabBtn = (key, label, count, active) =>
-        `<button onclick="pxmxSelectVmTab('${escJsAttr(key || '')}')" class="px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${active ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}">${escapeHtml(label)} <span class="opacity-60">(${count})</span></button>`;
+        `<button onclick="pxmxSelectVmTab('${escJsAttr(key || '')}')" class="px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${active ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}" title="Filter virtual machines by server ${escapeHtml(label)}">${escapeHtml(label)} <span class="opacity-60">(${count})</span></button>`;
     const countFor = key => allVms.filter(v => pxmxNodeKey(v.cluster, v.node) === key).length;
     return `<div class="flex flex-wrap gap-1.5 mb-3">
         ${tabBtn('', 'All', allVms.length, !activeKey)}
@@ -19846,7 +19846,7 @@ function pxmxVmSectionHtml() {
     const vms = pxmxFilteredVms();
     const countLabel = activeKey ? `${vms.length} on ${escapeHtml((activeKey.split('::')[1] || activeKey))}` : `${vms.length} total`;
     const buildBtn = nodes.length
-        ? `<button onclick="pxmxOpenCreateVm()" class="mb-3 ml-2 px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">＋ Build VM from ISO</button>`
+        ? `<button onclick="pxmxOpenCreateVm()" class="mb-3 ml-2 px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors" title="Create a new virtual machine from an ISO installer">＋ Build VM from ISO</button>`
         : '';
     return `<div class="flex items-center justify-between mb-1 px-1">
             <h3 class="text-base font-semibold text-[#263040]">Virtual Machines &amp; Containers
@@ -19866,7 +19866,7 @@ function pxmxBulkBar() {
     // Render from the shared PXMX_VM_ACTIONS spec so the bulk buttons match the
     // inline per-row buttons exactly (icon, label, color, hover, sizing).
     const btns = PXMX_VM_ACTIONS.map(s =>
-        `<button onclick="pxmxBulkAction('${s.action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${s.cls}">${s.label}</button>`).join('');
+        `<button onclick="pxmxBulkAction('${s.action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${s.cls}" title="Execute ${s.label} on all selected VMs">${s.label}</button>`).join('');
     return `<div class="flex flex-wrap items-center gap-2 mb-3 text-xs">
       <span class="text-slate-400 font-medium mr-1">Bulk (selected):</span>
       ${btns}
@@ -19937,7 +19937,7 @@ function openVmDetail(uniqueId) {
     const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     const uid = escJs(vm.unique_id);
     container.innerHTML = `
-        <button onclick="loadPxmxData('Virtual Machines')" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-[#01A982] font-medium transition-colors">
+        <button onclick="loadPxmxData('Virtual Machines')" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-[#01A982] font-medium transition-colors" title="Return to virtual machines list">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
             Back to VM list
         </button>
@@ -19952,10 +19952,10 @@ function openVmDetail(uniqueId) {
                 · Pool ${vm.pool ? escapeHtml(vm.pool) : '—'}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2 mb-4"${canEdit() ? '' : ' style="display:none"'}>
-            <button onclick="pxmxVmAction('${uid}','start')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-green-600 hover:bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-colors">▶ Start</button>
-            <button onclick="pxmxVmAction('${uid}','stop')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-600 hover:bg-red-700 text-white transition-colors">■ Stop</button>
-            <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors">↺ Restart</button>
-            <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors">📷 Snapshot</button>
+            <button onclick="pxmxVmAction('${uid}','start')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-green-600 hover:bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-colors" title="Power on this virtual machine">▶ Start</button>
+            <button onclick="pxmxVmAction('${uid}','stop')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-600 hover:bg-red-700 text-white transition-colors" title="Gracefully shut down or force-stop this VM">■ Stop</button>
+            <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors" title="Reboot this virtual machine">↺ Restart</button>
+            <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors" title="Take an instantaneous snapshot of this VM">📷 Snapshot</button>
             <button onclick="pxmxVmAction('${uid}','backup')" title="vzdump backup to the storage configured in Setup → Hypervisors" class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white transition-colors">💾 Backup</button>
             <button id="pxmx-backup-hub-btn" onclick="pxmxBackupToHub('${uid}')" title="vzdump this template and store a copy in the hub's Template Repo (Template Repo page). The archive is deleted from the chosen storage after streaming." class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300 transition-colors">⬆ Back up to Hub</button>
             <select id="pxmx-backup-hub-storage" title="vzdump storage target for THIS backup (file-based only — PBS excluded; vzdump-to-PBS isn't a single streamable file). The archive is deleted from here after it streams to the hub." class="px-2 py-1.5 rounded-md text-xs border border-slate-300 bg-white max-w-[12rem]"><option value="">loading storages…</option></select>
@@ -20020,7 +20020,7 @@ async function renderPxmxSettings(container) {
         const uid = escapeHtml(v.unique_id);
         const checked = protectedVms.has(v.unique_id) ? 'checked' : '';
         return `<label class="flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 cursor-pointer">
-            <input type="checkbox" class="pxmx-protect-cb rounded" value="${uid}" ${checked}/>
+            <input type="checkbox" class="pxmx-protect-cb rounded" value="${uid}" ${checked} title="Lock VM to prevent deletion"/>
             <span class="font-medium">${escapeHtml(v.name || '—')}</span>
             <span class="text-slate-400 font-mono">VMID ${escapeHtml(v.vmid)} · ${escapeHtml((v.cluster || '') + '/' + (v.node || ''))}</span>
         </label>`;
@@ -20030,17 +20030,17 @@ async function renderPxmxSettings(container) {
         <div class="hpe-card rounded-lg p-5 shadow-sm">
           <p class="text-sm font-bold text-[#263040] mb-3">Backup (vzdump) ${helpIcon('pxmx', null, 'Hypervisor help')}</p>
           <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div><label class="${lbl}">Default storage</label><select id="hv-backup-storage" class="${inp}">${optList(allStorages, cfg.backup_storage, '— select —')}</select></div>
-            <div><label class="${lbl}">Mode</label><select id="hv-backup-mode" class="${inp}">${modeSel(cfg.backup_mode || 'snapshot', '')}</select></div>
-            <div><label class="${lbl}">Keep last (0 = no prune)</label><input id="hv-backup-keep" type="number" min="0" value="${cfg.backup_keep ?? 3}" class="${inp}"/></div>
+            <div><label class="${lbl}">Default storage</label><select id="hv-backup-storage" class="${inp}" title="Default storage destination for VM backups">${optList(allStorages, cfg.backup_storage, '— select —')}</select></div>
+            <div><label class="${lbl}">Mode</label><select id="hv-backup-mode" class="${inp}" title="Backup mode (snapshot, suspend, or stop)">${modeSel(cfg.backup_mode || 'snapshot', '')}</select></div>
+            <div><label class="${lbl}">Keep last (0 = no prune)</label><input id="hv-backup-keep" type="number" min="0" value="${cfg.backup_keep ?? 3}" class="${inp}" title="Number of backup archives to keep per VM"/></div>
           </div>
           <p class="text-[11px] text-slate-400 mt-2">Snapshot mode = no downtime. Storage list is pulled live from each host; per-host overrides below win over the default.</p>
         </div>
         <div class="hpe-card rounded-lg p-5 shadow-sm">
           <p class="text-sm font-bold text-[#263040] mb-3">Snapshot</p>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div><label class="${lbl}">Keep last</label><input id="hv-snap-keep" type="number" min="0" value="${cfg.snapshot_keep ?? 5}" class="${inp}"/></div>
-            <div><label class="${lbl}">Name prefix</label><input id="hv-snap-prefix" type="text" value="${escapeHtml(cfg.snapshot_prefix || 'lm')}" class="${inp}"/></div>
+            <div><label class="${lbl}">Keep last</label><input id="hv-snap-keep" type="number" min="0" value="${cfg.snapshot_keep ?? 5}" class="${inp}" title="Number of snapshots to retain"/></div>
+            <div><label class="${lbl}">Name prefix</label><input id="hv-snap-prefix" type="text" value="${escapeHtml(cfg.snapshot_prefix || 'lm')}" class="${inp}" title="Prefix string for automated snapshot names"/></div>
           </div>
         </div>
         <div class="hpe-card rounded-lg p-5 shadow-sm">
@@ -20051,9 +20051,9 @@ async function renderPxmxSettings(container) {
           </table></div>
         </div>
         <div class="hpe-card rounded-lg p-5 shadow-sm space-y-3">
-          <label class="flex items-center gap-2 text-sm text-slate-700"><input id="hv-confirm" type="checkbox" ${cfg.confirm_destructive !== false ? 'checked' : ''} class="rounded"/> Confirm before destructive VM actions (stop / restart / reboot)</label>
-          ${isAdmin() ? `<label class="flex items-start gap-2 text-sm text-slate-700"><input id="hv-host-shell" type="checkbox" ${cfg.host_shell_enabled ? 'checked' : ''} class="rounded mt-0.5"/> <span>Enable <b>host terminal</b> (root shell on the Proxmox host via VM Server → Terminal). <span class="text-amber-600">Off by default</span> — a live root shell on this tenant's hypervisor. Global Admin (any host) + Tenant Admin (own tenant). Every session is audited.</span></label>` : ''}
-          ${isAdmin() ? `<label class="flex items-start gap-2 text-sm text-slate-700"><input id="hv-tenant-console" type="checkbox" ${cfg.tenant_console_enabled ? 'checked' : ''} class="rounded mt-0.5"/> <span>Allow <b>Tenant Admins</b> to open VM consoles &amp; lifecycle actions on this hypervisor. <span class="text-amber-600">Off by default</span> — turn on for a hypervisor dedicated to one tenant (or a flat lab) whose VMs aren't tagged or subnet-scoped. On a <b>shared</b> hypervisor leave OFF: tenant admins are then limited to VMs attributable to their tenant by Proxmox tag or subnet. (Enabling host terminal above also grants console.)</span></label>` : ''}
+          <label class="flex items-center gap-2 text-sm text-slate-700"><input id="hv-confirm" type="checkbox" ${cfg.confirm_destructive !== false ? 'checked' : ''} class="rounded" title="Require confirmation for destructive operations"/> Confirm before destructive VM actions (stop / restart / reboot)</label>
+          ${isAdmin() ? `<label class="flex items-start gap-2 text-sm text-slate-700"><input id="hv-host-shell" type="checkbox" ${cfg.host_shell_enabled ? 'checked' : ''} class="rounded mt-0.5" title="Enable root PTY shell on hypervisor host"/> <span>Enable <b>host terminal</b> (root shell on the Proxmox host via VM Server → Terminal). <span class="text-amber-600">Off by default</span> — a live root shell on this tenant's hypervisor. Global Admin (any host) + Tenant Admin (own tenant). Every session is audited.</span></label>` : ''}
+          ${isAdmin() ? `<label class="flex items-start gap-2 text-sm text-slate-700"><input id="hv-tenant-console" type="checkbox" ${cfg.tenant_console_enabled ? 'checked' : ''} class="rounded mt-0.5" title="Allow Tenant Admins to open VM consoles"/> <span>Allow <b>Tenant Admins</b> to open VM consoles &amp; lifecycle actions on this hypervisor. <span class="text-amber-600">Off by default</span> — turn on for a hypervisor dedicated to one tenant (or a flat lab) whose VMs aren't tagged or subnet-scoped. On a <b>shared</b> hypervisor leave OFF: tenant admins are then limited to VMs attributable to their tenant by Proxmox tag or subnet. (Enabling host terminal above also grants console.)</span></label>` : ''}
         </div>
         ${isAdmin() ? `<div class="hpe-card rounded-lg p-5 shadow-sm">
           <p class="text-sm font-bold text-[#263040] mb-1">Delete protection ${helpIcon('pxmx', null, 'Hypervisor help')}</p>
@@ -20061,7 +20061,7 @@ async function renderPxmxSettings(container) {
           <div class="max-h-64 overflow-y-auto border border-slate-200 rounded-md divide-y divide-slate-50">${protectRows}</div>
         </div>` : ''}
         <div class="flex justify-end items-center gap-3">
-          <button onclick="savePxmxSettings()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold">Save</button>
+          <button onclick="savePxmxSettings()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold" title="Save hypervisor backup and console settings">Save</button>
           <span id="pxmx-settings-status" class="text-xs text-slate-400"></span>
         </div>
       </div>`;
@@ -20437,21 +20437,21 @@ async function pxmxCloneVm(uniqueId) {
         <div class="bg-white rounded-lg shadow-xl w-full max-w-md p-5 space-y-4">
             <div class="flex items-center justify-between">
                 <h3 class="text-base font-semibold text-[#263040]">Clone template</h3>
-                <button onclick="document.getElementById('pxmx-clone-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+                <button onclick="document.getElementById('pxmx-clone-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none" title="Close clone dialog">×</button>
             </div>
             <p class="text-xs text-slate-500">Cloning <span class="font-mono">${escapeHtml(vm.name || '')}</span> (VMID ${vm.vmid}, pool ${escapeHtml(vm.pool || '—')}). The new VM is tagged with the current tenant name and starts stopped.</p>
             <label class="block text-xs font-medium text-slate-600">New VM name
-                <input id="pxmx-clone-name" value="${escapeHtml(baseName)}" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" />
+                <input id="pxmx-clone-name" value="${escapeHtml(baseName)}" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" title="Name for the newly cloned virtual machine" />
             </label>
             <label class="block text-xs font-medium text-slate-600">New VMID (optional — blank = auto-assign)
-                <input id="pxmx-clone-vmid" placeholder="auto" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" />
+                <input id="pxmx-clone-vmid" placeholder="auto" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" title="Optional custom VMID (leave blank to auto-assign)" />
             </label>
             <label class="block text-xs font-medium text-slate-600">Destination pool (optional)
-                <select id="pxmx-clone-pool" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm">${poolOpts}</select>
+                <select id="pxmx-clone-pool" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Select target resource pool">${poolOpts}</select>
             </label>
             <div class="flex justify-end gap-2 pt-1">
-                <button onclick="document.getElementById('pxmx-clone-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100">Cancel</button>
-                <button id="pxmx-clone-go" onclick="pxmxCloneVmSubmit('${escJs(vm.unique_id)}')" class="px-4 py-2 rounded-md text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white">⧉ Clone</button>
+                <button onclick="document.getElementById('pxmx-clone-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100" title="Cancel cloning">Cancel</button>
+                <button id="pxmx-clone-go" onclick="pxmxCloneVmSubmit('${escJs(vm.unique_id)}')" class="px-4 py-2 rounded-md text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white" title="Clone template to new VM">⧉ Clone</button>
             </div>
             <p id="pxmx-clone-status" class="text-xs text-slate-400"></p>
         </div>
@@ -20600,38 +20600,38 @@ function pxmxOpenCreateVm() {
         <div class="bg-white rounded-lg shadow-xl w-full max-w-lg p-5 space-y-3">
             <div class="flex items-center justify-between">
                 <h3 class="text-base font-semibold text-[#263040]">Build VM from ISO</h3>
-                <button onclick="document.getElementById('pxmx-create-vm-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+                <button onclick="document.getElementById('pxmx-create-vm-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none" title="Close create VM dialog">×</button>
             </div>
             <p class="text-xs text-slate-500">Define a new qemu VM that boots an installer ISO. The VM is tagged with the current tenant name and starts stopped — boot it from the Console button, install, then Start.</p>
             <div class="grid grid-cols-2 gap-3">
                 <label class="block text-xs font-medium text-slate-600">Node
-                    <select id="pxmx-cv-node" onchange="pxmxLoadNodeMedia()" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm">${nodeOpts}</select>
+                    <select id="pxmx-cv-node" onchange="pxmxLoadNodeMedia()" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Select hypervisor host node">${nodeOpts}</select>
                 </label>
                 <label class="block text-xs font-medium text-slate-600">VM name
-                    <input id="pxmx-cv-name" value="new-vm" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" />
+                    <input id="pxmx-cv-name" value="new-vm" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" title="Virtual machine name" />
                 </label>
                 <label class="block text-xs font-medium text-slate-600 col-span-2">Installer ISO
-                    <select id="pxmx-cv-iso" disabled class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm"><option value="">Loading ISOs…</option></select>
+                    <select id="pxmx-cv-iso" disabled class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Select installer ISO image"><option value="">Loading ISOs…</option></select>
                 </label>
                 <label class="block text-xs font-medium text-slate-600">Disk storage
-                    <select id="pxmx-cv-storage" disabled class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm"><option value="">Loading…</option></select>
+                    <select id="pxmx-cv-storage" disabled class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Target storage pool for root disk"><option value="">Loading…</option></select>
                 </label>
                 <label class="block text-xs font-medium text-slate-600">Disk size (GB)
-                    <input id="pxmx-cv-disk" type="number" min="1" value="32" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" />
+                    <input id="pxmx-cv-disk" type="number" min="1" value="32" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Root disk size in gigabytes" />
                 </label>
                 <label class="block text-xs font-medium text-slate-600">Memory (MB)
-                    <input id="pxmx-cv-mem" type="number" min="128" value="2048" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" />
+                    <input id="pxmx-cv-mem" type="number" min="128" value="2048" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Memory allocation in megabytes" />
                 </label>
                 <label class="block text-xs font-medium text-slate-600">CPU cores
-                    <input id="pxmx-cv-cores" type="number" min="1" value="2" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" />
+                    <input id="pxmx-cv-cores" type="number" min="1" value="2" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Virtual CPU core count" />
                 </label>
                 <label class="block text-xs font-medium text-slate-600 col-span-2">Destination pool (optional)
-                    <select id="pxmx-cv-pool" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm"><option value="">— no pool —</option></select>
+                    <select id="pxmx-cv-pool" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Optional resource pool assignment"><option value="">— no pool —</option></select>
                 </label>
             </div>
             <div class="flex justify-end gap-2 pt-1">
-                <button onclick="document.getElementById('pxmx-create-vm-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100">Cancel</button>
-                <button id="pxmx-cv-go" onclick="pxmxCreateVmSubmit()" class="px-4 py-2 rounded-md text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white">＋ Create VM</button>
+                <button onclick="document.getElementById('pxmx-create-vm-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100" title="Cancel VM creation">Cancel</button>
+                <button id="pxmx-cv-go" onclick="pxmxCreateVmSubmit()" class="px-4 py-2 rounded-md text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white" title="Provision new virtual machine">＋ Create VM</button>
             </div>
             <p id="pxmx-cv-status" class="text-xs text-slate-400"></p>
         </div>
@@ -21637,7 +21637,6 @@ function serialEnsureConsoleDock() {
                     <strong class="text-sm text-slate-200">Serial Consoles</strong>
                     <div class="flex items-center gap-2">
                         <button id="serial-console-refresh" title="Refresh the list of available consoles" class="text-slate-400 hover:text-sky-400 text-sm leading-none">⟳</button>
-                        <button id="serial-console-closeall" title="Close all open consoles" class="text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
                     </div>
                 </div>
                 <input id="serial-console-search" type="text" placeholder="Search consoles…"
@@ -21659,6 +21658,7 @@ function serialEnsureConsoleDock() {
                 <button id="serial-console-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
                 <button id="serial-console-reconnect" title="Reconnect this console — resumes on the same terminal, keeping its scrollback" class="px-2 py-0.5 text-xs rounded border border-green-500 text-green-400 hover:bg-green-900/40 hidden">⟳ Reconnect</button>
                 <span id="serial-console-status" class="ml-auto text-xs text-amber-400"></span>
+                <button id="serial-console-closeall" title="Close all open consoles" class="text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
             </div>
             <div id="serial-console-bodies" class="relative flex-1 min-h-0 flex bg-[#1e1e1e] overflow-hidden"></div>
             <div id="serial-broadcast-bar" class="hidden shrink-0 flex items-center gap-2 px-3 py-1.5 bg-[#2d2d2d] border-t border-slate-700">
@@ -23498,7 +23498,7 @@ async function renderPxmxDiagnostics(container) {
                     <div>
                         <span class="font-bold">Failed to load Drive Diagnostics:</span> ${escapeHtml(err.message || String(err))}
                     </div>
-                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium">↻ Retry</button>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium" title="Retry fetching drive diagnostics">↻ Retry</button>
                 </div>
             </div>`;
         return;
@@ -23564,7 +23564,7 @@ async function renderPxmxDiagnostics(container) {
                 <p class="text-xs text-slate-500 mt-1">Storage device telemetry and SSD wear level diagnostics across hypervisor nodes</p>
             </div>
             <div>
-                <button onclick="loadPxmxData('Diagnostics')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all">
+                <button onclick="loadPxmxData('Diagnostics')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Query SMART telemetry and SSD wear level diagnostics across all nodes">
                     ↻ Run Diagnostics / Refresh
                 </button>
             </div>
@@ -23598,7 +23598,7 @@ async function renderPxmxDiagnostics(container) {
                 <div class="bg-amber-50 border border-amber-200 rounded-lg p-6 text-center">
                     <div class="text-amber-800 font-semibold mb-1">No Hypervisor Spoke Connected</div>
                     <p class="text-xs text-amber-700 mb-4">No connected hypervisor spoke was found for the current tenant. Connect a Proxmox spoke to view drive diagnostics.</p>
-                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 font-medium">↻ Retry Connection</button>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 font-medium" title="Retry connecting to hypervisor spoke">↻ Retry Connection</button>
                 </div>
             </div>`;
         return;
@@ -23817,7 +23817,7 @@ async function loadPxmxData(subMenu) {    const container = document.getElementB
                 if (nodes.length === 0 && vms.length === 0) {
                     container.innerHTML = `<div class="py-10 text-center space-y-3">
                         <p class="text-slate-400 italic text-sm">No Proxmox agents connected.</p>
-                        ${isAdmin() ? `<button onclick="showPxmxInstallModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Show Install Command</button>` : ''}
+                        ${isAdmin() ? `<button onclick="showPxmxInstallModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Show bash installation command for Proxmox host agent">Show Install Command</button>` : ''}
                     </div>`;
                     return;
                 }
@@ -23909,7 +23909,7 @@ async function showPxmxInstallModal() {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-[#263040]">Install Proxmox Agent</h3>
-                <button onclick="document.getElementById('pxmx-install-modal').remove()" class="text-slate-400 hover:text-slate-600"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="document.getElementById('pxmx-install-modal').remove()" class="text-slate-400 hover:text-slate-600" title="Close install modal"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-3">
                 <p class="text-sm text-slate-600">Run this on each Proxmox host as <strong>root</strong>:</p>
@@ -23917,8 +23917,8 @@ async function showPxmxInstallModal() {
                 <p class="text-xs text-slate-400">The <code>--id</code> flag uses <code>$(hostname)</code> — replace it with a unique name if running on multiple nodes.</p>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-                <button onclick="navigator.clipboard.writeText(document.getElementById('pxmx-install-cmd').innerText)" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 border border-slate-300 rounded-md">Copy</button>
-                <button onclick="document.getElementById('pxmx-install-modal').remove()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Done</button>
+                <button onclick="navigator.clipboard.writeText(document.getElementById('pxmx-install-cmd').innerText)" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 border border-slate-300 rounded-md" title="Copy agent install script command to clipboard">Copy</button>
+                <button onclick="document.getElementById('pxmx-install-modal').remove()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Dismiss install dialog">Done</button>
             </div>
         </div>`;
     _mountModal(modal);
@@ -23942,16 +23942,16 @@ async function loadNetboxData(subMenu) {
             // already has (RFC1918 free-space scan) and assigns the pick. The
             // manual "+ Add" (carve-from-parent) flow stays alongside it.
             const findBtn = subMenu === 'Prefixes'
-                ? `<button onclick="showFindSubnetModal()" class="bg-white border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2">Add Prefix</button>`
+                ? `<button onclick="showFindSubnetModal()" class="bg-white border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2" title="Scan for and allocate the next available contiguous subnet">Add Prefix</button>`
                 : '';
             // Admin-only Excel rack-layout importer (Setup → Module Management
             // gating is mirrored here: only admins see the button; the hub
             // routes are admin-gated too — defense in depth).
             const importBtn = (subMenu === 'Racks' && isAdmin())
-                ? `<button onclick="showRackImportModal()" class="bg-white border border-indigo-500 text-indigo-600 hover:bg-indigo-500 hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2">Import .xlsx</button>`
+                ? `<button onclick="showRackImportModal()" class="bg-white border border-indigo-500 text-indigo-600 hover:bg-indigo-500 hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2" title="Import rack elevation layout from an Excel spreadsheet">Import .xlsx</button>`
                 : '';
             actions.innerHTML = canEdit()
-                ? `${importBtn}${findBtn}<button onclick="showNetboxAddModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add</button>`
+                ? `${importBtn}${findBtn}<button onclick="showNetboxAddModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm" title="Add a new item to NetBox">+ Add</button>`
                 : importBtn;
         } else if (subMenu === 'Overview' && isAdmin()) {
             // Admin-only maintenance: recover data orphaned by a NetBox tenant rename.
@@ -24245,7 +24245,7 @@ async function showCPPMDeviceDetail(mac) {
     const modal = openModal('cppm-device-modal', `
         <div class="flex justify-between items-start">
             <p class="font-mono text-base font-bold text-[#263040]">${mac}</p>
-            <button class="cppm-modal-close text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+            <button class="cppm-modal-close text-slate-400 hover:text-slate-600 text-xl leading-none" title="Close modal">&times;</button>
         </div>
         <div class="cppm-modal-body"><p class="text-xs text-slate-400 italic">Loading…</p></div>`, { card: 'w-full max-w-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
     modal.querySelector('.cppm-modal-close').addEventListener('click', () => modal.remove());
@@ -24323,7 +24323,7 @@ async function showCPPMDeviceDetail(mac) {
             </div>
             ${isUntagged ? `<div class="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between">
                 <p class="text-xs text-slate-400">Not assigned to any tenant - claim this device to your tenant.</p>
-                <button onclick="showClaimDeviceModal('${encodeURIComponent(mac)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shrink-0">Claim Device</button>
+                <button onclick="showClaimDeviceModal('${encodeURIComponent(mac)}')" title="Claim this unassigned device into NetBox IPAM" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shrink-0">Claim Device</button>
             </div>` : ''}`;
     } catch (e) {
         body.innerHTML = `<p class="text-xs text-red-400 italic">Error: ${e.message}</p>`;
@@ -24361,17 +24361,17 @@ async function showClaimDeviceModal(mac) {
             <div><span class="text-slate-400">Vendor/OS:</span> <span class="text-slate-700">${esc([dev.device_vendor, dev.device_os].filter(Boolean).join(' / ') || '—')}</span></div>
         </div>
         <div class="grid grid-cols-2 gap-3">
-            <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Device Name</label><input id="cl-name" value="${esc(nameDefault)}" class="${inputCls}" placeholder="router-01"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site <span class="text-red-400">*</span></label><select id="cl-site" class="${selCls}"><option value="">Select site…</option>${opt(opts.sites, '', o => o.name)}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Tenant <span class="text-red-400">*</span></label><select id="cl-tenant" class="${selCls}" ${tenantLocked ? 'disabled' : ''}><option value="">Select tenant…</option>${opt(opts.tenants, preTenant, o => o.name)}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Device Type <span class="text-red-400">*</span></label><select id="cl-type" class="${selCls}"><option value="">Select type…</option>${opt(opts.device_types, '', o => `${o.model}${o.manufacturer ? ' (' + o.manufacturer + ')' : ''}`)}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Role</label><select id="cl-role" class="${selCls}"><option value="">Select role…</option>${opt(opts.device_roles, '', o => o.name)}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="cl-status" class="${selCls}"><option value="active">active</option><option value="planned">planned</option><option value="offline">offline</option><option value="failed">failed</option><option value="inventory">inventory</option></select></div>
-            <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description</label><input id="cl-desc" class="${inputCls}" placeholder="optional"></div>
+            <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Device Name</label><input id="cl-name" value="${esc(nameDefault)}" class="${inputCls}" placeholder="router-01" title="Device name in NetBox"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site <span class="text-red-400">*</span></label><select id="cl-site" class="${selCls}" title="NetBox site to assign device to"><option value="">Select site…</option>${opt(opts.sites, '', o => o.name)}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Tenant <span class="text-red-400">*</span></label><select id="cl-tenant" class="${selCls}" ${tenantLocked ? 'disabled' : ''} title="Tenant that owns this device"><option value="">Select tenant…</option>${opt(opts.tenants, preTenant, o => o.name)}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Device Type <span class="text-red-400">*</span></label><select id="cl-type" class="${selCls}" title="Hardware model and manufacturer"><option value="">Select type…</option>${opt(opts.device_types, '', o => `${o.model}${o.manufacturer ? ' (' + o.manufacturer + ')' : ''}`)}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Role</label><select id="cl-role" class="${selCls}" title="Functional role in the network"><option value="">Select role…</option>${opt(opts.device_roles, '', o => o.name)}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="cl-status" class="${selCls}" title="Operational status in NetBox"><option value="active">active</option><option value="planned">planned</option><option value="offline">offline</option><option value="failed">failed</option><option value="inventory">inventory</option></select></div>
+            <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description</label><input id="cl-desc" class="${inputCls}" placeholder="optional" title="Optional description or notes"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button id="cl-submit" onclick="submitClaimDevice('${encodeURIComponent(mac)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Claim Device</button>
-            <button onclick="document.getElementById('nb-claim-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button id="cl-submit" onclick="submitClaimDevice('${encodeURIComponent(mac)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="Provision device into NetBox and tag endpoint">Claim Device</button>
+            <button onclick="document.getElementById('nb-claim-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel device claim">Cancel</button>
         </div>`, { backdropClose: true });
 }
 
@@ -24441,8 +24441,8 @@ function showNetboxAddDeviceModal(editItem, prefill) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-d-status" class="${inputCls}"><option value="active">active</option><option value="planned">planned</option><option value="offline">offline</option><option value="failed">failed</option><option value="inventory">inventory</option></select></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxAddDevice()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Device'}</button>
-            <button onclick="document.getElementById('nb-device-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="submitNetboxAddDevice()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to device' : 'Register new device in NetBox'}">${editing ? 'Save Changes' : 'Add Device'}</button>
+            <button onclick="document.getElementById('nb-device-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-lg p-6 space-y-4' });
     if (editing) modal.dataset.deviceId = editItem.id;
     if (editing && editItem.status) {
@@ -24564,8 +24564,8 @@ async function showNetboxRackModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Facility ID (optional)</label><input id="nb-r-facility" value="${val(editItem?.facility_id)}" class="${inputCls}" placeholder="A1"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxRack()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Rack'}</button>
-            <button onclick="document.getElementById('nb-rack-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="submitNetboxRack()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to rack' : 'Add new rack to NetBox'}">${editing ? 'Save Changes' : 'Add Rack'}</button>
+            <button onclick="document.getElementById('nb-rack-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) modal.dataset.rackId = editItem.id;
 }
@@ -24677,14 +24677,14 @@ async function showNetboxAllocatePrefixModal(editItem) {
                     ${commonOptionFields}
                 </div>
                 <div>
-                    <button type="button" onclick="document.getElementById('nb-p-advanced').classList.toggle('hidden'); this.textContent = this.textContent.startsWith('Show') ? 'Hide advanced options' : 'Show advanced options ▾'" class="text-xs font-bold text-[#01A982] hover:underline">Show advanced options ▾</button>
+                    <button type="button" onclick="document.getElementById('nb-p-advanced').classList.toggle('hidden'); this.textContent = this.textContent.startsWith('Show') ? 'Hide advanced options' : 'Show advanced options ▾'" class="text-xs font-bold text-[#01A982] hover:underline" title="Toggle visibility of advanced DHCP options (NTP, TFTP, Bootfile, NetBIOS, Broadcast)">Show advanced options ▾</button>
                 </div>
                 <div id="nb-p-advanced" class="hidden grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 pt-1">${advancedOptionFields}</div>
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxAllocatePrefix()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
-            <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="submitNetboxAllocatePrefix()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to prefix' : 'Allocate subnet prefix in NetBox'}">${editing ? 'Save Changes' : 'Allocate'}</button>
+            <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-4xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     if (editing) modal.dataset.prefixId = editItem.id;
 
@@ -25009,8 +25009,8 @@ function showNetboxAllocateIPModal(prefixHint, editItem) {
             ${editing ? `<div class="space-y-1 col-span-1 md:col-span-2"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-ip-status" class="${inputCls}">${statusOpts}</select></div>` : ''}
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxAllocateIP()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
-            <button onclick="document.getElementById('nb-ip-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="submitNetboxAllocateIP()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to IP address' : 'Allocate next available IP address in subnet'}">${editing ? 'Save Changes' : 'Allocate'}</button>
+            <button onclick="document.getElementById('nb-ip-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     if (editing) modal.dataset.ipId = editItem.id;
 }
@@ -25871,10 +25871,10 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
     // actually worked for this module.
     if (navActions) {
         const addRecordBtn = ((subMenu === 'Records') && (isAdmin() || isTenantAdmin()))
-            ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
+            ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" title="Add a new DNS record" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
             : '';
         const addForwarderBtn = (subMenu === 'Forwarders' && isAdmin())
-            ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Forwarder</button>`
+            ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" title="Add a new persistent upstream DNS forwarder" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Forwarder</button>`
             : '';
         navActions.innerHTML = addRecordBtn + addForwarderBtn;
     }
@@ -25982,9 +25982,9 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     <div class="flex items-center justify-between mb-2 gap-3">
                         <div class="text-sm font-semibold text-slate-700">Queries by Destination</div>
                         <div class="flex gap-2">
-                            <input id="dns-query-name-search" type="search" placeholder="Search domain"
+                            <input id="dns-query-name-search" type="search" placeholder="Search domain" title="Filter query log by domain or prefix"
                                    class="text-xs border border-slate-300 rounded-md px-2 py-1 w-56 focus:outline-none focus:ring-1 focus:ring-blue-400" />
-                            <input id="dns-query-host-search" type="search" placeholder="Search host/IP"
+                            <input id="dns-query-host-search" type="search" placeholder="Search host/IP" title="Filter query log by client host or IP"
                                    class="text-xs border border-slate-300 rounded-md px-2 py-1 w-56 focus:outline-none focus:ring-1 focus:ring-blue-400" />
                         </div>
                     </div>
@@ -26096,14 +26096,23 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 container.innerHTML = _spokeErrorBanner(d.message, 'unbound-control forwarders unavailable'); return;
             }
             const fwds = d.forwarders || [];
+            window._dnsForwarders = fwds;
             const showMember = fwds.some(f => f.member_id);
-            const cols = (showMember ? ['Member'] : []).concat(['Zone', 'Class', 'Upstream Servers']);
-            const rows = fwds.map(f => `<tr class="border-b border-slate-100 hover:bg-slate-50">
+            const cols = (showMember ? ['Member'] : []).concat(['Zone', 'Class', 'Upstream Servers', '']);
+            const rows = fwds.map(f => {
+                const zoneVal = f.zone || '.';
+                const eZone = String(zoneVal).replace(/'/g, "\\'");
+                return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                 ${showMember ? `<td class="px-4 py-2 font-mono text-xs">${escapeHtml(f.member_id || '—')}</td>` : ''}
-                <td class="px-4 py-2 font-mono font-medium">${escapeHtml(f.zone || '.')}</td>
+                <td class="px-4 py-2 font-mono font-medium">${escapeHtml(zoneVal)}</td>
                 <td class="px-4 py-2 text-xs">${escapeHtml(f.class || 'IN')}</td>
                 <td class="px-4 py-2 font-mono text-xs">${(f.upstreams || []).map(u => escapeHtml(u)).join(', ') || '—'}</td>
-            </tr>`).join('');
+                <td class="px-4 py-2 whitespace-nowrap text-right">
+                    <button onclick="editDnsForwarder('${eZone}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
+                    <button onclick="deleteDnsForwarder('${eZone}')" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                </td>
+            </tr>`;
+            }).join('');
             // The cluster fanout (dns_spoke.py's _cluster_forwarders) reports a
             // SUCCESS status + whatever it *could* collect even when one or
             // more members failed to answer — a member drop mid-fanout would
@@ -26680,7 +26689,7 @@ async function showLeWildcardCoverage() {
       <div class="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[85vh] overflow-y-auto">
         <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100">
           <h3 class="text-sm font-bold text-slate-700">Wildcard fan-out coverage</h3>
-          <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+          <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
         </div>
         <div class="p-5 space-y-5">
           <p class="text-xs text-slate-500">Fan-out is currently <b class="${d.enabled ? 'text-green-600' : 'text-slate-500'}">${d.enabled ? 'ENABLED' : 'OFF'}</b>. A wildcard cert (<code>*.domain</code>) is pushed to every <b>connected, cert-capable</b> spoke below (plus the hub). Ineligible spokes are skipped — connect them or note that their module type can't host a cert.</p>
@@ -26915,7 +26924,7 @@ async function showLeTargetsModal(domain) {
             <td class="px-3 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}">${t.last_status || 'pending'}</span></td>
             <td class="px-3 py-2 text-xs text-slate-500">${(t.last_pushed_at || '—').slice(0, 19).replace('T', ' ')}</td>
             <td class="px-3 py-2 text-xs text-slate-500">${t.last_message ? `<span title="${escapeHtml(t.last_message)}">${escapeHtml(t.last_message)}</span>` : ''}</td>
-            <td class="px-3 py-2">${canEdit ? `<button onclick="removeLeTarget('${esc(domain)}', ${i})" class="text-xs text-red-600 hover:text-red-700 font-medium">remove</button>` : ''}</td>
+            <td class="px-3 py-2">${canEdit ? `<button onclick="removeLeTarget('${esc(domain)}', ${i})" title="Remove this distribution target" class="text-xs text-red-600 hover:text-red-700 font-medium">remove</button>` : ''}</td>
         </tr>`;
     };
     const mtOpts = leModuleOptions();
@@ -26927,17 +26936,17 @@ async function showLeTargetsModal(domain) {
     const addBlock = canEdit ? `<div class="flex flex-wrap items-end gap-2 border-t border-slate-200 pt-4">
             <div class="flex flex-col">
                 <label class="text-xs text-slate-500 mb-1">Module type</label>
-                <select id="le-tgt-mt" onchange="leTgtMtChange('le-tgt-mt','le-tgt-id')" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${mtOpts}</select>
+                <select id="le-tgt-mt" onchange="leTgtMtChange('le-tgt-mt','le-tgt-id')" title="Select target module type" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${mtOpts}</select>
             </div>
             <div class="flex flex-col flex-1 min-w-[180px]">
                 <label class="text-xs text-slate-500 mb-1">Device</label>
-                <select id="le-tgt-id" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></select>
+                <select id="le-tgt-id" title="Select target device or node identifier" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></select>
             </div>
-            <button onclick="addLeTarget('${esc(domain)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add target</button>
+            <button onclick="addLeTarget('${esc(domain)}')" title="Add distribution target for this certificate" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add target</button>
             <button onclick="leDistributeCert('${esc(domain)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold" title="Deploy this certificate to all of its targets">Distribute now</button>
-            <button onclick="document.getElementById('le-targets-modal').remove()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
+            <button onclick="document.getElementById('le-targets-modal').remove()" title="Close dialog" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
         </div>` : `<div class="flex border-t border-slate-200 pt-4">
-            <button onclick="document.getElementById('le-targets-modal').remove()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
+            <button onclick="document.getElementById('le-targets-modal').remove()" title="Close dialog" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
         </div>`;
     const modal = openModal('le-targets-modal', `
         <h3 class="text-lg font-bold mb-1">Distribution targets — <span class="font-mono">${esc(domain)}</span></h3>
@@ -27002,10 +27011,10 @@ async function _leRenderTenantsSection(domain, cert, canEdit) {
         <div class="flex flex-wrap items-end gap-2 mt-2">
             <div class="flex flex-col flex-1 min-w-[180px]">
                 <label class="text-xs text-slate-500 mb-1">Add a tenant (or the shared tenant to share)</label>
-                <select id="le-tenant-add" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">— select —</option>${opts}</select>
+                <select id="le-tenant-add" title="Select tenant to grant certificate ownership or sharing" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">— select —</option>${opts}</select>
             </div>
-            <button onclick="_leAddTenantChip()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-3 py-2 rounded-md text-sm font-medium">Add</button>
-            <button onclick="_leSaveTenants()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save tenants</button>
+            <button onclick="_leAddTenantChip()" title="Add selected tenant to owners" class="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-3 py-2 rounded-md text-sm font-medium">Add</button>
+            <button onclick="_leSaveTenants()" title="Save tenant ownership list" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save tenants</button>
         </div>`);
 }
 
@@ -27144,7 +27153,7 @@ function _leRenderDeviceTable(d) {
         const did = String(v.device_id || v.name || '');
         const capable = v.cert_capable === true || String(v.object_type || '').toLowerCase() === 'cx_switch';
         const action = capable
-            ? `<button onclick="leDeployDevice('${escJsAttr(domain)}','${escJsAttr(did)}','${escJsAttr(mt)}','${escJsAttr(ident)}',this)" class="text-sm text-[#01A982] hover:underline font-bold">Deploy</button>`
+            ? `<button onclick="leDeployDevice('${escJsAttr(domain)}','${escJsAttr(did)}','${escJsAttr(mt)}','${escJsAttr(ident)}',this)" title="Deploy certificate directly to this network device" class="text-sm text-[#01A982] hover:underline font-bold">Deploy</button>`
             : `<span class="text-xs text-slate-400" title="${escapeHtml(v.message || 'cert install not supported for this device type')}">unsupported</span>`;
         return `<tr class="border-b border-slate-100">
             <td class="px-3 py-1.5 text-sm font-mono text-slate-700">${escapeHtml(v.name || did || '—')}</td>
@@ -27487,19 +27496,19 @@ async function showLeIssueModal(prefill) {
             <div class="grid grid-cols-2 gap-3">
                 <div class="flex flex-col">
                     <label class="text-xs text-slate-500 mb-1">Domain <span class="text-red-500">*</span></label>
-                    <input id="le-issue-domain" type="text" list="le-issue-domain-list" placeholder="pick or type a domain" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                    <input id="le-issue-domain" type="text" list="le-issue-domain-list" placeholder="pick or type a domain" title="Target domain or FQDN to issue certificate for (e.g. example.com or *.example.com)" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
                     <datalist id="le-issue-domain-list"></datalist>
                     <p class="text-[11px] text-slate-400 mt-1">Your DNS entries (from DNS + firewalls). A cert only shows on your Certificates page if its domain resolves into your subnet.</p>
                 </div>
                 <div class="flex flex-col">
                     <label class="text-xs text-slate-500 mb-1">ACME account email <span class="text-red-500">*</span></label>
-                    <input id="le-issue-email" type="email" placeholder="admin@example.com" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                    <input id="le-issue-email" type="email" placeholder="admin@example.com" title="ACME account contact email address for renewal notices" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
                 </div>
             </div>
             <div class="grid grid-cols-2 gap-3">
                 <div class="flex flex-col">
                     <label class="text-xs text-slate-500 mb-1">Challenge type</label>
-                    <select id="le-issue-challenge" onchange="leIssueToggleChallenge()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <select id="le-issue-challenge" onchange="leIssueToggleChallenge()" title="Select ACME challenge validation type" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         <option value="http">HTTP-01 (standalone)</option>
                         <option value="http-webroot">HTTP-01 (webroot)</option>
                         <option value="dns">DNS</option>
@@ -27508,7 +27517,7 @@ async function showLeIssueModal(prefill) {
                 </div>
                 <div class="flex flex-col">
                     <label class="text-xs text-slate-500 mb-1">Key type</label>
-                    <select id="le-issue-keytype" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <select id="le-issue-keytype" title="Select cryptographic key type" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         <option value="rsa">RSA</option>
                         <option value="ecdsa">ECDSA</option>
                     </select>
@@ -27516,18 +27525,18 @@ async function showLeIssueModal(prefill) {
             </div>
             <div id="le-issue-webroot-row" class="flex flex-col hidden">
                 <label class="text-xs text-slate-500 mb-1">Webroot path</label>
-                <input id="le-issue-webroot" type="text" placeholder="/var/www/html" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                <input id="le-issue-webroot" type="text" placeholder="/var/www/html" title="Path to webroot directory for HTTP-01 challenge" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
             </div>
             <div id="le-issue-dns-cred-row" class="flex flex-col hidden">
                 <label class="text-xs text-slate-500 mb-1">Saved DNS credential</label>
-                <select id="le-issue-dns-credential" onchange="leIssueToggleSavedCred()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                <select id="le-issue-dns-credential" onchange="leIssueToggleSavedCred()" title="Select saved tenant DNS credential" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     <option value="">— enter manually below —</option>
                 </select>
                 <p class="text-[11px] text-slate-400 mt-1">Pick one of your tenant's saved credentials (manage via 🔑 DNS Credentials), or enter one manually below.</p>
             </div>
             <div id="le-issue-dns-provider-row" class="flex flex-col hidden">
                 <label class="text-xs text-slate-500 mb-1">DNS provider</label>
-                <select id="le-issue-dns-provider" onchange="leIssueUpdateDnsFields()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${dnsOpts}</select>
+                <select id="le-issue-dns-provider" onchange="leIssueUpdateDnsFields()" title="Select DNS provider plugin" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${dnsOpts}</select>
             </div>
             <div id="le-issue-dns-creds-row" class="flex flex-col hidden">
                 <label class="text-xs text-slate-500 mb-1">DNS credentials <span class="text-slate-400">(written to /etc/lm-le/dns-&lt;provider&gt;.ini at 0600)</span></label>
@@ -27538,11 +27547,11 @@ async function showLeIssueModal(prefill) {
                     <div class="grid grid-cols-2 gap-3">
                         <div class="flex flex-col">
                             <label class="text-[11px] text-slate-500 mb-0.5">Key name <span class="text-red-500">*</span></label>
-                            <input id="le-issue-dns-keyname" type="text" placeholder="YOUR_KEY_NAME" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
+                            <input id="le-issue-dns-keyname" type="text" placeholder="YOUR_KEY_NAME" title="TSIG key name" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
                         </div>
                         <div class="flex flex-col">
                             <label class="text-[11px] text-slate-500 mb-0.5">Key secret <span class="text-red-500">*</span></label>
-                            <input id="le-issue-dns-keysecret" type="password" placeholder="YOUR_TSIG_SECRET" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
+                            <input id="le-issue-dns-keysecret" type="password" placeholder="YOUR_TSIG_SECRET" title="TSIG key secret" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
                         </div>
                     </div>
                     <details class="text-xs">
@@ -27550,15 +27559,15 @@ async function showLeIssueModal(prefill) {
                         <div class="grid grid-cols-3 gap-2 mt-2">
                             <div class="flex flex-col">
                                 <label class="text-[11px] text-slate-400 mb-0.5">Server</label>
-                                <input id="le-issue-dns-server" type="text" placeholder="216.218.130.2 (IP, not a hostname)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
+                                <input id="le-issue-dns-server" type="text" placeholder="216.218.130.2 (IP, not a hostname)" title="Primary authoritative DNS server IP address" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
                             </div>
                             <div class="flex flex-col">
                                 <label class="text-[11px] text-slate-400 mb-0.5">Port</label>
-                                <input id="le-issue-dns-port" type="text" value="53" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
+                                <input id="le-issue-dns-port" type="text" value="53" title="Authoritative DNS server port (default 53)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
                             </div>
                             <div class="flex flex-col">
                                 <label class="text-[11px] text-slate-400 mb-0.5">Algorithm</label>
-                                <select id="le-issue-dns-algo" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500">
+                                <select id="le-issue-dns-algo" title="TSIG HMAC algorithm" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500">
                                     <option value="hmac-sha256">hmac-sha256</option>
                                     <option value="hmac-sha512">hmac-sha512</option>
                                     <option value="hmac-sha1">hmac-sha1</option>
@@ -27576,33 +27585,33 @@ async function showLeIssueModal(prefill) {
                     <div class="grid grid-cols-2 gap-3">
                         <div class="flex flex-col">
                             <label class="text-[11px] text-slate-500 mb-0.5">HE account email</label>
-                            <input id="le-issue-he-user" type="text" placeholder="(use saved account)" autocomplete="off" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                            <input id="le-issue-he-user" type="text" placeholder="(use saved account)" autocomplete="off" title="Hurricane Electric account username or email" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
                         </div>
                         <div class="flex flex-col">
                             <label class="text-[11px] text-slate-500 mb-0.5">HE account password</label>
-                            <input id="le-issue-he-pass" type="password" placeholder="(use saved account)" autocomplete="new-password" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                            <input id="le-issue-he-pass" type="password" placeholder="(use saved account)" autocomplete="new-password" title="Hurricane Electric account password" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
                         </div>
                     </div>
                 </div>
                 <!-- Non-rfc2136 providers: raw INI textarea (field shapes vary
                      per provider — sample shown as a grey placeholder). -->
-                <textarea id="le-issue-dns-creds" rows="5" placeholder="" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500 placeholder:text-slate-400 placeholder:font-mono placeholder:text-xs"></textarea>
+                <textarea id="le-issue-dns-creds" rows="5" placeholder="" title="Provider-specific INI credentials configuration" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500 placeholder:text-slate-400 placeholder:font-mono placeholder:text-xs"></textarea>
             </div>
             <div class="flex items-center gap-4 flex-wrap">
                 <label class="flex items-center gap-2 text-sm text-slate-700">
-                    <input id="le-issue-staging" type="checkbox" class="rounded border-slate-300" />
+                    <input id="le-issue-staging" type="checkbox" title="Issue staging certificate from Let's Encrypt staging environment" class="rounded border-slate-300" />
                     Use Let's Encrypt <b>staging</b> (untrusted — for testing)
                 </label>
                 <label class="flex items-center gap-1 text-sm text-slate-700" title="Let's Encrypt sets the certificate LIFETIME via a named ACME profile, not an arbitrary duration. Standard is ~90 days; short-lived is ~7 days. mTLS CLIENT certs are NOT issued here — the hub mints those from its Local CA (see the 🔒 mTLS status panel).">
                     Lifetime
-                    <select id="le-issue-profile" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <select id="le-issue-profile" title="ACME certificate lifetime profile" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         <option value="">Standard (~90 days)</option>
                         <option value="shortlived">Short-lived (~7 days)</option>
                     </select>
                 </label>
                 <label class="flex items-center gap-1 text-sm text-slate-700" title="How many days before expiry the renewal loop triggers for THIS cert. Default 7. A larger window renews earlier (more retry slack before it actually expires); a smaller one renews later.">
                     Renew before expiry
-                    <input id="le-issue-renew-window" type="number" min="1" value="7" class="w-16 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                    <input id="le-issue-renew-window" type="number" min="1" value="7" title="Days before expiration when renewal triggers" class="w-16 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500" />
                     days
                 </label>
             </div>
@@ -27612,19 +27621,19 @@ async function showLeIssueModal(prefill) {
                 <div class="flex flex-wrap items-end gap-2">
                     <div class="flex flex-col">
                         <label class="text-[11px] text-slate-400 mb-0.5">Module type</label>
-                        <select id="le-issue-tgt-mt" onchange="leTgtMtChange('le-issue-tgt-mt','le-issue-tgt-id')" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${mtOpts}</select>
+                        <select id="le-issue-tgt-mt" onchange="leTgtMtChange('le-issue-tgt-mt','le-issue-tgt-id')" title="Select spoke or target module type" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${mtOpts}</select>
                     </div>
                     <div class="flex flex-col flex-1 min-w-[160px]">
                         <label class="text-[11px] text-slate-400 mb-0.5">Device</label>
-                        <select id="le-issue-tgt-id" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></select>
+                        <select id="le-issue-tgt-id" title="Select target device or node identifier" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></select>
                     </div>
-                    <button onclick="leIssueAddTarget()" type="button" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-md text-sm font-medium">Add</button>
+                    <button onclick="leIssueAddTarget()" type="button" title="Add distribution target" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-md text-sm font-medium">Add</button>
                 </div>
             </div>
         </div>
         <div class="flex justify-end gap-2 mt-5">
-            <button onclick="document.getElementById('le-issue-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Cancel</button>
-            <button id="le-issue-submit" onclick="leIssueCert()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Issue certificate</button>
+            <button onclick="document.getElementById('le-issue-modal').remove()" title="Cancel and close dialog" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Cancel</button>
+            <button id="le-issue-submit" onclick="leIssueCert()" title="Submit certificate issuance request" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Issue certificate</button>
         </div>`, { card: 'max-w-2xl w-full p-6 my-auto', overlay: 'overflow-y-auto py-6' });
     leIssuePopulateDomains();
     leIssueRenderTargets();
@@ -27965,21 +27974,21 @@ async function showDnsCredentialsModal() {
             <h4 id="dns-cred-form-title" class="text-sm font-bold text-slate-600 mb-2">Add a credential</h4>
             <div class="grid grid-cols-2 gap-3">
               <div class="flex flex-col"><label class="text-[11px] text-slate-500 mb-0.5">Name</label>
-                <input id="dns-cred-name" type="text" placeholder="e.g. HE - lrbtech" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <input id="dns-cred-name" type="text" placeholder="e.g. HE - lrbtech" title="Descriptive label for this DNS credential set" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
               <div class="flex flex-col"><label class="text-[11px] text-slate-500 mb-0.5">Provider</label>
-                <select id="dns-cred-provider" onchange="dnsCredRenderFields()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${provOpts}</select></div>
+                <select id="dns-cred-provider" onchange="dnsCredRenderFields()" title="Select DNS provider service" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${provOpts}</select></div>
             </div>
             <div id="dns-cred-fields" class="grid grid-cols-2 gap-3 mt-3"></div>
             <div class="flex justify-end gap-2 mt-3">
-              <button onclick="dnsCredResetForm()" class="px-3 py-1.5 text-sm text-slate-600 hover:text-slate-800">Clear</button>
-              <button onclick="saveDnsCredential()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">Save credential</button>
+              <button onclick="dnsCredResetForm()" title="Clear form fields" class="px-3 py-1.5 text-sm text-slate-600 hover:text-slate-800">Clear</button>
+              <button onclick="saveDnsCredential()" title="Save DNS provider credential" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">Save credential</button>
             </div>
           </div>`;
     modal.innerHTML = `
       <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
         <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
           <h3 class="text-lg font-bold text-[#263040]">DNS Credentials</h3>
-          <button onclick="document.getElementById('dns-creds-modal').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
+          <button onclick="document.getElementById('dns-creds-modal').remove()" title="Close dialog" class="text-slate-400 hover:text-slate-600">✕</button>
         </div>
         <div class="p-6 space-y-4 overflow-y-auto">
           ${note}
@@ -28005,6 +28014,7 @@ function dnsCredRenderFields(values) {
         <label class="text-[11px] text-slate-500 mb-0.5">${escapeHtml(f.label)}</label>
         <input id="dns-cred-f-${f.k}" type="${f.type}" value="${f.secret ? '' : escapeHtml(values[f.k] || '')}"
                placeholder="${f.secret && secretsSet[f.k] ? '(keep stored)' : (f.placeholder ? escapeHtml(f.placeholder) : '')}"
+               title="${escapeHtml(f.label)}"
                autocomplete="off" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
       </div>`).join('');
 }
@@ -28073,7 +28083,7 @@ async function dnsCredReloadList() {
     box.innerHTML = warnBanner + creds.map(c => {
         const label = (DNS_CRED_PROVIDERS[c.provider] || {}).label || c.provider;
         const editBtn = vaultOn ? '' :
-            `<button onclick='dnsCredEdit(${escapeHtml(JSON.stringify(c))})' class="text-xs text-slate-600 hover:text-slate-800 border border-slate-200 rounded px-2 py-1">Edit</button>`;
+            `<button onclick='dnsCredEdit(${escapeHtml(JSON.stringify(c))})' title="Edit this stored DNS provider credential" class="text-xs text-slate-600 hover:text-slate-800 border border-slate-200 rounded px-2 py-1">Edit</button>`;
         return `<div class="flex items-center justify-between border border-slate-200 rounded-md px-3 py-2">
           <div><span class="text-sm font-medium text-slate-700">${escapeHtml(c.name)}</span>
             <span class="text-[11px] text-slate-400 ml-2">${escapeHtml(label)}</span></div>
@@ -28341,12 +28351,12 @@ function _spokeRegistryDiagHtml(d) {
     const nOffline = rows.filter(r => !r.connected && !r.is_relayed_agent).length;
     const nTwins = rows.filter(r => r.legacy_twin_of).length;
     html += `<div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
-        <button type="button" onclick="srdSelect('offline')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Select offline (${nOffline})</button>
-        <button type="button" onclick="srdSelect('twins')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Select pre-rename twins (${nTwins})</button>
-        <button type="button" onclick="srdSelect('none')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Clear</button>
+        <button type="button" onclick="srdSelect('offline')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50" title="Select all offline spoke registrations">Select offline (${nOffline})</button>
+        <button type="button" onclick="srdSelect('twins')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50" title="Select legacy pre-rename spoke twin registrations">Select pre-rename twins (${nTwins})</button>
+        <button type="button" onclick="srdSelect('none')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50" title="Clear all selections">Clear</button>
         <span class="flex-1"></span>
         <button type="button" id="srd-del-btn" onclick="srdDeleteSelected()" disabled
-                class="px-3 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold">Delete selected (<span id="srd-del-count">0</span>)</button>
+                class="px-3 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold" title="Delete selected offline spoke registrations from the registry">Delete selected (<span id="srd-del-count">0</span>)</button>
     </div>`;
     html += `<div class="overflow-x-auto"><table class="w-full text-xs">
         <thead><tr class="text-left text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-200">
@@ -28372,10 +28382,10 @@ function _spokeRegistryDiagHtml(d) {
         if (r.legacy_twin_of) badges.push('<span class="px-1.5 py-0.5 rounded bg-orange-100 text-orange-700" title="Same box as ' + escapeHtml(r.legacy_twin_of) + ' — registered under the pre-2026-07-20 &quot;-spoke&quot; id. Safe to delete once the twin is connected.">twin of ' + escapeHtml(r.legacy_twin_of) + '</span>');
         const del = (r.connected || r.is_relayed_agent)
             ? `<span class="text-slate-300" title="${r.is_relayed_agent ? 'Relayed agent reporting through its parent spoke — not a leftover' : 'Connected — this is a live spoke, not a leftover'}">live</span>`
-            : `<button onclick="deleteSpokeRegistration('${escJsAttr(r.spoke_id)}')" class="px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50">Delete</button>`;
+            : `<button onclick="deleteSpokeRegistration('${escJsAttr(r.spoke_id)}')" class="px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50" title="Delete this spoke registration">Delete</button>`;
         const sel = (r.connected || r.is_relayed_agent) ? '' :
             `<input type="checkbox" class="srd-sel" data-twin="${r.legacy_twin_of ? '1' : '0'}" ` +
-            `value="${escapeHtml(r.spoke_id)}" onchange="srdSyncCount()">`;
+            `value="${escapeHtml(r.spoke_id)}" onchange="srdSyncCount()" title="Select this spoke registration for deletion">`;
         html += `<tr class="border-b border-slate-100 ${r.connected ? '' : 'bg-slate-50/60'}">
             <td class="py-1.5 pr-2">${sel}</td>
             <td class="py-1.5 pr-2 font-mono text-slate-700">${escapeHtml(r.spoke_id)}
@@ -28398,12 +28408,12 @@ function _spokeRegistryDiagHtml(d) {
             <div class="flex items-center justify-between mb-1">
                 <p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Orphaned telemetry (no such spoke)</p>
                 <button type="button" id="srd-orph-btn" onclick="srdPurgeTelemetry()" disabled
-                        class="text-xs px-3 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold">Purge selected (<span id="srd-orph-count">0</span>)</button>
+                        class="text-xs px-3 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold" title="Purge cached telemetry for selected nonexistent spoke IDs">Purge selected (<span id="srd-orph-count">0</span>)</button>
             </div>
             <p class="text-[10px] text-slate-400 mb-2">Cached telemetry keyed to a spoke id that no longer exists — typically an id that changed under a box. It keeps claiming the Proxmox hosts it last reported, so those hosts render under a spoke that no longer runs them. Deleting a spoke cannot remove these; purge them here.</p>
             <div class="space-y-1">` + orphans.map(o =>
             `<label class="flex items-start gap-2 text-xs p-2 rounded bg-amber-50 border border-amber-200 cursor-pointer">
-                <input type="checkbox" class="srd-orph mt-0.5" value="${escapeHtml(o.spoke_id)}" onchange="srdSyncOrphCount()">
+                <input type="checkbox" class="srd-orph mt-0.5" value="${escapeHtml(o.spoke_id)}" onchange="srdSyncOrphCount()" title="Select orphaned telemetry entry to purge">
                 <span class="flex-1"><span class="font-mono text-slate-700">${escapeHtml(o.spoke_id)}</span>
                     <span class="text-slate-400"> — tenant ${escapeHtml(o.tenant_id || 'none')}, claims ${o.host_count} host(s)</span>
                     ${(o.hosts || []).length ? `<span class="block text-slate-500 mt-0.5">${(o.hosts || []).map(escapeHtml).join(', ')}</span>` : ''}
@@ -28833,7 +28843,7 @@ async function showMtlsDebug() {
                 <div><div class="font-semibold text-slate-600 mb-1">Pinned AppBuilder cert verify</div><div class="font-mono text-slate-700 space-y-0.5">${pin}</div></div>
             </div>
             <div id="mtls-acme-info" class="border-t border-slate-200 pt-3 text-xs text-slate-500">Loading certbot / ACME profile info…</div>
-            <div class="flex justify-end"><button onclick="document.getElementById('mtls-debug-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button></div>
+            <div class="flex justify-end"><button onclick="document.getElementById('mtls-debug-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium" title="Close dialog">Close</button></div>
         </div>`, { card: 'max-w-4xl w-full max-h-[90vh] overflow-y-auto', backdropClose: true });
     // certbot / ACME profile info (le spoke) — diagnoses "requested clientAuth but
     // got serverAuth-only": needs certbot >= 4.0 for --preferred-profile, and the
@@ -28985,14 +28995,14 @@ function showDnsRecordModal(editItem) {
     const modal = openModal('dns-record-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} DNS Record</h3>
         <div class="space-y-3">
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Name</label><input id="dns-r-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" ${editing ? 'readonly' : ''}></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="dns-r-type" class="${selectCls}" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value</label><input id="dns-r-value" value="${val(editItem?.value)}" class="${inputCls}" placeholder="10.0.1.5"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="dns-r-ttl" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Name</label><input id="dns-r-name" title="Fully-qualified domain name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" ${editing ? 'readonly' : ''}></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="dns-r-type" title="DNS record type (A, AAAA, CNAME, PTR)" class="${selectCls}" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value</label><input id="dns-r-value" title="Target IP address or canonical name" value="${val(editItem?.value)}" class="${inputCls}" placeholder="10.0.1.5"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="dns-r-ttl" title="Time to Live in seconds (minimum 60s)" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsRecord()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
-            <button onclick="document.getElementById('dns-record-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDnsRecord()" title="Save record changes" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
+            <button onclick="document.getElementById('dns-record-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; }
 }
@@ -29019,30 +29029,46 @@ async function saveDnsRecord() {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
-function showDnsForwarderModal() {
+function editDnsForwarder(zone) {
+    const list = window._dnsForwarders || [];
+    const item = list.find(f => (f.zone || '.') === zone);
+    if (item) {
+        showDnsForwarderModal(item);
+    }
+}
+
+function showDnsForwarderModal(editItem) {
+    const isEdit = !!editItem;
+    const zoneVal = isEdit ? (editItem.zone || '.') : '.';
+    const upstreamsVal = isEdit && editItem.upstreams ? (Array.isArray(editItem.upstreams) ? editItem.upstreams.join(', ') : editItem.upstreams) : '';
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     openModal('dns-forwarder-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">Add DNS Forwarder</h3>
+        <h3 class="text-lg font-bold text-[#263040]">${isEdit ? 'Edit DNS Forwarder' : 'Add DNS Forwarder'}</h3>
         <div class="space-y-3">
             <div class="space-y-1">
                 <label class="text-xs text-slate-500 font-bold uppercase">Zone</label>
-                <input id="dns-fwd-zone" value="." class="${inputCls}" placeholder=". or example.com">
+                <input id="dns-fwd-zone" title="Forwarder zone domain (. for root/default)" value="${escapeHtml(zoneVal)}" ${isEdit ? 'readonly class="' + inputCls + ' bg-slate-50 cursor-not-allowed"' : 'class="' + inputCls + '"'} placeholder=". or example.com">
                 <p class="text-xs text-slate-400">Use <span class="font-mono">.</span> to forward all non-authoritative queries.</p>
             </div>
             <div class="space-y-1">
                 <label class="text-xs text-slate-500 font-bold uppercase">Upstream servers</label>
-                <input id="dns-fwd-upstreams" class="${inputCls}" placeholder="1.1.1.1, 1.0.0.1">
+                <input id="dns-fwd-upstreams" title="Comma-separated upstream DNS server IP addresses" value="${escapeHtml(upstreamsVal)}" class="${inputCls}" placeholder="1.1.1.1, 1.0.0.1">
                 <p class="text-xs text-slate-400">Enter one or more IPv4 or IPv6 addresses separated by commas or spaces.</p>
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsForwarder()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Add Forwarder</button>
-            <button onclick="document.getElementById('dns-forwarder-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDnsForwarder()" title="Save forwarder configuration" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Forwarder'}</button>
+            <button onclick="document.getElementById('dns-forwarder-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    const modal = document.getElementById('dns-forwarder-modal');
+    if (modal && isEdit) {
+        modal.dataset.editZone = editItem.zone || '.';
+    }
 }
 
 async function saveDnsForwarder() {
     const modal = document.getElementById('dns-forwarder-modal');
+    const editing = modal && modal.dataset.editZone;
     const zone = document.getElementById('dns-fwd-zone')?.value?.trim() || '.';
     const upstreams = (document.getElementById('dns-fwd-upstreams')?.value || '')
         .split(/[\s,]+/).filter(Boolean);
@@ -29050,19 +29076,42 @@ async function saveDnsForwarder() {
         showToast('At least one upstream server is required', 'error');
         return;
     }
+    const payload = { zone, upstreams };
+    if (editing) {
+        payload.old_zone = modal.dataset.editZone;
+    }
     try {
         const { ok, data: d, detail } = await _spokeFetch(
             '/api/dns/forwarders' + _tenantQS(), {
-                method: 'POST',
+                method: editing ? 'PUT' : 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ zone, upstreams }),
+                body: JSON.stringify(payload),
             });
         if (ok && d.status === 'SUCCESS') {
             modal.remove();
-            showToast(`Forwarder ${zone} added to all DNS servers.`, 'success');
+            showToast(editing ? `Forwarder ${zone} updated.` : `Forwarder ${zone} added to all DNS servers.`, 'success');
             loadDNSData('Forwarders');
         } else {
-            showToast('Error: ' + (detail || d?.message || 'Forwarder add failed'), 'error');
+            showToast('Error: ' + (detail || d?.message || (editing ? 'Forwarder update failed' : 'Forwarder add failed')), 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function deleteDnsForwarder(zone) {
+    if (!await showConfirmToast(`Delete forwarder for zone ${zone}?`)) return;
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dns/forwarders' + _tenantQS(), {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ zone }),
+        });
+        if (ok && d.status === 'SUCCESS') {
+            showToast(`Forwarder ${zone} deleted.`, 'success');
+            loadDNSData('Forwarders');
+        } else {
+            showToast('Error: ' + (detail || d?.message || 'Delete forwarder failed'), 'error');
         }
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
@@ -29112,7 +29161,7 @@ function _externalDnsConnected() {
 function _extDnsBackBar(name) {
     if (!window._extDnsMulti) return '';
     return `<div class="mb-3 flex items-center gap-2 text-xs">
-        <button onclick="loadExternalDNS()" class="inline-flex items-center gap-1 text-slate-500 hover:text-[#01A982] font-medium">← External DNS</button>
+        <button onclick="loadExternalDNS()" class="inline-flex items-center gap-1 text-slate-500 hover:text-[#01A982] font-medium" title="Back to External DNS providers">← External DNS</button>
         <span class="text-slate-300">/</span>
         <span class="font-bold text-slate-600">${escapeHtml(name)}</span>
       </div>`;
@@ -29136,7 +29185,7 @@ async function loadExternalDNS() {
     window._extDnsMulti = true;
     container.innerHTML = `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 p-1">` +
         providers.map(p => `
-          <button onclick="openExternalDns('${p.id}')" class="text-left bg-white border border-slate-200 rounded-lg p-4 hover:border-[#01A982] hover:shadow-md transition-all">
+          <button onclick="openExternalDns('${p.id}')" class="text-left bg-white border border-slate-200 rounded-lg p-4 hover:border-[#01A982] hover:shadow-md transition-all" title="Manage ${escapeHtml(p.name)} external DNS records">
             <div class="flex items-center justify-between mb-1">
               <span class="text-sm font-bold text-[#263040]">${escapeHtml(p.name)}</span>
               <span class="text-[10px] font-mono text-slate-400">${escapeHtml(p.id)}</span>
@@ -29373,7 +29422,7 @@ async function loadHenet() {
         <div class="text-xs text-slate-500">${statusHtml}${credInfo}${tenantCredInfo}${scheduleHtml}</div>
         <div class="flex gap-2">
           ${canWrite ? `<button onclick="showHenetCredModal()" class="${btnCls}" title="${assignedCred ? 'Change the assigned HE DDNS credential' : 'Assign an HE DDNS credential from the Credential Vault'}">🔐 ${assignedCred ? 'Change credential' : 'Assign credential'}</button>` : ''}
-          ${canWrite ? `<button onclick="showHenetRecordModal()" class="${btnCls}">+ Add Record</button>` : ''}
+          ${canWrite ? `<button onclick="showHenetRecordModal()" class="${btnCls}" title="Add a new DNS record to manage at HE.NET">+ Add Record</button>` : ''}
           ${admin && assignedCred ? `<button onclick="importHenet()" class="${btnCls}" title="Read the existing records already in your HE.NET zone (via the account login) and bring them under management">⇩ Import existing</button>` : ''}
           ${admin && assignedCred ? `<button onclick="syncHenet()" class="${btnCls}" title="Re-push every managed A/AAAA record to HE.NET">↻ Sync all</button>` : ''}
           ${admin ? `<button onclick="showHenetScheduleModal()" class="${btnCls}" title="Schedule an automatic re-sync of every managed HE.NET record">⏱ Schedule…</button>` : ''}
@@ -29462,8 +29511,8 @@ async function showHenetRecordModal(editItem) {
             <p class="text-[11px] text-slate-400">Records are created/updated directly in your HE.NET zone using the assigned account login${cred ? ` (<span class="font-mono">🔐 ${escapeHtml(cred.name)}</span>)` : ''} — no per-record DDNS key needed.${editing && isAdmin() ? ` To just move this record to another tenant's tab, change <b>Tenant</b> and leave <b>Value</b> unchanged — it's re-homed without touching HE.NET.` : ''}</p>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveHenetRecord()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
-            <button onclick="document.getElementById('henet-record-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveHenetRecord()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to this HE.NET record' : 'Add record to HE.NET management'}">${editing ? 'Save Changes' : 'Add Record'}</button>
+            <button onclick="document.getElementById('henet-record-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; modal.dataset.editTenant = String(editItem.tenant_id || ''); modal.dataset.editValue = String(editItem.value || ''); }
 }
@@ -29494,9 +29543,9 @@ async function showHenetCredModal() {
             : `<p class="text-sm text-amber-600 italic">No automation-readable Hurricane Electric credential found in the Credential Vault. Add a <b>DNS → Hurricane Electric (account login)</b> secret first (it serves both certs and DNS).</p>`}
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            ${assigned ? `<button onclick="_henetClearCred()" class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-4 py-2 rounded-md text-sm mr-auto">Clear</button>` : ''}
-            ${creds.length ? `<button onclick="_henetSaveCred()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>` : ''}
-            <button onclick="document.getElementById('henet-cred-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            ${assigned ? `<button onclick="_henetClearCred()" class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-4 py-2 rounded-md text-sm mr-auto" title="Clear assigned HE.NET DDNS credential">Clear</button>` : ''}
+            ${creds.length ? `<button onclick="_henetSaveCred()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="Save assigned HE.NET credential">Save</button>` : ''}
+            <button onclick="document.getElementById('henet-cred-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
 }
 
@@ -29562,12 +29611,12 @@ async function showHenetScheduleModal() {
         <h3 class="text-lg font-bold text-[#263040]">Scheduled HE.NET re-sync</h3>
         <p class="text-sm text-slate-500">Automatically re-apply every managed HE.NET record at Hurricane Electric (via the account-login web panel) on a schedule — the hands-off twin of <b>Sync all</b>. Records are written per tenant using each tenant's assigned credential. Off by default.</p>
         <label class="flex items-center gap-2 text-sm font-medium text-slate-700">
-          <input type="checkbox" id="henet-sched-enabled" ${cfg.enabled ? 'checked' : ''} class="rounded border-slate-300 text-[#01A982] focus:ring-[#01A982]">
+          <input type="checkbox" id="henet-sched-enabled" ${cfg.enabled ? 'checked' : ''} class="rounded border-slate-300 text-[#01A982] focus:ring-[#01A982]" title="Enable or disable scheduled auto-sync">
           Enable scheduled auto-sync
         </label>
         <div class="space-y-1">
           <label class="text-xs text-slate-500 font-bold uppercase">Schedule</label>
-          <select id="henet-sched-mode" class="${inputCls}">
+          <select id="henet-sched-mode" class="${inputCls}" title="Select sync schedule type: interval in minutes or daily at a set time">
             <option value="interval" ${isDaily ? '' : 'selected'}>Every N minutes</option>
             <option value="daily" ${isDaily ? 'selected' : ''}>Once daily at a set time</option>
           </select>
@@ -29578,11 +29627,11 @@ async function showHenetScheduleModal() {
         </div>
         <div class="space-y-1" id="henet-sched-daily-wrap" style="${isDaily ? '' : 'display:none'}">
           <label class="text-xs text-slate-500 font-bold uppercase">Daily time (24h, HH:MM)</label>
-          <input type="time" id="henet-sched-daily" value="${escapeHtml(String(cfg.daily_time || '02:00'))}" class="${inputCls}">
+          <input type="time" id="henet-sched-daily" value="${escapeHtml(String(cfg.daily_time || '02:00'))}" class="${inputCls}" title="Time of day (24-hour HH:MM) to run daily HE.NET synchronization">
         </div>
         <div class="flex justify-end gap-2 pt-2">
-          <button onclick="_henetSaveSchedule()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>
-          <button onclick="document.getElementById('henet-schedule-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+          <button onclick="_henetSaveSchedule()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="Save scheduled auto-sync settings">Save</button>
+          <button onclick="document.getElementById('henet-schedule-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     const modeSel = document.getElementById('henet-sched-mode');
     if (modeSel) modeSel.onchange = () => {
@@ -29741,10 +29790,10 @@ async function showHenetMoveAllModal() {
     openModal('henet-moveall-modal', `
         <h3 class="text-lg font-bold text-[#263040]">Move all records → tenant</h3>
         <p class="text-xs text-slate-500">Re-home all ${recs.length} record(s) currently shown (<span class="font-medium">${escapeHtml(_henetCurrentScopeLabel())}</span>) to another tenant. Metadata only — the HE.NET zone at dns.he.net is untouched.</p>
-        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Destination</label><select id="henet-moveall-target" class="${inputCls}">${opts}</select></div>
+        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Destination</label><select id="henet-moveall-target" class="${inputCls}" title="Select destination tenant to re-home these records to">${opts}</select></div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="_henetMoveAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Move all</button>
-            <button onclick="document.getElementById('henet-moveall-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="_henetMoveAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="Move all records in current view to selected destination tenant">Move all</button>
+            <button onclick="document.getElementById('henet-moveall-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
 }
 
@@ -29830,7 +29879,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
     const navActions = document.getElementById('top-nav-actions');
     if (navActions) {
         const addResBtn = (subMenu === 'Reservations' && (isAdmin() || isTenantAdmin()))
-            ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Reservation</button>`
+            ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm" title="Create a new static DHCP host reservation">+ Add Reservation</button>`
             : '';
         navActions.innerHTML = addResBtn;
     }
@@ -29947,7 +29996,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             window._dhcpConfigTest = cfg;
             const hasCfgDetails = Boolean((cfg.output || cfg.error) && String(cfg.output || cfg.error).trim());
             const cfgSub = cfg.ok ? 'syntax valid' : (cfg.error || cfg.output ? 'syntax error' : 'syntax invalid');
-            const cfgAction = hasCfgDetails ? `<button onclick="_showDhcpConfigDetailsModal()" class="text-xs text-[#01A982] hover:underline font-semibold ml-auto flex-shrink-0">Details</button>` : '';
+            const cfgAction = hasCfgDetails ? `<button onclick="_showDhcpConfigDetailsModal()" class="text-xs text-[#01A982] hover:underline font-semibold ml-auto flex-shrink-0" title="View detailed Kea configuration test output">Details</button>` : '';
             const subnetRows = subnets.map(s => `<tr class="border-b border-slate-100">
                 <td class="px-4 py-2 text-xs">${escapeHtml(String(s.id == null ? '—' : s.id))}</td>
                 <td class="px-4 py-2 font-mono text-xs">${escapeHtml(s.subnet || '—')}</td>
@@ -30221,14 +30270,14 @@ function showDhcpReservationModal(editItem, isConvert = false, prefillOnly = fal
     const modal = openModal('dhcp-res-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${title}</h3>
         <div class="space-y-3">
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Subnet</label><select id="dhcp-res-subnet" class="${inputCls}"><option value="">Loading…</option></select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">IP Address</label><input id="dhcp-res-ip" value="${val(editItem?.ip)}" class="${inputCls}" placeholder="10.0.0.50"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">MAC Address</label><input id="dhcp-res-mac" value="${val(editItem?.mac)}" class="${inputCls}" placeholder="aa:bb:cc:dd:ee:ff"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Hostname (optional)</label><input id="dhcp-res-host" value="${val(editItem?.hostname)}" class="${inputCls}" placeholder="printer-01"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Subnet</label><select id="dhcp-res-subnet" class="${inputCls}" title="Select target DHCP subnet scope"><option value="">Loading…</option></select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">IP Address</label><input id="dhcp-res-ip" value="${val(editItem?.ip)}" class="${inputCls}" placeholder="10.0.0.50" title="Static IP address to assign"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">MAC Address</label><input id="dhcp-res-mac" value="${val(editItem?.mac)}" class="${inputCls}" placeholder="aa:bb:cc:dd:ee:ff" title="Client hardware MAC address (e.g. aa:bb:cc:dd:ee:ff)"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Hostname (optional)</label><input id="dhcp-res-host" value="${val(editItem?.hostname)}" class="${inputCls}" placeholder="printer-01" title="Optional client hostname"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDhcpReservation()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${btnText}</button>
-            <button onclick="document.getElementById('dhcp-res-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDhcpReservation()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${btnText}">${btnText}</button>
+            <button onclick="document.getElementById('dhcp-res-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) modal.dataset.editIp = editItem.ip;
     if (isConvert && editItem?.ip) modal.dataset.oldLeaseIp = editItem.ip;
@@ -30433,10 +30482,12 @@ async function _renderCppmSessions(container, subMenu, th, tableWrap) {
         <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${s.state === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}">${s.state || '—'}</span></td>
     </tr>`).join('');
     const sessRefreshBtn = !isAdmin() ? `<button onclick="refreshModuleCache('cppm_sessions').then(()=>loadCPPMData('${subMenu}'))"
+        title="Refresh session cache from ClearPass"
         class="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1">
         <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
         Refresh</button>` : '';
     const limitSel = `<select onchange="window._cppmSessionLimit=+this.value; loadCPPMData('${subMenu}')"
+        title="Number of session records to display"
         class="text-xs border border-slate-200 rounded px-2 py-0.5 text-slate-500 bg-white">
         ${[50,100,200,500,1000].map(n => `<option value="${n}"${n===limit?' selected':''}>${n} records</option>`).join('')}
     </select>`;
@@ -30512,6 +30563,7 @@ async function _renderCppmDevices(container, subMenu, th, tableWrap) {
         <td class="px-4 py-2">${attrChips(d.attributes)}</td>
     </tr>`).join('');
     const devRefreshBtn = !isAdmin() ? `<button id="cppm-dev-refresh"
+        title="Refresh device cache from ClearPass"
         class="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1">
         <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
         Refresh</button>` : '';
@@ -30572,7 +30624,7 @@ function showOpnsenseAddModal(subMenu) {
     // picker as the first field. submitOpnsenseAdd reads #add-opn-fw (or falls
     // back to the single configured firewall).
     const fwPicker = _opnFirewalls.length > 1
-        ? `<div class="space-y-1"><label class="${label}">Firewall</label><select id="add-opn-fw" class="${input}">${_opnFirewalls.map(fw => `<option value="${fw.id}">${fw.name || fw.id}</option>`).join('')}</select></div>`
+        ? `<div class="space-y-1"><label class="${label}">Firewall</label><select id="add-opn-fw" class="${input}" title="Select target firewall">${_opnFirewalls.map(fw => `<option value="${fw.id}">${fw.name || fw.id}</option>`).join('')}</select></div>`
         : '';
 
     let fields = '';
@@ -30581,43 +30633,43 @@ function showOpnsenseAddModal(subMenu) {
     if (subMenu === 'Firewall Rules') {
         fields = `
             <div class="grid grid-cols-2 gap-4">
-                <div class="space-y-1"><label class="${label}">Interface</label><input type="text" id="add-opn-iface" placeholder="lan" class="${input}"></div>
-                <div class="space-y-1"><label class="${label}">Action</label><select id="add-opn-action" class="${input}"><option value="pass">Pass</option><option value="block">Block</option><option value="reject">Reject</option></select></div>
-                <div class="space-y-1"><label class="${label}">Protocol</label><select id="add-opn-proto" class="${input}"><option>TCP</option><option>UDP</option><option>TCP/UDP</option><option>ICMP</option><option>any</option></select></div>
-                <div class="space-y-1"><label class="${label}">Source</label><input type="text" id="add-opn-source" placeholder="any" class="${input}"></div>
-                <div class="space-y-1"><label class="${label}">Destination</label><input type="text" id="add-opn-dest" placeholder="any" class="${input}"></div>
-                <div class="space-y-1"><label class="${label}">Dest Port</label><input type="text" id="add-opn-dport" placeholder="any" class="${input}"></div>
+                <div class="space-y-1"><label class="${label}">Interface</label><input type="text" id="add-opn-iface" placeholder="lan" class="${input}" title="Network interface (e.g. lan, wan)"></div>
+                <div class="space-y-1"><label class="${label}">Action</label><select id="add-opn-action" class="${input}" title="Filter action: pass, block, or reject"><option value="pass">Pass</option><option value="block">Block</option><option value="reject">Reject</option></select></div>
+                <div class="space-y-1"><label class="${label}">Protocol</label><select id="add-opn-proto" class="${input}" title="Transport protocol (TCP, UDP, ICMP, any)"><option>TCP</option><option>UDP</option><option>TCP/UDP</option><option>ICMP</option><option>any</option></select></div>
+                <div class="space-y-1"><label class="${label}">Source</label><input type="text" id="add-opn-source" placeholder="any" class="${input}" title="Source IP address, subnet CIDR, or alias (default: any)"></div>
+                <div class="space-y-1"><label class="${label}">Destination</label><input type="text" id="add-opn-dest" placeholder="any" class="${input}" title="Destination IP address, subnet CIDR, or alias (default: any)"></div>
+                <div class="space-y-1"><label class="${label}">Dest Port</label><input type="text" id="add-opn-dport" placeholder="any" class="${input}" title="Destination port number or range (default: any)"></div>
             </div>
-            <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" placeholder="Rule description" class="${input}"></div>`;
+            <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" placeholder="Rule description" class="${input}" title="Brief rule description or purpose"></div>`;
         submitFn = `submitOpnsenseAdd('${subMenu}')`;
     } else if (subMenu === 'Aliases') {
         fields = `
-            <div class="space-y-1"><label class="${label}">Name</label><input type="text" id="add-opn-name" placeholder="my_alias" class="${input}"></div>
-            <div class="space-y-1"><label class="${label}">Type</label><select id="add-opn-type" class="${input}"><option value="host">Host</option><option value="network">Network</option><option value="port">Port</option><option value="url">URL</option></select></div>
-            <div class="space-y-1"><label class="${label}">Content (comma-separated)</label><input type="text" id="add-opn-content" placeholder="192.168.1.10, 192.168.1.20" class="${input}"></div>
-            <div class="space-y-1"><label class="${label}">Category</label><input type="text" id="add-opn-category" placeholder="tenant name (optional, attributes this alias to a tenant)" class="${input}"></div>
-            <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" placeholder="Optional description" class="${input}"></div>`;
+            <div class="space-y-1"><label class="${label}">Name</label><input type="text" id="add-opn-name" placeholder="my_alias" class="${input}" title="Alias name (letters, digits, underscores)"></div>
+            <div class="space-y-1"><label class="${label}">Type</label><select id="add-opn-type" class="${input}" title="Alias type: Host, Network, Port, or URL"><option value="host">Host</option><option value="network">Network</option><option value="port">Port</option><option value="url">URL</option></select></div>
+            <div class="space-y-1"><label class="${label}">Content (comma-separated)</label><input type="text" id="add-opn-content" placeholder="192.168.1.10, 192.168.1.20" class="${input}" title="Comma-separated IP addresses, CIDRs, or ports"></div>
+            <div class="space-y-1"><label class="${label}">Category</label><input type="text" id="add-opn-category" placeholder="tenant name (optional, attributes this alias to a tenant)" class="${input}" title="Optional category / tenant attribution tag"></div>
+            <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" placeholder="Optional description" class="${input}" title="Optional alias description"></div>`;
         submitFn = `submitOpnsenseAdd('${subMenu}')`;
     } else if (subMenu === 'NAT Policies') {
         fields = `
             <div class="grid grid-cols-2 gap-4">
-                <div class="space-y-1"><label class="${label}">NAT Type</label><select id="add-opn-nat-type" class="${input}"><option value="d_nat">Destination NAT (Port Forward)</option><option value="source_nat">Source NAT (Outbound)</option><option value="nat_1to1">1:1 NAT</option></select></div>
-                <div class="space-y-1"><label class="${label}">Protocol</label><select id="add-opn-proto" class="${input}"><option>TCP</option><option>UDP</option><option>TCP/UDP</option><option>any</option></select></div>
-                <div class="space-y-1"><label class="${label}">External IP</label><input type="text" id="add-opn-ext-ip" placeholder="any" class="${input}"></div>
-                <div class="space-y-1"><label class="${label}">External Port</label><input type="text" id="add-opn-ext-port" placeholder="80" class="${input}"></div>
-                <div class="space-y-1"><label class="${label}">Internal IP</label><input type="text" id="add-opn-int-ip" placeholder="192.168.1.100" class="${input}"></div>
-                <div class="space-y-1"><label class="${label}">Internal Port</label><input type="text" id="add-opn-int-port" placeholder="80" class="${input}"></div>
+                <div class="space-y-1"><label class="${label}">NAT Type</label><select id="add-opn-nat-type" class="${input}" title="NAT rule type: Port forward (d_nat), Outbound (source_nat), or 1:1 NAT"><option value="d_nat">Destination NAT (Port Forward)</option><option value="source_nat">Source NAT (Outbound)</option><option value="nat_1to1">1:1 NAT</option></select></div>
+                <div class="space-y-1"><label class="${label}">Protocol</label><select id="add-opn-proto" class="${input}" title="Transport protocol"><option>TCP</option><option>UDP</option><option>TCP/UDP</option><option>any</option></select></div>
+                <div class="space-y-1"><label class="${label}">External IP</label><input type="text" id="add-opn-ext-ip" placeholder="any" class="${input}" title="External listening IP address or WAN interface"></div>
+                <div class="space-y-1"><label class="${label}">External Port</label><input type="text" id="add-opn-ext-port" placeholder="80" class="${input}" title="External listening port number or range"></div>
+                <div class="space-y-1"><label class="${label}">Internal IP</label><input type="text" id="add-opn-int-ip" placeholder="192.168.1.100" class="${input}" title="Internal target host IP address"></div>
+                <div class="space-y-1"><label class="${label}">Internal Port</label><input type="text" id="add-opn-int-port" placeholder="80" class="${input}" title="Internal target port number"></div>
             </div>
-            <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" placeholder="NAT rule description" class="${input}"></div>`;
+            <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" placeholder="NAT rule description" class="${input}" title="NAT rule description"></div>`;
         submitFn = `submitOpnsenseAdd('${subMenu}')`;
     } else if (subMenu === 'DNS Records') {
         fields = `
             <div class="grid grid-cols-2 gap-4">
-                <div class="space-y-1"><label class="${label}">Hostname</label><input type="text" id="add-opn-hostname" placeholder="myserver" class="${input}"></div>
-                <div class="space-y-1"><label class="${label}">Domain</label><input type="text" id="add-opn-domain" placeholder="example.com" class="${input}"></div>
-                <div class="space-y-1 col-span-2"><label class="${label}">IP Address</label><input type="text" id="add-opn-ip" placeholder="192.168.1.100" class="${input}"></div>
+                <div class="space-y-1"><label class="${label}">Hostname</label><input type="text" id="add-opn-hostname" placeholder="myserver" class="${input}" title="DNS host name"></div>
+                <div class="space-y-1"><label class="${label}">Domain</label><input type="text" id="add-opn-domain" placeholder="example.com" class="${input}" title="DNS domain name"></div>
+                <div class="space-y-1 col-span-2"><label class="${label}">IP Address</label><input type="text" id="add-opn-ip" placeholder="192.168.1.100" class="${input}" title="IPv4 or IPv6 address"></div>
             </div>
-            <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" placeholder="Optional description" class="${input}"></div>`;
+            <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" placeholder="Optional description" class="${input}" title="Optional description"></div>`;
         submitFn = `submitOpnsenseAdd('${subMenu}')`;
     }
 
@@ -30628,12 +30680,12 @@ function showOpnsenseAddModal(subMenu) {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-[#263040]">Add ${subMenu.replace(/s$/, '')}</h3>
-                <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-400 hover:text-slate-600"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-400 hover:text-slate-600" title="Close dialog"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">${fwPicker}${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-                <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                <button onclick="${submitFn}" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Add</button>
+                <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800" title="Cancel and discard changes">Cancel</button>
+                <button onclick="${submitFn}" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Submit and save ${subMenu.replace(/s$/, '')}">Add</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -30757,12 +30809,12 @@ function showOpnsenseEditModal(fwId, subMenu, itemIdx) {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-[#263040]">Edit ${subMenu.replace(/s$/, '')}</h3>
-                <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-400 hover:text-slate-600"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-400 hover:text-slate-600" title="Close dialog"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-                <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                <button onclick="submitOpnsenseEdit('${fwId}','${subMenu}','${itemId.replace(/'/g,"\\'")}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save</button>
+                <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800" title="Cancel and discard changes">Cancel</button>
+                <button onclick="submitOpnsenseEdit('${fwId}','${subMenu}','${itemId.replace(/'/g,"\\'")}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Save changes to ${subMenu.replace(/s$/, '')}">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -30921,8 +30973,8 @@ async function loadLDAPData(subMenu) {
                 const memCount = Array.isArray(members) ? members.length : (it.member_count || 0);
                 const eCn = String(it.cn || it.name || '').replace(/'/g, "\\'");
                 const actions = canWrite ? `<td class="px-4 py-3 text-right whitespace-nowrap">
-                    <button onclick="showLDAPMembersModal('${eCn}')" title="Manage members" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${LDAP_ICONS.mem}</button>
-                    <button onclick="deleteLDAPGroup('${eCn}')" title="Delete" class="p-1 text-slate-400 hover:text-red-600 transition-colors">${LDAP_ICONS.del}</button>
+                    <button onclick="showLDAPMembersModal('${eCn}')" title="Manage group members" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${LDAP_ICONS.mem}</button>
+                    <button onclick="deleteLDAPGroup('${eCn}')" title="Delete group" class="p-1 text-slate-400 hover:text-red-600 transition-colors">${LDAP_ICONS.del}</button>
                 </td>` : '<td></td>';
                 return `<tr class="hover:bg-slate-50 transition-colors"><td class="px-4 py-3 font-medium text-slate-700">${cn}</td><td class="px-4 py-3 text-slate-500 text-xs">${memCount} members</td>${actions}</tr>`;
             }
@@ -30935,9 +30987,9 @@ async function loadLDAPData(subMenu) {
                 ? '<span title="Authenticates via Entra — no local password" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">Entra</span>'
                 : '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600">Local</span>';
             const actions = canWrite ? `<td class="px-4 py-3 text-right whitespace-nowrap">
-                <button onclick="editLDAPUser('${eUid}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${LDAP_ICONS.edit}</button>
-                ${isEntra ? '' : `<button onclick="showLDAPPasswordModal('${eUid}')" title="Reset password" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${LDAP_ICONS.pw}</button>`}
-                <button onclick="deleteLDAPUser('${eUid}')" title="Delete" class="p-1 text-slate-400 hover:text-red-600 transition-colors">${LDAP_ICONS.del}</button>
+                <button onclick="editLDAPUser('${eUid}')" title="Edit user details" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${LDAP_ICONS.edit}</button>
+                ${isEntra ? '' : `<button onclick="showLDAPPasswordModal('${eUid}')" title="Reset user password" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${LDAP_ICONS.pw}</button>`}
+                <button onclick="deleteLDAPUser('${eUid}')" title="Delete user" class="p-1 text-slate-400 hover:text-red-600 transition-colors">${LDAP_ICONS.del}</button>
             </td>` : '<td></td>';
             return `<tr class="hover:bg-slate-50 transition-colors"><td class="px-4 py-3 font-medium text-slate-700">${uid}</td><td class="px-4 py-3 text-slate-600">${name}</td><td class="px-4 py-3">${badge}</td><td class="px-4 py-3 text-slate-600">${email}</td>${actions}</tr>`;
         }).join('');
@@ -30965,25 +31017,25 @@ function showLDAPModal(subMenu, editItem) {
     let title = '';
     if (subMenu === 'Groups') {
         title = 'Add Group';
-        fields = `<div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Group Name (cn)</label><input type="text" id="ldap-group-cn" class="${inp}"></div>`;
+        fields = `<div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Group Name (cn)</label><input type="text" id="ldap-group-cn" title="Common Name (cn) for the new group" class="${inp}"></div>`;
     } else {
         title = editing ? 'Edit User' : 'Add User';
         const curMode = editing ? (editItem.auth_mode === 'entra' ? 'entra' : 'local') : 'local';
         fields = `
             <div class="grid grid-cols-2 gap-4">
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Username (uid)</label><input type="text" id="ldap-user-uid" value="${val(editItem && (editItem.uid || editItem.username))}" ${editing ? 'readonly' : ''} class="${inp} ${editing ? 'bg-slate-100 text-slate-500' : ''}"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Username (uid)</label><input type="text" id="ldap-user-uid" value="${val(editItem && (editItem.uid || editItem.username))}" ${editing ? 'readonly' : ''} title="Unique directory identifier (uid)" class="${inp} ${editing ? 'bg-slate-100 text-slate-500' : ''}"></div>
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Auth Mode</label>
-                    <select id="ldap-user-auth" ${editing ? 'disabled' : ''} onchange="_syncLDAPAuthFields()" class="${inp} ${editing ? 'bg-slate-100 text-slate-500' : ''}">
+                    <select id="ldap-user-auth" ${editing ? 'disabled' : ''} onchange="_syncLDAPAuthFields()" title="Authentication mode (Local password or Azure AD Entra-backed)" class="${inp} ${editing ? 'bg-slate-100 text-slate-500' : ''}">
                         <option value="local" ${curMode === 'local' ? 'selected' : ''}>Local (password)</option>
                         <option value="entra" ${curMode === 'entra' ? 'selected' : ''}>Entra-backed (UPN)</option>
                     </select>
                 </div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">First Name</label><input type="text" id="ldap-user-first" value="${val(editItem && editItem.first_name)}" class="${inp}"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Last Name</label><input type="text" id="ldap-user-last" value="${val(editItem && editItem.last_name)}" class="${inp}"></div>
-                <div class="space-y-2 col-span-2"><label class="text-xs text-slate-500 uppercase font-bold">Email</label><input type="text" id="ldap-user-email" value="${val(editItem && editItem.email)}" class="${inp}"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">First Name</label><input type="text" id="ldap-user-first" value="${val(editItem && editItem.first_name)}" title="User given name" class="${inp}"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Last Name</label><input type="text" id="ldap-user-last" value="${val(editItem && editItem.last_name)}" title="User surname / family name" class="${inp}"></div>
+                <div class="space-y-2 col-span-2"><label class="text-xs text-slate-500 uppercase font-bold">Email</label><input type="text" id="ldap-user-email" value="${val(editItem && editItem.email)}" title="User email address" class="${inp}"></div>
             </div>
-            <div id="ldap-entra-wrap" class="space-y-2 ${curMode === 'entra' ? '' : 'hidden'}"><label class="text-xs text-slate-500 uppercase font-bold">UPN (Entra user principal name)</label><input type="text" id="ldap-user-upn" value="${val(editItem && editItem.upn)}" placeholder="user@tenant.onmicrosoft.com" class="${inp}"></div>
-            ${editing ? '' : `<div id="ldap-local-wrap" class="space-y-2 ${curMode === 'local' ? '' : 'hidden'}"><label class="text-xs text-slate-500 uppercase font-bold">Password <span class="text-slate-400 normal-case font-normal">(leave blank to auto-generate)</span></label><input type="password" id="ldap-user-password" class="${inp}"></div>`}
+            <div id="ldap-entra-wrap" class="space-y-2 ${curMode === 'entra' ? '' : 'hidden'}"><label class="text-xs text-slate-500 uppercase font-bold">UPN (Entra user principal name)</label><input type="text" id="ldap-user-upn" value="${val(editItem && editItem.upn)}" placeholder="user@tenant.onmicrosoft.com" title="Entra User Principal Name (UPN)" class="${inp}"></div>
+            ${editing ? '' : `<div id="ldap-local-wrap" class="space-y-2 ${curMode === 'local' ? '' : 'hidden'}"><label class="text-xs text-slate-500 uppercase font-bold">Password <span class="text-slate-400 normal-case font-normal">(leave blank to auto-generate)</span></label><input type="password" id="ldap-user-password" title="Initial password (leave blank to auto-generate)" class="${inp}"></div>`}
         `;
     }
 
@@ -30991,12 +31043,12 @@ function showLDAPModal(subMenu, editItem) {
         <div class="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
                 <h3 class="text-lg font-bold text-[#263040]">${title}</h3>
-                <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="text-slate-400 hover:text-slate-600"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-                <button onclick="this.closest('.fixed').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                <button onclick="${subMenu === 'Groups' ? 'saveLDAPGroup()' : `saveLDAPUser(${editing ? 'true' : 'false'})`}" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all">Save</button>
+                <button onclick="this.closest('.fixed').remove()" title="Cancel and close dialog" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
+                <button onclick="${subMenu === 'Groups' ? 'saveLDAPGroup()' : `saveLDAPUser(${editing ? 'true' : 'false'})`}" title="Save directory changes" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -31117,16 +31169,16 @@ function showLDAPPasswordModal(uid) {
         <div class="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
                 <h3 class="text-lg font-bold text-[#263040]">Reset Password</h3>
-                <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
+                <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="text-slate-400 hover:text-slate-600">✕</button>
             </div>
             <div class="p-6 space-y-4">
                 <p class="text-xs text-slate-500 font-mono">${escapeHtml(uid)}</p>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">New Password</label><input type="password" id="ldap-new-password" class="${inputCls}" autocomplete="new-password"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Confirm Password</label><input type="password" id="ldap-confirm-password" class="${inputCls}" autocomplete="new-password"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">New Password</label><input type="password" id="ldap-new-password" title="Enter new user password" class="${inputCls}" autocomplete="new-password"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Confirm Password</label><input type="password" id="ldap-confirm-password" title="Re-enter new user password to confirm" class="${inputCls}" autocomplete="new-password"></div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-                <button onclick="this.closest('.fixed').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
-                <button onclick="changeUserPassword('${eUid}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all">Set Password</button>
+                <button onclick="this.closest('.fixed').remove()" title="Cancel and close dialog" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
+                <button onclick="changeUserPassword('${eUid}')" title="Apply new password" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all">Set Password</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -31163,17 +31215,17 @@ async function showLDAPMembersModal(cn) {
         <div class="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
                 <h3 class="text-lg font-bold text-[#263040]">Members — ${escapeHtml(cn)}</h3>
-                <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
+                <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="text-slate-400 hover:text-slate-600">✕</button>
             </div>
             <div class="p-6 space-y-4">
                 <div class="flex items-center gap-2">
-                    <select id="ldap-member-add" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading users…</option></select>
-                    <button onclick="addLDAPMember('${String(cn).replace(/'/g, "\\'")}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add</button>
+                    <select id="ldap-member-add" title="Select user to add to group" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading users…</option></select>
+                    <button onclick="addLDAPMember('${String(cn).replace(/'/g, "\\'")}')" title="Add selected user to group" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add</button>
                 </div>
                 <div id="ldap-members-list" class="space-y-1 max-h-64 overflow-y-auto"><p class="text-xs text-slate-400 italic">Loading members…</p></div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end">
-                <button onclick="this.closest('.fixed').remove()" class="px-4 py-2 text-sm text-slate-600">Close</button>
+                <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="px-4 py-2 text-sm text-slate-600">Close</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -31194,7 +31246,7 @@ async function _renderLDAPMembers(cn) {
         const members = (grp.members || grp.member || []).map(m => String(m));
         if (listEl) {
             listEl.innerHTML = members.length
-                ? members.map(m => `<div class="flex items-center justify-between px-3 py-1.5 bg-slate-50 rounded-md text-sm"><span class="text-slate-700">${escapeHtml(m)}</span><button onclick="removeLDAPMember('${String(cn).replace(/'/g, "\\'")}','${String(m).replace(/'/g, "\\'")}')" class="text-xs font-bold text-red-600 hover:text-red-700">Remove</button></div>`).join('')
+                ? members.map(m => `<div class="flex items-center justify-between px-3 py-1.5 bg-slate-50 rounded-md text-sm"><span class="text-slate-700">${escapeHtml(m)}</span><button onclick="removeLDAPMember('${String(cn).replace(/'/g, "\\'")}','${String(m).replace(/'/g, "\\'")}')" title="Remove user from group" class="text-xs font-bold text-red-600 hover:text-red-700">Remove</button></div>`).join('')
                 : '<p class="text-xs text-slate-400 italic">No members.</p>';
         }
         if (addSel) {
@@ -31915,8 +31967,8 @@ async function loadTruenasAppliancesList() {
             return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
                 <div><span class="text-sm font-medium text-slate-700">${escapeHtml(a.name || a.id)}</span><span class="ml-2 text-xs text-slate-400">${escapeHtml(sub)}</span></div>
                 <div class="flex gap-2">
-                    <button onclick="editTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
-                    <button onclick="deleteTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
+                    <button onclick="editTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium" title="Edit appliance settings">Edit</button>
+                    <button onclick="deleteTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-red-400 hover:text-red-600 font-medium" title="Remove appliance from Lab Manager">Delete</button>
                 </div>
             </div>`;
         }).join('');
@@ -31941,20 +31993,20 @@ function showAddTruenasApplianceModal() {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
                 <h3 class="text-lg font-bold text-[#263040]" id="truenas-modal-title">Add TrueNAS Appliance</h3>
-                <button onclick="closeTruenasApplianceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="closeTruenasApplianceModal()" class="text-slate-400 hover:text-slate-600 transition-colors" title="Close modal"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Name</label><input type="text" id="truenas-name" placeholder="e.g. nas-01" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Host / IP</label><input type="text" id="truenas-host" placeholder="10.0.0.50" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Key</label><input type="password" id="truenas-api-key" placeholder="Create in TrueNAS → Settings → API Keys" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><p class="text-[11px] text-slate-400">Leave blank on edit to keep the stored key (sentinel-merge). The spoke forces <code>wss://</code>; keys auto-revoke over plain <code>ws://</code>.</p></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Name</label><input type="text" id="truenas-name" placeholder="e.g. nas-01" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS appliance display name"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Host / IP</label><input type="text" id="truenas-host" placeholder="10.0.0.50" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS host IP address or FQDN"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Key</label><input type="password" id="truenas-api-key" placeholder="Create in TrueNAS → Settings → API Keys" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS API key token for WebSocket JSON-RPC auth"><p class="text-[11px] text-slate-400">Leave blank on edit to keep the stored key (sentinel-merge). The spoke forces <code>wss://</code>; keys auto-revoke over plain <code>ws://</code>.</p></div>
                 <div class="grid grid-cols-2 gap-4">
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Verify SSL</label><select id="truenas-verify-ssl" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="true">On (trusted CA)</option><option value="false" selected>Off (self-signed)</option></select></div>
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Auth Mechanism</label><select id="truenas-auth-mech" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="auto" selected>Auto (SCRAM→PLAIN)</option><option value="PLAIN">PLAIN (Core / 24.x)</option><option value="SCRAM">SCRAM-SHA-512 (26+)</option></select></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Verify SSL</label><select id="truenas-verify-ssl" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TLS certificate verification mode"><option value="true">On (trusted CA)</option><option value="false" selected>Off (self-signed)</option></select></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Auth Mechanism</label><select id="truenas-auth-mech" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Authentication handshake protocol"><option value="auto" selected>Auto (SCRAM→PLAIN)</option><option value="PLAIN">PLAIN (Core / 24.x)</option><option value="SCRAM">SCRAM-SHA-512 (26+)</option></select></div>
                 </div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Storage Spoke</label><select id="truenas-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Storage Spoke</label><select id="truenas-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Target storage spoke managing this appliance"><option value="">Loading spokes...</option></select></div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Auto-Poll Interval</label>
-                    <select id="truenas-poll-interval" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <select id="truenas-poll-interval" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Per-appliance polling cadence">
                         <option value="inherit" selected>Inherit module default</option>
                         <option value="0">Off (manual Poll Now only)</option>
                         <option value="60">Every 1 minute</option>
@@ -31968,8 +32020,8 @@ function showAddTruenasApplianceModal() {
                 </div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
-                <button onclick="closeTruenasApplianceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveTruenasAppliance()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Appliance</button>
+                <button onclick="closeTruenasApplianceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors" title="Cancel and close dialog">Cancel</button>
+                <button onclick="saveTruenasAppliance()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Save appliance credentials and settings">Save Appliance</button>
             </div>
         </div>`;
     document.body.appendChild(modal);

@@ -152,7 +152,14 @@ PROFILES: List[Dict[str, Any]] = [
             {"cmd": "show modules", "fields": {
                 "model": re.compile(r"Chassis\s*:?\s*(.+?)\s*(?:\(|Serial|$)", re.I | re.M),
             }},
-            {"cmd": "show ip", "fields": {"ip": re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")}},
+            # Anchor on the VLAN row's IP Config column (Manual, or DHCP —
+            # printed as "DHCP/Bootp" on ProCurve/AOS-S) so the Default
+            # Gateway line is never picked. [ \t]+ keeps the match on one row.
+            # With several addressed VLANs the first one listed wins — a
+            # deliberate, accepted limitation for now.
+            {"cmd": "show ip", "fields": {"ip": re.compile(
+                r"(?:Manual|DHCP(?:/Bootp)?)[ \t]+(?:(?:True|False)[ \t]+)?"
+                r"(\d{1,3}(?:\.\d{1,3}){3})\b", re.I)}},
         ],
         "config": {"enter": "configure", "exit": "exit", "save": "write memory",
                    "show_running": "show running-config"},
