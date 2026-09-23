@@ -308,3 +308,44 @@ def test_another_tenants_lldp_is_denied(monkeypatch, tmp_path):
     tok = _mint(hub, "u", tenants=["acme"])
     assert c.get("/api/nw/other-sw/lldp",
                  cookies={"lm_session": tok}).status_code == 403
+
+
+# ── shared-device subnet filtering ──────────────────────────────────────────
+
+_MIXED_LLDP = [
+    {"local_port": "1", "remote_chassis": "", "remote_port": "24",
+     "remote_name": "acme-edge-1", "remote_mgmt_ip": "10.0.0.9"},
+    {"local_port": "2", "remote_chassis": "", "remote_port": "24",
+     "remote_name": "other-edge-1", "remote_mgmt_ip": "192.168.1.9"},
+]
+
+
+def test_a_shared_switchs_lldp_is_narrowed_to_the_readers_prefixes(monkeypatch, tmp_path):
+    """LLDP carries the REMOTE device's management IP, so an unfiltered map
+    built from a SHARED switch would hand a tenant another tenant's gear."""
+    c, hub = _build(monkeypatch, tmp_path, shared=True)
+    _seed(hub, {"shared-sw": {"NW_GET_LLDP_NEIGHBORS": _MIXED_LLDP}})
+    tok = _mint(hub, "u", tenants=["acme"])
+    names = _names(c.get("/api/nw/topology?refresh=1",
+                         cookies={"lm_session": tok}).json())
+    assert "acme-edge-1" in names
+    assert "other-edge-1" not in names
+
+
+def test_a_dedicated_switchs_lldp_is_not_narrowed(monkeypatch, tmp_path):
+    """A device bound to ONE tenant owns its whole dataset — subnet-filtering it
+    would blank the map for a tenant whose prefixes don't cover its neighbours."""
+    c, hub = _build(monkeypatch, tmp_path, shared=True)
+    _seed(hub, {"acme-sw": {"NW_GET_LLDP_NEIGHBORS": _MIXED_LLDP}})
+    tok = _mint(hub, "u", tenants=["acme"])
+    names = _names(c.get("/api/nw/topology?refresh=1",
+                         cookies={"lm_session": tok}).json())
+    assert {"acme-edge-1", "other-edge-1"} <= names
+
+
+def test_the_per_device_lldp_view_is_filtered_the_same_way(monkeypatch, tmp_path):
+    c, hub = _build(monkeypatch, tmp_path, shared=True)
+    _seed(hub, {"shared-sw": {"NW_GET_LLDP_NEIGHBORS": _MIXED_LLDP}})
+    tok = _mint(hub, "u", tenants=["acme"])
+    rows = c.get("/api/nw/shared-sw/lldp", cookies={"lm_session": tok}).json()["data"]
+    assert [r["remote_name"] for r in rows] == ["acme-edge-1"]
