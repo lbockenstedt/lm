@@ -1003,8 +1003,104 @@ def shared_tenant_id():
     return _SHARED_TENANT_ID
 
 
+def _norm_tenant_id(tenant_id) -> str:
+    """Canonical comparison form for a tenant id: stripped and casefolded.
+
+    Tenant ids reach us from three places that disagree about capitalisation —
+    the picker query string (``?tenant=Default``), the tenant records
+    themselves, and per-resource bindings/tags — so every comparison between
+    them must go through here. Comparing raw strings meant a tenant recorded as
+    ``"Default"`` did not match the ``"default"`` the ADMIN scope is built
+    from, making that tenant's own resources invisible to it.
+
+    ``None`` and blanks both canonicalise to ``""``, the UNASSIGNED marker."""
+    return "" if tenant_id is None else str(tenant_id).strip().casefold()
+
+
 def tenant_is_shared(tenant_id) -> bool:
-    return bool(tenant_id) and (tenant_id == _SHARED_TENANT_ID or str(tenant_id).strip().lower() == "shared")
+    normalized = _norm_tenant_id(tenant_id)
+    return bool(normalized) and (normalized == _norm_tenant_id(_SHARED_TENANT_ID)
+                                 or normalized == "shared")
+
+
+# ── Tenant picker scoping ────────────────────────────────────────────────────
+# ``default`` is the built-in ADMIN tenant (routes/tenants_users.py renders it
+# as "ADMIN" and synthesises it when absent), NOT an "All tenants" view. The
+# rule — named in routes/nw.py as "ADMIN(default) must not accumulate across
+# tenants" — is that the ADMIN scope covers UNASSIGNED resources and resources
+# explicitly bound to ``default``, plus shared infra, but never another
+# tenant's dedicated resources.
+ADMIN_TENANT_ID = "default"
+
+
+def tenant_scope_ids(requested) -> Optional[set]:
+    """Effective tenant ids for a picker selection.
+
+    ``None`` (no ``?tenant=`` at all) means an unscoped programmatic call: no
+    filtering. ``default`` expands to ``{"", "default"}`` plus the shared
+    tenant. Any other id expands to itself plus the shared tenant.
+
+    Every id in the returned set is canonicalised by ``_norm_tenant_id``; the
+    set is only ever consumed by ``in_tenant_scope``, which canonicalises the
+    resource side the same way, so the two can never disagree on spelling.
+    """
+    if requested is None:
+        return None
+    normalized = _norm_tenant_id(requested)
+    if not normalized:
+        return None
+
+    if normalized == ADMIN_TENANT_ID:
+        scope = {"", ADMIN_TENANT_ID}
+    else:
+        scope = {normalized}
+
+    shared_id = shared_tenant_id()
+    if shared_id:
+        scope.add(_norm_tenant_id(shared_id))
+    return scope
+
+
+def in_tenant_scope(tenant_id, scope: Optional[set]) -> bool:
+    """Whether a resource's tenant belongs to ``scope`` (from tenant_scope_ids).
+
+    A ``None`` scope matches everything. ``tenant_id`` is canonicalised so that
+    ``None`` and blanks both read as UNASSIGNED ("") and capitalisation never
+    decides visibility."""
+    if scope is None:
+        return True
+    normalized = _norm_tenant_id(tenant_id)
+    if normalized in scope:
+        return True
+    return tenant_is_shared(normalized)
+
+
+def spoke_is_unbound(hub, spoke_id) -> bool:
+    """Whether ``spoke_id`` is NOT dedicated to a real tenant — i.e. it is
+    UNASSIGNED, or bound to the SHARED tenant, or to the ADMIN tenant.
+
+    Callers that fall back to "the global spoke" when no real tenant is
+    selected (``hub.get_hypervisor_spoke()`` returns whichever hypervisor/
+    simulation spoke happens to be connected) must gate that fallback on this,
+    or the ADMIN/Default view silently picks up a spoke BOUND to some other
+    tenant and reports that tenant's data as the admin's own — the reported
+    leak. Shared infra is deliberately included: shared is visible to every
+    tenant AND to the global admin.
+
+    Fails CLOSED (False) if the binding can't be read. A spoke with no
+    ``module_metadata`` entry at all is the ordinary UNASSIGNED case, not a
+    failure, and returns True."""
+    if not spoke_id:
+        return False
+    try:
+        md = (hub.state.system_state.get("module_metadata", {}) or {})
+        tenant_id = (md.get(spoke_id, {}) or {}).get("tenant_id")
+    except Exception:  # noqa: BLE001 - unreadable binding → never leak
+        return False
+    normalized = str(tenant_id or "").strip()
+    if not normalized:
+        return True
+    return tenant_is_shared(normalized) or normalized.lower() == ADMIN_TENANT_ID
 
 
 # ── NW per-tenant poll config (jitter / caps / default cadence) ──────────────

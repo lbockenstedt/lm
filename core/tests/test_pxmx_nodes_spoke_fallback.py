@@ -342,3 +342,62 @@ def test_offline_host_surfaced_when_no_spoke_and_no_cache():
     body = r.json()
     names = {str(n["node"]).lower() for n in body["nodes"]}
     assert "svr-05" in names
+
+
+# ── /api/pxmx/drive-health: same ADMIN(default) rule, behaviourally ──────────
+# These replace source-text assertions in test_pxmx_admin_default_scope.py that
+# grepped the route body for `if tid == "default":\n            spokes = []`
+# with exact indentation. That guarded the letter of the fix, not its effect:
+# it would pass on a route that had been reindented into something broken and
+# fail on a correct one that was merely reformatted. Flagged on lm#1026.
+
+def test_drive_health_admin_default_queries_no_spoke():
+    """ADMIN(default) must not borrow the global hypervisor spoke, which may be
+    bound to ANOTHER tenant — that leaked that tenant's drive diagnostics into
+    the ADMIN view."""
+    hub = _Hub(bound_spoke=None, global_spoke="pxmx-lrb", global_spoke_tenant="lrb")
+    c = _build(hub, admin=True, tenant=None)
+    r = c.get("/api/pxmx/drive-health?tenant=default")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["nodes"] == []
+    assert body.get("select_tenant") is True
+    assert hub.relayed_to is None, "queried a spoke for the ADMIN scope"
+
+
+def test_drive_health_admin_default_reports_no_spoke_connected():
+    """``spoke_connected`` answers "is a hypervisor spoke attached?". It was
+    forced True here purely to suppress the UI's offline banner, so every other
+    reader saw a spoke that does not exist. The UI now branches on
+    ``select_tenant`` first, so the field stays honest."""
+    hub = _Hub(bound_spoke=None, global_spoke="pxmx-lrb", global_spoke_tenant="lrb")
+    c = _build(hub, admin=True, tenant=None)
+    body = c.get("/api/pxmx/drive-health?tenant=default").json()
+    assert body["spoke_connected"] is False
+    assert body["summary"]["total_drives"] == 0
+
+
+def test_nodes_and_vms_admin_default_also_report_no_spoke_connected():
+    hub = _Hub(bound_spoke=None, global_spoke="pxmx-global")
+    c = _build(hub, admin=True, tenant=None)
+    nodes = c.get("/api/pxmx/nodes?tenant=default").json()
+    assert nodes["spoke_connected"] is False
+    assert nodes.get("select_tenant") is True
+
+
+def test_drive_health_unscoped_admin_still_uses_global_spoke():
+    """A programmatic call with no ``?tenant=`` at all keeps the fleet view."""
+    hub = _Hub(bound_spoke=None, global_spoke="pxmx-global")
+    c = _build(hub, admin=True, tenant=None)
+    r = c.get("/api/pxmx/drive-health")
+    assert r.status_code == 200
+    assert r.json().get("select_tenant") is None
+    assert hub.relayed_to == "pxmx-global"
+
+
+def test_drive_health_specific_tenant_uses_its_bound_spoke():
+    hub = _Hub(bound_spoke="pxmx-acme", global_spoke="pxmx-global")
+    c = _build(hub, admin=True, tenant="acme")
+    r = c.get("/api/pxmx/drive-health?tenant=acme")
+    assert r.status_code == 200
+    assert hub.relayed_to == "pxmx-acme"

@@ -32,7 +32,7 @@ try:
     from fingerprint import (run_identify, read_running_config, push_config, PROFILES,
                              passive_identify, run_commands, merge_credentials,
                              sanitize_console_text, _extract_profile_fields, prompt_hostname,
-                             looks_like_prompt, boot_fault,
+                             looks_like_prompt, boot_fault, set_patience,
                              FACTORY_DEFAULT_CREDENTIALS)
     from dpa import DpaManager
 except ImportError:  # loaded as a package (agent role loader) or from repo root
@@ -43,7 +43,7 @@ except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .fingerprint import (run_identify, read_running_config, push_config, PROFILES,  # type: ignore
                               passive_identify, run_commands, merge_credentials,
                               sanitize_console_text, _extract_profile_fields, prompt_hostname,
-                              looks_like_prompt, boot_fault,
+                              looks_like_prompt, boot_fault, set_patience,  # type: ignore
                               FACTORY_DEFAULT_CREDENTIALS)
     from .dpa import DpaManager  # type: ignore
 
@@ -89,6 +89,13 @@ class ConsoleSpoke(BaseSpoke):
         # the hub via CONSOLE_SET_CREDENTIALS and held in memory only (never
         # logged/persisted). The background loop probes each newly-seen port once.
         self._credentials: list = []
+        # How long the fingerprinter waits for a device to answer. Serial gear
+        # varies wildly (a loaded chassis can pause several seconds mid-reply),
+        # and being impatient reports a healthy switch as "unknown", so the
+        # defaults are already generous — this only exists for sites with gear
+        # that is slower still. Applied process-wide because fingerprint's
+        # windows are module constants.
+        set_patience(config.get("console_probe_patience", 1.0))
         self._autoprobe_task = None
         self._probe_attempts: Dict[str, float] = {}  # port_id → last attempt (monotonic)
         self._probe_delay: Dict[str, float] = {}      # port_id → current login-retry backoff (s)
