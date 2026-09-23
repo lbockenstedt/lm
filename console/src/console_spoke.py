@@ -762,6 +762,11 @@ class ConsoleSpoke(BaseSpoke):
             "source": "active",  # logged-in identify (authoritative; beats passive)
             "method": method,
         }
+        # VSF stack membership, when the device is stacked. Absent entirely for a
+        # standalone switch so the UI has nothing to render for the common case.
+        stack = res.get("stack") or {}
+        if stack.get("is_stack"):
+            probe["stack"] = stack
         # Preserve the auto-detected baud LOCK across probe rebuilds: only a
         # confident sweep sets a fresh one (res.detected_baud); otherwise carry
         # forward what a prior sweep already locked so we don't lose it and

@@ -21047,6 +21047,7 @@ function _renderConsolePorts(el, data) {
         const monDot = (p.monitoring && !p.in_use)
             ? ` <span title="Passively monitoring — capturing console output while idle" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold uppercase">● monitoring</span>` : '';
         const bootBadge = _consoleBootBadge(p.boot);
+        const stackBadge = _consoleStackBadge(p);
         const agentName = p.agent_name || p.spoke_id || '';
         const tenantId = p.tenant_id || 'unassigned';
         const eP = esc(p.port_id), eS = esc(p.spoke_id || ''), eT = esc(p.tenant_override || '');
@@ -21058,9 +21059,10 @@ function _renderConsolePorts(el, data) {
         const dpaBadge = (p.dpa && p.dpa.telnet_port)
             ? `<div class="text-[11px] mt-0.5"><span class="font-mono px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200" title="Direct Port Access — connect a terminal straight to this serial line (unencrypted telnet; bound to ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))})">🔌 ${escapeHtml(String(p.dpa.proto || 'telnet'))} ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))}:${escapeHtml(String(p.dpa.telnet_port))}</span></div>` : '';
         return `<tr class="hover:bg-slate-50">
-            <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${staleBadge}${disconnectedBadge}${monDot}${bootBadge}</div>
+            <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${staleBadge}${disconnectedBadge}${monDot}${bootBadge}${stackBadge}</div>
               <div class="text-xs font-mono text-slate-400" title="${escapeHtml(p.spoke_id || '')}">${escapeHtml(tenantId)}:${escapeHtml(agentName)}:${escapeHtml(p.device)}:${escapeHtml(String(baud))}</div>
               ${dpaBadge}
+              ${_consoleStackLine(p)}
               ${_consoleIdentityBlock(p)}</td>
             <td class="px-4 py-3 text-right whitespace-nowrap space-x-1">
               ${unreachable
@@ -21148,6 +21150,54 @@ function _consoleRelTime(ts) {
 // The identity line under a port. Placeholder until anything is scraped; once the
 // system gleans (passively) or verifies (active login) device info, it replaces
 // the placeholder. A badge marks how the info was obtained + when last seen.
+// VSF stack indicators. A stack is one logical switch spread over several
+// chassis, but each chassis has its own serial line — without these badges an
+// operator can't tell which cable actually reaches the conductor (the only
+// member that accepts configuration), and a standby member just looks like an
+// unidentifiable box called "standby".
+function _consoleStackBadge(p) {
+    const st = (p.probe && p.probe.stack) || null;
+    if (!st || !st.is_stack) return '';
+    const mbr = st.member_id ? ` ${st.member_id}` : '';
+    if (st.role === 'conductor') {
+        return ` <span title="VSF stack conductor — this console line configures the whole stack" class="text-[10px] px-2 py-0.5 rounded-full bg-[#01A982]/15 text-[#01A982] font-bold uppercase">\u2b22 conductor${mbr}</span>`;
+    }
+    if (st.role === 'standby') {
+        return ` <span title="VSF stack standby member — it will take over if the conductor fails. Most commands are rejected here; configure the stack from the conductor." class="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase">\u2b22 standby${mbr}</span>`;
+    }
+    return ` <span title="VSF stack member — configure the stack from its conductor" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-bold uppercase">\u2b22 member${mbr}</span>`;
+}
+
+// Second line of stack detail: image version, topology, and a jump to the
+// conductor's own console port when the hub managed to correlate it.
+function _consoleStackLine(p) {
+    const st = (p.probe && p.probe.stack) || null;
+    if (!st || !st.is_stack) return '';
+    const bits = [];
+    const total = (st.members || []).filter(m => m.present).length;
+    if (total) bits.push(`${total} member${total === 1 ? '' : 's'}`);
+    if (st.topology) bits.push(escapeHtml(String(st.topology)));
+    if (st.sw_version) bits.push(`image ${escapeHtml(String(st.sw_version))}`);
+    let link = '';
+    if (!st.is_conductor && st.conductor_port_id) {
+        const name = st.conductor_hostname || 'conductor';
+        link = ` &middot; <a href="#" onclick="focusConsolePort('${(st.conductor_spoke_id || '').replace(/'/g, "\\'")}','${(st.conductor_port_id || '').replace(/'/g, "\\'")}');return false;" class="text-[#01A982] hover:underline" title="Open the console port of this stack's conductor">conductor: ${escapeHtml(String(name))}</a>`;
+    } else if (!st.is_conductor && st.conductor_mac) {
+        link = ` &middot; <span title="This stack's conductor MAC is ${escapeHtml(String(st.conductor_mac))} but no console port has identified it yet">conductor not on console</span>`;
+    }
+    return `<div class="text-[11px] text-slate-400 mt-0.5">\u2b22 VSF ${bits.join(' \u00b7 ')}${link}</div>`;
+}
+
+// Jump to another port's row (used by the stack "conductor:" link) — scroll it
+// into view and flash it rather than opening a session the operator didn't ask for.
+function focusConsolePort(spokeId, portId) {
+    const rows = document.querySelectorAll('#console-ports-body tr, table tr');
+    const target = (_consolePorts || []).find(p => p.port_id === portId && (!spokeId || p.spoke_id === spokeId));
+    if (!target) { showToast('That console port is not in the current list.', 'warn'); return; }
+    const label = target.alias || ((target.probe && target.probe.identity && target.probe.identity.hostname) || target.device);
+    showToast(`Conductor is on ${label} (${target.device})`, 'info');
+}
+
 function _consoleBootBadge(boot) {
     if (!boot || !boot.state || boot.state === 'idle') return '';
     const relock = boot.relocked ? ' 🔒baud' : '';

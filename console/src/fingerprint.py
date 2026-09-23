@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from vsf_stack import at_standby_console, parse_show_version, parse_show_vsf
+
 logger = logging.getLogger("ConsoleSpoke")
 
 # Terminal escape-sequence strippers, used to turn raw console output (which is
@@ -115,6 +117,11 @@ PROFILES: List[Dict[str, Any]] = [
             {"cmd": "show interface mgmt", "fields": {
                 "ip": re.compile(r"IPv4 address\s*:?\s*(\d{1,3}(?:\.\d{1,3}){3})", re.I),
             }},
+            # VSF stack state. Harmless on a standalone switch (it answers
+            # "Topology : Standalone"), and it is the ONLY command a stack's
+            # standby member will actually answer — see vsf_stack.py.
+            {"cmd": "show vsf"},
+            {"cmd": "show version"},
         ],
         "config": {"enter": "configure terminal", "exit": "end", "save": "write memory",
                    "show_running": "show running-config"},
@@ -161,6 +168,9 @@ PROFILES: List[Dict[str, Any]] = [
             {"cmd": "show ip", "fields": {"ip": re.compile(
                 r"(?:Manual|DHCP(?:/Bootp)?)[ \t]+(?:(?:True|False)[ \t]+)?"
                 r"(\d{1,3}(?:\.\d{1,3}){3})\b", re.I)}},
+            # AOS-S VSF. A non-stacking model just replies "Invalid input: vsf".
+            {"cmd": "show vsf"},
+            {"cmd": "show version"},
         ],
         "config": {"enter": "configure", "exit": "exit", "save": "write memory",
                    "show_running": "show running-config"},
@@ -412,6 +422,59 @@ def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str],
     if identity.get("mac"):
         identity["mac"] = normalize_mac(identity["mac"]) or identity["mac"]
     return identity
+
+
+def detect_stack(outputs: Dict[str, str], transcript: str = "") -> Dict[str, Any]:
+    """Build the port's VSF stack record from its captured command output.
+
+    A stack spans several chassis but is administered from exactly one of them
+    (the conductor), so an operator needs to know which serial line is which.
+    ``conductor_mac`` is the cross-reference key: the hub matches it against the
+    learned MAC of every other console port to point at the conductor's port.
+
+    Returns {} for a device that is not stacked, so the field is simply absent
+    from the probe rather than carrying a misleading all-empty record.
+    """
+    vsf_text = ""
+    for cmd, out in (outputs or {}).items():
+        if "vsf" in cmd.lower() and (out or "").strip():
+            vsf_text = out
+            break
+    info = parse_show_vsf(vsf_text)
+    # A bare "standby#" prompt is proof of a stack even when the reduced
+    # `show vsf` was rejected or never ran.
+    standby = at_standby_console(transcript or "")
+    if not info["members"] and not standby:
+        return {}
+
+    version = ""
+    for cmd, out in (outputs or {}).items():
+        if "version" in cmd.lower() and (out or "").strip():
+            version = parse_show_version(out)
+            if version:
+                break
+    if not version and transcript:
+        version = parse_show_version(transcript)
+
+    conductor_mac = ""
+    local_mac = ""
+    for member in info["members"]:
+        if member["role"] == "conductor" and member["mac"]:
+            conductor_mac = member["mac"]
+        if member["member_id"] == info["local_member_id"]:
+            local_mac = member["mac"]
+
+    return {
+        "is_stack": bool(info["is_stack"] or standby),
+        "topology": info["topology"],
+        "stack_mac": info["stack_mac"],
+        "role": info["local_role"] or ("standby" if standby else ""),
+        "member_id": info["local_member_id"],
+        "local_mac": local_mac,
+        "conductor_mac": conductor_mac,
+        "sw_version": version,
+        "members": [dict(m) for m in info["members"]],
+    }
 
 
 # Generic fallbacks — a hostname prompt, a MAC, or an IP scrolling by is worth
@@ -1094,6 +1157,14 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
             diag["discovery_cmds"] = list(disc.keys())
             result["diag"] = _login_diag(diag, transcript, credentials)
 
+    if not profile and at_standby_console(transcript):
+        # A VSF standby member never prints a vendor banner and rejects the
+        # usual identity commands, so detect_vendor can't place it. Its bare
+        # "standby#" prompt is AOS-CX specific, so adopt that profile — this is
+        # what lets us run `show vsf` and find the conductor instead of
+        # reporting the port as an unknown device forever.
+        profile = next((p for p in PROFILES if p["name"] == "aruba-cx"), None)
+
     if not profile:
         # Unknown vendor, but if we reached a usable shell/CLI prompt (e.g. a
         # logged-in device or an open console) its prompt still names the box —
@@ -1144,6 +1215,15 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         # profile's default family.
         result["identity"]["type"] = infer_device_type(
             result["identity"].get("model"), profile["family"])
+    stack = detect_stack(outputs, transcript)
+    if stack:
+        result["stack"] = stack
+        # A standby has no hostname of its own and answers no identity command,
+        # so its own stack-member MAC is the only stable key we can reconcile
+        # the port against when /dev/ttyUSBn renumbers.
+        if stack.get("local_mac") and not result["identity"].get("mac"):
+            result["identity"]["mac"] = stack["local_mac"]
+
     if result["identity"].get("hostname"):
         result["hostname_source"] = "command"  # parsed from a show/display output
     else:
