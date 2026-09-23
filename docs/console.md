@@ -27,6 +27,12 @@ serial ports from the hub WebUI's **Console** view (an xterm.js terminal in the 
   scrape → vendor-profile match (Cisco IOS/NX-OS, Aruba AOS-CX, ArubaOS gateway/controller, HP ProCurve, Juniper, generic Linux) →
   credential login (global encrypted list, tried once each) → run the profile's read-only
   identity commands → parse serial/MAC/mgmt-IP/model/hostname → **NetBox match + create**.
+- **VSF stack detection (HPE/Aruba)** — a stack is one logical switch spread over several
+  chassis, each with its own serial line. The identify run adds `show vsf` + `show version`
+  on the Aruba profiles and labels every port with its role (**conductor** / **standby** /
+  **member**), the stack topology, member count and running image version. The hub then
+  cross-references the member MACs to point a standby/member at the **conductor's** console
+  port — even when the chassis hang off different console agents. See *VSF stacks* below.
 - **Two-level tenant binding** — the whole console agent (spoke Tenant action) or an individual
   port (`CONSOLE_SET_TENANT` override). Effective tenant = per-port override, else the agent's.
 - Gated by the **`console`** permission right (User Management column + `/api/console/*` gate).
@@ -51,7 +57,8 @@ serial ports from the hub WebUI's **Console** view (an xterm.js terminal in the 
 ## Files
 - `console/src/serial_manager.py` — enumeration, stable id, `PortStore`, baud detect, `PortChannel`/`SessionManager`.
 - `console/src/console_spoke.py` — `ConsoleSpoke(BaseSpoke)` command dispatch + auto-probe loop.
-- `console/src/fingerprint.py` — vendor profiles + `detect_vendor`/`parse_identity`/`run_identify`.
+- `console/src/fingerprint.py` — vendor profiles + `detect_vendor`/`parse_identity`/`run_identify`/`detect_stack`.
+- `console/src/vsf_stack.py` — pure parsers for HPE/Aruba VSF `show vsf` / `show version`.
 - WebUI Console view + xterm terminal + credential library (`WebUI/main.js`).
 
 ## Security / safety
@@ -67,6 +74,78 @@ serial ports from the hub WebUI's **Console** view (an xterm.js terminal in the 
 - NetBox auto-create currently maps ip/mac/hostname (the `sync_devices` shape); serial→`device.serial`
   and full match-by-serial need a NetBox-side field mapping — flagged for real-device verification.
 - Disable auto-identify per agent with role config `auto_identify=false`.
+
+## VSF stacks (HPE/Aruba)
+
+A VSF stack presents **one** logical switch across several physical chassis, but the console
+module sees each chassis as its own serial port. The member that matters is the **conductor**
+(older AOS-S firmware calls it the **commander**) — it is the only one that accepts
+configuration. Every other member rejects almost everything.
+
+**The problem this solves.** A stack's standby member has no hostname of its own, prints no
+vendor banner, and answers `show system` with `Invalid input`. Its CLI prompt is literally the
+bare word `standby`:
+
+```
+6300 login: admin
+Password:
+standby# show system
+Invalid input: sys
+```
+
+Left alone, that port stays an unidentified box forever, and there is nothing on screen telling
+an operator which of their cables actually reaches the conductor.
+
+**How detection works.**
+
+1. `console/src/vsf_stack.py` `at_standby_console()` spots the `standby#` prompt (also
+   `<host>-standby login:` and the standby banner). Only the tail of the capture is examined,
+   so a `show vsf` table scrolled past earlier — which legitimately contains the word
+   "Standby" — can't trigger it.
+2. A port sitting at that prompt adopts the **aruba-cx** profile even though `detect_vendor`
+   found no banner, which is what allows `show vsf` to run at all. (The read-only safety
+   contract is unchanged: still only a matched profile's `show` commands are ever sent.)
+3. `parse_show_vsf()` reads the member table. It handles the AOS-CX wrapped header, the
+   **reduced** table a standby prints (no header block, but an authoritative `This Mbr ID`),
+   the newer firmware's separate `Role` column and `Not Present` slots, and the AOS-S layout
+   with `xxxxxx-xxxxxx` MACs and a `*` marking the local member.
+4. `parse_show_version()` records the running image — only the line labelled exactly
+   `Version`, never `Service OS Version` or `BIOS Version`. A mismatched image is the usual
+   reason a chassis refuses to join a stack.
+5. The spoke stores the result under `probe.stack` (absent entirely for a standalone switch,
+   which still reports itself as "Conductor" of a 1-member VSF).
+6. The hub's `_correlate_stacks()` joins `stack.conductor_mac` against every visible port's
+   learned MAC and fills in `conductor_port_id` / `conductor_spoke_id` / `conductor_hostname`,
+   plus a `stack_id` for grouping. This runs on the hub because a stack's chassis are often
+   cabled to **different** console agents, and only the hub sees them all.
+
+**`probe.stack` shape**
+
+| field | meaning |
+| --- | --- |
+| `is_stack` | true only for a real stack (2+ present members, or a Ring/Chain/Mesh topology) |
+| `role` | `conductor` \| `standby` \| `member` — of the chassis this cable reaches |
+| `member_id` | its member number in the stack |
+| `topology` | `Ring` / `Chain` / `Standalone` |
+| `stack_mac`, `local_mac` | the stack's MAC and this chassis' own member MAC |
+| `conductor_mac` | the cross-reference key used to find the conductor's port |
+| `sw_version` | running image, e.g. `FL.10.13.1000` |
+| `members[]` | `member_id`, `mac`, `model`, `role`, `present` |
+| `is_conductor`, `stack_id`, `conductor_port_id`, `conductor_spoke_id`, `conductor_hostname` | added hub-side by `_correlate_stacks` |
+
+**In the UI.** The port row gets a role badge (⬢ conductor / ⬢ standby / ⬢ member with the
+member number) plus a detail line showing member count, topology, image version and a link to
+the conductor's own console port. If no visible port has identified the conductor yet, it says
+so rather than pointing nowhere — a conductor outside the caller's tenant scope is never
+revealed.
+
+**Notes.**
+- A standby's own member MAC becomes the port's identity MAC. It has no hostname and no
+  `show system`, so that is the only stable key for reattaching the port when `/dev/ttyUSBn`
+  renumbers.
+- `show vsf` is on the **aruba-cx** and **hp-procurve** profiles only; a Cisco/Juniper port is
+  never asked about VSF. A non-stacking ProCurve just answers `Invalid input: vsf`, which parses
+  to "not a stack".
 
 ## Config read / push (write access)
 A deliberate, admin/`console_write`-gated write path, separate from the read-only auto-probe:

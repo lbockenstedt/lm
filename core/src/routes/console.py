@@ -107,6 +107,55 @@ def console_port_result(p: dict) -> dict:
     }
 
 
+def _correlate_stacks(ports: list) -> None:
+    """Point every VSF stack member at the console port that reaches its conductor.
+
+    The spoke can only see its OWN serial lines, but a stack's chassis are often
+    cabled to different console servers, so matching a stack member to the
+    conductor has to happen here — this is the one place that holds every port
+    the caller may see. Works off ``conductor_mac`` (from the member's own
+    ``show vsf``) matched against each port's learned device MAC.
+
+    Ports the caller isn't allowed to see are already filtered out, so a stack is
+    only ever correlated within the requester's own visibility.
+
+    Mutates ``ports`` in place, deep-copying the nested ``probe``/``stack`` dicts
+    first because the warm cache hands out shared references that are reused
+    across requests.
+    """
+    by_mac = {}
+    for port in ports:
+        probe = port.get("probe") or {}
+        for mac in ((probe.get("identity") or {}).get("mac"),
+                    (probe.get("stack") or {}).get("local_mac")):
+            if mac:
+                by_mac.setdefault(str(mac).lower(), port)
+
+    for port in ports:
+        probe = port.get("probe") or {}
+        stack = probe.get("stack") or {}
+        if not stack.get("is_stack"):
+            continue
+        stack = dict(stack)
+        probe = dict(probe)
+        role = stack.get("role") or ""
+        stack["is_conductor"] = role == "conductor"
+        # A stable key so the UI can group the chassis of one stack together,
+        # even when they hang off different console agents.
+        stack["stack_id"] = (stack.get("stack_mac") or stack.get("conductor_mac") or "")
+        conductor_mac = str(stack.get("conductor_mac") or "").lower()
+        peer = by_mac.get(conductor_mac) if conductor_mac else None
+        if peer is not None and peer is not port:
+            peer_probe = peer.get("probe") or {}
+            stack["conductor_port_id"] = peer.get("port_id") or ""
+            stack["conductor_spoke_id"] = peer.get("spoke_id") or ""
+            stack["conductor_hostname"] = (
+                peer.get("alias")
+                or ((peer_probe.get("identity") or {}).get("hostname") or ""))
+        probe["stack"] = stack
+        port["probe"] = probe
+
+
 def register(app, hub, ctx):
     """Register console routes on the Hub app."""
     _session_user = ctx._session_user
@@ -1118,6 +1167,10 @@ def register(app, hub, ctx):
             if cached:
                 stale_spokes.add(sid)
                 _emit_ports(sid, cached, stale=True)
+
+        # Cross-spoke: a stack's chassis can hang off different console agents,
+        # so the conductor lookup runs once over the fully-assembled visible list.
+        _correlate_stacks(ports)
 
         all_spokes = list(spokes) + [s for s in stale_spokes if s not in spokes]
         consoles = all_spokes if sel is None else [s for s in all_spokes if s in visible_spokes]
