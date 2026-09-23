@@ -222,6 +222,21 @@ See [pxmx.md](pxmx.md) for the agent/VM lifecycle and [cs.md](cs.md) for the Sim
 - **`filter_config` / `filter_enabled`** — per-module **subnet-filter** toggles. Modules whose data carries tenant IPs (`nac`, `firewall`, `netbox`, `dhcp`, `hypervisor`, `nw`) default **ON**; Simulations (`cs`) is scoped by tenant **id** instead and defaults OFF. Admins can flip each in System → General.
 - **Subnet-filter + tenant-filter** — for a scoped user the hub resolves the tenant's **NetBox prefixes** and drops records whose concrete IPs all fall outside them (`filter_session`, `filter_fw`, `filter_nw`, `filter_tenant`). Admins bypass unless they explicitly select a tenant in the switcher; a tenant with no prefixes means "can't filter" → no-op (fail-open on *visibility*, not on access).
 
+**`default` is the ADMIN tenant, not "All tenants".** The WebUI tenant picker *always* sends `?tenant=<id>`, and `default` is the built-in **ADMIN** tenant (`routes/tenants_users.py` renders it as "ADMIN" and synthesises it when absent). It is **not** a fleet-wide view, so selecting it must never accumulate every tenant's data into one list. The rule, which `routes/nw.py` names *"ADMIN(default) must not accumulate across tenants"*:
+
+- **SHARED infra is visible to everyone, including the Global Admin** — that is what "shared" means.
+- **A Global Admin does not see a tenant's data until they switch into that tenant's context.** Under ADMIN/Default the admin sees UNASSIGNED resources, resources explicitly bound to `default`, and shared infra — never another tenant's dedicated resources.
+- Only a call with **no `?tenant=` at all** (programmatic; never the WebUI) is genuinely unscoped.
+
+Shared predicates in `access.py`, so modules stop open-coding `tid != "default"`:
+
+- **`ADMIN_TENANT_ID`** — `"default"`.
+- **`tenant_scope_ids(requested)`** — `None` when nothing was requested; `{"", "default", <shared>}` for the ADMIN scope; `{tid, <shared>}` for a real tenant.
+- **`in_tenant_scope(tenant_id, scope)`** — membership test, normalising `None`/blank to UNASSIGNED.
+- **`spoke_is_unbound(hub, spoke_id)`** — gate for every *"fall back to the global spoke"* path. `get_hypervisor_spoke()` returns whichever hypervisor/simulation spoke happens to be connected, which may be **bound to a real tenant**; using it unguarded as the admin's fallback was the main way another tenant's VMs, nodes and drive diagnostics leaked into the ADMIN/Default view. Returns True only for an UNASSIGNED / shared / ADMIN-bound spoke, and fails **closed**.
+
+Endpoints with nothing to show under the ADMIN scope return a clean, empty envelope flagged **`select_tenant: true`** so the UI prompts *"Select a tenant"* rather than erroring or implying the fleet is empty.
+
 **How objects get attributed to a tenant** (per module, since each system tags differently):
 
 - **IPAM / NetBox** — by **prefix containment**: a record's IP is bucketed to the first tenant whose NetBox prefix contains it (`attribute_by_prefix`). The tenant's `netbox_tenant_slug` is the key.

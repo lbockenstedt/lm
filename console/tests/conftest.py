@@ -25,3 +25,20 @@ def _isolated_state_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(sm, "_TELEMETRY", None, raising=False)
     yield
     sm._TELEMETRY = None
+
+
+@pytest.fixture(autouse=True)
+def _impatient_probe():
+    """Run the fingerprinter's read windows at 1/20th scale.
+
+    The real defaults are deliberately generous — a serial device that pauses
+    mid-reply must not be written off as unresponsive — but the tests drive
+    scripted in-memory channels that answer instantly, so the full schedule
+    would add minutes of pure sleeping to the suite. Scaling keeps every
+    timeout's RELATIVE behaviour (and so the code paths under test) identical.
+    """
+    import fingerprint as fp
+
+    prev = fp.set_patience(0.05)
+    yield
+    fp.set_patience(prev)

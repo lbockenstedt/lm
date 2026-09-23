@@ -23856,6 +23856,15 @@ async function renderPxmxDiagnostics(container) {
         return;
     }
 
+    // ADMIN (default) scope: the hub returns an empty, `select_tenant`-flagged
+    // payload rather than a cross-tenant firehose. Check this BEFORE
+    // spoke_connected — otherwise an empty payload renders as a falsely
+    // reassuring "All drives healthy / 0 drives" dashboard.
+    if (data.select_tenant) {
+        container.innerHTML = pxmxSelectTenantPromptHtml();
+        return;
+    }
+
     const spokeConnected = data.spoke_connected !== false;
     const nodes = Array.isArray(data.nodes) ? data.nodes : [];
     const summary = data.summary || {

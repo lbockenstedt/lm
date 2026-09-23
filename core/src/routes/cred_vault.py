@@ -39,8 +39,12 @@ def register(app, hub, ctx):
         return _session_user(request) or {}
 
     def _actor(sess) -> str:
-        u = (sess or {}).get("user", {}) or {}
-        return u.get("username") or u.get("id") or "?"
+        # Sessions carry the login id as ``user_id`` (routes/auth.py); reading
+        # only ``username``/``id`` logged every vault audit line as "?".
+        sess = sess or {}
+        u = sess.get("user", {}) or {}
+        return (u.get("user_id") or sess.get("user_id")
+                or u.get("username") or u.get("id") or "?")
 
     def _acting_tenants(sess):
         return (sess or {}).get("user", {}).get("tenants") or []
