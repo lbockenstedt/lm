@@ -3522,7 +3522,6 @@ function _rebuildMainNav(allSpokes, connections) {
         `;
     }).join('');
 
-    const dashboardNav = document.getElementById('nav-dashboard') ? document.getElementById('nav-dashboard').outerHTML : '';
     // Strip 'hidden' before capturing so the nav items are visible after the rebuild.
     const _getNavHtml = (id) => {
         const el = document.getElementById(id);
@@ -3610,7 +3609,6 @@ function _rebuildMainNav(allSpokes, connections) {
         </div>`;
 
     mainNav.innerHTML = `
-        ${dashboardNav}
         ${dynamicHtml}
         ${((window.activeProducts && window.activeProducts.has('ldap')) && canSeeModule('Directory')) ? _directoryNavHtml() : ''}
         ${canSeeModule('Reports') ? _reportsNavHtml() : ''}
