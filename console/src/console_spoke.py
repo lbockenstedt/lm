@@ -381,9 +381,17 @@ class ConsoleSpoke(BaseSpoke):
             res = await self._exclusive_probe(pid, self._identify_blocking, pid, dev)
             self._record_identify_telemetry(pid, res, method="login")
             await self._emit_probe_result(pid, res)
-            return {"status": "SUCCESS", "port_id": pid,
-                    "vendor": res.get("vendor"), "logged_in": bool(res.get("logged_in")),
-                    "identity": res.get("identity") or {}}
+            reply = {"status": "SUCCESS", "port_id": pid,
+                     "vendor": res.get("vendor"), "logged_in": bool(res.get("logged_in")),
+                     "identity": res.get("identity") or {}}
+            if res.get("ambiguous_fields"):
+                # The fingerprint found 2+ distinct device addresses for "ip" —
+                # pass the candidates so the hub can ask the LLM which is the
+                # device's own (see fingerprint.ip_ambiguity).
+                reply["ambiguous_fields"] = list(res["ambiguous_fields"])
+                reply["ip_candidates"] = list(res.get("ip_candidates") or [])
+                reply["ip_candidate_context"] = dict(res.get("ip_candidate_context") or {})
+            return reply
 
         if cmd == "CONSOLE_LLM_COLLECT":
             # Log in (generically) and run a validated set of READ-ONLY commands,

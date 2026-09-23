@@ -94,11 +94,16 @@ async def _github_get_contents(path):
     A thin, directly-monkeypatchable seam for tests — no local client/token
     plumbing to fake."""
     import httpx
+    import os
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN") or os.getenv("LM_HELP_SOURCE_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     async with httpx.AsyncClient(timeout=15.0) as client:
         return await client.get(
             f"{_GITHUB_API}/repos/{_CS_REPO_OWNER}/{_CS_REPO_NAME}/contents/{path}",
             params={"ref": _CS_REPO_BRANCH},
-            headers={"Accept": "application/vnd.github+json"})
+            headers=headers)
 
 
 async def _tool_list_available_sims(_args):
@@ -441,6 +446,31 @@ def register(app, hub, ctx):
             + doc_ctx
         )
 
+    async def _final_answer(hub, agent, messages, system):
+        """Run the ONE synthesis turn that produces the user-visible answer.
+
+        Tools are disabled and the turn is tagged role="final" so AppBuilder
+        routes it to the strongest model rather than the fast cheap one used
+        for tool-picking. Returns "" on any failure so callers can fall back
+        to whatever text they already have.
+        """
+        try:
+            res = await hub.request_response(
+                agent, "HELP_ASK",
+                {"messages": messages + [{"role": "user", "content": (
+                    "Using the simulation source code, documentation, and data "
+                    "gathered above, write your final response to my question now. "
+                    "Explain your recommendation clearly and quote relevant lines "
+                    "or parameters.")}],
+                 "tools": None, "system": system, "role": "final"},
+                timeout=90.0)
+            data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+            if isinstance(data, dict) and data.get("status") == "SUCCESS":
+                return (data.get("assistant") or {}).get("content") or ""
+        except Exception as e:
+            logger.warning("sim_assistant _final_answer synthesis failed: %s", e)
+        return ""
+
     @app.get("/api/sim-assistant/available")
     async def sim_assistant_available():
         """Whether the simulation build assistant is usable (ab connected)."""
@@ -489,7 +519,7 @@ def register(app, hub, ctx):
             try:
                 res = await hub.request_response(
                     agent, "HELP_ASK",
-                    {"messages": turn_messages, "tools": _SIM_TOOLS, "system": system},
+                    {"messages": turn_messages, "tools": _SIM_TOOLS, "system": system, "role": "tool"},
                     timeout=90.0)
             except Exception as e:  # noqa: BLE001
                 logger.warning("sim_assistant chat relay failed: %s", e)
@@ -502,7 +532,11 @@ def register(app, hub, ctx):
             tool_calls = assistant.get("tool_calls") or []
             text = assistant.get("content") or ""
             if not tool_calls:
-                answer = text
+                if len(turn_messages) > len(messages):
+                    synth = await _final_answer(hub, agent, turn_messages, system)
+                    answer = synth if synth.strip() else text
+                else:
+                    answer = text
                 break
             turn_messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
             for tc in tool_calls:
@@ -517,6 +551,24 @@ def register(app, hub, ctx):
                 turn_messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                       "name": name, "content": json.dumps(out)[:12000]})
         else:
+            # 5 rounds exhausted
+            try:
+                final_req = {
+                    "messages": turn_messages + [{"role": "user", "content": "Please synthesize and summarize your findings into a final response now."}],
+                    "tools": None,
+                    "system": system,
+                    "role": "final"
+                }
+                res = await hub.request_response(agent, "HELP_ASK", final_req, timeout=90.0)
+                data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+                if isinstance(data, dict) and data.get("status") == "SUCCESS":
+                    assistant = data.get("assistant") or {}
+                    answer = assistant.get("content") or ""
+                elif isinstance(data, dict) and data.get("message"):
+                    answer = f"Simulation assistant error: {data['message']}"
+            except Exception as e:  # noqa: BLE001
+                logger.warning("sim_assistant forced synthesis turn failed: %s", e)
+
             answer = answer or ("I wasn't able to finish looking up the existing sim source "
                                 "in time — try asking again, or narrow down which sim you mean.")
 
