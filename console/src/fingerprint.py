@@ -155,8 +155,9 @@ PROFILES: List[Dict[str, Any]] = [
             # Anchor on the VLAN row's IP Config column (Manual, or DHCP —
             # printed as "DHCP/Bootp" on ProCurve/AOS-S) so the Default
             # Gateway line is never picked. [ \t]+ keeps the match on one row.
-            # With several addressed VLANs the first one listed wins — a
-            # deliberate, accepted limitation for now.
+            # With several addressed VLANs the first one listed is stored, but
+            # "ip" is reported in ambiguous_fields with every address in
+            # ip_candidates so the hub can ask the LLM which is the device's.
             {"cmd": "show ip", "fields": {"ip": re.compile(
                 r"(?:Manual|DHCP(?:/Bootp)?)[ \t]+(?:(?:True|False)[ \t]+)?"
                 r"(\d{1,3}(?:\.\d{1,3}){3})\b", re.I)}},
@@ -299,7 +300,47 @@ def infer_device_type(model: Optional[str], family_default: Optional[str]) -> st
     return family_default or ""
 
 
-def _extract_profile_fields(profile: Dict[str, Any], text: str) -> Dict[str, str]:
+def _ip_candidates(rx: "re.Pattern", text: str) -> List[Tuple[str, str]]:
+    """Every distinct valid device IP ``rx`` yields in ``text``, in order of
+    appearance, each paired with the (whitespace-collapsed) line it came from —
+    e.g. ``("172.16.50.20", "MGMT | Manual 172.16.50.20 255.255.255.0 No No")``.
+    Candidates must pass ``is_valid_device_ip`` (masks / junk never count).
+
+    Only the ``ip`` field is tracked this way: 2+ distinct device addresses (a
+    switch with several addressed VLANs/interfaces) is real-world ambiguity. For
+    other fields multiple regex hits are a regex-scoping artifact, not competing
+    candidates, so they keep plain first-valid-match behavior."""
+    out: List[Tuple[str, str]] = []
+    seen = set()
+    text = text or ""
+    for m in rx.finditer(text):
+        # Same group handling as the first-match loops below.
+        val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
+        if not val or not is_valid_device_ip(val) or val in seen:
+            continue
+        seen.add(val)
+        start = text.rfind("\n", 0, m.start()) + 1
+        end = text.find("\n", m.end())
+        line = " ".join(text[start:end if end != -1 else len(text)].split())
+        out.append((val, line[:160]))
+    return out
+
+
+def ip_ambiguity(cands: List[Tuple[str, str]]) -> Dict[str, Any]:
+    """Result keys for a multi-candidate ``ip`` (``{}`` when 0-1 candidates):
+    ``ambiguous_fields: ["ip"]``, ``ip_candidates`` (the distinct values, first =
+    the stored ``identity["ip"]``) and ``ip_candidate_context`` (value → source
+    line) so the hub can ask the LLM which one is the device's own address."""
+    if len(cands) < 2:
+        return {}
+    return {"ambiguous_fields": ["ip"],
+            "ip_candidates": [ip for ip, _ in cands],
+            "ip_candidate_context": {ip: line for ip, line in cands}}
+
+
+def _extract_profile_fields(profile: Dict[str, Any], text: str,
+                            ip_candidates: Optional[List[Tuple[str, str]]] = None
+                            ) -> Dict[str, str]:
     """Apply a matched vendor profile's identity-field regexes across an arbitrary
     text blob (a full identify transcript or a passive capture), returning the
     fields found. The profile's regexes anchor on specific, low-ambiguity strings
@@ -309,7 +350,12 @@ def _extract_profile_fields(profile: Dict[str, Any], text: str) -> Dict[str, str
     an ArubaOS-Switch that answers ``show system`` during banner discovery but
     rejects the profile's exact ``show system-information`` command. Skips the
     ``linux`` profile, whose bare ``^(\\S+)$`` field regexes would match garbage
-    across arbitrary scrollback. MAC is normalized when present."""
+    across arbitrary scrollback. MAC is normalized when present.
+
+    The first valid match per field is the stored value. If ``ip_candidates``
+    (a list) is passed, it is filled with every distinct valid ``ip`` candidate
+    (see ``_ip_candidates``) for the regex that supplied ``found["ip"]``, so the
+    caller can flag a multi-address device instead of trusting the first hit."""
     found: Dict[str, str] = {}
     if not profile or profile.get("name") == "linux":
         return found
@@ -317,11 +363,16 @@ def _extract_profile_fields(profile: Dict[str, Any], text: str) -> Dict[str, str
         for key, rx in (spec.get("fields") or {}).items():
             if key in found:
                 continue
+            if key == "ip":
+                cands = _ip_candidates(rx, text)
+                if cands:
+                    found[key] = cands[0][0]
+                    if ip_candidates is not None:
+                        ip_candidates[:] = cands
+                continue
             for m in rx.finditer(text or ""):
                 val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
                 if val:
-                    if key == "ip" and not is_valid_device_ip(val):
-                        continue
                     found[key] = val
                     break
     if found.get("mac"):
@@ -329,10 +380,13 @@ def _extract_profile_fields(profile: Dict[str, Any], text: str) -> Dict[str, str
     return found
 
 
-def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str]) -> Dict[str, str]:
+def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str],
+                   ip_candidates: Optional[List[Tuple[str, str]]] = None) -> Dict[str, str]:
     """Apply a profile's per-command field regexes to captured command output.
     ``outputs`` maps command → its captured text. First non-empty match wins per
-    field; MAC is normalized."""
+    field; MAC is normalized. If ``ip_candidates`` (a list) is passed, it is
+    filled with every distinct valid ``ip`` candidate from the command output
+    that supplied ``identity["ip"]`` (see ``_extract_profile_fields``)."""
     identity: Dict[str, str] = {}
     for spec in profile.get("commands", []):
         fields = spec.get("fields") or {}
@@ -340,14 +394,19 @@ def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str]) -> Dict[str
         for key, rx in fields.items():
             if key in identity:
                 continue
+            if key == "ip":
+                cands = _ip_candidates(rx, text)
+                if cands:
+                    identity[key] = cands[0][0]
+                    if ip_candidates is not None:
+                        ip_candidates[:] = cands
+                continue
             for m in rx.finditer(text):
                 # Use the first capturing group, but tolerate alternation branches
                 # where group 1 didn't participate (returns None) — fall back to the
                 # whole match so a valid hit is never dropped (or worse, crashes).
                 val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
                 if val:
-                    if key == "ip" and not is_valid_device_ip(val):
-                        continue
                     identity[key] = val
                     break
     if identity.get("mac"):
@@ -693,10 +752,14 @@ def passive_identify(text: str) -> Dict[str, Any]:
     profile (avoids cross-vendor false positives); otherwise a light generic pass
     picks up a hostname prompt / MAC so the port stops showing "unknown".
 
-    Returns ``{"vendor": <name|None>, "identity": {...}}`` (identity may be {})."""
+    Returns ``{"vendor": <name|None>, "identity": {...}}`` (identity may be {}),
+    plus ``ambiguous_fields: ["ip"]`` / ``ip_candidates`` / ``ip_candidate_context``
+    ONLY when the profile's ip regex found 2+ distinct valid addresses (see
+    ``ip_ambiguity``; the keys are omitted otherwise)."""
     text = text or ""
     prof = detect_vendor(text)
     identity: Dict[str, str] = {}
+    ip_cands: List[Tuple[str, str]] = []
     vendor = prof["name"] if prof else None
     # Full field extraction only for the LABELED network-vendor profiles (their
     # regexes anchor on strings like "Processor board ID" / "Serial Number" /
@@ -705,7 +768,7 @@ def passive_identify(text: str) -> Dict[str, Any]:
     # to specific command outputs — matching those across arbitrary scrollback
     # yields garbage, so linux/unknown fall to the generic prompt pass below.
     if prof and prof["name"] != "linux":
-        identity.update(_extract_profile_fields(prof, text))
+        identity.update(_extract_profile_fields(prof, text, ip_cands))
     if prof and prof.get("family") and prof["name"] != "linux":
         identity["type"] = infer_device_type(identity.get("model"), prof["family"])
     if not identity.get("hostname"):
@@ -725,7 +788,9 @@ def passive_identify(text: str) -> Dict[str, Any]:
                 break
     if identity.get("mac"):
         identity["mac"] = normalize_mac(identity["mac"]) or identity["mac"]
-    return {"vendor": vendor, "identity": identity}
+    res: Dict[str, Any] = {"vendor": vendor, "identity": identity}
+    res.update(ip_ambiguity(ip_cands))
+    return res
 
 
 def _read_until(read_fn: Callable[[], bytes], patterns: List[re.Pattern],
@@ -978,7 +1043,11 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     ``read_fn()`` returns available bytes (non-blocking-ish); ``write_fn(bytes)``
     writes. ``credentials`` is an ordered list of ``{username,password}`` tried
     once each at a login prompt (attempt cap = len(credentials); no re-hammering).
-    Returns ``{banner, vendor, logged_in, credential_index, identity, outputs}``.
+    Returns ``{banner, vendor, logged_in, credential_index, identity, outputs}``,
+    plus ``ambiguous_fields: ["ip"]`` / ``ip_candidates`` / ``ip_candidate_context``
+    ONLY when 2+ distinct valid device addresses were found for ``ip`` (see
+    ``ip_ambiguity``; omitted otherwise, same as ``passive_identify``). The hub
+    asks the LLM which candidate is the device's own address.
     Read-only: only the matched profile's commands are sent.
     """
     result: Dict[str, Any] = {"banner": "", "vendor": None, "logged_in": False,
@@ -1055,14 +1124,21 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         write_fn((cmd + "\r").encode())
         outputs[cmd] = _read_command_output(read_fn, write_fn, [profile["prompt"]], cmd_secs)
     result["outputs"] = outputs
-    result["identity"] = parse_identity(profile, outputs)
+    ip_cands: List[Tuple[str, str]] = []
+    result["identity"] = parse_identity(profile, outputs, ip_cands)
     # Backfill any fields the dedicated identity commands didn't yield from the
     # FULL transcript: a device may answer an equivalent discovery command (e.g.
     # an ArubaOS-Switch that returns "System Name : …" for the banner-discovery
     # ``show system`` while rejecting the profile's ``show system-information``),
     # so the data is already captured — just not in this command's own output.
-    for key, val in _extract_profile_fields(profile, transcript).items():
-        result["identity"].setdefault(key, val)
+    # Transcript ip candidates only count if the ip was actually taken from it.
+    backfill_ip_cands: List[Tuple[str, str]] = []
+    for key, val in _extract_profile_fields(profile, transcript, backfill_ip_cands).items():
+        if key not in result["identity"]:
+            result["identity"][key] = val
+            if key == "ip":
+                ip_cands = backfill_ip_cands
+    result.update(ip_ambiguity(ip_cands))
     if profile.get("family"):
         # Concrete role from the model (e.g. Juniper SRX → Firewall), else the
         # profile's default family.
