@@ -53,7 +53,7 @@ class NwCacheMixin:
 
     NW_CACHE_FILE = "nw_data.json"
     _NW_CACHE_ENDPOINTS = ("info", "macs", "arp", "interfaces",
-                           "endpoints", "vlans")
+                           "endpoints", "vlans", "lldp")
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
