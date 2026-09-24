@@ -24,8 +24,10 @@ _NS = "pxmx_drive_health"
 @pytest.fixture(autouse=True)
 def _reset_caches():
     pxmx._NODES_CACHE.clear()
+    pxmx._DRIVE_HEALTH_CACHE.clear()
     yield
     pxmx._NODES_CACHE.clear()
+    pxmx._DRIVE_HEALTH_CACHE.clear()
 
 
 def _cached_payload(node="pve1", wear=12):
@@ -55,6 +57,52 @@ def test_successful_fetch_populates_the_cache():
     assert cached is not None
     assert cached["nodes"], "cached an empty aggregate"
     assert hub.warm_fetched_at(_NS, "t1|node=") > 0
+
+
+def test_connected_spoke_serves_warm_cache_without_polling():
+    """When cache is populated and fresh, normal GET does NOT poll the spoke."""
+    hub = _MockHub(bound_spoke="pxmx-1")
+    client = _build_client(hub, tenant="t1")
+
+    # First fetch: populates cache from spoke
+    res1 = client.get("/api/pxmx/drive-health?tenant=t1")
+    assert res1.status_code == 200
+    dh_calls1 = [c for c in hub.calls if c["cmd"] == "PXMX_DRIVE_HEALTH"]
+    assert len(dh_calls1) == 1
+
+    # Second fetch within TTL: served from cache without spoke polling!
+    res2 = client.get("/api/pxmx/drive-health?tenant=t1")
+    assert res2.status_code == 200
+    body2 = res2.json()
+    assert body2["spoke_connected"] is True
+    assert not body2.get("stale")
+    assert [n["node"] for n in body2["nodes"]] == ["pve1"]
+    dh_calls2 = [c for c in hub.calls if c["cmd"] == "PXMX_DRIVE_HEALTH"]
+    assert len(dh_calls2) == 1, f"Expected 1 spoke poll total, got {len(dh_calls2)}"
+
+
+def test_connected_spoke_force_refresh_polls_spoke():
+    """When refresh=true is passed, route bypasses cache and polls the spoke."""
+    hub = _MockHub(bound_spoke="pxmx-1")
+    client = _build_client(hub, tenant="t1")
+
+    # First fetch: populates cache with initial wear level
+    res1 = client.get("/api/pxmx/drive-health?tenant=t1")
+    assert res1.status_code == 200
+    assert len([c for c in hub.calls if c["cmd"] == "PXMX_DRIVE_HEALTH"]) == 1
+
+    # Spoke now returns updated wear level 15
+    fresh_payload = _cached_payload(wear=15)
+    hub.drive_response = fresh_payload["nodes"][0]
+
+    # Force refresh bypasses cache
+    res2 = client.get("/api/pxmx/drive-health?tenant=t1&refresh=true")
+    assert res2.status_code == 200
+    body2 = res2.json()
+    assert body2["spoke_connected"] is True
+    assert body2["nodes"][0]["drives"][0]["wear_level"] == 15
+    dh_calls = [c for c in hub.calls if c["cmd"] == "PXMX_DRIVE_HEALTH"]
+    assert len(dh_calls) == 2, "Expected second spoke poll on refresh=true"
 
 
 def test_spoke_gone_serves_cached_drives_marked_stale():
