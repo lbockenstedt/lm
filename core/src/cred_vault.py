@@ -632,11 +632,26 @@ async def automation_list_by_type(hub, sec_type,
                 for b, n, sm in to_fetch
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            failed = 0
             for (b, n, sm), res in zip(to_fetch, results):
                 if isinstance(res, Exception):
+                    # Per-record failures are non-fatal (this is a best-effort
+                    # scan), but they must NOT be invisible: a backend/auth fault
+                    # fails EVERY record and the caller just sees an empty list,
+                    # which looks identical to "no secrets are configured".
+                    failed += 1
+                    logger.warning("vault: could not read %s/%s for automation: "
+                                   "%s: %s", b, n, type(res).__name__, res)
                     continue
                 _cache_set(_cache_key(b, n, sm.get("updated_at", "")), res)
                 out.append({"bucket": b, "name": n, "value": res})
+            if failed and not out:
+                logger.error(
+                    "vault: ALL %d automation-readable secret(s) of type %s failed "
+                    "to decrypt — this is a vault backend/credential fault, NOT an "
+                    "empty vault; dependent features (console auto-login, etc.) "
+                    "will behave as if no credentials exist",
+                    failed, ",".join(sorted(want_types)))
     return out
 
 

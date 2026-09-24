@@ -37,6 +37,8 @@ import time
 from urllib.parse import quote as _url_quote
 
 import httpx
+
+from http_client import shared_client
 import jwt
 from cryptography.hazmat.primitives import serialization
 
@@ -307,7 +309,7 @@ async def discover(cfg: OidcConfig, http: httpx.AsyncClient | None = None) -> di
     cached = _discovery_cache.get(cfg.tenant_id)
     if cached and now - cached[0] < 300:
         return cached[1]
-    async with (http or httpx.AsyncClient(timeout=15.0)) as client:
+    async with shared_client(http, 15.0) as client:
         resp = await client.get(cfg.discovery_url())
         resp.raise_for_status()
         doc = resp.json()
@@ -480,7 +482,7 @@ async def exchange_code(cfg: OidcConfig, discovery_doc: dict,
             "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
         "client_assertion": assertion,
     }
-    async with (http or httpx.AsyncClient(timeout=15.0)) as client:
+    async with shared_client(http, 15.0) as client:
         resp = await client.post(token_endpoint, data=data)
     if resp.status_code != 200:
         raise OidcError(f"token exchange failed: HTTP {resp.status_code}"
@@ -508,7 +510,7 @@ def _entra_error_detail(resp) -> str:
 
 async def fetch_jwks(jwks_uri: str, http: httpx.AsyncClient | None = None) -> list:
     """Fetch the JWKS keys (cached implicitly by the caller via discovery)."""
-    async with (http or httpx.AsyncClient(timeout=15.0)) as client:
+    async with shared_client(http, 15.0) as client:
         resp = await client.get(jwks_uri)
         resp.raise_for_status()
         return resp.json().get("keys", [])
@@ -587,7 +589,7 @@ async def fetch_member_groups_via_graph(access_token: str,
                                         http: httpx.AsyncClient | None = None) -> list:
     """Fall back to Microsoft Graph ``/me/transitiveMemberOf`` when the
     ``groups`` claim overflows (>200 groups). Returns group object IDs."""
-    async with (http or httpx.AsyncClient(timeout=15.0)) as client:
+    async with shared_client(http, 15.0) as client:
         resp = await client.get(
             "https://graph.microsoft.com/v1.0/me/transitiveMemberOf?$select=id",
             headers={"Authorization": f"Bearer {access_token}"})
@@ -612,7 +614,7 @@ async def fetch_app_token(cfg: OidcConfig, scope: str,
         "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
         "client_assertion": build_client_assertion(cfg, token_endpoint),
     }
-    async with (http or httpx.AsyncClient(timeout=15.0)) as client:
+    async with shared_client(http, 15.0) as client:
         resp = await client.post(token_endpoint, data=data)
     if resp.status_code != 200:
         raise OidcError(f"app-token failed ({scope}): HTTP {resp.status_code} — "
@@ -641,7 +643,7 @@ async def fetch_directory_groups(cfg: OidcConfig,
     token = await fetch_app_graph_token(cfg, http=http)
     out: list = []
     url = "https://graph.microsoft.com/v1.0/groups?$select=id,displayName&$top=999"
-    async with (http or httpx.AsyncClient(timeout=20.0)) as client:
+    async with shared_client(http, 20.0) as client:
         while url:
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
             if resp.status_code != 200:
@@ -671,7 +673,7 @@ async def fetch_user_groups_via_app(cfg: OidcConfig, oid: str,
     out: list = []
     url = (f"https://graph.microsoft.com/v1.0/users/{oid}"
            f"/transitiveMemberOf/microsoft.graph.group?$select=id&$top=999")
-    async with (http or httpx.AsyncClient(timeout=15.0)) as client:
+    async with shared_client(http, 15.0) as client:
         while url:
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
             if resp.status_code != 200:

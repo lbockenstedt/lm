@@ -22023,6 +22023,40 @@ async function openConsoleCredentialsModal() {
         showToast('Unable to load console credentials (access denied or error).', 'error');
         return;
     }
+    // Which vault accounts the scan / auto-identify sweep may use. Admin-only,
+    // so a 403 here simply means "no picker for you" — never a modal failure.
+    let credCandidates = [];
+    let selectionActive = false;
+    try {
+        const cres = await fetch('/api/console/credentials/candidates' + _consoleTenantQuery(),
+                                 { credentials: 'same-origin' });
+        if (cres.ok) {
+            const cj = await cres.json();
+            credCandidates = cj.candidates || [];
+            selectionActive = (cj.selection_active === true);
+        }
+    } catch (e) { console.error('console credential candidates fetch failed', e); }
+    const selectionSection = credCandidates.length
+        ? `<div class="pt-2 border-t border-slate-100">
+             <p class="text-[11px] font-semibold text-slate-500 mb-1">Accounts used for scanning &amp; auto-identify</p>
+             <p class="text-[11px] text-slate-400 mb-2">Every account is tried unless you narrow this list. Un-tick an account to keep the sweep from using it.</p>
+             <div class="space-y-1">${credCandidates.map(c => `
+               <label class="flex items-center gap-2 bg-slate-50 rounded px-2 py-1 cursor-pointer">
+                 <input type="checkbox" class="console-cred-sel" data-name="${escapeHtml(c.name)}" ${c.selected ? 'checked' : ''}>
+                 <span class="font-mono text-xs text-slate-600">${escapeHtml(c.username || '(no username)')}</span>
+                 <span class="text-[10px] text-slate-400 ml-auto truncate max-w-[45%]" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>
+               </label>`).join('')}</div>
+             <div class="flex justify-between items-center pt-2 gap-2">
+               <span class="text-[10px] ${selectionActive ? 'text-amber-600' : 'text-slate-400'}">${selectionActive
+                   ? 'Selection active — only ticked accounts are used.'
+                   : 'No selection — every account is tried.'}</span>
+               <span class="flex gap-2 shrink-0">
+                 <button onclick="clearConsoleCredentialSelection('${escJsAttr(tenantScope)}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Use all</button>
+                 <button onclick="saveConsoleCredentialSelection('${escJsAttr(tenantScope)}')" class="text-[11px] px-3 py-1 rounded border border-[#01A982] text-[#01A982] hover:bg-[#01A982]/10 font-bold">Save selection</button>
+               </span>
+             </div>
+           </div>`
+        : '';
     if (vaultBacked) {
         // Creation is disabled: console logins are managed in the Credential
         // Vault (or a legacy Key Vault ref). The hub only reads them here, so
@@ -22064,6 +22098,7 @@ async function openConsoleCredentialsModal() {
               ${warnBanner}
               <ul class="space-y-1 list-disc list-inside">${list}</ul>
               ${sharedNote}
+              ${selectionSection}
               ${localSection}
               <div class="pt-3 flex justify-end"><button onclick="this.closest('#console-creds-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Close</button></div>
             </div></div>`;
@@ -22098,6 +22133,53 @@ async function openConsoleCredentialsModal() {
           </div>
         </div></div>`;
     _mountModal(modal);
+}
+
+// Persist which vault accounts the console scan / auto-identify sweep may use.
+// Ticking every account clears the restriction instead of pinning today's list,
+// so an account added to the vault later is picked up automatically.
+async function saveConsoleCredentialSelection(tenant) {
+    const boxes = Array.from(document.querySelectorAll('#console-creds-modal .console-cred-sel'));
+    const selected = boxes.filter(b => b.checked).map(b => b.dataset.name);
+    if (!selected.length) {
+        showToast('Tick at least one account, or use "Use all" to clear the selection.', 'error');
+        return;
+    }
+    await _postConsoleCredentialSelection(
+        tenant,
+        selected.length === boxes.length ? null : selected,
+        selected.length === boxes.length
+            ? 'Using every console account.'
+            : `Console sweep limited to ${selected.length} account${selected.length === 1 ? '' : 's'}.`);
+}
+
+// Drop any restriction — every console/login secret in the bucket is tried.
+async function clearConsoleCredentialSelection(tenant) {
+    await _postConsoleCredentialSelection(tenant, null, 'Using every console account.');
+}
+
+async function _postConsoleCredentialSelection(tenant, selected, okMsg) {
+    const body = { selected };
+    if (tenant) body.tenant = tenant;
+    try {
+        const res = await fetch('/api/console/credentials/selection', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+            const j = await res.json().catch(() => ({}));
+            showToast(j.detail || 'Could not save the credential selection.', 'error');
+            return;
+        }
+        showToast(okMsg, 'success');
+        document.getElementById('console-creds-modal')?.remove();
+        openConsoleCredentialsModal();
+    } catch (e) {
+        console.error('console credential selection save failed', e);
+        showToast('Could not save the credential selection.', 'error');
+    }
 }
 
 // Save the tenant's console SCAN credentials into the Credential Vault (tenant
@@ -33822,16 +33904,29 @@ async function _initApp() {
         // Admins (protected, no tenant assignments) get a picker listing EVERY
         // tenant so they can view any tenant's systems in Simulations (and
         // elsewhere). Non-admins are limited to their assigned tenants (allowed).
-        let pickerTenants = allowed.map(id => ({ id, name: id }));
-        if (isAdmin()) {
-            try {
-                const r = await fetch('/setup/tenants', { credentials: 'same-origin' });
-                if (r.ok) {
-                    const td = await r.json();
-                    pickerTenants = (td.tenants || []).map(t => ({ id: t.id, name: t.name || t.id }));
-                }
-            } catch (e) { console.error('_initApp: tenant picker fetch failed — falling back to allowed tenants', e); }
-        }
+        // Both fetch /setup/tenants so entries carry their display name and the
+        // is_group flag — a NetBox tenant GROUP is selectable like a tenant and
+        // shows the union of its member tenants, so it must not render as the
+        // raw "group:<slug>" id.
+        let pickerTenants = allowed.map(id => ({ id, name: id, isGroup: false, members: [] }));
+        try {
+            const r = await fetch('/setup/tenants', { credentials: 'same-origin' });
+            if (r.ok) {
+                const td = await r.json();
+                let rows = (td.tenants || []).map(t => ({
+                    id: t.id,
+                    name: t.name || t.id,
+                    isGroup: !!t.is_group,
+                    members: t.members || [],
+                }));
+                if (!isAdmin()) rows = rows.filter(t => allowed.includes(t.id));
+                if (rows.length) pickerTenants = rows;
+            }
+        } catch (e) { console.error('_initApp: tenant picker fetch failed — falling back to allowed tenants', e); }
+        // Groups first, then tenants, each alphabetically — a group is a wider
+        // scope, so it reads as the parent of the tenants listed under it.
+        pickerTenants.sort((a, b) =>
+            (b.isGroup - a.isGroup) || a.name.localeCompare(b.name));
         const tenantNameMap = {};
         pickerTenants.forEach(t => { tenantNameMap[t.id] = t.name; });
         window._lmTenantPicker = pickerTenants;
@@ -33859,7 +33954,10 @@ async function _initApp() {
                             </button>
                             <div id="tenant-picker-menu" class="hidden absolute top-full left-0 mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl z-50 min-w-[140px] max-h-[60vh] overflow-y-auto py-1">
                                 ${pickerTenants.map(t => `
-                                    <button data-tid="${escapeHtml(t.id)}" onclick="viewAsTenant('${escapeHtml(t.id)}')" class="w-full text-left px-3 py-1.5 text-[11px] text-slate-200 hover:bg-[#01A982] hover:text-white transition-colors ${t.id===currentTenant?'font-bold text-[#01A982]':''}">${escapeHtml(t.name)}</button>
+                                    <button data-tid="${escapeHtml(t.id)}" onclick="viewAsTenant('${escapeHtml(t.id)}')" title="${t.isGroup ? escapeHtml('Tenant group — shows: ' + (t.members.join(', ') || 'no members')) : ''}" class="w-full text-left px-3 py-1.5 text-[11px] text-slate-200 hover:bg-[#01A982] hover:text-white transition-colors flex items-center justify-between gap-2 ${t.id===currentTenant?'font-bold text-[#01A982]':''}">
+                                        <span>${escapeHtml(t.name)}</span>
+                                        ${t.isGroup ? `<span class="px-1 rounded bg-slate-600 text-slate-200 text-[9px] font-bold uppercase tracking-wider shrink-0">Group</span>` : ''}
+                                    </button>
                                 `).join('')}
                             </div>
                         </div>`;
