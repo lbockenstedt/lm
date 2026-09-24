@@ -1725,20 +1725,22 @@ def register(app, hub, ctx):
                 for k in ("total_drives", "healthy", "warning", "critical", "unknown"):
                     total_summary[k] += int(ns.get(k, 0) or 0)
 
-            return {
+            now_ts = time.time()
+            res = {
                 "nodes": aggregated_nodes,
                 "summary": total_summary,
                 "spoke_connected": True,
+                "cached_at": now_ts,
             }
+            if aggregated_nodes:
+                await hub.warm_set("pxmx_drive_health", warm_key, res)
+            return res
 
         try:
             result = await _ttl_cached(
                 _DRIVE_HEALTH_CACHE, "drive_health", warm_key, _fetch_drive_health,
                 ttl=_DRIVE_HEALTH_FRESH_S)
-            if isinstance(result, dict) and result.get("spoke_connected") and result.get("nodes"):
-                await hub.warm_set("pxmx_drive_health", warm_key, result)
             out = dict(result)
-            out["cached_at"] = hub.warm_fetched_at("pxmx_drive_health", warm_key)
             return out
         except Exception as e:
             logger.debug("get_pxmx_drive_health fetch failed: %s", e)

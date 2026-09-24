@@ -24214,7 +24214,7 @@ function pxmxStaleBanner(isStale, cachedAt) {
            </div>`;
 }
 
-async function renderPxmxDiagnostics(container) {
+async function renderPxmxDiagnostics(container, forceRefresh = false) {
     const forceRefresh = arguments.length > 1 && !!arguments[1];
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">' + (forceRefresh ? 'Polling drive diagnostics live…' : 'Loading drive diagnostics…') + '</p>';
 
@@ -24312,7 +24312,7 @@ async function renderPxmxDiagnostics(container) {
                 <p class="text-xs text-slate-500 mt-1">Storage device telemetry and SSD wear level diagnostics across hypervisor nodes${cachedNote}</p>
             </div>
             <div>
-                <button onclick="renderPxmxDiagnostics(document.getElementById('pxmx-content'), true)" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Query SMART telemetry and SSD wear level diagnostics across all nodes">
+                <button onclick="loadPxmxData('Diagnostics', true)" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Query SMART telemetry and SSD wear level diagnostics across all nodes">
                     ↻ Run Diagnostics / Refresh
                 </button>
             </div>
