@@ -196,7 +196,16 @@ PROFILES: List[Dict[str, Any]] = [
             {"cmd": "show version", "fields": {
                 "model": re.compile(r"Model\s*:?\s*(\S+)", re.I),
                 "os": re.compile(r"Junos:\s*(\S+)", re.I),
-                "hostname": re.compile(r"Hostname\s*:?\s*(\S+)", re.I),
+                # "Hostname: xxx" from `show version` output, OR the FreeBSD tty
+                # banner "FreeBSD/i386 (xxx) (ttyu0)" that a bare, never-logged-in
+                # login prompt keeps reprinting (see the profile's "match"
+                # comment above) — that banner is often the ONLY hostname signal
+                # we ever see for a login-locked box. "Amnesiac" means the
+                # device has no hostname configured, so it's excluded rather
+                # than reported as a literal hostname.
+                "hostname": re.compile(
+                    r"(?:Hostname\s*:?\s*|FreeBSD/\S+\s+\()"
+                    r"((?!Amnesiac\b)[\w.\-]+)(?=\)\s*\(tty|\s|$)", re.I),
             }},
             {"cmd": "show chassis hardware", "fields": {
                 "serial": re.compile(r"^Chassis\s+(\S+)", re.I | re.M),
@@ -720,6 +729,24 @@ def boot_fault(text: str) -> str:
     m = _BOOT_FAULT.search(sanitize_console_text(text or ""))
     return m.group(0).strip() if m else ""
 
+
+# HPE/Aruba (and similar) console firmware reprints "Connected at <N> baud" plus
+# its FULL startup banner on every fresh serial-line handshake (DTR toggle) —
+# not only on an actual power-on/reset. Our own baud sweeps/relocks and idle
+# session churn toggle that line, so a device can show several of these banner
+# replays back-to-back while it was never actually stuck: each one is a fresh,
+# independent boot/login cycle that reached a prompt fine on its own. Counting
+# them lets the boot watcher reset its "stuck" clock per cycle instead of
+# summing several genuine cycles' time into one false "stuck" verdict.
+_LINE_RECONNECT = re.compile(r"Connected at\s+\d+\s+baud", re.I)
+
+
+def count_line_reconnects(text: str) -> int:
+    """Count of "Connected at <N> baud" banner replays seen in ``text`` — each
+    one marks the start of an independent boot/login cycle (see
+    ``_LINE_RECONNECT``)."""
+    return len(_LINE_RECONNECT.findall(sanitize_console_text(text or "")))
+
 # Console lines are usually silent until they receive a keystroke: a device sits
 # idle at a prompt and emits nothing on its own (unless it happens to be booting).
 # So we actively wake the line by sending Enter (CR) — an initial CRLF plus a few
@@ -778,6 +805,16 @@ _NUDGE_SECS = 2.5          # per-nudge read window
 # prompt hadn't redrawn yet.
 _REPROMPT_NUDGES = 3       # CRs used to coax the login prompt back between creds
 _REPROMPT_SECS = 5.0       # read window per re-prompt nudge (covers rate-limit delay)
+
+# Many devices lock the console after a small number of failed attempts WITHIN
+# one session (AOS-CX: "Maximum number of tries exceeded (5)"; ArubaOS-Switch
+# similar). merge_credentials can hand us the operator's creds plus the full
+# FACTORY_DEFAULT_CREDENTIALS list — trying all of them back-to-back with no
+# gap between attempts burns through that counter in seconds and locks the
+# console before a valid credential further down the list is ever tried. Pace
+# failed attempts so identify never looks like a brute-force script to the
+# device itself.
+_CRED_RETRY_DELAY = 3.0    # seconds paused after each FAILED credential
 
 # A net-new device often forces a password SET/CHANGE right after a first login
 # with a factory-default credential. Identify is READ-ONLY, so we must NOT set a
@@ -1157,6 +1194,10 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
             diag["bytes"] = len(transcript)
             return True, idx, transcript, diag
         idx += 1
+        if idx < n:
+            # Failed credential: pace the next attempt (see _CRED_RETRY_DELAY)
+            # rather than immediately spending another one.
+            time.sleep(_t(_CRED_RETRY_DELAY))
     diag["bytes"] = len(transcript)
     return False, None, transcript, diag
 
