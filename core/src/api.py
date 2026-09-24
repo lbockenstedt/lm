@@ -1241,6 +1241,12 @@ def get_netbox_spoke(hub):
 def get_tenant_scoping(hub, tenant_id: str = None) -> dict:
     return access.get_tenant_scoping(hub, tenant_id)
 
+def netbox_tenant_scope(hub, tenant_id: str = None) -> dict:
+    return access.netbox_tenant_scope(hub, tenant_id)
+
+def tenant_netbox_slugs(hub, tenant_id: str = None) -> list:
+    return access.tenant_netbox_slugs(hub, tenant_id)
+
 
 def spoke_or_503(spoke_id, label: str) -> str:
     """Guard an already-resolved spoke id: raise the standard 503 when empty.

@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from http_client import shared_client
+
 from security.oidc import OidcConfig, fetch_app_token
 
 logger = logging.getLogger("KeyVault")
@@ -85,7 +87,7 @@ async def set_secret(cfg: OidcConfig, vault_url: str, name: str, value: str,
         raise KeyVaultError("Key Vault URL not configured")
     token = await _token(cfg, http=http)
     url = f"{_base(vault_url)}/secrets/{name}?api-version={_API}"
-    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+    async with shared_client(http, 20.0) as c:
         resp = await c.put(url, headers={"Authorization": f"Bearer {token}",
                                          "Content-Type": "application/json"},
                            json={"value": value})
@@ -98,7 +100,7 @@ async def get_secret(cfg: OidcConfig, vault_url: str, name: str,
                      http: Optional[httpx.AsyncClient] = None) -> Optional[str]:
     token = await _token(cfg, http=http)
     url = f"{_base(vault_url)}/secrets/{name}?api-version={_API}"
-    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+    async with shared_client(http, 20.0) as c:
         resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
     if resp.status_code == 404:
         return None
@@ -113,7 +115,7 @@ async def list_secret_names(cfg: OidcConfig, vault_url: str, prefix: str = "",
     token = await _token(cfg, http=http)
     url = f"{_base(vault_url)}/secrets?api-version={_API}"
     out: List[str] = []
-    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+    async with shared_client(http, 20.0) as c:
         while url:
             resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
             if resp.status_code != 200:
@@ -132,7 +134,7 @@ async def delete_secret(cfg: OidcConfig, vault_url: str, name: str,
                         http: Optional[httpx.AsyncClient] = None) -> bool:
     token = await _token(cfg, http=http)
     url = f"{_base(vault_url)}/secrets/{name}?api-version={_API}"
-    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+    async with shared_client(http, 20.0) as c:
         resp = await c.delete(url, headers={"Authorization": f"Bearer {token}"})
     if resp.status_code not in (200, 204, 404):
         raise KeyVaultError(f"Key Vault DELETE {name} failed: HTTP {resp.status_code} — {resp.text[:200]}")

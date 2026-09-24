@@ -15,11 +15,11 @@ import os
 
 import pytest
 
-from src.cache_core import StalenessPolicy
-from src.le_cache import LeCacheMixin
-from src.nw_cache import NwCacheMixin
-from src.truenas_cache import TruenasCacheMixin
-from src.warm_cache import WarmCacheMixin
+from cache_core import StalenessPolicy
+from le_cache import LeCacheMixin
+from nw_cache import NwCacheMixin
+from truenas_cache import TruenasCacheMixin
+from warm_cache import WarmCacheMixin
 
 pytestmark = pytest.mark.asyncio
 
