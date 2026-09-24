@@ -1401,6 +1401,7 @@ def register(app, hub, ctx):
                 out = dict(out)
                 out["stale"] = True
                 out["spoke_connected"] = False
+                out["cached_at"] = hub.warm_fetched_at("pxmx_nodes", warm_key)
             return out
 
         async def _merge_offline_hosts(data):
@@ -1496,6 +1497,7 @@ def register(app, hub, ctx):
                 if isinstance(out, dict):
                     out = dict(out)
                     out["stale"] = True
+                    out["cached_at"] = hub.warm_fetched_at("pxmx_nodes", warm_key)
                 return await _merge_offline_hosts(out)
             # No cache to fall back on — still surface offline hosts (from the
             # Agents roster) rather than a bare 500 when the only knowledge of
@@ -1562,7 +1564,42 @@ def register(app, hub, ctx):
         else:
             spokes = [hub.get_hypervisor_spoke()] if hub.get_hypervisor_spoke() else []
 
+        # Scope key for the warm cache: diagnostics vary by tenant AND by the
+        # optional single-node filter, so they must not share one entry.
+        warm_key = f"{tid or '_all_'}|node={(node or '').strip()}"
+
+        def _cached_diagnostics():
+            """Last-known diagnostics for this scope, marked stale, or None.
+
+            The spoke goes away for a minute or two during a hub/agent update,
+            and Diagnostics used to answer that with an empty drive table (or
+            'Timed out waiting for spoke response') even though it had just
+            rendered the same data seconds earlier. Nodes and VMs already warm-
+            start this way; this is the tab that was missing it.
+
+            ``expired`` (24h, per the shared StalenessPolicy) is the point where
+            silence stops being a blip and the data is no longer worth showing.
+            """
+            state = hub.warm_state("pxmx_drive_health", warm_key)
+            if state in ("expired", "missing"):
+                return None
+            cached = hub.warm_get("pxmx_drive_health", warm_key)
+            if not isinstance(cached, dict):
+                return None
+            out = dict(cached)
+            out["stale"] = True
+            out["spoke_connected"] = False
+            out["cached_at"] = hub.warm_fetched_at("pxmx_drive_health", warm_key)
+            return out
+
         if not spokes:
+            # No spoke in scope. When the operator simply hasn't picked a tenant
+            # that's a prompt, not an outage — never answer it with cached data
+            # from whatever tenant was last viewed.
+            if not select_tenant:
+                cached = _cached_diagnostics()
+                if cached is not None:
+                    return cached
             empty = {
                 "nodes": [],
                 "spoke_connected": False,
@@ -1675,11 +1712,31 @@ def register(app, hub, ctx):
             for k in ("total_drives", "healthy", "warning", "critical", "unknown"):
                 total_summary[k] += int(ns.get(k, 0) or 0)
 
-        return {
+        # Nothing answered at all (the update window): serve the last good
+        # answer marked stale instead of an empty drive table, which reads as
+        # "this host has no drives" rather than "we couldn't ask right now".
+        #
+        # Deliberately keyed on ``spoke_connected`` ALONE, not on an empty
+        # node list. spoke_connected only flips true once some spoke returned a
+        # usable envelope, and every usable envelope appends a node — so an
+        # empty list WITH spoke_connected set means the spoke genuinely
+        # reported zero nodes. Falling back there would overwrite a real
+        # "cluster is empty" with stale rows, i.e. exactly the "no data" vs
+        # "couldn't ask" conflation this fallback exists to remove.
+        if not spoke_connected:
+            cached = _cached_diagnostics()
+            if cached is not None:
+                return cached
+
+        result = {
             "nodes": aggregated_nodes,
             "summary": total_summary,
             "spoke_connected": spoke_connected,
         }
+        if spoke_connected and aggregated_nodes:
+            # Cache the raw aggregate (already tenant-scoped by ``spokes``).
+            await hub.warm_set("pxmx_drive_health", warm_key, result)
+        return result
 
     # ── pxmx / Proxmox: VMs + agent commands (/api/pxmx/*) ───────────────────
     @app.get("/api/pxmx/vms")
@@ -1764,6 +1821,7 @@ def register(app, hub, ctx):
                 out = dict(out)
                 out["stale"] = True
                 out["spoke_connected"] = False
+                out["cached_at"] = hub.warm_fetched_at("pxmx_vms", warm_key)
             return _with_tpl(out)
 
         # Which spokes this reader may query AT ALL — SPOKE-level tenant
@@ -1855,6 +1913,7 @@ def register(app, hub, ctx):
                 if isinstance(out, dict):
                     out = dict(out)
                     out["stale"] = True
+                    out["cached_at"] = hub.warm_fetched_at("pxmx_vms", warm_key)
                 return _with_tpl(out)
             raise HTTPException(status_code=500, detail=str(e))
 

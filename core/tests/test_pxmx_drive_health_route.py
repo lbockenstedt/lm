@@ -1,6 +1,7 @@
 """Tests for the Proxmox drive diagnostics backend API (/api/pxmx/drive-health)
 and WebUI main.js subMenus / renderPxmxDiagnostics integration.
 """
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from cache_core import StalenessPolicy
 from routes import pxmx
 
 MAIN_JS_PATH = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
@@ -45,6 +47,7 @@ class _MockHub:
         ]
         self.calls = []
         self.warm_cache = {}
+        self.warm_ts = {}
 
     def get_hypervisor_spoke_for_tenant(self, tid=None):
         return self._bound
@@ -65,6 +68,20 @@ class _MockHub:
 
     async def warm_set(self, ns, key, data):
         self.warm_cache.setdefault(ns, {})[key] = data
+        self.warm_ts[(ns, key)] = time.time()
+
+    def seed_warm(self, ns, key, data, age_s=0.0):
+        """Pre-populate the cache as if it had been written ``age_s`` ago —
+        the real mixin records a timestamp alongside every entry, and the
+        staleness ladder is meaningless without one."""
+        self.warm_cache.setdefault(ns, {})[key] = data
+        self.warm_ts[(ns, key)] = time.time() - age_s
+
+    def warm_fetched_at(self, ns, key="_"):
+        return self.warm_ts.get((ns, key))
+
+    def warm_state(self, ns, key="_", policy=None):
+        return (policy or StalenessPolicy()).classify(self.warm_fetched_at(ns, key))
 
     async def request_response(self, sid, cmd, payload, timeout=30.0, signing_secret=None):
         self.calls.append({"sid": sid, "cmd": cmd, "payload": payload, "timeout": timeout})
