@@ -18,7 +18,10 @@ last-known snapshot marked ``stale`` instead of going empty. These lock in:
   so one tenant's raw envelope is never served to another.
 """
 
+import time
 from types import SimpleNamespace
+
+from cache_core import StalenessPolicy
 
 import pytest
 from fastapi import FastAPI
@@ -73,6 +76,7 @@ class _Hub:
         self._spoke = "pxmx-1" if spoke_connected else None
         self._vms = vms if vms is not None else []
         self.warm = {}          # {(namespace, key): raw envelope}
+        self.warm_ts = {}       # {(namespace, key): epoch} — mirrors fetched_at
         self.warm_sets = []     # log of (namespace, key) writes
         self.fail_live = False  # make request_response raise
         # The single spoke's tenant binding, for the spoke-visibility gate in
@@ -87,8 +91,21 @@ class _Hub:
     def warm_get(self, namespace, key="_"):
         return self.warm.get((namespace, key))
 
+    def warm_fetched_at(self, namespace, key="_"):
+        return self.warm_ts.get((namespace, key))
+
+    def warm_state(self, namespace, key="_", policy=None):
+        return (policy or StalenessPolicy()).classify(
+            self.warm_fetched_at(namespace, key))
+
+    def seed_warm(self, namespace, key, data, age=0.0):
+        """Seed a warm entry AND its timestamp, the way warm_set would have."""
+        self.warm[(namespace, key)] = data
+        self.warm_ts[(namespace, key)] = time.time() - age
+
     async def warm_set(self, namespace, key, data):
         self.warm[(namespace, key)] = data
+        self.warm_ts[(namespace, key)] = time.time()
         self.warm_sets.append((namespace, key))
 
     def get_hypervisor_spoke(self):
@@ -154,8 +171,9 @@ def test_spoke_down_serves_warm_snapshot_stale():
     left a snapshot in the warm cache → serve it stale instead of going empty."""
     hub = _Hub(spoke_connected=False)
     # simulate a snapshot persisted before the restart
-    hub.warm[("pxmx_vms", "_all_|agent=")] = {"vms": [{"name": "carried-over"}],
-                                              "spoke_connected": True}
+    hub.seed_warm("pxmx_vms", "_all_|agent=",
+                  {"vms": [{"name": "carried-over"}], "spoke_connected": True},
+                  age=300)
     c = _build(hub, admin=True)
     r = c.get("/api/pxmx/vms")
     assert r.status_code == 200
@@ -181,7 +199,7 @@ def test_live_fetch_failure_serves_warm_snapshot_stale():
     snapshot instead of 500 when one exists."""
     hub = _Hub(vms=[{"name": "fresh"}], spoke_connected=True)
     hub.fail_live = True
-    hub.warm[("pxmx_vms", "_all_|agent=")] = {"vms": [{"name": "carried-over"}]}
+    hub.seed_warm("pxmx_vms", "_all_|agent=", {"vms": [{"name": "carried-over"}]}, age=300)
     c = _build(hub, admin=True)
     r = c.get("/api/pxmx/vms")
     assert r.status_code == 200
