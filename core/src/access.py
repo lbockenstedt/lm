@@ -378,6 +378,65 @@ def get_tenant_scoping(hub, tenant_id: str = None) -> dict:
         return {"netbox_tenant_slug": "", "proxmox_tag": "", "ldap_base_dn": "", "tenant_id": "default"}
 
 
+# ── NetBox tenant GROUPS ─────────────────────────────────────────────────────
+# A NetBox tenant group is surfaced as its own selectable hub "tenant" keyed
+# ``group:<group-slug>`` and flagged ``is_tenant_group``. Selecting it must show
+# the UNION of its member tenants — so instead of a tenant slug we send NetBox's
+# own ``?tenant_group=<slug>`` filter, which unions the group AND its sub-groups
+# server-side (it is tree-aware). ``member_tenant_slugs`` is the same union
+# materialised by the spoke; the hub uses it only to authorise writes and to
+# scope non-NetBox systems, never as the read filter.
+
+TENANT_GROUP_PREFIX = "group:"
+
+
+def netbox_tenant_scope(hub, tenant_id: str = None) -> dict:
+    """Resolve a hub tenant id to the NetBox query scope for the spoke.
+
+    Returns ``{tenant, tenant_group, slugs, is_group, tenant_id, key}``. A plain
+    tenant yields ``tenant=<slug>``; a group yields ``tenant_group=<slug>`` with
+    ``tenant=None`` (see the note above on why the group filter is preferred
+    over expanding to a slug list — NetBox rejects the whole query if any one
+    slug is unknown, and a list can't express nested sub-groups). ``key`` is a
+    stable cache-scope signature that can never collide between the two forms.
+    A group record with no usable group slug degrades to the unscoped plain
+    result rather than raising."""
+    scoping = get_tenant_scoping(hub, tenant_id)
+    tid = scoping.get("tenant_id")
+    try:
+        record = hub.state.get_tenant(tid) or {}
+    except Exception:  # noqa: BLE001
+        record = {}
+
+    if record.get("is_tenant_group"):
+        group_slug = str(record.get("netbox_tenant_group_slug") or "").strip()
+        if not group_slug and str(tid or "").startswith(TENANT_GROUP_PREFIX):
+            group_slug = str(tid)[len(TENANT_GROUP_PREFIX):].strip()
+        if group_slug:
+            slugs = sorted({
+                s for s in (str(x).strip() for x in (record.get("member_tenant_slugs") or [])
+                            if x is not None)
+                if s
+            })
+            return {"tenant": None, "tenant_group": group_slug, "slugs": slugs,
+                    "is_group": True, "tenant_id": tid,
+                    "key": TENANT_GROUP_PREFIX + group_slug}
+
+    tenant = scoping.get("netbox_tenant_slug") or None
+    return {"tenant": tenant, "tenant_group": None,
+            "slugs": [tenant] if tenant else [], "is_group": False,
+            "tenant_id": tid, "key": tenant or "_all_"}
+
+
+def tenant_netbox_slugs(hub, tenant_id: str = None) -> list:
+    """Every concrete NetBox tenant slug a hub tenant id covers.
+
+    One slug for a plain tenant, the whole membership for a group. Used by the
+    write guards, which must resolve a group to real tenants (you cannot create
+    an object *into* a group)."""
+    return netbox_tenant_scope(hub, tenant_id)["slugs"]
+
+
 # ── Directory (LDAP) per-tenant identity — TENANT == OU, 1:1 ─────────────────
 # The tenant slug IS the directory OU (``ou=<slug>,<base_dn>``). The SAME slug
 # identifies the tenant across LDAP ↔ NetBox ↔ LM, and it is matched

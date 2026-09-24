@@ -8278,7 +8278,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 logger.debug("[coalesce] drain loop iteration skipped: %s", e)
 
     async def run_tenant_sync_loop(self):
-        """Periodically pull tenants from the NetBox spoke and upsert into hub state."""
+        """Periodically pull tenants + tenant groups from the NetBox spoke and
+        upsert into hub state.
+
+        A NetBox tenant GROUP is stored as its own selectable hub tenant keyed
+        ``group:<group-slug>`` and flagged ``is_tenant_group``. Selecting it
+        shows the UNION of its member tenants (``member_tenant_slugs``), so a
+        user can be assigned either to one tenant or to a whole group. The
+        ``group:`` prefix keeps a group from ever colliding with a real tenant
+        slug. Groups that vanish from NetBox are pruned here; real tenants are
+        deliberately NOT pruned (that is what the tenant-migration flow is for)."""
         await asyncio.sleep(30)  # let spokes connect first
         while True:
             try:
@@ -8295,13 +8304,70 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                 "netbox_tenant_slug": slug,
                                 "netbox_id": t["id"],
                                 "description": t.get("description", ""),
-                                **{k: v for k, v in cfg.items() if k not in ("name", "netbox_tenant_slug", "netbox_id", "description")},
+                                # Which group (if any) owns this tenant, so the
+                                # WebUI can show the tenant nested under it.
+                                "tenant_group_slug": t.get("group_slug", "") or "",
+                                "tenant_group_name": t.get("group_name", "") or "",
+                                **{k: v for k, v in cfg.items() if k not in (
+                                    "name", "netbox_tenant_slug", "netbox_id", "description",
+                                    "tenant_group_slug", "tenant_group_name")},
                             })
                         self.state._mark_dirty()
                         logger.debug(f"Tenant sync: {len(data.get('tenants', []))} tenant(s) from NetBox")
+                    await self._sync_tenant_groups(spoke_id)
             except Exception as e:
                 logger.debug(f"Tenant sync skipped: {e}")
             await asyncio.sleep(300)  # every 5 minutes
+
+    async def _sync_tenant_groups(self, spoke_id: str) -> None:
+        """Upsert NetBox tenant groups as ``group:<slug>`` hub tenants, pruning
+        groups that no longer exist in NetBox.
+
+        Tolerates an older NetBox spoke that doesn't implement
+        NETBOX_GET_TENANT_GROUPS: a non-SUCCESS reply leaves existing group
+        records untouched (rather than pruning them all) so a spoke mid-upgrade
+        can't strip a user's assigned group out from under them."""
+        result = await self.request_response(spoke_id, "NETBOX_GET_TENANT_GROUPS", {}, timeout=60.0)
+        data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else {}
+        if not isinstance(data, dict) or data.get("status") != "SUCCESS":
+            logger.debug("Tenant-group sync skipped: spoke reply %s",
+                         (data or {}).get("status") if isinstance(data, dict) else "malformed")
+            return
+
+        import access as _access
+        groups = data.get("groups", []) or []
+        seen = set()
+        for g in groups:
+            gslug = str(g.get("slug") or "").strip()
+            if not gslug:
+                continue
+            tid = _access.TENANT_GROUP_PREFIX + gslug
+            seen.add(tid)
+            cfg = self.state.get_tenant(tid) or {}
+            self.state.update_tenant(tid, {
+                "name": g.get("name") or gslug,
+                "is_tenant_group": True,
+                "netbox_tenant_group_slug": gslug,
+                # A group owns no objects itself; an empty tenant slug keeps
+                # every plain-tenant code path treating it as unscoped.
+                "netbox_tenant_slug": "",
+                "member_tenant_slugs": g.get("tenant_slugs", []) or [],
+                "parent_group_slug": g.get("parent_slug", "") or "",
+                "netbox_id": g.get("id"),
+                "description": g.get("description", ""),
+                **{k: v for k, v in cfg.items() if k not in (
+                    "name", "is_tenant_group", "netbox_tenant_group_slug",
+                    "netbox_tenant_slug", "member_tenant_slugs",
+                    "parent_group_slug", "netbox_id", "description")},
+            })
+
+        for tid, cfg in list(self.state.tenant_state.get("tenants", {}).items()):
+            if cfg.get("is_tenant_group") and tid not in seen:
+                self.state.delete_tenant(tid)
+                logger.info("Tenant sync: pruned tenant group %s (gone from NetBox)", tid)
+
+        self.state._mark_dirty()
+        logger.debug("Tenant sync: %d tenant group(s) from NetBox", len(groups))
 
     # ── IPAM → CPPM endpoint sync → core/src/endpoint_sync.py (EndpointSyncMixin) ──
     # IPAM_SOURCES, _endpoint_sync_cfg/_source/_tenants/_next_delay, _ipam_scope_for_tenant,

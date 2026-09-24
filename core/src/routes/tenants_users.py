@@ -231,11 +231,18 @@ def register(app, hub, ctx):
                 # A shared tenant's spokes/resources are visible to every tenant
                 # (objects still subnet-scoped). Exactly one tenant carries it.
                 "shared": bool(cfg.get("shared")),
+                # NetBox tenant GROUP: selectable like a tenant, but shows the
+                # union of its members. The WebUI badges it and indents the
+                # member tenants (tenant_group_slug) underneath it.
+                "is_group": bool(cfg.get("is_tenant_group")),
+                "group_slug": cfg.get("netbox_tenant_group_slug", "") if cfg.get("is_tenant_group")
+                              else cfg.get("tenant_group_slug", ""),
+                "members": list(cfg.get("member_tenant_slugs") or []) if cfg.get("is_tenant_group") else [],
             }
             for tid, cfg in tenants.items()
         ]
         if "default" not in [t["id"] for t in tenant_list]:
-            tenant_list.insert(0, {"id": "default", "name": "ADMIN", "slug": "default", "netbox_id": None, "description": "", "shared": False})
+            tenant_list.insert(0, {"id": "default", "name": "ADMIN", "slug": "default", "netbox_id": None, "description": "", "shared": False, "is_group": False, "group_slug": "", "members": []})
         # Keep the shared-tenant cache fresh whenever the list is loaded.
         shared_id = refresh_shared_tenant(hub)
         return {"tenants": tenant_list, "shared_tenant_id": shared_id}

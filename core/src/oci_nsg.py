@@ -48,6 +48,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from http_client import shared_client
+
 import oci_auth as _oci_auth
 from oci_auth import OciAuthConfig as OciConfig  # re-exported: same fields/shape
 
@@ -328,7 +330,7 @@ async def test_connection(cfg: OciConfig, occfg: Dict[str, Any],
     Returns a small summary; raises OciNsgError with the OCI body on error."""
     _require(occfg)
     url = f"{_base_url(cfg)}/networkSecurityGroups/{occfg['nsg_id']}"
-    async with (http or httpx.AsyncClient(timeout=20.0)) as client:
+    async with shared_client(http, 20.0) as client:
         resp = await _oci_request(cfg, client, "GET", url)
     if resp.status_code != 200:
         raise _http_error(cfg, "OCI GET NSG", resp)
@@ -382,7 +384,7 @@ async def get_live_prefixes(cfg: OciConfig, occfg: Dict[str, Any],
     auto-imported into the local list, because adopting one would cause the
     next apply to create a second, marker-tagged rule for the same CIDR."""
     _require(occfg)
-    async with (http or httpx.AsyncClient(timeout=20.0)) as client:
+    async with shared_client(http, 20.0) as client:
         rules = await _list_ingress_rules(cfg, occfg, client)
     if rules is None:
         return None
@@ -400,7 +402,7 @@ async def get_allowlist(cfg: OciConfig, occfg: Dict[str, Any],
     """The CIDRs currently on OUR managed rules in OCI (None if the NSG
     doesn't exist yet) — for showing drift vs the hub's stored list."""
     _require(occfg)
-    async with (http or httpx.AsyncClient(timeout=20.0)) as client:
+    async with shared_client(http, 20.0) as client:
         rules = await _list_managed_rules(cfg, occfg, client)
     if rules is None:
         return None
@@ -420,7 +422,7 @@ async def reconcile_allowlist(cfg: OciConfig, occfg: Dict[str, Any], ips,
     _require(occfg)
     prefixes = normalize_prefixes(ips)
     base = f"{_base_url(cfg)}/networkSecurityGroups/{occfg['nsg_id']}"
-    async with (http or httpx.AsyncClient(timeout=30.0)) as client:
+    async with shared_client(http, 30.0) as client:
         existing = await _list_managed_rules(cfg, occfg, client)
         if existing is None:
             raise OciNsgError(f"NSG {occfg['nsg_id']} not found")

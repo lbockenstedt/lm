@@ -48,6 +48,8 @@ from urllib.parse import quote
 
 import httpx
 
+from http_client import shared_client
+
 import oci_auth as _oci_auth
 from oci_auth import OciAuthConfig as OciConfig  # re-exported: same fields/shape
 
@@ -224,7 +226,7 @@ async def get_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
     # whose body is empty — a GET on this path 404s.
     url = (f"{_secrets_base(cfg)}/secretbundles/actions/getByName"
            f"?secretName={quote(name, safe='')}&vaultId={quote(vault_id, safe='')}")
-    async with (http or httpx.AsyncClient(timeout=20.0)) as client:
+    async with shared_client(http, 20.0) as client:
         resp = await _request(cfg, client, "POST", url)
     if resp.status_code == 404:
         return None
@@ -316,7 +318,7 @@ async def set_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str, value: str
     if not name:
         raise OciVaultError("secret name is required")
     content_b64 = base64.b64encode((value or "").encode("utf-8")).decode("ascii")
-    async with (http or httpx.AsyncClient(timeout=20.0)) as client:
+    async with shared_client(http, 20.0) as client:
         secret_id = await _find_secret_id(cfg, vcfg, name, client)
         if secret_id:
             resp = await _request(
@@ -364,7 +366,7 @@ async def delete_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
     _require(vcfg)
     if not name:
         return True
-    async with (http or httpx.AsyncClient(timeout=20.0)) as client:
+    async with shared_client(http, 20.0) as client:
         secret_id = await _find_secret_id(cfg, vcfg, name, client)
         if not secret_id:
             return True  # already absent/deleted — nothing to schedule
@@ -383,7 +385,7 @@ async def test_connection(cfg: OciConfig, vcfg: Dict[str, Any],
     """GET the vault to confirm the signing key + IAM policy + OCID resolve."""
     _require(vcfg)
     url = f"{_kms_base(cfg)}/vaults/{vcfg['vault_id']}"
-    async with (http or httpx.AsyncClient(timeout=20.0)) as client:
+    async with shared_client(http, 20.0) as client:
         resp = await _request(cfg, client, "GET", url)
     if resp.status_code != 200:
         raise _http_error(cfg, "OCI GET vault", resp, vcfg)

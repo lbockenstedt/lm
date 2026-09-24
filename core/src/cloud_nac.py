@@ -22,6 +22,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from http_client import shared_client
+
 from security.oidc import OidcConfig, fetch_app_token
 
 logger = logging.getLogger("CloudNac")
@@ -88,7 +90,7 @@ def gen_password(n: int = 20) -> str:
 
 async def _graph(method: str, path: str, token: str, *, json=None, params=None,
                  http: Optional[httpx.AsyncClient] = None):
-    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+    async with shared_client(http, 20.0) as c:
         return await c.request(
             method, f"{_GRAPH}{path}",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},

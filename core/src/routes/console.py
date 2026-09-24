@@ -735,10 +735,16 @@ def register(app, hub, ctx):
             try:
                 val = await _cv.automation_get(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET)
                 _add(_console_creds_from_cred_vault(val))
-            except Exception:  # noqa: BLE001 — absent / unreadable
-                pass
-        except Exception:  # noqa: BLE001 — vault not configured
-            pass
+            except Exception as exc:  # noqa: BLE001 — absent / unreadable
+                logger.debug("console: legacy vault list secret %r unavailable: "
+                             "%s: %s", _CONSOLE_VAULT_SECRET, type(exc).__name__, exc)
+        except Exception as exc:  # noqa: BLE001 — vault not configured
+            # Never silent: an unreadable vault yields the SAME empty list as a
+            # vault with no console logins, which sends operators hunting in the
+            # UI for a fault that is actually server-side (see _console_warn_no_credentials).
+            logger.warning("console: could not read console credentials for tenant "
+                           "%r from the vault: %s: %s", tenant, type(exc).__name__, exc,
+                           exc_info=True)
         return creds
 
     async def _console_creds_in_bucket(hub, bucket):
@@ -761,8 +767,10 @@ def register(app, hub, ctx):
                 hub, await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, [bucket]))
             for rec in recs:
                 _add(_console_creds_from_cred_vault(rec.get("value")))
-        except Exception:  # noqa: BLE001 — vault not configured / unreadable
-            pass
+        except Exception as exc:  # noqa: BLE001 — vault not configured / unreadable
+            logger.warning("console: could not read console credentials from vault "
+                           "bucket %r: %s: %s", bucket, type(exc).__name__, exc,
+                           exc_info=True)
         return creds
 
     async def _console_creds_all_buckets(hub):
@@ -796,10 +804,12 @@ def register(app, hub, ctx):
             try:
                 _add(_console_creds_from_cred_vault(
                     await _cv.automation_get(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET)))
-            except Exception:  # noqa: BLE001 — absent / unreadable
-                pass
-        except Exception:  # noqa: BLE001 — vault not configured
-            pass
+            except Exception as exc:  # noqa: BLE001 — absent / unreadable
+                logger.debug("console: legacy vault list secret %r unavailable: "
+                             "%s: %s", _CONSOLE_VAULT_SECRET, type(exc).__name__, exc)
+        except Exception as exc:  # noqa: BLE001 — vault not configured
+            logger.warning("console: could not enumerate console credentials across "
+                           "vault buckets: %s: %s", type(exc).__name__, exc, exc_info=True)
         return creds
 
     async def _console_load_credentials_resolved(hub, tenant=None, stats=None):

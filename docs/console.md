@@ -382,6 +382,15 @@ comma-separated **source-IP allow-list**. This maps to the role config keys
    backs up the current config, applies your lines, verifies they landed, and either saves
    (on pass) or rolls back automatically (on fail). There is no separate "approve" step
    once you submit a push.
+7. **Choose which logins the sweep may use.** Console → **🔑 Credentials** lists every
+   automation-readable `console`/`login` secret in your bucket with a tick-box each.
+   **By default nothing is selected and every account is tried** — un-tick an account to
+   keep scanning/auto-identify from using it (handy when one of them locks the device out
+   after repeated failures, or is simply slow to time out). Ticking them all is treated as
+   "no restriction" rather than pinning today's list, so a login you add to the vault
+   later is picked up automatically; **Use all** clears the restriction explicitly. Saving
+   re-seeds the affected console agents immediately. See
+   [credential-vault.md](credential-vault.md) for where the secrets themselves live.
 
 ## Troubleshooting / common questions
 
@@ -426,6 +435,14 @@ comma-separated **source-IP allow-list**. This maps to the role config keys
     A login saved into a different tenant's bucket is never pushed to that agent. The
     Console diagnostics banner reports the saved/seeded counts (counts only, never
     values) so you can tell "not saved" from "saved but not seeded".
+    If the vault itself can't be read (expired Key Vault credentials, an unreachable
+    backend), the resolver used to return the same empty list as a genuinely empty
+    vault — indistinguishable in the UI. That path now logs loudly: look for
+    `vault: ALL N automation-readable secret(s) ... failed to decrypt` and
+    `console: could not read console credentials ...` in the hub log. A secret that
+    exists in the Credential Library but never reaches an agent is that fault, not a
+    missing login. Also check the **🔑 Credentials** tick-boxes — an account you
+    de-selected is excluded from the sweep on purpose.
 - **A Juniper device is reported as a Linux server.** A login-locked SRX/EX prints only
   `<hostname> (ttyu0)` — no vendor string — so it used to fall through to the generic
   `login:` match. It is now recognized pre-login; the full model/serial still require a
