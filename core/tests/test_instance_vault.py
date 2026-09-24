@@ -263,3 +263,50 @@ def test_validate_unusable_secret_is_400(monkeypatch):
                              {"user": {"tenants": ["acme"]}}, is_admin=False,
                              storage_key="nac_instances"))
     assert ei.value.status_code == 400
+
+
+# ── vault-only guard (no ref, inline secret, vault available) ───────────────
+def test_validate_rejects_inline_secret_when_vault_available(monkeypatch):
+    monkeypatch.setattr(cred_vault, "_vault_available", lambda hub: True)
+    with pytest.raises(HTTPException) as ei:
+        _run(iv.validate_ref(object(), {"host": "h", "client_secret": "inline"},
+                             {"user": {"tenants": []}}, is_admin=True,
+                             storage_key="nac_instances"))
+    assert ei.value.status_code == 400
+    assert "Credential Vault" in ei.value.detail
+
+
+def test_validate_allows_inline_secret_when_vault_unavailable(monkeypatch):
+    monkeypatch.setattr(cred_vault, "_vault_available", lambda hub: False)
+    _run(iv.validate_ref(object(), {"host": "h", "client_secret": "inline"},
+                         {"user": {"tenants": []}}, is_admin=True,
+                         storage_key="nac_instances"))
+
+
+def test_validate_allows_no_secret_at_all_when_vault_available(monkeypatch):
+    # No inline secret fields populated at all → nothing to flag, even with the
+    # guard active (e.g. a record still being filled in, or a product field
+    # that legitimately has no secret yet).
+    monkeypatch.setattr(cred_vault, "_vault_available", lambda hub: True)
+    _run(iv.validate_ref(object(), {"host": "h"}, {"user": {"tenants": []}},
+                         is_admin=True, storage_key="nac_instances"))
+
+
+def test_validate_allows_vault_ref_when_vault_available(monkeypatch):
+    # A proper vault_credential reference is unaffected by the guard — it takes
+    # the normal reach/resolve/usable path, not the inline-secret rejection.
+    monkeypatch.setattr(cred_vault, "_vault_available", lambda hub: True)
+    _patch_get(monkeypatch, {"client_secret": "s"})
+    _run(iv.validate_ref(object(),
+                         {"vault_credential": {"bucket": "acme", "name": "n"}},
+                         {"user": {"tenants": ["acme"]}}, is_admin=False,
+                         storage_key="nac_instances"))
+
+
+def test_validate_noop_for_unsupported_product_even_with_vault_available(monkeypatch):
+    # ldap has no SECRET_FIELDS entry → guard never applies regardless of
+    # vault availability.
+    monkeypatch.setattr(cred_vault, "_vault_available", lambda hub: True)
+    _run(iv.validate_ref(object(), {"password": "inline"}, {"user": {"tenants": []}},
+                         is_admin=True, storage_key="ldap_instances"))
+

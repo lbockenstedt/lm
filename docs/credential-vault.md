@@ -165,6 +165,23 @@ requires a tick-box before it will do so.
 
 ## Gotchas
 
+- **An unreadable vault looks exactly like an empty one.** `automation_list_by_type`
+  is a best-effort scan: per-secret failures are skipped so one bad record can't
+  break a sweep. That made a *backend-wide* fault (expired Key Vault credentials,
+  an unreachable vault, a broken OIDC client assertion) indistinguishable from
+  "no secrets are configured" — every consumer just saw an empty list. Failures are
+  now logged per record, plus a single `vault: ALL N automation-readable secret(s)
+  of type … failed to decrypt` error when nothing at all could be read. If a
+  feature reports no credentials while the Credential Library clearly lists them,
+  check the hub log for that line before hunting in the UI.
+- **Never pass a shared `httpx.AsyncClient` into a helper that owns it.** The vault
+  reuses one client across a concurrent `asyncio.gather` fetch. Helpers must borrow
+  it via `http_client.shared_client(http, timeout)`; the old
+  `async with (http or httpx.AsyncClient(...))` form re-enters the caller's client
+  (`RuntimeError: Cannot open a client instance more than once`) and would close a
+  client it doesn't own. A test guards the whole `core/src` tree against the pattern
+  returning.
+
 - **`psk`-mode secrets can't be resolved unattended** — a module that needs a
   credential (LE/HE.NET/console) must have it stored in **`hub`** mode. The
   add-secret form forces this for those types.
