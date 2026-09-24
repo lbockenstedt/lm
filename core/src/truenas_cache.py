@@ -34,12 +34,12 @@ is ``main → truenas_cache`` only). Audience: Hub developers. Mirrors nw_cache.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import os
 import time
 from typing import Any, Dict, Optional
+
+from cache_core import JsonCacheFile, StalenessPolicy
 
 logger = logging.getLogger("Hub")
 
@@ -68,9 +68,12 @@ class TruenasCacheMixin:
         """Initialize the in-memory cache slots. Call once from ``__init__``."""
         self.truenas_fleet_cache: Dict[str, Any] = {}
         self.truenas_appliance_cache: Dict[str, Dict[str, Any]] = {}
-        self._truenas_cache_lock = asyncio.Lock()
-        self._truenas_cache_save_tasks: set = set()
-        self._truenas_cache_dirty = False
+        self.truenas_policy = StalenessPolicy()
+        self._truenas_cache_file = JsonCacheFile(
+            "truenas cache", self._truenas_cache_path,
+            lambda: {"fleet": self.truenas_fleet_cache,
+                     "appliances": self.truenas_appliance_cache},
+            flush_delay_s=self._TRUENAS_CACHE_FLUSH_DELAY_S)
 
     def _truenas_cache_path(self) -> str:
         return os.path.join(getattr(self, "cache_dir", "."), self.TRUENAS_CACHE_FILE)
@@ -80,33 +83,27 @@ class TruenasCacheMixin:
 
         Missing/corrupt file → leaves the cache empty (cold-start behavior):
         the UI 503s once, then the first live fetch populates + persists.
+        The read itself is ``cache_core``'s, so a truncated or non-JSON file
+        degrades identically here and in every other module.
         """
-        try:
-            path = self._truenas_cache_path()
-            if not os.path.exists(path) or os.path.getsize(path) == 0:
-                return
-            with open(path) as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                return
-            fleet = data.get("fleet")
-            if isinstance(fleet, dict):
-                self.truenas_fleet_cache = {
-                    "appliances": fleet.get("appliances"),
-                    "fetched_at": float(fleet.get("fetched_at", 0.0) or 0.0),
-                }
-            appliances = data.get("appliances")
-            if isinstance(appliances, dict):
-                self.truenas_appliance_cache = {
-                    str(aid): dict(v) for aid, v in appliances.items()
-                    if isinstance(v, dict)
-                }
-            if self.truenas_fleet_cache or self.truenas_appliance_cache:
-                logger.info("truenas cache: restored %d appliance(s) + fleet snapshot from %s",
-                            len(self.truenas_appliance_cache), path)
-        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
-            logger.warning("truenas cache load failed (%s): %s — starting empty",
-                           self._truenas_cache_path(), exc)
+        data = self._truenas_cache_file.load()
+        if not isinstance(data, dict):
+            return
+        fleet = data.get("fleet")
+        if isinstance(fleet, dict):
+            self.truenas_fleet_cache = {
+                "appliances": fleet.get("appliances"),
+                "fetched_at": float(fleet.get("fetched_at", 0.0) or 0.0),
+            }
+        appliances = data.get("appliances")
+        if isinstance(appliances, dict):
+            self.truenas_appliance_cache = {
+                str(aid): dict(v) for aid, v in appliances.items()
+                if isinstance(v, dict)
+            }
+        if self.truenas_fleet_cache or self.truenas_appliance_cache:
+            logger.info("truenas cache: restored %d appliance(s) + fleet snapshot from %s",
+                        len(self.truenas_appliance_cache), self._truenas_cache_path())
 
     # ── read ──────────────────────────────────────────────────────────────────
 
@@ -149,7 +146,7 @@ class TruenasCacheMixin:
     async def truenas_cache_set_fleet(self, data: Any) -> None:
         """Store a fresh TRUENAS_LIST_APPLIANCES envelope + persist."""
         self.truenas_fleet_cache = {"appliances": data, "fetched_at": time.time()}
-        self._truenas_cache_schedule_save()
+        self._truenas_cache_file.schedule_save()
 
     async def truenas_cache_set_appliance(self, appliance_id: str, endpoint: str,
                                           data: Any) -> None:
@@ -159,7 +156,7 @@ class TruenasCacheMixin:
         entry = self.truenas_appliance_cache.setdefault(appliance_id, {})
         entry[endpoint] = data
         entry["fetched_at"] = time.time()
-        self._truenas_cache_schedule_save()
+        self._truenas_cache_file.schedule_save()
 
     async def truenas_cache_set_poll(self, appliance_id: str,
                                      poll_result: Dict[str, Any]) -> None:
@@ -183,55 +180,38 @@ class TruenasCacheMixin:
             slot = "info" if key == "system_info" else key
             entry[slot] = {"status": "SUCCESS", "data": val}
         entry["fetched_at"] = time.time()
-        self._truenas_cache_schedule_save()
+        self._truenas_cache_file.schedule_save()
 
     # ── persist ───────────────────────────────────────────────────────────────
-
-    def _truenas_cache_schedule_save(self) -> None:
-        """Mark the cache dirty + ensure ONE delayed flusher is pending."""
-        self._truenas_cache_dirty = True
-        if any(not t.done() for t in self._truenas_cache_save_tasks):
-            return  # a flusher is already pending — it will pick this up
-        try:
-            task = asyncio.create_task(self._truenas_cache_flush_after_delay())
-            self._truenas_cache_save_tasks.add(task)
-            task.add_done_callback(self._truenas_cache_save_tasks.discard)
-        except RuntimeError:  # pragma: no cover - no running loop (startup path)
-            logger.debug("truenas cache: skipping async persist (no running loop)")
-
-    async def _truenas_cache_flush_after_delay(self) -> None:
-        """Debounced flusher: wait out the coalescing window, then persist."""
-        while self._truenas_cache_dirty:
-            self._truenas_cache_dirty = False
-            await asyncio.sleep(self._TRUENAS_CACHE_FLUSH_DELAY_S)
-            await self._truenas_cache_persist()
+    # Persistence itself lives in cache_core.JsonCacheFile — see nw_cache for
+    # the same delegation; this module used to carry a verbatim copy of it.
 
     async def truenas_cache_flush_now(self) -> None:
         """Immediate persist (shutdown path) — skips the coalescing delay."""
-        self._truenas_cache_dirty = False
-        await self._truenas_cache_persist()
+        await self._truenas_cache_file.flush_now()
 
-    async def _truenas_cache_persist(self) -> None:
-        """Serialize the cache off the event loop + atomically replace the file."""
-        async with self._truenas_cache_lock:
-            snapshot = {
-                "fleet": self.truenas_fleet_cache,
-                "appliances": self.truenas_appliance_cache,
-            }
-            try:
-                await asyncio.to_thread(self._truenas_cache_write, snapshot)
-            except Exception as exc:  # noqa: BLE001 - best-effort persist
-                logger.warning("truenas cache persist failed: %s", exc)
+    # ── staleness ─────────────────────────────────────────────────────────────
 
-    def _truenas_cache_write(self, snapshot: Dict[str, Any]) -> None:
-        """Synchronous atomic write (runs in a worker thread)."""
-        path = self._truenas_cache_path()
-        d = os.path.dirname(path)
-        if d and not os.path.exists(d):
-            os.makedirs(d, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(snapshot, f, default=str)
-        # 0600: the truenas cache can hold fleet identifiers (mirrors nw_cache).
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
+    def truenas_cache_fleet_fetched_at(self) -> float:
+        """Epoch of the last fleet-cache write (0.0 if never cached)."""
+        f = self.truenas_fleet_cache
+        if not f or f.get("appliances") is None:
+            return 0.0
+        return float(f.get("fetched_at", 0.0) or 0.0)
+
+    def truenas_cache_appliance_fetched_at(self, appliance_id: str) -> float:
+        """Epoch of the most recent write to one appliance's cache entry."""
+        entry = self.truenas_appliance_cache.get(appliance_id)
+        if not entry:
+            return 0.0
+        return float(entry.get("fetched_at", 0.0) or 0.0)
+
+    def truenas_cache_fleet_state(self) -> str:
+        """Shared staleness verdict for the fleet snapshot (``cache_core``
+        vocabulary: fresh/refresh/stale/expired/missing)."""
+        return self.truenas_policy.classify(self.truenas_cache_fleet_fetched_at())
+
+    def truenas_cache_appliance_state(self, appliance_id: str) -> str:
+        """Shared staleness verdict for one appliance's cache entry."""
+        return self.truenas_policy.classify(
+            self.truenas_cache_appliance_fetched_at(appliance_id))
