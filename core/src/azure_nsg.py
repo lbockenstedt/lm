@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from http_client import shared_client
+
 from security.oidc import OidcConfig, fetch_app_token
 
 logger = logging.getLogger("AzureNsg")
@@ -179,7 +181,7 @@ async def test_connection(cfg: OidcConfig, azcfg: Dict[str, Any],
     _require(azcfg)
     token = await _arm_token(cfg, http=http)
     url = f"{_nsg_base(azcfg)}?api-version={_API_VERSION}"
-    async with (http or httpx.AsyncClient(timeout=20.0)) as client:
+    async with shared_client(http, 20.0) as client:
         resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
     if resp.status_code != 200:
         raise AzureNsgError(f"ARM GET NSG failed: HTTP {resp.status_code} — {resp.text[:300]}")
@@ -195,7 +197,7 @@ async def get_allowlist(cfg: OidcConfig, azcfg: Dict[str, Any],
     doesn't exist yet) — for showing drift vs the hub's stored list."""
     _require(azcfg)
     token = await _arm_token(cfg, http=http)
-    async with (http or httpx.AsyncClient(timeout=20.0)) as client:
+    async with shared_client(http, 20.0) as client:
         resp = await client.get(_rule_url(azcfg), headers={"Authorization": f"Bearer {token}"})
     if resp.status_code == 404:
         return None
@@ -216,7 +218,7 @@ async def reconcile_allowlist(cfg: OidcConfig, azcfg: Dict[str, Any], ips,
     prefixes = normalize_prefixes(ips)
     token = await _arm_token(cfg, http=http)
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    async with (http or httpx.AsyncClient(timeout=30.0)) as client:
+    async with shared_client(http, 30.0) as client:
         if not prefixes:
             resp = await client.delete(_rule_url(azcfg), headers=headers)
             if resp.status_code not in (200, 202, 204, 404):
@@ -259,7 +261,7 @@ async def clear_priority_slot(cfg: OidcConfig, azcfg: Dict[str, Any], *,
     token = await _arm_token(cfg, http=http)
     headers = {"Authorization": f"Bearer {token}"}
     deleted: List[str] = []
-    async with (http or httpx.AsyncClient(timeout=30.0)) as client:
+    async with shared_client(http, 30.0) as client:
         resp = await client.get(f"{_nsg_base(azcfg)}?api-version={_API_VERSION}", headers=headers)
         if resp.status_code != 200:
             raise AzureNsgError(f"ARM GET NSG failed: HTTP {resp.status_code} — {resp.text[:300]}")

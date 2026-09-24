@@ -49,6 +49,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from http_client import shared_client
+
 from security.encryption import hub_encryption
 from security.oidc import fetch_app_token, get_oidc_config
 import key_vault
@@ -205,7 +207,7 @@ async def _acs_connstr_arm(hub, cfg: Dict[str, Any],
     url = (f"https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}"
            f"/providers/Microsoft.Communication/communicationServices/{name}"
            f"/listKeys?api-version={_ACS_ARM_API}")
-    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+    async with shared_client(http, 20.0) as c:
         resp = await c.post(url, headers={"Authorization": f"Bearer {token}"})
     if resp.status_code != 200:
         raise NotificationsError(
@@ -242,7 +244,7 @@ async def list_azure_subscriptions(hub, http: Optional[httpx.AsyncClient] = None
     oidc_cfg = get_oidc_config(hub)
     token = await fetch_app_token(oidc_cfg, _ARM_SCOPE, http=http)
     url = "https://management.azure.com/subscriptions?api-version=2020-01-01"
-    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+    async with shared_client(http, 20.0) as c:
         resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
     if resp.status_code != 200:
         raise NotificationsError(
@@ -274,7 +276,7 @@ async def list_azure_resource_groups(hub, subscription_id: str,
     token = await fetch_app_token(oidc_cfg, _ARM_SCOPE, http=http)
     url = (f"https://management.azure.com/subscriptions/{sub}"
            f"/resourceGroups?api-version=2021-04-01")
-    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+    async with shared_client(http, 20.0) as c:
         resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
     if resp.status_code != 200:
         raise NotificationsError(
@@ -311,7 +313,7 @@ async def list_acs_resources(hub, subscription_id: str, resource_group: str,
     url = (f"https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}"
            f"/providers/Microsoft.Communication/communicationServices"
            f"?api-version={_ACS_ARM_API}")
-    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+    async with shared_client(http, 20.0) as c:
         resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
     if resp.status_code != 200:
         raise NotificationsError(
@@ -357,7 +359,7 @@ async def list_acs_sender_domains(hub, subscription_id: str, resource_group: str
     url = (f"https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}"
            f"/providers/Microsoft.Communication/communicationServices/{name}"
            f"?api-version={_ACS_ARM_API}")
-    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+    async with shared_client(http, 20.0) as c:
         resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
     if resp.status_code != 200:
         raise NotificationsError(
@@ -485,7 +487,7 @@ async def _acs_api_send(endpoint: str, accesskey: str, sender: str,
                           f"&Signature={sig}"),
         "Content-Type": "application/json",
     }
-    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+    async with shared_client(http, 20.0) as c:
         resp = await c.post(url, headers=headers, content=body_bytes)
     if resp.status_code not in (200, 201, 202):
         raise NotificationsError(

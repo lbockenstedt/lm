@@ -626,6 +626,43 @@ def register(app, hub, ctx):
     # type. Both are swept from the reachable buckets (automation-readable only).
     _CONSOLE_CRED_TYPES = ("console", "login")
 
+    def _console_get_selection(hub, bucket):
+        """The set of vault-secret NAMES this bucket has opted IN to the console
+        auto-identify sweep, or ``None`` when the bucket has never recorded a
+        selection — meaning every automation-readable ``console``/``login``
+        secret in the bucket is used (the original, still-default behavior).
+        Recording an empty selection clears it back to ``None`` rather than
+        "select nothing" (see :func:`_console_set_selection`), so a bucket can
+        never be silently swept with zero credentials."""
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        sel = (gc.get("console_credential_selection") or {}).get(bucket)
+        return set(sel) if isinstance(sel, list) else None
+
+    def _console_set_selection(hub, bucket, names):
+        """Persist ``bucket``'s console auto-identify selection. An empty/falsy
+        ``names`` clears the bucket's entry entirely (reverting to "use every
+        candidate") instead of storing an empty list."""
+        gc = hub.state.system_state.setdefault("global_config", {})
+        store = gc.setdefault("console_credential_selection", {})
+        if names:
+            store[bucket] = sorted(set(names))
+        else:
+            store.pop(bucket, None)
+        hub.state.system_state["global_config"] = gc
+        hub.state._mark_dirty()
+
+    def _console_selection_filter(hub, recs):
+        """Drop ``automation_list_by_type`` results a bucket has explicitly
+        deselected via :func:`_console_set_selection`. Buckets with no recorded
+        selection are unaffected (every candidate still counts)."""
+        out = []
+        for rec in recs:
+            sel = _console_get_selection(hub, rec.get("bucket"))
+            if sel is not None and rec.get("name") not in sel:
+                continue
+            out.append(rec)
+        return out
+
     def _console_creds_from_cred_vault(creds_dict):
         """Normalise a Credential Vault secret value into ``[{username,password}]``.
 
@@ -685,7 +722,9 @@ def register(app, hub, ctx):
                 buckets.append(tenant)
             if stats is not None:
                 stats["buckets"] = list(buckets)
-            for rec in await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, buckets):
+            recs = _console_selection_filter(
+                hub, await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, buckets))
+            for rec in recs:
                 got = _console_creds_from_cred_vault(rec.get("value"))
                 if stats is not None:
                     stats["candidates"] += 1
@@ -696,10 +735,16 @@ def register(app, hub, ctx):
             try:
                 val = await _cv.automation_get(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET)
                 _add(_console_creds_from_cred_vault(val))
-            except Exception:  # noqa: BLE001 — absent / unreadable
-                pass
-        except Exception:  # noqa: BLE001 — vault not configured
-            pass
+            except Exception as exc:  # noqa: BLE001 — absent / unreadable
+                logger.debug("console: legacy vault list secret %r unavailable: "
+                             "%s: %s", _CONSOLE_VAULT_SECRET, type(exc).__name__, exc)
+        except Exception as exc:  # noqa: BLE001 — vault not configured
+            # Never silent: an unreadable vault yields the SAME empty list as a
+            # vault with no console logins, which sends operators hunting in the
+            # UI for a fault that is actually server-side (see _console_warn_no_credentials).
+            logger.warning("console: could not read console credentials for tenant "
+                           "%r from the vault: %s: %s", tenant, type(exc).__name__, exc,
+                           exc_info=True)
         return creds
 
     async def _console_creds_in_bucket(hub, bucket):
@@ -718,10 +763,14 @@ def register(app, hub, ctx):
 
         try:
             import cred_vault as _cv
-            for rec in await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, [bucket]):
+            recs = _console_selection_filter(
+                hub, await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, [bucket]))
+            for rec in recs:
                 _add(_console_creds_from_cred_vault(rec.get("value")))
-        except Exception:  # noqa: BLE001 — vault not configured / unreadable
-            pass
+        except Exception as exc:  # noqa: BLE001 — vault not configured / unreadable
+            logger.warning("console: could not read console credentials from vault "
+                           "bucket %r: %s: %s", bucket, type(exc).__name__, exc,
+                           exc_info=True)
         return creds
 
     async def _console_creds_all_buckets(hub):
@@ -747,16 +796,20 @@ def register(app, hub, ctx):
 
         try:
             import cred_vault as _cv
-            for rec in await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, None):
+            recs = _console_selection_filter(
+                hub, await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, None))
+            for rec in recs:
                 _add(_console_creds_from_cred_vault(rec.get("value")))
             # Legacy single named list secret in the admin slot.
             try:
                 _add(_console_creds_from_cred_vault(
                     await _cv.automation_get(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET)))
-            except Exception:  # noqa: BLE001 — absent / unreadable
-                pass
-        except Exception:  # noqa: BLE001 — vault not configured
-            pass
+            except Exception as exc:  # noqa: BLE001 — absent / unreadable
+                logger.debug("console: legacy vault list secret %r unavailable: "
+                             "%s: %s", _CONSOLE_VAULT_SECRET, type(exc).__name__, exc)
+        except Exception as exc:  # noqa: BLE001 — vault not configured
+            logger.warning("console: could not enumerate console credentials across "
+                           "vault buckets: %s: %s", type(exc).__name__, exc, exc_info=True)
         return creds
 
     async def _console_load_credentials_resolved(hub, tenant=None, stats=None):
@@ -1915,6 +1968,101 @@ def register(app, hub, ctx):
                     len(creds), bucket, actor)
         return {"status": "ok", "count": len(creds), "bucket": bucket,
                 "name": _CONSOLE_VAULT_SECRET}
+
+    @app.get("/api/console/credentials/candidates")
+    async def console_credentials_candidates(request: Request):
+        """List every automation-readable ``console``/``login`` vault secret in
+        the caller's tenant bucket (Global Admin: ``?tenant=`` or ``__admin__``
+        by default), each flagged whether it's currently included in the
+        console auto-identify sweep. Powers a per-secret include/exclude picker
+        in the Credential Library — without this, the sweep blindly tries every
+        such secret in the bucket (still the default when nothing is
+        deselected here). Usernames only; passwords are never returned."""
+        sess = _session_user(request)
+        is_global = _is_admin(sess)
+        is_ta = (not is_global) and _is_tenant_admin(sess)
+        if not is_global and not is_ta:
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        import cred_vault as _cv
+        req_tenant = (request.query_params.get("tenant") or "").strip()
+        if is_ta:
+            bucket = _effective_tenant(request, req_tenant or None)
+            if not bucket:
+                raise HTTPException(status_code=403,
+                                    detail="no tenant scope — select one of your tenants")
+        else:
+            bucket = req_tenant or _cv.ADMIN_BUCKET
+        recs = await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, [bucket])
+        selection = _console_get_selection(hub, bucket)
+        candidates = []
+        for r in recs:
+            v = r.get("value") or {}
+            items = v.get("credentials") if isinstance(v.get("credentials"), list) else None
+            username = v.get("username") or (items[0].get("username") if items else "") or ""
+            candidates.append({"name": r.get("name"), "username": username,
+                               "selected": True if selection is None else (r.get("name") in selection)})
+        return {"bucket": bucket, "candidates": candidates, "selection_active": selection is not None}
+
+    @app.post("/api/console/credentials/selection")
+    async def console_set_credentials_selection(request: Request):
+        """Persist which of the bucket's vault-backed ``console``/``login``
+        secrets the console auto-identify sweep may use. Pass ``selected: null``
+        (or omit it) to revert the bucket to the default "use every candidate"
+        behavior. A non-null ``selected`` naming zero VALID candidates in the
+        bucket is rejected — a silent all-off sweep is almost certainly a
+        mistake; clear the selection explicitly instead."""
+        sess = _session_user(request)
+        is_global = _is_admin(sess)
+        is_ta = (not is_global) and _is_tenant_admin(sess)
+        if not is_global and not is_ta:
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        import cred_vault as _cv
+        if is_ta:
+            bucket = _effective_tenant(request, (body or {}).get("tenant"))
+            if not bucket:
+                raise HTTPException(status_code=403,
+                                    detail="no tenant scope — select one of your tenants")
+        else:
+            bucket = str((body or {}).get("tenant") or "").strip() or _cv.ADMIN_BUCKET
+        selected = body.get("selected", None)
+        if selected is None:
+            _console_set_selection(hub, bucket, [])
+            hub._console_creds_seeded = set()
+            return {"status": "ok", "bucket": bucket, "selection_active": False}
+        if not isinstance(selected, list):
+            raise HTTPException(status_code=400, detail="selected must be a list of secret names")
+        recs = await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, [bucket])
+        valid_names = {r.get("name") for r in recs}
+        names = [str(n) for n in selected if str(n) in valid_names]
+        if selected and not names:
+            raise HTTPException(status_code=400,
+                                detail="none of the selected names are valid console/login "
+                                       "secrets in this bucket")
+        _console_set_selection(hub, bucket, names)
+        # Re-seed this bucket's console spokes so the narrowed/widened selection
+        # takes effect immediately (same pattern as /api/console/credentials/set).
+        hub._console_creds_seeded = set()
+        for sid in (hub.get_all_spokes_by_type("console") or []):
+            try:
+                stenant = hub.state.get_spoke_tenant(sid) or ""
+            except Exception:  # noqa: BLE001
+                stenant = ""
+            if bucket != _cv.ADMIN_BUCKET and stenant != bucket:
+                continue
+            try:
+                resolved = await _console_load_credentials_resolved(hub, stenant)
+                await hub.send_to_spoke_command(sid, "CONSOLE_SET_CREDENTIALS",
+                                                {"credentials": resolved})
+                _console_mark_seeded(hub, sid)
+            except Exception:  # noqa: BLE001
+                pass
+        return {"status": "ok", "bucket": bucket, "selected": names, "selection_active": True}
 
     @app.post("/api/console/open")
     async def console_open(request: Request):

@@ -32,7 +32,7 @@ try:
     from fingerprint import (run_identify, read_running_config, push_config, PROFILES,
                              passive_identify, run_commands, merge_credentials,
                              sanitize_console_text, _extract_profile_fields, prompt_hostname,
-                             looks_like_prompt, boot_fault, set_patience,
+                             looks_like_prompt, boot_fault, count_line_reconnects, set_patience,
                              FACTORY_DEFAULT_CREDENTIALS)
     from dpa import DpaManager
 except ImportError:  # loaded as a package (agent role loader) or from repo root
@@ -43,7 +43,7 @@ except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .fingerprint import (run_identify, read_running_config, push_config, PROFILES,  # type: ignore
                               passive_identify, run_commands, merge_credentials,
                               sanitize_console_text, _extract_profile_fields, prompt_hostname,
-                              looks_like_prompt, boot_fault, set_patience,  # type: ignore
+                              looks_like_prompt, boot_fault, count_line_reconnects, set_patience,  # type: ignore
                               FACTORY_DEFAULT_CREDENTIALS)
     from .dpa import DpaManager  # type: ignore
 
@@ -1243,12 +1243,26 @@ class ConsoleSpoke(BaseSpoke):
                     "state": "booting", "started_at": now, "last_output_at": now,
                     "prompt_seen": False, "relocked": False,
                     "reason": "output after silence — capturing boot cycle",
-                    "stuck_reason": "", "transcript_tail": "",
+                    "stuck_reason": "", "transcript_tail": "", "reconnects": 0,
                 }
                 h["boot"] = boot
             if boot is not None and boot.get("state") == "booting":
                 boot["last_output_at"] = now
                 boot["transcript_tail"] = sanitize_console_text(tail)[-1600:]
+                # Some firmware (HPE/Aruba console lines) reprints "Connected at
+                # <N> baud" + its full startup banner on EVERY fresh serial
+                # handshake — including our own baud sweeps/relocks and a
+                # reconnect after the device's own idle-session logout — not
+                # only on a real power-on/reset. Each replay is an independent
+                # boot/login cycle that can reach a prompt on its own, so treat
+                # a NEW replay as the start of a fresh cycle (reset the "stuck"
+                # clock) instead of letting several genuine cycles' elapsed time
+                # sum into one false "stuck" verdict.
+                reconnects = count_line_reconnects(raw.decode("utf-8", "replace"))
+                if reconnects > boot.get("reconnects", 0):
+                    boot["reconnects"] = reconnects
+                    boot["started_at"] = now
+                    boot["reason"] = "line reconnected — restarting boot cycle clock"
                 self._boot_maybe_relock(pid, dev, score, cfg, boot, now)
                 if looks_like_prompt(tail):
                     boot["state"] = "booted"

@@ -6,6 +6,7 @@ from api import (
     HTTPException, Request, _cache_entry, _fetch_module, _hub_msg,
     _refresh_module_all_tenants, _unwrap_netbox,
     get_netbox_spoke, get_spoke_or_503, get_tenant_scoping, logger,
+    netbox_tenant_scope, tenant_netbox_slugs,
 )
 
 
@@ -106,7 +107,12 @@ def register(app, hub, ctx):
         just can't target another tenant). Admins may target any tenant.
         Mirrors claim-device's tenant guard so the plain add routes can't be
         used to plant a resource in another tenant's scope by forwarding
-        body.tenant verbatim. Returns the slug to send to the spoke."""
+        body.tenant verbatim. Returns the slug to send to the spoke.
+
+        A caller assigned to a NetBox tenant GROUP is allowed to create into any
+        MEMBER tenant of that group (tenant_netbox_slugs expands it) — but never
+        into the group itself, which is not a real NetBox tenant and cannot own
+        an object."""
         requested_slug = (str(data.get("tenant") or "").strip()) or None
         sess = _session_user(request)
         if not sess:
@@ -121,9 +127,7 @@ def register(app, hub, ctx):
             allowed_ids = [user.get("tenant_id")]
         allowed = set()
         for tid in allowed_ids:
-            s = (get_tenant_scoping(hub, tid) or {}).get("netbox_tenant_slug")
-            if s:
-                allowed.add(s)
+            allowed.update(tenant_netbox_slugs(hub, tid))
         if requested_slug not in allowed:
             raise HTTPException(status_code=403,
                                 detail="Not authorized to create into that tenant")
@@ -233,14 +237,14 @@ def register(app, hub, ctx):
                     if subnet_fields:
                         return await _filter_session(request, data, "netbox", subnet_fields)
                     return data
-        # Warm-cache scope key: the resolved tenant slug (admins acting all-
-        # tenants → "_all_"), so cached data is only ever served back to the same
-        # scope (tenant isolation preserved). Slice params vary the key so a
-        # site/rack-filtered read doesn't serve an unfiltered snapshot.
-        scoping = get_tenant_scoping(hub, _resolve_tenant(request, tenant))
-        slug = scoping["netbox_tenant_slug"] or "_all_"
+        # Warm-cache scope key: the resolved NetBox scope (admins acting all-
+        # tenants → "_all_", a tenant group → "group:<slug>"), so cached data is
+        # only ever served back to the same scope (tenant isolation preserved).
+        # Slice params vary the key so a site/rack-filtered read doesn't serve
+        # an unfiltered snapshot.
+        scope = netbox_tenant_scope(hub, _resolve_tenant(request, tenant))
         slice_sig = ",".join(f"{k}={v}" for k, v in sorted(slice_query.items()) if v)
-        warm_key = f"{slug}|{slice_sig}" if slice_sig else slug
+        warm_key = f"{scope['key']}|{slice_sig}" if slice_sig else scope["key"]
 
         async def _warm_or_raise(exc):
             cached = hub.warm_get(f"nb_{cache_key}", warm_key)
@@ -267,7 +271,14 @@ def register(app, hub, ctx):
                 HTTPException(status_code=503, detail="No spoke connected"))
         try:
             payload = dict(slice_query)
-            payload["tenant"] = scoping["netbox_tenant_slug"] or None
+            # Exactly one of these is set: a plain tenant sends ``tenant``, a
+            # NetBox tenant group sends ``tenant_group`` (which the spoke turns
+            # into NetBox's tree-aware union filter). An older spoke that
+            # doesn't know ``tenant_group`` just ignores it and returns the
+            # unscoped list — which is why the group path still passes
+            # tenant=None rather than a partial slug.
+            payload["tenant"] = scope["tenant"]
+            payload["tenant_group"] = scope["tenant_group"]
             # 20s (was the 5s relay default) — a large NetBox can be slow; the
             # warm cache covers an overrun so the page still renders.
             result = await hub.request_response(spoke_id, cmd, payload, timeout=20.0)
