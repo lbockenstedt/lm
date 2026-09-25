@@ -131,6 +131,22 @@ def test_add_trusted_immediately_unblocks_now_exempt_ip(tmp_path):
     assert "9.9.9.9" not in tm._blocks
 
 
+def test_block_manual_rejects_invalid_ip(tmp_path):
+    tm = ThreatMonitor(_Hub(_State(str(tmp_path), {"azure_nsg": {"entries": []}})))
+    res = tm.block_manual("not-an-ip", "test")
+    assert res["status"] == "ERROR"
+    assert res.get("block") is None
+    assert not tm._blocks
+
+
+def test_block_manual_rejects_cidr_range(tmp_path):
+    tm = ThreatMonitor(_Hub(_State(str(tmp_path), {"azure_nsg": {"entries": []}})))
+    res = tm.block_manual("10.0.0.0/24", "test")
+    assert res["status"] == "ERROR"
+    assert "CIDR" in res["message"]
+    assert not tm._blocks
+
+
 # ── 3. priority ordering validation (NEW rule: allow < deny < 1000) ──────────
 # Azure evaluates LOWER priority numbers FIRST → the ALLOW rule must be evaluated
 # before the DENY rule, and both must sit below Azure's default allow on 443
