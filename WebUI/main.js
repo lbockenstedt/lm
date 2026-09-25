@@ -24215,7 +24215,6 @@ function pxmxStaleBanner(isStale, cachedAt) {
 }
 
 async function renderPxmxDiagnostics(container, forceRefresh = false) {
-    const forceRefresh = arguments.length > 1 && !!arguments[1];
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">' + (forceRefresh ? 'Polling drive diagnostics live…' : 'Loading drive diagnostics…') + '</p>';
 
     let res;
@@ -24519,7 +24518,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
         </div>`;
 }
 
-async function loadPxmxData(subMenu) {    const container = document.getElementById('pxmx-content');
+async function loadPxmxData(subMenu, forceRefresh = false) {    const container = document.getElementById('pxmx-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
 
@@ -24531,7 +24530,7 @@ async function loadPxmxData(subMenu) {    const container = document.getElementB
             return;
         }
         if (subMenu === 'Diagnostics') {
-            await renderPxmxDiagnostics(container);
+            await renderPxmxDiagnostics(container, forceRefresh);
             return;
         }
         if (subMenu === 'Overview' || subMenu === 'Virtual Machines') {
