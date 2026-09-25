@@ -24300,7 +24300,10 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
         ? '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-800 border border-red-200">Attention needed</span>'
         : '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-800 border border-green-200">All drives healthy</span>';
 
-    const cachedNote = (data.cached_at && !isStale) ? ` · <span class="text-slate-400 font-normal">Last updated ${_relTimeAgo(new Date(data.cached_at * 1000))}</span>` : '';
+    const relTime = (data.cached_at && !isStale)
+        ? _relTimeAgo(new Date(data.cached_at * 1000)).replace(/[()]/g, '').trim()
+        : '';
+    const cachedNote = (data.cached_at && !isStale && relTime) ? ` · <span class="text-slate-400 font-normal">Last updated ${relTime}</span>` : '';
     const headerHtml = `
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
             <div>
