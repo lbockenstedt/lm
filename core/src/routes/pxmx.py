@@ -103,19 +103,21 @@ def _ttl_lock(cache_name: str, key: str) -> "asyncio.Lock":
     return lk
 
 
-async def _ttl_cached(cache: dict, cache_name: str, key: str, fetch, ttl: float = _PXMX_FRESH_S):
+async def _ttl_cached(cache: dict, cache_name: str, key: str, fetch, ttl: float = _PXMX_FRESH_S, force_refresh: bool = False):
     """Serve ``cache[key]`` verbatim while younger than ``ttl``;
     otherwise fetch live (serialized per-key so concurrent requests for the
     same scope collapse into one fan-out) and refresh the entry. Raises
     whatever ``fetch`` raises on a cold/expired entry — callers already fall
     back to ``hub.warm_get`` for that, same as before this cache existed."""
-    entry = cache.get(key)
-    if entry is not None and (time.time() - entry["ts"]) < ttl:
-        return entry["data"]
-    async with _ttl_lock(cache_name, key):
+    if not force_refresh:
         entry = cache.get(key)
         if entry is not None and (time.time() - entry["ts"]) < ttl:
             return entry["data"]
+    async with _ttl_lock(cache_name, key):
+        if not force_refresh:
+            entry = cache.get(key)
+            if entry is not None and (time.time() - entry["ts"]) < ttl:
+                return entry["data"]
         data = await fetch()
         cache[key] = {"data": data, "ts": time.time()}
         return data
@@ -1545,7 +1547,11 @@ def register(app, hub, ctx):
 
     @app.get("/api/pxmx/drive-health")
     async def get_pxmx_drive_health(request: Request, tenant: str = None, node: str = None, refresh: bool = False):
-        """Retrieve drive health and SSD wear diagnostics across hypervisor nodes."""
+        """Retrieve drive health and SSD wear diagnostics across hypervisor nodes.
+
+        Results are cached in memory for up to 60 seconds; passing refresh=True
+        bypasses the cache to guarantee a live poll.
+        """
         hub = app.state.hub
         sess = _session_user(request)
         if not sess:
@@ -1739,7 +1745,7 @@ def register(app, hub, ctx):
         try:
             result = await _ttl_cached(
                 _DRIVE_HEALTH_CACHE, "drive_health", warm_key, _fetch_drive_health,
-                ttl=_DRIVE_HEALTH_FRESH_S)
+                ttl=_DRIVE_HEALTH_FRESH_S, force_refresh=refresh)
             out = dict(result)
             return out
         except Exception as e:
