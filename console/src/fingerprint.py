@@ -512,6 +512,14 @@ _DEFAULT_HOSTNAME_PROMPTS: List[str] = [
 ]
 _GENERIC_MAC = re.compile(r"\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b")
 _PROMPT_HOST_SKIP = frozenset({"more", "username", "password", "login", "config"})
+# Generic-pass IP fallback: an unlabeled bare IPv4 anywhere in scrollback is as
+# likely to be a firmware version, gateway, or syslog server as the device's
+# own address, so this requires an explicit "IP address"/"IPv4 address"/"inet"
+# label (any run of dots/spaces/colon between label and value, e.g.
+# "IP Address.....: x"). The `\b` before "inet" keeps it from matching inside
+# words like "cabinet".
+_GENERIC_IP_LABEL = re.compile(
+    r"\b(?:ip(?:v4)?\s*address|inet)\b[.\s]*:?[.\s]*(\d{1,3}(?:\.\d{1,3}){3})", re.I)
 
 
 def load_hostname_prompts() -> List["re.Pattern"]:
@@ -966,7 +974,7 @@ def passive_identify(text: str) -> Dict[str, Any]:
         if mm:
             identity["mac"] = mm.group(1)
     if not identity.get("ip"):
-        for m in re.finditer(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", text):
+        for m in _GENERIC_IP_LABEL.finditer(text):
             cand = m.group(1)
             if is_valid_device_ip(cand):
                 identity["ip"] = cand

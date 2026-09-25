@@ -1645,68 +1645,93 @@ def register(app, hub, ctx):
         async def _fetch_drive_health():
             aggregated_nodes = []
             seen_nodes = set()
+            error_nodes = {}  # node -> placeholder entry, used only if no real reply ever arrives
             spoke_connected = False
             last_err = None
 
-            for sid in spokes:
-                for target_node in target_nodes:
-                    payload = {"node": target_node}
-                    try:
-                        res = await hub.request_response(sid, "PXMX_DRIVE_HEALTH", payload, timeout=30.0)
-                    except Exception as e:
-                        last_err = e
-                        logger.debug("PXMX_DRIVE_HEALTH failed for spoke %s node %s: %s", sid, target_node, e)
-                        continue
+            # One request per (spoke, node) pair, all in flight together — each
+            # already carries its own 30s bound via `timeout`, so N agents no
+            # longer serialize into an N*30s wall-clock wait.
+            requests = [(sid, target_node) for sid in spokes for target_node in target_nodes]
+            responses = await asyncio.gather(
+                *(hub.request_response(sid, "PXMX_DRIVE_HEALTH", {"node": target_node}, timeout=30.0)
+                  for sid, target_node in requests),
+                return_exceptions=True,
+            )
 
-                    data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
-                    if not isinstance(data, dict):
-                        continue
+            for (sid, target_node), res in zip(requests, responses):
+                if isinstance(res, Exception):
+                    last_err = res
+                    logger.debug("PXMX_DRIVE_HEALTH failed for spoke %s node %s: %s", sid, target_node, res)
+                    continue
 
-                    spoke_connected = True
+                data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+                if not isinstance(data, dict):
+                    continue
 
-                    diagnostics = data.get("diagnostics") or {}
-                    agent_version = data.get("agent_version")
-                    error_msg = data.get("message") if data.get("status") == "ERROR" else None
+                spoke_connected = True
 
-                    if isinstance(data.get("nodes"), list):
-                        for n in data["nodes"]:
-                            if not isinstance(n, dict):
-                                continue
-                            n_name = n.get("node") or target_node or "default"
-                            if n_name in seen_nodes:
-                                continue
-                            seen_nodes.add(n_name)
-                            drives = n.get("drives") or []
-                            summary = _normalize_drive_summary(n.get("summary"), drives)
-                            aggregated_nodes.append({
-                                "node": n_name,
-                                "cluster": n.get("cluster") or data.get("cluster") or "",
-                                "drives": drives,
-                                "summary": summary,
-                                "status": n.get("status", "UNKNOWN"),
-                                "error": n.get("message") if n.get("status") == "ERROR" else None,
-                                "envelope_error": error_msg,
-                                "agent_version": n.get("agent_version", agent_version),
-                                "diagnostics": n.get("diagnostics") or diagnostics,
-                            })
-                    else:
-                        n_name = data.get("node") or target_node or "default"
+                diagnostics = data.get("diagnostics") or {}
+                agent_version = data.get("agent_version")
+                error_msg = data.get("message") if data.get("status") == "ERROR" else None
+
+                if isinstance(data.get("nodes"), list):
+                    for n in data["nodes"]:
+                        if not isinstance(n, dict):
+                            continue
+                        n_name = n.get("node") or target_node or "default"
                         if n_name in seen_nodes:
                             continue
-                        seen_nodes.add(n_name)
-                        drives = data.get("drives") or []
-                        summary = _normalize_drive_summary(data.get("summary"), drives)
-                        aggregated_nodes.append({
+                        drives = n.get("drives") or []
+                        summary = _normalize_drive_summary(n.get("summary"), drives)
+                        entry = {
                             "node": n_name,
-                            "cluster": data.get("cluster") or "",
+                            "cluster": n.get("cluster") or data.get("cluster") or "",
                             "drives": drives,
                             "summary": summary,
-                            "status": data.get("status", "UNKNOWN"),
-                            "error": data.get("message") if data.get("status") == "ERROR" else None,
-                            "envelope_error": None,
-                            "agent_version": agent_version,
-                            "diagnostics": diagnostics,
-                        })
+                            "status": n.get("status", "UNKNOWN"),
+                            "error": n.get("message") if n.get("status") == "ERROR" else None,
+                            "envelope_error": error_msg,
+                            "agent_version": n.get("agent_version", agent_version),
+                            "diagnostics": n.get("diagnostics") or diagnostics,
+                        }
+                        if n.get("status") == "ERROR":
+                            # Don't let a spoke that doesn't own this node claim
+                            # it — a later spoke's real reply must still win.
+                            error_nodes.setdefault(n_name, entry)
+                        else:
+                            seen_nodes.add(n_name)
+                            aggregated_nodes.append(entry)
+                else:
+                    n_name = data.get("node") or target_node or "default"
+                    if n_name in seen_nodes:
+                        continue
+                    drives = data.get("drives") or []
+                    summary = _normalize_drive_summary(data.get("summary"), drives)
+                    entry = {
+                        "node": n_name,
+                        "cluster": data.get("cluster") or "",
+                        "drives": drives,
+                        "summary": summary,
+                        "status": data.get("status", "UNKNOWN"),
+                        "error": data.get("message") if data.get("status") == "ERROR" else None,
+                        "envelope_error": None,
+                        "agent_version": agent_version,
+                        "diagnostics": diagnostics,
+                    }
+                    if data.get("status") == "ERROR":
+                        error_nodes.setdefault(n_name, entry)
+                    else:
+                        seen_nodes.add(n_name)
+                        aggregated_nodes.append(entry)
+
+            # A node that got ONLY error replies (e.g. every owning spoke is
+            # down) still needs to surface — merge it in now that we know no
+            # real reply ever arrived for it.
+            for n_name, entry in error_nodes.items():
+                if n_name not in seen_nodes:
+                    aggregated_nodes.append(entry)
+                    seen_nodes.add(n_name)
 
             if not spoke_connected:
                 if last_err is not None:

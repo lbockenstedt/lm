@@ -1771,14 +1771,18 @@ def register(app, hub, ctx):
             # aggregate count only (no usernames), matching the vault's reach
             # model (tenant-admin → own bucket; __admin__ is Global-Admin-only).
             import asyncio
-            import cred_vault as _cv
-            own, admin_creds = await asyncio.gather(
+            own, combined = await asyncio.gather(
                 _console_creds_in_bucket(hub, tenant),
-                _console_creds_in_bucket(hub, _cv.ADMIN_BUCKET),
+                _console_creds_for_tenant(hub, tenant),
             )
             own_keys = {(c.get("username", ""), c.get("password", "")) for c in own}
+            # ``combined`` is everything actually pushed to this tenant's console
+            # spokes (its own bucket + __admin__ + the legacy list secret,
+            # already deduped) — subtracting ``own`` leaves just the shared/global
+            # count, including the legacy secret that ``_console_creds_in_bucket``
+            # deliberately does not read.
             shared_global_count = sum(
-                1 for c in admin_creds
+                1 for c in combined
                 if (c.get("username", ""), c.get("password", "")) not in own_keys)
             return {"credentials": [{"username": c.get("username", ""),
                                      "has_password": bool(c.get("password"))} for c in own],
