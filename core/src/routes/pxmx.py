@@ -62,6 +62,10 @@ _FANOUT_SEM = asyncio.Semaphore(8)
 _NODES_CACHE: dict = {}
 _VMS_CACHE: dict = {}
 _DRIVE_HEALTH_CACHE: dict = {}
+
+
+class _SpokeConnectionError(RuntimeError):
+    pass
 _PXMX_FRESH_S = 10.0
 _DRIVE_HEALTH_FRESH_S = 60.0
 _ttl_locks: dict = {}
@@ -1630,9 +1634,6 @@ def register(app, hub, ctx):
                 empty["select_tenant"] = True
             return empty
 
-        if refresh:
-            _DRIVE_HEALTH_CACHE.pop(warm_key, None)
-
         target_nodes = [node.strip()] if node and node.strip() else []
         if not target_nodes:
             try:
@@ -1715,9 +1716,8 @@ def register(app, hub, ctx):
                         })
 
             if not spoke_connected:
-                if last_err is not None:
-                    raise last_err
-                raise RuntimeError("No hypervisor spoke answered PXMX_DRIVE_HEALTH")
+                msg = str(last_err) if last_err is not None else "No hypervisor spoke answered PXMX_DRIVE_HEALTH"
+                raise _SpokeConnectionError(msg)
 
             total_summary = {
                 "total_drives": 0,
@@ -1743,12 +1743,10 @@ def register(app, hub, ctx):
             return res
 
         try:
-            result = await _ttl_cached(
+            return await _ttl_cached(
                 _DRIVE_HEALTH_CACHE, "drive_health", warm_key, _fetch_drive_health,
                 ttl=_DRIVE_HEALTH_FRESH_S, force_refresh=refresh)
-            out = dict(result)
-            return out
-        except Exception as e:
+        except _SpokeConnectionError as e:
             logger.debug("get_pxmx_drive_health fetch failed: %s", e)
             cached = _cached_diagnostics()
             if cached is not None:
@@ -1763,8 +1761,6 @@ def register(app, hub, ctx):
                     "critical": 0,
                     "unknown": 0,
                 },
-                "cached_at": None,
-                "stale": False,
             }
 
     # ── pxmx / Proxmox: VMs + agent commands (/api/pxmx/*) ───────────────────
