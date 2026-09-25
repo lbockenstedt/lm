@@ -24214,12 +24214,13 @@ function pxmxStaleBanner(isStale, cachedAt) {
            </div>`;
 }
 
-async function renderPxmxDiagnostics(container) {
-    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading drive diagnostics…</p>';
+async function renderPxmxDiagnostics(container, forceRefresh = false) {
+    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">' + (forceRefresh ? 'Polling drive diagnostics live…' : 'Loading drive diagnostics…') + '</p>';
 
     let res;
     try {
-        res = await fetch(`/api/pxmx/drive-health?tenant=${encodeURIComponent(currentTenant || 'default')}`);
+        const refreshParam = forceRefresh ? '&refresh=true' : '';
+        res = await fetch(`/api/pxmx/drive-health?tenant=${encodeURIComponent(currentTenant || 'default')}${refreshParam}`);
     } catch (err) {
         container.innerHTML = `
             <div class="p-6">
@@ -24299,6 +24300,7 @@ async function renderPxmxDiagnostics(container) {
         ? '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-800 border border-red-200">Attention needed</span>'
         : '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-800 border border-green-200">All drives healthy</span>';
 
+    const cachedNote = (data.cached_at && !isStale) ? ` · <span class="text-slate-400 font-normal">Last updated ${_relTimeAgo(new Date(data.cached_at * 1000))}</span>` : '';
     const headerHtml = `
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
             <div>
@@ -24306,10 +24308,10 @@ async function renderPxmxDiagnostics(container) {
                     <h2 class="text-xl font-bold text-slate-900">Drive Health & Diagnostics</h2>
                     ${overallStatusBadge}
                 </div>
-                <p class="text-xs text-slate-500 mt-1">Storage device telemetry and SSD wear level diagnostics across hypervisor nodes</p>
+                <p class="text-xs text-slate-500 mt-1">Storage device telemetry and SSD wear level diagnostics across hypervisor nodes${cachedNote}</p>
             </div>
             <div>
-                <button onclick="loadPxmxData('Diagnostics')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Query SMART telemetry and SSD wear level diagnostics across all nodes">
+                <button onclick="loadPxmxData('Diagnostics', true)" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Query SMART telemetry and SSD wear level diagnostics across all nodes">
                     ↻ Run Diagnostics / Refresh
                 </button>
             </div>
@@ -24516,7 +24518,7 @@ async function renderPxmxDiagnostics(container) {
         </div>`;
 }
 
-async function loadPxmxData(subMenu) {    const container = document.getElementById('pxmx-content');
+async function loadPxmxData(subMenu, forceRefresh = false) {    const container = document.getElementById('pxmx-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
 
@@ -24528,7 +24530,7 @@ async function loadPxmxData(subMenu) {    const container = document.getElementB
             return;
         }
         if (subMenu === 'Diagnostics') {
-            await renderPxmxDiagnostics(container);
+            await renderPxmxDiagnostics(container, forceRefresh);
             return;
         }
         if (subMenu === 'Overview' || subMenu === 'Virtual Machines') {
