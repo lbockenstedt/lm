@@ -62,6 +62,10 @@ _FANOUT_SEM = asyncio.Semaphore(8)
 _NODES_CACHE: dict = {}
 _VMS_CACHE: dict = {}
 _DRIVE_HEALTH_CACHE: dict = {}
+
+
+class _SpokeConnectionError(RuntimeError):
+    pass
 _PXMX_FRESH_S = 10.0
 _DRIVE_HEALTH_FRESH_S = 60.0
 _ttl_locks: dict = {}
@@ -103,19 +107,21 @@ def _ttl_lock(cache_name: str, key: str) -> "asyncio.Lock":
     return lk
 
 
-async def _ttl_cached(cache: dict, cache_name: str, key: str, fetch, ttl: float = _PXMX_FRESH_S):
+async def _ttl_cached(cache: dict, cache_name: str, key: str, fetch, ttl: float = _PXMX_FRESH_S, force_refresh: bool = False):
     """Serve ``cache[key]`` verbatim while younger than ``ttl``;
     otherwise fetch live (serialized per-key so concurrent requests for the
     same scope collapse into one fan-out) and refresh the entry. Raises
     whatever ``fetch`` raises on a cold/expired entry — callers already fall
     back to ``hub.warm_get`` for that, same as before this cache existed."""
-    entry = cache.get(key)
-    if entry is not None and (time.time() - entry["ts"]) < ttl:
-        return entry["data"]
-    async with _ttl_lock(cache_name, key):
+    if not force_refresh:
         entry = cache.get(key)
         if entry is not None and (time.time() - entry["ts"]) < ttl:
             return entry["data"]
+    async with _ttl_lock(cache_name, key):
+        if not force_refresh:
+            entry = cache.get(key)
+            if entry is not None and (time.time() - entry["ts"]) < ttl:
+                return entry["data"]
         data = await fetch()
         cache[key] = {"data": data, "ts": time.time()}
         return data
@@ -1545,7 +1551,11 @@ def register(app, hub, ctx):
 
     @app.get("/api/pxmx/drive-health")
     async def get_pxmx_drive_health(request: Request, tenant: str = None, node: str = None, refresh: bool = False):
-        """Retrieve drive health and SSD wear diagnostics across hypervisor nodes."""
+        """Retrieve drive health and SSD wear diagnostics across hypervisor nodes.
+
+        Results are cached in memory for up to 60 seconds; passing refresh=True
+        bypasses the cache to guarantee a live poll.
+        """
         hub = app.state.hub
         sess = _session_user(request)
         if not sess:
@@ -1623,9 +1633,6 @@ def register(app, hub, ctx):
                 # truthful.
                 empty["select_tenant"] = True
             return empty
-
-        if refresh:
-            _DRIVE_HEALTH_CACHE.pop(warm_key, None)
 
         target_nodes = [node.strip()] if node and node.strip() else []
         if not target_nodes:
@@ -1709,9 +1716,8 @@ def register(app, hub, ctx):
                         })
 
             if not spoke_connected:
-                if last_err is not None:
-                    raise last_err
-                raise RuntimeError("No hypervisor spoke answered PXMX_DRIVE_HEALTH")
+                msg = str(last_err) if last_err is not None else "No hypervisor spoke answered PXMX_DRIVE_HEALTH"
+                raise _SpokeConnectionError(msg)
 
             total_summary = {
                 "total_drives": 0,
@@ -1737,12 +1743,10 @@ def register(app, hub, ctx):
             return res
 
         try:
-            result = await _ttl_cached(
+            return await _ttl_cached(
                 _DRIVE_HEALTH_CACHE, "drive_health", warm_key, _fetch_drive_health,
-                ttl=_DRIVE_HEALTH_FRESH_S)
-            out = dict(result)
-            return out
-        except Exception as e:
+                ttl=_DRIVE_HEALTH_FRESH_S, force_refresh=refresh)
+        except _SpokeConnectionError as e:
             logger.debug("get_pxmx_drive_health fetch failed: %s", e)
             cached = _cached_diagnostics()
             if cached is not None:
