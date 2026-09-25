@@ -24214,8 +24214,7 @@ function pxmxStaleBanner(isStale, cachedAt) {
            </div>`;
 }
 
-async function renderPxmxDiagnostics(container) {
-    const forceRefresh = arguments.length > 1 && !!arguments[1];
+async function renderPxmxDiagnostics(container, forceRefresh = false) {
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">' + (forceRefresh ? 'Polling drive diagnostics live…' : 'Loading drive diagnostics…') + '</p>';
 
     let res;
@@ -24312,7 +24311,7 @@ async function renderPxmxDiagnostics(container) {
                 <p class="text-xs text-slate-500 mt-1">Storage device telemetry and SSD wear level diagnostics across hypervisor nodes${cachedNote}</p>
             </div>
             <div>
-                <button onclick="renderPxmxDiagnostics(document.getElementById('pxmx-content'), true)" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Query SMART telemetry and SSD wear level diagnostics across all nodes">
+                <button onclick="loadPxmxData('Diagnostics', true)" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Query SMART telemetry and SSD wear level diagnostics across all nodes">
                     ↻ Run Diagnostics / Refresh
                 </button>
             </div>
@@ -24519,7 +24518,7 @@ async function renderPxmxDiagnostics(container) {
         </div>`;
 }
 
-async function loadPxmxData(subMenu) {    const container = document.getElementById('pxmx-content');
+async function loadPxmxData(subMenu, forceRefresh = false) {    const container = document.getElementById('pxmx-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
 
@@ -24531,7 +24530,7 @@ async function loadPxmxData(subMenu) {    const container = document.getElementB
             return;
         }
         if (subMenu === 'Diagnostics') {
-            await renderPxmxDiagnostics(container);
+            await renderPxmxDiagnostics(container, forceRefresh);
             return;
         }
         if (subMenu === 'Overview' || subMenu === 'Virtual Machines') {
