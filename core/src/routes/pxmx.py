@@ -69,6 +69,37 @@ class _SpokeConnectionError(RuntimeError):
 _PXMX_FRESH_S = 10.0
 _DRIVE_HEALTH_FRESH_S = 60.0
 _ttl_locks: dict = {}
+# Every _ttl_* structure is keyed per warm_key (tenant/agent scope), so a hub
+# serving many tenants would otherwise accumulate one entry per scope forever.
+# _ttl_locks is the worse of the two: it is ALSO keyed by id(loop), and CPython
+# recycles id() values once a loop is collected, so a never-pruned table can
+# alias a stale lock onto an unrelated loop. Bound both by LRU-ish eviction of
+# the oldest-touched entry.
+_TTL_CACHE_MAX = 64
+
+
+def _prune(d: dict, max_entries: int, ts_of, keep=None) -> None:
+    """Evict oldest-``ts_of`` entries until ``len(d) <= max_entries``.
+
+    ``keep`` (optional) marks entries that must not be evicted — an in-flight
+    lock, for instance. If everything left is kept, stop rather than spin.
+    Never raises: a pruning failure must not fail the request that triggered it.
+    """
+    try:
+        while len(d) > max_entries:
+            victim = None
+            victim_ts = None
+            for k, v in d.items():
+                if keep is not None and keep(v):
+                    continue
+                ts = ts_of(v)
+                if victim_ts is None or ts < victim_ts:
+                    victim, victim_ts = k, ts
+            if victim is None:
+                return
+            del d[victim]
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def bust_pxmx_agents_cache():
@@ -100,11 +131,15 @@ def _agents_lock() -> "asyncio.Lock":
 def _ttl_lock(cache_name: str, key: str) -> "asyncio.Lock":
     loop = asyncio.get_running_loop()
     lk_key = (id(loop), cache_name, key)
-    lk = _ttl_locks.get(lk_key)
-    if lk is None:
-        lk = asyncio.Lock()
-        _ttl_locks[lk_key] = lk
-    return lk
+    entry = _ttl_locks.get(lk_key)
+    if entry is None:
+        entry = {"lock": asyncio.Lock(), "ts": time.time()}
+        _ttl_locks[lk_key] = entry
+        _prune(_ttl_locks, _TTL_CACHE_MAX, lambda v: v["ts"],
+               keep=lambda v: v["lock"].locked())
+    else:
+        entry["ts"] = time.time()
+    return entry["lock"]
 
 
 async def _ttl_cached(cache: dict, cache_name: str, key: str, fetch, ttl: float = _PXMX_FRESH_S, force_refresh: bool = False):
@@ -124,6 +159,7 @@ async def _ttl_cached(cache: dict, cache_name: str, key: str, fetch, ttl: float 
                 return entry["data"]
         data = await fetch()
         cache[key] = {"data": data, "ts": time.time()}
+        _prune(cache, _TTL_CACHE_MAX, lambda v: v["ts"])
         return data
 
 
