@@ -1757,6 +1757,8 @@ def register(app, hub, ctx):
                     "critical": 0,
                     "unknown": 0,
                 },
+                "cached_at": None,
+                "stale": False,
             }
 
     # ── pxmx / Proxmox: VMs + agent commands (/api/pxmx/*) ───────────────────
