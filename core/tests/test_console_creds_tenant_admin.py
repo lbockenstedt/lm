@@ -174,6 +174,30 @@ def test_tenant_admin_sees_own_bucket_only_plus_shared_count():
     assert body["local_passwords_present"] is False
 
 
+def test_tenant_admin_shared_count_includes_legacy_secret(monkeypatch):
+    # The legacy __admin__-slot list secret (console-auto-credentials) is still
+    # pushed to tenant console spokes alongside the by-type vault records, so
+    # shared_global_count must count it too, not just the __admin__ bucket's
+    # console/login-typed secrets.
+    _reset_vault()
+
+    async def _automation_get_with_legacy(hub, bucket, name):
+        if bucket == "__admin__" and name == "console-auto-credentials":
+            return {"credentials": [{"username": "legacy-user", "password": "lp"}]}
+        return None
+
+    monkeypatch.setattr(_fake_cv, "automation_get", _automation_get_with_legacy)
+
+    c = _client("tenant_admin", ("t1",))
+    r = c.get("/api/console/credentials?tenant=t1")
+    assert r.status_code == 200
+    body = r.json()
+    users = sorted(x["username"] for x in body["credentials"])
+    assert users == ["t1-user"]
+    # global-admin (by-type, __admin__) + legacy-user (legacy secret) = 2.
+    assert body["shared_global_count"] == 2
+
+
 def test_tenant_admin_cannot_reach_other_tenant():
     # Crafted ?tenant=t2 for a t1-only admin is confined back to t1 by
     # effective_tenant — no cross-tenant leak.
