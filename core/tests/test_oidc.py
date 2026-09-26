@@ -258,7 +258,12 @@ def test_pick_redirect_uri_falls_back_when_host_not_allowlisted():
 def test_state_cookie_rejects_tamper():
     hub = _FakeHub({})
     cookie = oidc.sign_state_cookie(hub, "st", "nc", "cv")
-    bad = cookie[:-2] + "00"  # flip the HMAC tail
+    # Flip the last HMAC nibble to a DIFFERENT value. The previous form,
+    # cookie[:-2] + "00", was a no-op whenever the signature already ended in
+    # "00" — the "tampered" cookie was then byte-identical to the valid one and
+    # verified correctly, failing this test on ~0.4% (1/256) of CI runs.
+    bad = cookie[:-1] + ("1" if cookie[-1] == "0" else "0")
+    assert bad != cookie, "the tamper must actually change the cookie"
     assert oidc.verify_state_cookie(hub, bad) is None
 
 
