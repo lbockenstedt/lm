@@ -89,11 +89,21 @@ def test_console_get_credentials_scoped(hub):
     client = TestClient(app)
     
     async def mock_automation_list(hub, sec_type, buckets=None):
-        if buckets == ["t1"]:
-            return [{"value": {"credentials": [{"username": "u1", "password": "p1"}, {"username": "u2", "password": "p2"}]}}]
-        elif buckets == ["__admin__"]:
-            return [{"value": {"credentials": [{"username": "u2", "password": "p2"}, {"username": "admin", "password": "pw"}]}}]
-        return []
+        # _console_creds_for_tenant batches every reachable bucket into ONE
+        # vault call -- that batching is precisely what this performance test
+        # exists to cover -- while _console_creds_in_bucket asks for a single
+        # bucket. Match on the SET of buckets requested so both call shapes are
+        # answered; keying off one exact list silently returned [] for the
+        # batched call and made shared_global_count collapse to 0.
+        want = set(buckets or [])
+        out = []
+        if "t1" in want:
+            out.append({"value": {"credentials": [{"username": "u1", "password": "p1"},
+                                                  {"username": "u2", "password": "p2"}]}})
+        if "__admin__" in want:
+            out.append({"value": {"credentials": [{"username": "u2", "password": "p2"},
+                                                  {"username": "admin", "password": "pw"}]}})
+        return out
     
     with patch('cred_vault.automation_list_by_type', new_callable=AsyncMock) as m:
         m.side_effect = mock_automation_list

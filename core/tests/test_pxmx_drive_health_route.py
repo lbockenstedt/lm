@@ -304,10 +304,13 @@ def test_webui_main_js_submenus_and_diagnostics_renderer():
     # Check specifically in VIEW_SUBMENUS
     assert "pxmx: ['Overview', 'Virtual Machines', 'Diagnostics', 'Settings']" in content
 
-    # Verify renderPxmxDiagnostics is defined and called
-    assert "async function renderPxmxDiagnostics(container)" in content
+    # Verify renderPxmxDiagnostics is defined and called. Match the signature
+    # PREFIX only: the renderer has since grown an optional `forceRefresh`
+    # parameter, and pinning the exact `(container)` arity made a purely
+    # additive change look like a missing renderer and failed CI on dev.
+    assert "async function renderPxmxDiagnostics(container" in content
     assert "if (subMenu === 'Diagnostics')" in content
-    assert "await renderPxmxDiagnostics(container)" in content
+    assert "await renderPxmxDiagnostics(container" in content
 
     # Verify required UI elements are present in renderPxmxDiagnostics
     assert "Drive Health & Diagnostics" in content
