@@ -126,6 +126,14 @@ class DHCPSpoke(BaseSpoke):
       DHCP_HA_STATUS     — HA member state, lease sync, drift, recommendations
       DHCP_HA_CONFIG     — set the HA member pair + mode (+ worker secret)
       DHCP_HA_APPLY      — re-apply the current desired config to both nodes
+
+      DHCPv6 (dual-stack), single-node only — refused on an HA-clustered pair:
+      DHCP_SYNC6         — replace all subnet6 scopes + reservations
+      DHCP_LIST_SUBNETS6 — list all managed subnet6 scopes
+      DHCP_LIST_LEASES6  — list active DHCPv6 leases (optional subnet filter)
+      DHCP_ADD_RES6      — add a static DHCPv6 reservation (matched by hw-address)
+      DHCP_LIST_RES6     — list static DHCPv6 reservations
+      DHCP_DEL_RES6      — remove a static DHCPv6 reservation by address
     """
 
     def __init__(self, spoke_id: str, config: Dict[str, Any]):
@@ -789,6 +797,18 @@ class DHCPSpoke(BaseSpoke):
             return await self.cluster.apply(desired.get("subnets") or [],
                                             desired.get("reservations") or [])
 
+        # ── DHCPv6 (dual-stack): single-node only for now. Kea HA/cluster
+        # dual-stack propagation (mirroring the v4 self.cluster.apply() path)
+        # is tracked as follow-up work — refuse clearly on an HA pair rather
+        # than silently applying to just one node or (worse) doing nothing.
+        _DHCP6_COMMANDS = ("DHCP_SYNC6", "DHCP_LIST_SUBNETS6", "DHCP_LIST_LEASES6",
+                          "DHCP_DEL_LEASE6", "DHCP_ADD_RES6", "DHCP_LIST_RES6",
+                          "DHCP_DEL_RES6")
+        if cmd in _DHCP6_COMMANDS and self.cluster.enabled:
+            return {"status": "ERROR",
+                    "message": "DHCPv6 is not yet supported on HA-clustered Kea pairs "
+                               "— disable HA or use the non-clustered node directly."}
+
         # ── HA path: both nodes are configured as one transaction ───────────
         if self.cluster.enabled:
             if cmd == "DHCP_SYNC":
@@ -890,6 +910,46 @@ class DHCPSpoke(BaseSpoke):
             if not ip:
                 return {"status": "ERROR", "message": "ip is required"}
             return await asyncio.to_thread(self.mgr.delete_reservation, ip)
+
+        # ── DHCPv6 (dual-stack), single-node ─────────────────────────────
+        if cmd == "DHCP_SYNC6":
+            subnets      = data.get("subnets", [])
+            reservations = data.get("reservations", [])
+            return await asyncio.to_thread(self.mgr.sync6, subnets, reservations)
+
+        if cmd == "DHCP_LIST_SUBNETS6":
+            subnets = await asyncio.to_thread(self.mgr.list_subnets6)
+            return {"status": "SUCCESS", "subnets": subnets}
+
+        if cmd == "DHCP_LIST_LEASES6":
+            subnet = data.get("subnet")
+            leases = await asyncio.to_thread(self.mgr.list_leases6, subnet)
+            return {"status": "SUCCESS", "leases": leases}
+
+        if cmd == "DHCP_DEL_LEASE6":
+            ip = data.get("ip") or data.get("ip-address")
+            if not ip:
+                return {"status": "ERROR", "message": "ip is required"}
+            return await asyncio.to_thread(self.mgr.delete_lease6, ip)
+
+        if cmd == "DHCP_ADD_RES6":
+            subnet_id = data.get("subnet_id")
+            ip        = data.get("ip")
+            mac       = data.get("mac")
+            hostname  = data.get("hostname", "")
+            if not all([subnet_id, ip, mac]):
+                return {"status": "ERROR", "message": "subnet_id, ip, and mac are required"}
+            return await asyncio.to_thread(self.mgr.add_reservation6, int(subnet_id), ip, mac, hostname)
+
+        if cmd == "DHCP_LIST_RES6":
+            reservations = await asyncio.to_thread(self.mgr.list_reservations6)
+            return {"status": "SUCCESS", "reservations": reservations}
+
+        if cmd == "DHCP_DEL_RES6":
+            ip = data.get("ip")
+            if not ip:
+                return {"status": "ERROR", "message": "ip is required"}
+            return await asyncio.to_thread(self.mgr.delete_reservation6, ip)
 
         if cmd == "DHCP_STATUS":
             s = await asyncio.to_thread(self.mgr.status)
