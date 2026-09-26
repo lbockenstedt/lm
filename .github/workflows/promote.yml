@@ -163,8 +163,8 @@ jobs:
           # takes the warn-and-push branch, silently disabling the preflight.
           # Fail loudly instead: a missing route output is a bug, not a state to
           # push through. (steps.route does emit tgt; this pins that it must.)
-          if [ -z "$TGT" ]; then
-            echo "::error::TGT is empty -- steps.route must emit a 'tgt' output. Refusing to push without a working workflow-file preflight."
+          if [ -z "$TGT" ] || [ -z "$BR" ]; then
+            echo "::error::TGT or BR is empty -- steps.route must emit 'tgt' and 'branch' outputs. Refusing to push without a working workflow-file preflight."
             exit 1
           fi
           # Preflight: a push carrying a .github/workflows/ change is rejected

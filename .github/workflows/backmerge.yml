@@ -150,8 +150,8 @@ jobs:
         run: |
           # A failed diff takes the warn-and-push branch below, so an empty TGT
           # would silently disable the preflight. Fail loudly instead.
-          if [ -z "$TGT" ]; then
-            echo "::error::TGT is empty -- the matrix must supply a target. Refusing to push without a working workflow-file preflight."
+          if [ -z "$TGT" ] || [ -z "$BR" ]; then
+            echo "::error::TGT or BR is empty -- the matrix must supply a target. Refusing to push without a working workflow-file preflight."
             exit 1
           fi
           # Same preflight as promote.yml -- see the checkout step above.
