@@ -93,6 +93,43 @@ async def test_get_device_detail_console_correlation(monkeypatch):
     assert len(res["console"]) == 1
     assert res["console"][0]["serial"] == "SN12345"
 
+@pytest.mark.asyncio
+async def test_get_device_detail_ignores_bare_device_path_match(monkeypatch):
+    # /dev/ttyUSB0 is an OS-assigned name every spoke reuses, so a match on it
+    # ALONE (no hostname/ip/serial/port_id agreement) must not pull in an
+    # unrelated port from a different spoke.
+    app = FastAPI()
+    app.state.hub = MockHub()
+    ctx = MockCtx()
+
+    app.state.console_list_visible_ports = AsyncMock(return_value={
+        "ports": [
+            {
+                "alias": "console1",
+                "device": "/dev/ttyUSB0",
+                "port_id": "port-1",
+                "spoke_id": "spoke-1",
+                "probe": {
+                    "identity": {
+                        "serial": "SN-OTHER",
+                        "hostname": "other-host",
+                    }
+                },
+            }
+        ]
+    })
+
+    register(app, app.state.hub, ctx)
+
+    route_func = next((r.endpoint for r in app.routes if getattr(r, "path", "") == "/api/device-detail"), None)
+    assert route_func is not None
+
+    request = Request({"type": "http", "method": "GET"})
+
+    res = await route_func(request, device="/dev/ttyUSB0")
+    assert res["console"] == []
+
+
 def test_webui_main_js_console_fastpath_is_admin_gated():
     import os
     with open(Path(__file__).resolve().parents[2] / "WebUI" / "main.js", "r") as f:

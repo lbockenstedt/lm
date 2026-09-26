@@ -336,6 +336,12 @@ class ThreatMonitor:
         ip = (ip or "").strip()
         if not ip:
             return {"status": "ERROR", "message": "ip required"}
+        if "/" in ip:
+            return {"status": "ERROR", "message": "CIDR ranges are not allowed; provide a single IP address"}
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            return {"status": "ERROR", "message": f"{ip!r} is not a valid IP address"}
         self._block(ip, reason or "manually blocked",
                     kind="manual", source="manual_perm" if permanent else "manual")
         return {"status": "SUCCESS", "block": self._blocks.get(ip)}
