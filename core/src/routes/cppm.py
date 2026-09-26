@@ -471,7 +471,6 @@ def register(app, hub, ctx):
                 h = (identity.get("hostname") or "").strip().lower()
                 cip = (identity.get("ip") or "").strip()
                 cser = (identity.get("serial") or "").strip().lower()
-                cdev = (device or "").strip().lower()
                 cpid = (port_id or "").strip().lower()
                 for p in (cdata.get("ports") or []):
                     probe = p.get("probe") or {}
@@ -480,13 +479,11 @@ def register(app, hub, ctx):
                     palias = str(p.get("alias") or "").strip().lower()
                     pip = str(pident.get("ip") or "").strip()
                     pser = str(pident.get("serial") or probe.get("serial") or "").strip().lower()
-                    pdev = str(p.get("device") or "").strip().lower()
                     ppid = str(p.get("port_id") or "").strip().lower()
                     if (
                         (h and (h == phost or h == palias))
                         or (cip and cip == pip)
                         or (cser and cser == pser)
-                        or (cdev and cdev == pdev)
                         or (cpid and cpid == ppid)
                     ):
                         console_results.append(console_port_result(p))

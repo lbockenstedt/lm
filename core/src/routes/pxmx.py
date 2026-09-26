@@ -69,6 +69,37 @@ class _SpokeConnectionError(RuntimeError):
 _PXMX_FRESH_S = 10.0
 _DRIVE_HEALTH_FRESH_S = 60.0
 _ttl_locks: dict = {}
+# Every _ttl_* structure is keyed per warm_key (tenant/agent scope), so a hub
+# serving many tenants would otherwise accumulate one entry per scope forever.
+# _ttl_locks is the worse of the two: it is ALSO keyed by id(loop), and CPython
+# recycles id() values once a loop is collected, so a never-pruned table can
+# alias a stale lock onto an unrelated loop. Bound both by LRU-ish eviction of
+# the oldest-touched entry.
+_TTL_CACHE_MAX = 64
+
+
+def _prune(d: dict, max_entries: int, ts_of, keep=None) -> None:
+    """Evict oldest-``ts_of`` entries until ``len(d) <= max_entries``.
+
+    ``keep`` (optional) marks entries that must not be evicted — an in-flight
+    lock, for instance. If everything left is kept, stop rather than spin.
+    Never raises: a pruning failure must not fail the request that triggered it.
+    """
+    try:
+        while len(d) > max_entries:
+            victim = None
+            victim_ts = None
+            for k, v in d.items():
+                if keep is not None and keep(v):
+                    continue
+                ts = ts_of(v)
+                if victim_ts is None or ts < victim_ts:
+                    victim, victim_ts = k, ts
+            if victim is None:
+                return
+            del d[victim]
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def bust_pxmx_agents_cache():
@@ -100,11 +131,15 @@ def _agents_lock() -> "asyncio.Lock":
 def _ttl_lock(cache_name: str, key: str) -> "asyncio.Lock":
     loop = asyncio.get_running_loop()
     lk_key = (id(loop), cache_name, key)
-    lk = _ttl_locks.get(lk_key)
-    if lk is None:
-        lk = asyncio.Lock()
-        _ttl_locks[lk_key] = lk
-    return lk
+    entry = _ttl_locks.get(lk_key)
+    if entry is None:
+        entry = {"lock": asyncio.Lock(), "ts": time.time()}
+        _ttl_locks[lk_key] = entry
+        _prune(_ttl_locks, _TTL_CACHE_MAX, lambda v: v["ts"],
+               keep=lambda v: v["lock"].locked())
+    else:
+        entry["ts"] = time.time()
+    return entry["lock"]
 
 
 async def _ttl_cached(cache: dict, cache_name: str, key: str, fetch, ttl: float = _PXMX_FRESH_S, force_refresh: bool = False):
@@ -124,6 +159,7 @@ async def _ttl_cached(cache: dict, cache_name: str, key: str, fetch, ttl: float 
                 return entry["data"]
         data = await fetch()
         cache[key] = {"data": data, "ts": time.time()}
+        _prune(cache, _TTL_CACHE_MAX, lambda v: v["ts"])
         return data
 
 
@@ -1652,68 +1688,93 @@ def register(app, hub, ctx):
         async def _fetch_drive_health():
             aggregated_nodes = []
             seen_nodes = set()
+            error_nodes = {}  # node -> placeholder entry, used only if no real reply ever arrives
             spoke_connected = False
             last_err = None
 
-            for sid in spokes:
-                for target_node in target_nodes:
-                    payload = {"node": target_node}
-                    try:
-                        res = await hub.request_response(sid, "PXMX_DRIVE_HEALTH", payload, timeout=30.0)
-                    except Exception as e:
-                        last_err = e
-                        logger.debug("PXMX_DRIVE_HEALTH failed for spoke %s node %s: %s", sid, target_node, e)
-                        continue
+            # One request per (spoke, node) pair, all in flight together — each
+            # already carries its own 30s bound via `timeout`, so N agents no
+            # longer serialize into an N*30s wall-clock wait.
+            requests = [(sid, target_node) for sid in spokes for target_node in target_nodes]
+            responses = await asyncio.gather(
+                *(hub.request_response(sid, "PXMX_DRIVE_HEALTH", {"node": target_node}, timeout=30.0)
+                  for sid, target_node in requests),
+                return_exceptions=True,
+            )
 
-                    data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
-                    if not isinstance(data, dict):
-                        continue
+            for (sid, target_node), res in zip(requests, responses):
+                if isinstance(res, Exception):
+                    last_err = res
+                    logger.debug("PXMX_DRIVE_HEALTH failed for spoke %s node %s: %s", sid, target_node, res)
+                    continue
 
-                    spoke_connected = True
+                data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+                if not isinstance(data, dict):
+                    continue
 
-                    diagnostics = data.get("diagnostics") or {}
-                    agent_version = data.get("agent_version")
-                    error_msg = data.get("message") if data.get("status") == "ERROR" else None
+                spoke_connected = True
 
-                    if isinstance(data.get("nodes"), list):
-                        for n in data["nodes"]:
-                            if not isinstance(n, dict):
-                                continue
-                            n_name = n.get("node") or target_node or "default"
-                            if n_name in seen_nodes:
-                                continue
-                            seen_nodes.add(n_name)
-                            drives = n.get("drives") or []
-                            summary = _normalize_drive_summary(n.get("summary"), drives)
-                            aggregated_nodes.append({
-                                "node": n_name,
-                                "cluster": n.get("cluster") or data.get("cluster") or "",
-                                "drives": drives,
-                                "summary": summary,
-                                "status": n.get("status", "UNKNOWN"),
-                                "error": n.get("message") if n.get("status") == "ERROR" else None,
-                                "envelope_error": error_msg,
-                                "agent_version": n.get("agent_version", agent_version),
-                                "diagnostics": n.get("diagnostics") or diagnostics,
-                            })
-                    else:
-                        n_name = data.get("node") or target_node or "default"
+                diagnostics = data.get("diagnostics") or {}
+                agent_version = data.get("agent_version")
+                error_msg = data.get("message") if data.get("status") == "ERROR" else None
+
+                if isinstance(data.get("nodes"), list):
+                    for n in data["nodes"]:
+                        if not isinstance(n, dict):
+                            continue
+                        n_name = n.get("node") or target_node or "default"
                         if n_name in seen_nodes:
                             continue
-                        seen_nodes.add(n_name)
-                        drives = data.get("drives") or []
-                        summary = _normalize_drive_summary(data.get("summary"), drives)
-                        aggregated_nodes.append({
+                        drives = n.get("drives") or []
+                        summary = _normalize_drive_summary(n.get("summary"), drives)
+                        entry = {
                             "node": n_name,
-                            "cluster": data.get("cluster") or "",
+                            "cluster": n.get("cluster") or data.get("cluster") or "",
                             "drives": drives,
                             "summary": summary,
-                            "status": data.get("status", "UNKNOWN"),
-                            "error": data.get("message") if data.get("status") == "ERROR" else None,
-                            "envelope_error": None,
-                            "agent_version": agent_version,
-                            "diagnostics": diagnostics,
-                        })
+                            "status": n.get("status", "UNKNOWN"),
+                            "error": n.get("message") if n.get("status") == "ERROR" else None,
+                            "envelope_error": error_msg,
+                            "agent_version": n.get("agent_version", agent_version),
+                            "diagnostics": n.get("diagnostics") or diagnostics,
+                        }
+                        if n.get("status") == "ERROR":
+                            # Don't let a spoke that doesn't own this node claim
+                            # it — a later spoke's real reply must still win.
+                            error_nodes.setdefault(n_name, entry)
+                        else:
+                            seen_nodes.add(n_name)
+                            aggregated_nodes.append(entry)
+                else:
+                    n_name = data.get("node") or target_node or "default"
+                    if n_name in seen_nodes:
+                        continue
+                    drives = data.get("drives") or []
+                    summary = _normalize_drive_summary(data.get("summary"), drives)
+                    entry = {
+                        "node": n_name,
+                        "cluster": data.get("cluster") or "",
+                        "drives": drives,
+                        "summary": summary,
+                        "status": data.get("status", "UNKNOWN"),
+                        "error": data.get("message") if data.get("status") == "ERROR" else None,
+                        "envelope_error": None,
+                        "agent_version": agent_version,
+                        "diagnostics": diagnostics,
+                    }
+                    if data.get("status") == "ERROR":
+                        error_nodes.setdefault(n_name, entry)
+                    else:
+                        seen_nodes.add(n_name)
+                        aggregated_nodes.append(entry)
+
+            # A node that got ONLY error replies (e.g. every owning spoke is
+            # down) still needs to surface — merge it in now that we know no
+            # real reply ever arrived for it.
+            for n_name, entry in error_nodes.items():
+                if n_name not in seen_nodes:
+                    aggregated_nodes.append(entry)
+                    seen_nodes.add(n_name)
 
             if not spoke_connected:
                 msg = str(last_err) if last_err is not None else "No hypervisor spoke answered PXMX_DRIVE_HEALTH"
