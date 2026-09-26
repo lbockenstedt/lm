@@ -1096,9 +1096,42 @@ def test_parse_identity_aruba_os_ip():
 
 def test_passive_identify_extracts_valid_ip():
     from fingerprint import passive_identify
-    text = "Some random text with a subnet mask 255.255.255.0 and then a valid IP 10.1.2.3"
+    text = "Some random text with a subnet mask 255.255.255.0 and then IP address: 10.1.2.3"
     result = passive_identify(text)
     assert result["identity"].get("ip") == "10.1.2.3"
+
+
+def test_passive_identify_ignores_unlabeled_bare_ip():
+    # A bare IPv4-looking string with no "IP address"/"inet" label is as likely
+    # to be a firmware version, gateway, or syslog server as the device's own
+    # address (lm-986) — it must not be picked up.
+    from fingerprint import passive_identify
+    text = "generic-host booting firmware 8.10.0.7, syslog server 10.9.9.9 configured\r\n"
+    result = passive_identify(text)
+    assert result["identity"].get("ip") is None
+
+
+def test_passive_identify_inet_label_not_matched_inside_word():
+    # "inet" must require a word boundary so it doesn't fire inside "cabinet".
+    from fingerprint import passive_identify
+    text = "unit stored in cabinet 10.0.0.1, nothing else logged\r\n"
+    result = passive_identify(text)
+    assert result["identity"].get("ip") is None
+
+
+def test_passive_identify_generic_inet_label():
+    from fingerprint import passive_identify
+    text = "unrecognized-host$ ip addr show\r\neth0: inet 192.168.50.5/24 brd 192.168.50.255\r\n"
+    result = passive_identify(text)
+    assert result["identity"].get("ip") == "192.168.50.5"
+
+
+def test_passive_identify_generic_ip_address_label_with_dot_leader():
+    # "IP Address.....: x" (a common CLI table leader style) must still match.
+    from fingerprint import passive_identify
+    text = "unrecognized-host# show system\r\nIP Address.....: 10.2.3.4\r\n"
+    result = passive_identify(text)
+    assert result["identity"].get("ip") == "10.2.3.4"
 
 
 # ── ambiguous_fields: 2+ distinct valid candidates → flag the field, don't guess ──
