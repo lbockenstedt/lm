@@ -181,8 +181,7 @@ jobs:
           # No `|| echo 0` here: that masks a rev-list FAILURE as a genuine count
           # of 0, so the body would claim "0 commit(s)" for a promotion that may
           # carry many. Capture the real status, then default only on failure.
-          ncommits="$(git rev-list --count --no-merges "$base..$BR" 2>/dev/null)"
-          if [ $? -eq 0 ] && [ -n "$ncommits" ]; then
+          if ncommits="$(git rev-list --count --no-merges "$base..$BR" 2>/dev/null)" && [ -n "$ncommits" ]; then
             ncommits_ok="yes"
           else
             ncommits_ok="no"
