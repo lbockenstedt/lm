@@ -240,14 +240,13 @@ jobs:
             done
             sleep 5
           done
-          failed="$(echo $failed)"
           if [ -n "$approved" ]; then
             echo "::notice::released parked run(s):$approved"
           fi
           for id in $failed; do
             echo "::warning::could not approve run $id -- approve it by hand to unblock this PR"
           done
-          if [ -z "$approved" ] && [ -z "$failed" ]; then
+          if [ -z "$approved" ] && [ -z "$(echo $failed)" ]; then
             echo "::notice::no parked run found for $BR @ $SHA"
           fi
 
