@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import time
@@ -42,18 +43,27 @@ _DEFAULT_INTERVAL = 300  # seconds
 
 
 def build_dns_records(ips_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """NetBox IP list → Unbound A-record sync payload.
+    """NetBox IP list → Unbound A/AAAA-record sync payload.
 
     An IP contributes a record only when it has a ``dns_name`` and a concrete
-    address. Shared by the loop and ``POST /api/dns/sync`` so both build the
-    identical payload.
+    address. Record type is derived from the address family — an IPv6 address
+    becomes ``AAAA``, not ``A`` (Unbound's own record validation rejects an
+    IPv6 value under type ``A``, so a dual-stack device's v6 address was
+    previously silently dropped/rejected by the sync rather than landing as
+    an AAAA record). Shared by the loop and ``POST /api/dns/sync`` so both
+    build the identical payload.
     """
     records: List[Dict[str, Any]] = []
     for entry in (ips_data.get("ip_addresses") or []):
         dns_name = (entry.get("dns_name") or "").strip()
         address = (entry.get("address") or "").split("/")[0].strip()
-        if dns_name and address:
-            records.append({"name": dns_name, "type": "A", "value": address, "ttl": 300})
+        if not (dns_name and address):
+            continue
+        try:
+            rtype = "AAAA" if ipaddress.ip_address(address).version == 6 else "A"
+        except ValueError:
+            continue  # malformed address — skip rather than mis-sync
+        records.append({"name": dns_name, "type": rtype, "value": address, "ttl": 300})
     return records
 
 
