@@ -62,6 +62,22 @@ def test_build_dns_records_only_named_with_address():
     assert recs == [{"name": "host1.lab", "type": "A", "value": "10.0.0.5", "ttl": 300}]
 
 
+def test_build_dns_records_ipv6_becomes_aaaa():
+    """An IPv6 NetBox address must sync as AAAA, not A — Unbound's own record
+    validation rejects an IPv6 value under type A, so before this fix a
+    dual-stack device's v6 address was silently dropped by the sync loop."""
+    ips = {"ip_addresses": [
+        {"address": "2001:470:4948:1::10/64", "dns_name": "host1.lab",
+         "custom_fields": {}},
+        {"address": "10.0.0.5/24", "dns_name": "host1.lab", "custom_fields": {}},
+        {"address": "not-an-ip/64", "dns_name": "broken.lab", "custom_fields": {}},
+    ]}
+    recs = build_dns_records(ips)
+    assert {"name": "host1.lab", "type": "AAAA", "value": "2001:470:4948:1::10", "ttl": 300} in recs
+    assert {"name": "host1.lab", "type": "A", "value": "10.0.0.5", "ttl": 300} in recs
+    assert len(recs) == 2  # the malformed address is skipped, not mis-synced
+
+
 def test_build_dhcp_payload_subnets_and_reservations():
     subs, res = build_dhcp_payload(_prefixes_payload(), _ips_payload())
     assert len(subs) == 1
