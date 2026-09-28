@@ -810,15 +810,17 @@ class KeaManager:
             res = self._rpc("dhcp6", "lease6-del", {"ip-address": ip})
             return {"status": "SUCCESS", "result": res}
         except Exception as e:
-            logger.debug("delete_lease6 %s: %s", ip, e)
-            return {"status": "SUCCESS", "message": str(e), "not_found": True}
+            # _rpc already treats Kea's result=3 (not found) as success, so
+            # anything raised here is a real transport/service failure.
+            logger.warning("delete_lease6 %s failed: %s", ip, e)
+            return {"status": "ERROR", "message": str(e)}
 
     def purge_leases6_for_mac_or_ip(self, mac: str = None, ip: str = None) -> list:
         """Purge any active DHCPv6 lease for a given MAC or IPv6 address."""
         purged = []
         if ip:
-            self.delete_lease6(ip)
-            purged.append(ip)
+            if self.delete_lease6(ip).get("status") == "SUCCESS":
+                purged.append(ip)
         if mac:
             norm_mac = _normalize_mac(mac)
             try:
@@ -827,8 +829,8 @@ class KeaManager:
                     l_ip = l.get("ip-address") or l.get("ip")
                     l_mac = _normalize_mac(l.get("hw-address") or l.get("mac"))
                     if l_mac and l_mac == norm_mac and l_ip and l_ip not in purged:
-                        self.delete_lease6(l_ip)
-                        purged.append(l_ip)
+                        if self.delete_lease6(l_ip).get("status") == "SUCCESS":
+                            purged.append(l_ip)
             except Exception as e:
                 logger.warning("Could not purge DHCPv6 leases for %s: %s", norm_mac, e)
         return purged
