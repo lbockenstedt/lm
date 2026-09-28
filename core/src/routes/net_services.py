@@ -810,15 +810,28 @@ def register(app, hub, ctx):
                 out[ip] = host
         return out
 
+    # Wire values for the WebUI's DNS "Queries by Destination" day/week/month
+    # selector -> trailing days the spoke should sum. The dns spoke retains at
+    # most 30 days of per-day query-name buckets (see unbound_manager.py
+    # MAX_RETENTION_DAYS), so "month" is also the retention ceiling, not just
+    # the widest selectable window.
+    _DNS_STATS_RANGE_DAYS = {"day": 1, "week": 7, "month": 30}
+
     @app.get("/api/dns/stats")
     async def dns_stats(request: Request, tenant: str = None, search: str = None,
-                        host: str = None):
+                        host: str = None, range: str = None):
         """Unbound query statistics (total/cache-hit/recursion + per-type,
         plus a per-destination-name breakdown, each with its querying source
         IPs) for the DNS analytics panel. ``search`` filters the per-name
         breakdown by substring match. ``host`` filters that same breakdown to
         only rows with at least one source whose resolved hostname (or, when
         unresolvable, raw IP) case-insensitively contains the substring.
+        ``range`` ("day"/"week"/"month") limits that same breakdown to the
+        trailing N days of query history the spoke has retained; an
+        unrecognized or omitted value leaves it unfiltered (i.e. the full
+        retained history, at most a month). The ``global``/``query_types``
+        counters are unaffected — they are unbound-control's own lifetime
+        totals and are not bucketed by day.
 
         Each returned source is enriched with a best-effort ``host`` field —
         the DHCP lease hostname for that client IP if one exists, else the raw
@@ -844,6 +857,9 @@ def register(app, hub, ctx):
         payload = {}
         if search:
             payload["search"] = search
+        range_days = _DNS_STATS_RANGE_DAYS.get((range or "").strip().lower())
+        if range_days:
+            payload["range_days"] = range_days
         if source_prefixes is not None:
             # Always sent once scoping applies — even `[]` (a tenant with no
             # configured prefixes), so the spoke fails CLOSED (no source rows)

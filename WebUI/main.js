@@ -26676,7 +26676,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
         }
         // ── Overview: Unbound query telemetry (OPNsense-grade) ────────────
         if (subMenu === 'Overview') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dns/stats' + _tenantQS());
+            const { ok, data: d, detail } = await _spokeFetch('/api/dns/stats' + _tenantQS() + (_tenantQS() ? '&' : '?') + 'range=month');
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS spoke not connected'); return; }
             if (d.status && d.status !== 'SUCCESS') {
                 container.innerHTML = _spokeErrorBanner(d.message, 'unbound-control stats unavailable'); return;
@@ -26724,6 +26724,12 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     <div class="flex items-center justify-between mb-2 gap-3">
                         <div class="text-sm font-semibold text-slate-700">Queries by Destination</div>
                         <div class="flex gap-2">
+                            <select id="dns-query-range" title="Limit this breakdown to a recent window — the spoke only retains a month of history, so data older than that is already dropped"
+                                    class="text-xs border border-slate-300 rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-400">
+                                <option value="day">Last Day</option>
+                                <option value="week">Last Week</option>
+                                <option value="month" selected>Last Month</option>
+                            </select>
                             <input id="dns-query-name-search" type="search" placeholder="Search domain" title="Filter query log by domain or prefix"
                                    class="text-xs border border-slate-300 rounded-md px-2 py-1 w-56 focus:outline-none focus:ring-1 focus:ring-blue-400" />
                             <input id="dns-query-host-search" type="search" placeholder="Search host/IP" title="Filter query log by client host or IP"
@@ -26735,23 +26741,31 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 ${syncLine}`;
             const searchInput = document.getElementById('dns-query-name-search');
             const hostInput = document.getElementById('dns-query-host-search');
-            if (searchInput || hostInput) {
+            const rangeSelect = document.getElementById('dns-query-range');
+            if (searchInput || hostInput || rangeSelect) {
                 let debounce;
                 const runSearch = () => {
                     clearTimeout(debounce);
                     debounce = setTimeout(async () => {
                         const list = document.getElementById('dns-query-name-list');
                         if (!list) return;
-                        const params = [];
+                        const rangeVal = (rangeSelect && rangeSelect.value) || 'month';
+                        const params = ['range=' + encodeURIComponent(rangeVal)];
                         if (searchInput && searchInput.value) params.push('search=' + encodeURIComponent(searchInput.value));
                         if (hostInput && hostInput.value) params.push('host=' + encodeURIComponent(hostInput.value));
-                        const qs = params.length ? (_tenantQS() ? '&' : '?') + params.join('&') : '';
+                        // "Filtered" (for the empty-state message) means the operator
+                        // narrowed the view — a non-default range counts, since a
+                        // genuinely empty "Last Day" is a narrowing result, not
+                        // evidence Unbound has never logged a query.
+                        const narrowed = (searchInput && !!searchInput.value) || (hostInput && !!hostInput.value) || rangeVal !== 'month';
+                        const qs = (_tenantQS() ? '&' : '?') + params.join('&');
                         const { ok: ok2, data: d2 } = await _spokeFetch('/api/dns/stats' + _tenantQS() + qs);
-                        if (ok2 && d2) list.innerHTML = _ddQueryNameRows(d2.query_names || [], params.length > 0);
+                        if (ok2 && d2) list.innerHTML = _ddQueryNameRows(d2.query_names || [], narrowed);
                     }, 250);
                 };
                 if (searchInput) searchInput.addEventListener('input', runSearch);
                 if (hostInput) hostInput.addEventListener('input', runSearch);
+                if (rangeSelect) rangeSelect.addEventListener('change', runSearch);
             }
             return;
         }
