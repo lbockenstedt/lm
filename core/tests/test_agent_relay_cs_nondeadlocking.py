@@ -127,6 +127,28 @@ def _agent_relay_up_payload(orig_type, agent_id="agent-1", hostname="host-1",
 
 # ── tests ──────────────────────────────────────────────────────────────────
 
+async def _await_relay(predicate, timeout=2.0):
+    """Waits for the detached relay task to actually run.
+
+    ``_handle_agent_relay_up`` dispatches the relay as a background task and
+    returns; that task has only *started* once the loop is yielded to. Asserting
+    on its side effects the instant the handler returns is therefore a race —
+    it happens to pass on a multi-core runner and fails 100% of the time on a
+    single-CPU host, where the detached task is not scheduled before the
+    assertion runs.
+
+    The non-blocking property under test is still enforced by the callers'
+    ``asyncio.wait_for(handler, timeout=1.0)``; this only waits for the
+    dispatch that the handler deliberately did NOT await."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("timed out waiting for the relay task to dispatch")
+
+
 @pytest.mark.asyncio
 async def test_cs_relay_does_not_block_receive_loop():
     """The fix: ``_handle_agent_relay_up`` must return immediately even when the
@@ -145,8 +167,7 @@ async def test_cs_relay_does_not_block_receive_loop():
     )
     # The relay was dispatched as a background task (request_response was
     # entered) but the receive loop already returned.
-    assert hub.relay_started.is_set()
-    assert len(hub.relay_calls) == 1
+    await _await_relay(lambda: hub.relay_started.is_set() and len(hub.relay_calls) == 1)
     assert hub.relay_calls[0][0] == "cs-svr-04-spoke"
     assert hub.relay_calls[0][1] == "CS_INGEST_TELEMETRY"
 
@@ -174,8 +195,8 @@ async def test_back_to_back_cs_events_do_not_serialize():
 
     # Both relays dispatched (two in-flight request_response calls) even though
     # NEITHER cs-spoke reply has arrived (relay_block still unset).
+    await _await_relay(lambda: len(hub.relay_calls) == 2)
     assert hub.relay_started.is_set()
-    assert len(hub.relay_calls) == 2
     types = [c[1] for c in hub.relay_calls]
     assert "CS_INGEST_TELEMETRY" in types
     assert "CS_INGEST_LOG" in types
