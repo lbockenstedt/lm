@@ -191,3 +191,73 @@ def test_remove_still_drops_the_zone(tmp_path, monkeypatch):
     text = _text(mgr)
     assert 'name: "lab.example.com."' not in text
     assert 'name: "."' in text
+
+
+# ── update_forwarder: this twin (the copy resolvers actually run) was
+# missing update_forwarder entirely — only add/remove existed — so the
+# WebUI's "Edit" action on a forwarder always failed with "Unknown command:
+# DNS_FORWARDER_UPDATE" once the standalone dns repo's edit/delete feature
+# shipped everywhere except here. ─────────────────────────────────────────
+
+def test_update_replaces_upstreams_in_place(tmp_path, monkeypatch):
+    mgr = _mgr(tmp_path, monkeypatch)
+    mgr.add_forwarder(".", ["1.1.1.1", "8.8.8.8"])
+    out = mgr.update_forwarder(".", ["9.9.9.9"])
+    assert out["status"] == "SUCCESS"
+    assert out["changed"] is True
+    assert out["upstreams"] == ["9.9.9.9"]
+    text = _text(mgr)
+    assert text.count("forward-zone:") == 1
+    assert "forward-addr: 1.1.1.1" not in text
+    assert "forward-addr: 9.9.9.9" in text
+
+
+def test_update_can_rename_a_zone_via_old_zone(tmp_path, monkeypatch):
+    mgr = _mgr(tmp_path, monkeypatch)
+    mgr.add_forwarder("lab.example.com", ["10.0.0.1"])
+    out = mgr.update_forwarder("lab2.example.com", ["10.0.0.2"], old_zone="lab.example.com")
+    assert out["status"] == "SUCCESS"
+    assert out["zone"] == "lab2.example.com."
+    text = _text(mgr)
+    assert 'name: "lab.example.com."' not in text
+    assert 'name: "lab2.example.com."' in text
+    assert "forward-addr: 10.0.0.2" in text
+
+
+def test_update_renaming_onto_an_existing_zone_is_rejected(tmp_path, monkeypatch):
+    mgr = _mgr(tmp_path, monkeypatch)
+    mgr.add_forwarder(".", ["1.1.1.1"])
+    mgr.add_forwarder("lab.example.com", ["10.0.0.1"])
+    out = mgr.update_forwarder(".", ["10.0.0.9"], old_zone="lab.example.com")
+    assert out["status"] == "ERROR"
+    assert out["changed"] is False
+    assert "already exists" in out["message"]
+
+
+def test_update_of_unknown_zone_is_rejected(tmp_path, monkeypatch):
+    mgr = _mgr(tmp_path, monkeypatch)
+    out = mgr.update_forwarder("nope.example.com", ["1.1.1.1"])
+    assert out["status"] == "ERROR"
+    assert out["changed"] is False
+    assert "not found" in out["message"]
+
+
+def test_update_idempotent_when_upstreams_unchanged(tmp_path, monkeypatch):
+    mgr = _mgr(tmp_path, monkeypatch)
+    mgr.add_forwarder(".", ["1.1.1.1"])
+    out = mgr.update_forwarder(".", ["1.1.1.1"])
+    assert out["status"] == "SUCCESS"
+    assert out["changed"] is False
+
+
+def test_update_failed_reload_reports_error_and_restores(tmp_path, monkeypatch):
+    mgr = _mgr(tmp_path, monkeypatch)
+    mgr.add_forwarder(".", ["1.1.1.1"])
+    before = _text(mgr)
+    monkeypatch.setattr(mgr, "_reload",
+                        lambda: {"ok": False, "error": "connection refused"})
+    out = mgr.update_forwarder(".", ["8.8.8.8"])
+    assert out["status"] == "ERROR"
+    assert out["changed"] is False
+    assert "connection refused" in out["message"]
+    assert _text(mgr) == before
