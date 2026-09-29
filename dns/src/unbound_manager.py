@@ -918,6 +918,66 @@ class UnboundManager:
             }
         return {**result, "zone": zone, "upstreams": final, "changed": True}
 
+    def update_forwarder(self, zone: str, upstreams, old_zone: str = None) -> dict:
+        """Replace an LM-managed forwarding zone's upstreams in-place.
+
+        Unlike ``add_forwarder`` this REPLACES rather than merges the upstream
+        list, and supports renaming a zone via ``old_zone`` (looked up instead
+        of ``zone`` when given). Mirrors ``add_forwarder``'s
+        reload-then-verify-then-rollback pattern: ``unbound-control reload``'s
+        "ok" reply is not proof the edited zone actually took effect, so the
+        live ``list_forwards`` result is re-checked before reporting success.
+        """
+        try:
+            zone = self._normalize_forward_zone(zone)
+            upstreams = self._normalize_upstreams(upstreams)
+            if old_zone is not None:
+                old_zone = self._normalize_forward_zone(old_zone)
+        except ValueError as exc:
+            return {"status": "ERROR", "message": str(exc), "changed": False}
+
+        managed = self._coalesce_forwarders(self._managed_forwarders())
+        target_zone = old_zone if old_zone is not None else zone
+        current = next((item for item in managed
+                        if self._safe_zone(item.get("zone")) == target_zone), None)
+        if current is None:
+            return {"status": "ERROR", "changed": False,
+                    "message": f"forwarder zone {target_zone} not found"}
+        if old_zone is not None and old_zone != zone and any(
+                self._safe_zone(item.get("zone")) == zone for item in managed):
+            return {"status": "ERROR", "changed": False,
+                    "message": f"forwarder zone {zone} already exists"}
+
+        renaming = old_zone is not None and old_zone != zone
+        changed = renaming or (list(current.get("upstreams") or []) != upstreams)
+        desired = [{"zone": zone, "upstreams": upstreams} if item is current else item
+                   for item in managed]
+
+        result = self._write_forwarders(desired)
+        if result.get("status") != "SUCCESS":
+            return {**result, "zone": zone, "upstreams": upstreams, "changed": False}
+        confirm = self.list_forwarders()
+        applied = confirm.get("status") == "SUCCESS" and any(
+            self._safe_zone(item.get("zone")) == zone
+            for item in confirm.get("forwarders") or [])
+        if not applied:
+            # Roll back to the pre-edit state so a silently rejected rename/
+            # upstream change doesn't leave our managed config out of sync
+            # with what Unbound is actually serving.
+            self._write_forwarders(managed)
+            return {
+                "status": "ERROR", "changed": False, "zone": zone,
+                "upstreams": upstreams,
+                "message": (
+                    f"Unbound reloaded but forwarder zone {zone} did not take "
+                    f"effect — it is likely a duplicate of an existing "
+                    f"forward-zone already defined outside Lab Manager's "
+                    f"managed config (check /etc/unbound/unbound.conf and "
+                    f"other files in conf.d for an existing '{zone}' "
+                    f"forward-zone, and the unbound journal for "
+                    f"'duplicate forward zone ... ignored')"),
+            }
+        return {**result, "zone": zone, "upstreams": upstreams, "changed": changed}
 
     def remove_forwarder(self, zone: str) -> dict:
         """Remove an LM-managed forwarding zone. Used for cluster rollback."""

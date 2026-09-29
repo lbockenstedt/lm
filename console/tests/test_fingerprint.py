@@ -1014,6 +1014,36 @@ def test_boot_fault():
     assert not fp.boot_fault("Starting kernel ...\r\nLinux version 5.10\r\nSwitch> ")
     assert not fp.boot_fault("Booting system, please wait...")
 
+
+def test_current_boot_fault_reports_primary_phrase():
+    """A single fault line trips several signatures — report the LEADING one,
+    which names the actual failure, and agree with boot_fault() on the same text.
+
+    Scanning for the LAST match in the buffer is how current_boot_fault decides
+    which fault is the current one, but the phrase it REPORTS must still come
+    from the start of that line: "Kernel panic - unable to mount root" matches
+    both "kernel panic" and "unable to mount", and reporting the trailing
+    "unable to mount" buries the diagnosis operators actually need."""
+    line = "Kernel panic - unable to mount root"
+    assert fp.current_boot_fault(line).lower() == "kernel panic"
+    assert fp.current_boot_fault(line).lower() == fp.boot_fault(line).lower()
+    # Still the most RECENT fault when several distinct events are in the buffer.
+    assert fp.current_boot_fault(
+        "CRC error\r\nreloading\r\nKernel panic - unable to mount root\r\n"
+    ).lower() == "kernel panic"
+    # A normal prompt after the fault means the device recovered.
+    assert fp.current_boot_fault("Kernel panic - unable to mount root\r\nsw1# ") == ""
+
+
+def test_is_recovery_prompt():
+    """Bootloader prompts answer a nudge and look like generic shell prompts, so
+    liveness alone cannot tell them apart from a booted device."""
+    for p in ("rommon 1 > ", "loader>", "boot>", "=>", "db>", "grub> ", "switch: "):
+        assert fp.is_recovery_prompt("boot chatter\r\n" + p), p
+    for p in ("sw1# ", "login: ", "Password: ", "switch> "):
+        assert not fp.is_recovery_prompt("boot chatter\r\n" + p), p
+
+
 def test_is_valid_device_ip():
     from fingerprint import is_valid_device_ip
     assert is_valid_device_ip("192.168.1.10") is True
