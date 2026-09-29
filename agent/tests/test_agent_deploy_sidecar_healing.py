@@ -89,7 +89,9 @@ def test_disabled_dead_sidecar_is_enabled_and_started(monkeypatch):
     """The exact production symptom: lm-dhcp-worker present but disabled+dead
     while the role is installed — must be enabled --now and reported."""
     calls = []
-    state = {"lm-dhcp-worker": {"loaded": True, "enabled": False, "active": False},
+    state = {"kea-dhcp4-server": {"loaded": True, "enabled": True, "active": True},
+             "kea-ctrl-agent": {"loaded": True, "enabled": True, "active": True},
+             "lm-dhcp-worker": {"loaded": True, "enabled": False, "active": False},
              "kea-ha-agent": {"loaded": True, "enabled": True, "active": True}}
     monkeypatch.setattr(agent_spoke.subprocess, "run", _fake_run(state, calls))
 
@@ -97,6 +99,44 @@ def test_disabled_dead_sidecar_is_enabled_and_started(monkeypatch):
 
     assert actions == ["enabled+started lm-dhcp-worker (was disabled/stopped)"]
     assert ["systemctl", "enable", "--now", "lm-dhcp-worker"] in calls
+
+
+def test_unloaded_role_sidecars_stay_disabled(monkeypatch):
+    """UNLOAD_ROLE disables primary + sidecar units but leaves the marker;
+    the heal must not undo that."""
+    calls = []
+    state = {"kea-dhcp4-server": {"loaded": True, "enabled": False, "active": False},
+             "kea-ctrl-agent": {"loaded": True, "enabled": False, "active": False},
+             "lm-dhcp-worker": {"loaded": True, "enabled": False, "active": False},
+             "kea-ha-agent": {"loaded": True, "enabled": False, "active": False},
+             "unbound": {"loaded": True, "enabled": False, "active": False},
+             "lm-dns-worker": {"loaded": True, "enabled": False, "active": False}}
+    monkeypatch.setattr(agent_spoke.subprocess, "run", _fake_run(state, calls))
+
+    actions = _heal_deploy_role_sidecars(["dhcp-server", "dns-server"])
+
+    assert actions == []
+    assert not any(c[:2] == ["systemctl", "enable"] for c in calls)
+
+
+def test_indeterminate_sidecar_state_is_not_mutated(monkeypatch):
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(list(cmd))
+        unit = cmd[-1]
+        if cmd[:3] == ["systemctl", "show", "-p"]:
+            return _proc(stdout="loaded")
+        if unit in ("lm-dhcp-worker", "kea-ha-agent") and cmd[1] in ("is-enabled", "is-active"):
+            raise agent_spoke.subprocess.TimeoutExpired(cmd, 10)
+        if cmd[1] in ("is-enabled", "is-active"):
+            return _proc(returncode=0)
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(agent_spoke.subprocess, "run", run)
+
+    assert _heal_deploy_role_sidecars(["dhcp-server"]) == []
+    assert not any(c[:2] == ["systemctl", "enable"] for c in calls)
 
 
 def test_enable_failure_is_logged_not_raised(monkeypatch):
