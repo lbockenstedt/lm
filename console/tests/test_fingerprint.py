@@ -243,6 +243,29 @@ def test_prompt_tail_sees_through_console_log_noise():
         "\r\nPassword:\r\n%LINK-3-UPDOWN: Interface ge-0/0/1, changed state\r\n"))
 
 
+def test_prompt_tail_sees_through_idle_timeout_banner_spam():
+    # HPE/Aruba (AOS-S) prints "Console terminated due to inactivity." whenever
+    # an unattended session's OWN idle timer fires, and can refire it every few
+    # seconds with NO newline between repeats — gluing straight onto the prior
+    # prompt/text. Unlike the syslog noise above (matched per LINE), this must
+    # be stripped as a bare trailing PHRASE, or a device that's actually sitting
+    # at a live prompt (just re-terminating an unused session) is
+    # indistinguishable from a genuinely hung boot — see the boot watcher's
+    # active liveness nudge, which relies on this same _prompt_tail/
+    # looks_like_prompt to recognize the prompt underneath.
+    banner = "Console terminated due to inactivity."
+    glued = "MIPBE-AJ19-L1SW-1> " + banner * 3
+    assert fp.looks_like_prompt(glued)
+    # newline-delimited repeats work too
+    newline_sep = "MIPBE-AJ19-L1SW-1> " + (banner + "\r\n") * 3
+    assert fp.looks_like_prompt(newline_sep)
+    # noise alone, with no prompt anywhere, must not invent one
+    assert not fp.looks_like_prompt(banner * 5)
+    # a genuinely hung boot (no prompt, no idle-timeout banner) still reads as
+    # not-a-prompt
+    assert not fp.looks_like_prompt("Booting...\nInitializing memory...\n")
+
+
 class _ChattyLoginChan:
     """A device that logs to its own console: every prompt it prints is followed
     immediately by an asynchronous syslog line, so the prompt is never the last
