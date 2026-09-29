@@ -86,6 +86,18 @@ class StatefulTransport:
                 zone = data["zone"]
                 self.state[m] = [f for f in self.state[m] if f["zone"] != zone]
                 results[m] = {"status": "SUCCESS", "changed": True}
+            elif command == "DNSW_FORWARDER_UPDATE":
+                zone, upstreams = data["zone"], data["upstreams"]
+                old_zone = data.get("old_zone") or zone
+                entry = next((f for f in self.state[m] if f["zone"] == old_zone), None)
+                if entry is None:
+                    results[m] = {"status": "ERROR",
+                                  "message": f"forwarder zone {old_zone} not found",
+                                  "changed": False}
+                    continue
+                entry["zone"] = zone
+                entry["upstreams"] = upstreams
+                results[m] = {"status": "SUCCESS", "reloaded": True, "changed": True}
         ok = [m for m, r in results.items() if r.get("status") == "SUCCESS"]
         failed = [m for m in targets if m not in ok]
         status = "SUCCESS" if not failed else ("PARTIAL" if ok else "ERROR")
@@ -172,3 +184,83 @@ def test_partial_add_rolls_back_success_and_ambiguous_timeout():
         {"zone": "."},
         ["dns-a", "dns-b"],
     )
+
+
+# ── DNS_FORWARDER_UPDATE / DNS_FORWARDER_REMOVE cluster fanout ─────────────
+#
+# The cluster-only twin dns_spoke.py that generic agents actually run (see
+# lm/dns/src/) shipped _cluster_add_forwarder but never _cluster_update_forwarder
+# or _cluster_remove_forwarder, so the WebUI's Edit action failed on every
+# real deployment with "Unknown command: DNS_FORWARDER_UPDATE" even though the
+# standalone dns repo and the WebUI both already supported editing.
+
+def test_update_round_trips_through_a_healthy_cluster():
+    spoke = DNSSpoke.__new__(DNSSpoke)
+    spoke._transport = StatefulTransport(["dns-a", "dns-b"])
+    asyncio.run(spoke._cluster_add_forwarder(
+        {"zone": ".", "upstreams": ["8.8.8.8"]}))
+
+    result = asyncio.run(spoke._cluster_update_forwarder(
+        {"zone": ".", "upstreams": ["9.9.9.9"]}))
+    assert result["status"] == "SUCCESS"
+
+    listing = asyncio.run(spoke._cluster_forwarders())
+    upstreams_by_member = {f["member_id"]: f["upstreams"] for f in listing["forwarders"]}
+    assert upstreams_by_member == {"dns-a": ["9.9.9.9"], "dns-b": ["9.9.9.9"]}
+
+
+def test_update_reports_error_with_reasons_when_a_member_rejects_it():
+    spoke = _spoke(None)
+    spoke._transport = FakeTransport(None)
+
+    async def fanout(command, data, timeout=20.0, member_ids=None):
+        assert command == "DNSW_FORWARDER_UPDATE"
+        return {
+            "status": "ERROR",
+            "results": {"dns-a": {"status": "ERROR",
+                                   "message": "forwarder zone . not found",
+                                   "changed": False}},
+            "ok": [], "failed": ["dns-a"],
+        }
+    spoke._transport.fanout = fanout
+
+    result = asyncio.run(spoke._cluster_update_forwarder(
+        {"zone": ".", "upstreams": ["1.1.1.1"]}))
+
+    assert result["status"] == "ERROR"
+    assert "not updated on all resolvers" in result["message"]
+    assert "not found" in result["message"]
+
+
+def test_remove_round_trips_through_a_healthy_cluster():
+    spoke = DNSSpoke.__new__(DNSSpoke)
+    spoke._transport = StatefulTransport(["dns-a", "dns-b"])
+    asyncio.run(spoke._cluster_add_forwarder(
+        {"zone": "lab.example.com", "upstreams": ["10.0.0.1"]}))
+
+    result = asyncio.run(spoke._cluster_remove_forwarder(
+        {"zone": "lab.example.com"}))
+    assert result["status"] == "SUCCESS"
+
+    listing = asyncio.run(spoke._cluster_forwarders())
+    assert listing["forwarders"] == []
+
+
+def test_remove_reports_error_with_reasons_when_a_member_rejects_it():
+    spoke = _spoke(None)
+    spoke._transport = FakeTransport(None)
+
+    async def fanout(command, data, timeout=20.0, member_ids=None):
+        assert command == "DNSW_FORWARDER_REMOVE"
+        return {
+            "status": "ERROR",
+            "results": {"dns-a": {"status": "ERROR", "message": "disk full"}},
+            "ok": [], "failed": ["dns-a"],
+        }
+    spoke._transport.fanout = fanout
+
+    result = asyncio.run(spoke._cluster_remove_forwarder({"zone": "."}))
+
+    assert result["status"] == "ERROR"
+    assert "not removed from all resolvers" in result["message"]
+    assert "disk full" in result["message"]
