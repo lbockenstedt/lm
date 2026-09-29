@@ -417,6 +417,8 @@ class _FakeBootChan:
     """Stand-in channel exposing just what _boot_watch reads: a capture buffer."""
     def __init__(self):
         self.capture = b""
+        self.sessions = set()  # no attached user sessions (matches a real idle monitor channel)
+        self.writer = None
 
     def set(self, text: str):
         self.capture = text.encode()
@@ -491,6 +493,100 @@ def test_boot_watch_stuck_on_timeout_no_prompt(spoke, monkeypatch):
     _drive_boot(spoke, "good", clock, chan, 50)  # no new bytes
     info = spoke._boot_info("good")
     assert info["state"] == "stuck" and info["prompt_seen"] is False
+
+
+def test_boot_watch_nudge_confirms_live_prompt_not_stuck(spoke, monkeypatch):
+    """A device that looks stuck only because it's repeating unrelated chatter
+    (e.g. a console idle-timeout banner) must not be condemned without a
+    confirming nudge — and the nudge finding a live prompt resolves it as
+    booted, not stuck."""
+    clock = [1_700_000_000.0]  # realistic epoch time, like real time.time()
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    spoke.config["console_boot_stuck_secs"] = 30
+    spoke.config["console_boot_idle_secs"] = 5
+    chan = _install_fake_boot_chan(spoke, "good")
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    chan.set("Console terminated due to inactivity.\r\n" * 20)
+    _drive_boot(spoke, "good", clock, chan, 50)
+    assert spoke._boot_info("good")["state"] == "booting"
+
+    async def _fake_exclusive_probe(pid, fn, *a):
+        assert fn.__func__ is cs.ConsoleSpoke._boot_liveness_blocking
+        return {"responsive": True, "tail": "switch> "}
+    monkeypatch.setattr(spoke, "_exclusive_probe", _fake_exclusive_probe)
+
+    async def _run():
+        spoke._loop = asyncio.get_running_loop()
+        clock[0] += 40  # well past stuck_secs, still no prompt in the passive tail
+        _drive_boot(spoke, "good", clock, chan, 50)  # no new bytes
+        # A nudge was scheduled instead of marking stuck outright.
+        info = spoke._boot_info("good")
+        assert info["state"] == "booting"
+        assert spoke._boot_nudge_at.get("good") == clock[0]
+        for _ in range(5):  # let the scheduled coroutine run to completion
+            await asyncio.sleep(0)
+    asyncio.run(_run())
+
+    info = spoke._boot_info("good")
+    assert info["state"] == "booted"
+    assert "liveness check" in info["reason"]
+
+
+def test_boot_watch_nudge_confirms_genuinely_stuck(spoke, monkeypatch):
+    """If the confirming nudge gets no reply either, the episode really is
+    stuck and is reported as such."""
+    clock = [1_700_000_000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    spoke.config["console_boot_stuck_secs"] = 30
+    spoke.config["console_boot_idle_secs"] = 5
+    chan = _install_fake_boot_chan(spoke, "good")
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    chan.set("Booting up, please wait ... garbled progress ...")
+    _drive_boot(spoke, "good", clock, chan, 50)
+    assert spoke._boot_info("good")["state"] == "booting"
+
+    async def _fake_exclusive_probe(pid, fn, *a):
+        return {"responsive": False, "tail": ""}
+    monkeypatch.setattr(spoke, "_exclusive_probe", _fake_exclusive_probe)
+
+    async def _run():
+        spoke._loop = asyncio.get_running_loop()
+        clock[0] += 40
+        _drive_boot(spoke, "good", clock, chan, 50)
+        for _ in range(5):
+            await asyncio.sleep(0)
+    asyncio.run(_run())
+
+    info = spoke._boot_info("good")
+    assert info["state"] == "stuck" and info["prompt_seen"] is False
+
+
+def test_boot_watch_no_nudge_while_user_holds_port(spoke, monkeypatch):
+    """Never send a confirming CR while a human/relay session is attached —
+    the port is marked stuck immediately, exactly as before this check
+    existed, so a real operator's session is never interfered with."""
+    clock = [1_700_000_000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    spoke.config["console_boot_stuck_secs"] = 30
+    spoke.config["console_boot_idle_secs"] = 5
+    chan = _install_fake_boot_chan(spoke, "good")
+    chan.sessions = {"some-session"}
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    chan.set("Booting up, please wait ... garbled progress ...")
+    _drive_boot(spoke, "good", clock, chan, 50)
+    spoke._loop = object()  # a loop IS available, but must still be skipped
+
+    def _boom(*a, **kw):
+        raise AssertionError("must not schedule a nudge while a user holds the port")
+    monkeypatch.setattr(spoke, "_exclusive_probe", _boom)
+
+    clock[0] += 40
+    _drive_boot(spoke, "good", clock, chan, 50)
+    info = spoke._boot_info("good")
+    assert info["state"] == "stuck"
 
 
 def test_boot_watch_surfaced_in_list_and_diagnostics(spoke, monkeypatch):

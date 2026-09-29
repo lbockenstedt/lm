@@ -755,6 +755,31 @@ def count_line_reconnects(text: str) -> int:
     ``_LINE_RECONNECT``)."""
     return len(_LINE_RECONNECT.findall(sanitize_console_text(text or "")))
 
+
+# A "stuck" boot is inferred from the passive capture alone, and a chatty device
+# can defeat that: a switch stuck repeating an unrelated message (e.g. a console
+# idle-timeout banner like "Console terminated due to inactivity.") looks
+# identical, byte-wise, to one that's actually hung — the tail is dominated by
+# the repeated noise and the live prompt underneath it never scrolls back into
+# view. Rather than trust "no prompt seen in the passive tail" alone, actively
+# confirm: send a single bare CR (what an operator does to wake a console) and
+# see if a login/password/shell prompt answers. This is the read-only,
+# no-credential half of run_identify's own "wake the line" step (see the
+# ``write_fn(b"\r\n")`` / ``_LOGIN_NUDGES`` block below) — it never spends a
+# credential, so it's safe to run purely to settle a stuck/not-stuck verdict.
+_LIVENESS_NUDGE_SECS = 3.0
+
+
+def check_line_responsive(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
+                          nudge_secs: float = _LIVENESS_NUDGE_SECS) -> Tuple[bool, str]:
+    """Send one bare CR and read back, to tell a device that's genuinely hung
+    mid-boot from one already sitting at a live prompt that's merely buried
+    behind unrelated console chatter. Returns ``(responsive, transcript)`` where
+    ``responsive`` is True if a login/password/shell prompt answered."""
+    write_fn(b"\r")
+    transcript = _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT], nudge_secs)
+    return looks_like_prompt(transcript), transcript
+
 # Console lines are usually silent until they receive a keystroke: a device sits
 # idle at a prompt and emits nothing on its own (unless it happens to be booting).
 # So we actively wake the line by sending Enter (CR) — an initial CRLF plus a few
