@@ -503,16 +503,6 @@ def _prompt_patterns_path() -> Path:
 _DEFAULT_HOSTNAME_PROMPTS: List[str] = [
     # Linux shell: user@host:~$ / user@host:/path#
     r"(?:^|\r|\n)[\w.\-]+@([\w.\-]+):[\w.\-/~]*[#$]\s*$",
-    # JUNOS operational/config-mode prompt: "user@hostname>" / "user@hostname#"
-    # / "user@hostname%" — no colon, unlike the Linux shell shape above, so it
-    # needs its own pattern (the generic "host>" one below never matches: the
-    # "@" isn't in its hostname character class, and there's no bare-word
-    # alternative starting position once the run breaks on "@"). This is
-    # often the ONLY hostname signal in a passive capture for a box that's
-    # already logged in but never printed "show version" / a tty banner —
-    # see e.g. BO-BOMm-CRFW01, whose scrollback carries only "show interfaces
-    # terse" output and console syslog spam between prompts.
-    r"(?:^|\r|\n)\s*[\w.\-]+@([\w.\-]+)[>#%]\s*$",
     # ArubaOS controller/gateway/Instant: "(hostname) #", "(hostname) *#"
     # (the * = pending config), optionally with a config-context paren:
     # "(hostname) (config) #". Hostname is the FIRST parenthesised token.
