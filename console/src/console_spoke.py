@@ -116,7 +116,8 @@ class ConsoleSpoke(BaseSpoke):
         self._mon_new_at: Dict[str, float] = {}
         self._baud_relock_at: Dict[str, float] = {}
         # Boot watcher: last time we actively nudged a port that LOOKED stuck to
-        #        confirm it (wall-clock time.time()), soa chatty device isn't re-poked every scan.
+        # confirm it (wall-clock time.time()), so a chatty device isn't re-poked
+        # every scan.
         self._boot_nudge_at: Dict[str, float] = {}
         # Ports that have a confirming nudge dispatched but not yet resolved; the
         # watcher defers (never marks stuck) while one is pending.
@@ -1249,7 +1250,7 @@ class ConsoleSpoke(BaseSpoke):
             # Start a fresh boot episode only if none is active and the line had
             # been quiet long enough that this really is a (re)boot/wake — not a
             # device that merely chats periodically.
-            if (boot is None or boot.get("state") in ("idle", "booted", "stuck")) \
+            if (boot is None or boot.get("state") in ("idle", "booted", "stuck", "unconfirmed")) \
                     and gap >= cfg["wake_secs"]:
                 boot = {
                     "state": "booting", "started_at": now, "last_output_at": now,
@@ -1338,6 +1339,11 @@ class ConsoleSpoke(BaseSpoke):
         loop = self._loop
         if loop is None:
             return True
+        # A stopped/closed loop accepts scheduling but never runs it, which would
+        # leave the port pending forever — treat it as "no nudge available".
+        if getattr(loop, "is_closed", lambda: False)() or \
+                not getattr(loop, "is_running", lambda: True)():
+            return True
         self._boot_nudge_at[pid] = now
         self._boot_nudge_pending.add(pid)
         boot["reason"] = "confirming responsiveness before flagging stuck: %s" % reason
@@ -1383,20 +1389,21 @@ class ConsoleSpoke(BaseSpoke):
             boot["booted_at"] = now
             boot["stuck_reason"] = ""
         elif res.get("error"):
-            # Nudge could not run — unconfirmed, same as the prior behaviour.
-            boot["state"] = "stuck"
-            boot["stuck_reason"] = reason
-            boot["reason"] = ("boot output stopped before a prompt appeared "
-                              "(liveness check unavailable: %s)" % res.get("error"))
-            boot["stuck_at"] = now
+            # The nudge never ran (open failed / probe raised): liveness was
+            # never established, which is NOT a confirmed hang. Leave the
+            # episode 'booting' and release the cooldown so the next scan can
+            # retry the confirmation instead of condemning the port.
+            self._boot_nudge_at.pop(pid, None)
+            boot["reason"] = ("liveness check unavailable (%s) — retrying before "
+                              "flagging stuck" % res.get("error"))
         elif (res.get("tail") or "").strip():
             # The line answered, just not with a recognizable prompt — not a
-            # confirmed hang.
-            boot["state"] = "stuck"
-            boot["stuck_reason"] = reason
+            # confirmed hang, so it gets its own state rather than 'stuck'.
+            boot["state"] = "unconfirmed"
+            boot["stuck_reason"] = ""
+            boot["unconfirmed_at"] = now
             boot["reason"] = ("unconfirmed: %s (line replied to a wake nudge but no "
                               "recognizable prompt)" % reason)
-            boot["stuck_at"] = now
         else:
             boot["state"] = "stuck"
             boot["stuck_reason"] = reason
