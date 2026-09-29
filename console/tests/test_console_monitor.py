@@ -535,9 +535,17 @@ def test_boot_watch_nudge_confirms_live_prompt_not_stuck(spoke, monkeypatch):
 
 @pytest.mark.parametrize("reply", ["", "Console terminated due to inactivity.\r\n" * 20,
                                    "Kernel panic\r\n" * 20,
-                                   "failed to boot\r\nrommon 1 >"])
+                                   "failed to boot\r\nrommon 1 >",
+                                   # Bootloader prompts with NO fault text at all:
+                                   # these ANSWER the nudge and match the generic
+                                   # shell-prompt shape, so liveness alone scores
+                                   # them "booted" — but a device parked in
+                                   # rommon/loader/u-boot never reached its OS.
+                                   "loader>", "boot>", "=>", "db>",
+                                   "rommon 1 >", "grub> ", "switch: "])
 def test_boot_watch_nudge_confirms_genuinely_stuck(spoke, monkeypatch, reply):
-    """Noise is not a prompt, and a recovery prompt cannot clear a boot fault."""
+    """Noise is not a prompt, a recovery prompt cannot clear a boot fault, and a
+    bootloader prompt is not a booted device even with no fault text to go on."""
     clock = [1_700_000_000.0]
     monkeypatch.setattr(cs.time, "time", lambda: clock[0])
     spoke.config["console_boot_stuck_secs"] = 30

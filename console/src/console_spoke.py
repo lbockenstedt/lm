@@ -32,7 +32,8 @@ try:
     from fingerprint import (run_identify, read_running_config, push_config, PROFILES,
                              passive_identify, run_commands, merge_credentials,
                              sanitize_console_text, _extract_profile_fields, prompt_hostname,
-                             looks_like_prompt, boot_fault, current_boot_fault, count_line_reconnects, set_patience,
+                             looks_like_prompt, boot_fault, current_boot_fault, is_recovery_prompt,
+                             count_line_reconnects, set_patience,
                              check_line_responsive, FACTORY_DEFAULT_CREDENTIALS)
     from dpa import DpaManager
 except ImportError:  # loaded as a package (agent role loader) or from repo root
@@ -43,7 +44,8 @@ except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .fingerprint import (run_identify, read_running_config, push_config, PROFILES,  # type: ignore
                               passive_identify, run_commands, merge_credentials,
                               sanitize_console_text, _extract_profile_fields, prompt_hostname,
-                              looks_like_prompt, boot_fault, current_boot_fault, count_line_reconnects, set_patience,  # type: ignore
+                              looks_like_prompt, boot_fault, current_boot_fault, is_recovery_prompt,
+                              count_line_reconnects, set_patience,
                               check_line_responsive, FACTORY_DEFAULT_CREDENTIALS)
     from .dpa import DpaManager  # type: ignore
 
@@ -1419,12 +1421,25 @@ class ConsoleSpoke(BaseSpoke):
             boot["reason"] = "boot fault detected: %s" % fault
             boot["stuck_at"] = now
         elif res.get("responsive") and not res.get("error"):
-            boot["state"] = "booted"
-            boot["prompt_seen"] = True
-            boot["reason"] = ("active liveness check found a live prompt — the "
-                              "port wasn't stuck, console chatter was burying it")
-            boot["booted_at"] = now
-            boot["stuck_reason"] = ""
+            if is_recovery_prompt(tail):
+                # Responsive, but at a BOOTLOADER — the device answered our nudge
+                # from rommon/loader/u-boot and never reached its OS. A bootloader
+                # can sit there indefinitely printing nothing, so there may be no
+                # fault text for current_boot_fault() to find; without this check
+                # the generic prompt shape below would score it "booted", which is
+                # exactly the hang this watcher exists to report.
+                boot["state"] = "stuck"
+                boot["stuck_reason"] = "stopped at bootloader prompt"
+                boot["reason"] = ("confirmed stuck: device answered at a "
+                                  "bootloader/recovery prompt, not a booted OS")
+                boot["stuck_at"] = now
+            else:
+                boot["state"] = "booted"
+                boot["prompt_seen"] = True
+                boot["reason"] = ("active liveness check found a live prompt — the "
+                                  "port wasn't stuck, console chatter was burying it")
+                boot["booted_at"] = now
+                boot["stuck_reason"] = ""
         else:
             boot["state"] = "stuck"
             boot["stuck_reason"] = reason

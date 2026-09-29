@@ -739,7 +739,20 @@ def boot_fault(text: str) -> str:
 
 
 # Bootloader / recovery prompts: responsive, but NOT evidence of a healthy boot.
-_RECOVERY_PROMPT = re.compile(r"(?:rommon\s*\d*\s*>|loader>|boot>|=>|db>)\s*$", re.I)
+_RECOVERY_PROMPT = re.compile(
+    r"(?:rommon\s*\d*\s*>|loader>|boot>|grub>|switch:|=>|db>)\s*$", re.I)
+
+
+def is_recovery_prompt(text: str) -> bool:
+    """True if the tail of ``text`` is a BOOTLOADER / recovery prompt.
+
+    Such a prompt answers a wake nudge, so :func:`looks_like_prompt` (and hence
+    :func:`check_line_responsive`) reports it as responsive — ``loader>``,
+    ``boot>``, ``=>`` and ``db>`` all match the generic shell-prompt shape. But
+    responsive is not booted: a device sitting at its bootloader never reached
+    its OS, which is precisely the condition the boot watcher exists to catch.
+    Callers deciding boot HEALTH (rather than mere liveness) must consult this."""
+    return bool(_RECOVERY_PROMPT.search(_prompt_tail(sanitize_console_text(text or ""))))
 
 
 def current_boot_fault(text: str) -> str:
@@ -755,7 +768,16 @@ def current_boot_fault(text: str) -> str:
     after = clean[last.end():]
     if looks_like_prompt(after) and not _RECOVERY_PROMPT.search(_prompt_tail(after)):
         return ""
-    return last.group(0).strip()
+    # Report the FIRST signature on the faulting LINE, not the last match in the
+    # buffer: one fault line routinely trips several phrases ("Kernel panic -
+    # unable to mount root" matches both "kernel panic" and "unable to mount"),
+    # and the leading one names the actual failure. Scanning to the last match
+    # above is still right for deciding WHICH fault is current; it is only the
+    # reported phrase that must come from the start of that line — which is also
+    # what :func:`boot_fault` reports for the same text.
+    nl = max(clean.rfind("\n", 0, last.start()), clean.rfind("\r", 0, last.start()))
+    primary = _BOOT_FAULT.search(clean, nl + 1, last.end())
+    return (primary or last).group(0).strip()
 
 
 # HPE/Aruba (and similar) console firmware reprints "Connected at <N> baud" plus
