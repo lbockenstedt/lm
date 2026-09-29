@@ -32,7 +32,7 @@ try:
     from fingerprint import (run_identify, read_running_config, push_config, PROFILES,
                              passive_identify, run_commands, merge_credentials,
                              sanitize_console_text, _extract_profile_fields, prompt_hostname,
-                             looks_like_prompt, boot_fault, count_line_reconnects, set_patience,
+                             looks_like_prompt, boot_fault, current_boot_fault, count_line_reconnects, set_patience,
                              check_line_responsive, FACTORY_DEFAULT_CREDENTIALS)
     from dpa import DpaManager
 except ImportError:  # loaded as a package (agent role loader) or from repo root
@@ -43,7 +43,7 @@ except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .fingerprint import (run_identify, read_running_config, push_config, PROFILES,  # type: ignore
                               passive_identify, run_commands, merge_credentials,
                               sanitize_console_text, _extract_profile_fields, prompt_hostname,
-                              looks_like_prompt, boot_fault, count_line_reconnects, set_patience,  # type: ignore
+                              looks_like_prompt, boot_fault, current_boot_fault, count_line_reconnects, set_patience,  # type: ignore
                               check_line_responsive, FACTORY_DEFAULT_CREDENTIALS)
     from .dpa import DpaManager  # type: ignore
 
@@ -1019,12 +1019,19 @@ class ConsoleSpoke(BaseSpoke):
         detect-baud, config get/push). Pauses the passive monitor to release the
         OS handle and marks the port ``probing`` so the monitor loop won't grab
         it back mid-op; the monitor loop re-establishes capture afterward."""
-        self._probing.add(pid)
-        self.sessions.stop_monitor(pid)
-        try:
-            return await asyncio.to_thread(fn, *args)
-        finally:
-            self._probing.discard(pid)
+        locks = self.__dict__.setdefault("_probe_locks", {})
+        lock = locks.get(pid)
+        if lock is None:
+            lock = locks[pid] = asyncio.Lock()
+        # One shared per-port reservation: concurrent exclusive ops serialize
+        # instead of opening the device twice.
+        async with lock:
+            self._probing.add(pid)
+            self.sessions.stop_monitor(pid)
+            try:
+                return await asyncio.to_thread(fn, *args)
+            finally:
+                self._probing.discard(pid)
 
     # ── passive monitor (keep-alive capture + opportunistic identity) ─────────
     def _ensure_monitor_task(self) -> None:
@@ -1287,7 +1294,7 @@ class ConsoleSpoke(BaseSpoke):
                     boot["started_at"] = now
                     boot["reason"] = "line reconnected — restarting boot cycle clock"
                 self._boot_maybe_relock(pid, dev, score, cfg, boot, now)
-                fault = boot_fault(tail)
+                fault = current_boot_fault(tail)
                 if fault:
                     # A loader/recovery prompt can be responsive without having
                     # booted successfully. Never nudge away a positive fault.
@@ -1300,6 +1307,15 @@ class ConsoleSpoke(BaseSpoke):
                     boot["prompt_seen"] = True
                     boot["reason"] = "reached a login/shell prompt"
                     boot["booted_at"] = now
+                elif now - boot.get("started_at", now) >= cfg["stuck_secs"]:
+                    # Continuously chatty line: output never stops, so the quiet
+                    # path can't run. Confirm actively once past the timeout.
+                    reason = boot.get("stuck_reason") or "no prompt within boot timeout"
+                    if self._boot_maybe_confirm_stuck(pid, dev, cfg, boot, now, reason):
+                        boot["state"] = "stuck"
+                        boot["stuck_reason"] = reason
+                        boot["reason"] = "continuous output without a prompt"
+                        boot["stuck_at"] = now
         elif boot is not None and boot.get("state") == "booting":
             # Output stopped. Once it's been quiet a moment, decide the outcome.
             since_out = now - boot.get("last_output_at", now)
@@ -1353,6 +1369,7 @@ class ConsoleSpoke(BaseSpoke):
         last_nudge = self._boot_nudge_at.get(pid)
         if last_nudge is not None and now - last_nudge < cfg["nudge_cooldown_secs"]:
             boot["reason"] = "awaiting liveness check cooldown: %s" % reason
+            boot["verdict_deferred"] = True
             return False
         self._boot_nudge_at[pid] = now
         self._boot_nudge_pending.add(pid)
@@ -1394,7 +1411,8 @@ class ConsoleSpoke(BaseSpoke):
         tail = res.get("tail") or ""
         if tail:
             boot["transcript_tail"] = sanitize_console_text(tail)[-1600:]
-        fault = boot_fault(tail)
+        boot.pop("verdict_deferred", None)
+        fault = current_boot_fault(tail)
         if fault:
             boot["state"] = "stuck"
             boot["stuck_reason"] = fault

@@ -738,6 +738,26 @@ def boot_fault(text: str) -> str:
     return m.group(0).strip() if m else ""
 
 
+# Bootloader / recovery prompts: responsive, but NOT evidence of a healthy boot.
+_RECOVERY_PROMPT = re.compile(r"(?:rommon\s*\d*\s*>|loader>|boot>|=>|db>)\s*$", re.I)
+
+
+def current_boot_fault(text: str) -> str:
+    """Like :func:`boot_fault`, but a fault followed later in ``text`` by a
+    normal (non-bootloader/recovery) prompt is treated as historical — the
+    device recovered/rebooted and reached a prompt, so it's not a current fault."""
+    clean = sanitize_console_text(text or "")
+    last = None
+    for m in _BOOT_FAULT.finditer(clean):
+        last = m
+    if last is None:
+        return ""
+    after = clean[last.end():]
+    if looks_like_prompt(after) and not _RECOVERY_PROMPT.search(_prompt_tail(after)):
+        return ""
+    return last.group(0).strip()
+
+
 # HPE/Aruba (and similar) console firmware reprints "Connected at <N> baud" plus
 # its FULL startup banner on every fresh serial-line handshake (DTR toggle) —
 # not only on an actual power-on/reset. Our own baud sweeps/relocks and idle
