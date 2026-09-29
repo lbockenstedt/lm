@@ -393,7 +393,79 @@ def _local_service_addresses() -> list:
     return addresses
 
 
+def _heal_deploy_role_sidecars(installed_roles: list) -> list:
+    """Best-effort, fixed-argv repair for a role's cluster sidecar
+    (``lm-dhcp-worker``/``lm-dns-worker``/``kea-ha-agent``) being disabled or
+    stopped while the role's primary daemon units are fine.
+
+    Production symptom this guards: the primary units
+    (kea-dhcp4-server/kea-ctrl-agent, unbound) were enabled and running, but
+    ``lm-dhcp-worker.service`` was disabled+dead on both nodes of a Kea HA
+    pair — nothing was dialling the HA coordinator, so it reported "cluster
+    member not connected" for both, every config apply failed at
+    install-hooks, and Kea never bound its listener. That worker sidecar is a
+    unit file only (no package pulls it back in), so unlike
+    ``kea_manager.py``'s ``_heal_inactive_units`` (which runs INSIDE the
+    worker and can restart its own daemon peers), nothing could resurrect the
+    worker process itself from within — this runs from the sibling agent
+    process instead, which is why it belongs here rather than in the DHCP/DNS
+    worker's own self-heal.
+
+    Only acts when the role is actually installed (its marker file exists)
+    AND the primary units are present (``LoadState=loaded``) — never installs
+    or enables anything that isn't already part of a deployed role. Returns
+    the repair actions taken, for logging."""
+    actions = []
+    for role, extras in _DEPLOY_ROLE_EXTRA_UNITS.items():
+        if role not in installed_roles:
+            continue
+        for unit in extras:
+            try:
+                loaded = subprocess.run(
+                    ["systemctl", "show", "-p", "LoadState", "--value", unit],
+                    capture_output=True, text=True, check=False, timeout=10,
+                ).stdout.strip() == "loaded"
+            except (OSError, subprocess.SubprocessError):
+                loaded = False
+            if not loaded:
+                continue  # not installed on this host — nothing to heal
+            try:
+                healthy = (
+                    subprocess.run(
+                        ["systemctl", "is-enabled", "--quiet", unit],
+                        capture_output=True, check=False, timeout=10,
+                    ).returncode == 0
+                    and subprocess.run(
+                        ["systemctl", "is-active", "--quiet", unit],
+                        capture_output=True, check=False, timeout=10,
+                    ).returncode == 0
+                )
+            except (OSError, subprocess.SubprocessError):
+                healthy = False
+            if healthy:
+                continue
+            try:
+                result = subprocess.run(
+                    ["systemctl", "enable", "--now", unit],
+                    capture_output=True, text=True, check=False, timeout=30,
+                )
+            except (OSError, subprocess.SubprocessError) as e:
+                logger.warning("self-heal: enable --now %s failed: %s", unit, e)
+                continue
+            if result.returncode == 0:
+                actions.append(f"enabled+started {unit} (was disabled/stopped)")
+                logger.info("self-heal: enabled+started %s (was disabled/stopped)", unit)
+            else:
+                logger.warning("self-heal: enable --now %s failed: %s", unit,
+                               (result.stderr or result.stdout or "").strip())
+    return actions
+
+
 def _active_deploy_roles(installed_roles: list) -> list:
+    try:
+        _heal_deploy_role_sidecars(installed_roles)
+    except Exception as e:  # noqa: BLE001 — self-heal must never break role reporting
+        logger.warning("self-heal (deploy role sidecars) failed: %s", e)
     active = []
     for role, units in _DEPLOY_ROLE_UNITS.items():
         if role not in installed_roles:
