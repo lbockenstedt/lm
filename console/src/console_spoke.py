@@ -1430,6 +1430,11 @@ class ConsoleSpoke(BaseSpoke):
         if tail:
             boot["transcript_tail"] = sanitize_console_text(tail)[-1600:]
         boot.pop("verdict_deferred", None)
+        # This verdict comes from a nudge that actually ran, so it is ACTIVE.
+        # Overwrite any "passive" tag left by an earlier cycle in which a held
+        # port or the cooldown prevented a nudge, so the basis always describes
+        # the verdict currently recorded rather than a superseded guess.
+        boot["verdict_basis"] = "active"
         fault = current_boot_fault(tail)
         if fault:
             boot["state"] = "stuck"
@@ -1462,6 +1467,7 @@ class ConsoleSpoke(BaseSpoke):
             if res.get("error"):
                 # Fall back to the passive verdict, not a confirmed hang.
                 # Retain the attempt timestamp even when no CR could be sent.
+                boot["verdict_basis"] = "passive"
                 boot["reason"] = ("passive stuck verdict: %s (liveness check "
                                   "unavailable: %s)" % (reason, res["error"]))
             else:
@@ -1654,6 +1660,12 @@ class ConsoleSpoke(BaseSpoke):
             "age_s": round(now - started) if started else 0,
             "since_output_s": round(now - last_out) if last_out else 0,
             "transcript_tail": (boot.get("transcript_tail") or "")[-1200:],
+            # How the verdict was reached: "active" if a wake nudge actually
+            # answered, "passive" if it was inferred from the capture alone
+            # because no nudge could run. An operator reading a "stuck" port
+            # needs to know which — a passive verdict is a strong suspicion, an
+            # active one is confirmed.
+            "verdict_basis": boot.get("verdict_basis", ""),
         }
 
     def _mark_unopenable(self, pid: str, err: str) -> None:

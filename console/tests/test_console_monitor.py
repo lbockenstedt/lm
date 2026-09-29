@@ -786,3 +786,38 @@ def test_boot_watch_disabled_by_config(spoke, monkeypatch):
     chan.set("switch login: ")
     _drive_boot(spoke, "good", clock, chan, 40)
     assert spoke._boot_info("good") is None
+
+
+def test_boot_verdict_basis_surfaced_and_active_overrides_stale_passive(spoke, monkeypatch):
+    """A stuck verdict must say HOW it was reached, and a nudge that actually ran
+    must overwrite a 'passive' tag left by an earlier cycle.
+
+    _boot_maybe_confirm_stuck tags a verdict 'passive' whenever it has to fall
+    back without nudging (port held, no loop, or cooldown). That tag lives on the
+    boot record, so a later episode resolved by a real nudge would keep claiming
+    'passive' unless the active path overwrites it — and _boot_info must actually
+    project the field, or no caller can ever see it.
+    """
+    clock = [5000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    spoke._health_rec("good")["boot"] = {
+        "state": "booting", "started_at": clock[0] - 100,
+        "last_output_at": clock[0] - 100,
+        "verdict_basis": "passive",  # stale tag from an earlier, un-nudged cycle
+    }
+    spoke._boot_liveness_apply("good", "no prompt within boot timeout",
+                               {"responsive": True, "tail": "switch> "})
+    info = spoke._boot_info("good")
+    assert info["state"] == "booted"
+    assert info["verdict_basis"] == "active"
+
+    # A probe that could not run at all stays honestly labelled 'passive'.
+    spoke._health_rec("good")["boot"] = {
+        "state": "booting", "started_at": clock[0] - 100,
+        "last_output_at": clock[0] - 100,
+    }
+    spoke._boot_liveness_apply("good", "no prompt within boot timeout",
+                               {"responsive": False, "tail": "", "error": "open failed"})
+    info = spoke._boot_info("good")
+    assert info["state"] == "stuck"
+    assert info["verdict_basis"] == "passive"
