@@ -766,7 +766,8 @@ def count_line_reconnects(text: str) -> int:
 # see if a login/password/shell prompt answers. This is the read-only,
 # no-credential half of run_identify's own "wake the line" step (see the
 # ``write_fn(b"\r\n")`` / ``_LOGIN_NUDGES`` block below) — it never spends a
-# credential, so it's safe to run purely to settle a stuck/not-stuck verdict.
+# credential. It establishes responsiveness, not boot health; a CR can still
+# interrupt a bootloader countdown, so callers must gate it by boot timeout.
 _LIVENESS_NUDGE_SECS = 3.0
 
 

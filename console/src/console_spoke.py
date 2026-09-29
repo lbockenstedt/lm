@@ -555,6 +555,13 @@ class ConsoleSpoke(BaseSpoke):
 
         return {"status": "ERROR", "error": f"Unknown command: {command_type}"}
 
+    def _open_user_session(self, session_id, port_id, dev, settings, writable):
+        # Both browser and DPA opens run on the event loop. Reserve the port
+        # until the nudge's worker has released its transient serial handle.
+        if port_id in self._boot_nudge_pending:
+            raise RuntimeError("boot liveness check in progress; retry shortly")
+        return self.sessions.open(session_id, port_id, dev, settings, writable)
+
     async def _cmd_open(self, data: Dict[str, Any]) -> Dict[str, Any]:
         sid = data.get("session_id")
         pid = data.get("port_id")
@@ -568,7 +575,7 @@ class ConsoleSpoke(BaseSpoke):
         self._loop = asyncio.get_running_loop()
         settings = self.store.settings(pid)
         try:
-            info = self.sessions.open(sid, pid, dev, settings, writable=(mode != "ro"))
+            info = self._open_user_session(sid, pid, dev, settings, writable=(mode != "ro"))
         except Exception as e:  # noqa: BLE001
             logger.warning("open %s (%s) failed: %s", pid, dev, e)
             return {"status": "ERROR", "message": f"could not open {dev}: {e}"}
@@ -1087,7 +1094,7 @@ class ConsoleSpoke(BaseSpoke):
         self._dpa = DpaManager(
             store=self.store,
             enumerate_ports=self._enum_cached,
-            open_session=self.sessions.open,
+            open_session=self._open_user_session,
             write_session=self.sessions.write,
             close_session=self.sessions.close,
             register_sink=self._register_local_sink,
@@ -1219,7 +1226,10 @@ class ConsoleSpoke(BaseSpoke):
             image…) appeared, or the boot produced output then stalled with no
             prompt past ``stuck_secs`` (likely a hardware/boot problem to flag).
         If the line is garbled (wrong baud), we opportunistically kick off a baud
-        re-lock so the boot is captured legibly. All passive — no login attempts."""
+        re-lock so the boot is captured legibly. Only a no-prompt timeout may
+        trigger a single CR liveness check; positive fault signatures stand.
+        No login attempts. Even a CR can interrupt a bootloader's 'press any key'
+        countdown, so it is gated by stuck_secs (150s by default) and cooldown."""
         cfg = self._boot_cfg()
         if not cfg["enabled"]:
             return
@@ -1250,7 +1260,7 @@ class ConsoleSpoke(BaseSpoke):
             # Start a fresh boot episode only if none is active and the line had
             # been quiet long enough that this really is a (re)boot/wake — not a
             # device that merely chats periodically.
-            if (boot is None or boot.get("state") in ("idle", "booted", "stuck", "unconfirmed")) \
+            if (boot is None or boot.get("state") in ("idle", "booted", "stuck")) \
                     and gap >= cfg["wake_secs"]:
                 boot = {
                     "state": "booting", "started_at": now, "last_output_at": now,
@@ -1277,20 +1287,19 @@ class ConsoleSpoke(BaseSpoke):
                     boot["started_at"] = now
                     boot["reason"] = "line reconnected — restarting boot cycle clock"
                 self._boot_maybe_relock(pid, dev, score, cfg, boot, now)
-                if looks_like_prompt(tail):
+                fault = boot_fault(tail)
+                if fault:
+                    # A loader/recovery prompt can be responsive without having
+                    # booted successfully. Never nudge away a positive fault.
+                    boot["state"] = "stuck"
+                    boot["stuck_reason"] = fault
+                    boot["reason"] = "boot fault detected: %s" % fault
+                    boot["stuck_at"] = now
+                elif looks_like_prompt(tail):
                     boot["state"] = "booted"
                     boot["prompt_seen"] = True
                     boot["reason"] = "reached a login/shell prompt"
                     boot["booted_at"] = now
-                else:
-                    fault = boot_fault(tail)
-                    if fault:
-                        reason = "boot fault detected: %s" % fault
-                        if self._boot_maybe_confirm_stuck(pid, dev, cfg, boot, now, reason):
-                            boot["state"] = "stuck"
-                            boot["stuck_reason"] = fault
-                            boot["reason"] = reason
-                            boot["stuck_at"] = now
         elif boot is not None and boot.get("state") == "booting":
             # Output stopped. Once it's been quiet a moment, decide the outcome.
             since_out = now - boot.get("last_output_at", now)
@@ -1325,16 +1334,13 @@ class ConsoleSpoke(BaseSpoke):
         ``nudge_cooldown_secs`` (a genuinely dead device stays dead; there's no
         rush, and it keeps a flapping line from being poked constantly).
 
-        Returns True if the caller should mark "stuck" now (no nudge
-        available/due — same as before this check existed), False if a nudge
-        was scheduled and the verdict is deferred to
-        :meth:`_boot_liveness_check`."""
+        Returns True for the prior passive-stuck fallback when a nudge cannot
+        run. Returns False while a nudge is pending or the per-port cooldown
+        defers this episode's check. A previous episode's nudge is not evidence
+        that the current episode is stuck."""
         if pid in self._boot_nudge_pending:
             return False  # a nudge is in flight — wait for its verdict
-        boot["stuck_reason"] = boot.get("stuck_reason") or reason
         if self.sessions.has_user_sessions(pid) or pid in self._probing:
-            return True
-        if now - self._boot_nudge_at.get(pid, 0.0) < cfg["nudge_cooldown_secs"]:
             return True
         loop = self._loop
         if loop is None:
@@ -1344,15 +1350,20 @@ class ConsoleSpoke(BaseSpoke):
         if getattr(loop, "is_closed", lambda: False)() or \
                 not getattr(loop, "is_running", lambda: True)():
             return True
+        last_nudge = self._boot_nudge_at.get(pid)
+        if last_nudge is not None and now - last_nudge < cfg["nudge_cooldown_secs"]:
+            boot["reason"] = "awaiting liveness check cooldown: %s" % reason
+            return False
         self._boot_nudge_at[pid] = now
         self._boot_nudge_pending.add(pid)
         boot["reason"] = "confirming responsiveness before flagging stuck: %s" % reason
+        check = self._boot_liveness_check(pid, dev, reason)
         try:
-            asyncio.run_coroutine_threadsafe(self._boot_liveness_check(pid, dev, reason), loop)
+            asyncio.run_coroutine_threadsafe(check, loop)
         except Exception:  # noqa: BLE001 - loop shutting down / not running
+            check.close()
             logger.debug("boot liveness-check dispatch failed for %s", pid)
             self._boot_nudge_pending.discard(pid)
-            self._boot_nudge_at.pop(pid, None)
             return True
         return False
 
@@ -1363,8 +1374,7 @@ class ConsoleSpoke(BaseSpoke):
         noise — resolve the episode as booted instead of stuck."""
         try:
             if pid in self._probing or self.sessions.has_user_sessions(pid):
-                # Nudge never ran: don't burn the cooldown, let the next scan decide.
-                self._boot_nudge_at.pop(pid, None)
+                self._boot_liveness_apply(pid, reason, {"error": "port became busy"})
                 return
             try:
                 res = await self._exclusive_probe(pid, self._boot_liveness_blocking, pid, dev)
@@ -1381,33 +1391,33 @@ class ConsoleSpoke(BaseSpoke):
         if not boot or boot.get("state") != "booting":
             return  # episode already resolved (or superseded) while we were probing
         now = time.time()
-        if res.get("responsive"):
+        tail = res.get("tail") or ""
+        if tail:
+            boot["transcript_tail"] = sanitize_console_text(tail)[-1600:]
+        fault = boot_fault(tail)
+        if fault:
+            boot["state"] = "stuck"
+            boot["stuck_reason"] = fault
+            boot["reason"] = "boot fault detected: %s" % fault
+            boot["stuck_at"] = now
+        elif res.get("responsive") and not res.get("error"):
             boot["state"] = "booted"
             boot["prompt_seen"] = True
             boot["reason"] = ("active liveness check found a live prompt — the "
                               "port wasn't stuck, console chatter was burying it")
             boot["booted_at"] = now
             boot["stuck_reason"] = ""
-        elif res.get("error"):
-            # The nudge never ran (open failed / probe raised): liveness was
-            # never established, which is NOT a confirmed hang. Leave the
-            # episode 'booting' and release the cooldown so the next scan can
-            # retry the confirmation instead of condemning the port.
-            self._boot_nudge_at.pop(pid, None)
-            boot["reason"] = ("liveness check unavailable (%s) — retrying before "
-                              "flagging stuck" % res.get("error"))
-        elif (res.get("tail") or "").strip():
-            # The line answered, just not with a recognizable prompt — not a
-            # confirmed hang, so it gets its own state rather than 'stuck'.
-            boot["state"] = "unconfirmed"
-            boot["stuck_reason"] = ""
-            boot["unconfirmed_at"] = now
-            boot["reason"] = ("unconfirmed: %s (line replied to a wake nudge but no "
-                              "recognizable prompt)" % reason)
         else:
             boot["state"] = "stuck"
             boot["stuck_reason"] = reason
-            boot["reason"] = "confirmed stuck: %s (no reply to a wake nudge)" % reason
+            if res.get("error"):
+                # Fall back to the passive verdict, not a confirmed hang.
+                # Retain the attempt timestamp even when no CR could be sent.
+                boot["reason"] = ("passive stuck verdict: %s (liveness check "
+                                  "unavailable: %s)" % (reason, res["error"]))
+            else:
+                boot["reason"] = ("confirmed stuck: %s (no recognized prompt "
+                                  "after a wake nudge)" % reason)
             boot["stuck_at"] = now
         self._health_save(force=True)
 
