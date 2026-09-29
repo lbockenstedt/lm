@@ -264,6 +264,9 @@ def test_prompt_tail_sees_through_idle_timeout_banner_spam():
     # a genuinely hung boot (no prompt, no idle-timeout banner) still reads as
     # not-a-prompt
     assert not fp.looks_like_prompt("Booting...\nInitializing memory...\n")
+    # mixed noise: prompt, syslog line, then banner
+    assert fp.looks_like_prompt(
+        "switch>\n%LINK-3-UPDOWN: Interface 1, changed state\n" + banner)
 
 
 class _ChattyLoginChan:

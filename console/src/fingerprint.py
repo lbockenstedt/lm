@@ -712,16 +712,20 @@ def _prompt_tail(text: str) -> str:
     Blank trailing lines are dropped too, which the anchored ``\\s*$`` already
     tolerated, so behaviour is unchanged on quiet lines.
     """
-    tail = (text or "")[-400:]
-    lines = re.split(r"\r\n|\r|\n", tail)
-    while len(lines) > 1 and (not lines[-1].strip()
-                              or _ASYNC_NOISE.match(lines[-1].lstrip())):
-        lines.pop()
-    joined = "\n".join(lines)
-    # Line-based stripping above only pops noise that starts its OWN line; an
+    joined = (text or "")[-400:]
+    # Line-based stripping only pops noise that starts its OWN line; an
     # idle-timeout banner can glue directly onto the prompt/prior repeat with no
     # newline at all, so also peel any trailing run of it off as a bare phrase.
-    return _TRAILING_NOISE_PHRASE.sub("", joined)
+    # Iterate until stable: removing either kind of noise can expose the other.
+    while True:
+        lines = re.split(r"\r\n|\r|\n", joined)
+        while len(lines) > 1 and (not lines[-1].strip()
+                                  or _ASYNC_NOISE.match(lines[-1].lstrip())):
+            lines.pop()
+        stripped = _TRAILING_NOISE_PHRASE.sub("", "\n".join(lines))
+        if stripped == joined:
+            return stripped
+        joined = stripped
 
 
 def looks_like_prompt(text: str) -> bool:
