@@ -32,8 +32,9 @@ try:
     from fingerprint import (run_identify, read_running_config, push_config, PROFILES,
                              passive_identify, run_commands, merge_credentials,
                              sanitize_console_text, _extract_profile_fields, prompt_hostname,
-                             looks_like_prompt, boot_fault, count_line_reconnects, set_patience,
-                             FACTORY_DEFAULT_CREDENTIALS)
+                             looks_like_prompt, boot_fault, current_boot_fault, is_recovery_prompt,
+                             count_line_reconnects, set_patience,
+                             check_line_responsive, FACTORY_DEFAULT_CREDENTIALS)
     from dpa import DpaManager
 except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .serial_manager import (  # type: ignore
@@ -43,8 +44,9 @@ except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .fingerprint import (run_identify, read_running_config, push_config, PROFILES,  # type: ignore
                               passive_identify, run_commands, merge_credentials,
                               sanitize_console_text, _extract_profile_fields, prompt_hostname,
-                              looks_like_prompt, boot_fault, count_line_reconnects, set_patience,  # type: ignore
-                              FACTORY_DEFAULT_CREDENTIALS)
+                              looks_like_prompt, boot_fault, current_boot_fault, is_recovery_prompt,
+                              count_line_reconnects, set_patience,
+                              check_line_responsive, FACTORY_DEFAULT_CREDENTIALS)
     from .dpa import DpaManager  # type: ignore
 
 logger = logging.getLogger("ConsoleSpoke")
@@ -115,6 +117,13 @@ class ConsoleSpoke(BaseSpoke):
         self._mon_bytes: Dict[str, int] = {}
         self._mon_new_at: Dict[str, float] = {}
         self._baud_relock_at: Dict[str, float] = {}
+        # Boot watcher: last time we actively nudged a port that LOOKED stuck to
+        # confirm it (wall-clock time.time()), so a chatty device isn't re-poked
+        # every scan.
+        self._boot_nudge_at: Dict[str, float] = {}
+        # Ports that have a confirming nudge dispatched but not yet resolved; the
+        # watcher defers (never marks stuck) while one is pending.
+        self._boot_nudge_pending: set = set()
         # Passive monitor: keep a read-only serial handle open per port so we
         # capture whatever a device emits even with NO user attached, and glean
         # identity from it opportunistically (config console_monitor, default on).
@@ -548,6 +557,13 @@ class ConsoleSpoke(BaseSpoke):
 
         return {"status": "ERROR", "error": f"Unknown command: {command_type}"}
 
+    def _open_user_session(self, session_id, port_id, dev, settings, writable):
+        # Both browser and DPA opens run on the event loop. Reserve the port
+        # until the nudge's worker has released its transient serial handle.
+        if port_id in self._boot_nudge_pending:
+            raise RuntimeError("boot liveness check in progress; retry shortly")
+        return self.sessions.open(session_id, port_id, dev, settings, writable)
+
     async def _cmd_open(self, data: Dict[str, Any]) -> Dict[str, Any]:
         sid = data.get("session_id")
         pid = data.get("port_id")
@@ -561,7 +577,7 @@ class ConsoleSpoke(BaseSpoke):
         self._loop = asyncio.get_running_loop()
         settings = self.store.settings(pid)
         try:
-            info = self.sessions.open(sid, pid, dev, settings, writable=(mode != "ro"))
+            info = self._open_user_session(sid, pid, dev, settings, writable=(mode != "ro"))
         except Exception as e:  # noqa: BLE001
             logger.warning("open %s (%s) failed: %s", pid, dev, e)
             return {"status": "ERROR", "message": f"could not open {dev}: {e}"}
@@ -1005,12 +1021,19 @@ class ConsoleSpoke(BaseSpoke):
         detect-baud, config get/push). Pauses the passive monitor to release the
         OS handle and marks the port ``probing`` so the monitor loop won't grab
         it back mid-op; the monitor loop re-establishes capture afterward."""
-        self._probing.add(pid)
-        self.sessions.stop_monitor(pid)
-        try:
-            return await asyncio.to_thread(fn, *args)
-        finally:
-            self._probing.discard(pid)
+        locks = self.__dict__.setdefault("_probe_locks", {})
+        lock = locks.get(pid)
+        if lock is None:
+            lock = locks[pid] = asyncio.Lock()
+        # One shared per-port reservation: concurrent exclusive ops serialize
+        # instead of opening the device twice.
+        async with lock:
+            self._probing.add(pid)
+            self.sessions.stop_monitor(pid)
+            try:
+                return await asyncio.to_thread(fn, *args)
+            finally:
+                self._probing.discard(pid)
 
     # ── passive monitor (keep-alive capture + opportunistic identity) ─────────
     def _ensure_monitor_task(self) -> None:
@@ -1080,7 +1103,7 @@ class ConsoleSpoke(BaseSpoke):
         self._dpa = DpaManager(
             store=self.store,
             enumerate_ports=self._enum_cached,
-            open_session=self.sessions.open,
+            open_session=self._open_user_session,
             write_session=self.sessions.write,
             close_session=self.sessions.close,
             register_sink=self._register_local_sink,
@@ -1175,8 +1198,9 @@ class ConsoleSpoke(BaseSpoke):
     def _boot_cfg(self) -> Dict[str, Any]:
         """Tunables for the boot watcher (all optional; sane defaults). Boot
         capture is passive — we watch what already scrolls into the rolling
-        buffer; the only active step is an opportunistic baud re-lock on a garbled
-        line (never on a port a user holds)."""
+        buffer; the active steps are an opportunistic baud re-lock on a garbled
+        line and a single confirming CR nudge before condemning a port as
+        "stuck" (neither ever runs on a port a user holds)."""
         c = self.config
 
         def _pos(key: str, default: float) -> float:
@@ -1192,6 +1216,11 @@ class ConsoleSpoke(BaseSpoke):
             "idle_secs": _pos("console_boot_idle_secs", 12.0),
             "stuck_secs": _pos("console_boot_stuck_secs", 150.0),
             "relock_secs": _pos("console_boot_relock_secs", 30.0),
+            # How often we're allowed to actively nudge a port that LOOKS stuck to
+            # confirm it before believing the passive read. Once an hour is plenty
+            # — a device that's genuinely hung stays hung, so there's no rush, and
+            # it keeps a noisy/flapping line from being poked constantly.
+            "nudge_cooldown_secs": _pos("console_boot_nudge_cooldown_secs", 3600.0),
             "garbage_score": float(c.get("console_boot_garbage_score", 0.55) or 0.55),
         }
 
@@ -1206,7 +1235,10 @@ class ConsoleSpoke(BaseSpoke):
             image…) appeared, or the boot produced output then stalled with no
             prompt past ``stuck_secs`` (likely a hardware/boot problem to flag).
         If the line is garbled (wrong baud), we opportunistically kick off a baud
-        re-lock so the boot is captured legibly. All passive — no login attempts."""
+        re-lock so the boot is captured legibly. Only a no-prompt timeout may
+        trigger a single CR liveness check; positive fault signatures stand.
+        No login attempts. Even a CR can interrupt a bootloader's 'press any key'
+        countdown, so it is gated by stuck_secs (150s by default) and cooldown."""
         cfg = self._boot_cfg()
         if not cfg["enabled"]:
             return
@@ -1264,35 +1296,203 @@ class ConsoleSpoke(BaseSpoke):
                     boot["started_at"] = now
                     boot["reason"] = "line reconnected — restarting boot cycle clock"
                 self._boot_maybe_relock(pid, dev, score, cfg, boot, now)
-                if looks_like_prompt(tail):
+                fault = current_boot_fault(tail)
+                if fault:
+                    # A loader/recovery prompt can be responsive without having
+                    # booted successfully. Never nudge away a positive fault.
+                    boot["state"] = "stuck"
+                    boot["stuck_reason"] = fault
+                    boot["reason"] = "boot fault detected: %s" % fault
+                    boot["stuck_at"] = now
+                elif looks_like_prompt(tail) and not is_recovery_prompt(tail):
                     boot["state"] = "booted"
                     boot["prompt_seen"] = True
                     boot["reason"] = "reached a login/shell prompt"
                     boot["booted_at"] = now
-                else:
-                    fault = boot_fault(tail)
-                    if fault:
+                elif (now - boot.get("started_at", now) >= cfg["stuck_secs"]
+                      and self._boot_output_repetitive(tail)):
+                    # Only REPETITIVE chatter (the same banner over and over) is
+                    # treated as a timeout while output flows; varied output is
+                    # still boot progress and waits for the quiet path.
+                    # Continuously chatty line: output never stops, so the quiet
+                    # path can't run. Confirm actively once past the timeout.
+                    reason = boot.get("stuck_reason") or "no prompt within boot timeout"
+                    if self._boot_maybe_confirm_stuck(pid, dev, cfg, boot, now, reason):
                         boot["state"] = "stuck"
-                        boot["stuck_reason"] = fault
-                        boot["reason"] = "boot fault detected: %s" % fault
+                        boot["stuck_reason"] = reason
+                        boot["reason"] = "continuous output without a prompt"
                         boot["stuck_at"] = now
         elif boot is not None and boot.get("state") == "booting":
             # Output stopped. Once it's been quiet a moment, decide the outcome.
             since_out = now - boot.get("last_output_at", now)
             elapsed = now - boot.get("started_at", now)
             if since_out >= cfg["idle_secs"]:
-                if looks_like_prompt(tail):
+                if looks_like_prompt(tail) and not is_recovery_prompt(tail):
                     boot["state"] = "booted"
                     boot["prompt_seen"] = True
                     boot["reason"] = "reached a login/shell prompt"
                     boot["booted_at"] = now
                 elif elapsed >= cfg["stuck_secs"]:
-                    boot["state"] = "stuck"
-                    boot["stuck_reason"] = boot.get("stuck_reason") \
-                        or "no prompt within boot timeout"
-                    boot["reason"] = "boot output stopped before a prompt appeared"
-                    boot["stuck_at"] = now
+                    reason = boot.get("stuck_reason") or "no prompt within boot timeout"
+                    if self._boot_maybe_confirm_stuck(pid, dev, cfg, boot, now, reason):
+                        boot["state"] = "stuck"
+                        boot["stuck_reason"] = reason
+                        boot["reason"] = "boot output stopped before a prompt appeared"
+                        boot["stuck_at"] = now
         self._health_save()
+
+    @staticmethod
+    def _boot_output_repetitive(tail: str) -> bool:
+        """True if the recent output is dominated by a few repeated lines
+        (chatter), as opposed to varied boot-progress output."""
+        lines = [ln.strip() for ln in sanitize_console_text(tail or "").splitlines()
+                 if ln.strip()][-20:]
+        return len(lines) >= 4 and len(set(lines)) * 4 <= len(lines)
+
+    def _boot_maybe_confirm_stuck(self, pid: str, dev: str, cfg: Dict[str, Any],
+                                  boot: Dict[str, Any], now: float, reason: str) -> bool:
+        """Gate before condemning a boot episode as "stuck".
+
+        The passive read alone can't tell a genuinely hung boot from a device
+        that's already sitting at a live prompt but buried behind unrelated
+        console chatter — e.g. a switch endlessly repeating its own console
+        idle-timeout banner ("Console terminated due to inactivity.") never lets
+        the prompt underneath scroll back into the capture tail. Rather than
+        trust that, actively confirm with a single CR nudge (see
+        :func:`check_line_responsive`) — but only when no user holds the port
+        (never interfere with someone typing) and no more than once per
+        ``nudge_cooldown_secs`` (a genuinely dead device stays dead; there's no
+        rush, and it keeps a flapping line from being poked constantly).
+
+        Returns True for the prior passive-stuck fallback when a nudge cannot
+        run (user/probe holds the port, loop unavailable, or the per-port
+        cooldown blocks a new nudge); such verdicts are tagged
+        ``verdict_basis='passive'``. Returns False only while a nudge is
+        pending (its result decides the episode)."""
+        if pid in self._boot_nudge_pending:
+            return False  # a nudge is in flight — wait for its verdict
+        if self.sessions.has_user_sessions(pid) or pid in self._probing:
+            boot["verdict_basis"] = "passive"
+            return True
+        loop = self._loop
+        if loop is None:
+            boot["verdict_basis"] = "passive"
+            return True
+        # A stopped/closed loop accepts scheduling but never runs it, which would
+        # leave the port pending forever — treat it as "no nudge available".
+        if getattr(loop, "is_closed", lambda: False)() or \
+                not getattr(loop, "is_running", lambda: True)():
+            boot["verdict_basis"] = "passive"
+            return True
+        last_nudge = self._boot_nudge_at.get(pid)
+        if last_nudge is not None and now - last_nudge < cfg["nudge_cooldown_secs"]:
+            boot.pop("verdict_deferred", None)
+            boot["verdict_basis"] = "passive"
+            return True
+        self._boot_nudge_at[pid] = now
+        self._boot_nudge_pending.add(pid)
+        boot["reason"] = "confirming responsiveness before flagging stuck: %s" % reason
+        check = self._boot_liveness_check(pid, dev, reason)
+        try:
+            asyncio.run_coroutine_threadsafe(check, loop)
+        except Exception:  # noqa: BLE001 - loop shutting down / not running
+            check.close()
+            logger.debug("boot liveness-check dispatch failed for %s", pid)
+            self._boot_nudge_pending.discard(pid)
+            return True
+        return False
+
+    async def _boot_liveness_check(self, pid: str, dev: str, reason: str) -> None:
+        """Single confirming CR nudge before condemning a boot episode as stuck
+        (scheduled by :meth:`_boot_maybe_confirm_stuck`, rate-limited). If the
+        device answers with a live prompt, the passive tail was just buried in
+        noise — resolve the episode as booted instead of stuck."""
+        try:
+            if pid in self._probing or self.sessions.has_user_sessions(pid):
+                self._boot_liveness_apply(pid, reason, {"error": "port became busy"})
+                return
+            try:
+                res = await self._exclusive_probe(pid, self._boot_liveness_blocking, pid, dev)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("console: boot liveness check failed on %s", pid)
+                res = {"responsive": False, "tail": "", "error": str(e) or "probe failed"}
+            self._boot_liveness_apply(pid, reason, res or {})
+        finally:
+            self._boot_nudge_pending.discard(pid)
+
+    def _boot_liveness_apply(self, pid: str, reason: str, res: Dict[str, Any]) -> None:
+        h = self._health_rec(pid)
+        boot = h.get("boot")
+        if not boot or boot.get("state") != "booting":
+            return  # episode already resolved (or superseded) while we were probing
+        now = time.time()
+        tail = res.get("tail") or ""
+        if tail:
+            boot["transcript_tail"] = sanitize_console_text(tail)[-1600:]
+        boot.pop("verdict_deferred", None)
+        # This verdict comes from a nudge that actually ran, so it is ACTIVE.
+        # Overwrite any "passive" tag left by an earlier cycle in which a held
+        # port or the cooldown prevented a nudge, so the basis always describes
+        # the verdict currently recorded rather than a superseded guess.
+        boot["verdict_basis"] = "active"
+        fault = current_boot_fault(tail)
+        if fault:
+            boot["state"] = "stuck"
+            boot["stuck_reason"] = fault
+            boot["reason"] = "boot fault detected: %s" % fault
+            boot["stuck_at"] = now
+        elif res.get("responsive") and not res.get("error"):
+            if is_recovery_prompt(tail):
+                # Responsive, but at a BOOTLOADER — the device answered our nudge
+                # from rommon/loader/u-boot and never reached its OS. A bootloader
+                # can sit there indefinitely printing nothing, so there may be no
+                # fault text for current_boot_fault() to find; without this check
+                # the generic prompt shape below would score it "booted", which is
+                # exactly the hang this watcher exists to report.
+                boot["state"] = "stuck"
+                boot["stuck_reason"] = "stopped at bootloader prompt"
+                boot["reason"] = ("confirmed stuck: device answered at a "
+                                  "bootloader/recovery prompt, not a booted OS")
+                boot["stuck_at"] = now
+            else:
+                boot["state"] = "booted"
+                boot["prompt_seen"] = True
+                boot["reason"] = ("active liveness check found a live prompt — the "
+                                  "port wasn't stuck, console chatter was burying it")
+                boot["booted_at"] = now
+                boot["stuck_reason"] = ""
+        else:
+            boot["state"] = "stuck"
+            boot["stuck_reason"] = reason
+            if res.get("error"):
+                # Fall back to the passive verdict, not a confirmed hang.
+                # Retain the attempt timestamp even when no CR could be sent.
+                boot["verdict_basis"] = "passive"
+                boot["reason"] = ("passive stuck verdict: %s (liveness check "
+                                  "unavailable: %s)" % (reason, res["error"]))
+            else:
+                boot["reason"] = ("confirmed stuck: %s (no recognized prompt "
+                                  "after a wake nudge)" % reason)
+            boot["stuck_at"] = now
+        self._health_save(force=True)
+
+    def _boot_liveness_blocking(self, port_id: str, dev: str) -> Dict[str, Any]:
+        """Blocking single-CR liveness nudge on a transient serial handle (run via
+        asyncio.to_thread): read-only, no credentials spent (see
+        :func:`check_line_responsive`)."""
+        baud = self.store.settings(port_id).get("baud") or DEFAULT_BAUD
+        try:
+            ser = open_raw(dev, baud, 0.3)
+        except Exception as e:  # noqa: BLE001
+            return {"responsive": False, "tail": "", "error": "open failed: %s" % (e or "error")}
+        try:
+            responsive, transcript = check_line_responsive(lambda: ser.read(256), ser.write)
+        finally:
+            try:
+                ser.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return {"responsive": responsive, "tail": transcript}
 
     def _boot_maybe_relock(self, pid: str, dev: str, score: float,
                            cfg: Dict[str, Any], boot: Dict[str, Any],
@@ -1460,6 +1660,12 @@ class ConsoleSpoke(BaseSpoke):
             "age_s": round(now - started) if started else 0,
             "since_output_s": round(now - last_out) if last_out else 0,
             "transcript_tail": (boot.get("transcript_tail") or "")[-1200:],
+            # How the verdict was reached: "active" if a wake nudge actually
+            # answered, "passive" if it was inferred from the capture alone
+            # because no nudge could run. An operator reading a "stuck" port
+            # needs to know which — a passive verdict is a strong suspicion, an
+            # active one is confirmed.
+            "verdict_basis": boot.get("verdict_basis", ""),
         }
 
     def _mark_unopenable(self, pid: str, err: str) -> None:

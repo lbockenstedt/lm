@@ -738,6 +738,48 @@ def boot_fault(text: str) -> str:
     return m.group(0).strip() if m else ""
 
 
+# Bootloader / recovery prompts: responsive, but NOT evidence of a healthy boot.
+_RECOVERY_PROMPT = re.compile(
+    r"(?:rommon\s*\d*\s*>|loader>|boot>|grub>|switch:|=>|db>)\s*$", re.I)
+
+
+def is_recovery_prompt(text: str) -> bool:
+    """True if the tail of ``text`` is a BOOTLOADER / recovery prompt.
+
+    Such a prompt answers a wake nudge, so :func:`looks_like_prompt` (and hence
+    :func:`check_line_responsive`) reports it as responsive — ``loader>``,
+    ``boot>``, ``=>`` and ``db>`` all match the generic shell-prompt shape. But
+    responsive is not booted: a device sitting at its bootloader never reached
+    its OS, which is precisely the condition the boot watcher exists to catch.
+    Callers deciding boot HEALTH (rather than mere liveness) must consult this."""
+    return bool(_RECOVERY_PROMPT.search(_prompt_tail(sanitize_console_text(text or ""))))
+
+
+def current_boot_fault(text: str) -> str:
+    """Like :func:`boot_fault`, but a fault followed later in ``text`` by a
+    normal (non-bootloader/recovery) prompt is treated as historical — the
+    device recovered/rebooted and reached a prompt, so it's not a current fault."""
+    clean = sanitize_console_text(text or "")
+    last = None
+    for m in _BOOT_FAULT.finditer(clean):
+        last = m
+    if last is None:
+        return ""
+    after = clean[last.end():]
+    if looks_like_prompt(after) and not _RECOVERY_PROMPT.search(_prompt_tail(after)):
+        return ""
+    # Report the FIRST signature on the faulting LINE, not the last match in the
+    # buffer: one fault line routinely trips several phrases ("Kernel panic -
+    # unable to mount root" matches both "kernel panic" and "unable to mount"),
+    # and the leading one names the actual failure. Scanning to the last match
+    # above is still right for deciding WHICH fault is current; it is only the
+    # reported phrase that must come from the start of that line — which is also
+    # what :func:`boot_fault` reports for the same text.
+    nl = max(clean.rfind("\n", 0, last.start()), clean.rfind("\r", 0, last.start()))
+    primary = _BOOT_FAULT.search(clean, nl + 1, last.end())
+    return (primary or last).group(0).strip()
+
+
 # HPE/Aruba (and similar) console firmware reprints "Connected at <N> baud" plus
 # its FULL startup banner on every fresh serial-line handshake (DTR toggle) —
 # not only on an actual power-on/reset. Our own baud sweeps/relocks and idle
@@ -754,6 +796,32 @@ def count_line_reconnects(text: str) -> int:
     one marks the start of an independent boot/login cycle (see
     ``_LINE_RECONNECT``)."""
     return len(_LINE_RECONNECT.findall(sanitize_console_text(text or "")))
+
+
+# A "stuck" boot is inferred from the passive capture alone, and a chatty device
+# can defeat that: a switch stuck repeating an unrelated message (e.g. a console
+# idle-timeout banner like "Console terminated due to inactivity.") looks
+# identical, byte-wise, to one that's actually hung — the tail is dominated by
+# the repeated noise and the live prompt underneath it never scrolls back into
+# view. Rather than trust "no prompt seen in the passive tail" alone, actively
+# confirm: send a single bare CR (what an operator does to wake a console) and
+# see if a login/password/shell prompt answers. This is the read-only,
+# no-credential half of run_identify's own "wake the line" step (see the
+# ``write_fn(b"\r\n")`` / ``_LOGIN_NUDGES`` block below) — it never spends a
+# credential. It establishes responsiveness, not boot health; a CR can still
+# interrupt a bootloader countdown, so callers must gate it by boot timeout.
+_LIVENESS_NUDGE_SECS = 3.0
+
+
+def check_line_responsive(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
+                          nudge_secs: float = _LIVENESS_NUDGE_SECS) -> Tuple[bool, str]:
+    """Send one bare CR and read back, to tell a device that's genuinely hung
+    mid-boot from one already sitting at a live prompt that's merely buried
+    behind unrelated console chatter. Returns ``(responsive, transcript)`` where
+    ``responsive`` is True if a login/password/shell prompt answered."""
+    write_fn(b"\r")
+    transcript = _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT], nudge_secs)
+    return looks_like_prompt(transcript), transcript
 
 # Console lines are usually silent until they receive a keystroke: a device sits
 # idle at a prompt and emits nothing on its own (unless it happens to be booting).
