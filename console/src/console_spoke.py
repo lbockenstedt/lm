@@ -1304,12 +1304,16 @@ class ConsoleSpoke(BaseSpoke):
                     boot["stuck_reason"] = fault
                     boot["reason"] = "boot fault detected: %s" % fault
                     boot["stuck_at"] = now
-                elif looks_like_prompt(tail):
+                elif looks_like_prompt(tail) and not is_recovery_prompt(tail):
                     boot["state"] = "booted"
                     boot["prompt_seen"] = True
                     boot["reason"] = "reached a login/shell prompt"
                     boot["booted_at"] = now
-                elif now - boot.get("started_at", now) >= cfg["stuck_secs"]:
+                elif (now - boot.get("started_at", now) >= cfg["stuck_secs"]
+                      and self._boot_output_repetitive(tail)):
+                    # Only REPETITIVE chatter (the same banner over and over) is
+                    # treated as a timeout while output flows; varied output is
+                    # still boot progress and waits for the quiet path.
                     # Continuously chatty line: output never stops, so the quiet
                     # path can't run. Confirm actively once past the timeout.
                     reason = boot.get("stuck_reason") or "no prompt within boot timeout"
@@ -1323,7 +1327,7 @@ class ConsoleSpoke(BaseSpoke):
             since_out = now - boot.get("last_output_at", now)
             elapsed = now - boot.get("started_at", now)
             if since_out >= cfg["idle_secs"]:
-                if looks_like_prompt(tail):
+                if looks_like_prompt(tail) and not is_recovery_prompt(tail):
                     boot["state"] = "booted"
                     boot["prompt_seen"] = True
                     boot["reason"] = "reached a login/shell prompt"
@@ -1336,6 +1340,14 @@ class ConsoleSpoke(BaseSpoke):
                         boot["reason"] = "boot output stopped before a prompt appeared"
                         boot["stuck_at"] = now
         self._health_save()
+
+    @staticmethod
+    def _boot_output_repetitive(tail: str) -> bool:
+        """True if the recent output is dominated by a few repeated lines
+        (chatter), as opposed to varied boot-progress output."""
+        lines = [ln.strip() for ln in sanitize_console_text(tail or "").splitlines()
+                 if ln.strip()][-20:]
+        return len(lines) >= 4 and len(set(lines)) * 4 <= len(lines)
 
     def _boot_maybe_confirm_stuck(self, pid: str, dev: str, cfg: Dict[str, Any],
                                   boot: Dict[str, Any], now: float, reason: str) -> bool:
@@ -1353,26 +1365,30 @@ class ConsoleSpoke(BaseSpoke):
         rush, and it keeps a flapping line from being poked constantly).
 
         Returns True for the prior passive-stuck fallback when a nudge cannot
-        run. Returns False while a nudge is pending or the per-port cooldown
-        defers this episode's check. A previous episode's nudge is not evidence
-        that the current episode is stuck."""
+        run (user/probe holds the port, loop unavailable, or the per-port
+        cooldown blocks a new nudge); such verdicts are tagged
+        ``verdict_basis='passive'``. Returns False only while a nudge is
+        pending (its result decides the episode)."""
         if pid in self._boot_nudge_pending:
             return False  # a nudge is in flight — wait for its verdict
         if self.sessions.has_user_sessions(pid) or pid in self._probing:
+            boot["verdict_basis"] = "passive"
             return True
         loop = self._loop
         if loop is None:
+            boot["verdict_basis"] = "passive"
             return True
         # A stopped/closed loop accepts scheduling but never runs it, which would
         # leave the port pending forever — treat it as "no nudge available".
         if getattr(loop, "is_closed", lambda: False)() or \
                 not getattr(loop, "is_running", lambda: True)():
+            boot["verdict_basis"] = "passive"
             return True
         last_nudge = self._boot_nudge_at.get(pid)
         if last_nudge is not None and now - last_nudge < cfg["nudge_cooldown_secs"]:
-            boot["reason"] = "awaiting liveness check cooldown: %s" % reason
-            boot["verdict_deferred"] = True
-            return False
+            boot.pop("verdict_deferred", None)
+            boot["verdict_basis"] = "passive"
+            return True
         self._boot_nudge_at[pid] = now
         self._boot_nudge_pending.add(pid)
         boot["reason"] = "confirming responsiveness before flagging stuck: %s" % reason

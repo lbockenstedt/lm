@@ -654,18 +654,30 @@ def test_boot_nudge_cooldown_defers_new_episode(spoke, monkeypatch):
         clock[0] += 100
         _drive_boot(spoke, "good", clock, chan, 100)
         clock[0] += 200
-        for _ in range(3):
-            _drive_boot(spoke, "good", clock, chan, 100)
-            assert spoke._boot_info("good")["state"] == "booting"
-            assert not spoke._boot_nudge_pending
-        assert len(calls) == 1
-        clock[0] = first + spoke._boot_cfg()["nudge_cooldown_secs"]
         _drive_boot(spoke, "good", clock, chan, 100)
-        for _ in range(5):
-            await asyncio.sleep(0)
-        assert len(calls) == 2
-        assert spoke._boot_info("good")["state"] == "booted"
+        info = spoke._boot_info("good")
+        assert info["state"] == "stuck"
+        assert info.get("verdict_basis") == "passive"
+        assert not spoke._boot_nudge_pending
+        assert len(calls) == 1
+        assert spoke._boot_nudge_at["good"] == first
     asyncio.run(run())
+
+
+def test_boot_watch_passive_recovery_prompt_not_booted(spoke, monkeypatch):
+    clock = [3000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    spoke.config["console_boot_stuck_secs"] = 30
+    spoke.config["console_boot_idle_secs"] = 5
+    chan = _install_fake_boot_chan(spoke, "good")
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    chan.set("System Bootstrap\r\nrommon 1 > ")
+    _drive_boot(spoke, "good", clock, chan, 50)
+    assert spoke._boot_info("good")["state"] == "booting"
+    clock[0] += 40
+    _drive_boot(spoke, "good", clock, chan, 50)  # no loop -> passive verdict
+    assert spoke._boot_info("good")["state"] == "stuck"
 
 
 @pytest.mark.parametrize("failure", ["open", "raise", "user", "probe"])
