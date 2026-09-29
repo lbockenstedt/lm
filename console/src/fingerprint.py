@@ -692,6 +692,19 @@ _ASYNC_NOISE = re.compile(
     r"|<\d{1,3}>"                                        # syslog priority "<30>"
     r")")
 
+# HPE/Aruba (AOS-S) and similar CLIs print "Console terminated due to
+# inactivity." whenever an unattended session's OWN idle timer fires, and can
+# refire it repeatedly every few seconds if nobody types — sometimes with no
+# newline between repeats, gluing straight onto the prior text/prompt. That
+# makes it unlike the rest of _ASYNC_NOISE, which is matched per LINE: this one
+# must be stripped as a bare trailing PHRASE regardless of line boundaries, or
+# a device that's actually sitting at a live prompt (just re-terminating a
+# session nobody is using) looks indistinguishable from a genuinely hung boot —
+# see check_line_responsive / the boot watcher's "confirm before condemning"
+# active nudge, which relies on this same _prompt_tail to see the prompt.
+_TRAILING_NOISE_PHRASE = re.compile(
+    r"(?:\s*Console (?:session )?terminated due to inactivity\.?)+\s*$", re.I)
+
 
 def _prompt_tail(text: str) -> str:
     """The tail a prompt matcher should run against, with trailing asynchronous
@@ -709,12 +722,20 @@ def _prompt_tail(text: str) -> str:
     Blank trailing lines are dropped too, which the anchored ``\\s*$`` already
     tolerated, so behaviour is unchanged on quiet lines.
     """
-    tail = (text or "")[-400:]
-    lines = re.split(r"\r\n|\r|\n", tail)
-    while len(lines) > 1 and (not lines[-1].strip()
-                              or _ASYNC_NOISE.match(lines[-1].lstrip())):
-        lines.pop()
-    return "\n".join(lines)
+    joined = (text or "")[-400:]
+    # Line-based stripping only pops noise that starts its OWN line; an
+    # idle-timeout banner can glue directly onto the prompt/prior repeat with no
+    # newline at all, so also peel any trailing run of it off as a bare phrase.
+    # Iterate until stable: removing either kind of noise can expose the other.
+    while True:
+        lines = re.split(r"\r\n|\r|\n", joined)
+        while len(lines) > 1 and (not lines[-1].strip()
+                                  or _ASYNC_NOISE.match(lines[-1].lstrip())):
+            lines.pop()
+        stripped = _TRAILING_NOISE_PHRASE.sub("", "\n".join(lines))
+        if stripped == joined:
+            return stripped
+        joined = stripped
 
 
 def looks_like_prompt(text: str) -> bool:
