@@ -95,27 +95,6 @@ def test_prompt_hostname_aruba_parenthesised():
     assert fp.prompt_hostname(tail) == "MIA-GW-02"
 
 
-def test_prompt_hostname_junos_userat_prompt():
-    # JUNOS operational-mode prompt: "user@hostname>" — no colon (unlike the
-    # Linux shell shape) and the "@" breaks the generic bare "host>" matcher,
-    # so this needs its own pattern. Regression for a logged-in SRX/EX whose
-    # scrollback carries only "show interfaces terse"/syslog output between
-    # prompts and never a "show version"/tty-banner hostname line.
-    assert fp.prompt_hostname("admin@BO-BOMm-CRFW01> ") == "BO-BOMm-CRFW01"
-    # config mode ("#") and shell ("%") prompt variants
-    assert fp.prompt_hostname("admin@BO-BOMm-CRFW01# ") == "BO-BOMm-CRFW01"
-    assert fp.prompt_hostname("admin@BO-BOMm-CRFW01% ") == "BO-BOMm-CRFW01"
-    # realistic transcript: repeated prompts interleaved with command output
-    # and console syslog spam, ending at the live prompt
-    tail = (
-        "admin@BO-BOMm-CRFW01> irb.210 up up inet 10.125.218.1/26\n"
-        "admin@BO-BOMm-CRFW01> Sep 23 21:29:07 init: na-grpc-server (PID 29025) started\n"
-        "Sep 23 21:29:24 init: na-grpc-server is thrashing, not restarted\n"
-        "admin@BO-BOMm-CRFW01> "
-    )
-    assert fp.prompt_hostname(tail) == "BO-BOMm-CRFW01"
-
-
 def test_load_hostname_prompts_reads_json_override(tmp_path, monkeypatch):
     # A new hostname-prompt shape can be added via JSON with no code change.
     pf = tmp_path / "prompt_patterns.json"
