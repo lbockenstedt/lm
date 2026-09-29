@@ -416,8 +416,32 @@ def _heal_deploy_role_sidecars(installed_roles: list) -> list:
     or enables anything that isn't already part of a deployed role. Returns
     the repair actions taken, for logging."""
     actions = []
+
+    def _unit_healthy(u):
+        """True/False when determinable; None if the query itself failed."""
+        try:
+            enabled = subprocess.run(
+                ["systemctl", "is-enabled", "--quiet", u],
+                capture_output=True, check=False, timeout=10,
+            ).returncode == 0
+            if not enabled:
+                return False
+            return subprocess.run(
+                ["systemctl", "is-active", "--quiet", u],
+                capture_output=True, check=False, timeout=10,
+            ).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return None
+
     for role, extras in _DEPLOY_ROLE_EXTRA_UNITS.items():
         if role not in installed_roles:
+            continue
+        # Installed is not the same as deployed: UNLOAD_ROLE disables the
+        # primary units AND the sidecars but leaves the marker. Only heal the
+        # sidecars when every primary unit is enabled and active, so an
+        # intentional unload is never undone.
+        primaries = _DEPLOY_ROLE_UNITS.get(role, ())
+        if not primaries or not all(_unit_healthy(p) is True for p in primaries):
             continue
         for unit in extras:
             try:
@@ -429,19 +453,10 @@ def _heal_deploy_role_sidecars(installed_roles: list) -> list:
                 loaded = False
             if not loaded:
                 continue  # not installed on this host — nothing to heal
-            try:
-                healthy = (
-                    subprocess.run(
-                        ["systemctl", "is-enabled", "--quiet", unit],
-                        capture_output=True, check=False, timeout=10,
-                    ).returncode == 0
-                    and subprocess.run(
-                        ["systemctl", "is-active", "--quiet", unit],
-                        capture_output=True, check=False, timeout=10,
-                    ).returncode == 0
-                )
-            except (OSError, subprocess.SubprocessError):
-                healthy = False
+            healthy = _unit_healthy(unit)
+            if healthy is None:
+                logger.warning("self-heal: could not query %s state; skipping", unit)
+                continue
             if healthy:
                 continue
             try:
