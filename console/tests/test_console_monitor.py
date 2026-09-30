@@ -723,10 +723,14 @@ def test_boot_watch_user_attaches_during_pending_nudge_not_condemned(spoke, monk
     assert spoke._boot_info("good")["state"] == "booting"
 
     async def _fake_exclusive_probe(pid, fn, *a):
-        # Simulate the operator attaching WHILE the probe is in flight (the
-        # narrowest version of the race — attach mid-await, not merely before
-        # the coroutine starts).
+        # Simulate the operator attaching AND TYPING WHILE the probe is in
+        # flight (the narrowest version of the race — attach mid-await, not
+        # merely before the coroutine starts). A bare attach with no recent
+        # keystroke would no longer be enough to defer here (see
+        # test_boot_watch_stuck_when_session_attached_but_idle) — this must
+        # reflect genuine activity, not just presence.
         chan.sessions.add("operator")
+        chan.last_user_write_at = clock[0]
         return {"responsive": False, "tail": "", "error": "port became busy"}
     monkeypatch.setattr(spoke, "_exclusive_probe", _fake_exclusive_probe)
 
@@ -742,6 +746,46 @@ def test_boot_watch_user_attaches_during_pending_nudge_not_condemned(spoke, monk
     info = spoke._boot_info("good")
     assert info["state"] == "booting"
     assert "deferring" in info["reason"]
+
+
+def test_boot_liveness_apply_does_not_discard_a_genuine_booted_result(spoke, monkeypatch):
+    """A previous revision's race guard in _boot_liveness_apply intercepted
+    EVERY attached session unconditionally, even ahead of the responsive/
+    booted check — so a nudge that genuinely proved the device reached a live
+    prompt had its positive verdict thrown away and the episode left stuck in
+    "booting" forever just because someone happened to attach. The user-active
+    defer must only ever suppress a would-be STUCK verdict, never a BOOTED
+    one."""
+    clock = [1_700_400_000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    spoke.config["console_boot_stuck_secs"] = 30
+    spoke.config["console_boot_idle_secs"] = 5
+    chan = _install_fake_boot_chan(spoke, "good")
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    chan.set("Console terminated due to inactivity.\r\n" * 20)
+    _drive_boot(spoke, "good", clock, chan, 50)
+    assert spoke._boot_info("good")["state"] == "booting"
+
+    async def _fake_exclusive_probe(pid, fn, *a):
+        # An operator attaches and types WHILE the probe is in flight, AND the
+        # probe itself genuinely finds a live prompt.
+        chan.sessions.add("operator")
+        chan.last_user_write_at = clock[0]
+        return {"responsive": True, "tail": "switch> "}
+    monkeypatch.setattr(spoke, "_exclusive_probe", _fake_exclusive_probe)
+
+    async def _run():
+        spoke._loop = asyncio.get_running_loop()
+        clock[0] += 40
+        _drive_boot(spoke, "good", clock, chan, 50)
+        for _ in range(5):
+            await asyncio.sleep(0)
+    asyncio.run(_run())
+
+    info = spoke._boot_info("good")
+    assert info["state"] == "booted"
+    assert info.get("verdict_basis") == "active"
 
 
 @pytest.mark.parametrize("prompt", ["", "rommon 1 >", "loader>", "=>", "db>"])
@@ -844,13 +888,16 @@ def test_boot_nudge_failure_keeps_cooldown_and_resolves(spoke, monkeypatch, fail
         _drive_boot(spoke, "good", clock, chan, 50)
         assert "good" in spoke._boot_nudge_pending
         if failure == "user":
-            # A session ATTACHES mid-flight — after _boot_maybe_confirm_stuck's
-            # synchronous check already scheduled this nudge. The old race:
-            # _boot_liveness_check saw the now-attached session, treated it as
-            # "port became busy", and _boot_liveness_apply converted that
-            # error straight into a false "stuck" verdict underneath the user
-            # the instant they connected. Never condemn here — defer instead.
+            # A session ATTACHES and TYPES mid-flight — after
+            # _boot_maybe_confirm_stuck's synchronous check already scheduled
+            # this nudge. The old race: _boot_liveness_check saw the
+            # now-attached session, treated it as "port became busy", and
+            # _boot_liveness_apply converted that error straight into a false
+            # "stuck" verdict underneath the user the instant they connected.
+            # Never condemn here — defer instead (bare attachment with no
+            # keystroke would NOT be enough — see the idle-session test).
             chan.sessions.add("operator")
+            chan.last_user_write_at = clock[0]
         elif failure == "probe":
             spoke._probing.add("good")
         for _ in range(5):

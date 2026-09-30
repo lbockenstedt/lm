@@ -756,6 +756,11 @@ class PortChannel:
         if prev == session_id:
             return None
         self.writer = session_id
+        # last_user_write_at is only ever advanced by the CURRENT writer (see
+        # write()), so it's evidence about whoever just lost the lock, not the
+        # incoming one. Clear it so a freshly-handed-off session isn't credited
+        # with keystrokes it never typed.
+        self.last_user_write_at = 0.0
         return prev
 
     def detach(self, session_id: str) -> bool:
@@ -763,6 +768,12 @@ class PortChannel:
         self.sessions.discard(session_id)
         if self.writer == session_id:
             self.writer = None
+            # Same reasoning as force_attach(): the departing writer's recent
+            # keystrokes are no longer evidence that whoever (if anyone) is
+            # left/attaches next is actively typing — a stale timestamp here
+            # would let a merely-attached idle session masquerade as "recently
+            # active" the instant the real typist leaves.
+            self.last_user_write_at = 0.0
         return not self.sessions
 
     def write(self, session_id: str, data: bytes) -> bool:

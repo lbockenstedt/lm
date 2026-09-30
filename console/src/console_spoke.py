@@ -1402,7 +1402,6 @@ class ConsoleSpoke(BaseSpoke):
             # (this episode resolves once a clean prompt shows, via the
             # ordinary looks_like_prompt checks, or once activity stops and the
             # line settles) — and never interject our own CR into their input.
-            boot.pop("verdict_deferred", None)
             boot["reason"] = "user actively typing — deferring stuck verdict"
             return False
         if self.sessions.has_user_sessions(pid):
@@ -1428,7 +1427,6 @@ class ConsoleSpoke(BaseSpoke):
             return True
         last_nudge = self._boot_nudge_at.get(pid)
         if last_nudge is not None and now - last_nudge < cfg["nudge_cooldown_secs"]:
-            boot.pop("verdict_deferred", None)
             boot["verdict_basis"] = "passive"
             return True
         self._boot_nudge_at[pid] = now
@@ -1471,31 +1469,37 @@ class ConsoleSpoke(BaseSpoke):
         tail = res.get("tail") or ""
         if tail:
             boot["transcript_tail"] = sanitize_console_text(tail)[-1600:]
-        boot.pop("verdict_deferred", None)
-        # This verdict comes from a nudge that actually ran, so it is ACTIVE.
-        # Overwrite any "passive" tag left by an earlier cycle in which a held
-        # port or the cooldown prevented a nudge, so the basis always describes
-        # the verdict currently recorded rather than a superseded guess.
-        boot["verdict_basis"] = "active"
         fault = current_boot_fault(tail)
         if fault:
+            # A hard fault signature bypasses everything below unconditionally —
+            # never nudged/deferred away, active typing or not.
+            boot["verdict_basis"] = "active"
             boot["state"] = "stuck"
             boot["stuck_reason"] = fault
             boot["reason"] = "boot fault detected: %s" % fault
             boot["stuck_at"] = now
+            self._health_save(force=True)
             return
-        if self.sessions.has_user_sessions(pid):
-            # A session can attach in the narrow window between
-            # _boot_maybe_confirm_stuck's synchronous "no session" check and
+        cfg = self._boot_cfg()
+
+        def _defer_for_active_user() -> bool:
+            # A session can attach (and start actively typing) in the narrow
+            # window between _boot_maybe_confirm_stuck's synchronous check and
             # this coroutine actually running/finishing (it schedules a nudge,
             # then awaits an exclusive probe) — closing that race here, at the
             # single point that writes a verdict, means it can never be missed
-            # regardless of where in the flow the attach happens. Never
-            # condemn a port as stuck while ANY session holds it, even one
-            # that only just attached: a hard boot-fault signature above still
-            # bypasses this (a genuine fault is never nudged away).
-            boot["reason"] = "user attached during confirmation — deferring stuck verdict"
-            return
+            # regardless of where in the flow the attach happened. Gated on
+            # _user_recently_active (not mere attachment) for consistency with
+            # _boot_maybe_confirm_stuck's sync gate: an idle/abandoned session
+            # must NOT be able to hide a genuine hang here either. Only
+            # consulted below when we're about to write a STUCK verdict — a
+            # genuine BOOTED result is never thrown away just because someone
+            # is attached.
+            if not self._user_recently_active(pid, cfg):
+                return False
+            boot["reason"] = "user actively typing during confirmation — deferring stuck verdict"
+            return True
+
         if res.get("responsive") and not res.get("error"):
             if is_recovery_prompt(tail):
                 # Responsive, but at a BOOTLOADER — the device answered our nudge
@@ -1504,12 +1508,16 @@ class ConsoleSpoke(BaseSpoke):
                 # fault text for current_boot_fault() to find; without this check
                 # the generic prompt shape below would score it "booted", which is
                 # exactly the hang this watcher exists to report.
+                if _defer_for_active_user():
+                    return
+                boot["verdict_basis"] = "active"
                 boot["state"] = "stuck"
                 boot["stuck_reason"] = "stopped at bootloader prompt"
                 boot["reason"] = ("confirmed stuck: device answered at a "
                                   "bootloader/recovery prompt, not a booted OS")
                 boot["stuck_at"] = now
             else:
+                boot["verdict_basis"] = "active"
                 boot["state"] = "booted"
                 boot["prompt_seen"] = True
                 boot["reason"] = ("active liveness check found a live prompt — the "
@@ -1517,6 +1525,9 @@ class ConsoleSpoke(BaseSpoke):
                 boot["booted_at"] = now
                 boot["stuck_reason"] = ""
         else:
+            if _defer_for_active_user():
+                return
+            boot["verdict_basis"] = "active"
             boot["state"] = "stuck"
             boot["stuck_reason"] = reason
             if res.get("error"):
