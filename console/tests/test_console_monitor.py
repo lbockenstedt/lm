@@ -576,9 +576,12 @@ def test_boot_watch_nudge_confirms_genuinely_stuck(spoke, monkeypatch, reply):
 
 
 def test_boot_watch_no_nudge_while_user_holds_port(spoke, monkeypatch):
-    """Never send a confirming CR while a human/relay session is attached —
-    the port is marked stuck immediately, exactly as before this check
-    existed, so a real operator's session is never interfered with."""
+    """Never send a confirming CR while a human/relay session is attached — a
+    real operator's session is never interfered with. Their own ongoing
+    activity is itself evidence the line is live, so the episode must NOT be
+    condemned as stuck either: it stays "booting" (deferred) for as long as
+    the user holds the port, e.g. a device that reprints a large login banner
+    on every retry while someone works through credentials by hand."""
     clock = [1_700_000_000.0]
     monkeypatch.setattr(cs.time, "time", lambda: clock[0])
     spoke.config["console_boot_stuck_secs"] = 30
@@ -598,9 +601,71 @@ def test_boot_watch_no_nudge_while_user_holds_port(spoke, monkeypatch):
         spoke._loop = asyncio.get_running_loop()
         clock[0] += 40
         _drive_boot(spoke, "good", clock, chan, 50)
-        assert spoke._boot_info("good")["state"] == "stuck"
+        assert spoke._boot_info("good")["state"] == "booting"
         assert "good" not in spoke._boot_nudge_at
         assert "good" not in spoke._boot_nudge_pending
+        # Stays deferred even well past the stuck timeout, for as long as the
+        # user keeps the port.
+        clock[0] += 500
+        chan.set("Booting up, please wait ... garbled progress ...")
+        _drive_boot(spoke, "good", clock, chan, 100)
+        assert spoke._boot_info("good")["state"] == "booting"
+    asyncio.run(_run())
+
+
+_SECURITY_BANNER = (
+    "*" * 79 + "\n"
+    "!!!WARNING!!!\n"
+    "This system is solely for the use of authorized users and only for official\n"
+    "purposes. Users must have express written permission to access this system.\n"
+    "You have no expectation of privacy in its use and to ensure that the system\n"
+    "is functioning properly, individuals using this system are subject to having\n"
+    "their activities monitored and recorded at all times. Use of this system\n"
+    "evidences an express consent to such monitoring and agreement that if such\n"
+    "monitoring reveals evidence of possible abuse or criminal activity, the results\n"
+    "of such monitoring will be supplied to the appropriate officials to be\n"
+    "prosecuted to the fullest extent of both civil and criminal law.\n\n"
+    "Unauthorized Access to this system is a violation of Federal Electronic\n"
+    "Communication Privacy Act of 1986, and may be result in fines of $250,000\n"
+    "and/or imprisonment (Title 18, USC).  All IP traffic is logged and violators\n"
+    "will be prosecuted.\n" + "*" * 79 + "\n\n"
+)
+
+
+def test_boot_watch_no_stuck_while_user_retries_login_behind_banner(spoke, monkeypatch):
+    """Real-world regression (BO-SYDm-ACSW01): a device reprints its ~1KB login
+    security banner before every retry while a human at the console works
+    through bad credentials ("Login incorrect" / "Maximum number of tries
+    exceeded (5)"). That's a live, human-driven session — never a stuck boot —
+    so it must stay deferred exactly like the synthetic user-session case."""
+    clock = [1_700_100_000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    spoke.config["console_boot_stuck_secs"] = 30
+    spoke.config["console_boot_idle_secs"] = 5
+    chan = _install_fake_boot_chan(spoke, "good")
+    chan.sessions = {"operator-console"}
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    transcript = (
+        "BO-SYDm-ACSW01 login: \n" + _SECURITY_BANNER +
+        "BO-SYDm-ACSW01 login: ****************\n" + _SECURITY_BANNER[:200] +
+        "Login incorrect\nMaximum number of tries exceeded (5)\n\n" +
+        _SECURITY_BANNER +
+        "BO-SYDm-ACSW01 login: ****************\n" + _SECURITY_BANNER[:150]
+    )
+    chan.set(transcript)
+    _drive_boot(spoke, "good", clock, chan, len(transcript))
+
+    def _boom(*a, **kw):
+        raise AssertionError("must not schedule a nudge while a user holds the port")
+    monkeypatch.setattr(spoke, "_exclusive_probe", _boom)
+    monkeypatch.setattr(cs.asyncio, "run_coroutine_threadsafe", _boom)
+
+    async def _run():
+        spoke._loop = asyncio.get_running_loop()
+        clock[0] += 40
+        _drive_boot(spoke, "good", clock, chan, len(transcript) + 1)
+        assert spoke._boot_info("good")["state"] == "booting"
     asyncio.run(_run())
 
 

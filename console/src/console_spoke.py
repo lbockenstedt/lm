@@ -1359,19 +1359,37 @@ class ConsoleSpoke(BaseSpoke):
         idle-timeout banner ("Console terminated due to inactivity.") never lets
         the prompt underneath scroll back into the capture tail. Rather than
         trust that, actively confirm with a single CR nudge (see
-        :func:`check_line_responsive`) — but only when no user holds the port
-        (never interfere with someone typing) and no more than once per
-        ``nudge_cooldown_secs`` (a genuinely dead device stays dead; there's no
-        rush, and it keeps a flapping line from being poked constantly).
+        :func:`check_line_responsive`) — but never while a human holds the port
+        (their own typing already proves it's live — see below) and no more
+        than once per ``nudge_cooldown_secs`` (a genuinely dead device stays
+        dead; there's no rush, and it keeps a flapping line from being poked
+        constantly).
 
-        Returns True for the prior passive-stuck fallback when a nudge cannot
-        run (user/probe holds the port, loop unavailable, or the per-port
-        cooldown blocks a new nudge); such verdicts are tagged
-        ``verdict_basis='passive'``. Returns False only while a nudge is
-        pending (its result decides the episode)."""
+        Returns True for the passive-stuck fallback when a nudge cannot run
+        (probe holds the port, loop unavailable, or the per-port cooldown
+        blocks a new nudge); such verdicts are tagged ``verdict_basis='passive'``.
+        Returns False while a nudge is pending (its result decides the episode),
+        AND whenever a user session holds the port (a human's own activity is
+        evidence of liveness, so the episode is deferred rather than condemned)."""
         if pid in self._boot_nudge_pending:
             return False  # a nudge is in flight — wait for its verdict
-        if self.sessions.has_user_sessions(pid) or pid in self._probing:
+        if self.sessions.has_user_sessions(pid):
+            # A human (or relay) already holds this port and is actively typing
+            # into it — e.g. retrying a login after a typo, working through a
+            # long security banner, or re-entering credentials after a lockout
+            # message. Their own ongoing interaction IS proof the line is live
+            # and responsive; it is the opposite of a hung/unresponsive boot.
+            # Falling through to the passive "stuck" verdict here previously
+            # flagged a perfectly healthy, human-supervised login session as a
+            # failed boot the moment the repetitive-banner + timeout heuristic
+            # tripped underneath them. Never condemn a user-held port as stuck —
+            # defer (this episode resolves once a clean prompt shows, via the
+            # ordinary looks_like_prompt checks, or once they disconnect and the
+            # line settles) — and never interject our own CR into their input.
+            boot.pop("verdict_deferred", None)
+            boot["reason"] = "user session active — deferring stuck verdict"
+            return False
+        if pid in self._probing:
             boot["verdict_basis"] = "passive"
             return True
         loop = self._loop
