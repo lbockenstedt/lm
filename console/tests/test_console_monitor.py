@@ -703,14 +703,15 @@ def test_boot_watch_no_stuck_while_user_retries_login_behind_banner(spoke, monke
 
 
 def test_boot_watch_user_attaches_during_pending_nudge_not_condemned(spoke, monkeypatch):
-    """Race regression: _boot_maybe_confirm_stuck's synchronous check can see
-    "no session" and schedule a confirming nudge — then, before that nudge's
-    coroutine actually runs/finishes, an operator attaches. The old code let
-    _boot_liveness_check treat the now-busy port as a probe error and
-    _boot_liveness_apply converted that straight into a false "stuck" verdict
-    the instant the operator connected. _boot_liveness_apply must check for an
-    attached session itself (the single point that writes a verdict) so the
-    race is closed regardless of where in the flow the attach happens."""
+    """Defense-in-depth regression (not currently reachable via the normal
+    open path — _open_user_session() refuses every new open while a nudge is
+    pending, see _boot_liveness_apply's _defer_for_active_user comment):
+    proves that IF a session were to attach and start typing between
+    _boot_maybe_confirm_stuck's synchronous check and the nudge coroutine
+    finishing, _boot_liveness_apply would still defer rather than convert the
+    resulting probe error into a false "stuck" verdict. Guards this invariant
+    against ever becoming reachable through a future relay/DPA open path or a
+    loosened pending-nudge guard."""
     clock = [1_700_300_000.0]
     monkeypatch.setattr(cs.time, "time", lambda: clock[0])
     spoke.config["console_boot_stuck_secs"] = 30
@@ -888,14 +889,13 @@ def test_boot_nudge_failure_keeps_cooldown_and_resolves(spoke, monkeypatch, fail
         _drive_boot(spoke, "good", clock, chan, 50)
         assert "good" in spoke._boot_nudge_pending
         if failure == "user":
-            # A session ATTACHES and TYPES mid-flight — after
-            # _boot_maybe_confirm_stuck's synchronous check already scheduled
-            # this nudge. The old race: _boot_liveness_check saw the
-            # now-attached session, treated it as "port became busy", and
-            # _boot_liveness_apply converted that error straight into a false
-            # "stuck" verdict underneath the user the instant they connected.
-            # Never condemn here — defer instead (bare attachment with no
-            # keystroke would NOT be enough — see the idle-session test).
+            # Same defense-in-depth scenario as
+            # test_boot_watch_user_attaches_during_pending_nudge_not_condemned
+            # (not reachable via the normal open path today, since
+            # _open_user_session() refuses opens while a nudge is pending) —
+            # bare attachment with no keystroke would NOT be enough on its
+            # own (see the idle-session test); it must also be recently
+            # active.
             chan.sessions.add("operator")
             chan.last_user_write_at = clock[0]
         elif failure == "probe":

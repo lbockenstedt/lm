@@ -1483,12 +1483,18 @@ class ConsoleSpoke(BaseSpoke):
         cfg = self._boot_cfg()
 
         def _defer_for_active_user() -> bool:
-            # A session can attach (and start actively typing) in the narrow
-            # window between _boot_maybe_confirm_stuck's synchronous check and
-            # this coroutine actually running/finishing (it schedules a nudge,
-            # then awaits an exclusive probe) — closing that race here, at the
-            # single point that writes a verdict, means it can never be missed
-            # regardless of where in the flow the attach happened. Gated on
+            # Defense-in-depth, not a currently-reachable race: today
+            # _open_user_session() refuses every new open while pid is in
+            # _boot_nudge_pending, and a nudge is only ever scheduled when NO
+            # session was attached at schedule time (_boot_maybe_confirm_stuck
+            # takes the idle/passive branch instead whenever one already is).
+            # So a session cannot actually attach between the sync gate and
+            # this coroutine finishing today. This check exists so that
+            # invariant staying true isn't a silent precondition of correctness
+            # — if a future relay/DPA open path, or a loosened
+            # _boot_nudge_pending guard, ever lets an attach slip into that
+            # window, the single point that writes a verdict still won't
+            # condemn someone who is actively typing. Gated on
             # _user_recently_active (not mere attachment) for consistency with
             # _boot_maybe_confirm_stuck's sync gate: an idle/abandoned session
             # must NOT be able to hide a genuine hang here either. Only

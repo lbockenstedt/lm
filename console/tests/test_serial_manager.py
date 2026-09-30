@@ -120,6 +120,7 @@ def _bare_channel():
     chan.sessions = set()
     chan.writer = None
     chan.last_user_write_at = 0.0
+    chan._outlock = threading.Lock()
     return chan
 
 
@@ -324,6 +325,28 @@ def test_channel_write_requires_writer_lock(monkeypatch):
     chan.start()
     chan.attach("reader", writable=False)  # observer, no writer lock
     assert chan.write("reader", b"nope") is False
+    chan.close()
+
+
+def test_write_after_detach_does_not_resurrect_last_user_write_at(monkeypatch):
+    """TOCTOU close: write() must re-verify writer identity INSIDE the same
+    lock detach()/force_attach() use to clear the writer + timestamp. A write
+    call that read self.writer as still matching, then lost a race with a
+    detach() before reaching the lock, must NOT land its timestamp afterward —
+    that would resurrect the exact "departed writer's keystroke looks like
+    current activity" bug detach() exists to prevent."""
+    _use_fake_serial(monkeypatch)
+    chan = m.PortChannel("p1", "/dev/ttyUSB0", {"baud": 9600}, lambda sid, d: None)
+    chan.attach("s1", writable=True)
+
+    # Simulate detach() winning the race: it runs (clearing writer + the
+    # timestamp) in between write()'s old pre-lock identity check and its
+    # now-locked re-check, by detaching BEFORE calling write() at all — if the
+    # re-check inside the lock didn't exist, write() would still have looked
+    # up "s1" == self.writer via a stale read and stamped activity anyway.
+    chan.detach("s1")
+    assert chan.write("s1", b"late keystroke") is False
+    assert chan.last_user_write_at == 0.0
     chan.close()
 
 
