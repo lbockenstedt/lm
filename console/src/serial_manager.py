@@ -629,6 +629,13 @@ class PortChannel:
         _tel = telemetry_store().get(port_id)
         self.last_activity: float = float(_tel.get("last_activity") or 0.0)
         self.bytes_seen: int = int(_tel.get("capture_bytes") or 0)
+        # Last time a SESSION (human/relay) wrote a keystroke into this port —
+        # distinct from last_activity (device OUTPUT). The boot watcher needs
+        # this to tell "a session is attached and actively typing" (genuine
+        # liveness evidence) from "a session is merely attached, possibly idle
+        # or abandoned" (no evidence either way) — see console_spoke.py's
+        # _user_recently_active. Not persisted: irrelevant across a restart.
+        self.last_user_write_at: float = 0.0
         # Outbound write-pacing state (drained by the writer thread).
         self._outbuf = bytearray()
         self._outlock = threading.Lock()
@@ -771,6 +778,7 @@ class PortChannel:
                                self.port_id, len(data))
                 return False
             self._outbuf += data
+        self.last_user_write_at = time.time()
         self._outwake.set()
         return True
 
@@ -804,6 +812,7 @@ class PortChannel:
             "capture_bytes": self.bytes_seen,
             "pending_out": self.pending_out(),
             "has_user": bool(self.sessions),
+            "last_user_write_at": self.last_user_write_at,
             "writer": self.writer,
             "baud": self.baud,
         }
@@ -972,6 +981,15 @@ class SessionManager:
         """A human/relay session is attached (as opposed to only the monitor)."""
         chan = self._channels.get(port_id)
         return bool(chan and chan.sessions)
+
+    def last_user_write_at(self, port_id: str) -> float:
+        """Epoch time of the most recent keystroke a session wrote into this
+        port, or ``0.0`` if none/no channel — distinct from a channel's
+        ``last_activity`` (device OUTPUT). Lets a caller tell an attached
+        session that's actively being typed into from one that's merely
+        attached (idle tab, abandoned relay leg)."""
+        chan = self._channels.get(port_id)
+        return float(chan.last_user_write_at) if chan else 0.0
 
     def snapshot(self, port_id: str) -> Dict[str, Any]:
         chan = self._channels.get(port_id)

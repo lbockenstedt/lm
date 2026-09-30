@@ -1349,6 +1349,18 @@ class ConsoleSpoke(BaseSpoke):
                  if ln.strip()][-20:]
         return len(lines) >= 4 and len(set(lines)) * 4 <= len(lines)
 
+    def _user_recently_active(self, pid: str, cfg: Dict[str, Any]) -> bool:
+        """True if a session attached to ``pid`` wrote a keystroke recently
+        enough to count as genuine, ongoing human activity (as opposed to a
+        session that's merely attached — an idle browser tab, an abandoned
+        relay leg, or a stale record). Gated on the same ``stuck_secs`` window
+        the boot watcher already uses, so a human slowly reading a long banner
+        between retries is still "recent" without inventing a second tunable."""
+        if not self.sessions.has_user_sessions(pid):
+            return False
+        last = self.sessions.last_user_write_at(pid)
+        return bool(last) and (time.time() - last) <= cfg["stuck_secs"]
+
     def _boot_maybe_confirm_stuck(self, pid: str, dev: str, cfg: Dict[str, Any],
                                   boot: Dict[str, Any], now: float, reason: str) -> bool:
         """Gate before condemning a boot episode as "stuck".
@@ -1359,36 +1371,48 @@ class ConsoleSpoke(BaseSpoke):
         idle-timeout banner ("Console terminated due to inactivity.") never lets
         the prompt underneath scroll back into the capture tail. Rather than
         trust that, actively confirm with a single CR nudge (see
-        :func:`check_line_responsive`) — but never while a human holds the port
-        (their own typing already proves it's live — see below) and no more
-        than once per ``nudge_cooldown_secs`` (a genuinely dead device stays
-        dead; there's no rush, and it keeps a flapping line from being poked
-        constantly).
+        :func:`check_line_responsive`) — but never while a human is actively
+        typing into the port (their own keystrokes already prove it's live —
+        see :meth:`_user_recently_active`) and no more than once per
+        ``nudge_cooldown_secs`` (a genuinely dead device stays dead; there's no
+        rush, and it keeps a flapping line from being poked constantly).
 
         Returns True for the passive-stuck fallback when a nudge cannot run
-        (probe holds the port, loop unavailable, or the per-port cooldown
-        blocks a new nudge); such verdicts are tagged ``verdict_basis='passive'``.
-        Returns False while a nudge is pending (its result decides the episode),
-        AND whenever a user session holds the port (a human's own activity is
-        evidence of liveness, so the episode is deferred rather than condemned)."""
+        (probe holds the port, an ATTACHED-BUT-IDLE session holds it, loop
+        unavailable, or the per-port cooldown blocks a new nudge); such
+        verdicts are tagged ``verdict_basis='passive'``. Returns False while a
+        nudge is pending (its result decides the episode), AND whenever a
+        session is actively typing into the port right now (a human's own
+        recent keystrokes are direct evidence of liveness, so the episode is
+        deferred rather than condemned — merely HOLDING the port with no
+        recent activity is not enough on its own, or a stale/abandoned session
+        would hide a genuinely hung boot forever)."""
         if pid in self._boot_nudge_pending:
             return False  # a nudge is in flight — wait for its verdict
-        if self.sessions.has_user_sessions(pid):
-            # A human (or relay) already holds this port and is actively typing
-            # into it — e.g. retrying a login after a typo, working through a
-            # long security banner, or re-entering credentials after a lockout
-            # message. Their own ongoing interaction IS proof the line is live
+        if self._user_recently_active(pid, cfg):
+            # A human (or relay) is actively typing into this port right now —
+            # e.g. retrying a login after a typo, working through a long
+            # security banner, or re-entering credentials after a lockout
+            # message. Their own recent keystrokes ARE proof the line is live
             # and responsive; it is the opposite of a hung/unresponsive boot.
             # Falling through to the passive "stuck" verdict here previously
             # flagged a perfectly healthy, human-supervised login session as a
             # failed boot the moment the repetitive-banner + timeout heuristic
-            # tripped underneath them. Never condemn a user-held port as stuck —
-            # defer (this episode resolves once a clean prompt shows, via the
-            # ordinary looks_like_prompt checks, or once they disconnect and the
+            # tripped underneath them. Never condemn this as stuck — defer
+            # (this episode resolves once a clean prompt shows, via the
+            # ordinary looks_like_prompt checks, or once activity stops and the
             # line settles) — and never interject our own CR into their input.
             boot.pop("verdict_deferred", None)
-            boot["reason"] = "user session active — deferring stuck verdict"
+            boot["reason"] = "user actively typing — deferring stuck verdict"
             return False
+        if self.sessions.has_user_sessions(pid):
+            # A session is attached but hasn't typed recently (idle tab,
+            # abandoned relay leg, stale record) — that's no evidence either
+            # way, so fall back to the prior passive-stuck behavior exactly as
+            # before this fix (never send our own CR into ANY attached
+            # session, active or not) rather than deferring indefinitely.
+            boot["verdict_basis"] = "passive"
+            return True
         if pid in self._probing:
             boot["verdict_basis"] = "passive"
             return True
@@ -1459,7 +1483,20 @@ class ConsoleSpoke(BaseSpoke):
             boot["stuck_reason"] = fault
             boot["reason"] = "boot fault detected: %s" % fault
             boot["stuck_at"] = now
-        elif res.get("responsive") and not res.get("error"):
+            return
+        if self.sessions.has_user_sessions(pid):
+            # A session can attach in the narrow window between
+            # _boot_maybe_confirm_stuck's synchronous "no session" check and
+            # this coroutine actually running/finishing (it schedules a nudge,
+            # then awaits an exclusive probe) — closing that race here, at the
+            # single point that writes a verdict, means it can never be missed
+            # regardless of where in the flow the attach happens. Never
+            # condemn a port as stuck while ANY session holds it, even one
+            # that only just attached: a hard boot-fault signature above still
+            # bypasses this (a genuine fault is never nudged away).
+            boot["reason"] = "user attached during confirmation — deferring stuck verdict"
+            return
+        if res.get("responsive") and not res.get("error"):
             if is_recovery_prompt(tail):
                 # Responsive, but at a BOOTLOADER — the device answered our nudge
                 # from rommon/loader/u-boot and never reached its OS. A bootloader
