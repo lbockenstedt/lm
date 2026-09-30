@@ -419,6 +419,7 @@ class _FakeBootChan:
         self.capture = b""
         self.sessions = set()  # no attached user sessions (matches a real idle monitor channel)
         self.writer = None
+        self.last_user_write_at = 0.0  # no session has ever typed into this port
 
     def set(self, text: str):
         self.capture = text.encode()
@@ -429,7 +430,8 @@ class _FakeBootChan:
     def snapshot(self):
         return {"monitoring": True, "last_activity": 0.0,
                 "capture_bytes": len(self.capture), "pending_out": 0,
-                "has_user": False, "writer": None, "baud": 9600}
+                "has_user": False, "last_user_write_at": self.last_user_write_at,
+                "writer": None, "baud": 9600}
 
 
 def _drive_boot(spoke, pid, clock, chan, cur_bytes, dev="/dev/ttyUSB0"):
@@ -576,9 +578,13 @@ def test_boot_watch_nudge_confirms_genuinely_stuck(spoke, monkeypatch, reply):
 
 
 def test_boot_watch_no_nudge_while_user_holds_port(spoke, monkeypatch):
-    """Never send a confirming CR while a human/relay session is attached —
-    the port is marked stuck immediately, exactly as before this check
-    existed, so a real operator's session is never interfered with."""
+    """Never send a confirming CR while a human/relay session is attached — a
+    real operator's session is never interfered with. A session that's
+    ACTIVELY BEING TYPED INTO is itself evidence the line is live, so that
+    episode must NOT be condemned as stuck either: it stays "booting"
+    (deferred) as long as the typing continues, e.g. a device that reprints a
+    large login banner on every retry while someone works through credentials
+    by hand."""
     clock = [1_700_000_000.0]
     monkeypatch.setattr(cs.time, "time", lambda: clock[0])
     spoke.config["console_boot_stuck_secs"] = 30
@@ -590,18 +596,197 @@ def test_boot_watch_no_nudge_while_user_holds_port(spoke, monkeypatch):
     chan.set("Booting up, please wait ... garbled progress ...")
     _drive_boot(spoke, "good", clock, chan, 50)
     def _boom(*a, **kw):
-        raise AssertionError("must not schedule a nudge while a user holds the port")
+        raise AssertionError("must not schedule a nudge while a user is typing")
     monkeypatch.setattr(spoke, "_exclusive_probe", _boom)
     monkeypatch.setattr(cs.asyncio, "run_coroutine_threadsafe", _boom)
 
     async def _run():
         spoke._loop = asyncio.get_running_loop()
         clock[0] += 40
+        chan.last_user_write_at = clock[0]  # a keystroke just landed
         _drive_boot(spoke, "good", clock, chan, 50)
-        assert spoke._boot_info("good")["state"] == "stuck"
+        assert spoke._boot_info("good")["state"] == "booting"
         assert "good" not in spoke._boot_nudge_at
         assert "good" not in spoke._boot_nudge_pending
+        # Stays deferred as long as typing keeps refreshing last_user_write_at,
+        # even well past the stuck timeout.
+        clock[0] += 20
+        chan.last_user_write_at = clock[0]
+        chan.set("Booting up, please wait ... garbled progress ...")
+        _drive_boot(spoke, "good", clock, chan, 100)
+        assert spoke._boot_info("good")["state"] == "booting"
     asyncio.run(_run())
+
+
+def test_boot_watch_stuck_when_session_attached_but_idle(spoke, monkeypatch):
+    """A session that's merely ATTACHED — no keystroke in the recorded window
+    (a stale browser tab, an abandoned relay leg) — is no evidence the device
+    is actually live, so it must NOT hide a genuinely hung boot forever: this
+    falls back to the same passive-stuck verdict as before a session existed
+    at all (never send our own CR into any attached session, active or not)."""
+    clock = [1_700_200_000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    spoke.config["console_boot_stuck_secs"] = 30
+    spoke.config["console_boot_idle_secs"] = 5
+    chan = _install_fake_boot_chan(spoke, "good")
+    chan.sessions = {"stale-tab"}
+    chan.last_user_write_at = 0.0  # never typed into
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    chan.set("Booting up, please wait ... garbled progress ...")
+    _drive_boot(spoke, "good", clock, chan, 50)
+    clock[0] += 40
+    _drive_boot(spoke, "good", clock, chan, 50)  # no loop -> passive verdict
+    info = spoke._boot_info("good")
+    assert info["state"] == "stuck"
+    assert info.get("verdict_basis") == "passive"
+
+
+_SECURITY_BANNER = (
+    "*" * 79 + "\n"
+    "!!!WARNING!!!\n"
+    "This system is solely for the use of authorized users and only for official\n"
+    "purposes. Users must have express written permission to access this system.\n"
+    "You have no expectation of privacy in its use and to ensure that the system\n"
+    "is functioning properly, individuals using this system are subject to having\n"
+    "their activities monitored and recorded at all times. Use of this system\n"
+    "evidences an express consent to such monitoring and agreement that if such\n"
+    "monitoring reveals evidence of possible abuse or criminal activity, the results\n"
+    "of such monitoring will be supplied to the appropriate officials to be\n"
+    "prosecuted to the fullest extent of both civil and criminal law.\n\n"
+    "Unauthorized Access to this system is a violation of Federal Electronic\n"
+    "Communication Privacy Act of 1986, and may be result in fines of $250,000\n"
+    "and/or imprisonment (Title 18, USC).  All IP traffic is logged and violators\n"
+    "will be prosecuted.\n" + "*" * 79 + "\n\n"
+)
+
+
+def test_boot_watch_no_stuck_while_user_retries_login_behind_banner(spoke, monkeypatch):
+    """Real-world regression (BO-SYDm-ACSW01): a device reprints its ~1KB login
+    security banner before every retry while a human at the console works
+    through bad credentials ("Login incorrect" / "Maximum number of tries
+    exceeded (5)"). That's a live, human-driven session (recent keystrokes) —
+    never a stuck boot — so it must stay deferred exactly like the synthetic
+    actively-typing case."""
+    clock = [1_700_100_000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    spoke.config["console_boot_stuck_secs"] = 30
+    spoke.config["console_boot_idle_secs"] = 5
+    chan = _install_fake_boot_chan(spoke, "good")
+    chan.sessions = {"operator-console"}
+    chan.last_user_write_at = clock[0]
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    chan.last_user_write_at = clock[0]  # still retrying credentials
+    transcript = (
+        "BO-SYDm-ACSW01 login: \n" + _SECURITY_BANNER +
+        "BO-SYDm-ACSW01 login: ****************\n" + _SECURITY_BANNER[:200] +
+        "Login incorrect\nMaximum number of tries exceeded (5)\n\n" +
+        _SECURITY_BANNER +
+        "BO-SYDm-ACSW01 login: ****************\n" + _SECURITY_BANNER[:150]
+    )
+    chan.set(transcript)
+    _drive_boot(spoke, "good", clock, chan, len(transcript))
+
+    def _boom(*a, **kw):
+        raise AssertionError("must not schedule a nudge while a user is typing")
+    monkeypatch.setattr(spoke, "_exclusive_probe", _boom)
+    monkeypatch.setattr(cs.asyncio, "run_coroutine_threadsafe", _boom)
+
+    async def _run():
+        spoke._loop = asyncio.get_running_loop()
+        clock[0] += 40
+        chan.last_user_write_at = clock[0]
+        _drive_boot(spoke, "good", clock, chan, len(transcript) + 1)
+        assert spoke._boot_info("good")["state"] == "booting"
+    asyncio.run(_run())
+
+
+def test_boot_watch_user_attaches_during_pending_nudge_not_condemned(spoke, monkeypatch):
+    """Defense-in-depth regression (not currently reachable via the normal
+    open path — _open_user_session() refuses every new open while a nudge is
+    pending, see _boot_liveness_apply's _defer_for_active_user comment):
+    proves that IF a session were to attach and start typing between
+    _boot_maybe_confirm_stuck's synchronous check and the nudge coroutine
+    finishing, _boot_liveness_apply would still defer rather than convert the
+    resulting probe error into a false "stuck" verdict. Guards this invariant
+    against ever becoming reachable through a future relay/DPA open path or a
+    loosened pending-nudge guard."""
+    clock = [1_700_300_000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    spoke.config["console_boot_stuck_secs"] = 30
+    spoke.config["console_boot_idle_secs"] = 5
+    chan = _install_fake_boot_chan(spoke, "good")
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    chan.set("Console terminated due to inactivity.\r\n" * 20)
+    _drive_boot(spoke, "good", clock, chan, 50)
+    assert spoke._boot_info("good")["state"] == "booting"
+
+    async def _fake_exclusive_probe(pid, fn, *a):
+        # Simulate the operator attaching AND TYPING WHILE the probe is in
+        # flight (the narrowest version of the race — attach mid-await, not
+        # merely before the coroutine starts). A bare attach with no recent
+        # keystroke would no longer be enough to defer here (see
+        # test_boot_watch_stuck_when_session_attached_but_idle) — this must
+        # reflect genuine activity, not just presence.
+        chan.sessions.add("operator")
+        chan.last_user_write_at = clock[0]
+        return {"responsive": False, "tail": "", "error": "port became busy"}
+    monkeypatch.setattr(spoke, "_exclusive_probe", _fake_exclusive_probe)
+
+    async def _run():
+        spoke._loop = asyncio.get_running_loop()
+        clock[0] += 40
+        _drive_boot(spoke, "good", clock, chan, 50)
+        assert spoke._boot_nudge_at.get("good") == clock[0]
+        for _ in range(5):
+            await asyncio.sleep(0)
+    asyncio.run(_run())
+
+    info = spoke._boot_info("good")
+    assert info["state"] == "booting"
+    assert "deferring" in info["reason"]
+
+
+def test_boot_liveness_apply_does_not_discard_a_genuine_booted_result(spoke, monkeypatch):
+    """A previous revision's race guard in _boot_liveness_apply intercepted
+    EVERY attached session unconditionally, even ahead of the responsive/
+    booted check — so a nudge that genuinely proved the device reached a live
+    prompt had its positive verdict thrown away and the episode left stuck in
+    "booting" forever just because someone happened to attach. The user-active
+    defer must only ever suppress a would-be STUCK verdict, never a BOOTED
+    one."""
+    clock = [1_700_400_000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    spoke.config["console_boot_stuck_secs"] = 30
+    spoke.config["console_boot_idle_secs"] = 5
+    chan = _install_fake_boot_chan(spoke, "good")
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    chan.set("Console terminated due to inactivity.\r\n" * 20)
+    _drive_boot(spoke, "good", clock, chan, 50)
+    assert spoke._boot_info("good")["state"] == "booting"
+
+    async def _fake_exclusive_probe(pid, fn, *a):
+        # An operator attaches and types WHILE the probe is in flight, AND the
+        # probe itself genuinely finds a live prompt.
+        chan.sessions.add("operator")
+        chan.last_user_write_at = clock[0]
+        return {"responsive": True, "tail": "switch> "}
+    monkeypatch.setattr(spoke, "_exclusive_probe", _fake_exclusive_probe)
+
+    async def _run():
+        spoke._loop = asyncio.get_running_loop()
+        clock[0] += 40
+        _drive_boot(spoke, "good", clock, chan, 50)
+        for _ in range(5):
+            await asyncio.sleep(0)
+    asyncio.run(_run())
+
+    info = spoke._boot_info("good")
+    assert info["state"] == "booted"
+    assert info.get("verdict_basis") == "active"
 
 
 @pytest.mark.parametrize("prompt", ["", "rommon 1 >", "loader>", "=>", "db>"])
@@ -704,13 +889,25 @@ def test_boot_nudge_failure_keeps_cooldown_and_resolves(spoke, monkeypatch, fail
         _drive_boot(spoke, "good", clock, chan, 50)
         assert "good" in spoke._boot_nudge_pending
         if failure == "user":
+            # Same defense-in-depth scenario as
+            # test_boot_watch_user_attaches_during_pending_nudge_not_condemned
+            # (not reachable via the normal open path today, since
+            # _open_user_session() refuses opens while a nudge is pending) —
+            # bare attachment with no keystroke would NOT be enough on its
+            # own (see the idle-session test); it must also be recently
+            # active.
             chan.sessions.add("operator")
+            chan.last_user_write_at = clock[0]
         elif failure == "probe":
             spoke._probing.add("good")
         for _ in range(5):
             await asyncio.sleep(0)
-        assert boot["state"] == "stuck"
-        assert "unavailable" in boot["reason"]
+        if failure == "user":
+            assert boot["state"] == "booting"
+            assert "deferring" in boot["reason"]
+        else:
+            assert boot["state"] == "stuck"
+            assert "unavailable" in boot["reason"]
         assert spoke._boot_nudge_at["good"] == 10000.0
         assert not spoke._boot_nudge_pending
         assert len(calls) == (0 if failure in ("user", "probe") else 1)
