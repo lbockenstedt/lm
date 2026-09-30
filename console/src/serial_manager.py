@@ -742,10 +742,12 @@ class PortChannel:
     def attach(self, session_id: str, writable: bool) -> bool:
         """Attach a session. Returns True if it got the writer lock."""
         self.sessions.add(session_id)
-        if writable and self.writer is None:
-            with self._outlock:
+        if not writable:
+            return False
+        with self._outlock:
+            if self.writer is None:
                 self.writer = session_id
-            return True
+                return True
         return False
 
     def force_attach(self, session_id: str) -> Optional[str]:
@@ -753,10 +755,10 @@ class PortChannel:
         be an attached session), evicting whoever currently holds it. Returns
         the PREVIOUS writer's session_id, or None if the channel had no
         writer or ``session_id`` already held it."""
-        prev = self.writer
-        if prev == session_id:
-            return None
         with self._outlock:
+            prev = self.writer
+            if prev == session_id:
+                return None
             self.writer = session_id
             # last_user_write_at is only ever advanced by the CURRENT writer
             # (see write()), so it's evidence about whoever just lost the
@@ -771,8 +773,8 @@ class PortChannel:
     def detach(self, session_id: str) -> bool:
         """Detach a session. Returns True if the channel is now empty (closeable)."""
         self.sessions.discard(session_id)
-        if self.writer == session_id:
-            with self._outlock:
+        with self._outlock:
+            if self.writer == session_id:
                 self.writer = None
                 # Same reasoning as force_attach(): the departing writer's
                 # recent keystrokes are no longer evidence that whoever (if
