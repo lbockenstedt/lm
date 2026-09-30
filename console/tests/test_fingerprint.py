@@ -95,6 +95,27 @@ def test_prompt_hostname_aruba_parenthesised():
     assert fp.prompt_hostname(tail) == "MIA-GW-02"
 
 
+def test_prompt_hostname_junos_userat_prompt():
+    # JUNOS operational-mode prompt: "user@hostname>" — no colon (unlike the
+    # Linux shell shape) and the "@" breaks the generic bare "host>" matcher,
+    # so this needs its own pattern. Regression for a logged-in SRX/EX whose
+    # scrollback carries only "show interfaces terse"/syslog output between
+    # prompts and never a "show version"/tty-banner hostname line.
+    assert fp.prompt_hostname("admin@BO-BOMm-CRFW01> ") == "BO-BOMm-CRFW01"
+    # config mode ("#") and shell ("%") prompt variants
+    assert fp.prompt_hostname("admin@BO-BOMm-CRFW01# ") == "BO-BOMm-CRFW01"
+    assert fp.prompt_hostname("admin@BO-BOMm-CRFW01% ") == "BO-BOMm-CRFW01"
+    # realistic transcript: repeated prompts interleaved with command output
+    # and console syslog spam, ending at the live prompt
+    tail = (
+        "admin@BO-BOMm-CRFW01> irb.210 up up inet 10.125.218.1/26\n"
+        "admin@BO-BOMm-CRFW01> Sep 23 21:29:07 init: na-grpc-server (PID 29025) started\n"
+        "Sep 23 21:29:24 init: na-grpc-server is thrashing, not restarted\n"
+        "admin@BO-BOMm-CRFW01> "
+    )
+    assert fp.prompt_hostname(tail) == "BO-BOMm-CRFW01"
+
+
 def test_load_hostname_prompts_reads_json_override(tmp_path, monkeypatch):
     # A new hostname-prompt shape can be added via JSON with no code change.
     pf = tmp_path / "prompt_patterns.json"
@@ -241,6 +262,32 @@ def test_prompt_tail_sees_through_console_log_noise():
         "\r\nlogin: \r\n[   12.345678] usb 1-1: new device\r\n"))
     assert fp._PASSWORD_PROMPT.search(fp._prompt_tail(
         "\r\nPassword:\r\n%LINK-3-UPDOWN: Interface ge-0/0/1, changed state\r\n"))
+
+
+def test_prompt_tail_sees_through_idle_timeout_banner_spam():
+    # HPE/Aruba (AOS-S) prints "Console terminated due to inactivity." whenever
+    # an unattended session's OWN idle timer fires, and can refire it every few
+    # seconds with NO newline between repeats — gluing straight onto the prior
+    # prompt/text. Unlike the syslog noise above (matched per LINE), this must
+    # be stripped as a bare trailing PHRASE, or a device that's actually sitting
+    # at a live prompt (just re-terminating an unused session) is
+    # indistinguishable from a genuinely hung boot — see the boot watcher's
+    # active liveness nudge, which relies on this same _prompt_tail/
+    # looks_like_prompt to recognize the prompt underneath.
+    banner = "Console terminated due to inactivity."
+    glued = "MIPBE-AJ19-L1SW-1> " + banner * 3
+    assert fp.looks_like_prompt(glued)
+    # newline-delimited repeats work too
+    newline_sep = "MIPBE-AJ19-L1SW-1> " + (banner + "\r\n") * 3
+    assert fp.looks_like_prompt(newline_sep)
+    # noise alone, with no prompt anywhere, must not invent one
+    assert not fp.looks_like_prompt(banner * 5)
+    # a genuinely hung boot (no prompt, no idle-timeout banner) still reads as
+    # not-a-prompt
+    assert not fp.looks_like_prompt("Booting...\nInitializing memory...\n")
+    # mixed noise: prompt, syslog line, then banner
+    assert fp.looks_like_prompt(
+        "switch>\n%LINK-3-UPDOWN: Interface 1, changed state\n" + banner)
 
 
 class _ChattyLoginChan:
