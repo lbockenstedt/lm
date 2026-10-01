@@ -119,6 +119,8 @@ def _bare_channel():
     chan = object.__new__(m.PortChannel)
     chan.sessions = set()
     chan.writer = None
+    chan.last_user_write_at = 0.0
+    chan._outlock = threading.Lock()
     return chan
 
 
@@ -155,6 +157,43 @@ def test_force_attach_with_no_prior_writer_returns_none():
     prev = chan.force_attach("s1")
     assert prev is None
     assert chan.writer == "s1"
+
+
+def test_force_attach_clears_stale_last_user_write_at():
+    """The departing writer's keystroke timestamp must not be inherited by
+    whoever takes the lock next — otherwise an idle session that just took
+    over the writer lock would look "recently active" purely from the
+    PREVIOUS writer's typing (see console_spoke._user_recently_active, which
+    trusts this timestamp as liveness evidence for the boot watcher)."""
+    chan = _bare_channel()
+    chan.attach("s1", writable=True)
+    chan.last_user_write_at = 12345.0  # s1 typed recently
+    chan.sessions.add("s2")
+    chan.force_attach("s2")
+    assert chan.last_user_write_at == 0.0
+
+
+def test_detach_writer_clears_stale_last_user_write_at():
+    """Same reasoning as force_attach: once the writer who produced the
+    timestamp leaves, it's no longer evidence of anything — a stale value
+    would let a merely-attached idle session (or no session at all) look
+    "recently active" the instant the real typist disconnects."""
+    chan = _bare_channel()
+    chan.attach("s1", writable=True)
+    chan.last_user_write_at = 12345.0
+    chan.detach("s1")
+    assert chan.last_user_write_at == 0.0
+
+
+def test_detach_non_writer_leaves_last_user_write_at_intact():
+    """Detaching a read-only OBSERVER (not the writer) must not erase the
+    writer's own still-valid recent-activity evidence."""
+    chan = _bare_channel()
+    chan.attach("s1", writable=True)
+    chan.sessions.add("s2")
+    chan.last_user_write_at = 12345.0
+    chan.detach("s2")
+    assert chan.last_user_write_at == 12345.0
 
 
 def test_session_manager_takeover_delegates_to_channel():
@@ -286,6 +325,28 @@ def test_channel_write_requires_writer_lock(monkeypatch):
     chan.start()
     chan.attach("reader", writable=False)  # observer, no writer lock
     assert chan.write("reader", b"nope") is False
+    chan.close()
+
+
+def test_write_after_detach_does_not_resurrect_last_user_write_at(monkeypatch):
+    """TOCTOU close: write() must re-verify writer identity INSIDE the same
+    lock detach()/force_attach() use to clear the writer + timestamp. A write
+    call that read self.writer as still matching, then lost a race with a
+    detach() before reaching the lock, must NOT land its timestamp afterward —
+    that would resurrect the exact "departed writer's keystroke looks like
+    current activity" bug detach() exists to prevent."""
+    _use_fake_serial(monkeypatch)
+    chan = m.PortChannel("p1", "/dev/ttyUSB0", {"baud": 9600}, lambda sid, d: None)
+    chan.attach("s1", writable=True)
+
+    # Simulate detach() winning the race: it runs (clearing writer + the
+    # timestamp) in between write()'s old pre-lock identity check and its
+    # now-locked re-check, by detaching BEFORE calling write() at all — if the
+    # re-check inside the lock didn't exist, write() would still have looked
+    # up "s1" == self.writer via a stale read and stamped activity anyway.
+    chan.detach("s1")
+    assert chan.write("s1", b"late keystroke") is False
+    assert chan.last_user_write_at == 0.0
     chan.close()
 
 

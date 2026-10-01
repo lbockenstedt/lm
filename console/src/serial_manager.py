@@ -629,6 +629,13 @@ class PortChannel:
         _tel = telemetry_store().get(port_id)
         self.last_activity: float = float(_tel.get("last_activity") or 0.0)
         self.bytes_seen: int = int(_tel.get("capture_bytes") or 0)
+        # Last time a SESSION (human/relay) wrote a keystroke into this port —
+        # distinct from last_activity (device OUTPUT). The boot watcher needs
+        # this to tell "a session is attached and actively typing" (genuine
+        # liveness evidence) from "a session is merely attached, possibly idle
+        # or abandoned" (no evidence either way) — see console_spoke.py's
+        # _user_recently_active. Not persisted: irrelevant across a restart.
+        self.last_user_write_at: float = 0.0
         # Outbound write-pacing state (drained by the writer thread).
         self._outbuf = bytearray()
         self._outlock = threading.Lock()
@@ -735,9 +742,12 @@ class PortChannel:
     def attach(self, session_id: str, writable: bool) -> bool:
         """Attach a session. Returns True if it got the writer lock."""
         self.sessions.add(session_id)
-        if writable and self.writer is None:
-            self.writer = session_id
-            return True
+        if not writable:
+            return False
+        with self._outlock:
+            if self.writer is None:
+                self.writer = session_id
+                return True
         return False
 
     def force_attach(self, session_id: str) -> Optional[str]:
@@ -745,32 +755,56 @@ class PortChannel:
         be an attached session), evicting whoever currently holds it. Returns
         the PREVIOUS writer's session_id, or None if the channel had no
         writer or ``session_id`` already held it."""
-        prev = self.writer
-        if prev == session_id:
-            return None
-        self.writer = session_id
+        with self._outlock:
+            prev = self.writer
+            if prev == session_id:
+                return None
+            self.writer = session_id
+            # last_user_write_at is only ever advanced by the CURRENT writer
+            # (see write()), so it's evidence about whoever just lost the
+            # lock, not the incoming one. Clear it so a freshly-handed-off
+            # session isn't credited with keystrokes it never typed. Done
+            # under the same lock write() uses to check-then-stamp, so a
+            # write already in flight from the OUTGOING writer can't land its
+            # timestamp after this reset (see write()'s re-check comment).
+            self.last_user_write_at = 0.0
         return prev
 
     def detach(self, session_id: str) -> bool:
         """Detach a session. Returns True if the channel is now empty (closeable)."""
         self.sessions.discard(session_id)
-        if self.writer == session_id:
-            self.writer = None
+        with self._outlock:
+            if self.writer == session_id:
+                self.writer = None
+                # Same reasoning as force_attach(): the departing writer's
+                # recent keystrokes are no longer evidence that whoever (if
+                # anyone) is left/attaches next is actively typing — a stale
+                # timestamp here would let a merely-attached idle session
+                # masquerade as "recently active" the instant the real typist
+                # leaves. Locked for the same reason as force_attach().
+                self.last_user_write_at = 0.0
         return not self.sessions
 
     def write(self, session_id: str, data: bytes) -> bool:
         """Enqueue writer bytes for paced draining. Non-blocking: a big paste is
         buffered and streamed out by ``_write_loop`` at a device-safe rate."""
-        if self.writer != session_id:
-            return False
         if not data:
-            return True
+            return self.writer == session_id
         with self._outlock:
+            # Re-check identity INSIDE the same lock detach()/force_attach()
+            # use to clear the writer + timestamp, so a write already past the
+            # (now stale) check above can't land a keystroke timestamp for a
+            # session that stopped being the writer a moment ago — closing the
+            # exact TOCTOU window a departed writer's in-flight write could
+            # otherwise re-introduce a stale last_user_write_at through.
+            if self.writer != session_id:
+                return False
             if len(self._outbuf) + len(data) > self.OUTBUF_MAX:
                 logger.warning("outbound buffer full on %s; dropping %d bytes",
                                self.port_id, len(data))
                 return False
             self._outbuf += data
+            self.last_user_write_at = time.time()
         self._outwake.set()
         return True
 
@@ -804,6 +838,7 @@ class PortChannel:
             "capture_bytes": self.bytes_seen,
             "pending_out": self.pending_out(),
             "has_user": bool(self.sessions),
+            "last_user_write_at": self.last_user_write_at,
             "writer": self.writer,
             "baud": self.baud,
         }
@@ -972,6 +1007,15 @@ class SessionManager:
         """A human/relay session is attached (as opposed to only the monitor)."""
         chan = self._channels.get(port_id)
         return bool(chan and chan.sessions)
+
+    def last_user_write_at(self, port_id: str) -> float:
+        """Epoch time of the most recent keystroke a session wrote into this
+        port, or ``0.0`` if none/no channel — distinct from a channel's
+        ``last_activity`` (device OUTPUT). Lets a caller tell an attached
+        session that's actively being typed into from one that's merely
+        attached (idle tab, abandoned relay leg)."""
+        chan = self._channels.get(port_id)
+        return float(chan.last_user_write_at) if chan else 0.0
 
     def snapshot(self, port_id: str) -> Dict[str, Any]:
         chan = self._channels.get(port_id)

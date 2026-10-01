@@ -1349,6 +1349,18 @@ class ConsoleSpoke(BaseSpoke):
                  if ln.strip()][-20:]
         return len(lines) >= 4 and len(set(lines)) * 4 <= len(lines)
 
+    def _user_recently_active(self, pid: str, cfg: Dict[str, Any]) -> bool:
+        """True if a session attached to ``pid`` wrote a keystroke recently
+        enough to count as genuine, ongoing human activity (as opposed to a
+        session that's merely attached — an idle browser tab, an abandoned
+        relay leg, or a stale record). Gated on the same ``stuck_secs`` window
+        the boot watcher already uses, so a human slowly reading a long banner
+        between retries is still "recent" without inventing a second tunable."""
+        if not self.sessions.has_user_sessions(pid):
+            return False
+        last = self.sessions.last_user_write_at(pid)
+        return bool(last) and (time.time() - last) <= cfg["stuck_secs"]
+
     def _boot_maybe_confirm_stuck(self, pid: str, dev: str, cfg: Dict[str, Any],
                                   boot: Dict[str, Any], now: float, reason: str) -> bool:
         """Gate before condemning a boot episode as "stuck".
@@ -1359,19 +1371,48 @@ class ConsoleSpoke(BaseSpoke):
         idle-timeout banner ("Console terminated due to inactivity.") never lets
         the prompt underneath scroll back into the capture tail. Rather than
         trust that, actively confirm with a single CR nudge (see
-        :func:`check_line_responsive`) — but only when no user holds the port
-        (never interfere with someone typing) and no more than once per
+        :func:`check_line_responsive`) — but never while a human is actively
+        typing into the port (their own keystrokes already prove it's live —
+        see :meth:`_user_recently_active`) and no more than once per
         ``nudge_cooldown_secs`` (a genuinely dead device stays dead; there's no
         rush, and it keeps a flapping line from being poked constantly).
 
-        Returns True for the prior passive-stuck fallback when a nudge cannot
-        run (user/probe holds the port, loop unavailable, or the per-port
-        cooldown blocks a new nudge); such verdicts are tagged
-        ``verdict_basis='passive'``. Returns False only while a nudge is
-        pending (its result decides the episode)."""
+        Returns True for the passive-stuck fallback when a nudge cannot run
+        (probe holds the port, an ATTACHED-BUT-IDLE session holds it, loop
+        unavailable, or the per-port cooldown blocks a new nudge); such
+        verdicts are tagged ``verdict_basis='passive'``. Returns False while a
+        nudge is pending (its result decides the episode), AND whenever a
+        session is actively typing into the port right now (a human's own
+        recent keystrokes are direct evidence of liveness, so the episode is
+        deferred rather than condemned — merely HOLDING the port with no
+        recent activity is not enough on its own, or a stale/abandoned session
+        would hide a genuinely hung boot forever)."""
         if pid in self._boot_nudge_pending:
             return False  # a nudge is in flight — wait for its verdict
-        if self.sessions.has_user_sessions(pid) or pid in self._probing:
+        if self._user_recently_active(pid, cfg):
+            # A human (or relay) is actively typing into this port right now —
+            # e.g. retrying a login after a typo, working through a long
+            # security banner, or re-entering credentials after a lockout
+            # message. Their own recent keystrokes ARE proof the line is live
+            # and responsive; it is the opposite of a hung/unresponsive boot.
+            # Falling through to the passive "stuck" verdict here previously
+            # flagged a perfectly healthy, human-supervised login session as a
+            # failed boot the moment the repetitive-banner + timeout heuristic
+            # tripped underneath them. Never condemn this as stuck — defer
+            # (this episode resolves once a clean prompt shows, via the
+            # ordinary looks_like_prompt checks, or once activity stops and the
+            # line settles) — and never interject our own CR into their input.
+            boot["reason"] = "user actively typing — deferring stuck verdict"
+            return False
+        if self.sessions.has_user_sessions(pid):
+            # A session is attached but hasn't typed recently (idle tab,
+            # abandoned relay leg, stale record) — that's no evidence either
+            # way, so fall back to the prior passive-stuck behavior exactly as
+            # before this fix (never send our own CR into ANY attached
+            # session, active or not) rather than deferring indefinitely.
+            boot["verdict_basis"] = "passive"
+            return True
+        if pid in self._probing:
             boot["verdict_basis"] = "passive"
             return True
         loop = self._loop
@@ -1386,7 +1427,6 @@ class ConsoleSpoke(BaseSpoke):
             return True
         last_nudge = self._boot_nudge_at.get(pid)
         if last_nudge is not None and now - last_nudge < cfg["nudge_cooldown_secs"]:
-            boot.pop("verdict_deferred", None)
             boot["verdict_basis"] = "passive"
             return True
         self._boot_nudge_at[pid] = now
@@ -1429,19 +1469,44 @@ class ConsoleSpoke(BaseSpoke):
         tail = res.get("tail") or ""
         if tail:
             boot["transcript_tail"] = sanitize_console_text(tail)[-1600:]
-        boot.pop("verdict_deferred", None)
-        # This verdict comes from a nudge that actually ran, so it is ACTIVE.
-        # Overwrite any "passive" tag left by an earlier cycle in which a held
-        # port or the cooldown prevented a nudge, so the basis always describes
-        # the verdict currently recorded rather than a superseded guess.
-        boot["verdict_basis"] = "active"
         fault = current_boot_fault(tail)
         if fault:
+            # A hard fault signature bypasses everything below unconditionally —
+            # never nudged/deferred away, active typing or not.
+            boot["verdict_basis"] = "active"
             boot["state"] = "stuck"
             boot["stuck_reason"] = fault
             boot["reason"] = "boot fault detected: %s" % fault
             boot["stuck_at"] = now
-        elif res.get("responsive") and not res.get("error"):
+            self._health_save(force=True)
+            return
+        cfg = self._boot_cfg()
+
+        def _defer_for_active_user() -> bool:
+            # Defense-in-depth, not a currently-reachable race: today
+            # _open_user_session() refuses every new open while pid is in
+            # _boot_nudge_pending, and a nudge is only ever scheduled when NO
+            # session was attached at schedule time (_boot_maybe_confirm_stuck
+            # takes the idle/passive branch instead whenever one already is).
+            # So a session cannot actually attach between the sync gate and
+            # this coroutine finishing today. This check exists so that
+            # invariant staying true isn't a silent precondition of correctness
+            # — if a future relay/DPA open path, or a loosened
+            # _boot_nudge_pending guard, ever lets an attach slip into that
+            # window, the single point that writes a verdict still won't
+            # condemn someone who is actively typing. Gated on
+            # _user_recently_active (not mere attachment) for consistency with
+            # _boot_maybe_confirm_stuck's sync gate: an idle/abandoned session
+            # must NOT be able to hide a genuine hang here either. Only
+            # consulted below when we're about to write a STUCK verdict — a
+            # genuine BOOTED result is never thrown away just because someone
+            # is attached.
+            if not self._user_recently_active(pid, cfg):
+                return False
+            boot["reason"] = "user actively typing during confirmation — deferring stuck verdict"
+            return True
+
+        if res.get("responsive") and not res.get("error"):
             if is_recovery_prompt(tail):
                 # Responsive, but at a BOOTLOADER — the device answered our nudge
                 # from rommon/loader/u-boot and never reached its OS. A bootloader
@@ -1449,12 +1514,16 @@ class ConsoleSpoke(BaseSpoke):
                 # fault text for current_boot_fault() to find; without this check
                 # the generic prompt shape below would score it "booted", which is
                 # exactly the hang this watcher exists to report.
+                if _defer_for_active_user():
+                    return
+                boot["verdict_basis"] = "active"
                 boot["state"] = "stuck"
                 boot["stuck_reason"] = "stopped at bootloader prompt"
                 boot["reason"] = ("confirmed stuck: device answered at a "
                                   "bootloader/recovery prompt, not a booted OS")
                 boot["stuck_at"] = now
             else:
+                boot["verdict_basis"] = "active"
                 boot["state"] = "booted"
                 boot["prompt_seen"] = True
                 boot["reason"] = ("active liveness check found a live prompt — the "
@@ -1462,6 +1531,9 @@ class ConsoleSpoke(BaseSpoke):
                 boot["booted_at"] = now
                 boot["stuck_reason"] = ""
         else:
+            if _defer_for_active_user():
+                return
+            boot["verdict_basis"] = "active"
             boot["state"] = "stuck"
             boot["stuck_reason"] = reason
             if res.get("error"):
