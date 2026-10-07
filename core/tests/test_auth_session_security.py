@@ -287,8 +287,10 @@ def test_secure_cookie_and_hsts_when_tls(monkeypatch, tmp_path):
 
 def test_csp_header_present_and_hardened(tmp_path):
     """Content-Security-Policy is emitted on every response (http and https) and
-    pins the cheap high-value directives while allowing the two CDNs the WebUI
-    actually loads (Tailwind Play + jsdelivr)."""
+    pins the cheap high-value directives while allowing the one CDN the WebUI
+    still actually loads from (jsdelivr, for xterm/noVNC). Tailwind is
+    precompiled and vendored locally (WebUI/assets/tailwind.css) rather than
+    loaded from the Play CDN, so that origin is no longer allowlisted."""
     users = {"admin": _admin_user()}
     c, hub = _build(users, tmp_path)
     s = c.get("/status")
@@ -298,7 +300,7 @@ def test_csp_header_present_and_hardened(tmp_path):
     assert "object-src 'none'" in csp
     assert "frame-ancestors 'none'" in csp
     assert "base-uri 'self'" in csp
-    assert "https://cdn.tailwindcss.com" in csp
+    assert "https://cdn.tailwindcss.com" not in csp
     assert "https://cdn.jsdelivr.net" in csp
 
 
