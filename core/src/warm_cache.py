@@ -100,6 +100,20 @@ class WarmCacheMixin:
             "data": data, "fetched_at": time.time()}
         self._warm_cache_file.schedule_save()
 
+    def warm_drop(self, ns_prefix: str, key_prefixes: tuple) -> int:
+        """Drop entries in namespaces starting ``ns_prefix`` whose key starts with
+        any of ``key_prefixes`` (write invalidation). Returns the count dropped."""
+        n = 0
+        for ns, entries in self.warm_cache.items():
+            if not ns.startswith(ns_prefix):
+                continue
+            for k in [k for k in entries if k.startswith(key_prefixes)]:
+                del entries[k]
+                n += 1
+        if n:
+            self._warm_cache_file.schedule_save()
+        return n
+
     async def warm_cache_flush_now(self) -> None:
         """Immediate persist (shutdown path) — skips the coalescing delay."""
         await self._warm_cache_file.flush_now()
