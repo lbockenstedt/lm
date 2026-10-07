@@ -5,7 +5,7 @@ import hashlib
 import ipaddress
 import json
 import time
-from cache_core import EXPIRED, FRESH, STALE
+from cache_core import FRESH, REFRESH, STALE
 from api import (
     HTTPException, Request, _refresh_module_all_tenants,
     _spoke_payload_or_raise, access, get_spoke_or_503, logger, spoke_or_503,
@@ -351,6 +351,12 @@ def register(app, hub, ctx):
         "DHCP_LIST_RES", "DHCP_STATUS", "DHCP_DIAGNOSTICS", "DHCP_HA_STATUS",
         "DHCP_STATS"})
     _swr_inflight = set()
+    _swr_gen = [0]
+
+    def _swr_invalidate(spoke_id):
+        _swr_gen[0] += 1
+        if hasattr(hub, "warm_drop"):
+            hub.warm_drop(_SWR_PREFIX, (f"{spoke_id}|", "merge|"))
 
     def _swr_key(scope, payload):
         raw = json.dumps(payload or {}, sort_keys=True, default=str)
@@ -362,8 +368,10 @@ def register(app, hub, ctx):
             return
         _swr_inflight.add(tag)
         try:
+            gen = _swr_gen[0]
             data = await fetch()
-            await hub.warm_set(ns, key, copy.deepcopy(data))
+            if gen == _swr_gen[0]:
+                await hub.warm_set(ns, key, copy.deepcopy(data))
         except Exception as e:  # noqa: BLE001 — background revalidation is best-effort
             logger.debug("net_services background refresh %s failed: %s", ns, e)
         finally:
@@ -377,7 +385,7 @@ def register(app, hub, ctx):
             return await fetch()
         cached = hub.warm_get(ns, key)
         state = hub.warm_state(ns, key)
-        if cached is not None and state != EXPIRED:
+        if cached is not None and state in (FRESH, REFRESH, STALE):
             if state != FRESH:
                 asyncio.create_task(_swr_refresh(ns, key, fetch))
             out = copy.deepcopy(cached)
@@ -385,8 +393,10 @@ def register(app, hub, ctx):
                 out["stale"] = True
                 out["cached_at"] = hub.warm_fetched_at(ns, key)
             return out
+        gen = _swr_gen[0]
         data = await fetch()
-        await hub.warm_set(ns, key, copy.deepcopy(data))
+        if gen == _swr_gen[0]:
+            await hub.warm_set(ns, key, copy.deepcopy(data))
         return data
 
     async def _cached_relay(spoke_id, cmd, payload=None, log_name="", timeout=None):
@@ -420,7 +430,10 @@ def register(app, hub, ctx):
         certbot for up to ~180s.
         """
         hub = app.state.hub
+        _is_write = command not in _SWR_READ_CMDS
         try:
+            if _is_write:
+                _swr_gen[0] += 1  # in-flight refreshes must not write back
             kw = {"timeout": timeout} if timeout else {}
             result = await hub.request_response(spoke_id, command, payload or {}, **kw)
             # Mirrors access.unwrap_spoke: an explicit ``data: null`` means NO
@@ -441,12 +454,16 @@ def register(app, hub, ctx):
                 logger.warning("%s: spoke %s rejected %s: %s",
                                log_name or command, spoke_id, command,
                                data.get("message") or data.get("error") or "no message")
-            if command not in _SWR_READ_CMDS and hasattr(hub, "warm_drop"):
-                hub.warm_drop(_SWR_PREFIX, (f"{spoke_id}|", "merge|"))
-            return _spoke_payload_or_raise(data)
+            _out = _spoke_payload_or_raise(data)
+            if _is_write:
+                _swr_invalidate(spoke_id)
+            return _out
         except HTTPException:
             raise
         except Exception as e:
+            if _is_write:
+                # outcome indeterminate (timeout/transport): drop cache
+                _swr_invalidate(spoke_id)
             logger.exception("%s relay failed", log_name or command)
             raise HTTPException(status_code=500, detail=str(e))
 
