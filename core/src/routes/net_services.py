@@ -1,7 +1,11 @@
 """DNS/LE/DHCP spoke-relay routes and shared spoke helpers."""
 import asyncio
+import copy
+import hashlib
 import ipaddress
+import json
 import time
+from cache_core import EXPIRED, FRESH, STALE
 from api import (
     HTTPException, Request, _refresh_module_all_tenants,
     _spoke_payload_or_raise, access, get_spoke_or_503, logger, spoke_or_503,
@@ -332,6 +336,69 @@ def register(app, hub, ctx):
     def _get_le_spoke(hub):
         return get_spoke_or_503(hub, "certificates", "Certificate")
 
+    # ── stale-while-revalidate cache for DNS/DHCP READ pages ────────────────
+    # Pages must render from the hub's last-known spoke data (memory, persisted
+    # to warm_cache.json so a restart is warm) and never block on a live spoke
+    # round-trip. A read older than the refresh threshold still returns the
+    # cached value immediately and revalidates in the background; only a missing
+    # or expired (24h) entry waits on the spoke. Any non-read command relayed
+    # through _relay_spoke invalidates that spoke's entries so a write is
+    # visible on the next read. Raw (pre-tenant-filter) envelopes only.
+    _SWR_PREFIX = "netsvc_"
+    _SWR_READ_CMDS = frozenset({
+        "DNS_LIST", "DNS_STATUS", "DNS_DIAGNOSTICS", "DNS_CLUSTER_STATUS",
+        "DNS_STATS", "DNS_FORWARDERS", "DHCP_LIST_SUBNETS", "DHCP_LIST_LEASES",
+        "DHCP_LIST_RES", "DHCP_STATUS", "DHCP_DIAGNOSTICS", "DHCP_HA_STATUS",
+        "DHCP_STATS"})
+    _swr_inflight = set()
+
+    def _swr_key(scope, payload):
+        raw = json.dumps(payload or {}, sort_keys=True, default=str)
+        return f"{scope}|{hashlib.sha1(raw.encode()).hexdigest()[:16]}"
+
+    async def _swr_refresh(ns, key, fetch):
+        tag = (ns, key)
+        if tag in _swr_inflight:
+            return
+        _swr_inflight.add(tag)
+        try:
+            data = await fetch()
+            await hub.warm_set(ns, key, copy.deepcopy(data))
+        except Exception as e:  # noqa: BLE001 — background revalidation is best-effort
+            logger.debug("net_services background refresh %s failed: %s", ns, e)
+        finally:
+            _swr_inflight.discard(tag)
+
+    async def _swr(ns, key, fetch):
+        """Serve ``(ns, key)`` from the hub cache; ``fetch`` is an async callable
+        returning the raw spoke payload. A deep copy is returned because the
+        route handlers mutate what they get back."""
+        if not hasattr(hub, "warm_get"):
+            return await fetch()
+        cached = hub.warm_get(ns, key)
+        state = hub.warm_state(ns, key)
+        if cached is not None and state != EXPIRED:
+            if state != FRESH:
+                asyncio.create_task(_swr_refresh(ns, key, fetch))
+            out = copy.deepcopy(cached)
+            if state == STALE and isinstance(out, dict):
+                out["stale"] = True
+                out["cached_at"] = hub.warm_fetched_at(ns, key)
+            return out
+        data = await fetch()
+        await hub.warm_set(ns, key, copy.deepcopy(data))
+        return data
+
+    async def _cached_relay(spoke_id, cmd, payload=None, log_name="", timeout=None):
+        return await _swr(
+            _SWR_PREFIX + cmd.lower(), _swr_key(spoke_id, payload),
+            lambda: _relay_spoke(spoke_id, cmd, payload, log_name=log_name, timeout=timeout))
+
+    async def _cached_merge(cmd, payload, list_key, fanout):
+        return await _swr(
+            _SWR_PREFIX + cmd.lower(), _swr_key("merge", payload),
+            lambda: fanout(cmd, payload, list_key))
+
     async def _relay_spoke(spoke_id, command, payload=None, log_name="", timeout=None):
         """Relay ``command`` to a spoke and return its SUCCESS payload.
 
@@ -374,6 +441,8 @@ def register(app, hub, ctx):
                 logger.warning("%s: spoke %s rejected %s: %s",
                                log_name or command, spoke_id, command,
                                data.get("message") or data.get("error") or "no message")
+            if command not in _SWR_READ_CMDS and hasattr(hub, "warm_drop"):
+                hub.warm_drop(_SWR_PREFIX, (f"{spoke_id}|", "merge|"))
             return _spoke_payload_or_raise(data)
         except HTTPException:
             raise
@@ -645,9 +714,9 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         tid = _effective_tenant(request, tenant)
         if not tid and sess and _is_admin(sess) and len(hub.get_all_spokes_by_type("dns") or []) > 1:
-            data = await _dns_merge_fanout("DNS_LIST", {}, "records")
+            data = await _cached_merge("DNS_LIST", {}, "records", _dns_merge_fanout)
         else:
-            data = await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_LIST", log_name="dns_list_records")
+            data = await _cached_relay(_dns_spoke_for_request(request, tenant), "DNS_LIST", log_name="dns_list_records")
         return await _filter_tenant(request, data, "dns", ["value", "ip"], tenant)
 
     @app.post("/api/dns/record")
@@ -672,13 +741,13 @@ def register(app, hub, ctx):
     async def dns_status(request: Request, tenant: str = None):
         """Unbound service status / health from the DNS spoke."""
         logger.debug("relay GET /api/dns/status")
-        return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_STATUS", log_name="dns_status")
+        return await _cached_relay(_dns_spoke_for_request(request, tenant), "DNS_STATUS", log_name="dns_status")
 
     @app.get("/api/dns/diagnostics")
     async def dns_diagnostics(request: Request, tenant: str = None):
         """Unbound config, listener, and local query diagnostics."""
         logger.debug("relay GET /api/dns/diagnostics")
-        data = await _relay_spoke(
+        data = await _cached_relay(
             _dns_spoke_for_request(request, tenant),
             "DNS_DIAGNOSTICS",
             log_name="dns_diagnostics",
@@ -756,7 +825,7 @@ def register(app, hub, ctx):
         agent-id stays for traceability, the name is what the WebUI shows as
         the primary label."""
         logger.debug("relay GET /api/dns/cluster")
-        data = await _relay_spoke(_dns_spoke_for_request(request, tenant),
+        data = await _cached_relay(_dns_spoke_for_request(request, tenant),
                                   "DNS_CLUSTER_STATUS", log_name="dns_cluster_status")
         data = _annotate_dns_cluster_members(data)
         # The cluster report IS the diagnostics cluster block; a non-admin must
@@ -825,7 +894,7 @@ def register(app, hub, ctx):
         except HTTPException:
             return {}
         try:
-            data = await _relay_spoke(dhcp_spoke, "DHCP_LIST_LEASES", {},
+            data = await _cached_relay(dhcp_spoke, "DHCP_LIST_LEASES", {},
                                        log_name="dns_stats_host_lookup")
         except HTTPException:
             return {}
@@ -894,7 +963,7 @@ def register(app, hub, ctx):
             # configured prefixes), so the spoke fails CLOSED (no source rows)
             # rather than treating an empty/omitted list as "unfiltered".
             payload["source_prefixes"] = source_prefixes
-        data = await _relay_spoke(
+        data = await _cached_relay(
             _dns_spoke_for_request(request, tenant), "DNS_STATS",
             payload, log_name="dns_stats",
         )
@@ -921,7 +990,7 @@ def register(app, hub, ctx):
     async def dns_forwarders(request: Request, tenant: str = None):
         """Configured upstream forwarders (per-zone upstream servers)."""
         logger.debug("relay GET /api/dns/forwarders")
-        return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_FORWARDERS", log_name="dns_forwarders")
+        return await _cached_relay(_dns_spoke_for_request(request, tenant), "DNS_FORWARDERS", log_name="dns_forwarders")
 
     @app.post("/api/dns/forwarders")
     async def dns_add_forwarder(request: Request, tenant: str = None):
@@ -3633,8 +3702,8 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         tid = _effective_tenant(request, tenant)
         if not tid and sess and _is_admin(sess) and len(hub.get_all_spokes_by_type("dhcp") or []) > 1:
-            return await _dhcp_merge_fanout(cmd, payload, list_key)
-        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), cmd, payload, log_name=log_name)
+            return await _cached_merge(cmd, payload, list_key, _dhcp_merge_fanout)
+        return await _cached_relay(_dhcp_spoke_for_request(request, tenant), cmd, payload, log_name=log_name)
 
     @app.get("/api/dhcp/subnets")
     async def dhcp_list_subnets(request: Request, tenant: str = None):
@@ -3891,13 +3960,13 @@ def register(app, hub, ctx):
     async def dhcp_status(request: Request, tenant: str = None):
         """Kea DHCP4 service status / health from the DHCP spoke."""
         logger.debug("relay GET /api/dhcp/status")
-        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_STATUS", log_name="dhcp_status")
+        return await _cached_relay(_dhcp_spoke_for_request(request, tenant), "DHCP_STATUS", log_name="dhcp_status")
 
     @app.get("/api/dhcp/diagnostics")
     async def dhcp_diagnostics(request: Request, tenant: str = None):
         """Kea service, config, interface, listener, CA, and lease diagnostics."""
         logger.debug("relay GET /api/dhcp/diagnostics")
-        data = await _relay_spoke(
+        data = await _cached_relay(
             _dhcp_spoke_for_request(request, tenant),
             "DHCP_DIAGNOSTICS",
             log_name="dhcp_diagnostics",
@@ -3990,7 +4059,7 @@ def register(app, hub, ctx):
         """Kea HA pair state: per-node HA state, lease sync, config drift and
         recommendations. A single-host DHCP module answers ``enabled: false``."""
         logger.debug("relay GET /api/dhcp/ha")
-        data = await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
+        data = await _cached_relay(_dhcp_spoke_for_request(request, tenant),
                                   "DHCP_HA_STATUS", log_name="dhcp_ha_status",
                                   timeout=30)
         data = _annotate_dhcp_cluster_members(data)
@@ -4065,7 +4134,7 @@ def register(app, hub, ctx):
         scopes and drops the raw per-HA-node ``members`` replies, which embed a
         second, unfiltered copy of every subnet."""
         logger.debug("relay GET /api/dhcp/stats")
-        data = await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_STATS", log_name="dhcp_stats")
+        data = await _cached_relay(_dhcp_spoke_for_request(request, tenant), "DHCP_STATS", log_name="dhcp_stats")
         filtered = await _filter_tenant(request, data, "dhcp", ["subnet"], tenant)
         return _dhcp_rescope_stats(data, filtered)
 

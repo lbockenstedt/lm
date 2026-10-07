@@ -92,6 +92,12 @@ data. Clock skew (a `fetched_at` in the future) is clamped rather than trusted.
 console port list and Proxmox VM list). Each exposes `*_cache_load()`,
 `*_cache_flush_now()` and a `*_state()`/`*_cache_*_state()` staleness verdict.
 
+DNS/DHCP read routes (`routes/net_services.py`) also use `warm_cache`, in
+namespaces prefixed `netsvc_`: reads are served from the last-known spoke
+envelope and revalidated in the background past 30s (never blocking the page);
+any non-read relayed command drops that spoke's entries so writes show on the
+next read.
+
 `core/tests/test_cache_modules_shared.py` asserts the uniformity across all
 four — restart survival, debounce, 0600 + valid JSON, and a shared policy — so
 a new cache that skips `cache_core` should be added there and will fail loudly.
