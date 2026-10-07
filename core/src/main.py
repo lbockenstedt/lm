@@ -1292,6 +1292,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # forged reports to poison the NSG blocklist. See _handle_edge_probe_report.
         self._edge_probe_reports = {}     # reporter spoke_id -> [ts, ...]
         self._EDGE_PROBE_MAX = 60         # max edge probe reports per reporter / 600s
+        # App-edge login failures (APP_LOGIN_FAILURE): a rejected credential
+        # against an app spoke's OWN WebUI login (currently just AppBuilder),
+        # relayed up so repeat attempts count toward the SAME brute-force
+        # threshold as a failed login against the hub itself. Shares the probe
+        # path's per-reporter rate cap (_EDGE_PROBE_MAX) — a compromised edge
+        # can flood forged failures just as easily as forged probe hits.
+        self._app_login_failure_reports = {}  # reporter spoke_id -> [ts, ...]
         # An edge-reported PERIMETER block (shared/infra reporter → NSG) is
         # capped to this TTL and can NEVER escalate to permanent — bounding the
         # blast radius of a compromised perimeter edge to a short, self-expiring
@@ -6270,6 +6277,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         spoke_id, remote_ip, payload.get("data", {}) or {})
                     continue
 
+                # --- App-edge login failure (APP_LOGIN_FAILURE) ---
+                # An app spoke (today just AppBuilder) rejected a WebUI login
+                # credential and relayed it up (send_to_hub) so repeat attempts
+                # against ITS edge count toward the same brute-force threshold
+                # as a failed login against the hub's own /login. The frame's
+                # signature already verified above (authenticated spoke);
+                # _handle_app_login_failure rate-caps the reporter. Fire-and-
+                # forget: never block the dispatch loop.
+                if payload.get("type") == "APP_LOGIN_FAILURE":
+                    self._handle_app_login_failure(
+                        spoke_id, remote_ip, payload.get("data", {}) or {})
+                    continue
+
                 # --- Node canary-endpoint interaction (NODE_CANARY_HIT) ---
                 # A node reported that one of its hub-assigned canary endpoints
                 # was touched — a definitive intrusion attempt (nothing legitimate
@@ -9269,6 +9289,94 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 self._tenant_probe_hard_revoke(spoke_id, reporter_tenant, reason))
         except Exception:  # noqa: BLE001 — monitoring must never break dispatch
             logger.debug("HTTP_PROBE_REPORT ingest failed", exc_info=True)
+
+    def _handle_app_login_failure(self, spoke_id, reporter_ip: Optional[str],
+                                  data: dict) -> None:
+        """Ingest an ``APP_LOGIN_FAILURE`` from an app spoke (today just
+        AppBuilder) reporting a REJECTED credential against ITS OWN WebUI
+        login form, relayed up the authenticated tunnel so a source guessing
+        passwords at an app's edge counts toward the SAME brute-force
+        threshold as a failed login against the hub's own ``/login``.
+
+        Unlike HTTP_PROBE_REPORT/NODE_CANARY_HIT this is NOT an unambiguous
+        attack signature by itself — an operator mistyping a password looks
+        identical on the wire — so it is fed through the ordinary ``"login"``-
+        style counting (the hub's generous >threshold/window already absorbs
+        that noise) under its own ``"app_login"`` kind tag (clean audit trail,
+        same shared per-IP counter/threshold as every other signal).
+
+        Routed by reporter location, same convention as HTTP_PROBE_REPORT, but
+        the RESPONSE differs because the signal itself is weaker evidence:
+
+        * **Perimeter / infra reporter** (shared-tenant or unassigned — today's
+          only real case; AppBuilder is a fleet-ops tool, not tenant-hosted):
+          recorded against the shared threat monitor with the edge-report
+          bounds (``max_ttl_s``/``allow_permanent=False``) — a compromised
+          app spoke can only ever place a short, self-expiring block, never a
+          permanent one, exactly like a forged HTTP_PROBE_REPORT.
+        * **Tenant reporter**: a mistyped password is not a reliable attack
+          signature, so — unlike probe/canary — this is LOG-ONLY; the tenant
+          node is never hard-revoked over an ordinary login failure.
+
+        Telemetry-only failure mode: a monitoring hiccup must never break the
+        dispatch loop.
+        """
+        tm = getattr(self, "threat_monitor", None)
+        try:
+            src = str((data or {}).get("source_ip") or "").strip()
+            username = str((data or {}).get("username") or "")[:128]
+            node = str((data or {}).get("node") or spoke_id or "?")[:64]
+
+            # Per-reporter rate cap (poisoning defense) — shares the edge-probe
+            # cap; a compromised app spoke can flood forged failures just as
+            # easily as forged probe hits.
+            now = time.time()
+            window = 600.0
+            times = self._app_login_failure_reports.setdefault(spoke_id or node, [])
+            times[:] = [t for t in times if t > now - window]
+            if len(times) >= self._EDGE_PROBE_MAX:
+                logger.warning("APP_LOGIN_FAILURE rate cap hit for reporter %s "
+                               "(%d/%ds) — dropping", spoke_id, self._EDGE_PROBE_MAX,
+                               int(window))
+                return
+            times.append(now)
+
+            if not tm or not src:
+                return
+            # Never let an app spoke attribute a failure to a bogus / non-
+            # routable source, or to one of our own INTERNAL ranges — NSG-
+            # denying those would sever internal control-plane paths.
+            try:
+                ipobj = ipaddress.ip_address(src)
+                if (ipobj.is_loopback or ipobj.is_unspecified or ipobj.is_link_local
+                        or any(ipobj in net for net in _INTERNAL_NETS)):
+                    logger.debug("APP_LOGIN_FAILURE from %s: refusing internal/"
+                                 "non-routable source_ip %r (never auto-blocked)",
+                                 spoke_id, src)
+                    return
+            except ValueError:
+                logger.debug("APP_LOGIN_FAILURE from %s: bad source_ip %r", spoke_id, src)
+                return
+
+            try:
+                import access as _access
+                reporter_tenant = self.state.get_spoke_tenant(self._primary_key(spoke_id)) or ""
+                is_perimeter = (not reporter_tenant) or _access.tenant_is_shared(reporter_tenant)
+            except Exception:  # noqa: BLE001 — fail SAFE: treat unknown as tenant-side
+                reporter_tenant, is_perimeter = "", False
+
+            if not is_perimeter:
+                logger.info("APP_LOGIN_FAILURE: tenant node %s (tenant=%s) reported "
+                           "a login failure for %r from %s — log-only, no auto-action",
+                           spoke_id, reporter_tenant or "?", username, src)
+                return
+
+            tm.record_failure(src, "app_login", username=username,
+                              detail=f"app edge {node}",
+                              max_ttl_s=self._EDGE_BLOCK_TTL_S,
+                              allow_permanent=False)
+        except Exception:  # noqa: BLE001 — monitoring must never break dispatch
+            logger.debug("APP_LOGIN_FAILURE ingest failed", exc_info=True)
 
     async def _tenant_probe_hard_revoke(self, spoke_id, tenant_id: str,
                                         reason: str) -> None:
