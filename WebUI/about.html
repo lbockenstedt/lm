@@ -4,7 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>About | Lab Manager</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tailwind is precompiled and vendored locally (see assets/tailwind.css +
+         scripts/build-tailwind.sh), NOT loaded from cdn.tailwindcss.com — see
+         index.html for why. about.html is served as a plain static file (no
+         server-side __WEBUI_VERSION__ substitution like index.html gets), so
+         this link has no cache-busting query param; it falls back to the
+         short (300s) cache the hub applies to unversioned static assets. -->
+    <link rel="stylesheet" href="assets/tailwind.css">
     <style>
         :root {
             --hpe-green: #01A982;

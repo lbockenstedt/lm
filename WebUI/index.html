@@ -4,7 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Lab Manager | Hub</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tailwind is precompiled and vendored locally (see assets/tailwind.css +
+         scripts/build-tailwind.sh), NOT loaded from cdn.tailwindcss.com. The
+         CDN build is a runtime JIT compiler meant for prototyping — it ships
+         the whole engine to the browser and recompiles CSS by rescanning the
+         DOM on load and most mutations, and it is a live external-network
+         fetch that can stall page load when the hub is on a disconnected
+         management network (the same reason html2canvas is vendored below).
+         Regenerate assets/tailwind.css with scripts/build-tailwind.sh whenever
+         a class name is added/changed/removed anywhere in WebUI/*.html|*.js. -->
+    <link rel="stylesheet" href="assets/tailwind.css?v=__WEBUI_VERSION__">
     <!-- Vendored locally (MIT) so the "File a Bug" screenshot capture works even
          when the hub is on a disconnected management network. Loaded before
          main.js so html2canvas is defined when fileBug() runs. -->
