@@ -383,7 +383,20 @@ def register(app, hub, ctx):
 
     async def _discover_dns_workers(request: Request, tenant: str = None):
         """Enroll connected agents that already have the DNS Server role."""
-        dns_spoke = _dns_spoke_for_request(request, tenant)
+        return await _discover_dns_workers_for_spoke(
+            _dns_spoke_for_request(request, tenant))
+
+    async def _discover_dns_workers_for_spoke(dns_spoke: str):
+        """Discovery/enrollment proper, against an ALREADY-RESOLVED dns spoke.
+
+        Split out from the request-scoped wrapper so a loopback operator can
+        drive the same enrollment without a browser session — re-forming a
+        cluster is exactly the kind of recovery that has to be possible when
+        the UI path is unavailable (e.g. right after the resolvers' IPs
+        changed and the WebUI's own DNS cluster panel is erroring). Mirrors
+        ``_discover_dhcp_workers_for_spoke``. The request was only ever used
+        to pick the spoke, so nothing below it changes.
+        """
         current = await _relay_spoke(
             dns_spoke, "DNS_CLUSTER_STATUS",
             log_name="dns_cluster_discovery_status")
@@ -771,11 +784,27 @@ def register(app, hub, ctx):
         """Automatically enroll DNS Server roles assigned to this DNS tenant."""
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
+        spoke_id = _dns_spoke_for_request(request, tenant)
+        return await _dns_discover_locked(spoke_id)
+
+    async def _dns_discover_locked(spoke_id: str):
+        """Serialize enrollment per spoke, then discover. Shared by the session
+        route and the loopback lever so the two can never race each other into
+        a half-enrolled pair (mirrors ``_dhcp_discover_locked``)."""
+        locks = getattr(app.state, "_dns_discovery_locks", None)
+        if locks is None:
+            locks = app.state._dns_discovery_locks = {}
+        lock = locks.setdefault(hub._primary_key(spoke_id), asyncio.Lock())
         try:
-            return await _discover_dns_workers(request, tenant)
+            async with lock:
+                return await _discover_dns_workers_for_spoke(spoke_id)
         except HTTPException as exc:
             logger.warning("DNS worker discovery failed: %s", exc.detail)
             raise
+
+    # Loopback lever (admin_ops) reuses the exact enrollment the UI button
+    # runs — re-forming a cluster must not require a browser session.
+    app.state.dns_discover_locked = _dns_discover_locked
 
     @app.post("/api/dns/cluster/reconcile")
     async def dns_cluster_reconcile(request: Request, tenant: str = None):
