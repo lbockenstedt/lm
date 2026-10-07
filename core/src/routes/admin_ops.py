@@ -661,6 +661,62 @@ def register(app, hub, ctx):
         result = await discover(spoke_id)
         return {"status": "ok", "spoke_id": spoke_id, "result": result}
 
+    @app.get("/admin/ops/dns-cluster-status")
+    async def admin_ops_dns_cluster_status(request: Request):
+        """Read-only resolver-cluster status straight from the DNS spoke's own
+        ``DNS_CLUSTER_STATUS`` handler — the same RPC ``dns_spoke.py`` answers
+        for the WebUI cluster tile (member state, convergence/drift,
+        recommendations). Mirrors ``admin_ops_dhcp_ha_status``."""
+        _guard(request)
+        dns_spoke = hub.get_spoke_by_type("dns")
+        if not dns_spoke:
+            return {"status": "ok", "enabled": False,
+                    "reason": "no DNS spoke connected"}
+        try:
+            resp = await hub.request_response(dns_spoke, "DNS_CLUSTER_STATUS", {},
+                                              timeout=30.0)
+        except Exception as e:
+            logger.exception("admin_ops: dns-cluster-status failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "ok", "result": unwrap_spoke(resp)}
+
+    @app.post("/admin/ops/dns-cluster-discover")
+    async def admin_ops_dns_cluster_discover(request: Request):
+        """Re-form the DNS resolver cluster from the active DNS Server roles.
+
+        Same enrollment the WebUI's discover button runs (shared
+        ``_dns_discover_locked``, so the two serialize against each other):
+        it enrolls each worker, mints the coordinator PSK, pushes LOAD_ROLE to
+        every node and finalizes. Exposed on loopback for the same reason as
+        ``/admin/ops/dhcp-ha-discover`` — re-forming a cluster (e.g. right
+        after the resolvers' IPs changed) is precisely the recovery needed
+        when the WebUI's own DNS views are erroring and the button is not
+        reachable. Body: optional ``{"spoke_id": "<dns spoke>"}``, else the
+        usual type-based pick."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        spoke_id = str((body or {}).get("spoke_id") or "").strip()
+        if spoke_id:
+            valid = set(hub.get_all_spokes_by_type("dns") or [])
+            if spoke_id not in valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{spoke_id}' is not a DNS spoke; known: {sorted(valid)}")
+        else:
+            spoke_id = hub.get_spoke_by_type("dns")
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="no DNS spoke connected")
+        discover = getattr(app.state, "dns_discover_locked", None)
+        if discover is None:
+            raise HTTPException(status_code=503,
+                                detail="DNS routes are not registered on this hub")
+        logger.warning("admin_ops: dns-cluster-discover spoke=%s via loopback", spoke_id)
+        result = await discover(spoke_id)
+        return {"status": "ok", "spoke_id": spoke_id, "result": result}
+
     @app.post("/admin/ops/dhcp-reservation")
     async def admin_ops_dhcp_reservation(request: Request):
         """Drive a reservation CRUD against a CHOSEN dhcp spoke and return
