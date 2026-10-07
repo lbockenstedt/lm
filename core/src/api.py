@@ -2139,14 +2139,18 @@ def create_app(hub):
             "magnetometer=(), gyroscope=(), accelerometer=()")
         # Content-Security-Policy. The WebUI is a single-origin admin app that
         # (a) uses ~500 inline event handlers and inline <script> bootstrap
-        # blocks, and (b) loads the Tailwind Play CDN (which JITs CSS via
-        # Function()/eval) plus xterm/noVNC ES modules from jsdelivr — so a
-        # strict nonce/hash policy is not achievable without a full front-end
-        # refactor. This policy is therefore intentionally permissive on
-        # script/style ('unsafe-inline'/'unsafe-eval') but still hardens the
-        # cheap, high-value directives (object-src/base-uri/frame-ancestors/
+        # blocks, and (b) dynamic-imports xterm/noVNC ES modules from jsdelivr
+        # — so a strict nonce/hash policy is not achievable without a full
+        # front-end refactor. Tailwind used to be loaded from its Play CDN
+        # (which JITs CSS via Function()/eval) but is now precompiled and
+        # vendored locally (WebUI/assets/tailwind.css, see
+        # scripts/build-tailwind.sh) — 'unsafe-eval' is kept only for the
+        # jsdelivr-hosted xterm/noVNC bundles, not for Tailwind anymore. This
+        # policy is therefore intentionally permissive on script/style
+        # ('unsafe-inline'/'unsafe-eval') but still hardens the cheap,
+        # high-value directives (object-src/base-uri/frame-ancestors/
         # form-action) and pins script/style/connect to a known allowlist
-        # (self + the two CDNs the UI actually pulls from). All WebSockets are
+        # (self + the one CDN the UI still actually pulls from). All WebSockets are
         # same-origin, covered by connect-src 'self'.
         resp.headers.setdefault(
             "Content-Security-Policy",
@@ -2160,7 +2164,7 @@ def create_app(hub):
                 "font-src 'self' data: https://cdn.jsdelivr.net",
                 "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
                 "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
-                "https://cdn.tailwindcss.com https://cdn.jsdelivr.net",
+                "https://cdn.jsdelivr.net",
                 "connect-src 'self' https://cdn.jsdelivr.net",
                 "worker-src 'self' blob:",
             )))
