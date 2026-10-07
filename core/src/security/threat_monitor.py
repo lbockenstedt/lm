@@ -9,6 +9,11 @@ Signals fed in from the auth layer (api.py):
     onboarding PSK, an invalid session secret, or a malformed/incomplete
     ``/ws/spoke`` auth frame (fed from main.handle_connection). The hub serves
     ``/ws/spoke`` directly, so the WebSocket peer is the real client IP.
+  * app-edge login failures  (``record_failure(ip, "app_login")``) — a
+    rejected credential against an app spoke's OWN WebUI login (currently just
+    AppBuilder), relayed up the authenticated tunnel as ``APP_LOGIN_FAILURE``
+    and ingested by ``main._handle_app_login_failure`` so it counts toward the
+    same brute-force threshold as a failed login against the hub itself.
 
 Policy (all configurable via ``global_config["threat_monitor"]``):
   * ``> threshold`` failures from one IP within ``window_s`` → BLOCK (default: >20).
@@ -286,6 +291,7 @@ class ThreatMonitor:
                  "api_key": "invalid API keys",
                  "spoke_auth": "invalid spoke onboarding attempts",
                  "http_probe": "HTTPS-port scan probes (paths we never serve)",
+                 "app_login": "failed app-edge logins",
                  "session_hijack": "concurrent admin session-cookie use"}.get(kind, f"{kind} failures")
         mins = max(1, int(self._cfg["window_s"] / 60))
         return f"{count} {label}{who} within {mins}m"
