@@ -130,9 +130,16 @@ def test_firewall_spokes_pinned_vs_all():
 class _FakeSimulationsStore:
     def __init__(self):
         self.recorded = {}
+        self._last_nonzero_tenants = {}
 
     async def set_fw_discovery_sync_status(self, tenant_id, status):
         self.recorded[tenant_id] = status
+
+    async def get_fw_discovery_last_nonzero_tenants(self, source_label):
+        return list(self._last_nonzero_tenants.get(source_label) or [])
+
+    async def set_fw_discovery_last_nonzero_tenants(self, source_label, tenant_ids):
+        self._last_nonzero_tenants[source_label] = sorted(set(tenant_ids or []))
 
 
 class _SyncHub(FwDiscoverySyncMixin):
@@ -331,6 +338,69 @@ async def test_run_all_returns_summary_with_dropped():
     agg = await h.run_fw_discovery_sync_all()
     assert agg["discovered_total"] == 3
     assert agg["dropped_unattributed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_all_skips_push_entirely_when_pull_has_any_error():
+    """A multi-spoke source where one spoke's fetch fails must not push at
+    all — a partial record set could make the sink's replace=True delete
+    devices only the failed spoke knew about."""
+    h = _SyncHub(
+        fw_spokes=["opn-fw1", "opn-fw2"],
+        responses={
+            ("opn-fw1", "OPNSENSE_GET_DHCP_LEASES"): _dhcp_payload(),
+            ("opn-fw1", "OPNSENSE_GET_ARP_TABLE"): _arp_payload(),
+            # opn-fw2 has NO canned response at all → request_response raises
+            # KeyError → _fetch records it as a pull error for this source.
+            ("netbox-spoke-1", "NETBOX_GET_PREFIXES"): _prefixes_payload(),
+            ("netbox-spoke-1", "NETBOX_SYNC_DEVICES"): _sync_devices_ok(2),
+        },
+    )
+    agg = await h.run_fw_discovery_sync_all()
+    assert agg["results"] == []
+    assert not any(cmd == "NETBOX_SYNC_DEVICES" for _, cmd, _ in h.request_log)
+
+
+@pytest.mark.asyncio
+async def test_sync_tenant_devices_skips_push_when_pull_has_any_error():
+    h = _SyncHub(
+        fw_spokes=["opn-fw1", "opn-fw2"],
+        responses={
+            ("opn-fw1", "OPNSENSE_GET_DHCP_LEASES"): _dhcp_payload(),
+            ("opn-fw1", "OPNSENSE_GET_ARP_TABLE"): _arp_payload(),
+            ("netbox-spoke-1", "NETBOX_GET_PREFIXES"): _prefixes_payload(),
+            ("netbox-spoke-1", "NETBOX_SYNC_DEVICES"): _sync_devices_ok(2),
+        },
+    )
+    status = await h.sync_tenant_devices("acme")
+    assert status["status"] == "error"
+    assert "pull failed" in status["message"]
+    assert not any(cmd == "NETBOX_SYNC_DEVICES" for _, cmd, _ in h.request_log)
+
+
+@pytest.mark.asyncio
+async def test_run_all_reconciles_tenant_that_drops_to_zero_records():
+    """A tenant with devices this cycle, then zero the next (clean pull, no
+    errors), must still get an empty replace=True push so the sink deletes
+    the now-stale NetBox devices — ``buckets`` has no entry for a
+    zero-record tenant, so without explicit reconciliation it would never be
+    pushed again at all."""
+    h = _hub_with_full_responses()
+    await h.run_fw_discovery_sync_all()
+    assert any(cmd == "NETBOX_SYNC_DEVICES" for _, cmd, _ in h.request_log)
+
+    # Next cycle: this source now returns zero usable records for the tenant.
+    h._responses[("opn-fw1", "OPNSENSE_GET_DHCP_LEASES")] = {
+        "payload": {"data": {"status": "SUCCESS", "data": []}}}
+    h._responses[("opn-fw1", "OPNSENSE_GET_ARP_TABLE")] = {
+        "payload": {"data": {"status": "SUCCESS", "data": []}}}
+    h.request_log.clear()
+    agg = await h.run_fw_discovery_sync_all()
+    push = next(p for sid, cmd, p in h.request_log
+                if cmd == "NETBOX_SYNC_DEVICES" and sid == "netbox-spoke-1")
+    assert push["tenant_slug"] == "acme"
+    assert push["devices"] == []
+    assert agg["results"][0]["tenant_id"] == "acme"
     assert len(agg["results"]) == 1
     assert agg["results"][0]["tenant_id"] == "acme"
     assert agg["results"][0]["pushed"] == 2
@@ -354,7 +424,7 @@ async def test_push_with_errors_emits_sync_error_marker_with_message(caplog):
                                       "message": "1 upserted, 180 errors — first error: device_type required"}}},
         })
         status = await h.sync_tenant_devices("acme")
-    assert status["status"] == "success"
+    assert status["status"] == "error"
     assert status["errors"] == 180
     warns = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("[sync-error]" in r.getMessage()

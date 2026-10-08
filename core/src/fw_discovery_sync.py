@@ -399,7 +399,12 @@ class FwDiscoverySyncMixin:
             skipped = int((rd or {}).get("skipped", 0) or 0)
             deleted = int((rd or {}).get("deleted", 0) or 0)
             message = (rd or {}).get("message", "")
-            rstate = "success" if rstatus != "ERROR" else "error"
+            # Any per-record errors must NOT be reported as a clean success —
+            # a sink can return batch status SUCCESS alongside a nonzero error
+            # count (e.g. "1 upserted, 180 errors"); treating that as
+            # "success" (the previous behavior) hid a mostly-failed push
+            # behind a green status.
+            rstate = "success" if (rstatus != "ERROR" and errors == 0) else "error"
             # Hub-authoritative sync log: on a clean push keep the INFO summary,
             # but on any errors/failure emit a [sync-error] WARNING carrying the
             # sink's message (the first-error text) so the cause lands in the hub
@@ -479,8 +484,11 @@ class FwDiscoverySyncMixin:
         if not sources:
             now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             tenant_name = (self.state.get_tenant(tenant_id) or {}).get("name") or tenant_id
+            # "skipped", not "error": nothing is configured, which is not the
+            # same as an attempted sync failing — this now matches
+            # ``run_fw_discovery_sync_all``'s equivalent no-source path.
             status = {"tenant_id": tenant_id, "tenant_name": tenant_name, "last_sync_ts": now,
-                      "discovered_total": 0, "status": "error", "pushed": 0, "errors": 0,
+                      "discovered_total": 0, "status": "skipped", "pushed": 0, "errors": 0,
                       "skipped": 0, "deleted": 0, "message": "no firewall discovery source connected"}
             await self.simulations_store.set_fw_discovery_sync_status(tenant_id, status)
             return {**status, "discovered_total_global": 0, "dropped_unattributed": 0, "pull_errors": []}
@@ -492,9 +500,25 @@ class FwDiscoverySyncMixin:
         for name, entry in sources:
             records, pull = await self._fw_pull_discovered(entry)
             discovered_total_global += len(records)
-            pull_errors.extend(f"{entry.get('label', name)}: {e}" for e in pull.get("errors", []))
+            src_errors = pull.get("errors", [])
+            pull_errors.extend(f"{entry.get('label', name)}: {e}" for e in src_errors)
             buckets, dropped = await self._fw_attribute(records)
             dropped_total += dropped
+            if src_errors:
+                # A partial/failed pull for this source must never drive a
+                # replace=True push — an incomplete record set would make the
+                # sink delete devices that only the failed spoke(s) knew
+                # about. Skip the push entirely and surface the pull failure
+                # as this source's own status instead of silently proceeding
+                # with whatever the OTHER (successful) spokes returned.
+                now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                tenant_name = (self.state.get_tenant(tenant_id) or {}).get("name") or tenant_id
+                per_source_statuses.append({
+                    "tenant_id": tenant_id, "tenant_name": tenant_name, "last_sync_ts": now,
+                    "discovered_total": len(records), "source": entry.get("label", name),
+                    "status": "error", "pushed": 0, "errors": 0, "skipped": 0, "deleted": 0,
+                    "message": f"pull failed, push skipped: {'; '.join(src_errors)}"})
+                continue
             per_source_statuses.append(
                 await self._fw_push_tenant(tenant_id, buckets.get(tenant_id, []), entry))
 
@@ -514,10 +538,14 @@ class FwDiscoverySyncMixin:
         replace=True pushes racing each other), with tenants WITHIN one
         source's push still bounded/parallel via the semaphore. A tenant that
         appears in more than one source's buckets gets one combined status
-        (see ``_fw_combine_statuses``) persisted once. Returns
-        ``{"results": [<per-tenant combined status>], "dropped_unattributed": N,
-        "discovered_total": M}``. Called by the background loop (which discards
-        the return) and the all-tenant 'Sync now'.
+        (see ``_fw_combine_statuses``) persisted once. A source whose pull had
+        ANY error is skipped entirely for this cycle (never partially pushed —
+        see ``simulations_store.get_fw_discovery_last_nonzero_tenants`` for why
+        a clean pull also pushes an empty reconciling update to tenants that
+        dropped to zero records). Returns ``{"results": [<per-tenant combined
+        status>], "dropped_unattributed": N, "discovered_total": M}``. Called
+        by the background loop (which discards the return) and the
+        all-tenant 'Sync now'.
         """
         sources = self._fw_discovery_sources()
         if not sources:
@@ -532,10 +560,34 @@ class FwDiscoverySyncMixin:
         for name, entry in sources:
             records, pull = await self._fw_pull_discovered(entry)
             discovered_total += len(records)
+            src_errors = pull.get("errors", [])
+            source_label = entry.get("label", name)
+            if src_errors:
+                # Same rule as sync_tenant_devices: a partial/failed pull must
+                # never drive a replace=True push — proceeding here could
+                # delete devices only a down spoke knew about. Skip the whole
+                # source this cycle; the next successful cycle will catch up.
+                logger.warning("[sync-error] fw-discovery source=%s pull failed (%s) — "
+                               "skipping push this cycle to avoid an incomplete replace=True",
+                               source_label, "; ".join(src_errors))
+                continue
             buckets, dropped = await self._fw_attribute(records)
             dropped_total += dropped
-            tids = list(buckets.keys())
+            active_tids = set(buckets.keys())
+            # Reconciliation: a tenant this source previously pushed a
+            # NON-EMPTY device set for, but that now has zero current
+            # records, would otherwise never get pushed again at all (buckets
+            # has no entry for it) — leaving its stale NetBox devices behind
+            # forever. Push an explicit empty replace=True for exactly those
+            # tenants so the sink's own tenant+source-scoped delete reconciles
+            # them, same as any other tenant's push.
+            previous_tids = set(await self.simulations_store
+                                .get_fw_discovery_last_nonzero_tenants(source_label))
+            stale_tids = previous_tids - active_tids
+            tids = sorted(active_tids | stale_tids)
             if not tids:
+                await self.simulations_store.set_fw_discovery_last_nonzero_tenants(
+                    source_label, [])
                 continue
 
             async def _one(tid: str, entry=entry, buckets=buckets, name=name):
@@ -550,6 +602,8 @@ class FwDiscoverySyncMixin:
             for tid, status in results:
                 if status:
                     per_tenant.setdefault(tid, []).append(status)
+            await self.simulations_store.set_fw_discovery_last_nonzero_tenants(
+                source_label, sorted(active_tids))
 
         if not per_tenant:
             logger.info("fw discovery sync cycle: %d records pulled across %d source(s), "

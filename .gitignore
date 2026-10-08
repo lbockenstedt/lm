@@ -36,3 +36,6 @@ certs/
 .env.lock
 *.crt
 hub_secret.json
+
+# Runtime agent cache (regenerated on startup) -- never commit
+agent/pxmx_agent_cache.json
