@@ -355,8 +355,8 @@ def register(app, hub, ctx):
 
     def _swr_invalidate(spoke_id):
         _swr_gen[0] += 1
-        if hasattr(hub, "warm_drop"):
-            hub.warm_drop(_SWR_PREFIX, (f"{spoke_id}|", "merge|"))
+        if hasattr(hub, "warm_invalidate"):
+            hub.warm_invalidate(_SWR_PREFIX, (f"{spoke_id}|", "merge|"))
 
     def _swr_key(scope, payload):
         raw = json.dumps(payload or {}, sort_keys=True, default=str)
@@ -383,10 +383,18 @@ def register(app, hub, ctx):
         if cached is None:
             return None
         out = copy.deepcopy(cached)
-        if isinstance(out, dict):
-            out["stale"] = True
-            out["cached_at"] = hub.warm_fetched_at(ns, key)
+        _swr_badge(out, ns, key)
         return out
+
+    def _swr_badge(out, ns, key):
+        """Badge ``out`` as cached only when the data is over 5 minutes old."""
+        ts = hub.warm_last_fetched_at(ns, key)
+        invalidated = bool(ts) and not hub.warm_fetched_at(ns, key)
+        if isinstance(out, dict) and ts and (
+            invalidated or time.time() - ts > hub.warm_policy.stale_after_s
+        ):
+            out["stale"] = True
+            out["cached_at"] = ts
 
     async def _swr(ns, key, fetch):
         """Serve ``(ns, key)`` from the hub cache; ``fetch`` is an async callable
@@ -402,15 +410,15 @@ def register(app, hub, ctx):
             if state != FRESH:
                 asyncio.create_task(_swr_refresh(ns, key, fetch))
             out = copy.deepcopy(cached)
-            if state == STALE and isinstance(out, dict):
-                out["stale"] = True
-                out["cached_at"] = hub.warm_fetched_at(ns, key)
+            if state == STALE:
+                _swr_badge(out, ns, key)
             return out
         gen = _swr_gen[0]
         try:
             data = await fetch()
         except HTTPException as e:
             if e.status_code in (502, 503, 504):
+                # includes a spoke mid-update (503): serve last-known silently
                 out = _swr_serve_stale(ns, key)
                 if out is not None:
                     return out
