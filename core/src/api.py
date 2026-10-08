@@ -428,6 +428,17 @@ def _client_ip(request: Request) -> str:
 access.set_client_ip_resolver(_client_ip)
 
 
+def _trusted_bind_networks():
+    # The operator's shared trusted list (e.g. their Zscaler range) doubles as
+    # "one client" for the session bind, so egress hops across /24s don't read
+    # as a cookie hijack.
+    tm = getattr(_MODULE_HUB, "threat_monitor", None)
+    return tm._allowlist_ips() if tm else []
+
+
+access.set_bind_networks_provider(_trusted_bind_networks)
+
+
 # ── HTTPS-port probe / scanner detection ────────────────────────────────────
 # The hub serves a Python/FastAPI API + a static JS SPA over :443 — it never
 # serves PHP/ASP/JSP/CGI, dotfiles, DB admin panels, or app-server consoles. A

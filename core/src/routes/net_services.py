@@ -702,7 +702,12 @@ def register(app, hub, ctx):
                     detail=f"DNS Management returned incomplete enrollment for {sid}")
             result = await hub.request_response(
                 sid, "LOAD_ROLE",
-                {"role": "dns-server", "config": bootstrap},
+                # force=True: reached only once the already-configured check
+                # above found a stale member_id/host — without it an
+                # already-installed dns-server role treats LOAD_ROLE as an
+                # idempotent no-op and never rewrites worker.env's
+                # coordinator pointer (same bug fixed for dhcp-server above).
+                {"role": "dns-server", "config": bootstrap, "force": True},
                 timeout=120.0)
             deployed = result.get("payload", {}).get("data", result)
             if (deployed.get("status") == "ERROR"
@@ -3676,7 +3681,16 @@ def register(app, hub, ctx):
                            f"{item['spoke_id']}")
             result = await hub.request_response(
                 item["spoke_id"], "LOAD_ROLE",
-                {"role": "dhcp-server", "config": bootstrap},
+                # force=True: this call is only reached once the
+                # already_configured short-circuit above has determined the
+                # worker's coordinator pointer is stale and must change.
+                # Without it, agent_spoke.py's LOAD_ROLE handler treats an
+                # already-installed dhcp-server/dns-server role as an
+                # idempotent no-op (``already_installed: true``) and never
+                # re-runs the installer — so worker.env's LM_DHCP_COORDINATOR
+                # silently kept pointing at a stale/dead coordinator address
+                # forever, no matter how many times discovery "succeeded".
+                {"role": "dhcp-server", "config": bootstrap, "force": True},
                 timeout=120.0)
             deployed = result.get("payload", {}).get("data", result)
             if (deployed.get("status") == "ERROR"
