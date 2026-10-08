@@ -1458,13 +1458,22 @@ def register(app, hub, ctx):
         client change. ``firewalls`` come from global_config["firewalls"]
         (each → {id, name, spoke_id, connected}) so the admin can pin the sync
         to one firewall. ``netbox_connected`` flags whether the sink is up.
+
+        A synthetic ``"auto"`` entry is prepended — the default (unset
+        ``source`` config) — which pulls+pushes EVERY connected registry
+        source each cycle (see ``_fw_discovery_sources``), rather than only
+        OPNsense. ``active`` lists every source name currently resolved by
+        the live config (one name when pinned, every connected one for auto).
         """
         hub = app.state.hub
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
-        active = hub._fw_discovery_source().get("module_type")
-        sources = []
+        active = [name for name, _ in hub._fw_discovery_sources()]
+        connected_names = [name for name, se in hub.FIREWALL_DISCOVERY_SOURCES.items()
+                           if hub.get_all_spokes_by_type(se.get("module_type", ""))]
+        sources = [{"name": "auto", "label": "Auto (every connected source)",
+                   "module_type": "", "connected": bool(connected_names)}]
         for name, se in hub.FIREWALL_DISCOVERY_SOURCES.items():
             sources.append({"name": name, "label": se.get("label", name),
                             "module_type": se.get("module_type", ""),

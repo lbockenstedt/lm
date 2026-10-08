@@ -824,6 +824,32 @@ class SimulationsStore:
                 out[tid] = dict(st)
         return out
 
+    # ── Firewall-discovery per-source "last non-empty tenants" (reconciliation) ─
+    # A source going from nonempty→empty for a tenant (e.g. its last DHCP lease
+    # expired, or discovery was disabled) must still push an empty replace=True
+    # so the sink deletes the now-stale devices — but the cycle that discovers
+    # a tenant has zero current records for a source NEVER calls
+    # ``_fw_push_tenant`` for that tenant (there's nothing to attribute it from),
+    # so without tracking which tenants a source previously pushed non-empty
+    # data for, those stale NetBox devices would never get cleaned up. This is
+    # a tiny, direct, explicitly-written record (not inferred from
+    # ``fw_discovery_sync`` status history, which conflates attempts across
+    # multiple sources and successful vs. failed cycles) — persisted under the
+    # global key, keyed by source label, so it survives a hub restart.
+    async def get_fw_discovery_last_nonzero_tenants(self, source_label: str) -> List[str]:
+        """Tenant ids this source pushed a NON-EMPTY device set for, as of its
+        last successful (no pull errors) cycle."""
+        tracked = self._global().get("fw_discovery_last_nonzero_tenants") or {}
+        return list(tracked.get(source_label) or [])
+
+    async def set_fw_discovery_last_nonzero_tenants(self, source_label: str,
+                                                    tenant_ids: List[str]) -> None:
+        async with self._lock:
+            g = self._global()
+            tracked = g.setdefault("fw_discovery_last_nonzero_tenants", {})
+            tracked[source_label] = sorted(set(tenant_ids or []))
+            await self._asave()
+
     # ── Network Devices → NetBox device-discovery sync last-run status ────────
     # Per-tenant result of the most recent nw-discovery sync cycle (background
     # loop or on-demand "Sync now"). Persisted so the UI still shows the last
