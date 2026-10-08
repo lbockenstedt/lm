@@ -33047,6 +33047,7 @@ const DEVICE_TYPES = {
         spokeFilter: s => s.module_type === 'firewall' || /^(opn|fw|firewall|pfsense|fortigate|juniper)/.test(s.spoke_id),
         payloadKey: 'firewall',
         badgeLabel: 'Firewall',
+        vaultPicker: true,
         rowSummary: d => `${d.host || '—'}${d.port ? ':' + d.port : ''}`,
         fields: [
             { id: 'model', label: 'Model', type: 'select', options: [['opnsense','OPNsense'],['juniper','Juniper'],['fortigate','Fortigate'],['pfsense','pfSense']] },
