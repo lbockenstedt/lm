@@ -660,6 +660,61 @@ def test_unload_role_removes_only_that_role(monkeypatch):
     assert cp.env.get("LOADED_ROLES") == "dhcp"
 
 
+def test_unload_role_persists_durable_exclusion(monkeypatch):
+    """Regression: a role baked into this host's CLI/STARTUP_ROLES (unit
+    ExecStart, set at install time) must not resurrect itself after an
+    explicit UNLOAD_ROLE. UNLOAD_ROLE records the role in UNLOADED_ROLES so a
+    later _resolve_startup_roles() subtracts it back out of the CLI union —
+    otherwise the role comes right back on this agent's very next restart
+    (self-update exits the process on every update)."""
+    agent = GenericAgent("agent-1", {})
+    cp = _FakeControlPlane()
+    agent.control_plane = cp
+    _stub_role_load(agent, monkeypatch)
+    _patch_role_conn(monkeypatch)
+
+    async def _run():
+        await agent.handle_command("LOAD_ROLE", {"role": "dhcp"})
+        await asyncio.sleep(0)
+        return await agent.handle_command("UNLOAD_ROLE", {"role": "dhcp"})
+    res = asyncio.run(_run())
+
+    assert res["status"] == "SUCCESS"
+    assert "dhcp" not in cp.env.get("LOADED_ROLES", "").split(",")
+    assert "dhcp" in cp.env.get("UNLOADED_ROLES", "").split(",")
+
+    # The CLI/STARTUP_ROLES still bakes 'dhcp' in (stale install-time unit
+    # file) — the next boot's resolve must NOT re-seed it.
+    host = _ResolveHost(loaded_roles=cp.env.get("LOADED_ROLES", ""),
+                        cli_roles=["cppm", "dhcp"])
+    host._env["UNLOADED_ROLES"] = cp.env["UNLOADED_ROLES"]
+    seed = host._resolve_startup_roles()
+    assert "dhcp" not in seed
+    assert "cppm" in seed
+
+
+def test_reload_after_unload_clears_durable_exclusion(monkeypatch):
+    """An explicit (re)LOAD_ROLE is a deliberate override: it must clear the
+    role back out of UNLOADED_ROLES so a legitimate future re-install/re-load
+    isn't permanently shadowed by an old exclusion."""
+    agent = GenericAgent("agent-1", {})
+    cp = _FakeControlPlane()
+    agent.control_plane = cp
+    _stub_role_load(agent, monkeypatch)
+    _patch_role_conn(monkeypatch)
+
+    async def _run():
+        await agent.handle_command("LOAD_ROLE", {"role": "dhcp"})
+        await asyncio.sleep(0)
+        await agent.handle_command("UNLOAD_ROLE", {"role": "dhcp"})
+        await agent.handle_command("LOAD_ROLE", {"role": "dhcp"})
+        await asyncio.sleep(0)
+    asyncio.run(_run())
+
+    assert "dhcp" not in cp.env.get("UNLOADED_ROLES", "").split(",")
+    assert "dhcp" in cp.env.get("LOADED_ROLES", "").split(",")
+
+
 def test_unload_role_without_arg_unloads_the_one_loaded(monkeypatch):
     """Backward-compat: no role arg + exactly one loaded role → unload that one."""
     agent = GenericAgent("agent-1", {})
