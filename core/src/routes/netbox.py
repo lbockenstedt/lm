@@ -853,7 +853,13 @@ def register(app, hub, ctx):
         Tenant is enforced server-side: a non-admin can only assign to their
         own tenant (any ``tenant`` in the body is ignored); an admin may target
         any tenant or leave it unassigned. Forwards NETBOX_CLAIM_PREFIX, which
-        reassigns an existing unassigned prefix or creates a new one."""
+        reassigns an existing unassigned prefix or creates a new one.
+
+        ``custom_fields`` (e.g. ``dhcp_enabled``/``gateway``/``dns_servers``)
+        is forwarded same as the Allocate Subnet modal — before this, "Add
+        Prefix" was the one creation path that silently dropped the DHCP
+        options a caller supplied, and never applied them to Kea either (no
+        DHCP sync was triggered on this route at all)."""
         hub = app.state.hub
         spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
         sess = _session_user(request)
@@ -874,12 +880,14 @@ def register(app, hub, ctx):
                 "description": body.get("description", ""),
                 "site": body.get("site"),
                 "status": body.get("status", "active"),
+                "custom_fields": body.get("custom_fields"),
             }
             result = await hub.request_response(spoke_id, "NETBOX_CLAIM_PREFIX", payload, timeout=60.0)
             data = _unwrap_netbox(result)
             if isinstance(data, dict) and data.get("status") == "SUCCESS":
                 _refresh_module_all_tenants(hub, "netbox_prefixes")
                 _refresh_module_all_tenants(hub, "netbox_ips")
+                _trigger_dhcp_sync_after_prefix_edit()
             return data
         except HTTPException:
             raise

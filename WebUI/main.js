@@ -25598,6 +25598,24 @@ async function showFindSubnetModal() {
                 <input id="nb-f-typed" class="${inputCls}" placeholder="10.50.0.0/24">
             </div>
             <div id="nb-f-results" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 max-h-48 overflow-y-auto"></div>
+            <div>
+                <label class="flex items-center gap-2 text-sm text-slate-600">
+                    <input type="checkbox" id="nb-f-dhcp" class="rounded border-slate-300 text-[#01A982]">
+                    Enable DHCP scope for this subnet
+                </label>
+                <p class="text-xs text-slate-400 mt-0.5">Only checked, non-container prefixes are synced to Kea as a DHCP scope.</p>
+            </div>
+            <div class="border-t border-slate-200 pt-3 space-y-3">
+                <div class="text-xs font-bold uppercase text-slate-500">DHCP Options</div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Gateway</label><input id="nb-f-gateway" class="${inputCls}" placeholder="e.g. 10.0.0.1"></div>
+                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DNS Servers</label><input id="nb-f-dns" class="${inputCls}" placeholder="comma-separated, e.g. 10.0.0.53, 10.0.0.54"></div>
+                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Domain Name</label><input id="nb-f-domain" class="${inputCls}" placeholder="e.g. lab.local"></div>
+                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Search Domain</label><input id="nb-f-search" class="${inputCls}" placeholder="comma-separated, e.g. lab.local"></div>
+                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Lease Time (seconds)</label><input id="nb-f-lease" class="${inputCls}" placeholder="2419200" value="2419200"></div>
+                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Exclusion Range(s)</label><input id="nb-f-exclusions" class="${inputCls}" placeholder="comma-separated, e.g. 10.0.0.1-10.0.0.20"></div>
+                </div>
+            </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button id="nb-f-assign-btn" onclick="submitFindSubnetAssign()" disabled class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed">Assign</button>
@@ -25711,10 +25729,26 @@ async function submitFindSubnetAssign() {
     const prefix = window._nbFindSelected;
     if (!prefix) { showToast('Search and pick a subnet first.', 'success'); return; }
     const desc = document.getElementById('nb-f-desc')?.value?.trim() || '';
+    const get = id => document.getElementById(id)?.value?.trim() || '';
+    const dhcpEnabled = !!document.getElementById('nb-f-dhcp')?.checked;
+    // Mirrors submitNetboxAllocatePrefix's custom_fields shape — see
+    // custom_fields_spec.CUSTOM_FIELDS_SPEC in the netbox repo — so the "Add
+    // Prefix" finder's DHCP checkbox actually takes effect at creation time
+    // instead of being silently dropped (previously the only way to enable
+    // DHCP on a prefix created through this flow was a separate Edit step).
+    const customFields = {
+        dhcp_enabled:     dhcpEnabled,
+        gateway:          get('nb-f-gateway'),
+        dns_servers:      get('nb-f-dns'),
+        domain_name:      get('nb-f-domain'),
+        search_domain:    get('nb-f-search'),
+        lease_time:       get('nb-f-lease') ? parseInt(get('nb-f-lease')) || undefined : undefined,
+        exclusion_ranges: get('nb-f-exclusions'),
+    };
     try {
         const d = await apiJson('/api/netbox/subnet-assign', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prefix, description: desc, status: 'active' }),
+            body: JSON.stringify({ prefix, description: desc, status: 'active', custom_fields: customFields }),
             credentials: 'same-origin',
         });
         if (d.status === 'SUCCESS') {
