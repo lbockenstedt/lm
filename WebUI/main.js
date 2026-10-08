@@ -25856,6 +25856,15 @@ function _spokeErrorBanner(detail, fallback) {
 // DOWN cluster looked exactly like an EMPTY one — "DHCP shows no reservations"
 // with nothing to explain it. _dhcp_merge_fanout now reports the casualties in
 // `_degraded`; surface them above the table so the missing cluster is named.
+function _spokeCachedBadge(d) {
+    if (!d || d.stale !== true) return '';
+    const when = d.cached_at ? ' ' + _relTimeAgo(new Date(d.cached_at * 1000)) : '';
+    return `<div class="mb-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-700 flex items-center gap-2">
+        <span class="px-2 py-0.5 rounded-full bg-amber-200 text-amber-800 font-bold uppercase text-[10px]">cached</span>
+        <span>Spoke offline — showing last-known data${escapeHtml(when)}. Live data resumes when the spoke reconnects.</span>
+    </div>`;
+}
+
 function _dhcpDegradedBanner(d) {
     const bad = (d && d._degraded) || [];
     if (!bad.length) return '';
@@ -26923,9 +26932,9 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 </td>
             </tr>`;
         }).join('');
-        container.innerHTML = records.length === 0
+        container.innerHTML = _spokeCachedBadge(d) + (records.length === 0
             ? '<p class="p-4 text-slate-400 italic text-sm">No DNS records found.</p>'
-            : tw(th(cols) + `<tbody>${rows}</tbody>`);
+            : tw(th(cols) + `<tbody>${rows}</tbody>`));
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
     }
@@ -30832,7 +30841,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(pools || '—')}</td>
                 </tr>`;
             }).join('');
-            container.innerHTML = _dhcpDegradedBanner(d) + (subnets.length === 0
+            container.innerHTML = _spokeCachedBadge(d) + _dhcpDegradedBanner(d) + (subnets.length === 0
                 ? '<p class="p-4 text-slate-400 italic text-sm">No subnets configured.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`));
 
@@ -30888,7 +30897,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     </td>
                 </tr>`;
             }).join('');
-            container.innerHTML = _dhcpDegradedBanner(d) + (leases.length === 0
+            container.innerHTML = _spokeCachedBadge(d) + _dhcpDegradedBanner(d) + (leases.length === 0
                 ? '<p class="p-4 text-slate-400 italic text-sm">No active leases.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`));
 
@@ -30914,7 +30923,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     </td>
                 </tr>`;
             }).join('');
-            container.innerHTML = _dhcpDegradedBanner(d) + (res.length === 0
+            container.innerHTML = _spokeCachedBadge(d) + _dhcpDegradedBanner(d) + (res.length === 0
                 ? '<p class="p-4 text-slate-400 italic text-sm">No static reservations configured.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`));
         }
