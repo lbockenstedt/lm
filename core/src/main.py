@@ -2691,6 +2691,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 else:
                     opn_fws = [f for f in firewalls if f.get("model") == "opnsense"]
                     config = opn_fws[0] if opn_fws else {}
+                # Overlay any Credential Vault api_key/api_secret so a
+                # vault-backed firewall still authenticates after a spoke
+                # reconnect (hourly self-update, reboot, …) — mirrors the nw
+                # branch below.
+                if config:
+                    import instance_vault as _instance_vault
+                    config = await _instance_vault.overlay(self, config, "firewalls")
             elif module_key == 'nw':
                 # Network Devices fleet: one nw spoke manages many devices.
                 # Push the devices bound to this spoke; fall back to unbound
