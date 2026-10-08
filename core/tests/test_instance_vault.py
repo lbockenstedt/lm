@@ -132,6 +132,39 @@ def test_overlay_nw_user_alias_fills_username(monkeypatch):
     assert out["username"] == "netadmin"
 
 
+def test_overlay_fills_firewall_api_key_and_secret(monkeypatch):
+    # A Credential Vault "Generic" secret carrying {api_key, api_secret} backs
+    # an OPNsense firewall's REST credentials — the managed-device case the
+    # vault sweep targeted (api_key must never be persisted inline once a
+    # vault_credential is set).
+    _patch_get(monkeypatch, {"api_key": "AK123", "api_secret": "ASxyz"})
+    fw = {"host": "172.16.1.1", "model": "opnsense",
+          "vault_credential": {"bucket": "acme", "name": "opn-core"}}
+    out = _run(iv.overlay(object(), fw, "firewalls"))
+    assert out["api_key"] == "AK123"
+    assert out["api_secret"] == "ASxyz"
+    assert "vault_credential" not in out
+    assert out["host"] == "172.16.1.1"
+
+
+def test_overlay_firewall_login_secret_aliases_key_and_secret(monkeypatch):
+    # A plain username/password "Login" secret also works: username -> api_key,
+    # password -> api_secret.
+    _patch_get(monkeypatch, {"username": "AK123", "password": "ASxyz"})
+    fw = {"model": "opnsense", "vault_credential": {"bucket": "acme", "name": "opn-core"}}
+    out = _run(iv.overlay(object(), fw, "firewalls"))
+    assert out["api_key"] == "AK123"
+    assert out["api_secret"] == "ASxyz"
+
+
+def test_strip_inline_secrets_firewall_drops_api_key_and_secret():
+    fw = {"host": "h", "model": "opnsense", "api_key": "AK", "api_secret": "AS",
+          "vault_credential": {"bucket": "acme", "name": "opn-core"}}
+    out = iv.strip_inline_secrets(fw, "firewalls")
+    assert "api_key" not in out and "api_secret" not in out
+    assert out["host"] == "h"
+
+
 def test_overlay_resolve_failure_degrades(monkeypatch):
     _patch_get(monkeypatch, None, raises=cred_vault.CredVaultError("boom"))
     dev = {"address": "10.0.0.1",

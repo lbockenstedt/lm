@@ -122,6 +122,10 @@ def register(app, hub, ctx):
             return False
         mode = prod.get("push")
         if mode == "firewall":
+            # Overlay any Credential Vault api_key/api_secret just before the
+            # push so the plaintext lives only in the vault, not in
+            # global_config (mirrors the nw/instance branches below).
+            record = await instance_vault.overlay(hub, record, prod["key"])
             await hub.send_to_spoke(_hub_msg(spoke_id, "UPDATE_CONFIG", record))
             return True
         if mode == "nw":
