@@ -893,18 +893,31 @@ class AgentControlPlane(BaseControlPlane):
             of being permanently evicted by a transient install/clone failure.
 
         Roles removed from STARTUP_ROLES are NOT auto-dropped (LOADED_ROLES
-        keeps them); use UNLOAD_ROLE to retire one. Unknown role names (not in
-        _ROLE_MAP) are SKIPPED for this boot's seed but KEPT in .env — a role
-        whose module is transiently unimportable mid-update (so it's briefly
-        absent from _ROLE_MAP) must not be permanently evicted; it re-seeds once
-        the code settles. The persisted set is only ever rewritten to GROW (union
-        with CLI roles), never to shrink."""
+        keeps them); use UNLOAD_ROLE to retire one — EXCEPT a role that was
+        ever explicitly UNLOAD_ROLE'd: that removal is durably recorded in
+        ``UNLOADED_ROLES`` and is subtracted back out of the CLI/STARTUP_ROLES
+        union below, so a role baked into this unit's ExecStart at install
+        time (e.g. a stray ``dhcp``/``dns`` coordinator role assigned to the
+        wrong host) does not silently reappear on the agent's very next
+        restart — which, for a self-updating agent (``os._exit(3)`` on every
+        update), could otherwise be minutes away. Re-loading the role (a fresh
+        LOAD_ROLE, no ``remove=``) clears it back out of ``UNLOADED_ROLES`` —
+        an explicit (re)load always overrides an earlier exclusion. Unknown
+        role names (not in _ROLE_MAP) are SKIPPED for this boot's seed but KEPT
+        in .env — a role whose module is transiently unimportable mid-update
+        (so it's briefly absent from _ROLE_MAP) must not be permanently
+        evicted; it re-seeds once the code settles. The persisted set is only
+        ever rewritten to GROW (union with CLI roles), never to shrink."""
         raw = [r.strip() for r in self._read_env_value("LOADED_ROLES").split(",")
                if r.strip()]
-        # Union with CLI/STARTUP_ROLES. Do NOT filter by _ROLE_MAP here: filtering
-        # then re-persisting the smaller set is a truncation vector (a transiently
-        # unknown role would be dropped from .env for good).
-        desired = list(dict.fromkeys([*raw, *self._cli_roles]))  # union, order-stable
+        unloaded = {r.strip() for r in self._read_env_value("UNLOADED_ROLES").split(",")
+                   if r.strip()}
+        # Union with CLI/STARTUP_ROLES, then drop anything explicitly unloaded.
+        # Do NOT filter by _ROLE_MAP here: filtering then re-persisting the
+        # smaller set is a truncation vector (a transiently unknown role would
+        # be dropped from .env for good).
+        desired = [r for r in dict.fromkeys([*raw, *self._cli_roles])  # union, order-stable
+                  if r not in unloaded]
         # Persist ONLY when the union added something (never a shrink / no-op churn).
         if desired and set(desired) != set(raw):
             self._persist_secret_to_env("LOADED_ROLES", ",".join(desired))
