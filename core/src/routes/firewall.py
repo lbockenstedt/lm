@@ -1,5 +1,6 @@
 """Firewall (OPNsense) data + rule/alias/NAT/DNS CRUD routes."""
 import access
+import instance_vault
 from api import (
     HTTPException, Request, _FW_FETCH_TIMEOUTS, _FW_FETCH_TIMEOUT_DEFAULT, _FW_MODULES,
     _FW_WRITE_TIMEOUT, _cache_entry, _fetch_module, _hub_msg, _invalidate_module_all_tenants,
@@ -375,7 +376,12 @@ def register(app, hub, ctx):
             new_fw = data.get("firewall", {})
             if not new_fw.get("name") or not new_fw.get("model"):
                 raise HTTPException(status_code=400, detail="Missing firewall name or model")
-            if new_fw.get("model") == "opnsense" and not (new_fw.get("api_key") and new_fw.get("api_secret")):
+            # A Credential Vault reference supplies api_key/api_secret at push
+            # time, so the "both required" inline check only applies when no
+            # vault_credential is present.
+            if (new_fw.get("model") == "opnsense"
+                    and not instance_vault.has_vault_ref(new_fw)
+                    and not (new_fw.get("api_key") and new_fw.get("api_secret"))):
                 raise HTTPException(status_code=400, detail="OPNsense needs both an API key and an API secret")
 
             # Tenant-scoped add: a tenant-admin may bind a firewall ONLY to a
@@ -394,6 +400,16 @@ def register(app, hub, ctx):
             elif spoke_id and not new_fw.get("tenant_id"):
                 new_fw["tenant_id"] = hub.state.get_spoke_tenant(spoke_id) or ""
 
+            # Vault-reference validation + strip: when a vault_credential is
+            # present it must resolve (reach + automation-readable + usable);
+            # either way the inline api_key/api_secret are never persisted once
+            # a reference is set (strip_inline_secrets is a no-op otherwise).
+            # Also enforces the hub's "vault available → no inline secrets"
+            # policy (instance_vault._vault_only_violation).
+            await instance_vault.validate_ref(
+                hub, new_fw, sess, is_admin=_is_admin(sess), storage_key="firewalls")
+            instance_vault.strip_inline_secrets(new_fw, "firewalls")
+
             if "id" not in new_fw:
                 new_fw["id"] = str(uuid.uuid4())
 
@@ -406,11 +422,14 @@ def register(app, hub, ctx):
 
             # Deliver the connection (host + API creds) to the bound spoke now;
             # otherwise it stays "No firewall configured" until it reconnects.
+            # The vault-resolved api_key/api_secret are overlaid onto a COPY
+            # just before the push — the plaintext never touches global_config.
             pushed = False
             new_spoke = new_fw.get("spoke_id")
             if new_spoke and hub._primary_key(new_spoke) in hub.active_connections:
                 try:
-                    await hub.send_to_spoke(_hub_msg(new_spoke, "UPDATE_CONFIG", new_fw))
+                    push_fw = await instance_vault.overlay(hub, new_fw, "firewalls")
+                    await hub.send_to_spoke(_hub_msg(new_spoke, "UPDATE_CONFIG", push_fw))
                     pushed = True
                 except Exception as e:  # noqa: BLE001 — saved; reconnect re-push covers it
                     logger.warning("add_firewall: config push to %s failed: %s", new_spoke, e)
@@ -437,15 +456,22 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=404, detail="Firewall not found")
 
             merged = {**firewalls[fw_index], **update_data}
-            if merged.get("model") == "opnsense" and not (merged.get("api_key") and merged.get("api_secret")):
+            if (merged.get("model") == "opnsense"
+                    and not instance_vault.has_vault_ref(merged)
+                    and not (merged.get("api_key") and merged.get("api_secret"))):
                 raise HTTPException(status_code=400, detail="OPNsense needs both an API key and an API secret")
             firewalls[fw_index].update(update_data)
+            sess = _session_user(request)
+            await instance_vault.validate_ref(
+                hub, firewalls[fw_index], sess, is_admin=_is_admin(sess), storage_key="firewalls")
+            instance_vault.strip_inline_secrets(firewalls[fw_index], "firewalls")
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
 
             spoke_id = firewalls[fw_index].get("spoke_id")
             if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
-                msg = _hub_msg(spoke_id, "UPDATE_CONFIG", firewalls[fw_index])
+                push_fw = await instance_vault.overlay(hub, firewalls[fw_index], "firewalls")
+                msg = _hub_msg(spoke_id, "UPDATE_CONFIG", push_fw)
                 await hub.send_to_spoke(msg)
                 return {"status": "ok", "message": "Firewall configuration updated and pushed to spoke.", "pushed": True}
             else:

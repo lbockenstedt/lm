@@ -60,6 +60,15 @@ SECRET_FIELDS = {
         # (record field `api_token`).
         "api_token": ("api_token", "token", "apikey", "api_key", "key", "value"),
     },
+    "firewalls": {
+        # OPNsense (and future models) authenticate with a REST API key +
+        # secret pair. Store them as a Credential Vault "Generic" secret
+        # ({api_key, api_secret}) or reuse a "Login" secret (username/password
+        # map onto key/secret) — only the field(s) the resolved secret actually
+        # carries are overlaid. Host/port/model stay inline (non-secret).
+        "api_key":    ("api_key", "username", "key", "apikey"),
+        "api_secret": ("api_secret", "password", "secret", "token"),
+    },
     "nw_devices": {
         # Network-device login password / enable secret / REST token / SNMP
         # community — a device uses whichever its transport needs; only the

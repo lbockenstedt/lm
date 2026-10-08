@@ -137,16 +137,22 @@ value.
   `console-auto-credentials` (`type=console`, `mode=hub`); `POST
   /api/console/credentials/to-vault` migrates existing creds into the vault
   (`console.py:1107-1136`). See [console.md](console.md).
-- **Module connections (NAC / network devices / IPAM)** — a saved connection
-  instance may carry a `vault_credential` `{bucket, name}` reference instead of an
-  inline secret. `core/src/instance_vault.py` (`SECRET_FIELDS`) maps each
-  product's secret fields to the vault-secret aliases: **ClearPass**
+- **Module connections (NAC / network devices / IPAM / firewalls)** — a saved
+  connection instance may carry a `vault_credential` `{bucket, name}` reference
+  instead of an inline secret. `core/src/instance_vault.py` (`SECRET_FIELDS`)
+  maps each product's secret fields to the vault-secret aliases: **ClearPass**
   (`nac_instances`) → `client_secret` / `user` / `password`; **network devices**
   (`nw_devices`) → `password` / `enable_secret` / `api_token` / `snmp_community`;
-  **NetBox/IPAM** (`ipam_instances`) → `api_token`. On save the inline secret is
-  stripped and the ref validated; at push time `instance_vault.overlay()` fills
-  the field(s) the resolved secret carries before the config reaches the spoke.
-  See [cppm.md](cppm.md) and [netbox.md](netbox.md).
+  **NetBox/IPAM** (`ipam_instances`) → `api_token`; **firewalls**
+  (`firewalls`) → `api_key` / `api_secret` (a Credential Vault "Generic" secret
+  `{api_key, api_secret}`, or a "Login" secret whose `username`/`password`
+  alias onto them). On save the inline secret is stripped and the ref
+  validated; at push time `instance_vault.overlay()` fills the field(s) the
+  resolved secret carries before the config reaches the spoke — this covers the
+  add/update routes (`routes/firewall.py`, `routes/tenant_devices.py`) AND the
+  spoke-reconnect re-push (`main.py`'s `module_key == 'opn'` branch), so a
+  vault-backed firewall still authenticates after an hourly self-update
+  restart. See [cppm.md](cppm.md) and [netbox.md](netbox.md).
 
 ## WebUI
 
