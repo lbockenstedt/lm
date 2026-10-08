@@ -402,7 +402,18 @@ def register(app, hub, ctx):
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
 
-            return {"status": "ok", "firewall": new_fw}
+            # Deliver the connection (host + API creds) to the bound spoke now;
+            # otherwise it stays "No firewall configured" until it reconnects.
+            pushed = False
+            new_spoke = new_fw.get("spoke_id")
+            if new_spoke and hub._primary_key(new_spoke) in hub.active_connections:
+                try:
+                    await hub.send_to_spoke(_hub_msg(new_spoke, "UPDATE_CONFIG", new_fw))
+                    pushed = True
+                except Exception as e:  # noqa: BLE001 — saved; reconnect re-push covers it
+                    logger.warning("add_firewall: config push to %s failed: %s", new_spoke, e)
+
+            return {"status": "ok", "firewall": new_fw, "pushed": pushed}
         except HTTPException:
             raise  # 400/403 must propagate as-is, not be re-wrapped as 500
         except Exception as e:
