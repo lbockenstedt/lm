@@ -326,3 +326,17 @@ def test_rebind_keeps_ip_seen_in_step():
     assert access.session_user(sessions, _FakeRequest("tok", "198.18.10.96")) is not None
     assert "198.18.10.96" in sessions["tok"]["ip_seen"]
     access.set_client_ip_resolver(None)
+
+
+def test_configured_egress_network_spans_subnets(monkeypatch):
+    # Incident: Zscaler hopped 170.85.9.11 -> 170.85.13.12 (different /24s).
+    assert access.same_bind_subnet("170.85.9.11", "170.85.13.12") is False
+    monkeypatch.setenv("LM_SESSION_IP_BIND_NETWORKS", "170.85.0.0/16")
+    assert access.same_bind_subnet("170.85.9.11", "170.85.13.12") is True
+    assert access.same_bind_subnet("170.85.9.11", "9.9.9.9") is False
+
+
+def test_trusted_provider_and_overbroad_cidr_ignored(monkeypatch):
+    monkeypatch.setattr(access, "_bind_networks_provider", lambda: ["0.0.0.0/0", "170.85.0.0/16"])
+    assert access.same_bind_subnet("170.85.9.11", "170.85.13.12") is True
+    assert access.same_bind_subnet("1.1.1.1", "9.9.9.9") is False

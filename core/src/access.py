@@ -580,12 +580,50 @@ def _norm_bind_addr(value):
     return addr
 
 
+# Egress networks (e.g. a Zscaler range) whose addresses are all one operator:
+# a proxy/SWG hands successive requests to nodes in DIFFERENT /24s of the same
+# range (170.85.9.11 → 170.85.13.12), which the /24 rule scores as a hijack.
+# Sources: LM_SESSION_IP_BIND_NETWORKS (comma-separated CIDRs) plus a provider
+# hook (the hub registers its trusted list). Anything broader than the floor is
+# ignored so a typo like 0.0.0.0/0 cannot disable the bind.
+_BIND_NET_MIN_PREFIX4 = 12
+_BIND_NET_MIN_PREFIX6 = 32
+_bind_networks_provider = None
+
+
+def set_bind_networks_provider(fn) -> None:
+    """Register a callable returning extra CIDR strings treated as one client."""
+    global _bind_networks_provider
+    _bind_networks_provider = fn
+
+
+def _bind_networks() -> list:
+    raw = [c for c in os.environ.get("LM_SESSION_IP_BIND_NETWORKS", "").split(",") if c.strip()]
+    try:
+        if _bind_networks_provider is not None:
+            raw.extend(_bind_networks_provider() or [])
+    except Exception:  # noqa: BLE001 — never break auth on a provider hiccup
+        pass
+    nets = []
+    for c in raw:
+        try:
+            n = ipaddress.ip_network(str(c).strip(), strict=False)
+        except ValueError:
+            continue
+        floor = _BIND_NET_MIN_PREFIX4 if n.version == 4 else _BIND_NET_MIN_PREFIX6
+        if n.prefixlen >= floor:
+            nets.append(n)
+    return nets
+
+
 def same_bind_subnet(a, b) -> bool:
     """True when ``a`` and ``b`` belong to the same client subnet.
 
     Compares at /24 (IPv4) or /64 (IPv6) by default; override with
     ``LM_SESSION_IP_BIND_PREFIX4`` / ``LM_SESSION_IP_BIND_PREFIX6``. Setting a
     prefix to its full width (32 / 128) restores strict per-address binding.
+    Two addresses inside the same configured egress network
+    (``LM_SESSION_IP_BIND_NETWORKS`` / trusted list) are also "same".
     Blanks, mixed families and unparseable values are never "same".
     """
     if not a or not b:
@@ -598,9 +636,11 @@ def same_bind_subnet(a, b) -> bool:
         return False
     plen = _IP_BIND_PREFIX4 if ia.version == 4 else _IP_BIND_PREFIX6
     try:
-        return ib in ipaddress.ip_network(f"{ia}/{plen}", strict=False)
+        if ib in ipaddress.ip_network(f"{ia}/{plen}", strict=False):
+            return True
     except ValueError:
         return False
+    return any(ia in n and ib in n for n in _bind_networks())
 
 
 def set_session_idle_timeout(seconds) -> None:
