@@ -26765,7 +26765,47 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     </div>
                     <div id="dns-query-name-list">${_ddQueryNameRows(d.query_names || [], false)}</div>
                 </div>
+                <div class="bg-white border border-slate-200 rounded-lg p-4 mt-4">
+                    <div class="flex items-center justify-between mb-2 gap-3">
+                        <div class="text-sm font-semibold text-slate-700">Queries by Device</div>
+                        <div class="flex gap-2">
+                            <input id="dns-client-ip" type="search" placeholder="Device IP or hostname"
+                                   class="text-xs border border-slate-300 rounded-md px-2 py-1 w-56 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                            <select id="dns-client-minutes" class="text-xs border border-slate-300 rounded-md px-2 py-1">
+                                <option value="5">Last 5 min</option>
+                                <option value="10" selected>Last 10 min</option>
+                                <option value="15">Last 15 min</option>
+                                <option value="60">Last 60 min</option>
+                                <option value="300">Last 300 min</option>
+                            </select>
+                            <button id="dns-client-go" class="text-xs bg-[#01A982]/10 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md font-bold">Show</button>
+                        </div>
+                    </div>
+                    <div id="dns-client-list"><p class="text-slate-400 italic text-sm">Enter a device IP to list every DNS query it made in the chosen window.</p></div>
+                </div>
                 ${syncLine}`;
+            const clientGo = document.getElementById('dns-client-go');
+            if (clientGo) {
+                const runClient = async () => {
+                    const list = document.getElementById('dns-client-list');
+                    const who = (document.getElementById('dns-client-ip').value || '').trim();
+                    const mins = document.getElementById('dns-client-minutes').value;
+                    list.innerHTML = '<p class="text-sm text-slate-400 italic">Loading…</p>';
+                    const qs = (_tenantQS() ? '&' : '?') + 'client=' + encodeURIComponent(who) + '&minutes=' + encodeURIComponent(mins);
+                    const { ok: okc, data: dc, detail: det } = await _spokeFetch('/api/dns/client-queries' + _tenantQS() + qs);
+                    if (!okc || !dc) { list.innerHTML = `<p class="text-sm text-red-500">${escapeHtml(det || 'Query failed')}</p>`; return; }
+                    const qs2 = dc.queries || [];
+                    if (!qs2.length) { list.innerHTML = `<p class="text-slate-400 italic text-sm">No queries from ${escapeHtml(who || 'any device')} in the last ${escapeHtml(String(mins))} minutes${dc.source === 'journal' ? ' (read from the journal: query log file not yet active)' : ''}.</p>`; return; }
+                    list.innerHTML = `<div class="text-xs text-slate-500 mb-1">${(dc.total || 0).toLocaleString()} queries${dc.total > qs2.length ? ` (showing newest ${qs2.length})` : ''}</div>
+                        <div class="max-h-96 overflow-y-auto divide-y divide-slate-100">${qs2.map(q => `
+                        <div class="py-1 text-xs flex items-center justify-between gap-3">
+                            <span><span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium mr-2">${escapeHtml(q.type)}</span><span class="font-mono text-slate-700">${escapeHtml(q.name)}</span>${who ? '' : `<span class="text-slate-400 ml-2">${escapeHtml(q.host && q.host !== q.client ? q.host + ' (' + q.client + ')' : q.client)}</span>`}</span>
+                            <span class="font-mono text-slate-400 whitespace-nowrap">${new Date(q.time * 1000).toLocaleTimeString()}</span>
+                        </div>`).join('')}</div>`;
+                };
+                clientGo.addEventListener('click', runClient);
+                document.getElementById('dns-client-ip').addEventListener('keydown', e => { if (e.key === 'Enter') runClient(); });
+            }
             const searchInput = document.getElementById('dns-query-name-search');
             const hostInput = document.getElementById('dns-query-host-search');
             const rangeSelect = document.getElementById('dns-query-range');
