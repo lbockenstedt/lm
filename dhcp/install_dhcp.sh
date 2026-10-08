@@ -574,7 +574,13 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable --now "$WORKER_SERVICE"
+    # enable --now is a no-op restart-wise on an already-active unit, so a
+    # re-run that only changed worker.env (e.g. a corrected coordinator
+    # address/secret after discovery re-enrolled this member) would never
+    # actually reload the new EnvironmentFile. Restart unconditionally:
+    # equivalent to a plain start when the unit was not yet running.
+    systemctl enable "$WORKER_SERVICE"
+    systemctl restart "$WORKER_SERVICE"
     echo "Kea HA worker installed (member: $MEMBER_ID → $COORDINATOR)"
     exit 0
 fi
