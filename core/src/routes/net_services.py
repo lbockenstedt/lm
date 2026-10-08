@@ -389,7 +389,10 @@ def register(app, hub, ctx):
     def _swr_badge(out, ns, key):
         """Badge ``out`` as cached only when the data is over 5 minutes old."""
         ts = hub.warm_last_fetched_at(ns, key)
-        if isinstance(out, dict) and ts and time.time() - ts > hub.warm_policy.stale_after_s:
+        invalidated = bool(ts) and not hub.warm_fetched_at(ns, key)
+        if isinstance(out, dict) and ts and (
+            invalidated or time.time() - ts > hub.warm_policy.stale_after_s
+        ):
             out["stale"] = True
             out["cached_at"] = ts
 
@@ -414,7 +417,7 @@ def register(app, hub, ctx):
         try:
             data = await fetch()
         except HTTPException as e:
-            if e.status_code in (500, 502, 503, 504):
+            if e.status_code in (502, 503, 504):
                 # includes a spoke mid-update (503): serve last-known silently
                 out = _swr_serve_stale(ns, key)
                 if out is not None:
