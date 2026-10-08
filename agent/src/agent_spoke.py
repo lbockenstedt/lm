@@ -1917,7 +1917,19 @@ class GenericAgent(BaseSpoke):
         self-update restart landing mid-seed (e.g. while a later role's pip
         install runs) would freeze the persisted set at that partial subset and
         permanently evict every not-yet-loaded role. Removal happens ONLY via an
-        explicit UNLOAD_ROLE (``remove=``), never as a side effect of a load."""
+        explicit UNLOAD_ROLE (``remove=``), never as a side effect of a load.
+
+        An explicit removal is also durably recorded in ``UNLOADED_ROLES`` so
+        ``_resolve_startup_roles`` can subtract it back out of a role baked
+        into the unit's CLI ``--roles``/STARTUP_ROLES (install-time, never
+        auto-dropped). Without this, a role an operator explicitly unloaded
+        from a mis-provisioned host (e.g. a stray ``dhcp``/``dns`` coordinator
+        role baked into that host's systemd ExecStart at install time) comes
+        right back on the agent's very next restart — and this agent restarts
+        itself on every self-update — making UNLOAD_ROLE look like a no-op on
+        any host whose CLI roles still list it. A fresh explicit LOAD (the
+        no-``remove`` call) clears the role back out of ``UNLOADED_ROLES`` —
+        reloading a role is a deliberate override of any earlier exclusion."""
         cp = getattr(self, "control_plane", None)
         if cp is None:
             return
@@ -1926,6 +1938,12 @@ class GenericAgent(BaseSpoke):
                         if r.strip()}
             roles = (existing | set(self._roles.keys())) - (remove or set())
             cp._persist_secret_to_env("LOADED_ROLES", ",".join(sorted(roles)))
+            unloaded = {r for r in cp._read_env_value("UNLOADED_ROLES").split(",")
+                        if r.strip()}
+            if remove:
+                unloaded |= set(remove)
+            unloaded -= set(self._roles.keys())
+            cp._persist_secret_to_env("UNLOADED_ROLES", ",".join(sorted(unloaded)))
         except Exception as e:
             logger.warning("Could not persist LOADED_ROLES: %s", e)
 
