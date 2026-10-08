@@ -580,3 +580,33 @@ def test_prep_for_imaging_is_syntactically_valid():
     assert os.path.isfile(PREP_SCRIPT), f"missing {PREP_SCRIPT}"
     r = subprocess.run(["bash", "-n", PREP_SCRIPT], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+# ── Sub-spoke display names ──────────────────────────────────────────────────
+
+def test_role_sub_spokes_get_distinct_display_names(tmp_path):
+    """{host}-{role} sub-spokes share the host's hostname; each must keep a
+    distinct display name, while the base agent keeps the bare hostname."""
+    state = _fresh_state(tmp_path)
+    hub = _ReconcileHub(state, _make_km())
+    u = {r: str(_uuid.uuid4()) for r in ("base", "console", "cppm")}
+    reconcile(hub, "lrb-agent", u["base"], "lrb-agent")
+    reconcile(hub, "lrb-agent-console", u["console"], "lrb-agent")
+    reconcile(hub, "lrb-agent-cppm", u["cppm"], "lrb-agent")
+    names = {pk: m["display_name"] for pk, m in state.system_state["module_metadata"].items()}
+    assert sorted(names.values()) == ["lrb-agent", "lrb-agent-console", "lrb-agent-cppm"]
+    assert state.system_state["module_names"] == names
+
+
+def test_legacy_sub_spoke_bare_hostname_name_is_healed(tmp_path):
+    state = _fresh_state(tmp_path)
+    hub = _ReconcileHub(state, _make_km())
+    u = str(_uuid.uuid4())
+    reconcile(hub, "lrb-agent-proxy", u, "lrb-agent")
+    pk = hub._primary_key("lrb-agent-proxy")
+    state.update_module_metadata(pk, {"display_name": "lrb-agent"})
+    reconcile(hub, "lrb-agent-proxy", u, "lrb-agent")
+    assert state.system_state["module_metadata"][pk]["display_name"] == "lrb-agent-proxy"
+    # An operator-chosen name is never overridden.
+    state.update_module_metadata(pk, {"display_name": "Console Lab"})
+    reconcile(hub, "lrb-agent-proxy", u, "lrb-agent")
+    assert state.system_state["module_metadata"][pk]["display_name"] == "Console Lab"
