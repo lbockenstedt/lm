@@ -581,8 +581,16 @@ class HubIdentityMixin:
         # real host name the feeder sent as hostname. Only on a genuinely new
         # module and only when a hostname was declared; a later operator rename
         # is never overridden (the entry then already exists, so this is skipped).
-        if hostname and new_pk not in self.state.system_state.get("module_metadata", {}):
-            _persist["display_name"] = hostname
+        # Role sub-spokes (id "{host}-{role}") report the SAME hostname as their
+        # base agent, so seed them with the connect-id to keep the registry rows
+        # distinguishable. A legacy row still carrying the bare hostname is healed.
+        _is_sub = bool(hostname) and new_id.lower().startswith(hostname.lower() + "-")
+        _seed = new_id if _is_sub else hostname
+        _meta = self.state.system_state.get("module_metadata", {}) or {}
+        if hostname and new_pk not in _meta:
+            _persist["display_name"] = _seed
+        elif _is_sub and (_meta.get(new_pk, {}) or {}).get("display_name") == hostname:
+            _persist["display_name"] = new_id
         self.state.update_module_metadata(new_pk, _persist)
 
         # Lazy guid-primary arm: relocate this spoke's hub-side state from its
