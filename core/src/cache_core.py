@@ -14,9 +14,10 @@ error":
 
   * ``refresh_after_s`` (30s)  — old enough to revalidate in the BACKGROUND. The
     reader still gets the cached value immediately; nothing is blocked.
-  * ``stale_after_s`` (120s)   — old enough to admit it. Still served, now with
+  * ``stale_after_s`` (300s)   — old enough to admit it (data under 5 minutes
+    old is shown as if live, with no badge). Still served, now with
     the "cached data" badge. This is the window that covers a spoke restarting
-    during a hub/agent update: it is offline for far less than this, so the
+    during a hub/agent update: it is offline for less than this, so the
     Hypervisor/Diagnostics pages keep rendering last-known data instead of
     replacing the page with "Timed out waiting for spoke response".
   * ``expire_after_s`` (24h)   — old enough that serving it would be a lie. This
@@ -46,7 +47,7 @@ logger = logging.getLogger("Hub")
 
 DEFAULT_FLUSH_DELAY_S = 5.0
 DEFAULT_REFRESH_AFTER_S = 30.0
-DEFAULT_STALE_AFTER_S = 120.0
+DEFAULT_STALE_AFTER_S = 300.0
 DEFAULT_EXPIRE_AFTER_S = 86400.0
 
 
