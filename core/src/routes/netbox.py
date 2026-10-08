@@ -2,6 +2,8 @@
 import asyncio
 import os
 import secrets
+
+from access import ADMIN_TENANT_ID
 from api import (
     HTTPException, Request, _cache_entry, _fetch_module, _hub_msg,
     _refresh_module_all_tenants, _unwrap_netbox,
@@ -118,7 +120,32 @@ def register(app, hub, ctx):
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
         if _is_admin(sess):
-            return requested_slug
+            if requested_slug is not None:
+                return requested_slug
+            # No explicit tenant in the body — this is the normal shape for the
+            # WebUI's "currently selected tenant" create forms when that tenant
+            # is the built-in Admin tenant (id "default"): every other tenant
+            # is 1:1 with its own NetBox slug and gets stamped into the body
+            # directly, but 'default' is excluded there (it also doubles as
+            # the unscoped/global sentinel). LM's own tenant list ALWAYS
+            # labels this tenant "ADMIN" in the UI (hardcoded in
+            # /setup/tenants, not a user rename) — NetBox has no tenant
+            # actually named/slugged "admin"; the matching NetBox tenant is
+            # the one literally slugged "default". Resolve the caller's
+            # selected tenant context (``?tenant=`` query param, the same
+            # convention every read route uses) through that tenant's
+            # ``netbox_tenant_slug`` config first (an explicit override always
+            # wins), and fall back to the literal "default" slug for the
+            # built-in Admin tenant specifically when nothing is configured —
+            # so the created object lands in NetBox's real "default" tenant
+            # out of the box, with no manual linking step required.
+            ctx_tid = request.query_params.get("tenant")
+            if ctx_tid:
+                slug = get_tenant_scoping(hub, ctx_tid).get("netbox_tenant_slug") or None
+                if not slug and ctx_tid == ADMIN_TENANT_ID:
+                    slug = ADMIN_TENANT_ID
+                return slug
+            return None
         if requested_slug is None:
             return None  # unassigned create is allowed; just can't target another tenant
         user = sess.get("user", {}) or {}

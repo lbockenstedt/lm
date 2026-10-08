@@ -377,8 +377,19 @@ class SpokeRegistryMixin:
         Still no cross-tenant leak — a spoke effectively scoped to a DIFFERENT
         real tenant is excluded. Empty (not a global fallback) when nothing is
         visible: the caller decides whether to fall back, as with the singular
-        resolver."""
-        if not tenant_id or tenant_id == "default":
+        resolver.
+
+        ``tenant_id == "default"`` (the built-in ADMIN tenant) is NOT a special
+        "no aggregation" case here — it is scoped exactly like any other
+        tenant (mirrors ``access.tenant_scope_ids``'s "default" → {"", "default"}
+        convention): UNASSIGNED hosts (no agent pin, no spoke binding) and
+        hosts explicitly bound/pinned to ``"default"`` are visible to it, plus
+        shared infra, but a host bound to some OTHER real tenant is never
+        pulled in (that firehose was the originally-reported leak). Without
+        this, a Proxmox host the admin deliberately assigned to the ADMIN
+        tenant would never appear on its own Overview — the reported "servers
+        I just added don't show up" bug."""
+        if not tenant_id:
             return []
         cands = (list(self.get_all_spokes_by_type("hypervisor") or [])
                  + list(self.get_all_spokes_by_type("simulation") or []))
@@ -389,6 +400,8 @@ class SpokeRegistryMixin:
         except Exception:
             shared = None
         want = {tenant_id}
+        if tenant_id == "default":
+            want.add("")  # UNASSIGNED resources are visible to the ADMIN scope
         if shared:
             want.add(shared)
         out = []
@@ -397,7 +410,8 @@ class SpokeRegistryMixin:
                 continue
             if not self.approved_modules.get(sid, False):
                 continue
-            if self._spoke_effective_tenants(sid) & want:
+            effs = self._spoke_effective_tenants(sid) or {""}
+            if effs & want:
                 out.append(sid)
         return out
 

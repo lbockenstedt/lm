@@ -1349,13 +1349,21 @@ def register(app, hub, ctx):
         # selected ("All") → the global spoke (every node). A non-admin with no
         # resolvable tenant still fails closed rather than the old flat 403.
         tid = _resolve_tenant(request, tenant)
-        if tid and tid != "default":
+        if tid:
             # Every agent-hosting spoke (pxmx AND cs) BOUND to this tenant — a
             # CS-enabled box on a cs spoke must contribute its node to the tenant's
             # Overview too. Strictly tenant-scoped (no cross-tenant host leak). Fall
             # back to the GLOBAL hypervisor spoke when nothing is bound so a
             # connected-but-unbound host's Overview still matches its (subnet-
             # filtered) VM list — the pre-existing behavior, unchanged.
+            #
+            # ``tid == "default"`` (ADMIN) is included here, not special-cased
+            # below: get_hypervisor_spokes_for_tenant already scopes "default"
+            # to UNASSIGNED + explicitly-"default"-bound/pinned + shared hosts
+            # (access.tenant_scope_ids), so a Proxmox host the admin actually
+            # assigned to the ADMIN tenant shows up here — it no longer gets
+            # blanked by a blanket "select a tenant" response (the reported
+            # "servers I just added don't show up" bug).
             node_spokes = hub.get_hypervisor_spokes_for_tenant(tid)
             if not node_spokes:
                 # Fall back to the global hypervisor spoke ONLY when it is
@@ -1382,21 +1390,12 @@ def register(app, hub, ctx):
                     if gs:
                         return {"nodes": [], "spoke_connected": False}
         elif _is_admin(sess):
-            if tid == "default":
-                # ADMIN (default) tenant EXPLICITLY selected in the picker: do
-                # NOT accumulate every tenant's hosts into one firehose. A Global
-                # Admin selects a SPECIFIC tenant to see that tenant's hosts (the
-                # branch above); the default/ADMIN scope shows nothing on its own.
-                # Returned clean + flagged so the UI prompts "select a tenant"
-                # rather than an error or a misleading "no agents connected".
-                # (Was: every node across every spoke — the reported cross-tenant
-                # accumulation.) A truly unscoped admin call (tid is None — not
-                # the picker, which always sends ?tenant=) still sees the fleet.
-                # ``spoke_connected`` stays truthful: no hypervisor spoke is
-                # in scope here. The UI branches on ``select_tenant`` first.
-                return {"nodes": [], "spoke_connected": False, "select_tenant": True}
-            # No tenant scope AT ALL (tid is None) → every node across every
-            # agent-hosting spoke (programmatic/unscoped admin call).
+            # No tenant scope AT ALL (tid is None — a truly unscoped/
+            # programmatic admin call, not the picker, which always sends
+            # ?tenant= including "default") → every node across every
+            # agent-hosting spoke. "default" (ADMIN picker selection) is
+            # handled in the ``if tid:`` branch above, scoped like any other
+            # tenant rather than blanked.
             node_spokes = list(dict.fromkeys(
                 hub.get_all_spokes_by_type("hypervisor")
                 + hub.get_all_spokes_by_type("simulation")))
@@ -1598,16 +1597,15 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=401, detail="Authentication required")
 
         tid = _resolve_tenant(request, tenant)
-        # ``default`` is the ADMIN tenant, not "All": do NOT fall back to the
-        # global hypervisor spoke there — it may be bound to ANOTHER tenant,
-        # which leaked that tenant's drive diagnostics into the ADMIN view.
-        # Flagged so the UI prompts "select a tenant" (mirrors get_pxmx_nodes /
-        # get_pxmx_vms). Only a tenantless resolve keeps the global fallback.
+        # ``default`` is the ADMIN tenant, not "All" — scoped like any other
+        # tenant via get_hypervisor_spokes_for_tenant (UNASSIGNED + explicitly
+        # "default"-bound/pinned + shared hosts), NOT forced to an empty
+        # "select a tenant" prompt. That used to blank even a Proxmox host the
+        # admin deliberately assigned to the ADMIN tenant (the reported bug).
+        # Only a truly tenantless resolve (tid is None — not the picker, which
+        # always sends ?tenant=) keeps the global fallback.
         select_tenant = False
-        if tid == "default":
-            spokes = []
-            select_tenant = True
-        elif tid:
+        if tid:
             spokes = hub.get_hypervisor_spokes_for_tenant(tid)
         else:
             spokes = [hub.get_hypervisor_spoke()] if hub.get_hypervisor_spoke() else []
@@ -1922,7 +1920,7 @@ def register(app, hub, ctx):
         # spokes; an unbound global spoke only when it's itself unbound to any
         # tenant) so Overview and the VM list share one isolation boundary
         # instead of VMs relying solely on the weaker subnet filter.
-        if tid and tid != "default":
+        if tid:
             visible_spokes = set(hub.get_hypervisor_spokes_for_tenant(tid))
             gs = hub.get_hypervisor_spoke()
             gs_tid = ((hub.state.system_state.get("module_metadata", {}) or {})
@@ -1930,16 +1928,6 @@ def register(app, hub, ctx):
             if gs and not gs_tid:
                 visible_spokes.add(gs)
         elif _is_admin(sess):
-            if tid == "default":
-                # ADMIN (default) tenant EXPLICITLY selected: do NOT accumulate
-                # every tenant's VMs. A Global Admin selects a SPECIFIC tenant to
-                # see that tenant's VMs (the branch above); the default/ADMIN
-                # scope shows nothing on its own. Clean + flagged so the UI
-                # prompts "select a tenant". (Was: None = no restriction = every
-                # spoke — the reported accumulation.) A truly unscoped admin call
-                # (tid is None, not the picker) still sees the whole fleet.
-                # Truthful spoke_connected; the UI branches on select_tenant.
-                return _with_tpl({"vms": [], "spoke_connected": False, "select_tenant": True})
             visible_spokes = None  # no restriction — admin, no tenant scope at all (tid is None)
         else:
             raise HTTPException(status_code=403, detail="Select a tenant to view its hypervisor VMs")
