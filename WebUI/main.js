@@ -14048,7 +14048,7 @@ async function loadFwDiscoveryConfig() {
         const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
         const chk = document.getElementById('fw-sync-enabled');
         if (chk) chk.checked = cfg.enabled === true;
-        set('fw-sync-source', cfg.source || 'opnsense');
+        set('fw-sync-source', cfg.source || 'auto');
         set('fw-sync-data', cfg.source_data || 'both');
         set('fw-sync-firewall', cfg.firewall_id || '');
         set('fw-sync-mode', cfg.mode === 'daily' ? 'daily' : 'interval');
@@ -14120,7 +14120,7 @@ async function runFwDiscoveryNow() {
 
 async function saveFwDiscoveryConfig() {
     const enabled = document.getElementById('fw-sync-enabled')?.checked ? true : false;
-    const source = document.getElementById('fw-sync-source')?.value || 'opnsense';
+    const source = document.getElementById('fw-sync-source')?.value || 'auto';
     const sourceData = document.getElementById('fw-sync-data')?.value || 'both';
     const firewallId = document.getElementById('fw-sync-firewall')?.value || '';
     const mode = document.getElementById('fw-sync-mode')?.value || 'interval';
