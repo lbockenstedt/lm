@@ -154,19 +154,23 @@ def test_expired_cache_is_not_served():
     assert body["nodes"] == []
 
 
-def test_admin_default_tenant_never_serves_another_tenants_cache():
-    """``default`` is the ADMIN scope, not "All". It prompts for a tenant, and
-    must NOT answer with whatever tenant was last viewed — that would reopen
-    the cross-tenant leak the select_tenant prompt exists to close."""
+def test_admin_default_tenant_serves_its_own_cache_not_another_tenants():
+    """``default`` is the ADMIN tenant, scoped exactly like any other tenant —
+    NOT a blanket "pick a tenant" prompt, and NOT "All tenants" either. With no
+    spoke currently in scope it still falls back to ITS OWN warm cache (keyed
+    "default|node=", exactly like any other tenant's "<tid>|node=" key), never
+    to some other tenant's cache (that would be the cross-tenant leak the
+    per-tenant warm-cache key exists to close)."""
     hub = _MockHub(bound_spoke=None, global_spoke="pxmx-global")
-    hub.seed_warm(_NS, "t1|node=", _cached_payload(node="secret-host"), age_s=5)
-    hub.seed_warm(_NS, "default|node=", _cached_payload(node="secret-host"), age_s=5)
+    hub.seed_warm(_NS, "t1|node=", _cached_payload(node="other-tenants-host"), age_s=5)
+    hub.seed_warm(_NS, "default|node=", _cached_payload(node="admin-own-host"), age_s=5)
     client = _build_client(hub, tenant="default")
 
     body = client.get("/api/pxmx/drive-health?tenant=default").json()
-    assert body["select_tenant"] is True
-    assert body["nodes"] == []
-    assert body.get("stale") is not True
+    assert body.get("select_tenant") is not True
+    assert [n["node"] for n in body["nodes"]] == ["admin-own-host"]
+    assert body["stale"] is True
+
 
 
 def test_cache_is_keyed_per_tenant_and_node():

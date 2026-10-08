@@ -204,11 +204,32 @@ def test_spokes_for_tenant_skips_unapproved_and_disconnected():
     assert sorted(LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "t")) == ["cs-06", "pxmx-1"]
 
 
-def test_spokes_for_tenant_empty_for_default_or_none():
+def test_spokes_for_tenant_none_is_always_empty():
+    """``None`` (no tenant context at all) never aggregates anything here —
+    callers fall back to the global spoke themselves in that case."""
+    hub = _MixedHub(hypervisors=["pxmx-1"], simulations=["cs-06"],
+                    metadata={"pxmx-1": {"tenant_id": "t"}, "cs-06": {"tenant_id": "t"}})
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, None) == []
+
+
+def test_spokes_for_tenant_default_excludes_other_real_tenants():
+    """``default`` (the ADMIN tenant) is scoped like any other tenant id — a
+    spoke bound to a DIFFERENT real tenant is still excluded (no firehose)."""
     hub = _MixedHub(hypervisors=["pxmx-1"], simulations=["cs-06"],
                     metadata={"pxmx-1": {"tenant_id": "t"}, "cs-06": {"tenant_id": "t"}})
     assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "default") == []
-    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, None) == []
+
+
+def test_spokes_for_tenant_default_includes_unassigned_and_default_bound():
+    """The reported bug: ``default`` must see spokes with NO tenant binding at
+    all, and spokes explicitly bound to ``"default"`` itself (a Proxmox host
+    the admin deliberately assigned to the ADMIN tenant) — previously this
+    helper unconditionally returned ``[]`` for ``"default"``, which silently
+    hid both cases from the Hypervisor Overview."""
+    hub = _MixedHub(hypervisors=["pxmx-unassigned", "pxmx-admin"], simulations=[],
+                    metadata={"pxmx-admin": {"tenant_id": "default"}})
+    got = LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "default")
+    assert sorted(got) == ["pxmx-admin", "pxmx-unassigned"]
 
 
 # ── shared-tenant infra visible to every tenant (Overview regression fix) ────
