@@ -375,6 +375,8 @@ def register(app, hub, ctx):
             new_fw = data.get("firewall", {})
             if not new_fw.get("name") or not new_fw.get("model"):
                 raise HTTPException(status_code=400, detail="Missing firewall name or model")
+            if new_fw.get("model") == "opnsense" and not (new_fw.get("api_key") and new_fw.get("api_secret")):
+                raise HTTPException(status_code=400, detail="OPNsense needs both an API key and an API secret")
 
             # Tenant-scoped add: a tenant-admin may bind a firewall ONLY to a
             # firewall spoke assigned to their own tenant, and the device is bound
@@ -434,6 +436,9 @@ def register(app, hub, ctx):
             if fw_index is None:
                 raise HTTPException(status_code=404, detail="Firewall not found")
 
+            merged = {**firewalls[fw_index], **update_data}
+            if merged.get("model") == "opnsense" and not (merged.get("api_key") and merged.get("api_secret")):
+                raise HTTPException(status_code=400, detail="OPNsense needs both an API key and an API secret")
             firewalls[fw_index].update(update_data)
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()

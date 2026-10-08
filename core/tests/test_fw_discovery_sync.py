@@ -20,6 +20,8 @@ from _fakes import FakeState
 
 
 REQUIRED_SOURCE_KEYS = {"module_type", "dhcp_command", "label"}
+_OPNSENSE = FwDiscoverySyncMixin.FIREWALL_DISCOVERY_SOURCES["opnsense"]
+_KEA = FwDiscoverySyncMixin.FIREWALL_DISCOVERY_SOURCES["kea"]
 
 
 # ── registry / config contract (sync) ───────────────────────────────────────
@@ -53,15 +55,43 @@ def test_cfg_key_and_target_are_fixed():
 def test_default_source_is_opnsense_when_unconfigured():
     m = FwDiscoverySyncMixin()
     m.state = FakeState(global_config={})
+    m.get_all_spokes_by_type = lambda mt: ["opn-1"] if mt == "firewall" else []
     assert m._fw_discovery_source() is FwDiscoverySyncMixin.FIREWALL_DISCOVERY_SOURCES["opnsense"]
 
 
-def test_unknown_source_falls_back_to_opnsense_case_insensitive():
+def test_unknown_source_falls_back_to_auto_case_insensitive():
+    # An unrecognized explicit name now falls back to "auto" (every connected
+    # source) rather than a single hard-coded product — same safety net, wider.
     m = FwDiscoverySyncMixin()
+    m.get_all_spokes_by_type = lambda mt: ["opn-1"] if mt == "firewall" else []
     m.state = FakeState(system_state={"global_config": {"opnsense_netbox_device_sync": {"source": "  PALO-ALTO-SOMEDAY  "}}})
     assert m._fw_discovery_source() is FwDiscoverySyncMixin.FIREWALL_DISCOVERY_SOURCES["opnsense"]
     m.state = FakeState(system_state={"global_config": {"opnsense_netbox_device_sync": {"source": "  OPNSENSE  "}}})
     assert m._fw_discovery_source() is FwDiscoverySyncMixin.FIREWALL_DISCOVERY_SOURCES["opnsense"]
+
+
+def test_discovery_sources_auto_resolves_every_connected_source():
+    m = FwDiscoverySyncMixin()
+    m.get_all_spokes_by_type = lambda mt: ["opn-1"] if mt == "firewall" else (["dhcp-1"] if mt == "dhcp" else [])
+    m.state = FakeState(system_state={"global_config": {}})
+    names = {n for n, _ in m._fw_discovery_sources()}
+    assert names == {"opnsense", "kea"}
+
+
+def test_discovery_sources_pinned_name_returns_only_that_one():
+    m = FwDiscoverySyncMixin()
+    m.get_all_spokes_by_type = lambda mt: ["opn-1"] if mt == "firewall" else (["dhcp-1"] if mt == "dhcp" else [])
+    m.state = FakeState(system_state={"global_config": {"opnsense_netbox_device_sync": {"source": "kea"}}})
+    names = [n for n, _ in m._fw_discovery_sources()]
+    assert names == ["kea"]
+
+
+def test_discovery_sources_excludes_disconnected_sources_in_auto_mode():
+    m = FwDiscoverySyncMixin()
+    m.get_all_spokes_by_type = lambda mt: [] if mt == "dhcp" else ["opn-1"]
+    m.state = FakeState(system_state={"global_config": {"opnsense_netbox_device_sync": {"source": "auto"}}})
+    names = {n for n, _ in m._fw_discovery_sources()}
+    assert names == {"opnsense"}
 
 
 # ── MAC normalization (sync) ────────────────────────────────────────────────
@@ -81,17 +111,18 @@ def test_norm_mac_drops_unknown_and_blank():
 # ── firewall spoke resolution (sync) ────────────────────────────────────────
 
 def test_firewall_spokes_pinned_vs_all():
+    opnsense = FwDiscoverySyncMixin.FIREWALL_DISCOVERY_SOURCES["opnsense"]
     m = FwDiscoverySyncMixin()
     m.state = FakeState(system_state={"global_config": {"opnsense_netbox_device_sync": {"firewall_id": "fw1"}}})
     m.get_spoke_for_firewall = lambda fid: "opn-fw1" if fid == "fw1" else None
     m.get_all_spokes_by_type = lambda mt: ["opn-a", "opn-b"]
-    assert m._fw_firewall_spokes() == ["opn-fw1"]
+    assert m._fw_firewall_spokes(opnsense) == ["opn-fw1"]
     # unpinned → all connected firewall spokes
     m.state = FakeState(system_state={"global_config": {}})
-    assert m._fw_firewall_spokes() == ["opn-a", "opn-b"]
+    assert m._fw_firewall_spokes(opnsense) == ["opn-a", "opn-b"]
     # pinned but firewall not found → empty (no fallback to all)
     m.state = FakeState(system_state={"global_config": {"opnsense_netbox_device_sync": {"firewall_id": "ghost"}}})
-    assert m._fw_firewall_spokes() == []
+    assert m._fw_firewall_spokes(opnsense) == []
 
 
 # ── canned-relay hub (async) ────────────────────────────────────────────────
@@ -190,7 +221,7 @@ def _hub_with_full_responses(sync_n=2):
 @pytest.mark.asyncio
 async def test_pull_merges_dhcp_arp_and_normalizes_mac():
     h = _hub_with_full_responses()
-    records, info = await h._fw_pull_discovered()
+    records, info = await h._fw_pull_discovered(_OPNSENSE)
     # 3 distinct devices: the DHCP+ARP pair merged into one, plus two ARP-only.
     assert len(records) == 3
     by_ip = {r["ip"]: r for r in records}
@@ -209,7 +240,7 @@ async def test_pull_uses_source_data_to_select_tables():
         ("opn-fw1", "OPNSENSE_GET_ARP_TABLE"): _arp_payload(),
         ("netbox-spoke-1", "NETBOX_GET_PREFIXES"): _prefixes_payload(),
     })
-    records, _ = await h._fw_pull_discovered()
+    records, _ = await h._fw_pull_discovered(_OPNSENSE)
     cmds = [c for _, c, _ in h.request_log]
     assert "OPNSENSE_GET_DHCP_LEASES" not in cmds
     assert "OPNSENSE_GET_ARP_TABLE" in cmds
@@ -219,7 +250,7 @@ async def test_pull_uses_source_data_to_select_tables():
 @pytest.mark.asyncio
 async def test_attribute_buckets_by_prefix_and_drops_unattributed():
     h = _hub_with_full_responses()
-    records, _ = await h._fw_pull_discovered()
+    records, _ = await h._fw_pull_discovered(_OPNSENSE)
     buckets, dropped = await h._fw_attribute(records)
     assert set(buckets.keys()) == {"acme"}
     assert len(buckets["acme"]) == 2          # 10.20.0.5 + 10.20.0.50
@@ -374,7 +405,7 @@ def _kea_hub(**over):
 
 def test_kea_source_selects_dhcp_spokes_not_firewall_spokes():
     h = _kea_hub()
-    assert h._fw_firewall_spokes() == ["dhcp-spoke-1"]
+    assert h._fw_firewall_spokes(_KEA) == ["dhcp-spoke-1"]
 
 
 def test_pinned_firewall_id_is_ignored_for_a_non_firewall_source():
@@ -383,13 +414,13 @@ def test_pinned_firewall_id_is_ignored_for_a_non_firewall_source():
     # return the firewall spoke here.
     h = _kea_hub(firewall_id="fw-abc")
     h.get_spoke_for_firewall = lambda firewall_id: "opn-fw1"
-    assert h._fw_firewall_spokes() == ["dhcp-spoke-1"]
+    assert h._fw_firewall_spokes(_KEA) == ["dhcp-spoke-1"]
 
 
 @pytest.mark.asyncio
 async def test_kea_leases_are_parsed_from_native_envelope_and_fields():
     h = _kea_hub()
-    records, info = await h._fw_pull_discovered()
+    records, info = await h._fw_pull_discovered(_KEA)
     assert info["errors"] == []
     by_ip = {r["ip"]: r for r in records}
     assert set(by_ip) == {"10.20.0.5", "10.20.0.77"}
@@ -405,7 +436,7 @@ async def test_kea_pull_never_issues_an_arp_command():
     # skipped rather than falling back to OPNSENSE_GET_ARP_TABLE, which a DHCP
     # spoke cannot answer (it would error every cycle).
     h = _kea_hub()
-    records, info = await h._fw_pull_discovered()
+    records, info = await h._fw_pull_discovered(_KEA)
     cmds = [c for _, c, _ in h.request_log]
     assert "OPNSENSE_GET_ARP_TABLE" not in cmds
     assert "DHCP_LIST_LEASES" in cmds
@@ -416,7 +447,7 @@ async def test_kea_pull_never_issues_an_arp_command():
 @pytest.mark.asyncio
 async def test_kea_discovered_leases_reach_the_netbox_push():
     h = _kea_hub()
-    records, _ = await h._fw_pull_discovered()
+    records, _ = await h._fw_pull_discovered(_KEA)
     buckets, dropped = await h._fw_attribute(records)
     assert dropped == 0
     assert {r["ip"] for r in buckets["acme"]} == {"10.20.0.5", "10.20.0.77"}
@@ -438,6 +469,107 @@ async def test_dhcp_hostname_wins_over_arp_on_merge():
             ]}}},
         ("netbox-spoke-1", "NETBOX_GET_PREFIXES"): _prefixes_payload(),
     })
-    records, _ = await h._fw_pull_discovered()
+    records, _ = await h._fw_pull_discovered(_OPNSENSE)
     assert len(records) == 1
     assert records[0]["hostname"] == "from-dhcp"
+
+
+# ── multi-source ("auto") end-to-end ────────────────────────────────────────
+# With both OPNsense and Kea connected and no pinned "source", the resolver
+# must pull+push BOTH, entirely separately (never merged into one NETBOX_SYNC_
+# DEVICES payload — that would let one source's replace=True wrongly delete
+# the other's devices), then combine the two resulting statuses into the one
+# record the status store/UI expects.
+
+def _dual_source_hub(**responses_extra):
+    h = _SyncHub(
+        global_config={},  # unset → "auto"
+        fw_spokes=["opn-fw1"], fw_spoke_type="firewall",
+        responses={
+            ("opn-fw1", "OPNSENSE_GET_DHCP_LEASES"): _dhcp_payload(),
+            ("opn-fw1", "OPNSENSE_GET_ARP_TABLE"): _arp_payload(),
+            ("dhcp-spoke-1", "DHCP_LIST_LEASES"): _kea_lease_payload(),
+            ("netbox-spoke-1", "NETBOX_GET_PREFIXES"): _prefixes_payload(),
+            ("netbox-spoke-1", "NETBOX_SYNC_DEVICES"): _sync_devices_ok(2),
+            **responses_extra,
+        },
+    )
+    # _SyncHub.get_all_spokes_by_type only knows one fw_spoke_type; patch it to
+    # report both "firewall" (opnsense) and "dhcp" (kea) as connected.
+    h.get_all_spokes_by_type = lambda mt: (
+        ["opn-fw1"] if mt == "firewall" else (["dhcp-spoke-1"] if mt == "dhcp" else []))
+    h.get_spoke_for_firewall = lambda fid: None
+    return h
+
+
+def test_auto_resolves_both_connected_sources():
+    h = _dual_source_hub()
+    names = [n for n, _ in h._fw_discovery_sources()]
+    assert set(names) == {"opnsense", "kea"}
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_pushes_each_source_separately_not_merged():
+    h = _dual_source_hub()
+    status = await h.sync_tenant_devices("acme")
+    pushes = [p for sid, cmd, p in h.request_log if cmd == "NETBOX_SYNC_DEVICES"]
+    # Two independent pushes, one per source — never one merged payload.
+    assert len(pushes) == 2
+    sources_pushed = {p["source"] for p in pushes}
+    assert sources_pushed == {"OPNsense", "Kea (LM DHCP)"}
+    for p in pushes:
+        assert p["replace"] is True
+        assert p["tenant_slug"] == "acme"
+    # Combined status sums both sources' pushed counts.
+    assert status["pushed"] == 4
+    assert len(status["sources"]) == 2
+    assert status["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_combines_statuses_when_one_source_errors():
+    # Kea's push fails (NetBox rejects it) while OPNsense succeeds — the
+    # combined status must still read "error" so the UI surfaces the failure,
+    # while OPNsense's successful push is NOT lost.
+    h = _dual_source_hub()
+    call_count = {"n": 0}
+    orig = h.request_response
+
+    async def flaky(spoke_id, command, payload, timeout=30.0):
+        if command == "NETBOX_SYNC_DEVICES":
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise RuntimeError("netbox spoke timed out")
+        return await orig(spoke_id, command, payload, timeout)
+
+    h.request_response = flaky
+    status = await h.sync_tenant_devices("acme")
+    assert status["status"] == "error"
+    assert any(s.get("status") == "success" for s in status["sources"])
+    assert any(s.get("status") == "error" for s in status["sources"])
+
+
+def test_combine_statuses_single_source_passthrough():
+    m = FwDiscoverySyncMixin()
+    s = {"tenant_id": "acme", "status": "success", "pushed": 2, "errors": 0,
+         "skipped": 0, "deleted": 0, "message": "ok", "source": "OPNsense"}
+    combined = m._fw_combine_statuses([s])
+    assert combined["pushed"] == 2
+    assert combined["sources"] == [s]
+
+
+def test_combine_statuses_merges_counters_and_escalates_status():
+    m = FwDiscoverySyncMixin()
+    s1 = {"tenant_id": "acme", "tenant_name": "Acme", "status": "success",
+          "pushed": 2, "errors": 0, "skipped": 0, "deleted": 0,
+          "message": "2 device(s) sent", "source": "OPNsense", "last_sync_ts": "a"}
+    s2 = {"tenant_id": "acme", "tenant_name": "Acme", "status": "error",
+          "pushed": 0, "errors": 1, "skipped": 0, "deleted": 0,
+          "message": "NetBox spoke not connected", "source": "Kea (LM DHCP)", "last_sync_ts": "b"}
+    combined = m._fw_combine_statuses([s1, s2])
+    assert combined["status"] == "error"
+    assert combined["pushed"] == 2
+    assert combined["errors"] == 1
+    assert "OPNsense: 2 device(s) sent" in combined["message"]
+    assert "Kea (LM DHCP): NetBox spoke not connected" in combined["message"]
+    assert combined["sources"] == [s1, s2]
