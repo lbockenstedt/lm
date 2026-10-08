@@ -1087,6 +1087,42 @@ def register(app, hub, ctx):
             data["query_names"] = filtered
         return data
 
+    @app.get("/api/dns/client-queries")
+    async def dns_client_queries(request: Request, client: str = "", minutes: int = 10,
+                                 search: str = None, tenant: str = None):
+        """Pi-hole-style per-device query log: every query ``client`` (an IP,
+        or a DHCP-lease hostname resolved to its IP) made in the trailing
+        ``minutes``, newest first. Tenant scoping mirrors /api/dns/stats."""
+        client = (client or "").strip()
+        ip_to_host = await _dns_stats_ip_to_host(request, tenant)
+        if client and client not in ip_to_host:
+            low = client.lower()
+            for ip, name in ip_to_host.items():
+                if name.lower() == low:
+                    client = ip
+                    break
+        source_prefixes = None
+        tid = _effective_tenant(request, tenant)
+        if tid:
+            if access.filter_enabled(hub, "dns"):
+                source_prefixes = await access.resolve_prefixes_for_tenant(hub, tid) or []
+        else:
+            sess = _session_user(request)
+            if sess and not _is_admin(sess) and access.filter_enabled(hub, "dns"):
+                source_prefixes = await access.resolve_prefixes(hub, sess) or []
+        payload = {"client": client, "minutes": max(1, min(int(minutes), 43200))}
+        if search:
+            payload["search"] = search
+        if source_prefixes is not None:
+            payload["source_prefixes"] = source_prefixes
+        data = await _relay_spoke(_dns_spoke_for_request(request, tenant),
+                                  "DNS_CLIENT_QUERIES", payload,
+                                  log_name="dns_client_queries")
+        for q in data.get("queries") or []:
+            if isinstance(q, dict):
+                q["host"] = ip_to_host.get(q.get("client", ""), "")
+        return data
+
     @app.get("/api/dns/forwarders")
     async def dns_forwarders(request: Request, tenant: str = None):
         """Configured upstream forwarders (per-zone upstream servers)."""
