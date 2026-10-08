@@ -184,19 +184,53 @@ def test_admin_no_tenant_uses_global_spoke():
     assert hub.relayed_to == "pxmx-global"
 
 
-def test_admin_default_tenant_does_not_accumulate_nodes():
-    """A Global Admin on the ADMIN (``default``) tenant must not see every
-    tenant's nodes accumulated. The Overview returns an empty,
-    ``select_tenant``-flagged payload and relays to NO spoke — the admin picks a
-    specific tenant to see its hosts. Distinct from the unscoped admin call
-    above (no ``?tenant=``), which still uses the global spoke."""
+def test_admin_default_tenant_sees_its_own_unbound_global_spoke():
+    """The ADMIN (``default``) tenant is scoped exactly like any other tenant:
+    an UNBOUND (truly unassigned) global hypervisor spoke is visible to it —
+    same fallback a real tenant with no dedicated spoke gets (see
+    ``test_unbound_tenant_falls_back_to_global_spoke``). Only a spoke bound to
+    a DIFFERENT real tenant must stay excluded (see the companion
+    ``..._does_not_leak_a_foreign_bound_spoke`` test below) — that was the
+    originally-reported cross-tenant accumulation. Previously ADMIN/default
+    was blanked unconditionally here, which also hid a Proxmox host the admin
+    had deliberately assigned to the ADMIN tenant (the reported "servers I
+    just added don't show up" bug)."""
     hub = _Hub(bound_spoke=None, global_spoke="pxmx-global")
     c = _build(hub, admin=True, tenant=None)  # ctx resolves ?tenant= explicitly
     r = c.get("/api/pxmx/nodes?tenant=default")
     assert r.status_code == 200
     body = r.json()
+    assert len(body["nodes"]) == 1
+    assert body.get("select_tenant") is not True
+    assert hub.relayed_to == "pxmx-global"
+
+
+def test_admin_default_tenant_sees_a_spoke_explicitly_bound_to_it():
+    """The reported bug: a Proxmox hypervisor spoke the admin explicitly
+    assigned to the ADMIN (``default``) tenant must show up on the ADMIN
+    tenant's own Overview — it is a REAL binding, not "unassigned", and
+    ``default`` is scoped like any other tenant id."""
+    hub = _Hub(bound_spoke="pxmx-admin-host", global_spoke="pxmx-global")
+    c = _build(hub, admin=True, tenant=None)
+    r = c.get("/api/pxmx/nodes?tenant=default")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["nodes"]) == 1
+    assert body.get("select_tenant") is not True
+    assert hub.relayed_to == "pxmx-admin-host"
+
+
+def test_admin_default_tenant_does_not_leak_a_foreign_bound_spoke():
+    """ADMIN (``default``) must still never accumulate a spoke BOUND to some
+    OTHER real tenant — the originally-reported cross-tenant leak. Mirrors
+    ``test_foreign_bound_global_spoke_does_not_leak_into_other_tenant`` but for
+    the ADMIN tenant itself."""
+    hub = _Hub(bound_spoke=None, global_spoke="pxmx-lrb", global_spoke_tenant="lrb")
+    c = _build(hub, admin=True, tenant=None)
+    r = c.get("/api/pxmx/nodes?tenant=default")
+    assert r.status_code == 200
+    body = r.json()
     assert body["nodes"] == []
-    assert body.get("select_tenant") is True
     assert hub.relayed_to is None  # no spoke was queried
 
 
@@ -381,7 +415,7 @@ def test_drive_health_admin_default_queries_no_spoke():
     assert r.status_code == 200
     body = r.json()
     assert body["nodes"] == []
-    assert body.get("select_tenant") is True
+    assert body.get("select_tenant") is not True
     assert hub.relayed_to is None, "queried a spoke for the ADMIN scope"
 
 
@@ -396,13 +430,6 @@ def test_drive_health_admin_default_reports_no_spoke_connected():
     assert body["spoke_connected"] is False
     assert body["summary"]["total_drives"] == 0
 
-
-def test_nodes_and_vms_admin_default_also_report_no_spoke_connected():
-    hub = _Hub(bound_spoke=None, global_spoke="pxmx-global")
-    c = _build(hub, admin=True, tenant=None)
-    nodes = c.get("/api/pxmx/nodes?tenant=default").json()
-    assert nodes["spoke_connected"] is False
-    assert nodes.get("select_tenant") is True
 
 
 def test_drive_health_unscoped_admin_still_uses_global_spoke():

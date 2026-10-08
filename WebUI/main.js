@@ -15574,8 +15574,14 @@ async function loadSpokesAndAgents() {
     // Tenant filter (Setup → Spokes & Agents dropdown). Applied LAST — after the
     // role-annotation pass above has run against the full set — so a role
     // sub-spoke's parent lookup is never broken by a filtered-out peer. Spokes
-    // and generic agents carry tenant_id directly; a pxmx node agent carries its
-    // owning spoke_id, so its tenant is that spoke's tenant_id. "__unassigned__"
+    // and generic agents carry tenant_id directly. A pxmx node agent's tenant
+    // is its OWN pinned client_simulation.tenant_id when set (same precedence
+    // as the DISPLAY label, _tenantOf) — NOT just its owning spoke's binding;
+    // using the spoke's tenant_id here (ignoring the per-agent pin) silently
+    // dropped a Proxmox agent explicitly assigned to a tenant (e.g. ADMIN/
+    // "default") from that tenant's filtered view whenever its spoke itself
+    // was bound/shared/unassigned differently — the reported "doesn't always
+    // show all spokes and agents assigned to Admin" bug. "__unassigned__"
     // (the default) matches anything with no tenant binding — the freshly
     // onboarded spokes/agents an admin triages first; "__all__" disables the
     // filter.
@@ -15589,7 +15595,8 @@ async function loadSpokesAndAgents() {
     };
     const trueSpokesF    = trueSpokes.filter(s => _saMatch(s.tenant_id));
     const genericAgentsF = genericAgents.filter(s => _saMatch(s.tenant_id));
-    const pxmxAgentsF    = pxmxAgents.filter(a => _saMatch(_spokeTenantById.get(a.spoke_id) ?? a.tenant_id));
+    const pxmxAgentsF    = pxmxAgents.filter(a => _saMatch(_tenantOf(a) || _spokeTenantById.get(a.spoke_id)));
+
 
     _renderSpokesTable(spokesWrap, trueSpokesF, diagBy);
     // An agent is an agent — idle (no role yet) and active (role-loaded) generic
@@ -25330,7 +25337,12 @@ async function submitNetboxRack() {
         return;
     }
     try {
-        const url = editing ? `/api/netbox/racks/${modal.dataset.rackId}` : '/api/netbox/racks';
+        // See submitNetboxAllocatePrefix: 'default' (Admin tenant) can't be
+        // stamped into the body (also the unscoped/global sentinel), so pass
+        // it as ?tenant= context — the server resolves it through that
+        // tenant's configured NetBox link instead of creating it unassigned.
+        const qs = (!editing) ? `?tenant=${encodeURIComponent(currentTenant || 'default')}` : '';
+        const url = editing ? `/api/netbox/racks/${modal.dataset.rackId}` : `/api/netbox/racks${qs}`;
         const d = await apiJson(url, { method: editing ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
         if (d.status === 'SUCCESS') { modal.remove(); loadNetboxData('Racks'); }
         else showToast('Error: ' + (d.message || 'Operation failed'), 'error');
@@ -25499,7 +25511,13 @@ async function submitNetboxAllocatePrefix() {
         tenant: (currentTenant && currentTenant !== 'default') ? currentTenant : undefined,
     };
     try {
-        const d = await apiJson('/api/netbox/prefixes', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+        // 'default' (the built-in Admin tenant) can't be stamped into the body
+        // above — it's also the unscoped/global sentinel — so pass it as the
+        // same ?tenant= context every read route already uses; the server
+        // resolves it through that tenant's configured NetBox link (if any)
+        // instead of silently creating the prefix unassigned.
+        const qs = `?tenant=${encodeURIComponent(currentTenant || 'default')}`;
+        const d = await apiJson(`/api/netbox/prefixes${qs}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
         if (d.status === 'SUCCESS') {
             document.getElementById('nb-prefix-modal')?.remove();
             showToast(`Allocated: ${d.prefix}`, 'success');
