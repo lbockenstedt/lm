@@ -114,6 +114,33 @@ class WarmCacheMixin:
             self._warm_cache_file.schedule_save()
         return n
 
+    def warm_invalidate(self, ns_prefix: str, key_prefixes: tuple) -> int:
+        """Like ``warm_drop`` but KEEPS the last-known data: matching entries
+        classify as ``missing`` (so the next read re-fetches live) while
+        ``warm_get`` still returns the old envelope to serve if that fetch fails
+        (spoke restarting/updating). The original timestamp moves to
+        ``stale_from`` so the badge age stays honest."""
+        n = 0
+        for ns, entries in self.warm_cache.items():
+            if not ns.startswith(ns_prefix):
+                continue
+            for k, e in entries.items():
+                if k.startswith(key_prefixes) and isinstance(e, dict) and e.get("fetched_at"):
+                    e["stale_from"] = e["fetched_at"]
+                    e["fetched_at"] = 0
+                    n += 1
+        if n:
+            self._warm_cache_file.schedule_save()
+        return n
+
+    def warm_last_fetched_at(self, namespace: str, key: str = "_") -> Optional[float]:
+        """Epoch of the data actually held, even if the entry was invalidated."""
+        entry = self.warm_cache.get(namespace, {}).get(str(key))
+        if not isinstance(entry, dict):
+            return None
+        ts = entry.get("fetched_at") or entry.get("stale_from")
+        return ts if isinstance(ts, (int, float)) else None
+
     async def warm_cache_flush_now(self) -> None:
         """Immediate persist (shutdown path) — skips the coalescing delay."""
         await self._warm_cache_file.flush_now()
