@@ -349,15 +349,55 @@ class DnsDhcpSyncMixin:
         # pass 30s+; this loop was the lone outlier. 30s matches them.
         return unwrap_spoke(await self.request_response(nb, "NETBOX_GET_IPS", {}, timeout=30.0))
 
+    def _ipam_spoke_candidates(self) -> List[str]:
+        """Connected IPAM spokes, the one bound to a configured ipam_instance
+        first. With several IPAM spokes connected (e.g. a dedicated NetBox
+        spoke plus a netbox role on a generic agent) "first registered wins"
+        can land on one with no NetBox URL configured."""
+        first = self.get_spoke_by_type("ipam")
+        spokes = []
+        if hasattr(self, "get_all_spokes_by_type"):
+            spokes = list(self.get_all_spokes_by_type("ipam") or [])
+        if first and first not in spokes:
+            spokes.insert(0, first)
+        pk = getattr(self, "_primary_key", None) or (lambda s: s)
+        gc = (self.state.system_state or {}).get("global_config", {}) or {}
+        bound = {pk(str(i.get("spoke_id"))) for i in (gc.get("ipam_instances") or [])
+                 if isinstance(i, dict) and i.get("spoke_id")}
+        return sorted(spokes, key=lambda s: 0 if pk(s) in bound else 1)
+
     async def _netbox_prefixes_and_ips(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        nb = self.get_spoke_by_type("ipam")
-        if not nb:
+        """Fetch NetBox prefixes + IPs, failing over across IPAM spokes.
+
+        Raises unless a spoke returns BOTH lists. A spoke-side failure comes
+        back as ``{"status": "ERROR", ...}`` with no ``prefixes`` key; treating
+        that as "zero prefixes" made the sync push an empty subnet4 and wipe
+        every Kea scope whenever NetBox was unreachable from the chosen spoke.
+        """
+        candidates = self._ipam_spoke_candidates()
+        if not candidates:
             raise RuntimeError("NetBox spoke not connected")
-        pfx_raw, ips_raw = await asyncio.gather(
-            self.request_response(nb, "NETBOX_GET_PREFIXES", {}, timeout=30.0),
-            self.request_response(nb, "NETBOX_GET_IPS", {}, timeout=30.0),
-        )
-        return unwrap_spoke(pfx_raw), unwrap_spoke(ips_raw)
+        errors = []
+        for nb in candidates:
+            try:
+                pfx_raw, ips_raw = await asyncio.gather(
+                    self.request_response(nb, "NETBOX_GET_PREFIXES", {}, timeout=30.0),
+                    self.request_response(nb, "NETBOX_GET_IPS", {}, timeout=30.0),
+                )
+            except Exception as e:  # noqa: BLE001 — try the next IPAM spoke
+                errors.append(f"{nb}: {e}")
+                continue
+            pfx, ips = unwrap_spoke(pfx_raw), unwrap_spoke(ips_raw)
+            bad = [f"{what}: {(d or {}).get('message') if isinstance(d, dict) else d!r}"
+                   for what, d, key in (("prefixes", pfx, "prefixes"),
+                                        ("ip_addresses", ips, "ip_addresses"))
+                   if not isinstance(d, dict) or str(d.get("status", "")).upper() == "ERROR"
+                   or not isinstance(d.get(key), list)]
+            if bad:
+                errors.append(f"{nb}: " + "; ".join(bad))
+                continue
+            return pfx, ips
+        raise RuntimeError("NetBox fetch failed on every IPAM spoke — " + " | ".join(errors))
 
     def _get_dhcp_spokes(self) -> List[str]:
         """All connected, approved DHCP spokes to sync to."""
