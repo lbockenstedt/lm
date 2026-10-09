@@ -1243,6 +1243,7 @@ def register(app, hub, ctx):
             "config": {
                 "enabled":  bool(cfg.get("enabled", True)),
                 "interval": int(cfg.get("interval", 300) or 300),
+                "dhcp_dns_hook": hub._dns_hook_desired(),
             },
         }
 
@@ -4332,10 +4333,18 @@ def register(app, hub, ctx):
         plus an optional ``hook_dir`` override."""
         body = await request.json()
         settings = {k: v for k, v in body.items() if k != "hook_dir"}
-        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
-                                  "DHCP_DNS_HOOK_CONFIG",
-                                  {"settings": settings, "hook_dir": body.get("hook_dir") or ""},
-                                  log_name="dhcp_dns_hook_config", timeout=30)
+        result = await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
+                                    "DHCP_DNS_HOOK_CONFIG",
+                                    {"settings": settings, "hook_dir": body.get("hook_dir") or ""},
+                                    log_name="dhcp_dns_hook_config", timeout=30)
+        # Persist as the desired state, or the hub's periodic reconcile
+        # (dns_dhcp_sync._reconcile_dns_hook) would revert this change.
+        if isinstance(settings, dict) and "enabled" in settings:
+            hub = app.state.hub
+            gc = hub.state.system_state.setdefault("global_config", {})
+            gc["dhcp_dns_hook"] = {**(gc.get("dhcp_dns_hook") or {}), **settings}
+            hub.state._mark_dirty()
+        return result
 
     @app.get("/api/dhcp/stats")
     async def dhcp_stats(request: Request, tenant: str = None):
