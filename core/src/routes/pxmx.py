@@ -1781,7 +1781,7 @@ def register(app, hub, ctx):
             silence stops being a blip and the data is no longer worth showing.
             """
             state = hub.warm_state("pxmx_drive_health", warm_key)
-            if state in ("expired", "missing"):
+            if state == "missing":
                 return None
             cached = hub.warm_get("pxmx_drive_health", warm_key)
             if not isinstance(cached, dict):
@@ -1827,11 +1827,14 @@ def register(app, hub, ctx):
         # spoke round-trip. Only an explicit ?refresh=true, or a scope that has
         # never been polled, goes to the spoke.
         if not refresh:
-            if hub.warm_state("pxmx_drive_health", warm_key) not in ("expired", "missing"):
+            state = hub.warm_state("pxmx_drive_health", warm_key)
+            if state != "missing":
                 cached = hub.warm_get("pxmx_drive_health", warm_key)
                 if isinstance(cached, dict):
                     out = dict(cached)
                     out["spoke_connected"] = True
+                    if state == "expired":  # >24h: the 6h poll is failing; badge it
+                        out["stale"] = True
                     out["cached_at"] = hub.warm_fetched_at("pxmx_drive_health", warm_key)
                     return out
 

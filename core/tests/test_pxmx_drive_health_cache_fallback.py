@@ -141,17 +141,17 @@ def test_spoke_present_but_timing_out_serves_cache():
     assert body["nodes"], "timeout produced an empty drive table"
 
 
-def test_expired_cache_is_not_served():
-    """A day-old snapshot is no longer evidence about the hardware — past
-    ``expire_after_s`` the honest answer is the empty/no-spoke state."""
+def test_expired_cache_is_served_but_badged_stale():
+    """Past 24h (the 6h poll is failing) the last-known drives are still shown,
+    flagged stale so the UI badges them."""
     hub = _MockHub(bound_spoke=None, global_spoke=None)
     hub.seed_warm(_NS, "t1|node=", _cached_payload(),
                   age_s=DEFAULT_EXPIRE_AFTER_S + 60)
     client = _build_client(hub, tenant="t1")
 
     body = client.get("/api/pxmx/drive-health?tenant=t1").json()
-    assert body.get("stale") is not True
-    assert body["nodes"] == []
+    assert body["stale"] is True
+    assert [n["node"] for n in body["nodes"]] == ["pve1"]
 
 
 def test_admin_default_tenant_serves_its_own_cache_not_another_tenants():
