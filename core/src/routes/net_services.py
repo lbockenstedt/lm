@@ -488,6 +488,49 @@ def register(app, hub, ctx):
             _SWR_PREFIX + cmd.lower(), _swr_key("merge", payload),
             lambda: fanout(cmd, payload, list_key))
 
+    # Background feed: (command, route payload, timeout). Payloads MUST match
+    # what the GET routes pass to _cached_relay or the warm-cache keys differ and
+    # the page never sees the pre-fetched entry.
+    _FEED_DHCP = (("DHCP_STATUS", None, None), ("DHCP_STATS", None, None),
+                  ("DHCP_LIST_SUBNETS", {}, None), ("DHCP_LIST_RES", {}, None),
+                  ("DHCP_LIST_LEASES", {"subnet": None}, None),
+                  ("DHCP_HA_STATUS", None, 30), ("DHCP_DIAGNOSTICS", None, None))
+    _FEED_DNS = (("DNS_STATUS", None, None), ("DNS_LIST", None, None),
+                 ("DNS_CLUSTER_STATUS", None, None), ("DNS_FORWARDERS", None, None),
+                 ("DNS_DIAGNOSTICS", None, None))
+
+    async def _swr_feed_once():
+        """Revalidate every connected DNS/DHCP spoke's read caches so the pages
+        are fed in the background (like the other modules) instead of only
+        refreshing when a tab is opened. Best-effort; never raises."""
+        jobs = []
+        for stype, cmds, merge_cmds, fanout in (
+            ("dhcp", _FEED_DHCP,
+             (("DHCP_LIST_SUBNETS", {}, "subnets"), ("DHCP_LIST_RES", {}, "reservations"),
+              ("DHCP_LIST_LEASES", {"subnet": None}, "leases")), _dhcp_merge_fanout),
+            ("dns", _FEED_DNS, (("DNS_LIST", {}, "records"),), _dns_merge_fanout),
+        ):
+            try:
+                spokes = list(hub.get_all_spokes_by_type(stype) or [])
+            except Exception:  # noqa: BLE001
+                spokes = []
+            for sid in spokes:
+                for cmd, payload, tmo in cmds:
+                    jobs.append(_swr_refresh(
+                        _SWR_PREFIX + cmd.lower(), _swr_key(sid, payload),
+                        lambda sid=sid, cmd=cmd, payload=payload, tmo=tmo, stype=stype:
+                            _relay_spoke(sid, cmd, payload, log_name=f"{stype}_feed", timeout=tmo)))
+            if len(spokes) > 1:
+                for cmd, payload, list_key in merge_cmds:
+                    jobs.append(_swr_refresh(
+                        _SWR_PREFIX + cmd.lower(), _swr_key("merge", payload),
+                        lambda cmd=cmd, payload=payload, list_key=list_key, fanout=fanout:
+                            fanout(cmd, payload, list_key)))
+        if jobs:
+            await asyncio.gather(*jobs, return_exceptions=True)
+
+    hub.net_services_feed_once = _swr_feed_once
+
     async def _relay_spoke(spoke_id, command, payload=None, log_name="", timeout=None):
         """Relay ``command`` to a spoke and return its SUCCESS payload.
 
