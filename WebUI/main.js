@@ -19226,12 +19226,14 @@ const _NW_SCHED_INTERVALS = [['0', 'Off'], ['3600', 'Every hour'],
 // must be able to tell them apart at a glance:
 //   lldp   — solid slate   (both ends advertised the adjacency)
 //   manual — solid green   (a human declared it)
+//   netbox — solid blue    (from NetBox's cable inventory)
 //   mac    — dashed amber  (inferred: exactly one MAC learned on that port)
 // Layout is a small deterministic force simulation — no library, no build step
 // (the WebUI is dependency-free vanilla JS by design).
 const _NW_TOPO_EDGE_STYLE = {
     lldp:   { stroke: '#64748b', dash: '',     label: 'LLDP' },
     manual: { stroke: '#01A982', dash: '',     label: 'Declared' },
+    netbox: { stroke: '#0ea5e9', dash: '',     label: 'NetBox cable' },
     mac:    { stroke: '#d97706', dash: '5 4',  label: 'Inferred (MAC)' },
 };
 

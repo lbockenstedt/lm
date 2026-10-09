@@ -147,8 +147,12 @@ class NwDiscoverySyncMixin:
         ``mac_command``) from every device on every connected nw spoke, merge +
         dedup. Returns ``(records, pull_info)`` where each record is
         ``{ip, mac, hostname, source_switch_name, source_switch_ip,
-        source_switch_port}`` (mac normalized; hostname "" — ARP/MAC tables
-        carry no hostname) and ``pull_info`` is ``{"errors": [...]}``.
+        source_switch_port}`` (mac normalized) and ``pull_info`` is
+        ``{"errors": [...]}``. ARP/MAC tables carry no hostname, so each record
+        is cross-referenced against LM's DHCP (Kea) + DNS modules
+        (``_nw_identity_index``): hostname by MAC, else by IP; a MAC-only
+        sighting also takes its lease/reservation IP. Opt out with
+        ``nw_netbox_device_sync.enrich_from_dhcp = false``.
 
         The source-switch identity (device name + mgmt IP) + the port the MAC
         was seen on are attached to EVERY record so NetBox answers "where is
@@ -243,7 +247,131 @@ class NwDiscoverySyncMixin:
                           "source_switch_port"):
                     if not ex.get(k) and rec.get(k):
                         ex[k] = rec[k]
-        return list(merged.values()), {"errors": errors}
+        records = list(merged.values())
+        # ARP/MAC tables carry no hostname: cross-reference LM's DHCP + DNS
+        # modules so NetBox gets a named device (and MAC-only sightings get
+        # their lease IP → tenant attribution) instead of device-<mac>.
+        by_mac, by_ip = await self._nw_identity_index()
+        if by_mac or by_ip:
+            stats = self._nw_apply_identity(records, by_mac, by_ip)
+            logger.info("nw discovery: identity cross-reference named=%d ip_filled=%d "
+                        "(index: %d MACs, %d IPs)", stats["named"], stats["ip_filled"],
+                        len(by_mac), len(by_ip))
+        return records, {"errors": errors}
+
+    async def _nw_identity_index(self) -> Tuple[Dict[str, Dict[str, str]], Dict[str, str]]:
+        """Cross-reference LM's DHCP (Kea reservations, then leases) and DNS
+        (Unbound A records) identity so ARP/MAC-table sightings, which carry no
+        hostname, get one — and MAC-only sightings get their lease IP. Returns
+        ``(by_mac, by_ip)``; higher-priority sources win. Never raises."""
+        if self._nw_discovery_cfg().get("enrich_from_dhcp", True) is False:
+            return {}, {}
+        by_mac: Dict[str, Dict[str, str]] = {}
+        by_ip: Dict[str, str] = {}
+
+        def _ip(v: Any) -> str:
+            s = str(v or "").strip().split("/")[0].strip()
+            return "" if s.lower() in ("", "unknown") else s
+
+        def _mac(v: Any) -> str:
+            return norm_mac(v) if norm_mac else str(v or "").strip().lower()
+
+        def _host(v: Any) -> str:
+            s = str(v or "").strip().rstrip(".")
+            return "" if s.lower() in ("", "unknown") else s
+
+        # (command, module_type, list_key) in PRIORITY order.
+        plan = [("DHCP_LIST_RES", "dhcp", "reservations"),
+                ("DHCP_LIST_LEASES", "dhcp", "leases"),
+                ("DNS_LIST", "dns", "records")]
+        jobs = []  # (command, spoke_id, list_key)
+        for cmd, mtype, key in plan:
+            for sid in dict.fromkeys(self.get_all_spokes_by_type(mtype) or []):
+                jobs.append((cmd, sid, key))
+
+        async def _one(cmd: str, sid: str):
+            try:
+                return await self.request_response(sid, cmd, {}, timeout=30.0)
+            except Exception as e:
+                logger.warning("nw identity index: %s(%s) failed: %s", cmd, sid, e)
+                return None
+
+        results = await asyncio.gather(*[_one(c, s) for c, s, _ in jobs])
+
+        for (cmd, sid, key), raw in zip(jobs, results):
+            if raw is None:
+                continue
+            d = unwrap_spoke(raw) if isinstance(raw, dict) else None
+            if not isinstance(d, dict) or str(d.get("status") or "").upper() == "ERROR":
+                continue
+            rows = d.get(key)
+            if not isinstance(rows, list):
+                rows = d.get("data")
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                if cmd == "DNS_LIST":
+                    if str(row.get("type") or "").upper() != "A":
+                        continue
+                    ip = _ip(row.get("value"))
+                    host = _host(row.get("name"))
+                    if ip and host and ip not in by_ip:
+                        by_ip[ip] = host
+                    continue
+                if cmd == "DHCP_LIST_LEASES" and row.get("state") not in (None, 0, "0"):
+                    continue
+                ip = _ip(row.get("ip") or row.get("ip-address"))
+                mac = _mac(row.get("mac") or row.get("hw-address"))
+                host = _host(row.get("hostname"))
+                if mac:
+                    ent = by_mac.setdefault(mac, {"ip": "", "hostname": ""})
+                    if ip and not ent["ip"]:
+                        ent["ip"] = ip
+                    if host and not ent["hostname"]:
+                        ent["hostname"] = host
+                if ip and host and ip not in by_ip:
+                    by_ip[ip] = host
+        return by_mac, by_ip
+
+    @staticmethod
+    def _nw_apply_identity(records: List[Dict[str, str]],
+                           by_mac: Dict[str, Dict[str, str]],
+                           by_ip: Dict[str, str]) -> Dict[str, int]:
+        """Fill each sighting's missing ``ip`` (from its MAC's DHCP lease/
+        reservation) and ``hostname`` (by MAC, else by IP) in place. Never
+        overwrites a value the sighting already carries, and never fills an IP
+        another sighting already holds (a stale lease must not steal a live
+        ARP address). Returns ``{"named", "ip_filled"}`` counts."""
+        result = {"named": 0, "ip_filled": 0}
+        taken = {r.get("ip") for r in records if isinstance(r, dict) and r.get("ip")}
+
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+
+            mac = rec.get("mac", "")
+            ident = by_mac.get(mac) if mac else None
+
+            if (not rec.get("ip") and ident and ident.get("ip")
+                    and ident["ip"] not in taken):
+                rec["ip"] = ident["ip"]
+                taken.add(ident["ip"])
+                result["ip_filled"] += 1
+
+            if not rec.get("hostname"):
+                hostname = None
+                if ident and ident.get("hostname"):
+                    hostname = ident["hostname"]
+                elif rec.get("ip"):
+                    hostname = by_ip.get(rec["ip"])
+
+                if hostname:
+                    rec["hostname"] = hostname
+                    result["named"] += 1
+
+        return result
 
     async def _nw_attribute(self, records: List[Dict[str, str]]
                             ) -> Tuple[Dict[str, List[Dict[str, str]]], int]:
