@@ -349,7 +349,7 @@ def register(app, hub, ctx):
         "DNS_LIST", "DNS_STATUS", "DNS_DIAGNOSTICS", "DNS_CLUSTER_STATUS",
         "DNS_STATS", "DNS_FORWARDERS", "DHCP_LIST_SUBNETS", "DHCP_LIST_LEASES",
         "DHCP_LIST_RES", "DHCP_STATUS", "DHCP_DIAGNOSTICS", "DHCP_HA_STATUS",
-        "DHCP_STATS"})
+        "DHCP_STATS", "DHCP_DNS_HOOK_STATUS"})
     _swr_inflight = set()
     _swr_gen = [0]
 
