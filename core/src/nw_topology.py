@@ -1,14 +1,20 @@
 """Build a network topology graph from what the fleet can actually tell us.
 
-Three sources, in descending order of trust:
+Four sources, in descending order of trust:
 
-1. **LLDP** (``NW_GET_LLDP_NEIGHBORS``) — a device naming its neighbour and the
-   port it is on. Authoritative: both ends agreed to advertise.
-2. **Operator-declared links** — what a human asserted. Equally authoritative,
-   and the whole point of the feature: a lot of lab gear (unmanaged switches,
-   media converters, PDUs, older APs) speaks no LLDP at all and would otherwise
-   be invisible.
-3. **MAC-table inference** — a switch port that has learned exactly ONE MAC is
+1. **Operator-declared links** — what a human asserted directly in the nw
+   topology UI. The most explicit statement available, and the escape hatch
+   for anything the other three sources get wrong.
+2. **LLDP** (``NW_GET_LLDP_NEIGHBORS``) — a device naming its neighbour and the
+   port it is on. Authoritative and LIVE: both ends agreed to advertise right
+   now.
+3. **NetBox cables** — an operator's cable inventory (``NETBOX_GET_CABLES``),
+   authoritative for gear the nw fleet never logs into at all (unmanaged
+   switches, media converters, PDUs, older APs) and would otherwise be
+   invisible on the map. Ranked below LLDP only because a cable record can go
+   stale (gear re-patched without updating NetBox) in a way a live LLDP
+   adjacency cannot.
+4. **MAC-table inference** — a switch port that has learned exactly ONE MAC is
    almost certainly a direct link to whatever owns that MAC. A port that has
    learned many is an uplink or a trunk carrying a whole downstream segment,
    which says nothing about what is *directly* attached, so it is recorded as a
@@ -31,7 +37,7 @@ from nw_topology_macs import classify_ports, is_topology_mac, norm_mac
 
 #: Edge provenance, most trusted first. Used to decide which edge wins when two
 #: sources describe the same link.
-SOURCE_RANK = {"manual": 0, "lldp": 1, "mac": 2}
+SOURCE_RANK = {"manual": 0, "lldp": 1, "netbox": 2, "mac": 3}
 
 
 def _s(value: Any) -> str:
@@ -319,6 +325,7 @@ def build_topology(fleet: Optional[List[dict]] = None,
                    lldp_by_device: Optional[Dict[str, list]] = None,
                    macs_by_device: Optional[Dict[str, list]] = None,
                    netbox_devices: Optional[List[dict]] = None,
+                   netbox_cables: Optional[List[dict]] = None,
                    manual_devices: Optional[List[dict]] = None,
                    manual_links: Optional[List[dict]] = None,
                    trunk_threshold: int = 4,
@@ -329,13 +336,15 @@ def build_topology(fleet: Optional[List[dict]] = None,
     ``lldp_by_device``  device id → NW_GET_LLDP_NEIGHBORS rows
     ``macs_by_device``  device id → NW_GET_MAC_TABLE rows
     ``netbox_devices``  NetBox inventory rows (name/primary_ip/role/site/model)
+    ``netbox_cables``   NetBox cable rows (NETBOX_GET_CABLES:
+                        a_device/a_port/b_device/b_port/status/label)
     ``manual_devices``  operator-declared devices that speak no LLDP
     ``manual_links``    operator-declared links
 
     Ordering is deliberate. Inventory first so that by the time MAC inference
-    runs, as many MACs as possible already resolve to a NAMED device; then LLDP,
-    so declared and inferred links can both see which ports are already spoken
-    for; then inference last, filling only the gaps.
+    runs, as many MACs as possible already resolve to a NAMED device; then LLDP
+    and NetBox cables, so declared and inferred links can both see which ports
+    are already spoken for; then inference last, filling only the gaps.
     """
     builder = TopologyBuilder(trunk_threshold=trunk_threshold)
 
@@ -351,8 +360,8 @@ def build_topology(fleet: Optional[List[dict]] = None,
 
     # ── 2. Inventory: NetBox ────────────────────────────────────────────────
     # NetBox knows about hardware the nw fleet has never logged into, which is
-    # most of what an operator wants on a topology map. It contributes nodes and
-    # identity (name ⇄ IP), never links: NetBox cables are not modelled here.
+    # most of what an operator wants on a topology map. It contributes nodes
+    # and identity (name ⇄ IP) here; its cables are folded in as links below.
     for dev in (netbox_devices or []):
         if not isinstance(dev, dict):
             continue
@@ -404,7 +413,22 @@ def build_topology(fleet: Optional[List[dict]] = None,
         builder.add_edge(a_id, link.get("a_port"), b_id, link.get("b_port"),
                          "manual", _s(link.get("note")))
 
-    # ── 6. MAC-table inference ──────────────────────────────────────────────
+    # ── 6. NetBox cables ─────────────────────────────────────────────────────
+    # An operator's cable inventory — the one link source that can place gear
+    # the nw fleet never logs into (unmanaged switches, PDUs, patch panels)
+    # onto the map. Declared AFTER manual links (a human override in the nw UI
+    # always wins) but BEFORE inference (a real cable record beats a guess).
+    for cable in (netbox_cables or []):
+        if not isinstance(cable, dict):
+            continue
+        a_id = builder.resolve({"name": cable.get("a_device")})
+        b_id = builder.resolve({"name": cable.get("b_device")})
+        if not a_id or not b_id:
+            continue  # the device end isn't on the map (filtered out upstream)
+        builder.add_edge(a_id, cable.get("a_port"), b_id, cable.get("b_port"),
+                         "netbox", _s(cable.get("label")))
+
+    # ── 7. MAC-table inference ──────────────────────────────────────────────
     if infer_from_macs:
         for device_id, rows in (macs_by_device or {}).items():
             local_id = fleet_ids.get(_s(device_id))

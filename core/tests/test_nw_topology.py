@@ -64,6 +64,7 @@ def test_fleet_alone_yields_nodes_but_no_links():
 def test_junk_records_are_skipped_not_fatal():
     g = build_topology(fleet=["nope", None, {}, {"id": "x", "name": "X"}],
                        netbox_devices=["nope", 7],
+                       netbox_cables=["nope", 7],
                        manual_devices=[None], manual_links=["bad"],
                        lldp_by_device={"x": ["junk", None]},
                        macs_by_device={"x": ["junk"]})
@@ -143,6 +144,76 @@ def test_netbox_and_lldp_views_of_one_device_merge():
     assert "172.16.1.91" in edge1["addresses"]
     assert "00:0b:86:bc:49:87" in edge1["macs"]
     assert len(g["nodes"]) == 3
+
+
+# ── NetBox cables ────────────────────────────────────────────────────────────
+
+def test_netbox_cable_links_two_netbox_only_devices():
+    """The PDU and the patch panel the nw fleet never logs into are the whole
+    point of NetBox cables: with no SSH spoke for either end, LLDP and MAC
+    inference can say nothing about them at all."""
+    g = build_topology(
+        fleet=FLEET,
+        netbox_devices=[
+            {"name": "OLKS-PDU-1", "primary_ip": "172.16.1.200/24"},
+            {"name": "OLKS-PATCH-1", "primary_ip": "172.16.1.201/24"},
+        ],
+        netbox_cables=[{"a_device": "OLKS-PDU-1", "a_port": "1",
+                       "b_device": "OLKS-PATCH-1", "b_port": "A3",
+                       "label": "cable-42"}])
+    edge = _edge_between(g, "OLKS-PDU-1", "OLKS-PATCH-1")
+    assert edge and edge["source"] == "netbox"
+    assert {edge["a_port"], edge["b_port"]} == {"1", "A3"}
+    assert edge["detail"] == "cable-42"
+
+
+def test_netbox_cable_can_link_into_the_fleet_by_name():
+    """A cable naming a device the nw fleet already manages (same name as the
+    fleet record) resolves onto that SAME node, not a phantom duplicate."""
+    g = build_topology(
+        fleet=FLEET,
+        netbox_devices=[{"name": "OLKS-PDU-1", "primary_ip": "172.16.1.200/24"}],
+        netbox_cables=[{"a_device": "OLKS-MGMTSW", "a_port": "48",
+                       "b_device": "OLKS-PDU-1", "b_port": "1"}])
+    edge = _edge_between(g, "OLKS-MGMTSW", "OLKS-PDU-1")
+    assert edge and edge["source"] == "netbox"
+    assert len(g["nodes"]) == 3  # sw1, gw1, OLKS-PDU-1 — no phantom node
+
+
+def test_netbox_cable_to_a_device_not_on_the_map_is_dropped():
+    """A cable end the caller's NetBox fetch didn't return (e.g. filtered to
+    another tenant) must not invent an endpoint."""
+    g = build_topology(fleet=FLEET, netbox_cables=[
+        {"a_device": "OLKS-MGMTSW", "a_port": "1", "b_device": "GHOST-DEV"}])
+    assert g["edges"] == []
+
+
+def test_netbox_cable_loses_to_lldp_on_the_same_port():
+    """A stale cable record and a live LLDP adjacency disagreeing about the
+    same port: LLDP, being LIVE, wins."""
+    g = build_topology(
+        fleet=FLEET + [{"id": "sw2", "name": "OLKS-EDGE-1",
+                        "object_type": "aos_switch", "address": "172.16.1.91"}],
+        lldp_by_device={"sw1": [
+            {"local_port": "1", "remote_chassis": "", "remote_port": "2",
+             "remote_name": "OLKS-EDGE-1", "remote_mgmt_ip": "172.16.1.91"}]},
+        netbox_cables=[{"a_device": "OLKS-MGMTSW", "a_port": "1",
+                       "b_device": "OLKS-EDGE-1", "b_port": "2"}])
+    assert len(g["edges"]) == 1
+    assert g["edges"][0]["source"] == "lldp"
+
+
+def test_manual_link_beats_a_netbox_cable_on_the_same_port():
+    g = build_topology(
+        fleet=FLEET,
+        netbox_devices=[{"name": "OLKS-PDU-1", "primary_ip": "172.16.1.200/24"}],
+        manual_links=[{"a": "sw1", "a_port": "48", "b": "OLKS-PDU-1",
+                       "b_port": "1", "note": "verified by hand"}],
+        netbox_cables=[{"a_device": "OLKS-MGMTSW", "a_port": "48",
+                       "b_device": "OLKS-PDU-1", "b_port": "1"}])
+    edge = _edge_between(g, "OLKS-MGMTSW", "OLKS-PDU-1")
+    assert edge["source"] == "manual"
+    assert edge["detail"] == "verified by hand"
 
 
 # ── MAC inference ───────────────────────────────────────────────────────────

@@ -325,3 +325,91 @@ async def test_run_all_unscoped_push_error_when_netbox_offline():
     # No pushes dispatched; the unscoped push status reports the offline error.
     assert agg["mac_only_status"]["status"] == "error"
     assert h.sync_payloads == []
+
+# ── DHCP/DNS identity cross-reference (ARP/MAC sightings carry no hostname) ──
+
+class _IdentityHub(_SyncHub):
+    def get_all_spokes_by_type(self, module_type):
+        return {"nw": list(self._nw_spoke_list), "dhcp": ["dhcp-1"],
+                "dns": ["dns-1"]}.get(module_type, [])
+
+
+def _identity_hub(global_config=None, leases=None, reservations=None, dns=None):
+    gc = global_config or _global_config()
+    ok = lambda key, rows: {"payload": {"data": {"status": "SUCCESS", key: rows}}}
+    return _IdentityHub(
+        responses={
+            ("nw-1", "NW_GET_ARP"): {"payload": {"data": {"status": "SUCCESS", "data": [
+                {"ip": "10.20.0.5", "mac": "aa:bb:cc:dd:ee:05", "interface": "Gi1/0/5"},
+                {"ip": "10.20.0.7", "mac": "aa:bb:cc:dd:ee:07", "interface": "Gi1/0/7"},
+                {"ip": "10.20.0.8", "mac": "aa:bb:cc:dd:ee:08", "interface": "Gi1/0/8"},
+            ]}}},
+            ("nw-1", "NW_GET_MAC_TABLE"): _mac_table_payload(),
+            ("netbox-1", "NETBOX_GET_PREFIXES"): _prefixes_payload(),
+            ("dhcp-1", "DHCP_LIST_RES"): ok("reservations", reservations if reservations is not None else [
+                {"ip": "10.20.0.5", "mac": "AA-BB-CC-DD-EE-05", "hostname": "printer1"}]),
+            ("dhcp-1", "DHCP_LIST_LEASES"): ok("leases", leases if leases is not None else [
+                # lease name loses to the reservation for the same MAC
+                {"ip-address": "10.20.0.5", "hw-address": "aa:bb:cc:dd:ee:05", "hostname": "lease-name", "state": 0},
+                # MAC-only sighting ee99 gets its lease IP + name (trailing dot stripped)
+                {"ip-address": "10.20.0.99", "hw-address": "aa:bb:cc:dd:ee:99", "hostname": "laptop99.", "state": 0},
+                # declined/expired lease ignored
+                {"ip-address": "10.20.0.7", "hw-address": "aa:bb:cc:dd:ee:07", "hostname": "stale", "state": 1},
+            ]),
+            ("dns-1", "DNS_LIST"): ok("records", dns if dns is not None else [
+                {"name": "static8.lab", "type": "A", "value": "10.20.0.8"},
+                {"name": "alias", "type": "CNAME", "value": "static8.lab"},
+            ]),
+        },
+        global_config=gc,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pull_cross_references_dhcp_and_dns_identity():
+    h = _identity_hub()
+    records, info = await h._nw_pull_discovered()
+    assert not info["errors"]
+    by_mac = {r["mac"]: r for r in records}
+    assert by_mac["aa:bb:cc:dd:ee:05"]["hostname"] == "printer1"      # reservation wins
+    assert by_mac["aa:bb:cc:dd:ee:99"]["ip"] == "10.20.0.99"         # MAC-only → lease IP
+    assert by_mac["aa:bb:cc:dd:ee:99"]["hostname"] == "laptop99"
+    assert by_mac["aa:bb:cc:dd:ee:07"]["hostname"] == ""             # non-active lease skipped
+    assert by_mac["aa:bb:cc:dd:ee:08"]["hostname"] == "static8.lab"  # DNS A by IP
+
+
+@pytest.mark.asyncio
+async def test_mac_only_sighting_with_lease_is_pushed_to_tenant_not_unscoped():
+    h = _identity_hub()
+    agg = await h.run_nw_discovery_sync_all()
+    assert agg["mac_only_total"] == 0
+    tenant_push = next(p for p in h.sync_payloads if p.get("tenant_slug") == "acme")
+    names = {d["mac"]: d["hostname"] for d in tenant_push["devices"]}
+    assert names["aa:bb:cc:dd:ee:99"] == "laptop99"
+    assert not any(p.get("tenant_slug") == "" for p in h.sync_payloads)
+
+
+@pytest.mark.asyncio
+async def test_stale_lease_ip_never_steals_a_live_arp_address():
+    h = _identity_hub(leases=[
+        {"ip-address": "10.20.0.5", "hw-address": "aa:bb:cc:dd:ee:99", "hostname": "old", "state": 0}])
+    records, _ = await h._nw_pull_discovered()
+    by_mac = {r["mac"]: r for r in records}
+    assert by_mac["aa:bb:cc:dd:ee:99"]["ip"] == ""
+    assert by_mac["aa:bb:cc:dd:ee:05"]["ip"] == "10.20.0.5"
+
+
+@pytest.mark.asyncio
+async def test_identity_enrichment_opt_out_and_spoke_failure_tolerated():
+    gc = _global_config()
+    gc["nw_netbox_device_sync"]["enrich_from_dhcp"] = False
+    h = _identity_hub(global_config=gc)
+    records, _ = await h._nw_pull_discovered()
+    assert all(r["hostname"] == "" for r in records)
+    assert not any(c.startswith(("DHCP_", "DNS_")) for _, c, _ in h.request_log)
+
+    h2 = _identity_hub()
+    del h2._responses[("dhcp-1", "DHCP_LIST_RES")]   # request raises KeyError
+    records2, info2 = await h2._nw_pull_discovered()
+    assert not info2["errors"]
+    assert {r["mac"]: r for r in records2}["aa:bb:cc:dd:ee:05"]["hostname"] == "lease-name"
