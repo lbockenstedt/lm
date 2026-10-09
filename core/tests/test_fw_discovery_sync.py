@@ -86,6 +86,17 @@ def test_discovery_sources_pinned_name_returns_only_that_one():
     assert names == ["kea"]
 
 
+def test_discovery_sources_pinned_firewall_still_includes_connected_kea():
+    # A pre-"auto" config pinned to "opnsense" must not starve NetBox of LM's
+    # own Kea leases: the pin picks the firewall product, Kea rides along.
+    m = FwDiscoverySyncMixin()
+    m.get_all_spokes_by_type = lambda mt: ["opn-1"] if mt == "firewall" else (["dhcp-1"] if mt == "dhcp" else [])
+    m.state = FakeState(system_state={"global_config": {"opnsense_netbox_device_sync": {"source": "opnsense"}}})
+    assert [n for n, _ in m._fw_discovery_sources()] == ["opnsense", "kea"]
+    m.get_all_spokes_by_type = lambda mt: ["opn-1"] if mt == "firewall" else []
+    assert [n for n, _ in m._fw_discovery_sources()] == ["opnsense"]
+
+
 def test_discovery_sources_excludes_disconnected_sources_in_auto_mode():
     m = FwDiscoverySyncMixin()
     m.get_all_spokes_by_type = lambda mt: [] if mt == "dhcp" else ["opn-1"]

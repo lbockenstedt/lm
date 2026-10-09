@@ -160,9 +160,13 @@ class FwDiscoverySyncMixin:
             all, even though nothing was actually broken in the Kea pull path
             itself. Every dynamic Kea lease now gets a corresponding NetBox
             device/IP record by default, same as OPNsense always has.
-          - an explicit known name (e.g. ``"opnsense"``, ``"kea"``) → ONLY that
-            one source — an operator who deliberately pinned a single source
-            keeps that exact behavior, unchanged.
+          - an explicit known name (e.g. ``"opnsense"``, ``"kea"``) →
+            a pinned FIREWALL product (``module_type == "firewall"``) is
+            returned first, followed by every connected non-firewall source
+            (LM's own Kea). The pin chooses which firewall, not whether LM's
+            DHCP module feeds NetBox — a pre-"auto" config pinned to
+            "opnsense" otherwise starved NetBox of every Kea lease. A pinned
+            non-firewall source (``"kea"``) returns ONLY that source.
           - an explicit but unknown name → falls back to "auto" (same safety
             net the old code had in defaulting to OPNsense, just widened to
             "try every connected source" instead of one hard-coded product).
@@ -175,10 +179,26 @@ class FwDiscoverySyncMixin:
         devices the OTHER source owns.
         """
         name = str(self._fw_discovery_cfg().get("source", "") or "").strip().lower()
-        if name and name != "auto" and name in self.FIREWALL_DISCOVERY_SOURCES:
-            return [(name, self.FIREWALL_DISCOVERY_SOURCES[name])]
-        return [(n, se) for n, se in self.FIREWALL_DISCOVERY_SOURCES.items()
-                if self.get_all_spokes_by_type(se.get("module_type", ""))]
+        if not name or name == "auto":
+            return [(n, se) for n, se in self.FIREWALL_DISCOVERY_SOURCES.items()
+                    if self.get_all_spokes_by_type(se.get("module_type", ""))]
+
+        if name not in self.FIREWALL_DISCOVERY_SOURCES:
+            return [(n, se) for n, se in self.FIREWALL_DISCOVERY_SOURCES.items()
+                    if self.get_all_spokes_by_type(se.get("module_type", ""))]
+
+        source_entry = self.FIREWALL_DISCOVERY_SOURCES[name]
+        module_type = source_entry.get("module_type", "")
+
+        if module_type == "firewall":
+            result = [(name, source_entry)]
+            for n, se in self.FIREWALL_DISCOVERY_SOURCES.items():
+                if (se.get("module_type", "") != "firewall" and
+                        self.get_all_spokes_by_type(se.get("module_type", ""))):
+                    result.append((n, se))
+            return result
+        else:
+            return [(name, source_entry)]
 
     def _fw_firewall_spokes(self, source_entry: Dict[str, str]) -> List[str]:
         """Connected source spoke ids to pull from this cycle for ONE source.
