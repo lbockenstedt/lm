@@ -8395,6 +8395,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 logger.info("Tenant sync: pruned tenant group %s (gone from NetBox)", tid)
 
         self.state._mark_dirty()
+        _access.refresh_shared_tenant(self)
         logger.debug("Tenant sync: %d tenant group(s) from NetBox", len(groups))
 
     # ── IPAM → CPPM endpoint sync → core/src/endpoint_sync.py (EndpointSyncMixin) ──
