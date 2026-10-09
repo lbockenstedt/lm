@@ -423,6 +423,17 @@ def netbox_tenant_scope(hub, tenant_id: str = None) -> dict:
                     "key": TENANT_GROUP_PREFIX + group_slug}
 
     tenant = scoping.get("netbox_tenant_slug") or None
+    if not tenant and tid == ADMIN_TENANT_ID:
+        # The built-in Admin tenant (id "default") doubles as the unscoped/
+        # all-tenants sentinel, so it has no ``netbox_tenant_slug`` configured
+        # out of the box — but it is also a REAL NetBox tenant (literally
+        # slugged "default"). Without this fallback, every reader of this
+        # scope (NetBox list GETs, ``fetch_tenant_prefixes`` and therefore
+        # ``attribute_by_prefix``) resolves Admin to "no tenant filter"
+        # instead of "the default tenant", so records the write path already
+        # stamps "default" onto (see ``_enforce_body_tenant``) never come
+        # back when Admin is the selected tenant. Mirrors that same fallback.
+        tenant = ADMIN_TENANT_ID
     return {"tenant": tenant, "tenant_group": None,
             "slugs": [tenant] if tenant else [], "is_group": False,
             "tenant_id": tid, "key": tenant or "_all_"}
@@ -1530,11 +1541,17 @@ def effective_tenant(sessions: dict, request: "Request", explicit: str = None) -
 def effective_tenant_slug(hub, sessions: dict, request: "Request", explicit: str = None) -> str | None:
     """NetBox tenant slug for the effective (selected) tenant, or None when the
     tenant is unbound to NetBox / unknown / unselected. None → callers treat as
-    'no scope' (no-op)."""
+    'no scope' (no-op).
+
+    Routed through ``netbox_tenant_scope`` (not a raw ``netbox_tenant_slug``
+    read) so the built-in Admin tenant's "default" NetBox-slug fallback
+    applies here too — otherwise a caller scoping by the selected tenant would
+    resolve Admin to "no scope" even though NetBox objects are stamped into
+    its real "default" tenant (see ``netbox_tenant_scope``)."""
     tid = effective_tenant(sessions, request, explicit)
     if not tid:
         return None
-    return (get_tenant_scoping(hub, tid) or {}).get("netbox_tenant_slug") or None
+    return netbox_tenant_scope(hub, tid).get("tenant")
 
 
 # ── Prefix resolution ────────────────────────────────────────────────────────
@@ -1546,16 +1563,21 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
     the tenant is unconfigured or the NetBox spoke is down."""
     if not tenant_id:
         return []
-    scoping = get_tenant_scoping(hub, tenant_id) or {}
-    nb_slug = scoping.get("netbox_tenant_slug")
+    # Routed through netbox_tenant_scope (not a raw netbox_tenant_slug read) so
+    # the built-in Admin tenant's "default" NetBox-slug fallback applies here
+    # too — otherwise Admin's own NetBox-tenant-"default" prefixes never come
+    # back, which starves attribute_by_prefix of them and silently drops (or
+    # mis-attributes) Admin-tenant DHCP/ARP discoveries that land in NetBox
+    # under the real "default" tenant (see netbox_tenant_scope).
+    scope = netbox_tenant_scope(hub, tenant_id)
+    nb_slug = scope.get("tenant")
     payload = {"tenant": nb_slug}
     if not nb_slug:
         # A tenant GROUP has no slug of its own: union its members' prefixes
         # via NetBox's tree-aware tenant_group filter.
-        group = netbox_tenant_scope(hub, tenant_id)
-        if not group.get("tenant_group"):
+        if not scope.get("tenant_group"):
             return []
-        payload = {"tenant_group": group["tenant_group"]}
+        payload = {"tenant_group": scope["tenant_group"]}
     def _from_warm():
         # Last-known prefixes for this scope (same cache the NetBox page uses),
         # so a restarting/unreachable spoke doesn't make a tenant look empty.
@@ -1606,6 +1628,15 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
     tenants = (hub.state.tenant_state or {}).get("tenants", {}) or {}
     tids = [str(tid) for tid, c in tenants.items()
             if not (isinstance(c, dict) and c.get("is_tenant_group"))]
+    if ADMIN_TENANT_ID not in tids:
+        # The built-in Admin tenant ("default") commonly has no explicit
+        # record in tenant_state (it's synthesized for display in
+        # /setup/tenants when absent — see get_tenants), but it can genuinely
+        # own NetBox prefixes/IPs (stamped "default" by _enforce_body_tenant).
+        # Without it in tids, Admin-owned prefixes are never fetched and any
+        # DHCP/ARP discovery whose IP falls in one of them is wrongly dropped
+        # or mis-attributed to another tenant's broader prefix.
+        tids.append(ADMIN_TENANT_ID)
     nets_by_tid: Dict[str, List[Any]] = {}
     if fetch_tenant_prefixes is not None and tids:
         sem = asyncio.Semaphore(8)
