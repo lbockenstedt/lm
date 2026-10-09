@@ -172,3 +172,43 @@ def test_expanded_targets_dedup_against_subnets():
     assert ips[:2] == ["10.0.0.1", "10.0.0.2"]
     assert per["explicit"] == 2
     assert per["subnets"] == 4
+
+
+def test_split_leaf_and_supernets():
+    from routes.nw import split_leaf_and_supernets
+    leaves, supers = split_leaf_and_supernets(
+        ["10.0.0.0/16", "10.0.1.0/24", "10.0.2.0/24", "192.168.1.0/24", "bogus", "fd00::/64"])
+    assert [str(n) for n in supers] == ["10.0.0.0/16"]
+    assert sorted(str(n) for n in leaves) == ["10.0.1.0/24", "10.0.2.0/24", "192.168.1.0/24"]
+
+
+def test_split_leaf_and_supernets_dedupes_and_standalone():
+    from routes.nw import split_leaf_and_supernets
+    leaves, supers = split_leaf_and_supernets(["10.0.0.0/24", "10.0.0.0/24"])
+    assert supers == [] and [str(n) for n in leaves] == ["10.0.0.0/24"]
+
+
+def test_sweep_ranges_exclude_leaves():
+    import ipaddress
+    from routes.nw import sweep_ranges, split_leaf_and_supernets
+    leaves, supers = split_leaf_and_supernets(["10.0.0.0/24", "10.0.1.0/24", "10.0.0.0/23"])
+    # /23 contains both /24s -> nothing left to sweep
+    assert sweep_ranges(supers, leaves) == []
+    leaves, supers = split_leaf_and_supernets(["10.0.0.0/22", "10.0.1.0/24"])
+    r = sweep_ranges(supers, leaves)
+    total = sum(h - l + 1 for l, h in r)
+    assert total == 1024 - 256 - 2  # /22 minus the /24 and its own net/broadcast
+    # first usable host is 10.0.0.1, 10.0.1.x absent
+    ips, cur, tot = __import__("routes.nw", fromlist=["sweep_take"]).sweep_take(r, 0, 5000)
+    assert "10.0.1.5" not in ips and "10.0.0.1" in ips and "10.0.2.1" in ips
+
+
+def test_sweep_take_cursor_and_wrap():
+    from routes.nw import sweep_take
+    r = [(167772161, 167772170)]  # 10.0.0.1-10.0.0.10
+    ips, cur, tot = sweep_take(r, 0, 4)
+    assert ips == ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"] and cur == 4 and tot == 10
+    ips, cur, _ = sweep_take(r, cur, 4, skip={"10.0.0.6"})
+    assert ips == ["10.0.0.5", "10.0.0.7", "10.0.0.8"] and cur == 8
+    ips, cur, _ = sweep_take(r, cur, 4)
+    assert ips == ["10.0.0.9", "10.0.0.10"] and cur == 0

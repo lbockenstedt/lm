@@ -9559,9 +9559,18 @@ async function runNwScan(btn, dryRun) {
 function _nwScanResultsHtml(d) {
     const rows = (d.added && d.added.length) ? d.added : (d.preview || []);
     const reachable = (d.reachable || []).filter(h => h && h.reachable !== false && !(d.identified || []).some(i => i.address === h.address && i.object_type));
-    const srcTxt = Object.entries(d.sources || {}).map(([k, v]) => `${k}:${v}`).join(' · ') || 'none';
+    const srcTxt = Object.entries(d.sources || {}).filter(([k]) => k !== 'truncated' && k !== 'failed_batches').map(([k, v]) => `${k}:${v}`).join(' · ') || 'none';
     let html = `<div class="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-md">
         <p class="text-slate-600"><b>${d.targets || 0}</b> target(s) scanned (${escapeHtml(srcTxt)}) · <b>${(d.identified || []).length}</b> identified · <b>${reachable.length}</b> reachable · <b>${d.dry_run ? (d.preview || []).length + ' to add (preview)' : (d.added || []).length + ' added'}</b></p>`;
+    if ((d.batches || 0) > 1) {
+        html += `<p class="mt-1 text-[11px] text-slate-500">Large scan split into ${d.batches} batches.</p>`;
+    }
+    if ((d.sources || {}).truncated) {
+        html += `<p class="mt-1 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">${d.sources.truncated} further address(es) exceeded the scan ceiling and were not scanned. Narrow the sources, or leave very large supernets to the background sweep.</p>`;
+    }
+    if ((d.sources || {}).failed_batches) {
+        html += `<p class="mt-1 text-[11px] text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1">${d.sources.failed_batches} batch(es) failed or timed out; results are partial.</p>`;
+    }
     if (d.discovery_only) {
         html += `<p class="mt-1 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">Discovery-only scan — no scan credentials were selected, so hosts were probed for reachability and open ports but not logged into. Nothing can be auto-added from this run. Select a credential set to identify and add devices.</p>`;
     }
@@ -19639,7 +19648,7 @@ async function _renderNwScanTab() {
         </div>
         <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
           <div><label class="${lblCls}">TCP Ports</label><input type="text" id="nwt-ports" value="${escapeHtml((scan.tcp_ports || [22,443,80,23]).join(', '))}" class="${inCls}"></div>
-          <div><label class="${lblCls}">Max Targets</label><input type="number" id="nwt-maxtargets" min="1" max="4096" value="${escapeHtml(String(scan.max_targets || 1024))}" class="${inCls}"></div>
+          <div><label class="${lblCls}" title="Scans larger than this are split into batches of this size and run in parallel">Batch size</label><input type="number" id="nwt-maxtargets" min="1" max="4096" value="${escapeHtml(String(scan.max_targets || 1024))}" class="${inCls}"></div>
           <div><label class="${lblCls}">Concurrency</label><input type="number" id="nwt-concurrency" min="1" max="128" value="${escapeHtml(String(scan.concurrency || 32))}" class="${inCls}"></div>
         </div>
         <div class="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
@@ -19649,6 +19658,13 @@ async function _renderNwScanTab() {
         </div>
         <div id="nwt-results" class="text-xs mt-3"></div>
       </div>
+
+      <div class="${card}">
+        <h3 class="text-sm font-bold text-slate-700 mb-1">Background Supernet Sweep</h3>
+        <p class="text-xs text-slate-400 mb-3">Slowly probes the rest of each NetBox supernet (e.g. a /16 split into /24s) for unknown hosts not covered by DNS, DHCP, NAC, child subnets or your extra targets. Runs separately from scheduled scans, reports only, and never adds devices.</p>
+        <div id="nwt-sweep" class="text-xs text-slate-400 italic">Loading…</div>
+      </div>
+      ${(setTimeout(() => _nwtLoadSweep(), 0), '')}
 
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-700 mb-1">Recurring Scan Schedule</h3>
@@ -19834,6 +19850,37 @@ async function saveNwTenantPollSchedule(btn) {
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Save schedule & cadence'; }
     }
+}
+
+async function _nwtLoadSweep() {
+    const box = document.getElementById('nwt-sweep');
+    if (!box) return;
+    try {
+        const r = await setupFetch('/api/nw/sweep' + (currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : ''));
+        const d = await r.json();
+        const pct = d.total ? Math.min(100, Math.round(100 * (d.cursor || 0) / d.total)) : 0;
+        const rows = (d.discovered || []).slice(0, 200).map(x => `<tr><td class="py-1 pr-3 font-mono">${escapeHtml(x.address)}</td><td class="pr-3">${escapeHtml((x.open_ports || []).join(', ') || '—')}</td><td>${x.last_seen ? new Date(x.last_seen * 1000).toLocaleString() : ''}</td></tr>`).join('');
+        box.className = 'text-xs text-slate-600';
+        box.innerHTML = `<div class="flex flex-wrap items-center gap-3 mb-2">
+            <label class="flex items-center gap-2"><input type="checkbox" ${d.enabled ? 'checked' : ''} onchange="nwtSweepAction({enabled: this.checked})"> Enable sweep</label>
+            <button onclick="nwtSweepAction({run: true})" class="px-3 py-1 rounded bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Probe next batch now</button>
+            <button onclick="nwtSweepAction({reset: true})" class="px-3 py-1 rounded bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Restart cycle</button>
+            <span>${d.total ? `Progress ${pct}% of ${d.total} addresses · cycles ${d.cycles || 0}` : 'No supernet space to sweep yet'}${d.last_status ? ` · last: ${escapeHtml(d.last_status)}` : ''}${d.last_error ? ` (${escapeHtml(d.last_error)})` : ''}</span></div>
+            ${rows ? `<table class="w-full text-left"><thead><tr class="text-slate-400"><th>Unknown host</th><th>Open ports</th><th>Last seen</th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="italic text-slate-400">No unknown hosts found yet.</p>'}`;
+    } catch (e) {
+        box.textContent = 'Sweep status unavailable: ' + e.message;
+    }
+}
+
+async function nwtSweepAction(body) {
+    if (currentTenant) body.tenant = currentTenant;
+    try {
+        const r = await setupFetch('/api/nw/sweep', { method: 'POST', body: JSON.stringify(body) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { showToast(d.detail || 'Sweep action failed', 'error'); return; }
+        if (body.run) showToast('Sweep batch: ' + ((d.run || {}).status || 'done'), 'success');
+    } catch (e) { showToast(e.message, 'error'); }
+    _nwtLoadSweep();
 }
 
 async function runNwTenantScan(btn, dryRun) {

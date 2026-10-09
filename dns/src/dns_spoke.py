@@ -551,7 +551,13 @@ class DNSSpoke(BaseSpoke):
         top_names = sorted(
             ({"name": n, "type": t, "count": c} for (n, t), c in summary.items()),
             key=lambda x: x["count"], reverse=True)[:100]
-        return {"status": "SUCCESS", "client": data.get("client", ""),
+        # Pre-fix this was hardcoded "SUCCESS" even when EVERY member failed
+        # (e.g. the whole cluster unreachable) -- the headline "0 queries" and
+        # a genuine outage were indistinguishable to the caller. Mirrors the
+        # PARTIAL convention used elsewhere in this module (status-conflation
+        # is exactly what the skeptical review panel flagged).
+        return {"status": "PARTIAL" if errors else "SUCCESS",
+                "client": data.get("client", ""),
                 "minutes": data.get("minutes", 10), "total": len(queries),
                 "queries": queries[:1000], "top_names": top_names,
                 "cluster": True, "member_errors": errors}

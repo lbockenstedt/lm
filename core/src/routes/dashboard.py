@@ -197,10 +197,11 @@ def register(app, hub, ctx):
         if _tid:
             _acfg = hub.state.system_state.get("agent_config", {}) or {}
             _hv_set = set(hv_spokes)
+            _norm_tid = _tid.strip().casefold()
             for _apk, _cfg in _acfg.items():
                 _pin = str(((_cfg or {}).get("client_simulation") or {})
                            .get("tenant_id") or "").strip()
-                if _pin != _tid:
+                if _pin.casefold() != _norm_tid:
                     continue
                 _sp = hub.get_spoke_for_agent(_apk, fallback_hypervisor=False)
                 if _sp and _sp in _hv_set:

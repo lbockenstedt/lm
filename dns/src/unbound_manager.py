@@ -555,7 +555,16 @@ class UnboundManager:
             current = open(LOGGING_CONF).read() if os.path.exists(LOGGING_CONF) else ""
         except Exception:
             current = ""
-        if current == want and not apparmor_changed:
+        # The exact "config already correct but the log is still empty" case
+        # this method exists to fix used to be UNREACHABLE: if the conf.d
+        # snippet already matched (e.g. it predates this process, or a prior
+        # call already wrote it) and AppArmor needed no change, this returned
+        # True unconditionally -- even when unbound has never actually opened
+        # QUERY_LOG (a restart never happened, so the config is correct but
+        # inert). The caller's `if not self._ensure_query_logging(): self._reload()`
+        # then never ran. Only short-circuit once the logfile demonstrably
+        # exists; otherwise fall through and force the restart below.
+        if current == want and not apparmor_changed and os.path.exists(QUERY_LOG):
             return True
         try:
             with open(LOGGING_CONF, "w") as f:
@@ -663,10 +672,15 @@ class UnboundManager:
         cutoff = time.time() - minutes * 60
         source = "logfile"
         events = list(self._query_events)
-        if not os.path.exists(QUERY_LOG) or not events:
-            # No events yet from the (possibly brand-new) logfile — try the
-            # journal so a freshly-enabled logger doesn't look broken for the
-            # first restart cycle.
+        # Fall back to the journal both when the logfile is wholly absent/
+        # empty (a freshly-enabled logger that hasn't produced anything yet)
+        # AND when it exists with history but nothing falls inside the
+        # requested window. That second case used to be read as "truly no
+        # queries" — but a stale/stuck logfile (rotation hiccup, AppArmor
+        # re-denial, tailing wedged after a restart) looks identical to real
+        # silence unless the journal is also consulted.
+        if not os.path.exists(QUERY_LOG) or not events or not any(
+                ts >= cutoff for ts, *_ in events):
             journal = self._journal_events(minutes)
             if journal:
                 events = journal
