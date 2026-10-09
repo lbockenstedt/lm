@@ -154,6 +154,29 @@ def test_expired_cache_is_served_but_badged_stale():
     assert [n["node"] for n in body["nodes"]] == ["pve1"]
 
 
+def test_expired_cache_on_cache_first_path_is_not_falsely_spoke_connected():
+    """lm#1131/#1132: the CACHE-FIRST branch (a hypervisor spoke IS bound/in
+    scope, so the 6h background poll normally serves this without a live
+    round-trip) hardcoded ``spoke_connected = True`` even when the warm entry
+    is >24h old -- i.e. even when the background poll has been failing for a
+    full day straight. That's state conflation: the UI showed a healthy
+    "connected" badge next to data nobody can vouch for. Past the expiry
+    threshold this must read exactly like the no-spoke fallback: stale AND
+    not connected."""
+    hub = _MockHub(bound_spoke="pxmx-1")
+    hub.seed_warm(_NS, "t1|node=", _cached_payload(), age_s=DEFAULT_EXPIRE_AFTER_S + 60)
+    client = _build_client(hub, tenant="t1")
+
+    body = client.get("/api/pxmx/drive-health?tenant=t1").json()
+    assert body["stale"] is True
+    assert body["spoke_connected"] is False
+    assert [n["node"] for n in body["nodes"]] == ["pve1"]
+    # A merely-refresh-due (not expired) cache hit on this same branch is a
+    # normal background-poll lag, not an outage -- still reports connected.
+    dh_calls = [c for c in hub.calls if c["cmd"] == "PXMX_DRIVE_HEALTH"]
+    assert len(dh_calls) == 0, "expired cache-first hit should not poll the spoke"
+
+
 def test_admin_default_tenant_serves_its_own_cache_not_another_tenants():
     """``default`` is the ADMIN tenant, scoped exactly like any other tenant —
     NOT a blanket "pick a tenant" prompt, and NOT "All tenants" either. With no

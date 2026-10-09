@@ -10343,6 +10343,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # hub.run_nw_scheduled_scan (wired in routes/nw.py). See
         # run_nw_scan_schedule_loop (NwDiscoverySyncMixin).
         nw_scan_schedule_task = asyncio.create_task(self.run_nw_scan_schedule_loop())
+        # Tier-2 background supernet sweep (opt-in per tenant, report-only).
+        nw_sweep_task = asyncio.create_task(self.run_nw_sweep_loop())
         # TrueNAS → NetBox inventory-discovery sync: per schedule (or on-demand
         # "Sync now") pull the TrueNAS appliance fleet from every connected
         # storage spoke, map each appliance to a NetBox dcim.device record
