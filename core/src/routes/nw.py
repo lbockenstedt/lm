@@ -60,6 +60,41 @@ def _nw_spawn_refresh(key, coro_factory) -> None:
     t.add_done_callback(_NW_BG_TASKS.discard)
 
 
+# A device a scan auto-adds is polled as part of that discovery (MAC/ARP/LLDP,
+# hostname, interfaces) rather than waiting hours for its first scheduled poll.
+_NW_DISCOVERY_POLL_CONCURRENCY = 4
+_NW_DISCOVERY_POLL_ATTEMPTS = 3
+_NW_DISCOVERY_POLL_RETRY_S = 5.0
+
+
+async def _nw_poll_discovered(hub, device_ids) -> None:
+    """Poll each newly discovered device through the same path as POLL NOW
+    (``hub.poll_nw_device``): renames it to the polled hostname, pushes it to
+    NetBox, and warms the nw cache. Retries "not found" briefly in case the
+    spoke hasn't applied the UPDATE_CONFIG carrying the new device yet."""
+    sem = asyncio.Semaphore(_NW_DISCOVERY_POLL_CONCURRENCY)
+
+    async def _one(did):
+        async with sem:
+            res = None
+            for attempt in range(_NW_DISCOVERY_POLL_ATTEMPTS):
+                try:
+                    res = await hub.poll_nw_device(did)
+                except Exception as e:  # noqa: BLE001 - best-effort per device
+                    logger.warning("nw discovery poll %s failed: %s", did, e)
+                    return
+                errs = " ".join(str(x) for x in (res or {}).get("errors") or [])
+                if "not found" in errs and attempt + 1 < _NW_DISCOVERY_POLL_ATTEMPTS:
+                    await asyncio.sleep(_NW_DISCOVERY_POLL_RETRY_S)
+                    continue
+                break
+            if isinstance(res, dict):
+                await hub.nw_cache_set_poll(did, res)
+                logger.info("nw discovery poll %s -> %s", did, res.get("message"))
+
+    await asyncio.gather(*(_one(d) for d in device_ids), return_exceptions=True)
+
+
 async def _nw_bg_refresh_fleet(hub) -> None:
     """Whole-fleet revalidate: query every connected+approved nw spoke for the
     full inventory ({} = no tenant filter) and refresh the global fleet cache.
@@ -69,19 +104,25 @@ async def _nw_bg_refresh_fleet(hub) -> None:
               if s in hub.active_connections and hub.approved_modules.get(s, False)]
     if not spokes:
         return
-    merged, seen = [], set()
+    merged, seen, answered = [], set(), 0
     for sid in spokes:
         try:
             result = await hub.request_response(sid, "NW_LIST_DEVICES", {}, timeout=20.0)
             env = access.unwrap_spoke(result)
             rows = env.get("data") if isinstance(env, dict) else None
             if isinstance(rows, list):
+                answered += 1
                 for r in rows:
                     if isinstance(r, dict) and r.get("id") and r["id"] not in seen:
                         seen.add(r["id"])
                         merged.append(r)
         except Exception as e:  # noqa: BLE001
             logger.debug("nw bg fleet refresh: spoke %s failed: %s", sid, e)
+    if not answered:
+        # Every spoke errored (e.g. draining for an update): keep the
+        # last-known snapshot rather than caching an empty fleet.
+        logger.info("nw bg fleet refresh: no spoke answered — keeping cached fleet")
+        return
     env = {"status": "SUCCESS", "data": merged, "message": f"{len(merged)} device(s)"}
     try:
         await hub.nw_cache_set_fleet(env)
@@ -831,7 +872,7 @@ def register(app, hub, ctx):
 
         # Fan out NW_LIST_DEVICES (admin: {} = whole fleet per spoke; non-admin:
         # {"tenant": tid} = own+shared from that spoke) + merge rows by id.
-        merged, seen = [], set()
+        merged, seen, answered = [], set(), 0
         for sid in spokes:
             tid = spoke_to_tid.get(sid, "")
             payload = {"tenant": tid} if tid else {}
@@ -841,6 +882,7 @@ def register(app, hub, ctx):
                 env = access.unwrap_spoke(result)
                 rows = env.get("data") if isinstance(env, dict) else None
                 if isinstance(rows, list):
+                    answered += 1
                     for r in rows:
                         if isinstance(r, dict) and r.get("id") and r["id"] not in seen:
                             seen.add(r["id"])
@@ -862,7 +904,7 @@ def register(app, hub, ctx):
         # offline path serves a complete, filterable snapshot — only update it
         # from a whole-fleet (admin) fetch, never a non-admin subset NOR an
         # admin acting-as a single tenant (``env`` is a scoped subset there).
-        if is_admin and acting_tenant is None:
+        if is_admin and acting_tenant is None and answered:
             try:
                 await hub.nw_cache_set_fleet(env)
             except Exception:
@@ -2103,6 +2145,9 @@ def register(app, hub, ctx):
             hub.state.system_state["global_config"] = gc
             hub.state._mark_dirty()
             await _nw_push_fleet(hub, spoke_id)
+            new_ids = [d["id"] for d in added]
+            _nw_spawn_refresh(f"discovery-poll:{new_ids[0]}",
+                              lambda: _nw_poll_discovered(hub, new_ids))
 
         return {
             "status": "ok",

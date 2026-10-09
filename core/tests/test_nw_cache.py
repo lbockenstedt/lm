@@ -151,6 +151,51 @@ async def test_unreachable_poll_does_not_clobber_good_datum_caches(tmp_path):
     assert hub.nw_cache_get_device("gw1", "vlans")["data"] == [{"vlan": "10"}]
 
 
+_DRAINING = {"status": "ERROR", "message": "Timed out waiting for spoke response",
+             "updating": True, "draining": True}
+
+
+async def test_failed_device_fetch_keeps_last_known_good(tmp_path):
+    """A spoke that times out mid-update (draining) answers with an ERROR
+    envelope; caching it overwrote good MAC/LLDP data and was persisted, so
+    the UI came back blank after the update. It must be ignored instead."""
+    hub = _CacheHub(str(tmp_path))
+    await hub.nw_cache_set_device("sw1", "macs", _envelope([{"mac": "aa"}]))
+    stamp = hub.nw_cache_device_fetched_at("sw1")
+    await hub.nw_cache_set_device("sw1", "macs", dict(_DRAINING))
+    await hub.nw_cache_set_device("sw1", "lldp", {"status": "error", "message": "x"})
+    assert hub.nw_cache_get_device("sw1", "macs")["data"] == [{"mac": "aa"}]
+    assert hub.nw_cache_get_device("sw1", "lldp") is None
+    assert hub.nw_cache_device_fetched_at("sw1") == stamp
+    # A failure on a never-cached device does not create an entry.
+    await hub.nw_cache_set_device("sw2", "macs", dict(_DRAINING))
+    assert hub.nw_cache_device_fetched_at("sw2") == 0.0
+
+
+async def test_failed_fleet_fetch_keeps_last_known_snapshot(tmp_path):
+    hub = _CacheHub(str(tmp_path))
+    good = _envelope([{"id": "sw1"}])
+    await hub.nw_cache_set_fleet(good)
+    await hub.nw_cache_set_fleet(dict(_DRAINING))
+    assert hub.nw_cache_get_fleet()["devices"] == good
+
+
+async def test_load_drops_previously_persisted_error_envelopes(tmp_path):
+    """Heal files written before set_device refused failures: ERROR slots are
+    dropped on load (cold miss → live fetch), good slots are kept."""
+    path = os.path.join(str(tmp_path), "nw_data.json")
+    with open(path, "w") as f:
+        json.dump({"fleet": {"devices": _envelope([{"id": "sw1"}]), "fetched_at": 1.0},
+                   "devices": {"sw1": {"macs": _DRAINING, "lldp": _DRAINING,
+                                       "arp": _envelope([{"ip": "10.0.0.5"}]),
+                                       "fetched_at": 2.0}}}, f)
+    hub = _CacheHub(str(tmp_path))
+    hub.nw_cache_load()
+    assert hub.nw_cache_get_device("sw1", "macs") is None
+    assert hub.nw_cache_get_device("sw1", "lldp") is None
+    assert hub.nw_cache_get_device("sw1", "arp")["data"] == [{"ip": "10.0.0.5"}]
+
+
 async def test_missing_file_is_cold_start(tmp_path):
     hub = _CacheHub(str(tmp_path))
     hub.nw_cache_load()  # no file yet
