@@ -1556,16 +1556,35 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
         if not group.get("tenant_group"):
             return []
         payload = {"tenant_group": group["tenant_group"]}
+    def _from_warm():
+        # Last-known prefixes for this scope (same cache the NetBox page uses),
+        # so a restarting/unreachable spoke doesn't make a tenant look empty.
+        try:
+            key = payload.get("tenant") or ("group:" + str(payload.get("tenant_group")))
+            cached = hub.warm_get("nb_netbox_prefixes", key)
+            data = unwrap_spoke(cached) if cached is not None else None
+            if isinstance(data, dict) and "data" in data and "prefixes" not in data:
+                data = data["data"]
+            return [p["prefix"] for p in ((data or {}).get("prefixes") or []) if p.get("prefix")]
+        except Exception:
+            return []
+
     spoke_id = get_netbox_spoke(hub)
     if not spoke_id:
-        return []
+        logger.warning("fetch_tenant_prefixes tenant=%s: no connected NetBox spoke", tenant_id)
+        return _from_warm()
     try:
         result = await hub.request_response(spoke_id, "NETBOX_GET_PREFIXES", payload, timeout=30.0)
         data = unwrap_spoke(result)
-        return [p["prefix"] for p in (data.get("prefixes", []) if isinstance(data, dict) else []) if p.get("prefix")]
+        out = [p["prefix"] for p in (data.get("prefixes", []) if isinstance(data, dict) else []) if p.get("prefix")]
+        if not out:
+            logger.warning("fetch_tenant_prefixes tenant=%s payload=%s spoke=%s returned none (resp=%s)",
+                           tenant_id, payload, spoke_id, str(data)[:200])
+            return _from_warm()
+        return out
     except Exception as e:
         logger.warning(f"Failed to fetch prefixes for tenant '{tenant_id}': {e}")
-        return []
+        return _from_warm()
 
 
 async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
