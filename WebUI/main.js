@@ -26259,7 +26259,7 @@ function _dnsQueryLogPanel(q) {
     return `<div class="mt-3 border-t border-slate-200 pt-3 text-xs">
         <div class="text-sm font-semibold text-slate-700 mb-1">Query logging</div>
         ${findings.length ? `<ul class="list-disc pl-5 mb-2 text-red-700">${findings.map(x => `<li>${e(x)}</li>`).join('')}</ul>`
-            : '<div class="text-emerald-600 mb-2">No query-logging problems detected.</div>'}
+            : (q.error ? '<div class="text-amber-600 mb-2">Query-logging check could not complete.</div>' : '<div class="text-emerald-600 mb-2">No query-logging problems detected.</div>')}
         ${q.error ? `<div class="text-red-600">${e(q.error)}</div>` : ''}
         <table class="w-full">
             ${kv('Log file', q.query_log)}${kv('Log file state', fs(lf))}${kv('Log directory', fs(ld))}
@@ -26691,7 +26691,12 @@ function _dhcpDnsHookPanel(dnsHook) {
 // domain, ttl, register_ptr) — a toggle must never silently reset an
 // operator's existing hook configuration.
 async function toggleDhcpDnsHook(enable) {
-    const prior = (window._dhcpDnsHookStatus || {}).settings || {};
+    const st = window._dhcpDnsHookStatus;
+    if (!st || !st.settings || st.status === 'ERROR') {
+        showToast('DNS hook status unavailable — refresh before toggling so existing settings are preserved', 'error');
+        return;
+    }
+    const prior = st.settings;
     const body = Object.assign({}, prior, { enabled: enable });
     try {
         const res = await fetch('/api/dhcp/dns-hook' + _tenantQS(),
@@ -30943,18 +30948,21 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
 
         if (subMenu === 'Diagnostics') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/diagnostics' + _tenantQS());
-            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP diagnostics unavailable'); return; }
             // Real-time DNS hook status is a separate, best-effort fetch — a
             // spoke running an older version without the route/command must
-            // not blank the whole Diagnostics tab.
+            // not blank the whole Diagnostics tab. A 200 carrying
+            // status:ERROR is treated as unavailable, not as 'disabled'.
             const dnsHook = await (async () => {
                 try {
                     const r = await fetch('/api/dhcp/dns-hook' + _tenantQS());
                     if (!r.ok) return null;
-                    return await r.json();
+                    const j = await r.json();
+                    if (!j || j.status === 'ERROR') return null;
+                    return j;
                 } catch (e) { return null; }
             })();
             window._dhcpDnsHookStatus = dnsHook;
+            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP diagnostics unavailable') + _dhcpDnsHookPanel(dnsHook); return; }
             const updating = !!(d.updating || (d.cluster && d.cluster.updating));
             // "Running" means answering clients. A node re-reading a freshly
             // synced config is out of sync but the pair is still serving, so
