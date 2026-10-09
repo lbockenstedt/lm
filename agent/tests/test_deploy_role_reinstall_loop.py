@@ -107,6 +107,31 @@ def test_sim_host_kea_binary_is_not_an_installed_dhcp_server(monkeypatch, tmp_pa
     assert "dhcp-server" in _installed_deploy_roles()
 
 
+def test_unload_and_uninstall_leave_cs_node_kea_running(monkeypatch, tmp_path):
+    """A client-simulation node needs its distro Kea running. Unloading or
+    uninstalling the LM dhcp-server role there must succeed (so the hub forgets
+    it) without stopping or purging that Kea."""
+    import agent_spoke
+    binary = tmp_path / "kea-dhcp4"
+    binary.write_text("distro")
+    monkeypatch.setitem(_DEPLOY_ROLE_MARKERS, "dhcp-server", str(binary))
+    monkeypatch.setitem(_DEPLOY_ROLE_OWNERSHIP, "dhcp-server",
+                        (str(tmp_path / "kea-api-password"),))
+    calls = []
+    monkeypatch.setattr(agent_spoke.subprocess, "run",
+                        lambda *a, **k: calls.append(a) or (_ for _ in ()).throw(
+                            AssertionError(f"must not run {a}")))
+    monkeypatch.setattr(agent_spoke, "_purge_deploy_role",
+                        lambda role: calls.append(("purge", role)) or {})
+
+    agent = _agent()
+    res = asyncio.run(_unload(agent, "dhcp-server"))
+    assert res["status"] == "SUCCESS" and "left running" in res["message"], res
+    res = asyncio.run(agent.handle_command("UNINSTALL_ROLE", {"role": "dhcp-server"}))
+    assert res["status"] == "SUCCESS" and "left running" in res["message"], res
+    assert calls == []
+
+
 def test_load_role_does_not_reinstall_when_marker_present(monkeypatch, tmp_path):
     """The reboot-reinstall bug: dhcp-server is already installed, so a
     re-pushed LOAD_ROLE must NOT run the installer again."""

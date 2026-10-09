@@ -19,7 +19,7 @@ CI/tooling changes are omitted unless they change what an operator sees.
   role onto another tenant's agent. See [dhcp.md](dhcp.md#tenant-isolation).
 - **No more phantom DHCP role on simulation hosts.** The `dhcp-server` badge
   only appears for LM-installed Kea, not the distro Kea a simulation host
-  uses privately. See [dhcp.md](dhcp.md#troubleshooting--common-questions).
+  runs for its sim; unloading the role there leaves that Kea running. See [dhcp.md](dhcp.md#troubleshooting--common-questions).
 
 ## Week of 2026-09-15
 
