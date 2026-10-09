@@ -19226,58 +19226,66 @@ const _NW_TOPO_EDGE_STYLE = {
     mac:    { stroke: '#d97706', dash: '5 4',  label: 'Inferred (MAC)' },
 };
 
-function _nwTopoLayout(nodes, edges, width, height) {
-    // Seeded by index, so the same graph always lands the same way: a map that
-    // reshuffles on every refresh is unreadable.
-    const pos = {};
-    const n = nodes.length;
-    nodes.forEach((node, i) => {
-        const a = (2 * Math.PI * i) / Math.max(n, 1);
-        pos[node.id] = {
-            x: width / 2 + Math.cos(a) * width * 0.32,
-            y: height / 2 + Math.sin(a) * height * 0.32,
-        };
+function _nwTopoLayout(nodes, edges, colW, rowH) {
+    // Layered left-to-right tree (Aruba Central style): the best-connected
+    // device of each component is the root column, and every hop away from it
+    // is one column further right. Rows are ordered by neighbour barycentre to
+    // keep links from crossing needlessly. Deterministic: no randomness.
+    const ids = new Set(nodes.map(n => n.id));
+    const adj = {};
+    nodes.forEach(n => { adj[n.id] = new Set(); });
+    edges.forEach(e => {
+        if (ids.has(e.a) && ids.has(e.b) && e.a !== e.b) { adj[e.a].add(e.b); adj[e.b].add(e.a); }
     });
-    if (n < 2) return pos;
-    const adj = edges.filter(e => pos[e.a] && pos[e.b]);
-    const ideal = Math.min(width, height) / Math.sqrt(n) * 0.9;
-    for (let step = 0; step < 300; step++) {
-        const disp = {};
-        nodes.forEach(node => { disp[node.id] = { x: 0, y: 0 }; });
-        for (let i = 0; i < n; i++) {
-            for (let j = i + 1; j < n; j++) {
-                const a = pos[nodes[i].id], b = pos[nodes[j].id];
-                let dx = a.x - b.x, dy = a.y - b.y;
-                let d = Math.sqrt(dx * dx + dy * dy) || 0.01;
-                // Nudge exactly-coincident nodes apart or they stay stuck.
-                if (d < 1) { dx = (i - j); dy = 1; d = Math.sqrt(dx * dx + dy * dy); }
-                const rep = (ideal * ideal) / d;
-                disp[nodes[i].id].x += (dx / d) * rep;
-                disp[nodes[i].id].y += (dy / d) * rep;
-                disp[nodes[j].id].x -= (dx / d) * rep;
-                disp[nodes[j].id].y -= (dy / d) * rep;
+    const linked = nodes.filter(n => adj[n.id].size);
+    const loose = nodes.filter(n => !adj[n.id].size);
+    const rank = n => (n.kind === 'switch' ? 1 : 0) * 1000 + adj[n.id].size;
+    const depth = {};
+    const comps = [];
+    linked.slice().sort((x, y) => rank(y) - rank(x) || String(x.name).localeCompare(String(y.name)))
+        .forEach(root => {
+            if (depth[root.id] !== undefined) return;
+            const comp = [root.id];
+            depth[root.id] = 0;
+            for (let i = 0; i < comp.length; i++) {
+                [...adj[comp[i]]].sort().forEach(nb => {
+                    if (depth[nb] === undefined) { depth[nb] = depth[comp[i]] + 1; comp.push(nb); }
+                });
+            }
+            comps.push(comp);
+        });
+    const pos = {};
+    let yCursor = 40, maxX = 0;
+    comps.forEach(comp => {
+        const layers = [];
+        comp.forEach(id => { (layers[depth[id]] = layers[depth[id]] || []).push(id); });
+        const nameOf = {};
+        nodes.forEach(n => { nameOf[n.id] = String(n.name || n.id); });
+        layers.forEach(l => l.sort((x, y) => nameOf[x].localeCompare(nameOf[y])));
+        const row = {};
+        layers.forEach(l => l.forEach((id, i) => { row[id] = i; }));
+        for (let sweep = 0; sweep < 4; sweep++) {
+            for (let d = 1; d < layers.length; d++) {
+                const bc = id => {
+                    const prev = [...adj[id]].filter(n => depth[n] === d - 1);
+                    return prev.length ? prev.reduce((t, n) => t + row[n], 0) / prev.length : row[id];
+                };
+                layers[d].sort((x, y) => bc(x) - bc(y) || nameOf[x].localeCompare(nameOf[y]));
+                layers[d].forEach((id, i) => { row[id] = i; });
             }
         }
-        adj.forEach(e => {
-            const a = pos[e.a], b = pos[e.b];
-            const dx = a.x - b.x, dy = a.y - b.y;
-            const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
-            const att = (d * d) / ideal;
-            disp[e.a].x -= (dx / d) * att;
-            disp[e.a].y -= (dy / d) * att;
-            disp[e.b].x += (dx / d) * att;
-            disp[e.b].y += (dy / d) * att;
+        const tallest = Math.max(...layers.map(l => l.length));
+        const height = Math.max(1, tallest) * rowH;
+        layers.forEach((l, d) => {
+            const off = (height - l.length * rowH) / 2;
+            l.forEach((id, i) => {
+                pos[id] = { x: 70 + d * colW, y: yCursor + off + i * rowH + rowH / 2 };
+                maxX = Math.max(maxX, pos[id].x);
+            });
         });
-        const temp = ideal * (1 - step / 300);
-        nodes.forEach(node => {
-            const d = disp[node.id];
-            const len = Math.sqrt(d.x * d.x + d.y * d.y) || 0.01;
-            const p = pos[node.id];
-            p.x = Math.max(60, Math.min(width - 60, p.x + (d.x / len) * Math.min(len, temp)));
-            p.y = Math.max(40, Math.min(height - 40, p.y + (d.y / len) * Math.min(len, temp)));
-        });
-    }
-    return pos;
+        yCursor += height + rowH * 0.6;
+    });
+    return { pos, loose, width: maxX + 120, height: yCursor };
 }
 
 function _nwTopoNodeColor(node) {
@@ -19287,15 +19295,31 @@ function _nwTopoNodeColor(node) {
     return '#94a3b8';
 }
 
+function _nwTopoIcon(nd, x, y, color) {
+    const r = 17;
+    const g = (nd.kind === 'gateway')
+        ? `<path d="M-7 0h14M0 -7v14M-7 0l3 -3M-7 0l3 3M7 0l-3 -3M7 0l-3 3M0 -7l-3 3M0 -7l3 3M0 7l-3 -3M0 7l3 -3" stroke="#0f172a" stroke-width="1.6" fill="none"/>`
+        : (nd.kind === 'switch')
+            ? `<rect x="-9" y="-6" width="18" height="12" rx="2" fill="none" stroke="#0f172a" stroke-width="1.6"/><path d="M-5 -1h9M1 -3l3 2l-3 2M5 3h-9M-1 1l-3 2l3 2" stroke="#0f172a" stroke-width="1.3" fill="none"/>`
+            : `<rect x="-6" y="-5" width="12" height="10" rx="2" fill="none" stroke="#475569" stroke-width="1.5"/>`;
+    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r}" fill="#fff" stroke="${color}" stroke-width="3"/>` +
+           `<g transform="translate(${x.toFixed(1)} ${y.toFixed(1)})">${g}</g>`;
+}
+
 function _nwTopoSvg(graph) {
     const nodes = graph.nodes || [], edges = graph.edges || [];
     if (!nodes.length) {
         return `<div class="py-12 text-center text-slate-400 italic">No devices in this tenant's topology yet.</div>`;
     }
-    const W = 900, H = Math.max(420, Math.min(760, 220 + nodes.length * 26));
-    const pos = _nwTopoLayout(nodes, edges, W, H);
+    const colW = 240, rowH = 64, W0 = 900;
+    const lay = _nwTopoLayout(nodes, edges, colW, rowH);
+    const pos = lay.pos;
     const byId = {};
     nodes.forEach(nd => { byId[nd.id] = nd; });
+    const tipOf = nd => [nd.name, nd.object_type || nd.kind,
+                     (nd.addresses || []).join(', '), (nd.macs || []).join(', '),
+                     nd.lldp_capable ? 'LLDP' : '', nd.manual ? 'Declared' : '',
+                     'via ' + (nd.sources || []).join('+')].filter(Boolean).join('\n');
     const lines = edges.map(e => {
         const a = pos[e.a], b = pos[e.b];
         if (!a || !b) return '';
@@ -19303,22 +19327,33 @@ function _nwTopoSvg(graph) {
         const tip = `${(byId[e.a] || {}).name || ''} ${e.a_port ? '(' + e.a_port + ')' : ''} — ` +
                     `${(byId[e.b] || {}).name || ''} ${e.b_port ? '(' + e.b_port + ')' : ''}` +
                     `\n${st.label}${e.detail ? ' — ' + e.detail : ''}`;
-        return `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}"
-            stroke="${st.stroke}" stroke-width="2" ${st.dash ? `stroke-dasharray="${st.dash}"` : ''} opacity="0.8"><title>${escapeHtml(tip)}</title></line>`;
+        const [l, r] = a.x <= b.x ? [a, b] : [b, a];
+        const mx = (l.x + r.x) / 2;
+        const same = Math.abs(l.x - r.x) < 1;
+        const d = same
+            ? `M${l.x.toFixed(1)} ${l.y.toFixed(1)}C${(l.x + 60).toFixed(1)} ${l.y.toFixed(1)} ${(r.x + 60).toFixed(1)} ${r.y.toFixed(1)} ${r.x.toFixed(1)} ${r.y.toFixed(1)}`
+            : `M${l.x.toFixed(1)} ${l.y.toFixed(1)}C${mx.toFixed(1)} ${l.y.toFixed(1)} ${mx.toFixed(1)} ${r.y.toFixed(1)} ${r.x.toFixed(1)} ${r.y.toFixed(1)}`;
+        return `<path d="${d}" fill="none" stroke="${st.stroke}" stroke-width="1.5"
+            ${st.dash ? `stroke-dasharray="${st.dash}"` : ''} opacity="0.85"><title>${escapeHtml(tip)}</title></path>`;
     }).join('');
-    const dots = nodes.map(nd => {
-        const p = pos[nd.id];
-        const r = (nd.kind === 'switch' || nd.kind === 'gateway') ? 11 : 7;
-        const tip = [nd.name, nd.object_type || nd.kind,
-                     (nd.addresses || []).join(', '), (nd.macs || []).join(', '),
-                     nd.lldp_capable ? 'LLDP' : '', nd.manual ? 'Declared' : '',
-                     'via ' + (nd.sources || []).join('+')].filter(Boolean).join('\n');
-        return `<g><circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r}"
-              fill="${_nwTopoNodeColor(nd)}" stroke="#fff" stroke-width="2"><title>${escapeHtml(tip)}</title></circle>
-            <text x="${p.x.toFixed(1)}" y="${(p.y + r + 12).toFixed(1)}" text-anchor="middle"
-              class="text-[10px]" fill="#475569">${escapeHtml(nd.name || nd.id)}</text></g>`;
-    }).join('');
-    return `<svg viewBox="0 0 ${W} ${H}" class="w-full" style="max-height:70vh">${lines}${dots}</svg>`;
+    const drawNode = (nd, p) => `<g><title>${escapeHtml(tipOf(nd))}</title>${_nwTopoIcon(nd, p.x, p.y, _nwTopoNodeColor(nd))}
+        <text x="${p.x.toFixed(1)}" y="${(p.y + 32).toFixed(1)}" text-anchor="middle"
+          style="font-size:10px" fill="#334155">${escapeHtml(String(nd.name || nd.id).slice(0, 28))}</text></g>`;
+    const dots = nodes.filter(nd => pos[nd.id]).map(nd => drawNode(nd, pos[nd.id])).join('');
+
+    // Devices with no known link: a compact wrapped grid instead of a hairball.
+    const W = Math.max(W0, lay.width);
+    const perRow = Math.max(1, Math.floor((W - 40) / 150));
+    let H = lay.height, looseSvg = '';
+    if (lay.loose.length) {
+        const top = H + 10;
+        const rows = Math.ceil(lay.loose.length / perRow);
+        looseSvg = `<text x="20" y="${top + 4}" style="font-size:11px;font-weight:600" fill="#64748b">Unlinked devices (${lay.loose.length})</text>` +
+            lay.loose.map((nd, i) => drawNode(nd, {
+                x: 20 + 75 + (i % perRow) * 150, y: top + 40 + Math.floor(i / perRow) * 76 })).join('');
+        H = top + 40 + rows * 76 + 10;
+    }
+    return `<svg viewBox="0 0 ${W} ${H}" class="w-full" style="max-height:75vh">${lines}${dots}${looseSvg}</svg>`;
 }
 
 async function _renderNwTopologyTab(opts) {
@@ -26211,6 +26246,40 @@ async function removeDhcpHaMember(id) {
 // `updatingIds` are nodes the cluster reports as mid-apply: their local Kea is
 // deliberately out of service while it re-reads config, so "needs attention"
 // would be wrong for them.
+// Query-log evidence from DNS diagnostics: explains an empty "Queries by
+// Destination" / per-client query log (file, running config, AppArmor, journal).
+function _dnsQueryLogPanel(q) {
+    if (!q) return '';
+    const e = escapeHtml;
+    const kv = (k, v) => `<tr class="border-b border-slate-100"><td class="px-3 py-1 text-slate-500 whitespace-nowrap">${e(k)}</td><td class="px-3 py-1 font-mono break-all">${e(v == null || v === '' ? '—' : String(v))}</td></tr>`;
+    const pre = (title, lines) => `<div class="mt-2"><div class="font-semibold text-slate-600 mb-1">${e(title)}</div><pre class="whitespace-pre-wrap break-all font-mono text-[11px] text-slate-600 bg-slate-50 p-2 rounded">${e((lines && lines.length) ? lines.join('\n') : '(none)')}</pre></div>`;
+    const lf = q.log_file || {}, ld = q.log_dir || {}, mem = q.memory || {};
+    const fs = o => o.exists ? `${o.mode} ${o.owner || '?'}:${o.group || '?'}, ${o.size} bytes, modified ${o.age_seconds}s ago` : `missing (${o.error || ''})`;
+    const findings = q.findings || [];
+    return `<div class="mt-3 border-t border-slate-200 pt-3 text-xs">
+        <div class="text-sm font-semibold text-slate-700 mb-1">Query logging</div>
+        ${findings.length ? `<ul class="list-disc pl-5 mb-2 text-red-700">${findings.map(x => `<li>${e(x)}</li>`).join('')}</ul>`
+            : '<div class="text-emerald-600 mb-2">No query-logging problems detected.</div>'}
+        ${q.error ? `<div class="text-red-600">${e(q.error)}</div>` : ''}
+        <table class="w-full">
+            ${kv('Log file', q.query_log)}${kv('Log file state', fs(lf))}${kv('Log directory', fs(ld))}
+            ${kv('Lines parsed in last tail', q.log_tail_parsed)}
+            ${kv('Config file included by unbound.conf', q.conf_dir_included)}
+            ${kv('Running log-queries', q.running_log_queries)}${kv('Running logfile', q.running_logfile)}${kv('Running use-syslog', q.running_use_syslog)}
+            ${kv('Configured log-queries', q.configured_log_queries)}${kv('Configured logfile', q.configured_logfile)}
+            ${kv('Unbound version', q.unbound_version)}${kv('Unbound active since', q.unbound_active_since)}
+            ${kv('AppArmor profile present', q.apparmor_profile_present)}${kv('AppArmor lm override present', q.apparmor_override_present)}
+            ${kv('AppArmor override has log rule', q.apparmor_override_has_rule)}${kv('AppArmor unbound profile', q.apparmor_unbound_status)}
+            ${kv('Query lines in journal', q.journal_query_lines)}
+            ${kv('In-memory events / tracked names', `${mem.events} / ${mem.tracked_names}`)}${kv('Tail offset / inode', `${mem.log_offset} / ${mem.log_inode}`)}
+        </table>
+        ${pre('lm-logging.conf', (q.logging_conf_content || '').split('\n'))}
+        ${pre('Last log lines', q.log_tail)}
+        ${pre('AppArmor denials (kernel log)', q.apparmor_denials)}
+        ${pre('Journal (unbound)', q.journal_tail)}
+    </div>`;
+}
+
 function _ddMemberEvidence(members, kind, updatingIds) {
     const entries = Object.entries(members || {});
     if (!entries.length) return '';
@@ -26276,7 +26345,8 @@ function _ddMemberEvidence(members, kind, updatingIds) {
             <div class="mt-3">
                 <div class="font-semibold text-slate-600 mb-1 text-xs">Local DNS query probes</div>
                 ${tableWrap(tableHead(['Target', 'Result', 'RCODE', 'Latency']) + `<tbody>${probeRows}</tbody>`)}
-            </div>`;
+            </div>
+            ${_dnsQueryLogPanel(diag.query_logging)}`;
         })() : '';
         return `<div class="bg-white border border-slate-200 rounded-lg p-4">
             <div class="text-sm font-semibold text-slate-700 mb-1" title="${escapeHtml(id)}">${escapeHtml(name)} — ${okBadge}</div>
@@ -26984,7 +27054,8 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 <div class="bg-white border border-slate-200 rounded-lg overflow-hidden">
                     <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-200">Local DNS query probes</div>
                     ${tw(th(['Target', 'Result', 'RCODE', 'Latency', 'Error']) + `<tbody>${probeRows}</tbody>`)}
-                </div>`}`;
+                </div>
+                <div class="bg-white border border-slate-200 rounded-lg p-4 mt-4">${_dnsQueryLogPanel(d.query_logging)}</div>`}`;
             return;
         }
 
