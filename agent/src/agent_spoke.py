@@ -308,6 +308,26 @@ def _deploy_role_installed(role_name: str) -> bool:
 def _installed_deploy_roles() -> list:
     return [role for role in _DEPLOY_ROLE_MARKERS if _deploy_role_installed(role)]
 
+
+def _deploy_role_foreign(role_name: str) -> bool:
+    """The role's software is present but NOT LM-owned (e.g. the Kea a client-
+    simulation node needs running for its sim DHCP). Unload/uninstall of the
+    LM role must leave such software untouched."""
+    marker = _DEPLOY_ROLE_MARKERS.get(role_name)
+    return bool(marker and os.path.exists(marker)
+                and role_name in _DEPLOY_ROLE_OWNERSHIP
+                and not _deploy_role_installed(role_name))
+
+
+def _foreign_deploy_role_reply(role_name: str, action: str) -> dict:
+    return {
+        "status": "SUCCESS",
+        "role": role_name,
+        "deploy": True,
+        "message": (f"Role '{role_name}' {action} — the software on this host is "
+                    f"not LM-managed (e.g. client-simulation Kea) and was left running"),
+    }
+
 _DEPLOY_ROLE_UNITS = {
     "dns-server": ("unbound",),
     "dhcp-server": ("kea-dhcp4-server", "kea-ctrl-agent"),
@@ -1732,6 +1752,9 @@ class GenericAgent(BaseSpoke):
                         f"(supported: {', '.join(sorted(_DEPLOY_ROLE_PURGE))})."
                     ),
                 }
+            if _deploy_role_foreign(role_name):
+                self._deploy_status_by_role.pop(role_name, None)
+                return _foreign_deploy_role_reply(role_name, "uninstalled")
             # Same guards as UNLOAD_ROLE, and for the same reasons — purging the
             # server out from under a live management sub-spoke or a running
             # deploy would leave both in an undefined state.
@@ -1809,6 +1832,9 @@ class GenericAgent(BaseSpoke):
                         f"deploy it to this host (installed software left in place)"
                     ),
                 }
+            if role_name in _DEPLOY_ROLE_UNITS and _deploy_role_foreign(role_name):
+                self._deploy_status_by_role.pop(role_name, None)
+                return _foreign_deploy_role_reply(role_name, "unloaded")
             if role_name in _DEPLOY_ROLE_UNITS:
                 module_role = role_name.removesuffix("-server")
                 if module_role in self._roles:
