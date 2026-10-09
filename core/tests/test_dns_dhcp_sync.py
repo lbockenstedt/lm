@@ -428,3 +428,82 @@ def test_ipam_candidates_prefer_instance_bound_spoke():
     hub = _MultiIpamHub(["nb-broken", "nb-good"], system_state={"global_config": {
         "ipam_instances": [{"spoke_id": "nb-good", "url": "https://nb"}]}})
     assert hub._ipam_spoke_candidates() == ["nb-good", "nb-broken"]
+
+
+# ── Tenant isolation: a tenant's DHCP/DNS only ever gets its own NetBox data ──
+
+class _TenantHub(_DdsHub):
+    """DHCP spokes in several tenants. NetBox answers per tenant filter."""
+
+    _BY_TENANT = {None: ["10.0.0.0/24", "10.1.0.0/24", "10.2.0.0/24"],
+                  "lrb": ["10.1.0.0/24"], "dxp": ["10.2.0.0/24"]}
+
+    def __init__(self, dhcp_tenants, tenants):
+        super().__init__(system_state={"module_metadata": {
+            sid: {"tenant_id": t} for sid, t in dhcp_tenants.items() if t}})
+        self.state._spoke_tenants = {s: t for s, t in dhcp_tenants.items() if t}
+        self.state._tenants = tenants
+        self._dhcp = list(dhcp_tenants)
+        self.active_connections = {s: object() for s in self._dhcp}
+        self.approved_modules = {s: True for s in self._dhcp}
+
+    def get_all_spokes_by_type(self, module_type):
+        return list(self._dhcp) if module_type == "dhcp" else []
+
+    async def request_response(self, spoke_id, command, payload, timeout=30.0):
+        self.request_log.append((spoke_id, command, payload))
+        if command == "NETBOX_GET_PREFIXES":
+            nets = self._BY_TENANT[payload.get("tenant")]
+            return {"payload": {"data": {"prefixes": [
+                {"prefix": n, "status": "active", "custom_fields": {"dhcp_enabled": True}}
+                for n in nets]}}}
+        if command == "NETBOX_GET_IPS":
+            return {"payload": {"data": {"ip_addresses": []}}}
+        return await super().request_response(spoke_id, command, payload, timeout)
+
+    def pushed(self):
+        return {sid: [s["subnet"] for s in p["subnets"]]
+                for sid, c, p in self.request_log if c == "DHCP_SYNC"}
+
+
+_TENANTS = {"lrb": {"netbox_tenant_slug": "lrb"}, "dxp": {"netbox_tenant_slug": "dxp"},
+            "nomap": {}}
+
+
+@pytest.mark.asyncio
+async def test_tenant_dhcp_spoke_only_receives_its_own_tenants_subnets():
+    hub = _TenantHub({"dhcp-shared": None, "dhcp-lrb": "lrb", "dhcp-dxp": "dxp"}, _TENANTS)
+    await hub._sync_dns_dhcp_once()
+    assert hub.pushed() == {"dhcp-shared": ["10.0.0.0/24", "10.1.0.0/24", "10.2.0.0/24"],
+                            "dhcp-lrb": ["10.1.0.0/24"], "dhcp-dxp": ["10.2.0.0/24"]}
+    assert hub.dns_dhcp_sync_status["dhcp"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_tenant_without_netbox_mapping_is_skipped_never_given_everything():
+    hub = _TenantHub({"dhcp-shared": None, "dhcp-nomap": "nomap"}, _TENANTS)
+    await hub._sync_dns_dhcp_once()
+    assert set(hub.pushed()) == {"dhcp-shared"}
+    assert hub.dns_dhcp_sync_status["dhcp"]["skipped_spokes"] == ["dhcp-nomap"]
+
+    res = await hub.sync_dhcp_from_netbox()
+    assert res["status"] == "ok" and res["skipped_spokes"] == ["dhcp-nomap"]
+    assert "dhcp-nomap" not in hub.pushed()
+
+
+@pytest.mark.asyncio
+async def test_per_scope_hash_only_repushes_the_changed_tenant():
+    hub = _TenantHub({"dhcp-shared": None, "dhcp-lrb": "lrb"}, _TENANTS)
+    await hub._sync_dns_dhcp_once()
+    hub.request_log.clear()
+    hub._BY_TENANT = dict(_TenantHub._BY_TENANT, lrb=["10.1.0.0/24", "10.9.0.0/24"])
+    await hub._sync_dns_dhcp_once()
+    assert hub.pushed() == {"dhcp-lrb": ["10.1.0.0/24", "10.9.0.0/24"]}
+
+
+@pytest.mark.asyncio
+async def test_on_demand_dhcp_sync_is_tenant_scoped_too():
+    hub = _TenantHub({"dhcp-lrb": "lrb"}, _TENANTS)
+    res = await hub.sync_dhcp_from_netbox()
+    assert res["status"] == "ok" and res["subnets_synced"] == 1
+    assert hub.pushed() == {"dhcp-lrb": ["10.1.0.0/24"]}

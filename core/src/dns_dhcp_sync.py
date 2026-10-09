@@ -366,14 +366,20 @@ class DnsDhcpSyncMixin:
                  if isinstance(i, dict) and i.get("spoke_id")}
         return sorted(spokes, key=lambda s: 0 if pk(s) in bound else 1)
 
-    async def _netbox_prefixes_and_ips(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    async def _netbox_prefixes_and_ips(self, filters: Dict[str, Any] = None
+                                       ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Fetch NetBox prefixes + IPs, failing over across IPAM spokes.
 
         Raises unless a spoke returns BOTH lists. A spoke-side failure comes
         back as ``{"status": "ERROR", ...}`` with no ``prefixes`` key; treating
         that as "zero prefixes" made the sync push an empty subnet4 and wipe
         every Kea scope whenever NetBox was unreachable from the chosen spoke.
+
+        ``filters`` (``tenant`` / ``tenant_group``, see ``_sync_scope``) is
+        passed to both reads so a tenant-dedicated target only gets its own
+        tenant's prefixes and IPs.
         """
+        req = dict(filters or {})
         candidates = self._ipam_spoke_candidates()
         if not candidates:
             raise RuntimeError("NetBox spoke not connected")
@@ -381,8 +387,8 @@ class DnsDhcpSyncMixin:
         for nb in candidates:
             try:
                 pfx_raw, ips_raw = await asyncio.gather(
-                    self.request_response(nb, "NETBOX_GET_PREFIXES", {}, timeout=30.0),
-                    self.request_response(nb, "NETBOX_GET_IPS", {}, timeout=30.0),
+                    self.request_response(nb, "NETBOX_GET_PREFIXES", dict(req), timeout=30.0),
+                    self.request_response(nb, "NETBOX_GET_IPS", dict(req), timeout=30.0),
                 )
             except Exception as e:  # noqa: BLE001 — try the next IPAM spoke
                 errors.append(f"{nb}: {e}")
@@ -398,6 +404,78 @@ class DnsDhcpSyncMixin:
                 continue
             return pfx, ips
         raise RuntimeError("NetBox fetch failed on every IPAM spoke — " + " | ".join(errors))
+
+    def _sync_scope(self, spoke_id):
+        """NetBox read scope for one DHCP/DNS target spoke (tenant isolation).
+
+        Returns ``(key, filters)``:
+          * ``("", {})`` — spoke not dedicated to a real tenant (unassigned,
+            shared or Admin): unfiltered, it serves shared infra.
+          * ``("tenant:<key>", {tenant|tenant_group: slug})`` — a spoke
+            dedicated to a real tenant only ever sees that tenant's data.
+          * ``(None, None)`` — tenant-dedicated spoke whose tenant has no
+            NetBox mapping (or the binding is unreadable): the caller skips it,
+            never pushing another tenant's subnets nor an empty set.
+        """
+        from access import spoke_is_unbound, netbox_tenant_scope
+        try:
+            if spoke_is_unbound(self, spoke_id):
+                return "", {}
+            tenant = self.state.get_spoke_tenant(spoke_id) or ""
+            scope = netbox_tenant_scope(self, tenant)
+        except Exception as e:  # noqa: BLE001 — fail closed
+            logger.warning("DNS/DHCP sync: tenant scope for %s unreadable: %s", spoke_id, e)
+            return None, None
+        filters = {k: scope.get(k) for k in ("tenant", "tenant_group") if scope.get(k)}
+        if not filters:
+            logger.warning("DNS/DHCP sync: %s is bound to tenant %r with no NetBox "
+                           "tenant mapping — not synced", spoke_id, tenant)
+            return None, None
+        return "tenant:" + str(scope.get("key")), filters
+
+    def _scope_groups(self, spokes):
+        """Group target spokes by ``_sync_scope`` →
+        ``({key: (filters, [sids])}, [skipped sids])``."""
+        groups, skipped = {}, []
+        for sid in spokes:
+            key, filters = self._sync_scope(sid)
+            if key is None:
+                skipped.append(sid)
+                continue
+            groups.setdefault(key, (filters, []))[1].append(sid)
+        return groups, skipped
+
+    @staticmethod
+    def _hash_key(side: str, scope_key: str) -> str:
+        return side if not scope_key else f"{side}|{scope_key}"
+
+    async def _scoped_push(self, side: str, spokes: List[str]):
+        """On-demand (non-hashed) push of one side to ``spokes``, one NetBox
+        fetch per tenant scope. Returns ``(counts, spoke_results, skipped)``;
+        raises on a fetch or push failure."""
+        groups, skipped = self._scope_groups(spokes)
+        counts = ({"records_synced": 0} if side == "dns" else
+                  {"subnets_synced": 0, "reservations_synced": 0})
+        spoke_results = []
+        for _key, (filters, sids) in groups.items():
+            pfx_data, ips_data = await self._netbox_prefixes_and_ips(filters)
+            if side == "dns":
+                records = build_dns_records(ips_data, pfx_data)
+                payload, cmd = {"records": records}, "DNS_SYNC"
+                counts["records_synced"] += len(records)
+            else:
+                subnets, reservations = build_dhcp_payload(pfx_data, ips_data)
+                payload, cmd = {"subnets": subnets, "reservations": reservations}, "DHCP_SYNC"
+                counts["subnets_synced"] += len(subnets)
+                counts["reservations_synced"] += len(reservations)
+            results = await asyncio.gather(*[
+                self.request_response(sid, cmd, payload, timeout=30.0) for sid in sids
+            ], return_exceptions=True)
+            errs = [r for r in results if isinstance(r, Exception)]
+            if errs:
+                raise errs[0]
+            spoke_results.extend(unwrap_spoke(r) for r in results)
+        return counts, spoke_results, skipped
 
     def _get_dhcp_spokes(self) -> List[str]:
         """All connected, approved DHCP spokes to sync to."""
@@ -435,19 +513,9 @@ class DnsDhcpSyncMixin:
             return self._record_status("dns", status="skipped",
                                        reason=f"{missing} spoke not connected")
         try:
-            pfx_data, ips_data = await self._netbox_prefixes_and_ips()
-            records = build_dns_records(ips_data, pfx_data)
-            results = await asyncio.gather(*[
-                self.request_response(sid, "DNS_SYNC", {"records": records}, timeout=30.0)
-                for sid in dns_spokes
-            ], return_exceptions=True)
-            spoke_errors = [r for r in results if isinstance(r, Exception)]
-            if spoke_errors:
-                logger.warning("DNS auto-sync failed: %s", spoke_errors[0])
-                return self._record_status("dns", status="error", error=str(spoke_errors[0]))
-            spoke_results = [unwrap_spoke(r) for r in results]
-            return self._record_status("dns", status="ok",
-                                       records_synced=len(records),
+            counts, spoke_results, skipped = await self._scoped_push("dns", dns_spokes)
+            extra = {"skipped_spokes": skipped} if skipped else {}
+            return self._record_status("dns", status="ok", **counts, **extra,
                                        spoke_result=spoke_results[0] if len(spoke_results) == 1 else spoke_results)
         except Exception as e:  # noqa: BLE001 — best-effort loop must not die
             logger.warning("DNS auto-sync failed: %s", e)
@@ -461,22 +529,10 @@ class DnsDhcpSyncMixin:
             return self._record_status("dhcp", status="skipped",
                                        reason=f"{missing} spoke not connected")
         try:
-            pfx_data, ips_data = await self._netbox_prefixes_and_ips()
-            subnets, reservations = build_dhcp_payload(pfx_data, ips_data)
-            results = await asyncio.gather(*[
-                self.request_response(sid, "DHCP_SYNC", {
-                    "subnets": subnets, "reservations": reservations}, timeout=30.0)
-                for sid in dhcp_spokes
-            ], return_exceptions=True)
-            spoke_errors = [r for r in results if isinstance(r, Exception)]
-            if spoke_errors:
-                logger.warning("DHCP auto-sync failed: %s", spoke_errors[0])
-                return self._record_status("dhcp", status="error", error=str(spoke_errors[0]))
-            spoke_results = [unwrap_spoke(r) for r in results]
+            counts, spoke_results, skipped = await self._scoped_push("dhcp", dhcp_spokes)
             single = spoke_results[0] if len(spoke_results) == 1 else spoke_results
-            return self._record_status("dhcp", status="ok",
-                                       subnets_synced=len(subnets),
-                                       reservations_synced=len(reservations),
+            extra = {"skipped_spokes": skipped} if skipped else {}
+            return self._record_status("dhcp", status="ok", **counts, **extra,
                                        **dhcp_skip_warning(single),
                                        spoke_result=single)
         except Exception as e:  # noqa: BLE001
@@ -484,18 +540,19 @@ class DnsDhcpSyncMixin:
             return self._record_status("dhcp", status="error", error=str(e))
 
     async def _sync_dns_dhcp_once(self) -> None:
-        """One loop tick: fetch NetBox prefixes+IPs ONCE, build both payloads,
-        and skip the spoke push entirely when neither changed since the last
-        tick.
+        """One loop tick: fetch NetBox prefixes+IPs ONCE per tenant scope,
+        build the DNS/DHCP payloads, and skip a spoke push when its payload is
+        unchanged since the last tick.
 
-        The previous loop called ``sync_dns_from_netbox`` then
-        ``sync_dhcp_from_netbox`` sequentially, each fetching the full NetBox IP
-        set independently (2 paginated 100k-row fetches per cycle) and pushing
-        unconditionally — so an idle fleet still paid 2 NetBox fetches + an
-        ``unbound-control reload`` (10s) + 3 Kea RPCs every 300s. Hashing the
-        payloads and skipping the push when unchanged removes the expensive
-        spoke-side write/reload/RPC storm on idle fleets. NetBox is still
-        fetched each tick (it's the change signal), but only once.
+        Hashing the payloads and skipping unchanged pushes avoids an
+        ``unbound-control reload`` + Kea RPC storm on idle fleets; NetBox is
+        still fetched each tick (it's the change signal).
+
+        Tenant isolation: spokes are grouped by ``_sync_scope`` — a spoke
+        dedicated to a real tenant only receives that tenant's NetBox data,
+        unbound (shared/admin/unassigned) spokes keep the unfiltered set.
+        Hashes are kept per (side, scope); a failed fetch or push never
+        latches a hash and never pushes an empty set for that scope.
         """
         ipam = self.get_spoke_by_type("ipam")
         if not ipam:
@@ -504,93 +561,95 @@ class DnsDhcpSyncMixin:
         dhcp_spokes = self._get_dhcp_spokes()
         if not dns_spokes and not dhcp_spokes:
             return
-        try:
-            pfx_data, ips_data = await self._netbox_prefixes_and_ips()
-        except Exception as e:  # noqa: BLE001
-            logger.warning("DNS/DHCP sync: NetBox fetch failed: %s", e)
-            self._record_status("dns", status="error", error=str(e))
-            self._record_status("dhcp", status="error", error=str(e))
-            return
 
-        records = build_dns_records(ips_data, pfx_data)
-        subnets, reservations = build_dhcp_payload(pfx_data, ips_data)
+        dns_groups, dns_skipped = self._scope_groups(dns_spokes)
+        dhcp_groups, dhcp_skipped = self._scope_groups(dhcp_spokes)
 
-        dns_hash = hashlib.sha256(json.dumps(records, sort_keys=True,
-                                             default=str).encode()).hexdigest()
-        dhcp_hash = hashlib.sha256(json.dumps(
-            {"subnets": subnets, "reservations": reservations},
-            sort_keys=True, default=str).encode()).hexdigest()
+        scopes = {}
+        for groups in (dns_groups, dhcp_groups):
+            for key, (filters, _sids) in groups.items():
+                scopes.setdefault(key, filters)
+
+        fetched, fetch_errors = {}, {}
+        for key, filters in scopes.items():
+            try:
+                fetched[key] = await self._netbox_prefixes_and_ips(filters)
+            except Exception as e:  # noqa: BLE001
+                fetch_errors[key] = str(e)
+                logger.warning("DNS/DHCP sync: NetBox fetch failed (%s): %s", key or "all", e)
 
         last = getattr(self, "_last_sync_hashes", None) or {}
-        dns_changed = last.get("dns") != dns_hash
-        dhcp_changed = last.get("dhcp") != dhcp_hash
+        new_hashes = dict(last)
+        st = {side: {"error": None, "records_synced": 0, "subnets_synced": 0,
+                     "reservations_synced": 0, "spoke_results": []}
+              for side in ("dns", "dhcp")}
 
-        pushes = []
-        dns_indices = []
-        dhcp_indices = []
-        if dns_spokes and dns_changed:
-            for sid in dns_spokes:
-                dns_indices.append(len(pushes))
-                pushes.append(self.request_response(sid, "DNS_SYNC",
-                                                    {"records": records}, timeout=30.0))
-        if dhcp_spokes and dhcp_changed:
-            for sid in dhcp_spokes:
-                dhcp_indices.append(len(pushes))
-                pushes.append(self.request_response(sid, "DHCP_SYNC", {
-                    "subnets": subnets, "reservations": reservations}, timeout=30.0))
+        pushes, push_groups = [], []
+        for side, groups in (("dns", dns_groups), ("dhcp", dhcp_groups)):
+            for key, (_filters, sids) in groups.items():
+                if key not in fetched:
+                    if st[side]["error"] is None:
+                        st[side]["error"] = fetch_errors.get(key) or "NetBox fetch failed"
+                    continue
+                pfx, ips = fetched[key]
+                if side == "dns":
+                    records = build_dns_records(ips, pfx)
+                    payload = {"records": records}
+                    h = hashlib.sha256(json.dumps(records, sort_keys=True,
+                                                  default=str).encode()).hexdigest()
+                    st[side]["records_synced"] += len(records)
+                else:
+                    subnets, reservations = build_dhcp_payload(pfx, ips)
+                    payload = {"subnets": subnets, "reservations": reservations}
+                    h = hashlib.sha256(json.dumps(payload, sort_keys=True,
+                                                  default=str).encode()).hexdigest()
+                    st[side]["subnets_synced"] += len(subnets)
+                    st[side]["reservations_synced"] += len(reservations)
+                hk = self._hash_key(side, key)
+                if last.get(hk) == h:
+                    new_hashes[hk] = h
+                    continue
+                cmd = "DNS_SYNC" if side == "dns" else "DHCP_SYNC"
+                indices = []
+                for sid in sids:
+                    indices.append(len(pushes))
+                    pushes.append(self.request_response(sid, cmd, payload, timeout=30.0))
+                push_groups.append((side, hk, h, indices))
 
-        if not pushes:
-            # Nothing changed — record a "skipped (unchanged)" status so the UI
-            # status card reflects that the loop is alive without a spoke push.
-            self._record_status("dns", status="ok", records_synced=len(records),
-                                skipped_unchanged=True)
-            self._record_status("dhcp", status="ok", subnets_synced=len(subnets),
-                                reservations_synced=len(reservations),
-                                skipped_unchanged=True)
-            self._last_sync_hashes = {"dns": dns_hash, "dhcp": dhcp_hash}
-            return
-
-        results = await asyncio.gather(*pushes, return_exceptions=True)
-        # Latch each side's hash ONLY when that side's push actually SUCCEEDED.
-        # A failed/unapplied push (e.g. spoke transiently offline) must leave the
-        # old hash in place so the change is retried next cycle rather than
-        # latched-as-synced forever.
-        new_hashes = dict(getattr(self, "_last_sync_hashes", None) or {})
-        if dns_spokes and dns_changed:
-            dns_res = [results[i] for i in dns_indices]
-            dns_errors = [r for r in dns_res if isinstance(r, Exception)]
-            if dns_errors:
-                logger.warning("DNS auto-sync push failed: %s", dns_errors[0])
-                self._record_status("dns", status="error", error=str(dns_errors[0]))
+        results = await asyncio.gather(*pushes, return_exceptions=True) if pushes else []
+        # Latch a scope's hash ONLY when every push for it succeeded, so a
+        # transiently-offline spoke is retried next cycle.
+        for side, hk, h, indices in push_groups:
+            res = [results[i] for i in indices]
+            errs = [r for r in res if isinstance(r, Exception)]
+            if errs:
+                logger.warning("%s auto-sync push failed: %s", side.upper(), errs[0])
+                if st[side]["error"] is None:
+                    st[side]["error"] = str(errs[0])
             else:
-                spoke_res = [unwrap_spoke(r) for r in dns_res]
-                self._record_status("dns", status="ok", records_synced=len(records),
-                                    spoke_result=spoke_res[0] if len(spoke_res) == 1 else spoke_res)
-                new_hashes["dns"] = dns_hash
-        else:
-            self._record_status("dns", status="ok", records_synced=len(records),
-                                skipped_unchanged=True)
-            new_hashes["dns"] = dns_hash
+                new_hashes[hk] = h
+                st[side]["spoke_results"].extend(unwrap_spoke(r) for r in res)
 
-        if dhcp_spokes and dhcp_changed:
-            dhcp_res = [results[i] for i in dhcp_indices]
-            dhcp_errors = [r for r in dhcp_res if isinstance(r, Exception)]
-            if dhcp_errors:
-                logger.warning("DHCP auto-sync push failed: %s", dhcp_errors[0])
-                self._record_status("dhcp", status="error", error=str(dhcp_errors[0]))
+        for side, skipped in (("dns", dns_skipped), ("dhcp", dhcp_skipped)):
+            s = st[side]
+            if s["error"]:
+                self._record_status(side, status="error", error=s["error"])
+                continue
+            fields = ({"records_synced": s["records_synced"]} if side == "dns" else
+                      {"subnets_synced": s["subnets_synced"],
+                       "reservations_synced": s["reservations_synced"]})
+            results_ = s["spoke_results"]
+            if results_:
+                single = results_[0] if len(results_) == 1 else results_
+                if side == "dhcp":
+                    fields.update(dhcp_skip_warning(single))
+                fields["spoke_result"] = single
             else:
-                spoke_res = [unwrap_spoke(r) for r in dhcp_res]
-                single = spoke_res[0] if len(spoke_res) == 1 else spoke_res
-                self._record_status("dhcp", status="ok", subnets_synced=len(subnets),
-                                    reservations_synced=len(reservations),
-                                    **dhcp_skip_warning(single),
-                                    spoke_result=single)
-                new_hashes["dhcp"] = dhcp_hash
-        else:
-            self._record_status("dhcp", status="ok", subnets_synced=len(subnets),
-                                reservations_synced=len(reservations),
-                                skipped_unchanged=True)
-            new_hashes["dhcp"] = dhcp_hash
+                fields["skipped_unchanged"] = True
+            if skipped:
+                fields["skipped_spokes"] = list(skipped)
+            self._record_status(side, status="ok", **fields)
+
         self._last_sync_hashes = new_hashes
 
     async def run_dns_dhcp_sync_loop(self):

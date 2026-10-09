@@ -10,6 +10,17 @@ first. This is a pointer index, not the source of truth — each entry links to
 the module doc that describes the behaviour in full. Internal refactors and
 CI/tooling changes are omitted unless they change what an operator sees.
 
+## Week of 2026-10-05
+
+### DHCP / DNS / multitenancy
+- **Tenant isolation for DHCP/DNS.** A tenant-bound DHCP/DNS spoke now only gets
+  its own tenant's NetBox subnets/records; the shared tenant is the only one
+  that may manage other tenants, and automatic instance failover never moves a
+  role onto another tenant's agent. See [dhcp.md](dhcp.md#tenant-isolation).
+- **No more phantom DHCP role on simulation hosts.** The `dhcp-server` badge
+  only appears for LM-installed Kea, not the distro Kea a simulation host
+  uses privately. See [dhcp.md](dhcp.md#troubleshooting--common-questions).
+
 ## Week of 2026-09-15
 
 ### DNS

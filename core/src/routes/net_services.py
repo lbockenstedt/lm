@@ -661,7 +661,7 @@ def register(app, hub, ctx):
             if module_type != "agent" or hub._primary_key(sid) not in hub.active_connections:
                 continue
             agent_tenant = hub.state.get_spoke_tenant(sid) or ""
-            if agent_tenant != dns_tenant:
+            if not access.same_tenant(agent_tenant, dns_tenant):
                 continue
             candidates.append(sid)
 
@@ -3605,7 +3605,7 @@ def register(app, hub, ctx):
         for sid, module_type in list(hub.spoke_module_types.items()):
             if module_type != "agent" or hub._primary_key(sid) not in hub.active_connections:
                 continue
-            if (hub.state.get_spoke_tenant(sid) or "") != dhcp_tenant:
+            if not access.same_tenant(hub.state.get_spoke_tenant(sid), dhcp_tenant):
                 continue
             candidates.append(sid)
 

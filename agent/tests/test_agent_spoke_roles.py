@@ -453,7 +453,8 @@ def test_load_multiple_roles_hosts_all_concurrently(monkeypatch):
 
 def test_available_roles_reports_installed_deploy_roles(monkeypatch):
     agent = GenericAgent("agent-1", {})
-    installed = {"/usr/sbin/unbound", "/usr/sbin/kea-dhcp4"}
+    installed = {"/usr/sbin/unbound", "/usr/sbin/kea-dhcp4",
+                 "/etc/kea/kea-api-password"}
     monkeypatch.setattr(
         agent_spoke.os.path, "exists", lambda path: path in installed)
     monkeypatch.setattr(agent_spoke.subprocess, "run", lambda *args, **kwargs:
@@ -464,6 +465,23 @@ def test_available_roles_reports_installed_deploy_roles(monkeypatch):
     assert result["installed_deploy_roles"] == ["dns-server", "dhcp-server"]
     assert result["active_deploy_roles"] == ["dns-server", "dhcp-server"]
     assert result["deploy"] == {"state": "idle"}
+
+
+def test_available_roles_ignores_sim_hosts_private_kea(monkeypatch):
+    """A simulation host has the distro kea binary (for kea-dhcp4-sim) and the
+    package auto-enables kea-dhcp4-server, but LM never deployed dhcp-server
+    there — it must not surface as an installed/active DHCP Server role."""
+    agent = GenericAgent("agent-1", {})
+    installed = {"/usr/sbin/kea-dhcp4"}
+    monkeypatch.setattr(
+        agent_spoke.os.path, "exists", lambda path: path in installed)
+    monkeypatch.setattr(agent_spoke.subprocess, "run", lambda *args, **kwargs:
+                        types.SimpleNamespace(returncode=0, stdout=""))
+
+    result = asyncio.run(agent.handle_command("GET_AVAILABLE_ROLES", {}))
+
+    assert "dhcp-server" not in result["installed_deploy_roles"]
+    assert "dhcp-server" not in result["active_deploy_roles"]
 
 
 def test_configured_worker_report_never_exposes_secret(monkeypatch):

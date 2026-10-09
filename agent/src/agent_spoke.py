@@ -283,6 +283,31 @@ _DEPLOY_ROLE_MARKERS = {
     "dhcp-server": "/usr/sbin/kea-dhcp4",
 }
 
+# The service binary alone is ambiguous for dhcp-server: the simulation role's
+# installer apt-installs kea-dhcp4-server for its own private kea-dhcp4-sim
+# instance, so /usr/sbin/kea-dhcp4 exists on every sim host. Reporting that as
+# an installed (and, with the distro units auto-enabled, ACTIVE) DHCP Server
+# role made a "DHCP" role reappear on sim agents after every cs reinstall, and
+# let DHCP discovery enroll them into a Kea HA pair. Only LM's own dhcp
+# installer writes these files, so at least one must exist too.
+_DEPLOY_ROLE_OWNERSHIP = {
+    "dhcp-server": ("/etc/kea/kea-api-password", "/etc/lm-dhcp-worker/worker.env"),
+}
+
+
+def _deploy_role_installed(role_name: str) -> bool:
+    marker = _DEPLOY_ROLE_MARKERS.get(role_name)
+    if not marker or not os.path.exists(marker):
+        return False
+    owned_by = _DEPLOY_ROLE_OWNERSHIP.get(role_name)
+    if owned_by:
+        return any(os.path.exists(path) for path in owned_by)
+    return True
+
+
+def _installed_deploy_roles() -> list:
+    return [role for role in _DEPLOY_ROLE_MARKERS if _deploy_role_installed(role)]
+
 _DEPLOY_ROLE_UNITS = {
     "dns-server": ("unbound",),
     "dhcp-server": ("kea-dhcp4-server", "kea-ctrl-agent"),
@@ -1492,10 +1517,7 @@ class GenericAgent(BaseSpoke):
             return await self._apply_netbox_sso(data)
 
         if cmd == "GET_AVAILABLE_ROLES":
-            installed_deploy_roles = [
-                role for role, marker in _DEPLOY_ROLE_MARKERS.items()
-                if os.path.exists(marker)
-            ]
+            installed_deploy_roles = _installed_deploy_roles()
             active_deploy_roles = await asyncio.to_thread(
                 _active_deploy_roles, installed_deploy_roles)
             configured_workers = _configured_service_workers()
@@ -1557,8 +1579,7 @@ class GenericAgent(BaseSpoke):
                 # reconnects, so without this a reboot re-ran the Kea/Unbound
                 # installer every time. ``force`` keeps the deliberate
                 # re-install/repair path available.
-                marker = _DEPLOY_ROLE_MARKERS.get(role_name)
-                if not data.get("force") and marker and os.path.exists(marker):
+                if not data.get("force") and _deploy_role_installed(role_name):
                     return {"status": "SUCCESS", "role": role_name,
                             "module_type": _DEPLOY_ROLES[role_name]["module_type"],
                             "deploy": True, "already_installed": True,
@@ -1631,10 +1652,7 @@ class GenericAgent(BaseSpoke):
             # "roles:" badge line only ever showed the last one installed.
             # ``deploy``/``active_role`` are kept (most-recent-by-start) for
             # back-compat with any caller still reading the singular shape.
-            installed_deploy_roles = [
-                role for role, marker in _DEPLOY_ROLE_MARKERS.items()
-                if os.path.exists(marker)
-            ]
+            installed_deploy_roles = _installed_deploy_roles()
             deploys = list(self._deploy_status_by_role.values())
             last = deploys[-1] if deploys else {"state": "idle"}
             last_role = last.get("role") if deploys else None
