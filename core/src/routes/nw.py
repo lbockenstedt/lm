@@ -1741,6 +1741,7 @@ def register(app, hub, ctx):
         # config), overlaying each set's vault secret just before the push.
         cred_ids = [str(x) for x in (data.get("credential_ids") or saved.get("credential_ids") or [])]
         all_sets = (hub.state.system_state.get("global_config", {}) or {}).get("nw_scan_credentials", []) or []
+        all_sets = list(all_sets) + _vault_scan_sets(hub, tenant_id)
         chosen = [c for c in all_sets if isinstance(c, dict) and c.get("id") in set(cred_ids)]
         # Tenant-owned (or shared) credentials only — for every caller. On the
         # ADMIN (``default``) scope the admin's OWN sets are the unassigned /
@@ -2104,6 +2105,28 @@ def register(app, hub, ctx):
         await hub.send_to_spoke(msg)
         return True
 
+    def _vault_scan_sets(hub, tenant_id):
+        """Synthetic scan credential sets for the tenant's own Credential Vault
+        bucket (login/console secrets, automation-readable), so a vault login is
+        selectable on the scan tab without hand-creating a set. Ids are
+        ``vault:<bucket>:<name>`` and resolve at scan time via the normal overlay."""
+        tid = str(tenant_id or "").strip()
+        if not tid:
+            return []
+        bucket = next((b for b in (
+            (((hub.state.system_state.get("global_config", {}) or {})
+              .get("cred_vault", {}) or {}).get("secrets", {}) or {}))
+            if str(b).casefold() == tid.casefold()), None)
+        if bucket is None:
+            return []
+        secrets = (hub.state.system_state["global_config"]["cred_vault"]["secrets"].get(bucket) or {})
+        return [{
+            "id": f"vault:{bucket}:{name}", "name": f"{name} (vault)", "username": "",
+            "tenant_id": tid, "vault_credential": {"bucket": bucket, "name": name},
+        } for name, m in sorted(secrets.items())
+            if isinstance(m, dict) and m.get("mode") == "hub"
+            and m.get("type") in ("login", "console")]
+
     def _instance_crud(route_prefix: str, storage_key: str, payload_fn=None,
                        legacy_key: str = None, legacy_to_instance=None,
                        topology_sync=None):
@@ -2176,6 +2199,8 @@ def register(app, hub, ctx):
                 scope = access.tenant_scope_ids(req_tenant)
                 instances = [i for i in instances
                              if isinstance(i, dict) and access.in_tenant_scope(i.get("tenant_id"), scope)]
+                if storage_key == "nw_scan_credentials":
+                    instances = instances + _vault_scan_sets(hub, req_tenant)
             return {"instances": instances}
 
         @app.post(f"/setup/{route_prefix}", operation_id=f"add_{op}")
