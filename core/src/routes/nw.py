@@ -1480,13 +1480,15 @@ def register(app, hub, ctx):
             for r in rows:
                 if not isinstance(r, dict):
                     continue
-                ip = r.get("ip") or r.get("ip_address") or r.get("address") or r.get("value")
+                ip = (r.get("ip") or r.get("ip_address") or r.get("ip-address")
+                      or r.get("address") or r.get("value"))
                 if _add(ip):
                     c += 1
             if c:
                 per_source[source] = c
-            logger.info("scan aggregate tenant=%s %s: %d rows, %d new targets",
-                        tenant_id, source, len(rows), c)
+            logger.info("scan aggregate tenant=%s %s spoke=%s: %d rows, %d new targets%s",
+                        tenant_id, source, sid, len(rows), c,
+                        "" if rows else " (resp=%s)" % str(data)[:200])
 
         await _pull("dns", hub.get_dns_spoke_for_tenant, "DNS_LIST")
         await _pull("dhcp", hub.get_dhcp_spoke_for_tenant, "DHCP_LIST_LEASES")
