@@ -19506,19 +19506,13 @@ async function _renderNwTopologyManual() {
 async function _renderNwScanTab() {
     const c = document.getElementById('nw-table-container');
     if (!c) return;
-    // ADMIN (default) scope: every object this tab touches is per-tenant — the
-    // scan config and schedule live under nw_tenant_cfg[tenant], and a scan
-    // credential set is stamped with the tenant of the nw spoke it is bound to.
-    // Rendered under ADMIN/default the tab was actively misleading: the
-    // credential picker came back EMPTY (the ?tenant=default scope is
-    // ""/default/shared only, so a set auto-stamped with the spoke's tenant is
-    // filtered out — i.e. a set vanished from the very view that created it),
-    // and any save landed in a nw_tenant_cfg["default"] bucket no real tenant
-    // reads. Prompt for a tenant instead, exactly like the Devices view.
-    if (isAdmin() && (!currentTenant || currentTenant === 'default')) {
+    // The ADMIN tenant ("default") is a real tenant: an nw spoke bound to it
+    // is offered by /api/nw/tenant-config and its scan config lives under
+    // nw_tenant_cfg["default"]. Only prompt when no tenant is selected at all.
+    if (isAdmin() && !currentTenant) {
         c.innerHTML = `<div class="py-12 text-center space-y-3">
             <p class="text-slate-600 text-sm font-semibold">Select a tenant to configure network scans</p>
-            <p class="text-slate-400 text-xs max-w-md mx-auto">Scan settings, schedules and credential sets all belong to a specific tenant — a credential set is bound to that tenant's Network Devices spoke. Choose a tenant from the tenant picker to view and edit its scan configuration.</p>
+            <p class="text-slate-400 text-xs max-w-md mx-auto">Scan settings, schedules and credential sets all belong to a specific tenant. Choose a tenant from the tenant picker to view and edit its scan configuration.</p>
         </div>`;
         return;
     }
@@ -24217,7 +24211,7 @@ function pxmxStaleBanner(isStale, cachedAt) {
     const when = cachedAt ? _relTimeAgo(new Date(cachedAt * 1000)) : '';
     return `<div class="mb-4 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-700 flex items-center gap-2">
                <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.07 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
-               <span>Showing cached data${when} — agent offline. Live stats resume automatically when the agent reconnects.</span>
+               <span>Showing cached data${when} — the agent is offline or not responding. Live stats resume automatically when it answers again.</span>
            </div>`;
 }
 
@@ -24321,7 +24315,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
                 <p class="text-xs text-slate-500 mt-1">Storage device telemetry and SSD wear level diagnostics across hypervisor nodes${cachedNote}</p>
             </div>
             <div>
-                <button onclick="loadPxmxData('Diagnostics', true)" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Query SMART telemetry and SSD wear level diagnostics across all nodes">
+                <button onclick="loadPxmxData('Diagnostics')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Reload SMART telemetry and SSD wear diagnostics from the hub cache (polled every 6 hours)">
                     ↻ Run Diagnostics / Refresh
                 </button>
             </div>

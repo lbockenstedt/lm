@@ -88,6 +88,7 @@ from truenas_cache import TruenasCacheMixin
 from le_cache import LeCacheMixin
 from warm_cache import WarmCacheMixin
 from dns_dhcp_sync import DnsDhcpSyncMixin
+from sync_loop import run_sync_loop
 from henet_sync import HenetSyncMixin
 from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
 from search_index import SearchIndexMixin
@@ -8401,6 +8402,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     # tenant_id_for_ipam_scope, sync_tenant_endpoints, trigger_endpoint_sync, run_endpoint_sync_loop
     # moved to EndpointSyncMixin (added to LabManagerHub bases); all hub.* call sites unchanged.
 
+    async def run_pxmx_drive_health_loop(self):
+        """Background feed for Proxmox drive health / SSD wear.
+
+        The data changes slowly, so it is polled every 6h per tenant scope
+        (``pxmx_drive_health_feed_once`` skips scopes whose cached copy is
+        younger than 6h; the cache is persisted across restarts) and the
+        Diagnostics tab serves from it instead of querying the spoke live."""
+        async def _body():
+            feed = getattr(self, "pxmx_drive_health_feed_once", None)
+            if feed:
+                await feed()
+
+        await run_sync_loop(
+            stagger=90, body=_body, delay=lambda: 900.0,
+            on_error=lambda e: logger.warning("pxmx drive-health feed error: %s", e),
+            error_delay=300.0)
+
     async def run_pxmx_diag_loop(self):
         """Emit spoke-health diagnostics into the hub log (the logging telemetry).
 
@@ -10351,6 +10369,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         dns_dhcp_sync_task = asyncio.create_task(self.run_dns_dhcp_sync_loop())
         # Keeps the DNS/DHCP page caches fresh in the background (not only on tab open).
         dns_dhcp_feed_task = asyncio.create_task(self.run_dns_dhcp_feed_loop())
+        # Proxmox drive health/SSD wear: polled every 6h, served from cache.
+        pxmx_drive_health_task = asyncio.create_task(self.run_pxmx_drive_health_loop())
         # HE.NET (External DNS) scheduled re-sync: on a schedule (interval or a
         # daily HH:MM, global_config.henet_sync) re-apply every managed A/AAAA
         # record to Hurricane Electric via the account-login web panel — the
