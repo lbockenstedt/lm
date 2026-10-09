@@ -649,7 +649,7 @@ async def _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0):
     return out
 
 
-async def _merge_pinned_agent_vms(hub, data, tid, visible_spokes, timeout=10.0):
+async def _merge_pinned_agent_vms(hub, data, tid, visible_spokes, timeout=10.0, agent_id=None):
     """Union in VMs from Proxmox hosts explicitly PINNED to ``tid``
     (``agent_config[agent].client_simulation.tenant_id == tid``) even when
     they dial an otherwise-SHARED spoke — mirrors the Dashboard's whole-host
@@ -666,15 +666,28 @@ async def _merge_pinned_agent_vms(hub, data, tid, visible_spokes, timeout=10.0):
     here at all). A ``visible_spokes`` of ``None`` means no spoke restriction
     (admin, no tenant scope); otherwise an agent's spoke must be in that set
     or its VMs are skipped (never widens tenant/spoke visibility).
+
+    ``agent_id``, when given, scopes the merge to that ONE pinned agent —
+    matching the caller's ``?agent_id=`` request. Without this the merge
+    always unioned every agent pinned to ``tid``, so a single-agent request
+    could return VMs from other agents pinned to the same tenant, violating
+    the endpoint's documented single-agent contract.
     """
     if not tid or not isinstance(data, dict):
         return data
+    # Case-insensitive compare: a pin recorded as "Default" must match a scope
+    # of "default" — same canonicalisation access.tenant_scope_ids/_norm_tenant_id
+    # use everywhere else, so an agent explicitly pinned to a tenant isn't
+    # silently dropped by a capitalisation mismatch.
+    norm_tid = tid.strip().casefold()
     acfg = hub.state.system_state.get("agent_config", {}) or {}
     reqs = []
     for apk, cfg in acfg.items():
+        if agent_id and apk != agent_id:
+            continue
         pin = str(((cfg or {}).get("client_simulation") or {})
                   .get("tenant_id") or "").strip()
-        if pin != tid:
+        if pin.casefold() != norm_tid:
             continue
         sp = hub.get_spoke_for_agent(apk, fallback_hypervisor=False)
         if sp and (visible_spokes is None or sp in visible_spokes):
@@ -1892,9 +1905,16 @@ def register(app, hub, ctx):
                 cached = hub.warm_get("pxmx_drive_health", warm_key)
                 if isinstance(cached, dict):
                     out = dict(cached)
-                    out["spoke_connected"] = True
-                    if state == "expired":  # >24h: the 6h poll is failing; badge it
+                    if state == "expired":
+                        # >24h: the 6h background poll has been failing the
+                        # whole time, not just missing one cycle. Reporting
+                        # spoke_connected=True here was pure state conflation
+                        # — the UI showed a healthy "connected" badge next to
+                        # data we can no longer vouch for at all.
+                        out["spoke_connected"] = False
                         out["stale"] = True
+                    else:
+                        out["spoke_connected"] = True
                     out["cached_at"] = hub.warm_fetched_at("pxmx_drive_health", warm_key)
                     return out
 
@@ -1991,7 +2011,19 @@ def register(app, hub, ctx):
             if tid:
                 cached = _cache_entry(tid, "pxmx_vms")
                 if cached:
-                    return _with_tpl(await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant))
+                    out = await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant)
+                    # Same pinned-host merge as every other return path below —
+                    # this fast session-cache path used to skip it entirely, so
+                    # a pinned-but-shared host's off-subnet/untagged VMs dropped
+                    # off the very first (cache-hit) render.
+                    _vs = set(hub.get_hypervisor_spokes_for_tenant(tid))
+                    _gs = hub.get_hypervisor_spoke()
+                    _gs_tid = ((hub.state.system_state.get("module_metadata", {}) or {})
+                               .get(_gs, {}) or {}).get("tenant_id") if _gs else None
+                    if _gs and not _gs_tid:
+                        _vs.add(_gs)
+                    out = await _merge_pinned_agent_vms(hub, out, tid, _vs)
+                    return _with_tpl(out)
         # Tenant scope for the live fetch (proxmox_tag filter) — also the warm-
         # cache scope key so a cached raw envelope is only served back to the same
         # scope (tenant isolation preserved). admins / a tenant with no
@@ -2016,7 +2048,7 @@ def register(app, hub, ctx):
             if cached is None:
                 return _with_tpl({"vms": [], "spoke_connected": False})
             out = await _filter_tenant(request, cached, "hypervisor", ["ips"], tenant)
-            out = await _merge_pinned_agent_vms(hub, out, tid, visible_spokes)
+            out = await _merge_pinned_agent_vms(hub, out, tid, visible_spokes, agent_id=agent_id)
             if isinstance(out, dict):
                 out = dict(out)
                 out["stale"] = True
@@ -2076,7 +2108,9 @@ def register(app, hub, ctx):
                 tid = sess.get("user", {}).get("tenant_id")
                 cached = _cache_entry(tid, "pxmx_vms") if tid else None
                 if cached:
-                    return _with_tpl(await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant))
+                    out = await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant)
+                    out = await _merge_pinned_agent_vms(hub, out, tid, visible_spokes, agent_id=agent_id)
+                    return _with_tpl(out)
             return await _warm_or_empty()
         try:
             payload: dict = {}
@@ -2093,7 +2127,7 @@ def register(app, hub, ctx):
                 lambda: _aggregate_pxmx_vms(hub, pxmx_spokes, payload, timeout=30.0))
             await hub.warm_set("pxmx_vms", warm_key, data)  # cache raw (pre-filter)
             out = await _filter_tenant(request, data, "hypervisor", ["ips"], tenant)
-            out = await _merge_pinned_agent_vms(hub, out, tid, visible_spokes)
+            out = await _merge_pinned_agent_vms(hub, out, tid, visible_spokes, agent_id=agent_id)
             return _with_tpl(out)
         except Exception as e:
             logger.exception("get_pxmx_vms failed")
@@ -2102,7 +2136,7 @@ def register(app, hub, ctx):
             cached = hub.warm_get("pxmx_vms", warm_key)
             if cached is not None:
                 out = await _filter_tenant(request, cached, "hypervisor", ["ips"], tenant)
-                out = await _merge_pinned_agent_vms(hub, out, tid, visible_spokes)
+                out = await _merge_pinned_agent_vms(hub, out, tid, visible_spokes, agent_id=agent_id)
                 if isinstance(out, dict):
                     out = dict(out)
                     out["stale"] = True

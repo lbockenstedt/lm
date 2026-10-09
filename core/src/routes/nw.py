@@ -1759,6 +1759,15 @@ def register(app, hub, ctx):
         # ``default``-tagged ones, matching what the scan tab lists for default,
         # so a set the admin can see is a set the admin can actually scan with.
         owned = access.tenant_scope_ids(tenant_id)
+        if owned is None:
+            # A blank/None tenant_id (reachable here — the scheduler can pass
+            # one, and admins resolve to "" when no shared tenant is set) must
+            # still be scoped. tenant_scope_ids(None-ish) returns None, and
+            # in_tenant_scope treats a None scope as UNRESTRICTED — that would
+            # let a blank-tenant scan pick up every tenant's vault credentials,
+            # exactly the leak this scoping exists to prevent. Fall back to the
+            # ADMIN scope (unassigned + default-tagged + shared) instead.
+            owned = access.tenant_scope_ids(access.ADMIN_TENANT_ID)
         chosen = [c for c in chosen if access.in_tenant_scope(c.get("tenant_id"), owned)]
         if not system and not _is_admin(sess):
             chosen = [c for c in chosen
