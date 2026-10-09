@@ -10349,6 +10349,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # loop and the button can't diverge. See run_dns_dhcp_sync_loop
         # (DnsDhcpSyncMixin).
         dns_dhcp_sync_task = asyncio.create_task(self.run_dns_dhcp_sync_loop())
+        # Keeps the DNS/DHCP page caches fresh in the background (not only on tab open).
+        dns_dhcp_feed_task = asyncio.create_task(self.run_dns_dhcp_feed_loop())
         # HE.NET (External DNS) scheduled re-sync: on a schedule (interval or a
         # daily HH:MM, global_config.henet_sync) re-apply every managed A/AAAA
         # record to Hurricane Electric via the account-login web panel — the
