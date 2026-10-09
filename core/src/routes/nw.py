@@ -648,9 +648,6 @@ def register(app, hub, ctx):
         # inventory/stats view. A truly unscoped admin call (tenant is None —
         # not the picker) still returns the whole fleet for programmatic
         # callers / the fleet cache warm path.
-        if is_admin and tenant == "default":
-            return {"status": "SUCCESS", "data": [], "select_tenant": True,
-                    "message": "Select a tenant to view its network devices"}
         # Tenant selector scoping: when the caller explicitly selects a SPECIFIC
         # tenant (the WebUI tenant picker sends ``?tenant=``; ``default`` is the
         # built-in global/"All tenants" scope, NOT a real tenant), scope the
@@ -662,6 +659,11 @@ def register(app, hub, ctx):
         acting_tenant = None
         if tenant and tenant != "default" and access.check_tenant_access(sess, tenant):
             acting_tenant = tenant
+        elif is_admin and tenant == "default":
+            # The ADMIN scope is the ``default`` tenant itself (its own scanner,
+            # subnets and scan-added devices): scope to that tenant's devices
+            # (plus unassigned and shared), never the cross-tenant firehose.
+            acting_tenant = "default"
 
         def _row_visible(tid):
             """Whether an nw_devices row (by ``tenant_id``) is visible to this
@@ -669,7 +671,10 @@ def register(app, hub, ctx):
             devices + shared devices. Otherwise the existing rule: admin → all,
             non-admin → own-tenant + shared (``spoke_visible_to_session``)."""
             if acting_tenant is not None:
-                return tid == acting_tenant or access.tenant_is_shared(tid)
+                if acting_tenant == "default" and not str(tid or "").strip():
+                    return True
+                return (str(tid or "").casefold() == str(acting_tenant).casefold()
+                        or access.tenant_is_shared(tid))
             return is_admin or access.spoke_visible_to_session(sess, tid)
 
         # Authoritative visibility: the hub config is the source of truth for
@@ -864,9 +869,9 @@ def register(app, hub, ctx):
         NetBox inventory, switch MAC tables and operator-declared gear.
 
         Tenant-scoped exactly like ``/api/nw/devices``: a Global Admin sitting in
-        the ADMIN (``default``) scope gets an EMPTY graph + ``select_tenant``
-        rather than every tenant's topology fused into one meaningless mesh —
-        a map is only coherent within one tenant's slice anyway. An explicit
+        the ADMIN (``default``) scope maps the default tenant's OWN devices
+        (never every tenant's topology fused into one mesh — a map is only
+        coherent within one tenant's slice). An explicit
         ``?tenant=`` scopes even an admin to that tenant; a non-admin sees their
         own + shared devices.
 
@@ -888,17 +893,21 @@ def register(app, hub, ctx):
         # ADMIN (default) tenant explicitly selected in the picker: the WebUI
         # always sends ?tenant=<currentTenant> and 'default' is the built-in
         # ADMIN scope. Same rule as the device inventory — see nw_list_devices.
-        if is_admin and tenant == "default":
-            return {"status": "SUCCESS", **empty, "select_tenant": True,
-                    "message": "Select a tenant to view its network topology"}
-
         acting_tenant = None
         if tenant and tenant != "default" and access.check_tenant_access(sess, tenant):
             acting_tenant = tenant
+        elif is_admin and tenant == "default":
+            # The ADMIN scope is the ``default`` tenant itself (its own scanner,
+            # subnets and scan-added devices): scope to that tenant's devices
+            # (plus unassigned and shared), never the cross-tenant firehose.
+            acting_tenant = "default"
 
         def _row_visible(tid):
             if acting_tenant is not None:
-                return tid == acting_tenant or access.tenant_is_shared(tid)
+                if acting_tenant == "default" and not str(tid or "").strip():
+                    return True
+                return (str(tid or "").casefold() == str(acting_tenant).casefold()
+                        or access.tenant_is_shared(tid))
             return is_admin or access.spoke_visible_to_session(sess, tid)
 
         all_devs = (hub.state.system_state.get("global_config", {}) or {}).get("nw_devices", []) or []

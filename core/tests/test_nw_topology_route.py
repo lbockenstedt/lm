@@ -44,16 +44,16 @@ def _edge_names(graph):
 
 # ── tenant scoping ──────────────────────────────────────────────────────────
 
-def test_admin_in_the_default_scope_is_asked_to_pick_a_tenant(monkeypatch, tmp_path):
-    """The ADMIN scope must not fuse every tenant's gear into one mesh — the
-    same rule the device inventory follows."""
+def test_admin_in_the_default_scope_maps_only_the_default_tenant(monkeypatch, tmp_path):
+    """The ADMIN scope is the default tenant itself: it must not fuse every
+    tenant's gear into one mesh, and it is no longer a "select a tenant" dead end."""
     c, hub = _build(monkeypatch, tmp_path, shared=True)
     tok = _mint(hub, "admin", tenants=[], admin=True)
     r = c.get("/api/nw/topology?tenant=default", cookies={"lm_session": tok})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["select_tenant"] is True
-    assert body["nodes"] == [] and body["edges"] == []
+    assert not body.get("select_tenant")
+    assert not ({"acme", "other"} & _names(body))
 
 
 def test_admin_acting_as_a_tenant_sees_only_that_tenants_devices(monkeypatch, tmp_path):
