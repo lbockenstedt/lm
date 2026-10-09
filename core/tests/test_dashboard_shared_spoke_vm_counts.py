@@ -227,3 +227,34 @@ def test_pinned_agent_stopped_vm_not_counted():
     )
     out = _summary(hub, _ctx(_LRB_PREFIXES))
     assert out["vms"] == 1  # only the running one
+
+
+def test_pinned_agent_whole_host_vms_counted_for_default_tenant():
+    """The reported bug: admin/default was special-cased OUT of both the
+    plural hv_spokes resolver AND the whole-host pinned-agent merge, so a
+    Proxmox host explicitly PINNED to "default" (per-agent Tenant button,
+    e.g. the admin assigning a lab host to the ADMIN tenant) only ever
+    contributed its on-subnet VMs — off-subnet/untagged VMs on that pinned
+    host silently dropped off the Overview for admin/default, even though the
+    identical scenario already worked for every other real tenant (lrb/ra/...).
+    get_hypervisor_spokes_for_tenant("default") already scopes this safely
+    (unassigned + default-pinned + shared only — never another tenant's
+    dedicated spoke), so admin/default must get the same treatment."""
+    spoke_vms = [_vm(701, "10.10.0.71"),
+                 _vm(702, "192.168.9.2"),   # off-subnet, untagged
+                 _vm(703, "192.168.9.3")]   # off-subnet, untagged
+    host_vms = [_vm(701, "10.10.0.71"), _vm(702, "192.168.9.2"), _vm(703, "192.168.9.3")]
+    tenants = dict(_TENANTS, default={"netbox_tenant_slug": "default", "proxmox_tag": ""})
+    prefixes = dict(_LRB_PREFIXES, default=["10.10.0.0/24"])
+    hub = _Hub(
+        tenants=tenants,
+        module_metadata={"shared-pxmx": {"tenant_id": "shared"}},
+        plural={"default": ["shared-pxmx"]},
+        global_spoke=None,
+        responses={("shared-pxmx", "PXMX_LIST_VMS"): {"vms": spoke_vms},
+                   ("shared-pxmx", "PXMX_LIST_VMS", "agent-default-1"): {"vms": host_vms}},
+        agent_config={"agent-default-1": {"client_simulation": {"tenant_id": "default"}}},
+        agent_spokes={"agent-default-1": "shared-pxmx"},
+    )
+    out = _summary(hub, _ctx(prefixes), tenant="default")
+    assert out["vms"] == 3  # 701 (subnet) + 702/703 (whole-host pinned) — all counted
