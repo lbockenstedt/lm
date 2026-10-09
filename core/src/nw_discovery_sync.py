@@ -917,3 +917,25 @@ class NwDiscoverySyncMixin:
             except Exception as e:  # noqa: BLE001 - loop must never die
                 logger.debug("nw scan schedule loop tick error: %s", e)
             await asyncio.sleep(CHECK_INTERVAL)
+
+    async def run_nw_sweep_loop(self):
+        """Tier-2 background supernet sweep: one small batch per opted-in tenant
+        every ~3 min, so a /16 completes over many hours without ever competing
+        with the targeted scheduled scans (a separate task, own probe budget).
+        The work is ``hub.run_nw_sweep_step`` (wired in routes/nw.py)."""
+        await asyncio.sleep(240)
+        while True:
+            try:
+                step = getattr(self, "run_nw_sweep_step", None)
+                enabled = getattr(self, "nw_sweep_enabled_for_tenant", None)
+                if step and enabled and self.get_all_spokes_by_type("nw"):
+                    for tid in list((getattr(self.state, "tenant_state", {}) or {})
+                                    .get("tenants", {}) or {}):
+                        try:
+                            if enabled(tid):
+                                await step(tid)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("nw sweep tenant=%s failed: %s", tid, e)
+            except Exception as e:  # noqa: BLE001 - loop must never die
+                logger.debug("nw sweep loop tick error: %s", e)
+            await asyncio.sleep(180)

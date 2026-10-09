@@ -191,6 +191,96 @@ def resolve_nw_scan_spoke(hub, tenant_id, requested_spoke_id, shared_tenant_id):
     return ""
 
 
+# Absolute ceiling on one scan's total target list, and how many batches run
+# at once. Anything over the per-request batch size (``max_targets``) is split.
+_NW_SCAN_MAX_TOTAL = 32768
+_NW_SCAN_PARALLEL_BATCHES = 3
+# Hosts probed per sweep tick (a tick runs every few minutes per tenant).
+_NW_SWEEP_BATCH = 256
+
+
+def split_leaf_and_supernets(prefixes):
+    """Split IPv4 CIDR strings into ``(leaves, supernets)`` ``IPv4Network`` lists.
+    A supernet is a prefix that CONTAINS another prefix in the set; invalid and
+    IPv6 entries are ignored and duplicates collapsed."""
+    nets = []
+    for p in (prefixes or []):
+        try:
+            n = ipaddress.ip_network(str(p).strip(), strict=False)
+        except ValueError:
+            continue
+        if isinstance(n, ipaddress.IPv4Network) and n not in nets:
+            nets.append(n)
+    supers = [n for n in nets
+              if any(o.prefixlen > n.prefixlen and o.subnet_of(n) for o in nets)]
+    return [n for n in nets if n not in supers], supers
+
+
+def sweep_ranges(supernets, leaves):
+    """Inclusive ``(first, last)`` integer host ranges covering every supernet
+    minus the leaf prefixes carved out of it (those belong to the targeted
+    scan, not the sweep). Sorted and non-overlapping; stable across calls so a
+    persisted cursor stays valid while the prefix set is unchanged."""
+    out = []
+    for sn in sorted(supernets, key=lambda n: (int(n.network_address), n.prefixlen)):
+        pieces = [sn]
+        for leaf in leaves:
+            if leaf.subnet_of(sn):
+                nxt = []
+                for piece in pieces:
+                    if leaf.subnet_of(piece):
+                        nxt.extend(piece.address_exclude(leaf))
+                    elif not piece.subnet_of(leaf):
+                        nxt.append(piece)
+                pieces = nxt
+        for piece in pieces:
+            lo, hi = int(piece.network_address), int(piece.broadcast_address)
+            if sn.prefixlen < 31:
+                if lo == int(sn.network_address):
+                    lo += 1
+                if hi == int(sn.broadcast_address):
+                    hi -= 1
+            if hi >= lo:
+                out.append((lo, hi))
+    out.sort()
+    merged = []
+    for lo, hi in out:
+        if merged and lo <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def sweep_take(ranges, cursor, n, skip=frozenset()):
+    """Next ``n`` host IPs (strings, minus ``skip``) from ``ranges`` starting at
+    absolute index ``cursor`` of the concatenated space. Returns
+    ``(ips, new_cursor, total)``; ``new_cursor`` is ``0`` after wrapping past
+    the end (a full cycle completed)."""
+    total = sum(hi - lo + 1 for lo, hi in ranges)
+    if total <= 0:
+        return [], 0, 0
+    cursor = max(0, int(cursor)) % total if cursor < total else 0
+    ips, idx, consumed = [], 0, cursor
+    for lo, hi in ranges:
+        size = hi - lo + 1
+        if cursor >= idx + size:
+            idx += size
+            continue
+        start = lo + max(0, cursor - idx)
+        for v in range(start, hi + 1):
+            consumed += 1
+            ip = str(ipaddress.IPv4Address(v))
+            if ip not in skip:
+                ips.append(ip)
+            if consumed - cursor >= n:
+                break
+        idx += size
+        if consumed - cursor >= n:
+            break
+    return ips, (consumed if consumed < total else 0), total
+
+
 def build_scan_target_pool(targets, subnets, cap):
     """Pure IPv4 host-IP pool builder for the network scanner: explicit
     ``targets`` + expanded CIDRs (``subnets``), deduped, IPv4-only, bounded to
@@ -1320,68 +1410,54 @@ def register(app, hub, ctx):
     # ── Network scan (fingerprint discovery) ────────────────────────────────
     _SCAN_OBJECT_TYPES = ("aos_switch", "cx_switch", "ex_switch", "gateway")
 
+    async def _nw_netbox_prefix_split(hub, tenant_id):
+        """The tenant's NetBox IPv4 prefixes split into ``(leaf, supernets)``.
+        A supernet is any prefix that CONTAINS another of the tenant's prefixes
+        (e.g. a /16 carved into /24s); everything else is a leaf. Leaves are
+        what a targeted scan expands; supernets are left to the background sweep."""
+        try:
+            prefixes = await access.fetch_tenant_prefixes(hub, tenant_id)
+        except Exception:
+            prefixes = []
+        return split_leaf_and_supernets(prefixes)
+
     async def _aggregate_scan_targets(hub, tenant_id, sources, extra_subnets,
                                       extra_targets, cap):
-        """Build the candidate host-IP list for a tenant scan.
+        """Build the candidate host-IP list for a tenant scan, in priority order
+        (each tier fully included before the next; deduped, IPv4-only):
 
-        Combines (best-effort, each source guarded):
-          * explicit ``extra_targets`` (host IPs) and ``extra_subnets`` (CIDRs),
-          * NetBox tenant prefixes (``netbox``) expanded to hosts,
-          * NAC/DHCP/DNS known host IPs (``nac`` / ``dhcp`` / ``dns``) pulled
-            from the tenant's bound spoke and parsed generically for any
-            ip/ip_address/address field.
-        Deduped, IPv4-only, bounded to ``cap``. Returns ``(targets, per_source)``
-        where ``per_source`` counts each source's contribution (for the UI)."""
+          1. DNS records (``dns``), 2. DHCP leases (``dhcp``), 3. NAC endpoints
+          (``nac``), 4. NetBox LEAF prefixes (``netbox`` — prefixes that contain
+          other prefixes are supernets, left to the background sweep), 5. the
+          user's explicit ``extra_targets`` / ``extra_subnets``.
+
+        ``cap`` is the TOTAL ceiling for the list (the caller splits it into
+        batches). Returns ``(targets, per_source)``; ``per_source`` counts each
+        tier's contribution and ``"truncated"`` is the number of IPs dropped
+        because the total ceiling was hit."""
         sources = set(sources or [])
-        seen, per_source = build_scan_target_pool(extra_targets, extra_subnets, cap)
-        seen_set = set(seen)
+        seen, seen_set, per_source = [], set(), {}
+        dropped = 0
 
         def _add(ip):
+            nonlocal dropped
             ip = str(ip or "").split("/")[0].strip()
-            if not ip or ip in seen_set or len(seen) >= cap:
+            if not ip or ip in seen_set:
                 return False
             try:
                 if not isinstance(ipaddress.ip_address(ip), ipaddress.IPv4Address):
                     return False
             except ValueError:
                 return False
+            if len(seen) >= cap:
+                dropped += 1
+                return False
             seen_set.add(ip)
             seen.append(ip)
             return True
 
-        def _expand(cidr):
-            n = 0
-            try:
-                net = ipaddress.ip_network(str(cidr).strip(), strict=False)
-            except ValueError:
-                return 0
-            if not isinstance(net, ipaddress.IPv4Network):
-                return 0
-            hosts = net.hosts() if net.prefixlen < 31 else iter([net.network_address])
-            for host in hosts:
-                if len(seen) >= cap:
-                    break
-                if _add(str(host)):
-                    n += 1
-            return n
-
-        # NetBox tenant prefixes.
-        if "netbox" in sources and tenant_id and len(seen) < cap:
-            try:
-                prefixes = await access.fetch_tenant_prefixes(hub, tenant_id)
-            except Exception:
-                prefixes = []
-            c = 0
-            for p in (prefixes or []):
-                if len(seen) >= cap:
-                    break
-                c += _expand(p)
-            if c:
-                per_source["netbox"] = c
-
-        # NAC / DHCP / DNS host IPs (generic ip-field parse; fully guarded).
         async def _pull(source, spoke_getter, command, payload=None):
-            if source not in sources or len(seen) >= cap:
+            if source not in sources:
                 return
             try:
                 sid = spoke_getter(tenant_id) if tenant_id else None
@@ -1390,7 +1466,7 @@ def register(app, hub, ctx):
                 result = await hub.request_response(sid, command, payload or {}, timeout=30.0)
                 data = access.unwrap_spoke(result)
             except Exception as e:
-                logger.debug("scan aggregate %s skipped: %s", source, e)
+                logger.warning("scan aggregate tenant=%s %s skipped: %s", tenant_id, source, e)
                 return
             rows = []
             if isinstance(data, dict):
@@ -1402,8 +1478,6 @@ def register(app, hub, ctx):
                 rows = data
             c = 0
             for r in rows:
-                if len(seen) >= cap:
-                    break
                 if not isinstance(r, dict):
                     continue
                 ip = r.get("ip") or r.get("ip_address") or r.get("address") or r.get("value")
@@ -1411,11 +1485,35 @@ def register(app, hub, ctx):
                     c += 1
             if c:
                 per_source[source] = c
+            logger.info("scan aggregate tenant=%s %s: %d rows, %d new targets",
+                        tenant_id, source, len(rows), c)
 
-        await _pull("nac", hub.get_cppm_spoke_for_tenant, "LIST_ENDPOINTS")
-        await _pull("dhcp", hub.get_dhcp_spoke_for_tenant, "DHCP_LIST_LEASES")
         await _pull("dns", hub.get_dns_spoke_for_tenant, "DNS_LIST")
+        await _pull("dhcp", hub.get_dhcp_spoke_for_tenant, "DHCP_LIST_LEASES")
+        await _pull("nac", hub.get_cppm_spoke_for_tenant, "LIST_ENDPOINTS")
 
+        if "netbox" in sources and tenant_id:
+            leaves, _supers = await _nw_netbox_prefix_split(hub, tenant_id)
+            logger.info("scan aggregate tenant=%s netbox: %d leaf prefix(es), %d supernet(s)",
+                        tenant_id, len(leaves), len(_supers))
+            c = 0
+            for net in leaves:
+                hosts = net.hosts() if net.prefixlen < 31 else iter([net.network_address])
+                for host in hosts:
+                    if _add(str(host)):
+                        c += 1
+            if c:
+                per_source["netbox"] = c
+
+        # User extras last. Pool is built with a generous bound and merged
+        # through _add so the shared total ceiling and dedup apply.
+        extras, extra_counts = build_scan_target_pool(extra_targets, extra_subnets, cap)
+        for ip in extras:
+            _add(ip)
+        for k, v in extra_counts.items():
+            per_source[k] = v
+        if dropped:
+            per_source["truncated"] = dropped
         return seen, per_source
 
     def _nw_scan_config(hub, tenant_id=None):
@@ -1792,13 +1890,20 @@ def register(app, hub, ctx):
         } for c in overlaid]
 
         ip_sources = data.get("ip_sources") or saved.get("ip_sources") or ["netbox"]
+        # ``max_targets`` is the per-request BATCH size: a longer target list is
+        # split into batches (run a few in parallel) rather than truncated. Only
+        # the absolute ceiling below truncates.
         cap = max(1, min(int(data.get("max_targets") or saved.get("max_targets") or 1024), 4096))
         targets, per_source = await _aggregate_scan_targets(
             hub, tenant_id, ip_sources,
             data.get("subnets") or saved.get("subnets") or [],
-            data.get("targets") or [], cap)
+            data.get("targets") or [], _NW_SCAN_MAX_TOTAL)
+        logger.info("nw scan tenant=%s targets=%d sources=%s creds=%d",
+                    tenant_id, len(targets), per_source, len(chosen))
         if not targets:
-            return {"status": "ok", "message": "No candidate IPs found for this tenant.",
+            return {"status": "ok", "message": "No candidate IPs found for this tenant "
+                    "(no DNS/DHCP/NAC rows and no NetBox prefixes tagged to it). Add "
+                    "subnets or targets under Network Scan.",
                     "tenant": tenant_id, "targets": 0, "sources": per_source,
                     "identified": [], "added": []}
 
@@ -1824,26 +1929,40 @@ def register(app, hub, ctx):
             "max_targets": cap,
             "max_depth": int(data.get("max_depth") or 2),
         }
-        try:
-            result = await hub.request_response(
-                spoke_id, "NW_SCAN",
-                {"targets": targets, "credentials": push_creds, "options": options,
-                 "tenant": tenant_id},
-                timeout=max(60.0, min(len(targets) * 2.0, 900.0)))
-            scan = access.unwrap_spoke(result)
-        except Exception as e:
-            logger.exception("nw scan failed (tenant=%s)", tenant_id)
+        batches = [targets[i:i + cap] for i in range(0, len(targets), cap)]
+        sem = asyncio.Semaphore(_NW_SCAN_PARALLEL_BATCHES)
+
+        async def _run_batch(batch):
+            async with sem:
+                result = await hub.request_response(
+                    spoke_id, "NW_SCAN",
+                    {"targets": batch, "credentials": push_creds, "options": options,
+                     "tenant": tenant_id},
+                    timeout=max(60.0, min(len(batch) * 2.0, 900.0)))
+                return access.unwrap_spoke(result)
+
+        outcomes = await asyncio.gather(*(_run_batch(b) for b in batches),
+                                        return_exceptions=True)
+        failed = [o for o in outcomes if isinstance(o, BaseException)]
+        if len(failed) == len(outcomes):
+            e = failed[0]
+            logger.error("nw scan failed (tenant=%s): %s", tenant_id, e)
             if system:
                 return {"status": "error", "reason": str(e), "tenant": tenant_id,
                         "added": [], "identified": []}
             raise HTTPException(status_code=500, detail=f"scan failed: {e}")
-
-        identified = (scan or {}).get("identified", []) if isinstance(scan, dict) else []
+        if failed:
+            logger.warning("nw scan tenant=%s: %d of %d batch(es) failed: %s",
+                           tenant_id, len(failed), len(outcomes), failed[0])
+            per_source["failed_batches"] = len(failed)
+        scans = [o for o in outcomes if isinstance(o, dict)]
+        identified = [d for o in scans for d in (o.get("identified") or [])]
         # Hosts that answered a TCP probe but were not classified into a device
         # family. Always reported now — on a discovery-only (credential-free)
         # scan this IS the result, and even on a credentialed scan it is the
         # actionable "something is here that I can't manage yet" list.
-        reachable = (scan or {}).get("reachable", []) if isinstance(scan, dict) else []
+        reachable = [d for o in scans for d in (o.get("reachable") or [])]
+        scan = {"scanned": sum(int(o.get("scanned") or 0) for o in scans)}
 
         # Existing addresses for this tenant (dedup) — an identified device that
         # is already in the fleet (own or shared) is reported but not re-added.
@@ -1917,7 +2036,8 @@ def register(app, hub, ctx):
             "spoke_id": spoke_id,
             "targets": len(targets),
             "sources": per_source,
-            "scanned": (scan or {}).get("scanned", 0) if isinstance(scan, dict) else 0,
+            "scanned": scan["scanned"],
+            "batches": len(batches),
             "identified": identified,
             "reachable": reachable,
             "discovery_only": discovery_only,
@@ -1940,6 +2060,117 @@ def register(app, hub, ctx):
     # Expose the system scan executor + schedule reader to the hub so the
     # background run_nw_scan_schedule_loop (a mixin method) can drive scans
     # without re-implementing the credential/target/add pipeline.
+    # ── Tier 2: background supernet sweep ────────────────────────────────────
+    # Slow, report-only, opt-in per tenant. Walks the address space of the
+    # tenant's supernets MINUS anything the targeted scan already covers (DNS,
+    # DHCP, NAC, child prefixes, user extras, fleet devices), a small batch per
+    # tick with a persisted cursor, and records hosts that answer a light TCP
+    # probe. It never adds devices and never blocks a scheduled scan.
+    def _sweep_enabled(hub, tid):
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        return bool((((gc.get("nw_tenant_cfg") or {}).get(tid) or {}).get("sweep") or {}).get("enabled", False))
+
+    def _sweep_state(hub, tid):
+        gc = hub.state.system_state.setdefault("global_config", {})
+        return gc.setdefault("nw_sweep", {}).setdefault(tid, {
+            "cursor": 0, "total": 0, "cycles": 0, "scanned": 0, "discovered": [],
+            "last_run_at": None, "last_status": None, "last_error": ""})
+
+    async def _nw_sweep_step(tid, *, force=False):
+        """Probe the next batch of the tenant's sweep space. Returns the sweep
+        state dict (or ``{"status": ...}`` when skipped)."""
+        if not force and not _sweep_enabled(hub, tid):
+            return {"status": "disabled"}
+        saved = _nw_scan_config(hub, tid)
+        spoke_id = resolve_nw_scan_spoke(
+            hub, tid, str(saved.get("spoke_id") or "").strip(), access.shared_tenant_id())
+        if not spoke_id:
+            return {"status": "skipped", "reason": "no nw spoke connected"}
+        st = _sweep_state(hub, tid)
+        leaves, supers = await _nw_netbox_prefix_split(hub, tid)
+        ranges = sweep_ranges(supers, leaves)
+        if not ranges:
+            st.update(total=0, cursor=0, last_status="no-supernets", last_run_at=time.time())
+            hub.state._mark_dirty()
+            return {"status": "no-supernets"}
+        covered, _ps = await _aggregate_scan_targets(
+            hub, tid, ["dns", "dhcp", "nac"], saved.get("subnets") or [], [], _NW_SCAN_MAX_TOTAL)
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        covered = set(covered) | {str((d or {}).get("address", "")).strip()
+                                  for d in (gc.get("nw_devices") or []) if isinstance(d, dict)}
+        batch, cursor, total = sweep_take(ranges, st.get("cursor") or 0,
+                                          _NW_SWEEP_BATCH, skip=frozenset(covered))
+        options = {"tcp_ports": [22, 443, 80, 23], "try_snmp": False, "use_nmap": False,
+                   "concurrency": 8, "crawl": False, "max_targets": _NW_SWEEP_BATCH,
+                   "max_depth": 1}
+        try:
+            res = access.unwrap_spoke(await hub.request_response(
+                spoke_id, "NW_SCAN",
+                {"targets": batch, "credentials": [], "options": options, "tenant": tid},
+                timeout=600.0)) if batch else {}
+        except Exception as e:
+            st.update(last_status="error", last_error=str(e), last_run_at=time.time())
+            hub.state._mark_dirty()
+            logger.warning("nw sweep tenant=%s batch failed: %s", tid, e)
+            return {"status": "error", "reason": str(e)}
+        now = time.time()
+        found = {str(d.get("address")): d for d in (st.get("discovered") or []) if isinstance(d, dict)}
+        for r in ((res or {}).get("reachable") or []) + ((res or {}).get("identified") or []):
+            ip = str((r or {}).get("address") or "").strip()
+            if not ip:
+                continue
+            prev = found.get(ip) or {"address": ip, "first_seen": now}
+            prev.update(last_seen=now, open_ports=r.get("open_ports") or prev.get("open_ports") or [],
+                        object_type=r.get("object_type") or prev.get("object_type"))
+            found[ip] = prev
+        wrapped = cursor == 0 and bool(batch)
+        st.update(cursor=cursor, total=total, scanned=int(st.get("scanned") or 0) + len(batch),
+                  discovered=sorted(found.values(), key=lambda d: -d.get("last_seen", 0))[:2000],
+                  last_run_at=now, last_status="ok", last_error="",
+                  cycles=int(st.get("cycles") or 0) + (1 if wrapped else 0))
+        hub.state._mark_dirty()
+        return {"status": "ok", "probed": len(batch), "discovered": len(found)}
+
+    hub.run_nw_sweep_step = _nw_sweep_step
+    hub.nw_sweep_enabled_for_tenant = lambda tid: _sweep_enabled(hub, tid)
+
+    @app.get("/api/nw/sweep")
+    async def get_nw_sweep(request: Request, tenant: str = ""):
+        sess = _session_user(request)
+        tid = _nw_caller_tenant(sess, tenant or None)
+        st = dict(_sweep_state(hub, tid))
+        known = {str((d or {}).get("address", "")).strip()
+                 for d in ((hub.state.system_state.get("global_config", {}) or {}).get("nw_devices") or [])
+                 if isinstance(d, dict)}
+        st["discovered"] = [d for d in st.get("discovered", []) if d.get("address") not in known]
+        st["enabled"] = _sweep_enabled(hub, tid)
+        st["tenant"] = tid
+        return st
+
+    @app.post("/api/nw/sweep")
+    async def post_nw_sweep(request: Request):
+        """Body: ``tenant``, optional ``enabled`` (bool), ``run`` (bool, probe
+        one batch now), ``reset`` (bool, restart the cycle + clear findings)."""
+        sess = _session_user(request)
+        if not (_is_admin(sess) or _is_tenant_admin(sess)):
+            raise HTTPException(status_code=403, detail="admin or tenant-admin required")
+        data = await request.json()
+        tid = _nw_caller_tenant(sess, data.get("tenant"))
+        gc = hub.state.system_state.setdefault("global_config", {})
+        if "enabled" in data:
+            tmap = dict(gc.get("nw_tenant_cfg") or {})
+            cur = dict(tmap.get(tid) or {})
+            cur["sweep"] = {"enabled": bool(data["enabled"])}
+            tmap[tid] = cur
+            gc["nw_tenant_cfg"] = tmap
+        if data.get("reset"):
+            gc.setdefault("nw_sweep", {}).pop(tid, None)
+        hub.state._mark_dirty()
+        out = {"status": "ok", "enabled": _sweep_enabled(hub, tid)}
+        if data.get("run"):
+            out["run"] = await _nw_sweep_step(tid, force=True)
+        return out
+
     hub.run_nw_scheduled_scan = _run_nw_scheduled_scan
     hub.nw_scan_schedule_for_tenant = lambda tid: _nw_scan_schedule(hub, tid)
 
