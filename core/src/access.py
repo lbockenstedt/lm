@@ -1092,14 +1092,50 @@ def write_scope(sess, tenant_id) -> str:
 # admin-only (a holding state until an admin assigns it). Shared infra must live
 # in the shared tenant now, not rely on "unassigned = everyone".
 _SHARED_TENANT_ID = None
+# normalised ``group:<slug>`` -> normalised member tenant ids (incl. sub-groups).
+# Cached for the same reason as the shared id (no hub handle).
+_GROUP_MEMBERS: dict = {}
+
+
+def _compute_group_members(tenants: dict) -> dict:
+    groups = {tid: cfg for tid, cfg in tenants.items()
+              if isinstance(cfg, dict) and cfg.get("is_tenant_group")}
+    gslug = {tid: str(cfg.get("netbox_tenant_group_slug")
+                      or str(tid)[len(TENANT_GROUP_PREFIX):]).strip()
+             for tid, cfg in groups.items()}
+    out = {}
+    for tid in groups:
+        family, changed = {gslug[tid]}, True
+        while changed:
+            changed = False
+            for gid, gcfg in groups.items():
+                if gslug[gid] not in family and str(gcfg.get("parent_group_slug") or "") in family:
+                    family.add(gslug[gid])
+                    changed = True
+        members = set()
+        for gid, gcfg in groups.items():
+            if gslug[gid] in family:
+                members.update(str(x).strip() for x in (gcfg.get("member_tenant_slugs") or []) if x)
+        for mid, mcfg in tenants.items():
+            if (isinstance(mcfg, dict) and not mcfg.get("is_tenant_group")
+                    and str(mcfg.get("tenant_group_slug") or "") in family):
+                members.add(str(mid))
+                if mcfg.get("netbox_tenant_slug"):
+                    members.add(str(mcfg["netbox_tenant_slug"]))
+        out[_norm_tenant_id(tid)] = {_norm_tenant_id(m) for m in members if m}
+    return out
 
 
 def refresh_shared_tenant(hub):
     """Recompute + cache the single shared-tenant id from tenant state. Returns
     the id (or None). Safe to call often; called on state load + tenant writes."""
-    global _SHARED_TENANT_ID
+    global _SHARED_TENANT_ID, _GROUP_MEMBERS
     try:
         tenants = (getattr(hub.state, "tenant_state", {}) or {}).get("tenants", {}) or {}
+        try:
+            _GROUP_MEMBERS = _compute_group_members(tenants)
+        except Exception:  # noqa: BLE001
+            _GROUP_MEMBERS = {}
         _SHARED_TENANT_ID = next(
             (tid for tid, cfg in tenants.items()
              if isinstance(cfg, dict) and cfg.get("shared")), None)
@@ -1164,6 +1200,8 @@ def tenant_scope_ids(requested) -> Optional[set]:
         scope = {"", ADMIN_TENANT_ID}
     else:
         scope = {normalized}
+        # A tenant GROUP selection covers every member tenant underneath it.
+        scope |= _GROUP_MEMBERS.get(normalized, set())
 
     shared_id = shared_tenant_id()
     if shared_id:
@@ -1510,13 +1548,19 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
         return []
     scoping = get_tenant_scoping(hub, tenant_id) or {}
     nb_slug = scoping.get("netbox_tenant_slug")
+    payload = {"tenant": nb_slug}
     if not nb_slug:
-        return []
+        # A tenant GROUP has no slug of its own: union its members' prefixes
+        # via NetBox's tree-aware tenant_group filter.
+        group = netbox_tenant_scope(hub, tenant_id)
+        if not group.get("tenant_group"):
+            return []
+        payload = {"tenant_group": group["tenant_group"]}
     spoke_id = get_netbox_spoke(hub)
     if not spoke_id:
         return []
     try:
-        result = await hub.request_response(spoke_id, "NETBOX_GET_PREFIXES", {"tenant": nb_slug}, timeout=30.0)
+        result = await hub.request_response(spoke_id, "NETBOX_GET_PREFIXES", payload, timeout=30.0)
         data = unwrap_spoke(result)
         return [p["prefix"] for p in (data.get("prefixes", []) if isinstance(data, dict) else []) if p.get("prefix")]
     except Exception as e:
@@ -1541,7 +1585,8 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
     helper); the caller normalizes MACs etc.
     """
     tenants = (hub.state.tenant_state or {}).get("tenants", {}) or {}
-    tids = [str(tid) for tid in tenants.keys()]
+    tids = [str(tid) for tid, c in tenants.items()
+            if not (isinstance(c, dict) and c.get("is_tenant_group"))]
     nets_by_tid: Dict[str, List[Any]] = {}
     if fetch_tenant_prefixes is not None and tids:
         sem = asyncio.Semaphore(8)
