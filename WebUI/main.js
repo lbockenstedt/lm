@@ -24732,9 +24732,6 @@ async function loadNetboxData(subMenu) {
             actions.innerHTML = canEdit()
                 ? `${importBtn}${findBtn}<button onclick="showNetboxAddModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm" title="Add a new item to NetBox">+ Add</button>`
                 : importBtn;
-        } else if (subMenu === 'Overview' && isAdmin()) {
-            // Admin-only maintenance: recover data orphaned by a NetBox tenant rename.
-            actions.innerHTML = `<button onclick="showNetboxMigrateTenantModal()" class="bg-white border border-amber-500 text-amber-600 hover:bg-amber-500 hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm" title="Reassign all of one tenant's NetBox objects to another, then delete the source">Migrate Data to new Tenant</button>`;
         } else {
             actions.innerHTML = '';
         }
@@ -24922,102 +24919,6 @@ function showNetboxAddModal() {
     else if (subMenu === 'Racks') showNetboxRackModal();
     else if (subMenu === 'Prefixes') showNetboxAllocatePrefixModal();
     else if (subMenu === 'IP Addresses') showNetboxAllocateIPModal('');
-}
-
-// Migrate Data to new Tenant — admin-only, CROSS-MODULE, keyed by LM tenant_id.
-// Copies a source tenant's data to a target across modules (CS/simulations +
-// NetBox now; pxmx/ldap are Phase 2), then purges the source's data. Recovers
-// data orphaned by a tenant rename. Backed by GET /setup/tenants (LM tenant
-// list) + POST /api/tenant/migrate (admin-gated cross-module orchestrator).
-async function showNetboxMigrateTenantModal() {
-    const modal = openModal('netbox-migrate-modal', `
-        <div class="flex justify-between items-start">
-            <div>
-              <p class="font-bold text-base text-[#263040]">Migrate Data to new Tenant</p>
-              <p class="text-xs text-slate-400 mt-1">Move a tenant's data to another tenant across modules, then purge the source. Recovers data orphaned by a tenant rename. (The source tenant's shell — its registry entry + user assignments — is left in place; delete it via tenant management if you want it gone.)</p>
-            </div>
-            <button class="nbmig-close text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
-        </div>
-        <div class="nbmig-body"><p class="text-xs text-slate-400 italic">Loading tenants…</p></div>`, { backdropClose: true });
-    modal.querySelector('.nbmig-close').addEventListener('click', () => modal.remove());
-
-    const body = modal.querySelector('.nbmig-body');
-    let tenants = [];
-    try {
-        tenants = (await apiJson('/setup/tenants')).tenants || [];
-    } catch (e) {
-        body.innerHTML = `<p class="text-sm text-red-500">Failed to load tenants: ${escapeHtml(e.message)}</p>`;
-        return;
-    }
-    if (tenants.length < 2) {
-        body.innerHTML = `<p class="text-sm text-slate-500">Need at least two tenants to migrate between.</p>`;
-        return;
-    }
-    const opts = () => tenants.map(t => `<option value="${escapeHtml(String(t.id))}">${escapeHtml(t.name)} (${escapeHtml(String(t.id))})</option>`).join('');
-    body.innerHTML = `
-        <label class="block text-xs font-bold text-slate-500 uppercase tracking-wider">Source — data moves FROM here, then it's cleared
-          <select id="nbmig-source" class="w-full mt-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm">${opts()}</select>
-        </label>
-        <label class="block text-xs font-bold text-slate-500 uppercase tracking-wider">Target — data moves TO here
-          <select id="nbmig-target" class="w-full mt-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm">${opts()}</select>
-        </label>
-        <div class="text-xs">
-          <p class="font-bold text-slate-500 uppercase tracking-wider mb-1">Modules to migrate</p>
-          <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-cs" type="checkbox" checked class="w-4 h-4 rounded"> CS / Simulations — all per-tenant config (central, sim conf, quotas, overrides, notifications, …)</label>
-          <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-netbox" type="checkbox" checked class="w-4 h-4 rounded"> NetBox — reassign objects, delete the source NetBox tenant</label>
-          <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-pxmx" type="checkbox" class="w-4 h-4 rounded"> pxmx / Hypervisors — re-tag VMs from the source proxmox_tag to the target's</label>
-          <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-ldap" type="checkbox" class="w-4 h-4 rounded"> LDAP / Directory — re-home the directory subtree (ldap_base_dn)</label>
-        </div>
-        <label class="flex items-center gap-2 text-xs text-slate-600">
-          <input id="nbmig-delete" type="checkbox" checked class="w-4 h-4 rounded"> Purge the source after migrating (clear its CS data + delete its NetBox tenant)
-        </label>
-        <div id="nbmig-result" class="text-xs"></div>
-        <div class="flex justify-end gap-2 pt-2">
-          <button class="nbmig-cancel bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Cancel</button>
-          <button id="nbmig-go" class="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-md text-sm font-bold">Migrate</button>
-        </div>`;
-    modal.querySelector('.nbmig-cancel').addEventListener('click', () => modal.remove());
-    document.getElementById('nbmig-target').selectedIndex = 1;  // default target ≠ source
-    document.getElementById('nbmig-go').addEventListener('click', () => netboxMigrateTenant(modal));
-}
-
-async function netboxMigrateTenant(modal) {
-    const source = document.getElementById('nbmig-source').value;
-    const target = document.getElementById('nbmig-target').value;
-    const del = document.getElementById('nbmig-delete').checked;
-    const modules = [];
-    if (document.getElementById('nbmig-m-cs').checked) modules.push('cs');
-    if (document.getElementById('nbmig-m-netbox').checked) modules.push('netbox');
-    if (document.getElementById('nbmig-m-pxmx').checked) modules.push('pxmx');
-    if (document.getElementById('nbmig-m-ldap').checked) modules.push('ldap');
-    const resEl = document.getElementById('nbmig-result');
-    const goBtn = document.getElementById('nbmig-go');
-    if (source === target) { resEl.innerHTML = `<span class="text-red-500">Source and target must differ.</span>`; return; }
-    if (!modules.length) { resEl.innerHTML = `<span class="text-red-500">Pick at least one module.</span>`; return; }
-    const srcName = document.querySelector(`#nbmig-source option[value="${source}"]`)?.textContent || source;
-    const tgtName = document.querySelector(`#nbmig-target option[value="${target}"]`)?.textContent || target;
-    if (!confirm(`Migrate ${modules.join(', ')} data from "${srcName}" to "${tgtName}"${del ? `, then PURGE "${srcName}"` : ''}?\n\nThis cannot be undone.`)) return;
-    goBtn.disabled = true; goBtn.textContent = 'Migrating…';
-    resEl.innerHTML = `<span class="text-slate-400 italic">Working…</span>`;
-    try {
-        const d = await apiJson('/api/tenant/migrate', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ source, target, delete_source: del, modules }),
-        });
-        const mods = d.modules || {};
-        const rows = Object.entries(mods).map(([k, v]) => {
-            const st = v.status || '?';
-            const color = st === 'SUCCESS' ? 'text-green-600' : st === 'ERROR' ? 'text-red-600' : 'text-amber-600';
-            return `<div><b>${escapeHtml(k)}</b>: <span class="${color}">${escapeHtml(st)}</span> — ${escapeHtml(v.message || '')}</div>`;
-        }).join('');
-        resEl.innerHTML = `<div class="font-bold ${d.status === 'SUCCESS' ? 'text-green-600' : d.status === 'ERROR' ? 'text-red-600' : 'text-amber-600'}">Overall: ${escapeHtml(d.status || '?')}</div><div class="mt-1">${rows}</div>`;
-        showToast('Tenant migration: ' + (d.status || 'done'), d.status === 'ERROR' ? 'error' : 'success');
-    } catch (e) {
-        resEl.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`;
-        showToast(e.message, 'error');
-    } finally {
-        goBtn.disabled = false; goBtn.textContent = 'Migrate';
-    }
 }
 
 async function showCPPMDeviceDetail(mac) {
