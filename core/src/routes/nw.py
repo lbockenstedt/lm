@@ -1742,15 +1742,12 @@ def register(app, hub, ctx):
         cred_ids = [str(x) for x in (data.get("credential_ids") or saved.get("credential_ids") or [])]
         all_sets = (hub.state.system_state.get("global_config", {}) or {}).get("nw_scan_credentials", []) or []
         chosen = [c for c in all_sets if isinstance(c, dict) and c.get("id") in set(cred_ids)]
-        shared_tid = access.shared_tenant_id()
         # Tenant-owned (or shared) credentials only — for every caller. On the
         # ADMIN (``default``) scope the admin's OWN sets are the unassigned /
         # ``default``-tagged ones, matching what the scan tab lists for default,
         # so a set the admin can see is a set the admin can actually scan with.
-        owned = {tenant_id, shared_tid}
-        if tenant_id == "default":
-            owned |= {"", "default"}
-        chosen = [c for c in chosen if c.get("tenant_id", "") in owned]
+        owned = access.tenant_scope_ids(tenant_id)
+        chosen = [c for c in chosen if access.in_tenant_scope(c.get("tenant_id"), owned)]
         if not system and not _is_admin(sess):
             chosen = [c for c in chosen
                       if access.spoke_visible_to_session(sess, c.get("tenant_id", ""))]
@@ -2173,13 +2170,10 @@ def register(app, hub, ctx):
             # is their own tenant id — so leave their already visibility-filtered
             # list untouched in that case.)
             req_tenant = str(request.query_params.get("tenant") or "").strip()
-            if req_tenant and (req_tenant != "default" or _is_admin(sess)):
-                shared_tid = access.shared_tenant_id() or ""
-                scope = {"", "default"} if req_tenant == "default" else {req_tenant}
-                if shared_tid:
-                    scope.add(shared_tid)
+            if req_tenant and (req_tenant.casefold() != "default" or _is_admin(sess)):
+                scope = access.tenant_scope_ids(req_tenant)
                 instances = [i for i in instances
-                             if isinstance(i, dict) and i.get("tenant_id", "") in scope]
+                             if isinstance(i, dict) and access.in_tenant_scope(i.get("tenant_id"), scope)]
             return {"instances": instances}
 
         @app.post(f"/setup/{route_prefix}", operation_id=f"add_{op}")
