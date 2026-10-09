@@ -24321,7 +24321,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
                 <p class="text-xs text-slate-500 mt-1">Storage device telemetry and SSD wear level diagnostics across hypervisor nodes${cachedNote}</p>
             </div>
             <div>
-                <button onclick="loadPxmxData('Diagnostics', true)" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Query SMART telemetry and SSD wear level diagnostics across all nodes">
+                <button onclick="loadPxmxData('Diagnostics')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Reload SMART telemetry and SSD wear diagnostics from the hub cache (polled every 6 hours)">
                     ↻ Run Diagnostics / Refresh
                 </button>
             </div>

@@ -136,7 +136,7 @@ def test_spoke_present_but_timing_out_serves_cache():
     hub.request_response = _timeout
     client = _build_client(hub, tenant="t1")
 
-    body = client.get("/api/pxmx/drive-health?tenant=t1").json()
+    body = client.get("/api/pxmx/drive-health?tenant=t1&refresh=true").json()
     assert body["stale"] is True
     assert body["nodes"], "timeout produced an empty drive table"
 
@@ -262,7 +262,7 @@ def test_genuinely_empty_cluster_is_not_papered_over_with_stale_rows():
     # Spoke is up and replies, but the cluster now has no nodes at all.
     hub.drive_response = {"status": "SUCCESS", "nodes": []}
     body = _build_client(hub, tenant="t1").get(
-        "/api/pxmx/drive-health?tenant=t1").json()
+        "/api/pxmx/drive-health?tenant=t1&refresh=true").json()
 
     assert body["nodes"] == [], "stale rows resurrected over a real empty answer"
     assert not body.get("stale")
@@ -279,8 +279,37 @@ def test_total_spoke_silence_still_falls_back():
 
     hub.request_response = _boom
     body = _build_client(hub, tenant="t1").get(
-        "/api/pxmx/drive-health?tenant=t1").json()
+        "/api/pxmx/drive-health?tenant=t1&refresh=true").json()
 
     assert body["stale"] is True
     assert body["spoke_connected"] is False
     assert [n["node"] for n in body["nodes"]] == ["pve1"]
+
+
+def test_diagnostics_loads_from_cache_without_polling_even_when_hours_old():
+    """Drive health is a slow metric polled every 6h in the background: the tab
+    never goes to the spoke, and a 5h-old snapshot is not badged stale."""
+    hub = _MockHub(bound_spoke="pxmx-1")
+    hub.seed_warm(_NS, "t1|node=", _cached_payload(), age_s=5 * 3600)
+    client = _build_client(hub, tenant="t1")
+
+    body = client.get("/api/pxmx/drive-health?tenant=t1").json()
+    assert body["nodes"][0]["node"] == "pve1"
+    assert not body.get("stale")
+    assert [c for c in hub.calls if c["cmd"] == "PXMX_DRIVE_HEALTH"] == []
+
+
+def test_background_feed_polls_only_scopes_older_than_6h():
+    import asyncio
+    hub = _MockHub(bound_spoke="pxmx-1")
+    _build_client(hub, tenant="default")  # registers hub.pxmx_drive_health_feed_once
+
+    hub.seed_warm(_NS, "default|node=", _cached_payload(), age_s=3600)
+    asyncio.run(hub.pxmx_drive_health_feed_once())
+    assert [c for c in hub.calls if c["cmd"] == "PXMX_DRIVE_HEALTH"] == []
+
+    hub.seed_warm(_NS, "default|node=", _cached_payload(), age_s=7 * 3600)
+    asyncio.run(hub.pxmx_drive_health_feed_once())
+    assert len([c for c in hub.calls if c["cmd"] == "PXMX_DRIVE_HEALTH"]) >= 1
+    assert hub.warm_fetched_at(_NS, "default|node=") > 0
+    assert hub.warm_state(_NS, "default|node=") == "fresh"

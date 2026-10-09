@@ -1584,6 +1584,160 @@ def register(app, hub, ctx):
                 s["unknown"] += 1
         return s
 
+    async def _collect_drive_health(hub, spokes, target_nodes, warm_key):
+        """Poll PXMX_DRIVE_HEALTH on every (spoke, node), aggregate, and store the
+        result in the warm cache. Shared by the route and the 6h background feed."""
+        aggregated_nodes = []
+        seen_nodes = set()
+        error_nodes = {}  # node -> placeholder entry, used only if no real reply ever arrives
+        spoke_connected = False
+        last_err = None
+
+        # One request per (spoke, node) pair, all in flight together — each
+        # already carries its own 30s bound via `timeout`, so N agents no
+        # longer serialize into an N*30s wall-clock wait.
+        requests = [(sid, target_node) for sid in spokes for target_node in target_nodes]
+        responses = await asyncio.gather(
+            *(hub.request_response(sid, "PXMX_DRIVE_HEALTH", {"node": target_node}, timeout=30.0)
+              for sid, target_node in requests),
+            return_exceptions=True,
+        )
+
+        for (sid, target_node), res in zip(requests, responses):
+            if isinstance(res, Exception):
+                last_err = res
+                logger.debug("PXMX_DRIVE_HEALTH failed for spoke %s node %s: %s", sid, target_node, res)
+                continue
+
+            data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+            if not isinstance(data, dict):
+                continue
+
+            spoke_connected = True
+
+            diagnostics = data.get("diagnostics") or {}
+            agent_version = data.get("agent_version")
+            error_msg = data.get("message") if data.get("status") == "ERROR" else None
+
+            if isinstance(data.get("nodes"), list):
+                for n in data["nodes"]:
+                    if not isinstance(n, dict):
+                        continue
+                    n_name = n.get("node") or target_node or "default"
+                    if n_name in seen_nodes:
+                        continue
+                    drives = n.get("drives") or []
+                    summary = _normalize_drive_summary(n.get("summary"), drives)
+                    entry = {
+                        "node": n_name,
+                        "cluster": n.get("cluster") or data.get("cluster") or "",
+                        "drives": drives,
+                        "summary": summary,
+                        "status": n.get("status", "UNKNOWN"),
+                        "error": n.get("message") if n.get("status") == "ERROR" else None,
+                        "envelope_error": error_msg,
+                        "agent_version": n.get("agent_version", agent_version),
+                        "diagnostics": n.get("diagnostics") or diagnostics,
+                    }
+                    if n.get("status") == "ERROR":
+                        # Don't let a spoke that doesn't own this node claim
+                        # it — a later spoke's real reply must still win.
+                        error_nodes.setdefault(n_name, entry)
+                    else:
+                        seen_nodes.add(n_name)
+                        aggregated_nodes.append(entry)
+            else:
+                n_name = data.get("node") or target_node or "default"
+                if n_name in seen_nodes:
+                    continue
+                drives = data.get("drives") or []
+                summary = _normalize_drive_summary(data.get("summary"), drives)
+                entry = {
+                    "node": n_name,
+                    "cluster": data.get("cluster") or "",
+                    "drives": drives,
+                    "summary": summary,
+                    "status": data.get("status", "UNKNOWN"),
+                    "error": data.get("message") if data.get("status") == "ERROR" else None,
+                    "envelope_error": None,
+                    "agent_version": agent_version,
+                    "diagnostics": diagnostics,
+                }
+                if data.get("status") == "ERROR":
+                    error_nodes.setdefault(n_name, entry)
+                else:
+                    seen_nodes.add(n_name)
+                    aggregated_nodes.append(entry)
+
+        # A node that got ONLY error replies (e.g. every owning spoke is
+        # down) still needs to surface — merge it in now that we know no
+        # real reply ever arrived for it.
+        for n_name, entry in error_nodes.items():
+            if n_name not in seen_nodes:
+                aggregated_nodes.append(entry)
+                seen_nodes.add(n_name)
+
+        if not spoke_connected:
+            msg = str(last_err) if last_err is not None else "No hypervisor spoke answered PXMX_DRIVE_HEALTH"
+            raise _SpokeConnectionError(msg)
+
+        total_summary = {
+            "total_drives": 0,
+            "healthy": 0,
+            "warning": 0,
+            "critical": 0,
+            "unknown": 0,
+        }
+        for n in aggregated_nodes:
+            ns = n.get("summary") or {}
+            for k in ("total_drives", "healthy", "warning", "critical", "unknown"):
+                total_summary[k] += int(ns.get(k, 0) or 0)
+
+        now_ts = time.time()
+        res = {
+            "nodes": aggregated_nodes,
+            "summary": total_summary,
+            "spoke_connected": True,
+            "cached_at": now_ts,
+        }
+        if aggregated_nodes:
+            await hub.warm_set("pxmx_drive_health", warm_key, res)
+        return res
+
+    # Drive health/SSD wear changes slowly: the hub polls it in the background
+    # every 6h per tenant scope and the Diagnostics tab is served from that cache
+    # (no live spoke round-trip on tab open).
+    _DRIVE_HEALTH_FEED_S = 6 * 3600.0
+
+    async def _drive_health_feed_once():
+        """Refresh every tenant scope whose cached drive health is >=6h old (or
+        missing). Called every few minutes by hub.run_pxmx_drive_health_loop; the
+        warm cache is persisted, so a hub restart doesn't re-poll fresh scopes.
+        Best-effort; never raises."""
+        try:
+            tenants = {str(t) for t in (hub.state.tenant_state.get("tenants", {}) or {})}
+        except Exception:  # noqa: BLE001
+            tenants = set()
+        done = {}
+        for tid in sorted(tenants | {"default"}):
+            warm_key = f"{tid}|node="
+            fetched = hub.warm_fetched_at("pxmx_drive_health", warm_key)
+            if fetched and time.time() - fetched < _DRIVE_HEALTH_FEED_S:
+                continue
+            try:
+                spokes = list(hub.get_hypervisor_spokes_for_tenant(tid) or [])
+                if not spokes:
+                    continue
+                sig = tuple(sorted(spokes))
+                if sig in done:  # shared spokes: reuse this cycle's poll
+                    await hub.warm_set("pxmx_drive_health", warm_key, done[sig])
+                    continue
+                done[sig] = await _collect_drive_health(hub, spokes, [""], warm_key)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("drive-health feed for tenant %s failed: %s", tid, e)
+
+    hub.pxmx_drive_health_feed_once = _drive_health_feed_once
+
     @app.get("/api/pxmx/drive-health")
     async def get_pxmx_drive_health(request: Request, tenant: str = None, node: str = None, refresh: bool = False):
         """Retrieve drive health and SSD wear diagnostics across hypervisor nodes.
@@ -1668,6 +1822,19 @@ def register(app, hub, ctx):
                 empty["select_tenant"] = True
             return empty
 
+        # Cache-first: drive health is polled in the background every 6h, so the
+        # tab (and its Diagnose button) loads from the hub cache with no live
+        # spoke round-trip. Only an explicit ?refresh=true, or a scope that has
+        # never been polled, goes to the spoke.
+        if not refresh:
+            if hub.warm_state("pxmx_drive_health", warm_key) not in ("expired", "missing"):
+                cached = hub.warm_get("pxmx_drive_health", warm_key)
+                if isinstance(cached, dict):
+                    out = dict(cached)
+                    out["spoke_connected"] = True
+                    out["cached_at"] = hub.warm_fetched_at("pxmx_drive_health", warm_key)
+                    return out
+
         target_nodes = [node.strip()] if node and node.strip() else []
         if not target_nodes:
             try:
@@ -1684,122 +1851,7 @@ def register(app, hub, ctx):
             target_nodes = [""]
 
         async def _fetch_drive_health():
-            aggregated_nodes = []
-            seen_nodes = set()
-            error_nodes = {}  # node -> placeholder entry, used only if no real reply ever arrives
-            spoke_connected = False
-            last_err = None
-
-            # One request per (spoke, node) pair, all in flight together — each
-            # already carries its own 30s bound via `timeout`, so N agents no
-            # longer serialize into an N*30s wall-clock wait.
-            requests = [(sid, target_node) for sid in spokes for target_node in target_nodes]
-            responses = await asyncio.gather(
-                *(hub.request_response(sid, "PXMX_DRIVE_HEALTH", {"node": target_node}, timeout=30.0)
-                  for sid, target_node in requests),
-                return_exceptions=True,
-            )
-
-            for (sid, target_node), res in zip(requests, responses):
-                if isinstance(res, Exception):
-                    last_err = res
-                    logger.debug("PXMX_DRIVE_HEALTH failed for spoke %s node %s: %s", sid, target_node, res)
-                    continue
-
-                data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
-                if not isinstance(data, dict):
-                    continue
-
-                spoke_connected = True
-
-                diagnostics = data.get("diagnostics") or {}
-                agent_version = data.get("agent_version")
-                error_msg = data.get("message") if data.get("status") == "ERROR" else None
-
-                if isinstance(data.get("nodes"), list):
-                    for n in data["nodes"]:
-                        if not isinstance(n, dict):
-                            continue
-                        n_name = n.get("node") or target_node or "default"
-                        if n_name in seen_nodes:
-                            continue
-                        drives = n.get("drives") or []
-                        summary = _normalize_drive_summary(n.get("summary"), drives)
-                        entry = {
-                            "node": n_name,
-                            "cluster": n.get("cluster") or data.get("cluster") or "",
-                            "drives": drives,
-                            "summary": summary,
-                            "status": n.get("status", "UNKNOWN"),
-                            "error": n.get("message") if n.get("status") == "ERROR" else None,
-                            "envelope_error": error_msg,
-                            "agent_version": n.get("agent_version", agent_version),
-                            "diagnostics": n.get("diagnostics") or diagnostics,
-                        }
-                        if n.get("status") == "ERROR":
-                            # Don't let a spoke that doesn't own this node claim
-                            # it — a later spoke's real reply must still win.
-                            error_nodes.setdefault(n_name, entry)
-                        else:
-                            seen_nodes.add(n_name)
-                            aggregated_nodes.append(entry)
-                else:
-                    n_name = data.get("node") or target_node or "default"
-                    if n_name in seen_nodes:
-                        continue
-                    drives = data.get("drives") or []
-                    summary = _normalize_drive_summary(data.get("summary"), drives)
-                    entry = {
-                        "node": n_name,
-                        "cluster": data.get("cluster") or "",
-                        "drives": drives,
-                        "summary": summary,
-                        "status": data.get("status", "UNKNOWN"),
-                        "error": data.get("message") if data.get("status") == "ERROR" else None,
-                        "envelope_error": None,
-                        "agent_version": agent_version,
-                        "diagnostics": diagnostics,
-                    }
-                    if data.get("status") == "ERROR":
-                        error_nodes.setdefault(n_name, entry)
-                    else:
-                        seen_nodes.add(n_name)
-                        aggregated_nodes.append(entry)
-
-            # A node that got ONLY error replies (e.g. every owning spoke is
-            # down) still needs to surface — merge it in now that we know no
-            # real reply ever arrived for it.
-            for n_name, entry in error_nodes.items():
-                if n_name not in seen_nodes:
-                    aggregated_nodes.append(entry)
-                    seen_nodes.add(n_name)
-
-            if not spoke_connected:
-                msg = str(last_err) if last_err is not None else "No hypervisor spoke answered PXMX_DRIVE_HEALTH"
-                raise _SpokeConnectionError(msg)
-
-            total_summary = {
-                "total_drives": 0,
-                "healthy": 0,
-                "warning": 0,
-                "critical": 0,
-                "unknown": 0,
-            }
-            for n in aggregated_nodes:
-                ns = n.get("summary") or {}
-                for k in ("total_drives", "healthy", "warning", "critical", "unknown"):
-                    total_summary[k] += int(ns.get(k, 0) or 0)
-
-            now_ts = time.time()
-            res = {
-                "nodes": aggregated_nodes,
-                "summary": total_summary,
-                "spoke_connected": True,
-                "cached_at": now_ts,
-            }
-            if aggregated_nodes:
-                await hub.warm_set("pxmx_drive_health", warm_key, res)
-            return res
+            return await _collect_drive_health(hub, spokes, target_nodes, warm_key)
 
         try:
             return await _ttl_cached(
