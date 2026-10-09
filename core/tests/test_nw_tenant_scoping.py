@@ -298,20 +298,20 @@ def test_list_admin_acting_as_tenant_scopes_to_that_tenant(monkeypatch, tmp_path
     assert ids == {"acme-sw", "shared-sw"}   # NOT other-sw
 
 
-def test_list_admin_default_tenant_prompts_select_not_global(monkeypatch, tmp_path):
-    """``default`` is the built-in ADMIN scope. A Global Admin who EXPLICITLY
-    selects it (``?tenant=default`` — what the WebUI tenant picker sends) must
-    NOT see every tenant's devices accumulated. The endpoint returns an empty,
-    ``select_tenant``-flagged payload so the UI prompts the admin to pick a
-    specific tenant. (A truly unscoped admin call — no ``?tenant=`` at all —
-    still sees the whole fleet: see test_list_admin_sees_all_devices.)"""
+def test_list_admin_default_tenant_is_scoped_not_global(monkeypatch, tmp_path):
+    """``default`` is the built-in ADMIN tenant with its own scanner/devices. A
+    Global Admin who selects it (``?tenant=default``) sees the default tenant's
+    own devices (plus shared) — never every other tenant's, and no
+    "select a tenant" dead end. (An unscoped admin call still sees the whole
+    fleet: see test_list_admin_sees_all_devices.)"""
     c, hub = _build(monkeypatch, tmp_path, shared=True)
     tok = _mint(hub, "admin", tenants=[], admin=True)
     r = c.get("/api/nw/devices?tenant=default", cookies={"lm_session": tok})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["data"] == []
-    assert body.get("select_tenant") is True
+    assert not body.get("select_tenant")
+    ids = {d["id"] for d in body["data"]}
+    assert "acme-sw" not in ids and "other-sw" not in ids
 
 
 def test_list_admin_acting_as_empty_tenant_is_empty_not_fleet(monkeypatch, tmp_path):
