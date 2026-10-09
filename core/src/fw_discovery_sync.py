@@ -257,7 +257,16 @@ class FwDiscoverySyncMixin:
                     r = await self.request_response(sid, cmd, payload, timeout=30.0)
                 d = unwrap_spoke(r) if isinstance(r, dict) else {}
                 if isinstance(d, dict) and d.get("status") == "ERROR":
-                    errors.append(f"{tag}({sid}): {d.get('message', 'error')}")
+                    # Sources like OPNsense wrap the real failure under
+                    # "details" (e.g. {"status": "ERROR", "details": {...}})
+                    # rather than a top-level "message" — reading only
+                    # "message" here always fell back to the generic "error"
+                    # string in production, hiding the actual API failure.
+                    details = d.get("details") if isinstance(d.get("details"), dict) else {}
+                    msg = (d.get("message") or details.get("message")
+                           or details.get("error") or details.get("errorMessage")
+                           or "error")
+                    errors.append(f"{tag}({sid}): {msg}")
                     return
                 # Sources do not agree on where the list lives: OPNsense answers
                 # under "data", Kea under "leases".
