@@ -255,6 +255,31 @@ async def test_pull_uses_source_data_to_select_tables():
 
 
 @pytest.mark.asyncio
+async def test_pull_error_surfaces_opnsense_details_message_not_generic_fallback():
+    """OPNsense's engine classifies an API/transport failure as
+    ``{"status": "ERROR", "details": {...real error...}}`` — it never puts the
+    real reason under a top-level "message" key. Reading only "message" here
+    silently fell back to the generic string "error" in production (hub.log
+    showed e.g. "DHCP(<spoke>): error" for every cycle), hiding the actual
+    OPNsense API failure. The real text must be pulled out of "details"."""
+    h = _SyncHub(responses={
+        ("opn-fw1", "OPNSENSE_GET_DHCP_LEASES"): {"payload": {"data": {
+            "status": "ERROR",
+            "details": {"status": "ERROR", "message": "Empty response from server"},
+        }}},
+        ("opn-fw1", "OPNSENSE_GET_ARP_TABLE"): {"payload": {"data": {
+            "status": "ERROR",
+            "details": {"error": "invalid API credentials"},
+        }}},
+        ("netbox-spoke-1", "NETBOX_GET_PREFIXES"): _prefixes_payload(),
+    })
+    _, info = await h._fw_pull_discovered(_OPNSENSE)
+    assert any("Empty response from server" in e for e in info["errors"])
+    assert any("invalid API credentials" in e for e in info["errors"])
+    assert not any(e.endswith(": error") for e in info["errors"])
+
+
+@pytest.mark.asyncio
 async def test_attribute_buckets_by_prefix_and_drops_unattributed():
     h = _hub_with_full_responses()
     records, _ = await h._fw_pull_discovered(_OPNSENSE)
