@@ -26586,6 +26586,55 @@ async function applyDhcpHaConfig() {
     loadDHCPData('Diagnostics');
 }
 
+// Real-time Kea -> Unbound DNS registration hook ("Option 1"): a spoke
+// run_script hook that registers A/PTR records in Unbound the moment a Kea
+// lease is committed/released, independent of the NetBox sync loop shown
+// above. Status-only render when the GET failed/is unreachable — an older
+// dhcp spoke without the DHCP_DNS_HOOK_STATUS command must not break the
+// rest of the Diagnostics tab (hence the null guard, not an error banner).
+function _dhcpDnsHookPanel(dnsHook) {
+    if (!dnsHook) return '';
+    const settings = dnsHook.settings || {};
+    const enabled = !!settings.enabled;
+    const loaded = dnsHook.loaded_in_running_config;
+    const admin = typeof isAdmin === 'function' && isAdmin();
+    const targets = (settings.targets || []).join(', ') || '127.0.0.1@8953';
+    const logTail = (dnsHook.log_tail || []).slice(-10);
+    return `
+        <div class="bg-white border border-slate-200 rounded-lg p-4 mt-4">
+            <div class="flex items-center justify-between gap-3 mb-2">
+                <div>
+                    <div class="text-sm font-semibold text-slate-700">Real-time DNS registration (Kea → Unbound)</div>
+                    <div class="text-xs text-slate-400">Registers/retracts a client's DNS record in Unbound the instant a Kea lease is committed, renewed, released, expired, or declined — no dependency on the NetBox sync loop above.</div>
+                </div>
+                ${admin ? `<button onclick="toggleDhcpDnsHook(${enabled ? 'false' : 'true'})" class="px-3 py-1.5 rounded-md text-xs font-bold ${enabled ? 'bg-white border border-slate-300 hover:bg-slate-50' : 'bg-[#01A982] text-white hover:bg-[#018a6c]'} flex-shrink-0">${enabled ? 'Disable' : 'Enable'}</button>` : ''}
+            </div>
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                ${_ddTile('Hook', enabled ? 'ENABLED' : 'DISABLED', enabled ? `targets: ${escapeHtml(targets)}` : 'not configured', enabled ? 'text-emerald-600' : 'text-slate-500')}
+                ${_ddTile('Loaded in Kea', loaded === true ? 'YES' : (loaded === false ? 'NO' : '—'), loaded === false && enabled ? 'drift: enabled but not loaded — re-apply' : '', loaded === false && enabled ? 'text-red-600' : 'text-slate-600')}
+            </div>
+            ${logTail.length ? `<div class="mt-3"><div class="text-xs font-semibold text-slate-500 mb-1">Recent hook events</div><pre class="text-[11px] whitespace-pre-wrap break-all text-slate-600">${escapeHtml(logTail.join('\n'))}</pre></div>` : ''}
+        </div>`;
+}
+
+// Flips `enabled` while preserving every other on-disk setting (targets,
+// domain, ttl, register_ptr) — a toggle must never silently reset an
+// operator's existing hook configuration.
+async function toggleDhcpDnsHook(enable) {
+    const prior = (window._dhcpDnsHookStatus || {}).settings || {};
+    const body = Object.assign({}, prior, { enabled: enable });
+    try {
+        const res = await fetch('/api/dhcp/dns-hook' + _tenantQS(),
+                                { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify(body) });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.status === 'ERROR') { showToast(data.detail || data.message || 'DNS hook update failed', 'error'); return; }
+        showToast(enable ? 'Real-time DNS registration enabled' : 'Real-time DNS registration disabled', 'success');
+    } catch (e) { showToast(e.message, 'error'); }
+    loadDHCPData('Diagnostics');
+}
+
+
 // Renders the "Queries by Destination" rows — e.g. "A record for
 // www.dwx.com — 42 queries" — from the /api/dns/stats `query_names` list
 // (already sorted/filtered server-side; this just formats it), plus a
@@ -30824,6 +30873,17 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
         if (subMenu === 'Diagnostics') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/diagnostics' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP diagnostics unavailable'); return; }
+            // Real-time DNS hook status is a separate, best-effort fetch — a
+            // spoke running an older version without the route/command must
+            // not blank the whole Diagnostics tab.
+            const dnsHook = await (async () => {
+                try {
+                    const r = await fetch('/api/dhcp/dns-hook' + _tenantQS());
+                    if (!r.ok) return null;
+                    return await r.json();
+                } catch (e) { return null; }
+            })();
+            window._dhcpDnsHookStatus = dnsHook;
             const updating = !!(d.updating || (d.cluster && d.cluster.updating));
             // "Running" means answering clients. A node re-reading a freshly
             // synced config is out of sync but the pair is still serving, so
@@ -30907,7 +30967,8 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 ${(d.last_errors || []).length ? `<div class="bg-white border border-slate-200 rounded-lg p-4">
                     <div class="text-sm font-semibold text-slate-700 mb-2">Recent service warnings/errors</div>
                     <pre class="text-[11px] whitespace-pre-wrap break-all text-slate-600">${escapeHtml(d.last_errors.join('\n'))}</pre>
-                </div>` : ''}`;
+                </div>` : ''}
+                ${_dhcpDnsHookPanel(dnsHook)}`;
             return;
         }
 

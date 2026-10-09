@@ -101,9 +101,17 @@ control** — nothing ever sent it, so the hook stayed permanently disabled
 Kea's running config + a log tail); `POST` (Global-Admin only, same
 `_ADMIN_INFRA_WRITE_PREFIXES` gate as the rest of `/api/dhcp/`) relays
 `DHCP_DNS_HOOK_CONFIG` with `{"enabled", "targets", "domain", "ttl",
-"register_ptr"}` plus an optional `hook_dir`. There is still no WebUI toggle
-for this — enable it via a direct `POST /api/dhcp/dns-hook` call (or the
-`DHCP_DNS_HOOK_CONFIG` admin-ops lever) until a Settings panel is added.
+"register_ptr"}` plus an optional `hook_dir`.
+
+**See it.** DHCP → **Diagnostics** grows a *Real-time DNS registration* panel
+(hook enabled/disabled, whether it's actually loaded in Kea's running config —
+flagged as drift if not, since `config-set` can silently fail to persist —
+targets, and a tail of the hook's own event log) with a Global-Admin-only
+*Enable*/*Disable* button that preserves every other on-disk setting
+(`targets`/`domain`/`ttl`/`register_ptr`) when flipping `enabled`. There is
+still no panel for editing `targets`/`domain`/`ttl`/`register_ptr`
+themselves — change those via a direct `POST /api/dhcp/dns-hook` call (or the
+`DHCP_DNS_HOOK_CONFIG` admin-ops lever) until a full settings form exists.
 
 ## NetBox auto-sync (source of truth)
 
