@@ -60,6 +60,41 @@ def _nw_spawn_refresh(key, coro_factory) -> None:
     t.add_done_callback(_NW_BG_TASKS.discard)
 
 
+# A device a scan auto-adds is polled as part of that discovery (MAC/ARP/LLDP,
+# hostname, interfaces) rather than waiting hours for its first scheduled poll.
+_NW_DISCOVERY_POLL_CONCURRENCY = 4
+_NW_DISCOVERY_POLL_ATTEMPTS = 3
+_NW_DISCOVERY_POLL_RETRY_S = 5.0
+
+
+async def _nw_poll_discovered(hub, device_ids) -> None:
+    """Poll each newly discovered device through the same path as POLL NOW
+    (``hub.poll_nw_device``): renames it to the polled hostname, pushes it to
+    NetBox, and warms the nw cache. Retries "not found" briefly in case the
+    spoke hasn't applied the UPDATE_CONFIG carrying the new device yet."""
+    sem = asyncio.Semaphore(_NW_DISCOVERY_POLL_CONCURRENCY)
+
+    async def _one(did):
+        async with sem:
+            res = None
+            for attempt in range(_NW_DISCOVERY_POLL_ATTEMPTS):
+                try:
+                    res = await hub.poll_nw_device(did)
+                except Exception as e:  # noqa: BLE001 - best-effort per device
+                    logger.warning("nw discovery poll %s failed: %s", did, e)
+                    return
+                errs = " ".join(str(x) for x in (res or {}).get("errors") or [])
+                if "not found" in errs and attempt + 1 < _NW_DISCOVERY_POLL_ATTEMPTS:
+                    await asyncio.sleep(_NW_DISCOVERY_POLL_RETRY_S)
+                    continue
+                break
+            if isinstance(res, dict):
+                await hub.nw_cache_set_poll(did, res)
+                logger.info("nw discovery poll %s -> %s", did, res.get("message"))
+
+    await asyncio.gather(*(_one(d) for d in device_ids), return_exceptions=True)
+
+
 async def _nw_bg_refresh_fleet(hub) -> None:
     """Whole-fleet revalidate: query every connected+approved nw spoke for the
     full inventory ({} = no tenant filter) and refresh the global fleet cache.
@@ -2110,6 +2145,9 @@ def register(app, hub, ctx):
             hub.state.system_state["global_config"] = gc
             hub.state._mark_dirty()
             await _nw_push_fleet(hub, spoke_id)
+            new_ids = [d["id"] for d in added]
+            _nw_spawn_refresh(f"discovery-poll:{new_ids[0]}",
+                              lambda: _nw_poll_discovered(hub, new_ids))
 
         return {
             "status": "ok",
