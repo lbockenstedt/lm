@@ -150,3 +150,10 @@ def test_no_shared_tenant_configured_is_safe():
     """With no shared tenant, a tenant with no agent resolves to nothing rather
     than borrowing whatever is online."""
     assert resolve_nw_scan_spoke(_hub(), "tenant-admin", "", None) == ""
+
+
+def test_tenant_id_case_insensitive():
+    hub = _Hub(spokes=["nw-default"], metadata={"nw-default": {"tenant_id": "default"}})
+    got = nw_scan_spoke_choices(hub, "Default", SHARED)
+    assert [(c["spoke_id"], c["scope"]) for c in got] == [("nw-default", "own")]
+    assert resolve_nw_scan_spoke(hub, " DEFAULT ", "", SHARED) == "nw-default"
