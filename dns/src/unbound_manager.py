@@ -12,6 +12,7 @@ import ipaddress
 import socket
 import struct
 import time
+from collections import deque
 
 logger = logging.getLogger("UnboundManager")
 
@@ -69,6 +70,10 @@ MAX_TRACKED_NAMES = 5000
 # trees don't get shipped to the WebUI on every poll; the in-memory table
 # still holds up to MAX_TRACKED_NAMES for search to work against.
 TOP_NAMES_LIMIT = 200
+# Timestamped per-query events retained for the per-client ("Pi-hole style")
+# query log, independent of the per-name counters above.
+MAX_QUERY_EVENTS = 200000
+CLIENT_QUERY_LIMIT = 1000
 
 _QUERY_LOG_RE = re.compile(
     r"info:\s+(?P<ip>[0-9a-fA-F.:]+)\s+(?P<name>\S+?)\.?\s+(?P<type>\w+)\s+IN\s*$"
@@ -100,6 +105,10 @@ class UnboundManager:
         self._query_counts = {}       # "name|TYPE|source_ip" -> int
         self._query_log_offset = 0
         self._query_log_inode = None
+        # (epoch, client_ip, name, type), oldest first — feeds the per-client
+        # ("Pi-hole style") query log, which needs individual timestamped
+        # events rather than the aggregate counters above.
+        self._query_events = deque(maxlen=MAX_QUERY_EVENTS)
 
     def _ensure_conf_included(self) -> dict:
         """Guarantee Unbound actually PARSES the directory we write into.
@@ -555,6 +564,15 @@ class UnboundManager:
         except Exception as e:
             logger.warning("failed to write %s: %s", LOGGING_CONF, e)
             return False
+        # ``logfile`` is only opened at process startup — a plain reload
+        # leaves Unbound still logging to its old destination (syslog, or
+        # nowhere), so the query log would stay empty until the next
+        # incidental restart. Force it now.
+        try:
+            subprocess.run(["systemctl", "restart", "unbound"], check=True,
+                           capture_output=True, timeout=30)
+        except Exception as e:
+            logger.warning("unbound restart after enabling query logging failed: %s", e)
         return False
 
     def _tail_query_log(self) -> None:
@@ -590,12 +608,107 @@ class UnboundManager:
                     rtype = m.group("type").upper()
                     ip = m.group("ip")
                     key = f"{name}|{rtype}|{ip}"
+                    self._query_events.append((self._line_epoch(line), ip, name, rtype))
                     if key not in self._query_counts and len(self._query_counts) >= MAX_TRACKED_NAMES:
                         continue  # cap reached; keep counting names already tracked
                     self._query_counts[key] = self._query_counts.get(key, 0) + 1
                 self._query_log_offset = f.tell()
         except Exception as e:
             logger.warning("failed tailing unbound query log: %s", e)
+
+    @staticmethod
+    def _line_epoch(line: str) -> float:
+        """Epoch for a query-log/journal line: Unbound's own ``[epoch]``
+        prefix, or a leading ``journalctl -o short-unix`` timestamp, else
+        now() as a last resort (still bucketable, just slightly late)."""
+        m = re.match(r"\s*\[(\d{9,})\]", line) or re.match(r"\s*(\d{9,})(?:\.\d+)?\s", line)
+        return float(m.group(1)) if m else time.time()
+
+    def _journal_events(self, minutes: int) -> list:
+        """Fallback source when the logfile is absent or still empty (e.g. an
+        AppArmor denial, or query logging was just enabled and the restart
+        above hasn't landed yet): Unbound logs to the journal in that case."""
+        try:
+            r = subprocess.run(
+                ["journalctl", "-u", "unbound", "--no-pager", "-o", "short-unix",
+                 "--since", f"{int(minutes)} min ago"],
+                capture_output=True, text=True, timeout=15)
+        except Exception as e:
+            logger.debug("journalctl fallback failed: %s", e)
+            return []
+        events = []
+        for line in r.stdout.splitlines():
+            m = _QUERY_LOG_RE.search(line)
+            if m:
+                events.append((self._line_epoch(line), m.group("ip"),
+                               m.group("name").lower(), m.group("type").upper()))
+        return events
+
+    def get_client_queries(self, client: str = None, minutes: int = 10,
+                           search: str = None, limit: int = CLIENT_QUERY_LIMIT,
+                           source_prefixes: list = None) -> dict:
+        """Pi-hole-style per-device query log: every query made by ``client``
+        (exact source IP, or every client when omitted) in the trailing
+        ``minutes``, newest first, plus a per-destination-name summary of the
+        returned window. ``search``/``source_prefixes`` mirror
+        ``get_query_names`` (substring match on name / tenant subnet scoping).
+        """
+        if not self._ensure_query_logging():
+            self._reload()
+        self._tail_query_log()
+        try:
+            minutes = max(1, min(int(minutes or 10), 30 * 1440))
+        except (TypeError, ValueError):
+            minutes = 10
+        cutoff = time.time() - minutes * 60
+        source = "logfile"
+        events = list(self._query_events)
+        if not os.path.exists(QUERY_LOG) or not events:
+            # No events yet from the (possibly brand-new) logfile — try the
+            # journal so a freshly-enabled logger doesn't look broken for the
+            # first restart cycle.
+            journal = self._journal_events(minutes)
+            if journal:
+                events = journal
+                source = "journal"
+        client = (client or "").strip()
+        needle = (search or "").strip().lower()
+        nets = None
+        if source_prefixes is not None:
+            nets = []
+            for p in source_prefixes:
+                try:
+                    nets.append(ipaddress.ip_network(p, strict=False))
+                except ValueError:
+                    continue
+        rows = []
+        for ts, ip, name, rtype in events:
+            if ts < cutoff:
+                continue
+            if client and ip != client:
+                continue
+            if needle and needle not in name:
+                continue
+            if nets is not None:
+                try:
+                    addr = ipaddress.ip_address(ip)
+                except ValueError:
+                    continue
+                if not any(addr in n for n in nets):
+                    continue  # source outside this tenant's subnets
+            rows.append({"time": ts, "client": ip, "name": name, "type": rtype})
+        rows.sort(key=lambda r: r["time"], reverse=True)
+        summary = {}
+        for r in rows:
+            k = (r["name"], r["type"])
+            summary[k] = summary.get(k, 0) + 1
+        top_names = sorted(
+            ({"name": n, "type": t, "count": c} for (n, t), c in summary.items()),
+            key=lambda x: x["count"], reverse=True)[:100]
+        return {"status": "SUCCESS", "client": client, "minutes": minutes,
+                "source": source, "total": len(rows),
+                "queries": rows[:(limit or CLIENT_QUERY_LIMIT)],
+                "top_names": top_names}
 
     def get_query_names(self, search: str = None, limit: int = TOP_NAMES_LIMIT,
                          source_prefixes: list = None) -> list:
