@@ -212,3 +212,10 @@ def test_sweep_take_cursor_and_wrap():
     assert ips == ["10.0.0.5", "10.0.0.7", "10.0.0.8"] and cur == 8
     ips, cur, _ = sweep_take(r, cur, 4)
     assert ips == ["10.0.0.9", "10.0.0.10"] and cur == 0
+
+
+def test_wide_leaf_is_sweep_only():
+    from routes.nw import split_leaf_and_supernets
+    leaves, supers = split_leaf_and_supernets(["10.21.0.0/16", "172.21.0.0/24", "10.5.0.0/22"])
+    assert [str(n) for n in supers] == ["10.21.0.0/16"]
+    assert sorted(str(n) for n in leaves) == ["10.5.0.0/22", "172.21.0.0/24"]

@@ -199,9 +199,15 @@ _NW_SCAN_PARALLEL_BATCHES = 3
 _NW_SWEEP_BATCH = 256
 
 
+# A prefix wider than this (more than 1024 hosts) is never expanded by the
+# targeted scan even if it has no children; the background sweep covers it.
+_NW_MAX_LEAF_PREFIXLEN = 22
+
+
 def split_leaf_and_supernets(prefixes):
     """Split IPv4 CIDR strings into ``(leaves, supernets)`` ``IPv4Network`` lists.
-    A supernet is a prefix that CONTAINS another prefix in the set; invalid and
+    A supernet is a prefix that CONTAINS another prefix in the set, or is wider
+    than /22 (too big for a targeted scan); invalid and
     IPv6 entries are ignored and duplicates collapsed."""
     nets = []
     for p in (prefixes or []):
@@ -212,7 +218,8 @@ def split_leaf_and_supernets(prefixes):
         if isinstance(n, ipaddress.IPv4Network) and n not in nets:
             nets.append(n)
     supers = [n for n in nets
-              if any(o.prefixlen > n.prefixlen and o.subnet_of(n) for o in nets)]
+              if n.prefixlen < _NW_MAX_LEAF_PREFIXLEN
+              or any(o.prefixlen > n.prefixlen and o.subnet_of(n) for o in nets)]
     return [n for n in nets if n not in supers], supers
 
 
