@@ -53,6 +53,7 @@ async def test_get_pxmx_drive_health_diagnostics():
     
     # Use regular mock for sync methods
     hub.get_hypervisor_spokes_for_tenant = MagicMock(return_value=["spoke-1"])
+    hub.warm_state = MagicMock(return_value="missing")
     
     register(app, hub, ctx)
     
