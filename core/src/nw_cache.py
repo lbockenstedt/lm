@@ -95,8 +95,12 @@ class NwCacheMixin:
             }
         devices = data.get("devices")
         if isinstance(devices, dict):
+            # Drop failed envelopes persisted before set_device refused them, so
+            # a restart serves a cold miss (live fetch) rather than a cached ERROR.
             self.nw_device_cache = {
-                str(did): dict(v) for did, v in devices.items()
+                str(did): {k: e for k, e in v.items()
+                           if not self._nw_failed_envelope(e)}
+                for did, v in devices.items()
                 if isinstance(v, dict)
             }
         if self.nw_fleet_cache or self.nw_device_cache:
@@ -165,8 +169,19 @@ class NwCacheMixin:
 
     # ── write ─────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _nw_failed_envelope(data: Any) -> bool:
+        """Return True when data is a dict whose 'status' value, converted with str(...).strip().upper(), is one of 'ERROR', 'FAILED', 'FAILURE'. Otherwise False."""
+        if not isinstance(data, dict):
+            return False
+        status = str(data.get("status", "")).strip().upper()
+        return status in ("ERROR", "FAILED", "FAILURE")
+
     async def nw_cache_set_fleet(self, data: Any) -> None:
-        """Store a fresh NW_LIST_DEVICES envelope + persist (best-effort)."""
+        """Store a fresh NW_LIST_DEVICES envelope + persist (best-effort). Failed envelopes never overwrite last-known-good data."""
+        if self._nw_failed_envelope(data):
+            logger.info("nw cache: keeping last-known fleet snapshot (refresh failed: %s)", data.get("message"))
+            return
         self.nw_fleet_cache = {"devices": data, "fetched_at": time.time()}
         self._nw_cache_file.schedule_save()
 
@@ -199,8 +214,11 @@ class NwCacheMixin:
 
     async def nw_cache_set_device(self, device_id: str, endpoint: str,
                                   data: Any) -> None:
-        """Store a fresh per-device endpoint envelope + persist (best-effort)."""
+        """Store a fresh per-device endpoint envelope + persist (best-effort). Failed envelopes never overwrite last-known-good data."""
         if endpoint not in self._NW_CACHE_ENDPOINTS and endpoint != "poll":
+            return
+        if self._nw_failed_envelope(data):
+            logger.info("nw cache: keeping last-known %s for %s (refresh failed: %s)", endpoint, device_id, data.get("message"))
             return
         entry = self.nw_device_cache.setdefault(device_id, {})
         entry[endpoint] = data
