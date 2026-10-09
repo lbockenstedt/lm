@@ -121,6 +121,14 @@ themselves — change those via a direct `POST /api/dhcp/dns-hook` call (or the
 
 NetBox is the IPAM source of truth. A successful NetBox prefix create, update, or delete triggers an immediate DHCP reconciliation, and the hub's `DnsDhcpSyncMixin` (`core/src/dns_dhcp_sync.py`) also reconciles Kea periodically (`run_dns_dhcp_sync_loop`, `global_config.dns_dhcp_sync` `{enabled` default true`, interval` default 300s`}`). In HA mode `DHCP_SYNC` validates and applies the resulting subnet configuration to both nodes as one transaction. The loop and the on-demand `POST /api/dhcp/sync` share the same extraction helper (`build_dhcp_payload`), so all paths build the same Kea payload. Per-run status is available at `GET /api/dns-dhcp/sync-status`.
 
+### Tenant isolation
+
+A tenant's DHCP/DNS is only ever fed and managed from inside that tenant. The single rule is `access.tenant_may_manage(manager, target)`: same tenant, or the manager is in the **shared** tenant — the only cross-tenant exception (so an LRB agent can never manage a DXP agent).
+
+- **Sync scope.** The NetBox → Kea/Unbound sync groups target spokes by tenant (`DnsDhcpSyncMixin._sync_scope`). A DHCP/DNS spoke bound to a real tenant receives only that tenant's prefixes and IPs (`NETBOX_GET_PREFIXES`/`NETBOX_GET_IPS` with the tenant's `tenant`/`tenant_group` filter from `access.netbox_tenant_scope`). Unassigned, shared, and Admin (`default`) spokes keep receiving the unfiltered set. A tenant-bound spoke whose tenant has no NetBox slug is **skipped** (listed under `skipped_spokes` in the sync status) — never sent everything and never sent an empty set. Payload hashes are kept per tenant scope, so one tenant's change re-pushes only that tenant's spokes.
+- **Clustering.** Worker discovery (`POST /api/dhcp/ha/discover`, and `POST /api/dns/cluster/discover`) only enrolls agents whose tenant equals the coordinator's tenant (`access.same_tenant`), so the Kea nodes in a tenant cluster with that tenant's DHCP coordinator. A shared coordinator enrolls shared nodes; it does not claim other tenants' nodes.
+- **Failover / rebalance.** `instance_relocate` never loads a role onto a `spoke_pool` candidate whose agent tenant cannot manage the instance's tenant; such candidates are skipped with a `[instance-relocate] … outside the instance's tenant` warning.
+
 ## WebUI
 
 Module view tabs: **Overview** (pool-utilization / assigned-leases / packet-counter stat tiles + per-scope utilization bars + last-auto-sync line), **Diagnostics** (the same operational evidence used by Sim DHCP health: service/restart state, config validity, interface presence, listeners, control-agent reachability, scopes, leases, and recent warnings), **Subnets**, **Leases**, **Reservations**.
@@ -159,6 +167,8 @@ Module view tabs: **Overview** (pool-utilization / assigned-leases / packet-coun
 - **Read pool health:** **Overview** tab — utilization / assigned-leases / packet-counter tiles, per-scope utilization bars, and a last-auto-sync line.
 
 ## Troubleshooting / common questions
+
+- **"An agent shows a DHCP badge I never assigned."** The badge is the `dhcp-server` *deploy* role, reported when the agent finds Kea installed. A host that only has the distro Kea packages (e.g. a client-simulation host running its private `kea-dhcp4-sim`) is no longer reported: the agent requires an LM ownership marker (`/etc/kea/kea-api-password` or `/etc/lm-dhcp-worker/worker.env`) as well as the binary, and the cs installer disables the distro `kea-dhcp4-server`/`kea-ctrl-agent` units it pulls in.
 
 - **"Subnets/Leases/Reservations tabs are empty even though Kea is running."** Check `KEA_URL` — the Kea Control Agent address this `dhcp` role/spoke is configured with — is actually reachable from the node. Current code defaults to `http://localhost:8001` specifically so it won't collide with the hub, but a box also running NetBox, a legacy webui-spoke, or a custom Kea CA port (e.g. :8760 per the netbox `install_kea.sh` convention) needs `KEA_URL` pushed/set to match. A wrong or unreachable `KEA_URL` surfaces as Kea-unreachable errors in `DHCP_STATUS`/`DHCP_STATS`, and empty lists everywhere else (`list_subnets`/`list_reservations` both swallow errors and return `[]`).
 - **"I added a reservation/prefix in NetBox but it's not showing up in Kea."** Same NetBox → Kea auto-sync loop as DNS (default every 300s). An IP needs `custom_fields.mac_address` set to mint a reservation, and a prefix must exist for a subnet to be created. Check `GET /api/dns-dhcp/sync-status` for the last run's `subnets_synced`/`reservations_synced` counts and whether it was `skipped` (NetBox or DHCP spoke offline) or `error`. Or just press **Sync now** instead of waiting.

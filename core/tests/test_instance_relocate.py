@@ -282,3 +282,45 @@ async def test_rebalance_runs_only_every_nth_cycle_of_the_main_loop(monkeypatch)
 
     assert calls["relocate"] == mod._REBALANCE_EVERY_N_CYCLES + 1
     assert calls["rebalance"] == 1  # only fired once the tick count hit the Nth cycle
+
+
+# ── Tenant isolation: failover/rebalance never crosses tenants ──────────────
+
+@pytest.mark.asyncio
+async def test_failover_skips_pool_candidate_in_another_tenant():
+    inst = {"id": "i1", "name": "nb", "tenant_id": "lrb", "spoke_id": "dead-netbox",
+            "spoke_pool": ["agent-dxp", "agent-lrb"]}
+    hub = _hub({"ipam_instances": [inst]}, active={"agent-dxp": 1, "agent-lrb": 1})
+    hub.state._spoke_tenants = {"agent-dxp": "dxp", "agent-lrb": "LRB"}
+    await hub._instance_relocate_cycle()
+    assert [c[0] for c in hub.load_role_calls] == ["agent-lrb"]
+    assert inst["spoke_id"] == "agent-lrb-netbox"
+
+
+@pytest.mark.asyncio
+async def test_failover_never_lands_on_a_foreign_tenant_even_if_it_is_the_only_one(monkeypatch):
+    import access
+    monkeypatch.setattr(access, "_SHARED_TENANT_ID", "shared", raising=False)
+    inst = {"id": "i1", "name": "nb", "tenant_id": "lrb", "spoke_id": "dead-netbox",
+            "spoke_pool": ["agent-dxp"]}
+    hub = _hub({"ipam_instances": [inst]}, active={"agent-dxp": 1})
+    hub.state._spoke_tenants = {"agent-dxp": "dxp"}
+    await hub._instance_relocate_cycle()
+    assert hub.load_role_calls == [] and inst["spoke_id"] == "dead-netbox"
+
+    # ...but the shared tenant may manage any tenant.
+    hub.state._spoke_tenants = {"agent-dxp": "shared"}
+    await hub._instance_relocate_cycle()
+    assert inst["spoke_id"] == "agent-dxp-netbox"
+
+
+@pytest.mark.asyncio
+async def test_rebalance_skips_pool_candidate_in_another_tenant():
+    insts = [{"id": f"i{n}", "name": f"nb{n}", "tenant_id": "lrb",
+              "spoke_id": "busy-netbox", "spoke_pool": ["busy", "idle-dxp"]} for n in range(4)]
+    hub = _hub({"ipam_instances": insts},
+               active={"busy": 1, "busy-netbox": 1, "idle-dxp": 1},
+               module_types={"busy-netbox": "ipam"})
+    hub.state._spoke_tenants = {"busy": "lrb", "idle-dxp": "dxp"}
+    await hub._instance_rebalance_cycle()
+    assert hub.load_role_calls == []

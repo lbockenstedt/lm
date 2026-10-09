@@ -90,3 +90,16 @@ async def test_filter_tenant_shared_tenant_keeps_unscoped_data():
     res_upper = await access.filter_tenant(hub, sessions, _FakeReq(), raw_data, "dhcp", ["ip", "address", "ip-address", "ip_address"], explicit_tenant="SHARED")
     assert res_upper == raw_data
 
+
+
+def test_tenant_may_manage_rule(monkeypatch):
+    monkeypatch.setattr(access, "_SHARED_TENANT_ID", "shared-lab", raising=False)
+    assert access.tenant_may_manage("lrb", "LRB")
+    assert not access.tenant_may_manage("lrb", "dxp")
+    assert not access.tenant_may_manage("dxp", "lrb")
+    assert access.tenant_may_manage("shared-lab", "dxp")
+    assert access.tenant_may_manage("Shared-Lab", "")
+    assert not access.tenant_may_manage("lrb", "shared-lab")
+    assert not access.tenant_may_manage("", "lrb")
+    assert not access.tenant_may_manage("lrb", "")
+    assert access.same_tenant(None, "") and not access.same_tenant("shared-lab", "lrb")
