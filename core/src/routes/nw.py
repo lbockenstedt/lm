@@ -1637,6 +1637,17 @@ def register(app, hub, ctx):
                 scan_ov["ip_sources"] = [str(x) for x in (s["ip_sources"] or []) if str(x).strip()]
             if "credential_ids" in s:
                 scan_ov["credential_ids"] = [str(x) for x in (s["credential_ids"] or []) if str(x).strip()]
+            if "subnets" in s:
+                subs = s["subnets"]
+                if isinstance(subs, str):
+                    subs = subs.replace(",", " ").split()
+                clean_subs = []
+                for sub in (subs or []):
+                    try:
+                        clean_subs.append(str(ipaddress.ip_network(str(sub).strip(), strict=False)))
+                    except ValueError:
+                        raise HTTPException(status_code=400, detail=f"invalid subnet: {sub}")
+                scan_ov["subnets"] = clean_subs
             if "tcp_ports" in s:
                 ports = s["tcp_ports"]
                 if isinstance(ports, str):
@@ -1774,7 +1785,8 @@ def register(app, hub, ctx):
         ip_sources = data.get("ip_sources") or saved.get("ip_sources") or ["netbox"]
         cap = max(1, min(int(data.get("max_targets") or saved.get("max_targets") or 1024), 4096))
         targets, per_source = await _aggregate_scan_targets(
-            hub, tenant_id, ip_sources, data.get("subnets") or [],
+            hub, tenant_id, ip_sources,
+            data.get("subnets") or saved.get("subnets") or [],
             data.get("targets") or [], cap)
         if not targets:
             return {"status": "ok", "message": "No candidate IPs found for this tenant.",

@@ -19634,7 +19634,7 @@ async function _renderNwScanTab() {
           </div>
         </div>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-          <div><label class="${lblCls}">Extra Subnets (optional)</label><textarea id="nwt-subnets" rows="2" placeholder="10.0.0.0/24, 192.168.1.0/24" class="${inCls} font-mono"></textarea></div>
+          <div><label class="${lblCls}">Extra Subnets (optional)</label><textarea id="nwt-subnets" rows="2" placeholder="10.0.0.0/24, 192.168.1.0/24" class="${inCls} font-mono">${escapeHtml((scan.subnets || []).join(', '))}</textarea></div>
           <div><label class="${lblCls}">Extra Targets (optional)</label><textarea id="nwt-targets" rows="2" placeholder="10.0.0.1, 10.0.0.2" class="${inCls} font-mono"></textarea></div>
         </div>
         <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
@@ -19774,6 +19774,7 @@ function _nwtScanConfigBody() {
         auto_add: !!document.getElementById('nwt-autoadd')?.checked,
         credential_ids: _nwtSelectedCreds(),
         ip_sources: _nwtSources(),
+        subnets: _nwtParseList(document.getElementById('nwt-subnets')?.value),
         tcp_ports: _nwtParseList(document.getElementById('nwt-ports')?.value)
             .map(p => parseInt(p, 10)).filter(n => !isNaN(n)),
         max_targets: parseInt(document.getElementById('nwt-maxtargets')?.value, 10) || 1024,
