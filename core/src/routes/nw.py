@@ -1018,6 +1018,7 @@ def register(app, hub, ctx):
         # panels, APs) still belongs on the map. Best-effort — no IPAM spoke, a
         # timeout or a NetBox error degrades to "no inventory", never a 500.
         netbox_devices = []
+        netbox_cables = []
         try:
             netbox = hub.get_spoke_by_type("ipam")
             if netbox:
@@ -1025,6 +1026,15 @@ def register(app, hub, ctx):
                                                 timeout=60.0)
                 rows = (access.unwrap_spoke(rr) or {}).get("devices") or []
                 netbox_devices = [r for r in rows if isinstance(r, dict)]
+                # Cables carry no IP of their own and are resolved purely by
+                # device NAME against nodes already on the map, so a cable
+                # whose end was filtered out below (another tenant's gear)
+                # harmlessly fails to resolve rather than needing its own
+                # tenant filter.
+                cr = await hub.request_response(netbox, "NETBOX_GET_CABLES", {},
+                                                timeout=60.0)
+                crows = (access.unwrap_spoke(cr) or {}).get("cables") or []
+                netbox_cables = [r for r in crows if isinstance(r, dict)]
         except Exception as e:
             logger.info("nw_topology: NetBox inventory unavailable (%s)", e)
 
@@ -1048,6 +1058,7 @@ def register(app, hub, ctx):
             lldp_by_device=lldp_by_device,
             macs_by_device=macs_by_device,
             netbox_devices=netbox_devices,
+            netbox_cables=netbox_cables,
             manual_devices=manual["devices"],
             manual_links=manual["links"],
             infer_from_macs=infer,
