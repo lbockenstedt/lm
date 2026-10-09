@@ -152,12 +152,17 @@ def register(app, hub, ctx):
         # (get_pxmx_vms / get_hypervisor_spokes_for_tenant): fan PXMX_LIST_VMS
         # across the plural visible set + the unbound-global spoke, merge/dedupe,
         # then subnet/tag-filter (below) so shared-spoke VMs land on the right
-        # tenant. admin/default → the global hypervisor ONLY when it is itself
-        # UNBOUND (or shared/ADMIN-bound): a spoke dedicated to a real tenant
-        # must never report its VM count as the admin's own — shared infra is
-        # visible to every tenant AND the admin, another tenant's is not.
+        # tenant. admin/default is NOT special-cased away from the plural
+        # resolver: get_hypervisor_spokes_for_tenant("default") already scopes
+        # safely (unassigned + default-pinned + shared spokes only — a spoke
+        # dedicated to a DIFFERENT real tenant is excluded by that resolver
+        # itself), so it cannot leak another tenant's dedicated spoke. Using
+        # only the bare global-spoke fallback for "default" (the prior
+        # behavior) missed hosts explicitly PINNED to the admin/default tenant
+        # on an otherwise-shared spoke — the reported "servers I added to
+        # Admin don't show up" gap.
         _tid = scoping.get("tenant_id")
-        if _tid and _tid != "default":
+        if _tid:
             hv_spokes = list(hub.get_hypervisor_spokes_for_tenant(_tid))
             # Include a hypervisor bound to NO tenant (global/unassigned) — the
             # same fallback get_pxmx_vms adds — so an unbound lab hypervisor's
@@ -182,9 +187,14 @@ def register(app, hub, ctx):
         # scoped to that agent (?agent_id=) — every returned VM is owned and is
         # merged in below UNCONDITIONALLY (no subnet/tag filter). Same-spoke
         # pinned agents each need their own scoped call (one shared spoke hosts
-        # several distinct pinned hosts).
+        # several distinct pinned hosts). Applies to admin/default too: an
+        # agent can be explicitly pinned to "default" via the per-agent Tenant
+        # button the same way it can be pinned to any other real tenant, and
+        # that pin must win here exactly as it already does in
+        # _spoke_effective_tenants (Overview visibility) — excluding "default"
+        # left those hosts' off-subnet/untagged VMs undercounted.
         owned_agent_reqs = []  # (agent_pk, spoke)
-        if _tid and _tid != "default":
+        if _tid:
             _acfg = hub.state.system_state.get("agent_config", {}) or {}
             _hv_set = set(hv_spokes)
             for _apk, _cfg in _acfg.items():
