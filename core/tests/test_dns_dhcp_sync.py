@@ -377,3 +377,54 @@ async def test_dns_hook_ha_pair_one_member_drifted_and_errors_reported():
     old = _HookHub({"status": "ERROR", "error": "Unknown command: DHCP_DNS_HOOK_STATUS"})
     res = await old._reconcile_dns_hook()
     assert res["status"] == "error" and _configs(old) == []
+
+
+# ── NetBox fetch failure must never wipe Kea ────────────────────────────────
+
+class _MultiIpamHub(_DdsHub):
+    """Two IPAM spokes: ``nb-broken`` answers like a netbox role with no URL
+    configured (status ERROR, no prefixes key), ``nb-good`` is healthy."""
+
+    def __init__(self, ipams, broken=("nb-broken",), **kw):
+        super().__init__(ipam=ipams[0], **kw)
+        self._ipams = list(ipams)
+        self._broken = set(broken)
+
+    def get_all_spokes_by_type(self, module_type):
+        if module_type == "ipam":
+            return list(self._ipams)
+        return [self._spokes[module_type]] if self._spokes.get(module_type) else []
+
+    async def request_response(self, spoke_id, command, payload, timeout=30.0):
+        if spoke_id in self._broken and command.startswith("NETBOX_GET_"):
+            self.request_log.append((spoke_id, command, payload))
+            return {"payload": {"data": {"status": "ERROR", "message":
+                    "HTTPConnectionPool(host='localhost', port=8000): Connection refused"}}}
+        return await super().request_response(spoke_id, command, payload, timeout)
+
+
+@pytest.mark.asyncio
+async def test_netbox_error_never_pushes_empty_dhcp_payload():
+    hub = _MultiIpamHub(["nb-broken"])
+    await hub._sync_dns_dhcp_once()
+    assert not [c for _, c, _ in hub.request_log if c in ("DHCP_SYNC", "DNS_SYNC")]
+    assert hub.dns_dhcp_sync_status["dhcp"]["status"] == "error"
+    assert "Connection refused" in hub.dns_dhcp_sync_status["dhcp"]["error"]
+
+    res = await hub.sync_dhcp_from_netbox()
+    assert res["status"] == "error"
+    assert not [c for _, c, _ in hub.request_log if c == "DHCP_SYNC"]
+
+
+@pytest.mark.asyncio
+async def test_netbox_fetch_fails_over_to_healthy_ipam_spoke():
+    hub = _MultiIpamHub(["nb-broken", "nb-good"])
+    await hub._sync_dns_dhcp_once()
+    sent = [p for _, c, p in hub.request_log if c == "DHCP_SYNC"]
+    assert sent and [s["subnet"] for s in sent[0]["subnets"]] == ["10.0.0.0/24"]
+
+
+def test_ipam_candidates_prefer_instance_bound_spoke():
+    hub = _MultiIpamHub(["nb-broken", "nb-good"], system_state={"global_config": {
+        "ipam_instances": [{"spoke_id": "nb-good", "url": "https://nb"}]}})
+    assert hub._ipam_spoke_candidates() == ["nb-good", "nb-broken"]
