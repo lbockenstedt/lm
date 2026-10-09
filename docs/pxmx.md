@@ -155,3 +155,5 @@ You also need at least one certified USB vid:pid configured and at least one clo
 ## Related pages
 
 [architecture-topology.md](architecture-topology.md), [cs.md](cs.md), [lm-hub.md](lm-hub.md), [environment-variables.md](environment-variables.md), [install-flags.md](install-flags.md).
+
+**Drive diagnostics feed.** `/api/pxmx/drive-health` is cache-first: the hub polls `PXMX_DRIVE_HEALTH` in the background every 6 hours per tenant scope (`run_pxmx_drive_health_loop` in `core/src/main.py`, `pxmx_drive_health_feed_once` in `core/src/routes/pxmx.py`; the warm cache persists across restarts, so only scopes older than 6h are re-polled). The Diagnostics tab loads from that cache without querying the spoke; only an explicit `?refresh=true` API call (or a never-polled scope) polls live. Data older than 24h is still served, flagged `stale: true` so the UI shows the cached-data banner.
