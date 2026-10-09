@@ -454,3 +454,24 @@ class DnsDhcpSyncMixin:
             body=_body, delay=_delay,
             on_error=lambda e: logger.error("Error in DNS/DHCP auto-sync loop: %s", e),
             error_delay=_delay)
+
+    async def run_dns_dhcp_feed_loop(self):
+        """Background data feed for the DNS/DHCP pages.
+
+        Those pages are stale-while-revalidate over the warm cache, which
+        previously only revalidated when a tab was opened — so an idle hub
+        showed hours-old "cached" data until someone clicked. This keeps the
+        cache continuously fresh (every 60s, inside the 300s "cached" badge
+        threshold) via ``hub.net_services_feed_once`` (set by routes.net_services).
+        """
+        logger.info("DNS/DHCP page data-feed loop started.")
+
+        async def _body():
+            feed = getattr(self, "net_services_feed_once", None)
+            if feed:
+                await feed()
+
+        await run_sync_loop(
+            stagger=20, body=_body, delay=lambda: 60.0,
+            on_error=lambda e: logger.warning("DNS/DHCP feed loop error: %s", e),
+            error_delay=60.0)

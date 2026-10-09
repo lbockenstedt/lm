@@ -140,3 +140,5 @@ Module view tabs: **Overview** (pool-utilization / assigned-leases / packet-coun
 ## Related pages
 
 [architecture-topology.md](architecture-topology.md), [netbox.md](netbox.md) (NetBox→Kea scope sync), [install-flags.md](install-flags.md).
+
+**Background data feed.** The hub's `run_dns_dhcp_feed_loop` (`core/src/dns_dhcp_sync.py`) revalidates every connected DHCP spoke's read caches (via `hub.net_services_feed_once`, `core/src/routes/net_services.py`) every 60s, so the page never shows an hours-old "cached" banner just because no tab was opened.
