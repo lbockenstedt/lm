@@ -113,6 +113,10 @@ still no panel for editing `targets`/`domain`/`ttl`/`register_ptr`
 themselves — change those via a direct `POST /api/dhcp/dns-hook` call (or the
 `DHCP_DNS_HOOK_CONFIG` admin-ops lever) until a full settings form exists.
 
+**On by default, hub-managed.** The desired state lives in `global_config.dhcp_dns_hook` (`enabled` default **true**, plus optional `targets`/`domain`/`ttl`/`register_ptr`). Every DNS/DHCP sync tick (`run_dns_dhcp_sync_loop`, even while `dns_dhcp_sync` itself is disabled), `DnsDhcpSyncMixin._reconcile_dns_hook` reads `DHCP_DNS_HOOK_STATUS` from each DHCP spoke (each HA member), and sends `DHCP_DNS_HOOK_CONFIG` only to a node that has drifted. The on/off knob is **System → Sync → DHCP → DNS (real-time)**, which also offers *Also register PTR records*. The Diagnostics *Enable*/*Disable* button and `POST /api/dhcp/dns-hook` save their settings into the same key, so the reconcile never reverts them. The last check is reported as `status.dns_hook` in `GET /api/dns-dhcp/sync-status`. The default `127.0.0.1@8953` target assumes Unbound runs on the Kea host.
+
+**Domain.** A single-label lease hostname gets the `domain-name` option of the lease's own Kea subnet (the scope's NetBox `domain_name`), falling back to the hook's global `domain`. This matches the NetBox → DNS sync.
+
 ## NetBox auto-sync (source of truth)
 
 NetBox is the IPAM source of truth. A successful NetBox prefix create, update, or delete triggers an immediate DHCP reconciliation, and the hub's `DnsDhcpSyncMixin` (`core/src/dns_dhcp_sync.py`) also reconciles Kea periodically (`run_dns_dhcp_sync_loop`, `global_config.dns_dhcp_sync` `{enabled` default true`, interval` default 300s`}`). In HA mode `DHCP_SYNC` validates and applies the resulting subnet configuration to both nodes as one transaction. The loop and the on-demand `POST /api/dhcp/sync` share the same extraction helper (`build_dhcp_payload`), so all paths build the same Kea payload. Per-run status is available at `GET /api/dns-dhcp/sync-status`.

@@ -238,3 +238,142 @@ def test_dds_cfg_reads_overrides():
         "dns_dhcp_sync": {"enabled": False, "interval": 60}}})
     cfg = hub._dds_cfg()
     assert cfg["enabled"] is False and cfg["interval"] == 60
+
+
+# ── DHCP scope domain suffix ────────────────────────────────────────────────
+
+def _scoped_prefixes():
+    return {"prefixes": [
+        {"prefix": "10.0.0.0/16", "status": "active",
+         "custom_fields": {"dhcp_enabled": True, "domain_name": "corp.example"}},
+        {"prefix": "10.0.5.0/24", "status": "active",
+         "custom_fields": {"dhcp_enabled": True, "domain_name": "Lab.Example."}},
+        {"prefix": "10.9.0.0/24", "status": "active",          # not a DHCP scope
+         "custom_fields": {"dhcp_enabled": False, "domain_name": "nope.example"}},
+        {"prefix": "10.8.0.0/24", "status": "active",          # invalid domain ignored
+         "custom_fields": {"dhcp_enabled": True, "domain_name": "bad domain"}},
+    ]}
+
+
+def test_build_dns_records_appends_containing_scope_domain():
+    ips = {"ip_addresses": [
+        {"address": "10.0.5.7/24", "dns_name": "printer1"},     # most specific scope wins
+        {"address": "10.0.9.7/24", "dns_name": "laptop2"},      # falls to the /16
+        {"address": "10.0.5.8/24", "dns_name": "already.fq.dn"},  # dotted → untouched
+        {"address": "10.9.0.4/24", "dns_name": "nodhcp"},       # not in a DHCP scope
+        {"address": "10.8.0.4/24", "dns_name": "badscope"},
+        {"address": "192.168.1.1/24", "dns_name": "outside"},
+    ]}
+    names = {r["value"]: r["name"] for r in build_dns_records(ips, _scoped_prefixes())}
+    assert names == {"10.0.5.7": "printer1.lab.example", "10.0.9.7": "laptop2.corp.example",
+                     "10.0.5.8": "already.fq.dn", "10.9.0.4": "nodhcp",
+                     "10.8.0.4": "badscope", "192.168.1.1": "outside"}
+
+
+def test_build_dns_records_without_prefixes_is_unchanged():
+    assert build_dns_records(_ips_payload()) == build_dns_records(_ips_payload(), {"prefixes": []})
+
+
+@pytest.mark.asyncio
+async def test_sync_dns_qualifies_names_with_scope_domain():
+    hub = _DdsHub()
+    hub_prefixes = {"prefixes": [{"prefix": "10.0.0.0/24", "status": "active",
+                                  "custom_fields": {"dhcp_enabled": True, "domain_name": "lab"}}]}
+    ips = {"ip_addresses": [{"address": "10.0.0.9/24", "dns_name": "ws9"}]}
+
+    async def rr(spoke_id, command, payload, timeout=30.0):
+        hub.request_log.append((spoke_id, command, payload))
+        if command == "NETBOX_GET_IPS":
+            return {"payload": {"data": ips}}
+        if command == "NETBOX_GET_PREFIXES":
+            return {"payload": {"data": hub_prefixes}}
+        return {"payload": {"data": {"status": "SUCCESS"}}}
+    hub.request_response = rr
+    res = await hub.sync_dns_from_netbox()
+    assert res["status"] == "ok"
+    sent = next(p for _, c, p in hub.request_log if c == "DNS_SYNC")
+    assert sent["records"][0]["name"] == "ws9.lab"
+
+
+# ── real-time DHCP→DNS hook reconcile ──────────────────────────────────────
+
+class _HookHub(_DdsHub):
+    def __init__(self, node_status, gc=None, config_reply=None):
+        super().__init__(system_state={"global_config": gc or {}})
+        self.node_status = node_status
+        self.config_reply = config_reply or {"status": "SUCCESS"}
+
+    def _get_dhcp_spokes(self):
+        return ["dhcp-1"]
+
+    async def request_response(self, spoke_id, command, payload, timeout=30.0):
+        self.request_log.append((spoke_id, command, payload))
+        if command == "DHCP_DNS_HOOK_STATUS":
+            return {"payload": {"data": self.node_status}}
+        if command == "DHCP_DNS_HOOK_CONFIG":
+            return {"payload": {"data": self.config_reply}}
+        return {}
+
+
+def _node(enabled, loaded, **over):
+    s = {"enabled": enabled, "targets": ["127.0.0.1@8953"], "domain": "", "ttl": 300,
+         "register_ptr": False}
+    s.update(over)
+    return {"status": "SUCCESS", "settings": s, "loaded_in_running_config": loaded}
+
+
+def _configs(hub):
+    return [p for _, c, p in hub.request_log if c == "DHCP_DNS_HOOK_CONFIG"]
+
+
+def test_dns_hook_desired_defaults_on():
+    d = _HookHub(_node(False, False))._dns_hook_desired()
+    assert d == {"enabled": True, "targets": ["127.0.0.1@8953"], "domain": "",
+                 "ttl": 300, "register_ptr": False}
+
+
+@pytest.mark.asyncio
+async def test_dns_hook_enabled_by_default_on_unconfigured_spoke():
+    hub = _HookHub(_node(False, False))
+    res = await hub._reconcile_dns_hook()
+    assert res["status"] == "ok" and res["applied"] == ["dhcp-1"]
+    assert _configs(hub)[0]["settings"]["enabled"] is True
+    assert hub.dns_dhcp_sync_status["dns_hook"]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_dns_hook_converged_spoke_is_not_repushed():
+    hub = _HookHub(_node(True, True))
+    res = await hub._reconcile_dns_hook()
+    assert res["applied"] == [] and _configs(hub) == []
+
+
+@pytest.mark.asyncio
+async def test_dns_hook_knob_off_disables_and_ptr_drift_repushes():
+    hub = _HookHub(_node(True, True), gc={"dhcp_dns_hook": {"enabled": False}})
+    await hub._reconcile_dns_hook()
+    assert _configs(hub)[0]["settings"]["enabled"] is False
+
+    off = _HookHub(_node(False, False), gc={"dhcp_dns_hook": {"enabled": False}})
+    await off._reconcile_dns_hook()
+    assert _configs(off) == []
+
+    ptr = _HookHub(_node(True, True), gc={"dhcp_dns_hook": {"register_ptr": True}})
+    await ptr._reconcile_dns_hook()
+    assert _configs(ptr)[0]["settings"]["register_ptr"] is True
+
+
+@pytest.mark.asyncio
+async def test_dns_hook_ha_pair_one_member_drifted_and_errors_reported():
+    ha = {"status": "SUCCESS", "members": {"a": _node(True, True), "b": _node(False, False)}}
+    hub = _HookHub(ha)
+    await hub._reconcile_dns_hook()
+    assert len(_configs(hub)) == 1
+
+    bad = _HookHub(_node(False, False), config_reply={"status": "ERROR", "message": "nope"})
+    res = await bad._reconcile_dns_hook()
+    assert res["status"] == "error" and res["errors"] == {"dhcp-1": "nope"}
+
+    old = _HookHub({"status": "ERROR", "error": "Unknown command: DHCP_DNS_HOOK_STATUS"})
+    res = await old._reconcile_dns_hook()
+    assert res["status"] == "error" and _configs(old) == []
