@@ -1868,7 +1868,9 @@ def register(app, hub, ctx):
                 "name": entry["name"],
                 "object_type": entry["object_type"],
                 "address": addr,
-                "transport": "auto",
+                # Keep the transport the scan actually authenticated over; "auto"
+                # would resolve a gateway to REST and every poll would time out.
+                "transport": (dev.get("method") if dev.get("method") in ("ssh", "snmp") else "auto"),
                 "username": cred_set.get("username") or cred_set.get("user") or "",
                 "tenant_id": tenant_id,
                 "spoke_id": spoke_id,
