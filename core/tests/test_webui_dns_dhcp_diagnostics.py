@@ -76,3 +76,16 @@ def test_dhcp_configuration_tile_renders_details_button_and_modal():
     assert "check('Configuration', !!cfg.ok, cfgSub, cfgAction)" in src
     assert "syntax valid" in src
 
+
+def test_dhcp_diagnostics_renders_the_real_time_dns_hook_panel_and_toggle():
+    """DHCP_DNS_HOOK_CONFIG/STATUS (dhcp repo) had no hub route or WebUI
+    control at all — the feature was unreachable regardless of how its
+    settings defaulted. This locks in the Diagnostics-tab panel + admin-only
+    enable/disable toggle that calls the new /api/dhcp/dns-hook route."""
+    src = MAIN_JS.read_text(encoding="utf-8")
+    assert "fetch('/api/dhcp/dns-hook' + _tenantQS())" in src
+    assert "_dhcpDnsHookPanel(dnsHook)" in src
+    assert "function toggleDhcpDnsHook(enable)" in src
+    assert "'/api/dhcp/dns-hook' + _tenantQS()" in src
+    assert "Real-time DNS registration (Kea → Unbound)" in src
+

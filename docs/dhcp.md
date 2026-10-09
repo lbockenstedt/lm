@@ -86,6 +86,33 @@ Add `--ca-cert <coordinator cert>` (required), `--ha-user`/`--ha-password` (requ
 **See it.** DHCP → **Diagnostics** grows a *Kea HA pair* panel (per-node role, health, HA state, partner state, scopes, config digest) plus each node's own diagnostics findings, and a *Re-apply configuration to both nodes* action. `GET /api/dhcp/ha` returns the same report; Settings → Diagnostics carries a one-line summary. A non-admin sees the verdict but not node addressing or error text.
 
 
+## Real-time DNS registration (Kea → Unbound hook)
+
+The `dhcp` spoke can install a Kea `run_script` hook (`libdhcp_run_script.so`) that
+calls `unbound-control local_data`/`local_data_remove` directly on every lease
+commit/renewal/release/expiry/decline — no dependency on the hub or the NetBox
+sync loop below (see the `dhcp` repo's README, "Real-Time DNS Registration",
+and `src/kea_dns_hook.py`). The spoke command (`DHCP_DNS_HOOK_CONFIG`/
+`DHCP_DNS_HOOK_STATUS`) existed for a while with **no hub route and no WebUI
+control** — nothing ever sent it, so the hook stayed permanently disabled
+(`enabled` defaults to `false`) no matter how it was documented. `GET`/`POST
+/api/dhcp/dns-hook` (`core/src/routes/net_services.py`) close that gap:
+`GET` relays `DHCP_DNS_HOOK_STATUS` (on-disk settings + whether it's loaded in
+Kea's running config + a log tail); `POST` (Global-Admin only, same
+`_ADMIN_INFRA_WRITE_PREFIXES` gate as the rest of `/api/dhcp/`) relays
+`DHCP_DNS_HOOK_CONFIG` with `{"enabled", "targets", "domain", "ttl",
+"register_ptr"}` plus an optional `hook_dir`.
+
+**See it.** DHCP → **Diagnostics** grows a *Real-time DNS registration* panel
+(hook enabled/disabled, whether it's actually loaded in Kea's running config —
+flagged as drift if not, since `config-set` can silently fail to persist —
+targets, and a tail of the hook's own event log) with a Global-Admin-only
+*Enable*/*Disable* button that preserves every other on-disk setting
+(`targets`/`domain`/`ttl`/`register_ptr`) when flipping `enabled`. There is
+still no panel for editing `targets`/`domain`/`ttl`/`register_ptr`
+themselves — change those via a direct `POST /api/dhcp/dns-hook` call (or the
+`DHCP_DNS_HOOK_CONFIG` admin-ops lever) until a full settings form exists.
+
 ## NetBox auto-sync (source of truth)
 
 NetBox is the IPAM source of truth. A successful NetBox prefix create, update, or delete triggers an immediate DHCP reconciliation, and the hub's `DnsDhcpSyncMixin` (`core/src/dns_dhcp_sync.py`) also reconciles Kea periodically (`run_dns_dhcp_sync_loop`, `global_config.dns_dhcp_sync` `{enabled` default true`, interval` default 300s`}`). In HA mode `DHCP_SYNC` validates and applies the resulting subnet configuration to both nodes as one transaction. The loop and the on-demand `POST /api/dhcp/sync` share the same extraction helper (`build_dhcp_payload`), so all paths build the same Kea payload. Per-run status is available at `GET /api/dns-dhcp/sync-status`.

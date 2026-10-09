@@ -655,6 +655,26 @@ def test_dhcp_ha_apply_relays_the_apply_command():
     assert hub.forwarded[-1][:2] == ("dhcp-1", "DHCP_HA_APPLY")
 
 
+def test_dhcp_dns_hook_get_relays_the_status_command():
+    hub = FakeHub({"dhcp-1": {"DHCP_DNS_HOOK_STATUS": {
+        "status": "SUCCESS", "settings": {"enabled": True}, "script_installed": True}}})
+    r = _client(ADMIN, hub).get("/api/dhcp/dns-hook")
+    assert r.json()["settings"]["enabled"] is True
+    assert hub.forwarded[-1][:2] == ("dhcp-1", "DHCP_DNS_HOOK_STATUS")
+
+
+def test_dhcp_dns_hook_post_relays_settings_and_hook_dir():
+    hub = FakeHub()
+    body = {"enabled": True, "targets": ["127.0.0.1@8953"], "domain": "lab.local",
+            "ttl": 300, "register_ptr": True, "hook_dir": "/usr/lib/kea/hooks"}
+    _client(ADMIN, hub).post("/api/dhcp/dns-hook", json=body)
+    sid, cmd, payload = hub.forwarded[-1]
+    assert (sid, cmd) == ("dhcp-1", "DHCP_DNS_HOOK_CONFIG")
+    assert payload["hook_dir"] == "/usr/lib/kea/hooks"
+    assert payload["settings"] == {"enabled": True, "targets": ["127.0.0.1@8953"],
+                                   "domain": "lab.local", "ttl": 300, "register_ptr": True}
+
+
 def test_dhcp_worker_discovery_configures_exactly_two_server_roles():
     hub = FakeHub()
     hub.spoke_module_types = {
