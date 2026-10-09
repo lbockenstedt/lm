@@ -100,6 +100,36 @@ async def _nw_bg_refresh_device(hub, device_id, endpoint, spoke_id, spoke_cmd,
     await hub.nw_cache_set_device(device_id, endpoint, data)
 
 
+async def _nw_sync_lldp_cables(hub, netbox_spoke, lldp_edges, node_names) -> None:
+    """Push an LLDP-confirmed edge into NetBox as a real ``dcim.cable`` via
+    ``NETBOX_SYNC_CABLE``, one request per edge, sequentially (this runs
+    detached from the request/response cycle, so there is no reader waiting
+    on it — no need for concurrency, and sequential keeps load on NetBox
+    predictable). Conservative and best-effort end to end: ``sync_cable``
+    itself never invents a device and never overwrites an existing cable to a
+    different far end, and any failure here is logged, never raised (a
+    NetBox hiccup must not be visible anywhere in the topology UI)."""
+    for edge in lldp_edges:
+        a_name = node_names.get(edge["a"], "")
+        b_name = node_names.get(edge["b"], "")
+        if not a_name or not b_name:
+            continue
+        try:
+            result = await hub.request_response(
+                netbox_spoke, "NETBOX_SYNC_CABLE",
+                {"a_device": a_name, "a_port": edge["a_port"],
+                 "b_device": b_name, "b_port": edge["b_port"]},
+                timeout=30.0)
+            data = access.unwrap_spoke(result) or {}
+            if data.get("status") not in ("SUCCESS", "UNCHANGED"):
+                logger.info("nw_topology: NetBox cable sync %s:%s <-> %s:%s: %s",
+                           a_name, edge["a_port"], b_name, edge["b_port"],
+                           data.get("message") or data.get("status"))
+        except Exception as e:
+            logger.info("nw_topology: NetBox cable sync %s:%s <-> %s:%s failed: %s",
+                       a_name, edge["a_port"], b_name, edge["b_port"], e)
+
+
 
 def validate_nw_address(addr):
     """Validate a network device's management address: it must be PRESENT and a
@@ -1017,6 +1047,7 @@ def register(app, hub, ctx):
         # NetBox inventory: gear the nw fleet never logs into (PDUs, patch
         # panels, APs) still belongs on the map. Best-effort — no IPAM spoke, a
         # timeout or a NetBox error degrades to "no inventory", never a 500.
+        netbox = None
         netbox_devices = []
         netbox_cables = []
         try:
@@ -1066,6 +1097,20 @@ def register(app, hub, ctx):
         graph["status"] = "SUCCESS"
         graph["tenant_id"] = cfg_tid
         graph["netbox"] = bool(netbox_devices)
+
+        # Write LLDP's live truth back into NetBox as real cables, so it
+        # persists past nw's in-memory cache — but only on an explicit scan
+        # (``?refresh=1``), never on a routine page load, and only for
+        # "lldp"-sourced edges (a real, confirmed adjacency — never a "mac"
+        # guess). Fire-and-forget: a slow/broken NetBox must never make the
+        # topology view itself slow or fail.
+        if force and netbox:
+            names = {n["id"]: n["name"] for n in graph["nodes"]}
+            lldp_edges = [e for e in graph["edges"]
+                         if e["source"] == "lldp" and e["a_port"] and e["b_port"]]
+            if lldp_edges:
+                asyncio.create_task(_nw_sync_lldp_cables(hub, netbox, lldp_edges, names))
+
         return graph
 
     @app.get("/api/nw/topology/manual")
