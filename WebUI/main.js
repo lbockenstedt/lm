@@ -19506,19 +19506,13 @@ async function _renderNwTopologyManual() {
 async function _renderNwScanTab() {
     const c = document.getElementById('nw-table-container');
     if (!c) return;
-    // ADMIN (default) scope: every object this tab touches is per-tenant — the
-    // scan config and schedule live under nw_tenant_cfg[tenant], and a scan
-    // credential set is stamped with the tenant of the nw spoke it is bound to.
-    // Rendered under ADMIN/default the tab was actively misleading: the
-    // credential picker came back EMPTY (the ?tenant=default scope is
-    // ""/default/shared only, so a set auto-stamped with the spoke's tenant is
-    // filtered out — i.e. a set vanished from the very view that created it),
-    // and any save landed in a nw_tenant_cfg["default"] bucket no real tenant
-    // reads. Prompt for a tenant instead, exactly like the Devices view.
-    if (isAdmin() && (!currentTenant || currentTenant === 'default')) {
+    // The ADMIN tenant ("default") is a real tenant: an nw spoke bound to it
+    // is offered by /api/nw/tenant-config and its scan config lives under
+    // nw_tenant_cfg["default"]. Only prompt when no tenant is selected at all.
+    if (isAdmin() && !currentTenant) {
         c.innerHTML = `<div class="py-12 text-center space-y-3">
             <p class="text-slate-600 text-sm font-semibold">Select a tenant to configure network scans</p>
-            <p class="text-slate-400 text-xs max-w-md mx-auto">Scan settings, schedules and credential sets all belong to a specific tenant — a credential set is bound to that tenant's Network Devices spoke. Choose a tenant from the tenant picker to view and edit its scan configuration.</p>
+            <p class="text-slate-400 text-xs max-w-md mx-auto">Scan settings, schedules and credential sets all belong to a specific tenant. Choose a tenant from the tenant picker to view and edit its scan configuration.</p>
         </div>`;
         return;
     }
