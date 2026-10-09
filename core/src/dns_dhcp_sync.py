@@ -30,6 +30,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import re
 import time
 from typing import Any, Dict, List, Tuple
 
@@ -40,9 +41,62 @@ logger = logging.getLogger("Hub")
 
 _CFG_KEY = "dns_dhcp_sync"
 _DEFAULT_INTERVAL = 300  # seconds
+# Real-time Kea -> Unbound registration hook (dhcp/src/kea_dns_hook.py). On by
+# default; global_config["dhcp_dns_hook"]["enabled"]=false turns it off. The
+# default unbound-control target assumes Kea + Unbound share a host.
+_HOOK_CFG_KEY = "dhcp_dns_hook"
+_HOOK_DEFAULT_TARGETS = ["127.0.0.1@8953"]
+
+_LABEL_RE = re.compile(r"^(?!-)[A-Za-z0-9_-]{1,63}(?<!-)$")  # one DNS label
 
 
-def build_dns_records(ips_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _scope_domains(pfx_data: Dict[str, Any]) -> List[Tuple[Any, str]]:
+    """DHCP scopes (NetBox prefixes Kea serves) -> [(network, domain_name)],
+    most specific prefix first."""
+
+    result = []
+    for p in (pfx_data or {}).get("prefixes") or []:
+        if not isinstance(p, dict):
+            continue
+        st = p.get("status")
+        if isinstance(st, dict):
+            st = st.get("value") or ""
+        if str(st).lower() == "container":
+            continue
+        cf = p.get("custom_fields") or {}
+        if not cf.get("dhcp_enabled"):
+            continue
+        dom = str(cf.get("domain_name") or "").strip().strip(".").lower()
+        if not dom or not all(_LABEL_RE.match(l) for l in dom.split(".")):
+            continue
+        try:
+            net = ipaddress.ip_network(str(p.get("prefix") or ""), strict=False)
+        except ValueError:
+            continue
+        result.append((net, dom))
+    return sorted(result, key=lambda t: t[0].prefixlen, reverse=True)
+
+
+def qualify_dns_name(name: str, address: str, scopes: List[Tuple[Any, str]]) -> str:
+    """Append the containing DHCP scope's domain to a single-label host name."""
+
+    orig = (name or "").strip()
+    n = orig.rstrip(".")
+    if not n or "." in n or not scopes:
+        return orig
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return orig
+    for net, dom in scopes:
+        if ip.version == net.version and ip in net:
+            return f"{n}.{dom}"
+    return orig
+
+
+
+def build_dns_records(ips_data: Dict[str, Any],
+                      pfx_data: Dict[str, Any] = None) -> List[Dict[str, Any]]:
     """NetBox IP list → Unbound A/AAAA-record sync payload.
 
     An IP contributes a record only when it has a ``dns_name`` and a concrete
@@ -52,7 +106,13 @@ def build_dns_records(ips_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     previously silently dropped/rejected by the sync rather than landing as
     an AAAA record). Shared by the loop and ``POST /api/dns/sync`` so both
     build the identical payload.
+
+    A single-label name (a DHCP hostname like ``printer1``) gets the
+    ``domain_name`` of the DHCP scope (dhcp_enabled prefix) containing its
+    address appended — the same domain Kea hands that client — so DNS holds
+    ``printer1.lab.example``. Names that already contain a dot are untouched.
     """
+    scopes = _scope_domains(pfx_data) if pfx_data else []
     records: List[Dict[str, Any]] = []
     for entry in (ips_data.get("ip_addresses") or []):
         dns_name = (entry.get("dns_name") or "").strip()
@@ -63,7 +123,8 @@ def build_dns_records(ips_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             rtype = "AAAA" if ipaddress.ip_address(address).version == 6 else "A"
         except ValueError:
             continue  # malformed address — skip rather than mis-sync
-        records.append({"name": dns_name, "type": rtype, "value": address, "ttl": 300})
+        records.append({"name": qualify_dns_name(dns_name, address, scopes),
+                        "type": rtype, "value": address, "ttl": 300})
     return records
 
 
@@ -195,12 +256,77 @@ class DnsDhcpSyncMixin:
             "interval": int(cfg.get("interval", _DEFAULT_INTERVAL) or _DEFAULT_INTERVAL),
         }
 
+    def _dns_hook_desired(self) -> Dict[str, Any]:
+        """Desired real-time DNS hook settings, normalized the way the dhcp
+        spoke stores them (kea_dns_hook.validate_settings) so a converged node
+        never reads as drifted."""
+        gc = self.state.system_state.get("global_config", {}) or {}
+        cfg = gc.get(_HOOK_CFG_KEY, {}) or {}
+        targets = [str(t).strip() for t in (cfg.get("targets") or []) if str(t).strip()]
+        try:
+            ttl = int(cfg.get("ttl", 300) or 300)
+        except (TypeError, ValueError):
+            ttl = 300
+        return {
+            "enabled":      bool(cfg.get("enabled", True)),
+            "targets":      targets or list(_HOOK_DEFAULT_TARGETS),
+            "domain":       str(cfg.get("domain") or "").strip().rstrip(".").lower(),
+            "ttl":          ttl,
+            "register_ptr": bool(cfg.get("register_ptr", False)),
+        }
+
+    async def _reconcile_dns_hook(self) -> Dict[str, Any]:
+        """Converge every DHCP spoke's real-time Kea->Unbound DNS hook to
+        global_config["dhcp_dns_hook"]; only pushes when a node has drifted."""
+        desired = self._dns_hook_desired()
+        spokes = self._get_dhcp_spokes()
+        applied = []
+        errors = {}
+
+        if not spokes:
+            return self._record_status("dns_hook", status="skipped", enabled=desired["enabled"], reason="DHCP spoke not connected")
+
+        def _drifted(node: dict) -> bool:
+            s = (node or {}).get("settings") or {}
+            if not desired["enabled"]:
+                return bool(s.get("enabled")) or node.get("loaded_in_running_config") is True
+            if not s.get("enabled") or node.get("loaded_in_running_config") is False:
+                return True
+            for k in ("targets", "domain", "ttl", "register_ptr"):
+                if s.get(k) != desired[k]:
+                    return True
+            return False
+
+        for sid in spokes:
+            try:
+                st = unwrap_spoke(await self.request_response(sid, "DHCP_DNS_HOOK_STATUS", {}, timeout=30.0)) or {}
+                members = st.get("members")
+                if st.get("status") == "ERROR" and not members and "settings" not in st:
+                    # e.g. a dhcp spoke too old to know the command — report,
+                    # don't blindly re-push config every tick.
+                    errors[sid] = str(st.get("message") or st.get("error") or "status read failed")
+                    continue
+                nodes = list(members.values()) if isinstance(members, dict) and members else [st]
+                if not any(_drifted(n if isinstance(n, dict) else {}) for n in nodes):
+                    continue
+                res = unwrap_spoke(await self.request_response(sid, "DHCP_DNS_HOOK_CONFIG", {"settings": dict(desired), "hook_dir": ""}, timeout=30.0)) or {}
+                if res.get("status") in ("SUCCESS", "PARTIAL"):
+                    applied.append(sid)
+                    logger.info("DNS hook %s on %s", "enabled" if desired["enabled"] else "disabled", sid)
+                else:
+                    errors[sid] = str(res.get("message") or res.get("error") or res.get("member_errors") or "config failed")
+            except Exception as e:
+                errors[sid] = str(e)
+                logger.warning("DNS hook reconcile %s failed: %s", sid, e)
+
+        return self._record_status("dns_hook", status=("error" if errors else "ok"), enabled=desired["enabled"], applied=applied, errors=errors, spokes=len(spokes))
+
     @property
     def dns_dhcp_sync_status(self) -> Dict[str, Any]:
         """Last-run status for each side; lazily initialized (mixin has no __init__)."""
         st = getattr(self, "_dns_dhcp_sync_status", None)
         if st is None:
-            st = {"dns": {}, "dhcp": {}}
+            st = {"dns": {}, "dhcp": {}, "dns_hook": {}}
             self._dns_dhcp_sync_status = st
         return st
 
@@ -269,7 +395,8 @@ class DnsDhcpSyncMixin:
             return self._record_status("dns", status="skipped",
                                        reason=f"{missing} spoke not connected")
         try:
-            records = build_dns_records(await self._netbox_ips())
+            pfx_data, ips_data = await self._netbox_prefixes_and_ips()
+            records = build_dns_records(ips_data, pfx_data)
             results = await asyncio.gather(*[
                 self.request_response(sid, "DNS_SYNC", {"records": records}, timeout=30.0)
                 for sid in dns_spokes
@@ -345,7 +472,7 @@ class DnsDhcpSyncMixin:
             self._record_status("dhcp", status="error", error=str(e))
             return
 
-        records = build_dns_records(ips_data)
+        records = build_dns_records(ips_data, pfx_data)
         subnets, reservations = build_dhcp_payload(pfx_data, ips_data)
 
         dns_hash = hashlib.sha256(json.dumps(records, sort_keys=True,
@@ -429,8 +556,10 @@ class DnsDhcpSyncMixin:
     async def run_dns_dhcp_sync_loop(self):
         """Background loop: reconcile Unbound + Kea to NetBox every ``interval`` s.
 
-        Disabled (skipped, not stopped) while ``global_config.dns_dhcp_sync
-        .enabled`` is False, so toggling it in the WebUI takes effect without a
+        The NetBox reconciliation is skipped (not stopped) while
+        ``global_config.dns_dhcp_sync.enabled`` is False; the real-time DNS
+        hook (``global_config.dhcp_dns_hook.enabled``, default on) is
+        reconciled every tick regardless, so toggling it in the WebUI takes effect without a
         hub restart. Skips quietly whenever the NetBox / DNS / DHCP spokes are
         offline — nothing to reconcile against.
         """
@@ -443,6 +572,14 @@ class DnsDhcpSyncMixin:
                 return max(30, _DEFAULT_INTERVAL)
 
         async def _body():
+            # The real-time hook has its own on/off knob, so it converges even
+            # while the NetBox reconciliation below is disabled.
+            try:
+                await self._reconcile_dns_hook()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("DNS hook reconcile failed: %s", e)
+            if not self._dds_cfg()["enabled"]:
+                return
             # Single NetBox fetch + skip-if-unchanged (see
             # _sync_dns_dhcp_once). The manual /api/dns|dhcp/sync buttons
             # still call the per-side methods directly (they re-fetch,
@@ -450,7 +587,7 @@ class DnsDhcpSyncMixin:
             await self._sync_dns_dhcp_once()
 
         await run_sync_loop(
-            stagger=0, guard=lambda: bool(self._dds_cfg()["enabled"]),
+            stagger=0,
             body=_body, delay=_delay,
             on_error=lambda e: logger.error("Error in DNS/DHCP auto-sync loop: %s", e),
             error_delay=_delay)

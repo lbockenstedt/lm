@@ -101,6 +101,9 @@ const ROUTES = {
     loadRealtimeNacSyncStatus: { m: 'GET',  p: '/setup/realtime-nac-sync/status',  api: 'realtime_nac_sync_status' },
     runRealtimeNacNow:         { m: 'POST', p: '/setup/realtime-nac-sync/run',     api: 'run_realtime_nac_sync' },
     saveRealtimeNacSyncConfig: { m: 'POST', p: '/setup/config',                    api: 'update_global_config' },
+    // ── Real-time DHCP → DNS hook (System → Sync; global_config.dhcp_dns_hook) ──
+    loadDnsHookConfig:         { m: 'GET',  p: '/setup/config',                    api: 'get_global_config' },
+    saveDnsHookConfig:         { m: 'POST', p: '/setup/config',                    api: 'update_global_config' },
 
     // ── VM sync (Hypervisor → NetBox) ──
     loadVmSyncSources:      { m: 'GET',  p: '/setup/vm-sync/sources',     api: 'vm_sync_sources' },
@@ -8240,6 +8243,17 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">DHCP → DNS (real-time)</h3>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Kea registers each lease's hostname in Unbound the moment the lease is committed, and removes it on release/expiry — suffixed with the lease's DHCP scope domain. The hub keeps every DHCP spoke's hook in this state (checked each DNS/DHCP sync cycle). The NetBox → DNS sync remains the durable backstop.</p>
+                <div class="flex flex-wrap items-end gap-4">
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="dns-hook-enabled" class="w-4 h-4 text-green-600 rounded" checked>Enable real-time DHCP → DNS registration</label>
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="dns-hook-register-ptr" class="w-4 h-4 text-green-600 rounded">Also register PTR records</label>
+                </div>
+                <div id="dns-hook-status" class="text-xs text-slate-400 mt-3"></div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hypervisor → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="vm-sync-run-btn" onclick="runVmSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
@@ -8557,6 +8571,7 @@ function _renderSetupSyncTile(content) {
     loadEndpointSyncStatus();
     loadRealtimeNacSyncConfig();
     loadRealtimeNacSyncStatus();
+    loadDnsHookConfig();
     loadVmSyncSources();
     loadVmSyncConfig();
     loadVmSyncStatus();
@@ -8589,6 +8604,7 @@ function _syncSaveFnFor(el) {
     const id = (el && el.id) || '';
     if (id.startsWith('repo-sync-'))        return saveRepoSyncConfig;
     if (id.startsWith('rt-nac-sync-'))      return saveRealtimeNacSyncConfig;
+    if (id.startsWith('dns-hook-'))         return saveDnsHookConfig;
     if (id.startsWith('ep-sync-'))          return saveEndpointSyncConfig;
     if (id.startsWith('vm-sync-'))          return saveVmSyncConfig;
     if (id.startsWith('fw-sync-'))          return saveFwDiscoveryConfig;
@@ -13441,6 +13457,45 @@ async function runRealtimeNacNow() {
         showToast('Sync failed: ' + e.message, 'error');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = orig; }
+    }
+}
+
+// ── Real-time DHCP → DNS hook (System → Sync; global_config.dhcp_dns_hook) ──
+// Default ON when unset; the hub's DNS/DHCP sync loop pushes it to the spokes.
+async function loadDnsHookConfig() {
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const data = await r.json();
+        const cfg = (data.global_config || {}).dhcp_dns_hook || {};
+        const en = document.getElementById('dns-hook-enabled');
+        const ptr = document.getElementById('dns-hook-register-ptr');
+        if (en) en.checked = cfg.enabled !== false;
+        if (ptr) ptr.checked = cfg.register_ptr === true;
+        const st = document.getElementById('dns-hook-status');
+        const s = await _spokeFetch('/api/dns-dhcp/sync-status');
+        const h = (s && s.ok && s.data && (s.data.status || {}).dns_hook) || {};
+        if (st && h.last_run) {
+            const errs = Object.entries(h.errors || {}).map(([k, v]) => `${k}: ${v}`).join('; ');
+            st.innerHTML = `Last check: <span class="${h.status === 'ok' ? 'text-emerald-600' : 'text-red-500'} font-medium">${escapeHtml(h.status || '')}</span> · ${escapeHtml(new Date(h.last_run * 1000).toLocaleString())}${errs ? ' · ' + escapeHtml(errs) : ''}${h.reason ? ' · ' + escapeHtml(h.reason) : ''}`;
+        }
+    } catch (e) { console.error('loadDnsHookConfig failed', e); }
+}
+
+async function saveDnsHookConfig() {
+    const r0 = await setupFetch('/setup/config');
+    const prev = r0.ok ? (((await r0.json()).global_config || {}).dhcp_dns_hook || {}) : {};
+    const enabled = !!document.getElementById('dns-hook-enabled')?.checked;
+    const register_ptr = !!document.getElementById('dns-hook-register-ptr')?.checked;
+    try {
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { dhcp_dns_hook: { ...prev, enabled, register_ptr } } })
+        });
+        if (r.ok) showToast(`Real-time DHCP → DNS ${enabled ? 'enabled' : 'disabled'} — applied on the next sync cycle.`, 'success');
+        else showToast('Failed to save.', 'error');
+    } catch (e) {
+        showToast('Error saving: ' + e.message, 'error');
     }
 }
 
