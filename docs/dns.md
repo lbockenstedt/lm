@@ -144,3 +144,5 @@ Module view tabs: **Overview** (total-queries / cache-hit-ratio / recursion / up
 ## Related pages
 
 [architecture-topology.md](architecture-topology.md), [install-flags.md](install-flags.md).
+
+**Background data feed.** The hub's `run_dns_dhcp_feed_loop` (`core/src/dns_dhcp_sync.py`) revalidates every connected DNS spoke's read caches (via `hub.net_services_feed_once`, `core/src/routes/net_services.py`) every 60s, so the page never shows an hours-old "cached" banner just because no tab was opened.
