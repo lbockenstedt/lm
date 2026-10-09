@@ -138,13 +138,18 @@ def nw_scan_spoke_choices(hub, tenant_id, shared_tenant_id):
     md = hub.state.system_state.get("module_metadata", {}) or {}
     names = hub.state.system_state.get("module_names", {}) or {}
     out = []
+    # Ids reach here with differing spelling ("Default" from the picker vs the
+    # "default" a spoke is bound to), so compare canonicalised (strip+casefold).
+    def _n(x):
+        return str(x or "").strip().casefold()
+    want, shared_n = _n(tenant_id), _n(shared_tenant_id)
     for sid in (hub.get_all_spokes_by_type("nw") or []):
         if not hub.approved_modules.get(hub._primary_key(sid), False):
             continue
         owner = (md.get(sid, {}) or {}).get("tenant_id") or ""
-        if tenant_id and owner == tenant_id:
+        if want and _n(owner) == want:
             scope = "own"
-        elif shared_tenant_id and owner == shared_tenant_id:
+        elif shared_n and _n(owner) == shared_n:
             scope = "shared"
         else:
             continue
