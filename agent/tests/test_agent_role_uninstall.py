@@ -47,6 +47,10 @@ def _sandbox(monkeypatch, tmp_path, role="dhcp-server", *, make_marker=True):
     monkeypatch.setattr(agent_spoke, "_DEPLOY_ROLE_PURGE", {role: spec})
     monkeypatch.setattr(agent_spoke, "_DEPLOY_ROLE_MARKERS",
                         {**agent_spoke._DEPLOY_ROLE_MARKERS, role: str(marker)})
+    # LM-installed Kea: the ownership marker lives under the purged config tree.
+    owner = etc / "kea-api-password"
+    owner.write_text("x")
+    monkeypatch.setitem(agent_spoke._DEPLOY_ROLE_OWNERSHIP, role, (str(owner),))
     return types.SimpleNamespace(marker=marker, etc=etc, var=var,
                                  unit_dir=unit_dir, spec=spec)
 
