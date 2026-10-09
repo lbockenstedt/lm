@@ -128,6 +128,8 @@ class InstanceRelocateMixin:
         for base_id in pool:
             if not isinstance(base_id, str) or not base_id:
                 continue
+            if not self._pool_candidate_allowed(inst, base_id):
+                continue
             try:
                 new_sub_id = await self._relocate_load_role(base_id, role, module_type)
             except Exception as e:  # noqa: BLE001 — one candidate's failure tries the next
@@ -160,6 +162,23 @@ class InstanceRelocateMixin:
             logger.warning("[instance-relocate] config push to %s failed: %s", new_sub_id, e)
         if old_active and old_active != new_sub_id:
             await self._relocate_unload_orphan(old_active, role, storage_key, inst.get("id"))
+
+    def _pool_candidate_allowed(self, inst, base_id) -> bool:
+        """A spoke_pool candidate may only host this instance's role if it is
+        in the instance's own tenant or the shared tenant (access.
+        tenant_may_manage). spoke_pool is saved without validation, so the
+        automatic failover/rebalance passes must enforce it — otherwise they
+        LOAD_ROLE onto another tenant's agent that nobody asked for."""
+        from access import tenant_may_manage  # lazy: keep this mixin a leaf
+        candidate_tenant = self.state.get_spoke_tenant(self._primary_key(base_id)) or ""
+        target_tenant = inst.get("tenant_id") or ""
+        if tenant_may_manage(candidate_tenant, target_tenant):
+            return True
+        logger.warning("[instance-relocate] '%s': pool candidate %s (tenant %r) is outside "
+                       "the instance's tenant %r — skipped",
+                       inst.get("name") or inst.get("id") or "?", base_id,
+                       candidate_tenant, target_tenant)
+        return False
 
     async def _relocate_load_role(self, base_id, role, module_type):
         """Minimal inline LOAD_ROLE — see module docstring for why this
@@ -249,6 +268,8 @@ class InstanceRelocateMixin:
                     if not isinstance(base_id, str) or not base_id or base_id == current_base:
                         continue
                     if not self._candidate_viable(base_id, role, module_type):
+                        continue
+                    if not self._pool_candidate_allowed(inst, base_id):
                         continue
                     candidate_load = load.get(base_id, 0)
                     if best_load is None or candidate_load < best_load:

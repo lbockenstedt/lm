@@ -27,6 +27,8 @@ Three defects combined:
 import asyncio
 
 from agent_spoke import (GenericAgent, _DEPLOY_ROLES, _DEPLOY_ROLE_MARKERS,
+                         _DEPLOY_ROLE_OWNERSHIP, _deploy_role_installed,
+                         _installed_deploy_roles,
                          _DEPLOY_ROLE_UNITS)
 
 
@@ -76,6 +78,33 @@ def _set_marker(monkeypatch, role, path, exists):
     if exists:
         path.write_text("installed")
     monkeypatch.setitem(_DEPLOY_ROLE_MARKERS, role, str(path))
+    if role in _DEPLOY_ROLE_OWNERSHIP:
+        monkeypatch.setitem(_DEPLOY_ROLE_OWNERSHIP, role, (str(path),))
+
+
+def test_sim_host_kea_binary_is_not_an_installed_dhcp_server(monkeypatch, tmp_path):
+    """The recurring phantom-DHCP-role bug: a simulation host has the distro
+    kea-dhcp4 binary (for its private kea-dhcp4-sim) but LM never deployed
+    dhcp-server there. It must not be reported as installed, and a real
+    LOAD_ROLE must run the installer rather than short-circuit."""
+    binary = tmp_path / "kea-dhcp4"
+    binary.write_text("distro")
+    monkeypatch.setitem(_DEPLOY_ROLE_MARKERS, "dhcp-server", str(binary))
+    monkeypatch.setitem(_DEPLOY_ROLE_OWNERSHIP, "dhcp-server",
+                        (str(tmp_path / "kea-api-password"),
+                         str(tmp_path / "worker.env")))
+    assert not _deploy_role_installed("dhcp-server")
+    assert "dhcp-server" not in _installed_deploy_roles()
+
+    agent = _agent()
+    ran = _stub_deploy(agent, monkeypatch)
+    res = asyncio.run(_load(agent, "dhcp-server"))
+    assert not res.get("already_installed"), res
+    assert ran == ["dhcp-server"]
+
+    (tmp_path / "kea-api-password").write_text("x")
+    assert _deploy_role_installed("dhcp-server")
+    assert "dhcp-server" in _installed_deploy_roles()
 
 
 def test_load_role_does_not_reinstall_when_marker_present(monkeypatch, tmp_path):

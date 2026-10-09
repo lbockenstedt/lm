@@ -1180,6 +1180,27 @@ def tenant_is_shared(tenant_id) -> bool:
                                  or normalized == "shared")
 
 
+def same_tenant(a, b) -> bool:
+    """Exact tenant equality (case/blank-insensitive). Used where a manager
+    must only ADOPT its own tenant's systems — e.g. DHCP/DNS cluster discovery
+    — even when it is shared (shared may manage others, but must not claim a
+    tenant's nodes away from that tenant's own coordinator)."""
+    return _norm_tenant_id(a) == _norm_tenant_id(b)
+
+
+def tenant_may_manage(manager_tenant, target_tenant) -> bool:
+    """The single cross-tenant management rule: an agent/spoke may only
+    manage, coordinate, cluster with or load roles onto systems in its OWN
+    tenant. The shared tenant is the sole exception and may manage systems in
+    any tenant (e.g. an LRB agent must never manage a DXP agent, but a shared
+    DHCP coordinator may manage everyone's Kea workers). Unassigned ("") only
+    matches unassigned; capitalisation never matters."""
+    m = _norm_tenant_id(manager_tenant)
+    if m == _norm_tenant_id(target_tenant):
+        return True
+    return tenant_is_shared(m)
+
+
 # ── Tenant picker scoping ────────────────────────────────────────────────────
 # ``default`` is the built-in ADMIN tenant (routes/tenants_users.py renders it
 # as "ADMIN" and synthesises it when absent), NOT an "All tenants" view. The
