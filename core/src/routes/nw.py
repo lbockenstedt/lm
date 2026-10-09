@@ -69,19 +69,25 @@ async def _nw_bg_refresh_fleet(hub) -> None:
               if s in hub.active_connections and hub.approved_modules.get(s, False)]
     if not spokes:
         return
-    merged, seen = [], set()
+    merged, seen, answered = [], set(), 0
     for sid in spokes:
         try:
             result = await hub.request_response(sid, "NW_LIST_DEVICES", {}, timeout=20.0)
             env = access.unwrap_spoke(result)
             rows = env.get("data") if isinstance(env, dict) else None
             if isinstance(rows, list):
+                answered += 1
                 for r in rows:
                     if isinstance(r, dict) and r.get("id") and r["id"] not in seen:
                         seen.add(r["id"])
                         merged.append(r)
         except Exception as e:  # noqa: BLE001
             logger.debug("nw bg fleet refresh: spoke %s failed: %s", sid, e)
+    if not answered:
+        # Every spoke errored (e.g. draining for an update): keep the
+        # last-known snapshot rather than caching an empty fleet.
+        logger.info("nw bg fleet refresh: no spoke answered — keeping cached fleet")
+        return
     env = {"status": "SUCCESS", "data": merged, "message": f"{len(merged)} device(s)"}
     try:
         await hub.nw_cache_set_fleet(env)
@@ -831,7 +837,7 @@ def register(app, hub, ctx):
 
         # Fan out NW_LIST_DEVICES (admin: {} = whole fleet per spoke; non-admin:
         # {"tenant": tid} = own+shared from that spoke) + merge rows by id.
-        merged, seen = [], set()
+        merged, seen, answered = [], set(), 0
         for sid in spokes:
             tid = spoke_to_tid.get(sid, "")
             payload = {"tenant": tid} if tid else {}
@@ -841,6 +847,7 @@ def register(app, hub, ctx):
                 env = access.unwrap_spoke(result)
                 rows = env.get("data") if isinstance(env, dict) else None
                 if isinstance(rows, list):
+                    answered += 1
                     for r in rows:
                         if isinstance(r, dict) and r.get("id") and r["id"] not in seen:
                             seen.add(r["id"])
@@ -862,7 +869,7 @@ def register(app, hub, ctx):
         # offline path serves a complete, filterable snapshot — only update it
         # from a whole-fleet (admin) fetch, never a non-admin subset NOR an
         # admin acting-as a single tenant (``env`` is a scoped subset there).
-        if is_admin and acting_tenant is None:
+        if is_admin and acting_tenant is None and answered:
             try:
                 await hub.nw_cache_set_fleet(env)
             except Exception:
