@@ -349,7 +349,7 @@ def register(app, hub, ctx):
         "DNS_LIST", "DNS_STATUS", "DNS_DIAGNOSTICS", "DNS_CLUSTER_STATUS",
         "DNS_STATS", "DNS_FORWARDERS", "DHCP_LIST_SUBNETS", "DHCP_LIST_LEASES",
         "DHCP_LIST_RES", "DHCP_STATUS", "DHCP_DIAGNOSTICS", "DHCP_HA_STATUS",
-        "DHCP_STATS"})
+        "DHCP_STATS", "DHCP_DNS_HOOK_STATUS"})
     _swr_inflight = set()
     _swr_gen = [0]
 
@@ -4305,6 +4305,36 @@ def register(app, hub, ctx):
         return await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
                                   "DHCP_HA_APPLY", {},
                                   log_name="dhcp_ha_apply", timeout=120)
+
+    @app.get("/api/dhcp/dns-hook")
+    async def dhcp_dns_hook_status(request: Request, tenant: str = None):
+        """Real-time Kea -> Unbound DNS registration hook ("Option 1"):
+        on-disk settings, whether it's loaded in Kea's running config, and a
+        tail of its own event log. Mirrors ``/api/dhcp/ha``'s GET shape —
+        this is a status read, open to any authenticated session."""
+        logger.debug("relay GET /api/dhcp/dns-hook")
+        return await _cached_relay(_spoke_ref("dhcp", request, tenant),
+                                  "DHCP_DNS_HOOK_STATUS", log_name="dhcp_dns_hook_status",
+                                  timeout=30)
+
+    @app.post("/api/dhcp/dns-hook")
+    async def dhcp_dns_hook_config(request: Request, tenant: str = None):
+        """Enable/update/disable the real-time Kea -> Unbound DNS registration
+        hook (Global-Admin only — ``_ADMIN_INFRA_WRITE_PREFIXES`` covers
+        ``/api/dhcp/``). Without this route the spoke's
+        ``DHCP_DNS_HOOK_CONFIG`` command — and therefore the entire real-time
+        DNS registration feature — could never actually be turned on; nothing
+        else in the hub or WebUI ever sends it.
+
+        Body: ``{"enabled", "targets", "domain", "ttl", "register_ptr"}``
+        (see ``kea_dns_hook.validate_settings`` for field meaning/defaults)
+        plus an optional ``hook_dir`` override."""
+        body = await request.json()
+        settings = {k: v for k, v in body.items() if k != "hook_dir"}
+        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
+                                  "DHCP_DNS_HOOK_CONFIG",
+                                  {"settings": settings, "hook_dir": body.get("hook_dir") or ""},
+                                  log_name="dhcp_dns_hook_config", timeout=30)
 
     @app.get("/api/dhcp/stats")
     async def dhcp_stats(request: Request, tenant: str = None):
