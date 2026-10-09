@@ -198,6 +198,65 @@ def test_dns_ensure_query_logging_tolerates_missing_unbound_user(monkeypatch, tm
     assert log_path.parent.is_dir()
 
 
+def test_ensure_query_logging_restarts_when_logfile_never_opened(monkeypatch, tmp_path):
+    """lm#1127: the "config already correct but the log is still empty" case
+    this method exists to fix was UNREACHABLE — if the conf.d snippet already
+    matched and AppArmor needed no change, it returned True unconditionally,
+    even when unbound had never actually opened QUERY_LOG (so the caller's
+    ``if not self._ensure_query_logging(): self._reload()`` never ran). It
+    must now force a restart whenever the logfile doesn't exist yet, even
+    with an already-correct config."""
+    mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
+    log_path = tmp_path / "unbound-logs" / "lm-queries.log"
+    logging_conf = tmp_path / "lm-logging.conf"
+    monkeypatch.setattr(dns_manager, "QUERY_LOG", str(log_path))
+    monkeypatch.setattr(dns_manager, "LOGGING_CONF", str(logging_conf))
+    monkeypatch.setattr(mgr, "_ensure_apparmor_log_access", lambda: False)
+
+    # Pre-seed the conf.d snippet with EXACTLY what _ensure_query_logging
+    # would write, simulating "config already correct" -- but QUERY_LOG
+    # itself was never created (unbound never actually restarted with it).
+    want = (f'server:\n    log-queries: yes\n'
+            f'    use-syslog: no\n    logfile: "{log_path}"\n')
+    logging_conf.parent.mkdir(parents=True, exist_ok=True)
+    logging_conf.write_text(want)
+    assert not log_path.exists()
+
+    restarts = []
+    monkeypatch.setattr(dns_manager.subprocess, "run",
+                         lambda cmd, **kw: restarts.append(cmd))
+
+    result = mgr._ensure_query_logging()
+    assert restarts and restarts[0][:2] == ["systemctl", "restart"]
+    assert result is False  # caller must reload/restart, not assume it's fine
+
+
+def test_ensure_query_logging_short_circuits_once_logfile_exists(monkeypatch, tmp_path):
+    """Once the logfile demonstrably exists, a matching config really is a
+    no-op — this must NOT restart unbound on every single call."""
+    mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
+    log_path = tmp_path / "unbound-logs" / "lm-queries.log"
+    logging_conf = tmp_path / "lm-logging.conf"
+    monkeypatch.setattr(dns_manager, "QUERY_LOG", str(log_path))
+    monkeypatch.setattr(dns_manager, "LOGGING_CONF", str(logging_conf))
+    monkeypatch.setattr(mgr, "_ensure_apparmor_log_access", lambda: False)
+
+    want = (f'server:\n    log-queries: yes\n'
+            f'    use-syslog: no\n    logfile: "{log_path}"\n')
+    logging_conf.parent.mkdir(parents=True, exist_ok=True)
+    logging_conf.write_text(want)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("")  # the logfile has been opened at least once
+
+    restarts = []
+    monkeypatch.setattr(dns_manager.subprocess, "run",
+                         lambda cmd, **kw: restarts.append(cmd))
+
+    result = mgr._ensure_query_logging()
+    assert restarts == []
+    assert result is True
+
+
 def test_dns_add_forwarder_persists_config_and_reloads(monkeypatch, tmp_path):
     mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
     # list_forwarders is called twice by add_forwarder: once before the write
