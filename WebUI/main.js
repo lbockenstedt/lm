@@ -24946,7 +24946,7 @@ async function loadNetboxData(subMenu) {
             if (!r.ok || d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || d.detail || 'NetBox spoke not connected'}</p>`; return; }
             const prefixes = d.prefixes || [];
             window._nbPrefixes = prefixes;
-            const cols = ['Prefix', 'Status', 'DHCP', 'Site', 'VRF', 'Is Pool', 'Description', ''];
+            const cols = ['Prefix', 'Status', 'DHCP', 'Site', 'VRF', 'Description', ''];
             const rows = prefixes.map(p => {
                 const statusCls = p.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500';
                 const cf = p.custom_fields || {};
@@ -24960,7 +24960,6 @@ async function loadNetboxData(subMenu) {
                     <td class="px-4 py-2 text-center">${dhcpBadge}</td>
                     <td class="px-4 py-2 text-xs">${p.site || '—'}</td>
                     <td class="px-4 py-2 text-xs">${p.vrf || 'Global'}</td>
-                    <td class="px-4 py-2 text-center text-xs">${p.is_pool ? '✓' : ''}</td>
                     <td class="px-4 py-2 text-xs">${p.description || '—'}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
                         <button onclick="showNetboxAllocateIPModal('${p.prefix}')" title="Allocate IP address in this subnet" class="p-1 text-slate-400 hover:text-[#01A982] transition-colors text-xs font-medium">+IP</button>
