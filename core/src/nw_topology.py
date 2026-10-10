@@ -45,6 +45,17 @@ def _s(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
 
+def _short_hostname(name: str) -> str:
+    """``host.example.com`` -> ``host`` (casefolded), so an LLDP FQDN and a
+    NetBox short name are one device. "" when there is no domain to strip or
+    the name is an IP / MAC literal or free text."""
+    name = _s(name)
+    if ("." not in name or _IP_NAME_RE.match(name) or _MAC_NAME_RE.match(name)
+            or not _HOSTNAME_RE.match(name)):
+        return ""
+    return name.split(".", 1)[0].casefold()
+
+
 def _key_candidates(rec: Dict[str, Any]) -> List[str]:
     """Identity keys for one record, strongest first.
 
@@ -70,6 +81,9 @@ def _key_candidates(rec: Dict[str, Any]) -> List[str]:
         name = _s(rec.get(field))
         if name:
             out.append("name:" + name.casefold())
+            short = _short_hostname(name)
+            if short:
+                out.append("name:" + short)
     # De-dupe, preserving order.
     seen = set()
     return [k for k in out if not (k in seen or seen.add(k))]
@@ -736,3 +750,50 @@ def build_topology(fleet: Optional[List[dict]] = None,
                     builder.add_trunk(local_id, port, info["count"])
 
     return builder.render()
+
+
+def netbox_lldp_links(graph: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The graph's LLDP-confirmed links as ``NETBOX_SYNC_LLDP`` payload rows.
+
+    Each end carries every identity the merge learned (name, MACs, IPs, the nw
+    fleet id) so the NetBox spoke can match it SERIAL/MAC-first and only fall
+    back to the name. A server NIC usually advertises its MAC as the LLDP port
+    id; when its port description is a short single token (``nic1``, not NIC
+    firmware text) that is the readable interface name instead.
+    Only edges with both ports known are emitted, de-duplicated by
+    (name, port) pairs.
+    """
+    nodes = {n.get("id"): n for n in (graph or {}).get("nodes") or []
+             if isinstance(n, dict)}
+
+    def end(node):
+        return {"name": _s(node.get("name")),
+                "macs": list(node.get("macs") or []),
+                "addresses": list(node.get("addresses") or []),
+                "nw_device_id": (_s(node.get("device_id"))
+                                 if "fleet" in (node.get("sources") or []) else "")}
+
+    def port(p, detail):
+        p = _s(p)
+        if re.fullmatch(r"[0-9a-f]{12}", re.sub(r"[:.\-]", "", p.lower())) \
+                and re.fullmatch(r"[A-Za-z0-9][\w./-]{0,31}", detail or ""):
+            return detail
+        return p
+
+    out, seen = [], set()
+    for edge in (graph or {}).get("edges") or []:
+        if not isinstance(edge, dict) or edge.get("source") != "lldp":
+            continue
+        a, b = nodes.get(edge.get("a")), nodes.get(edge.get("b"))
+        if not a or not b or not _s(edge.get("a_port")) or not _s(edge.get("b_port")):
+            continue
+        detail = _s(edge.get("detail"))
+        link = {"a": end(a), "a_port": port(edge.get("a_port"), detail),
+                "b": end(b), "b_port": port(edge.get("b_port"), detail)}
+        key = (link["a"]["name"].lower(), link["a_port"],
+               link["b"]["name"].lower(), link["b_port"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(link)
+    return out
