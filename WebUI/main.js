@@ -18289,6 +18289,15 @@ async function showLoadRoleModal(spokeId) {
                 </div>
                 <div id="ldap-server-cfg" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
                     <p class="text-xs font-semibold text-slate-700">LDAP server</p>
+                    <div class="p-2 bg-blue-50 border border-blue-200 rounded-md space-y-2">
+                        <p class="text-xs font-semibold text-slate-700">Quick fill</p>
+                        <div class="grid grid-cols-2 gap-2">
+                            <input id="lsrv-wiz-domain" type="text" placeholder="domain name (e.g. orange-tme.com)" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-blue-500 focus:border-blue-500">
+                            <input id="lsrv-wiz-admin" type="text" placeholder="admin username" value="Administrator" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-blue-500 focus:border-blue-500">
+                        </div>
+                        <button type="button" onclick="fillLdapServerWizard()" class="px-3 py-1.5 text-xs font-bold text-blue-700 bg-white border border-blue-300 rounded-md hover:bg-blue-100 transition-colors">Fill in LDAP fields</button>
+                        <p class="text-[11px] text-slate-500">Derives the Base DN and Admin DN from the domain, and pre-selects server-id 1 below — every field stays editable so you can review (and set the server/peer URLs) before loading the role.</p>
+                    </div>
                     <div class="grid grid-cols-2 gap-2">
                         <input id="lsrv-base-dn" type="text" placeholder="base DN (e.g. dc=lab,dc=example,dc=com)" autocomplete="off" class="col-span-2 w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
                         <input id="lsrv-admin-dn" type="text" placeholder="admin DN (e.g. cn=admin,dc=lab,dc=example,dc=com)" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
@@ -18400,6 +18409,26 @@ async function showLoadRoleModal(spokeId) {
         activateButton.disabled = true;
         activateButton.classList.add('opacity-50', 'cursor-not-allowed');
     }
+}
+
+// Quick-fill the ldap-server config from just a domain name + admin username:
+// derives Base DN (dc=... per label) and Admin DN (cn=<admin>,<base DN>), and
+// pre-selects server-id 1 as a sane single/first-node default. Leaves
+// admin password, server URL, and peer untouched — those remain editable so
+// the operator reviews the final values before loading the role.
+function fillLdapServerWizard() {
+    const domain = document.getElementById('lsrv-wiz-domain')?.value.trim().toLowerCase();
+    if (!domain) { showToast('Enter a domain name first (e.g. orange-tme.com)', 'info'); return; }
+    const admin = document.getElementById('lsrv-wiz-admin')?.value.trim() || 'Administrator';
+    const baseDn = domain.split('.').map(s => s.trim()).filter(Boolean).map(p => `dc=${p}`).join(',');
+    if (!baseDn) { showToast('That domain name doesn\'t look valid.', 'error'); return; }
+    const baseEl = document.getElementById('lsrv-base-dn');
+    const adminEl = document.getElementById('lsrv-admin-dn');
+    const serverIdEl = document.getElementById('lsrv-server-id');
+    if (baseEl) baseEl.value = baseDn;
+    if (adminEl) adminEl.value = `cn=${admin},${baseDn}`;
+    if (serverIdEl && !serverIdEl.value) serverIdEl.value = '1';
+    showToast('Base DN and Admin DN filled in — review all fields below before loading the role.', 'success');
 }
 
 // Show the NetBox admin-account inputs only while the netbox-server role is
