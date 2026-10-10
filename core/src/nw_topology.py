@@ -347,6 +347,9 @@ _MAC_NAME_RE = re.compile(r"^(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}$|^(?:[0-9a-f]{4}\
                           r"|^[0-9a-f]{12}$", re.IGNORECASE)
 #: NetBox auto-discovery names unknown hosts ``device-<mac>``.
 _NETBOX_PLACEHOLDER_RE = re.compile(r"^device-[0-9a-f]{12}$", re.IGNORECASE)
+_IP_NAME_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+#: Tokens that older nw parsers lifted out of LLDP system descriptions.
+_JUNK_NAMES = frozenset({"x86_64", "aarch64", "amd64", "localhost", "none", "(none)"})
 
 
 def _is_real_hostname(name: str) -> bool:
@@ -355,20 +358,26 @@ def _is_real_hostname(name: str) -> bool:
     name = _s(name)
     return bool(name and _HOSTNAME_RE.match(name)
                 and re.search(r"[A-Za-z]", name)
+                and name.casefold() not in _JUNK_NAMES
                 and not _MAC_NAME_RE.match(name)
                 and not _NETBOX_PLACEHOLDER_RE.match(name))
 
 
 def _better_name(current: str, candidate: str) -> bool:
     """Whether ``candidate`` should replace a node's ``current`` name: fill an
-    empty one, or upgrade a bare MAC / NetBox placeholder to a real hostname.
-    Any other name (including an IP) is kept -- LLDP junk must not rename it."""
+    empty one, or upgrade a bare MAC / IP / NetBox placeholder to a real
+    hostname. A real hostname is kept -- LLDP junk must not rename it.
+
+    Fleet switches added by address are named after their IP; the hostname
+    only arrives via a neighbour's LLDP or NetBox, and keeping the IP left
+    the map full of ``172.21.x.y`` labels next to unlinked NetBox rows."""
     if not _s(candidate):
         return False
     current = _s(current)
     if not current:
         return True
     is_placeholder = bool(_MAC_NAME_RE.match(current)
+                          or _IP_NAME_RE.match(current)
                           or _NETBOX_PLACEHOLDER_RE.match(current))
     return is_placeholder and _is_real_hostname(candidate)
 
@@ -392,6 +401,70 @@ def _is_infra(node: Dict[str, Any]) -> bool:
     if not _is_real_hostname(node.get("name")):
         return False
     return "netbox" in sources or bool(node.get("addresses"))
+
+
+#: LLDP capability codes ("B:R") that older nw parsers stored as the remote port.
+_LLDP_CAPS_RE = re.compile(r"^[BRWPCSTOAHDr](?:[:,][BRWPCSTOAHDr])*$")
+
+
+def _lldp_port(value: Any) -> str:
+    port = _s(value)
+    return "" if _LLDP_CAPS_RE.match(port) else port
+
+
+def _same_switch_groups(fleet, lldp_by_device) -> Dict[str, str]:
+    """Map each duplicate fleet device id to the canonical id it duplicates.
+
+    The scanner adds a switch once per address it answers on (every SVI, the
+    VSX virtual IP), so one CX pair showed up as fifteen fleet devices named
+    ``172.21.x.y``. Each copy returns the same LLDP table, and a neighbour
+    port ``(chassis, port)`` faces exactly one device, so an identical set of
+    real neighbour ports (at least two) means the same box. Rows without a
+    real chassis MAC, remote port and local port are ignored, which keeps
+    junk LLDP from merging unrelated devices.
+    """
+    id_to_dev = {_s(dev.get("id")): dev for dev in (fleet or [])
+                 if isinstance(dev, dict) and _s(dev.get("id"))}
+    fingerprints = {}
+    for dev_id, dev in id_to_dev.items():
+        rows = (lldp_by_device or {}).get(dev_id) or []
+        fingerprint_rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            mac = norm_mac(_s(row.get("remote_chassis")))
+            if not mac or not is_topology_mac(mac):
+                continue
+            remote_port = _lldp_port(row.get("remote_port"))
+            local_port = _s(row.get("local_port"))
+            if not remote_port or not local_port:
+                continue
+            if not re.search(r"[A-Za-z0-9]", local_port):
+                continue
+            fingerprint_rows.append((mac, remote_port, local_port))
+        fingerprint = frozenset(fingerprint_rows)
+        if len(fingerprint) < 2:
+            continue
+        if fingerprint not in fingerprints:
+            fingerprints[fingerprint] = []
+        fingerprints[fingerprint].append(dev_id)
+
+    result = {}
+    for group in fingerprints.values():
+        if len(group) < 2:
+            continue
+        canonical = None
+        for dev_id in group:
+            dev = id_to_dev[dev_id]
+            if _is_real_hostname(_s(dev.get("name"))):
+                canonical = dev_id
+                break
+        if canonical is None:
+            canonical = group[0]
+        for dev_id in group:
+            if dev_id != canonical:
+                result[dev_id] = canonical
+    return result
 
 
 def build_topology(fleet: Optional[List[dict]] = None,
@@ -423,11 +496,16 @@ def build_topology(fleet: Optional[List[dict]] = None,
 
     # ── 1. Inventory: the nw fleet ──────────────────────────────────────────
     fleet_ids: Dict[str, str] = {}
+    duplicate_of = _same_switch_groups(fleet, lldp_by_device)
     for dev in (fleet or []):
         if not isinstance(dev, dict):
             continue
         kind = _OBJECT_KIND.get(_s(dev.get("object_type")), "device")
-        node_id = builder.add_node(dev, kind, "fleet")
+        rec = dev
+        if _s(dev.get("id")) in duplicate_of:
+            # Fold the copy's address/name into the canonical device.
+            rec = dict(dev, id=duplicate_of[_s(dev.get("id"))])
+        node_id = builder.add_node(rec, kind, "fleet")
         if node_id:
             fleet_ids[_s(dev.get("id"))] = node_id
 
@@ -450,6 +528,8 @@ def build_topology(fleet: Optional[List[dict]] = None,
 
     # ── 4. LLDP adjacencies ─────────────────────────────────────────────────
     for device_id, rows in (lldp_by_device or {}).items():
+        if _s(device_id) in duplicate_of:
+            continue  # same table as its canonical device
         local_id = (builder.current(fleet_ids.get(_s(device_id), ""))
                     or builder.resolve({"id": device_id}))
         if not local_id:
@@ -470,7 +550,7 @@ def build_topology(fleet: Optional[List[dict]] = None,
             builder._nodes[remote_id]["lldp_capable"] = True
             local_id = builder.current(local_id)
             builder.add_edge(local_id, row.get("local_port"),
-                             remote_id, row.get("remote_port"),
+                             remote_id, _lldp_port(row.get("remote_port")),
                              "lldp", _s(row.get("remote_descr")))
 
     # ── 5. Operator-declared links ──────────────────────────────────────────
@@ -506,6 +586,8 @@ def build_topology(fleet: Optional[List[dict]] = None,
     # ── 7. MAC-table inference ──────────────────────────────────────────────
     if infer_from_macs:
         for device_id, rows in (macs_by_device or {}).items():
+            if _s(device_id) in duplicate_of:
+                continue
             local_id = builder.current(fleet_ids.get(_s(device_id), ""))
             if not local_id:
                 continue
