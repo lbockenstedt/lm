@@ -117,6 +117,7 @@ async def _load_roles_impl(hub, spoke_id, data):
                 continue
             if rname == "ldap-server":
                 rcfg = _enrich_ldap_server_config(hub, rcfg)
+                rcfg = await _auto_cluster_ldap_server_config(hub, spoke_id, rcfg)
             try:
                 res = await hub.request_response(spoke_id, "LOAD_ROLE",
                                                  {"role": rname, "config": rcfg},
@@ -139,6 +140,7 @@ async def _load_roles_impl(hub, spoke_id, data):
         raise HTTPException(status_code=400, detail="role is required")
     if role == "ldap-server":
         config = _enrich_ldap_server_config(hub, config)
+        config = await _auto_cluster_ldap_server_config(hub, spoke_id, config)
     # LOAD_ROLE on the multi-role agent shallow-clones the role's sibling repo on
     # first load — a network git clone that routinely exceeds the 5s default.
     result = await hub.request_response(spoke_id, "LOAD_ROLE",
@@ -178,6 +180,140 @@ def _enrich_ldap_server_config(hub, cfg):
         cfg.setdefault("entra_key", oc.key_path)
     except Exception as e:  # noqa: BLE001 — Entra optional; deploy LDAP anyway
         logger.warning("ldap-server: could not source Entra creds from OIDC: %s", e)
+    return cfg
+
+
+async def _agent_primary_address(hub, spoke_id):
+    """Best-effort private IPv4 an agent advertises, via GET_AVAILABLE_ROLES'
+    ``service_addresses`` (the same probe used for the Spokes & Agents list).
+    Returns None if the agent is unreachable or reports nothing routable."""
+    try:
+        result = await hub.request_response(spoke_id, "GET_AVAILABLE_ROLES", {}, timeout=15.0)
+    except Exception:  # noqa: BLE001 — best-effort
+        return None
+    payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+    if not isinstance(payload, dict):
+        return None
+    addrs = payload.get("service_addresses") or []
+    return addrs[0] if addrs else None
+
+
+def _parse_env_file(text):
+    """Parse a simple ``KEY=value`` ``.env`` (no quoting) into a dict — used to
+    read back an already-provisioned ldap-server's ``.env`` so an auto-cluster
+    re-push can reuse its EXACT base_dn/admin_dn/admin_pw rather than guessing
+    or regenerating them."""
+    out = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        out[k.strip()] = v.strip()
+    return out
+
+
+async def _read_ldap_server_env(hub, spoke_id):
+    """Read an already-provisioned ldap-server's ``/opt/lm/ldap/.env`` via the
+    hub's own RUN_COMMAND RPC (``cat`` is allowlisted). Returns {} on any
+    failure — callers must treat that as "peer's existing config unknown"."""
+    try:
+        result = await hub.request_response(
+            spoke_id, "RUN_COMMAND",
+            {"command": "cat /opt/lm/ldap/.env"}, timeout=15.0)
+    except Exception:  # noqa: BLE001
+        return {}
+    payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+    if not isinstance(payload, dict):
+        return {}
+    res = payload.get("result") or {}
+    if not res.get("ok"):
+        return {}
+    return _parse_env_file(res.get("stdout", ""))
+
+
+async def _auto_cluster_ldap_server_config(hub, spoke_id, cfg):
+    """Automatically wire 2-node OpenLDAP mirror-mode when a SECOND
+    ``ldap-server`` is loaded in the same tenant as an already-installed one —
+    so clustering is part of the role/install, not a manual per-node form the
+    operator has to fill in twice with matching server-id/peer values.
+
+    Any ``server_id``/``peers`` the caller already supplied are left alone
+    (manual input always wins — this only fills gaps). When exactly one
+    existing peer is found: this node is auto-assigned the other server-id,
+    base_dn/admin_dn/admin_pw are copied from the peer's live ``.env`` (so both
+    nodes share the SAME bind identity, required for syncrepl), and the peer
+    itself is re-pushed a matching ``LOAD_ROLE`` (``force`` — deploy roles are
+    normally a no-op once installed) so the mirror is wired on BOTH sides from
+    one action. Re-pushing always echoes the peer's OWN already-set admin_pw
+    back to it unchanged — install_ldap.sh re-applies whatever admin_pw it is
+    given on every run, so omitting it (or sending a different one) would
+    silently reset the peer's bind password.
+
+    Zero or 2+ existing peers in the tenant are left untouched (first node, or
+    an ambiguous 3+-node topology best left to manual configuration)."""
+    cfg = dict(cfg or {})
+    if cfg.get("server_id") and (cfg.get("peers") or cfg.get("peer")):
+        return cfg  # caller fully specified the topology — don't second-guess it
+    try:
+        my_pk = hub._primary_key(spoke_id)
+        tenant_id = hub.state.get_spoke_tenant(my_pk) or ""
+        peer_pk = None
+        for pk, roles in hub._agent_roles_store().items():
+            if pk == my_pk or "ldap-server" not in (roles or []):
+                continue
+            if (hub.state.get_spoke_tenant(pk) or "") != tenant_id:
+                continue
+            if peer_pk is not None:
+                logger.warning("ldap-server auto-cluster: >1 existing ldap-server in "
+                               "tenant %r — leaving server-id/peer manual", tenant_id or "(default)")
+                return cfg
+            peer_pk = pk
+        if not peer_pk:
+            return cfg  # first ldap-server in this tenant — nothing to mirror yet
+        if peer_pk not in hub.active_connections:
+            logger.warning("ldap-server auto-cluster: existing peer %s not connected — "
+                           "leaving server-id/peer manual", peer_pk)
+            return cfg
+        peer_env = await _read_ldap_server_env(hub, peer_pk)
+        peer_addr = await _agent_primary_address(hub, peer_pk)
+        my_addr = await _agent_primary_address(hub, spoke_id)
+        if not peer_env or not peer_addr or not my_addr:
+            logger.warning("ldap-server auto-cluster: could not read peer %s's existing "
+                           "config/address — leaving server-id/peer manual", peer_pk)
+            return cfg
+        peer_server_id = peer_env.get("LDAP_SERVER_ID") or "1"
+        my_server_id = "2" if peer_server_id == "1" else "1"
+        my_url = f"ldap://{my_addr}:389"
+        peer_url = f"ldap://{peer_addr}:389"
+        cfg.setdefault("base_dn", peer_env.get("LDAP_BASE_DN"))
+        cfg.setdefault("admin_dn", peer_env.get("LDAP_ADMIN_DN"))
+        cfg.setdefault("admin_pw", peer_env.get("LDAP_ADMIN_PW"))
+        cfg.setdefault("server_id", my_server_id)
+        cfg.setdefault("peers", [peer_url])
+        cfg.setdefault("server_url", my_url)
+        logger.info("ldap-server auto-cluster: pairing %s (server-id %s) with existing "
+                   "peer %s (server-id %s)", spoke_id, my_server_id, peer_pk, peer_server_id)
+        peer_cfg = _enrich_ldap_server_config(hub, {
+            "base_dn": peer_env.get("LDAP_BASE_DN"),
+            "admin_dn": peer_env.get("LDAP_ADMIN_DN"),
+            "admin_pw": peer_env.get("LDAP_ADMIN_PW"),  # unchanged — never reset the peer's password
+            "server_id": peer_server_id,
+            "peers": [my_url],
+            "server_url": peer_url,
+        })
+        try:
+            await hub.request_response(
+                peer_pk, "LOAD_ROLE",
+                {"role": "ldap-server", "config": peer_cfg, "force": True},
+                timeout=120.0)
+            logger.info("ldap-server auto-cluster: re-applied mirror config on existing peer %s", peer_pk)
+        except Exception as e:  # noqa: BLE001 — new node still deploys standalone-capable
+            logger.warning("ldap-server auto-cluster: failed to update existing peer %s: %s",
+                           peer_pk, e)
+    except Exception as e:  # noqa: BLE001 — never block the deploy on detection failure
+        logger.warning("ldap-server auto-cluster: detection failed, falling back to "
+                       "manual config: %s", e)
     return cfg
 
 
