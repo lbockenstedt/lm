@@ -64,5 +64,11 @@ def test_auto_add_branch_spawns_the_discovery_poll():
     src = NW_ROUTES.read_text(encoding="utf-8")
     block = src[src.index("        if added:"):src.index('            "discovery_only": discovery_only,')]
     assert "_nw_push_fleet(hub, spoke_id)" in block
-    assert "_nw_poll_discovered(hub, new_ids)" in block
+    assert "_nw_poll_discovered(hub, poll_ids)" in block
     assert block.index("_nw_push_fleet") < block.index("_nw_poll_discovered")
+    # Pre-existing devices on this spoke whose name was never resolved off its
+    # address (added before this hook existed, or whose first autonomous poll
+    # never landed before a spoke reconnect reset the scheduler) are folded
+    # into the same poll — not just the ones this scan just added.
+    assert 'd.get("spoke_id") == spoke_id' in block
+    assert 'str(d.get("name") or "").strip()\n                     == str(d.get("address") or "").strip()' in block

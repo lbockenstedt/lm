@@ -14,9 +14,14 @@ from _fakes import FakeState
 def _ips_payload():
     return {"ip_addresses": [
         {"address": "10.0.0.5/24", "dns_name": "host1.lab",
-         "custom_fields": {"mac_address": "aa:bb:cc:dd:ee:ff"}},
+         "custom_fields": {"mac_address": "aa:bb:cc:dd:ee:ff",
+                           "dhcp_reservation": True}},
         {"address": "10.0.0.6/24", "dns_name": "", "custom_fields": {}},   # no dns_name/mac → dropped
         {"address": "", "dns_name": "noaddr.lab"},                          # no address → dropped
+        # ARP/CPPM discovery stamped mac_address on a plain dynamic-lease IP
+        # (no explicit dhcp_reservation opt-in) — must NOT become a reservation.
+        {"address": "10.0.0.7/24", "dns_name": "",
+         "custom_fields": {"mac_address": "11:22:33:44:55:66"}},
     ]}
 
 
@@ -86,6 +91,20 @@ def test_build_dhcp_payload_subnets_and_reservations():
     assert subs[0]["dns_servers"] == ["10.0.0.53", "10.0.0.54"]
     assert res == [{"ip": "10.0.0.5", "mac": "aa:bb:cc:dd:ee:ff",
                     "hostname": "host1.lab", "subnet": ""}]
+
+
+def test_build_dhcp_payload_requires_the_reservation_opt_in_not_just_a_mac():
+    """A plain dynamic lease routinely has ``custom_fields.mac_address`` set —
+    ARP/firewall discovery and the CPPM access-tracker sync stamp it on any
+    device they see, purely for identity. Minting a reservation off that
+    alone turned every such lease into a static Kea reservation; the explicit
+    ``dhcp_reservation`` opt-in must be present too."""
+    ips = {"ip_addresses": [
+        {"address": "10.0.0.9/24", "dns_name": "",
+         "custom_fields": {"mac_address": "de:ad:be:ef:00:01"}},
+    ]}
+    _subs, res = build_dhcp_payload(_prefixes_payload(), ips)
+    assert res == []
 
 
 def test_build_dhcp_payload_reads_advanced_dhcp_option_custom_fields():

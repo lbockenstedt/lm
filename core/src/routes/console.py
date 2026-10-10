@@ -1520,6 +1520,7 @@ def register(app, hub, ctx):
         }, timeout=15.0)
         return _console_unwrap(r)
 
+    @app.post("/api/console/tenant")
     async def console_set_tenant(request: Request):
         """Bind a single PORT to a tenant (per-port override). Admin-only, like the
         whole-agent tenant assignment. Empty tenant_id clears the override so the
