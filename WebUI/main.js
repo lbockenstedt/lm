@@ -19435,6 +19435,60 @@ function _nwTopoIcon(nd, x, y, color) {
            `<g transform="translate(${x.toFixed(1)} ${y.toFixed(1)})">${g}</g>`;
 }
 
+// Fold each device's leaf endpoints (non-infra, single link) into one
+// "N endpoints" group node so a switch with dozens of MACs stays readable.
+// Groups are closed unless their id ('eg:<parent>') is in openSet; an open
+// group hangs the endpoints off the group node, labelled with the switch port.
+function _nwTopoGroupEndpoints(nodes, edges, openSet) {
+    const byId = {}, deg = {};
+    nodes.forEach(n => { byId[n.id] = n; deg[n.id] = 0; });
+    edges.forEach(e => { deg[e.a] = (deg[e.a] || 0) + 1; deg[e.b] = (deg[e.b] || 0) + 1; });
+    const leafEdge = {}, byParent = {};
+    edges.forEach(e => {
+        [[e.a, e.b], [e.b, e.a]].forEach(([leaf, par]) => {
+            const ln = byId[leaf], pn = byId[par];
+            if (ln && pn && ln.infra === false && deg[leaf] === 1 && pn.infra !== false) {
+                leafEdge[leaf] = e;
+                (byParent[par] = byParent[par] || []).push(leaf);
+            }
+        });
+    });
+    const dropNodes = new Set(), dropEdges = new Set();
+    const addNodes = [], addEdges = [];
+    Object.keys(byParent).forEach(par => {
+        const leaves = byParent[par];
+        if (leaves.length < 2) return;
+        const gid = 'eg:' + par;
+        addNodes.push({ id: gid, name: leaves.length + ' endpoints', kind: 'epgroup', infra: false,
+                        group_parent: par, group_size: leaves.length,
+                        addresses: [], macs: [], sources: ['group'] });
+        addEdges.push({ a: par, a_port: '', b: gid, b_port: '', source: 'mac',
+                        detail: leaves.length + ' endpoints' });
+        const open = openSet && openSet.has(gid);
+        leaves.forEach(leaf => {
+            const e = leafEdge[leaf];
+            dropEdges.add(e);
+            if (!open) { dropNodes.add(leaf); return; }
+            const port = _nwTopoPort(e, e.a === par ? 'a' : 'b');
+            addEdges.push({ a: gid, a_port: '', b: leaf, b_port: '', source: e.source,
+                            detail: port ? 'port ' + port + (e.detail ? ' — ' + e.detail : '') : e.detail });
+        });
+    });
+    return {
+        nodes: nodes.filter(n => !dropNodes.has(n.id)).concat(addNodes),
+        edges: edges.filter(e => !dropEdges.has(e)).concat(addEdges),
+    };
+}
+
+// A VSX unit's edges carry the physical member that owns the port.
+function _nwTopoPort(e, side) {
+    const port = e[side + '_port'] || '';
+    const member = e[side + '_member'] || '';
+    if (!member) return port;
+    const short = member.split(/[-.]/).filter(Boolean).pop() || member;
+    return port ? short + ' ' + port : short;
+}
+
 function _nwTopoSvg(graph, view) {
     const showEndpoints = !!(view && view.showEndpoints);
     const collapsed = (view && view.collapsed) || new Set();
@@ -19442,6 +19496,9 @@ function _nwTopoSvg(graph, view) {
     let nodes = showEndpoints ? allNodes : allNodes.filter(nd => nd.infra !== false);
     const keep = new Set(nodes.map(n => n.id));
     let edges = (graph.edges || []).filter(e => keep.has(e.a) && keep.has(e.b));
+    if (showEndpoints) {
+        ({ nodes, edges } = _nwTopoGroupEndpoints(nodes, edges, view.epOpen));
+    }
     if (!allNodes.length) {
         return `<div class="py-12 text-center text-slate-400 italic">No devices in this tenant's topology yet.</div>`;
     }
@@ -19455,14 +19512,17 @@ function _nwTopoSvg(graph, view) {
     nodes.forEach(nd => { byId[nd.id] = nd; });
     const tipOf = nd => [nd.name, nd.object_type || nd.kind,
                      (nd.addresses || []).join(', '), (nd.macs || []).join(', '),
+                     nd.unit === 'vsx' ? 'VSX pair: ' + (nd.members || []).map(m => m.name).join(' + ') : '',
+                     (nd.stack_members || []).length ? 'Stack members: ' + nd.stack_members.join(', ') : '',
                      nd.lldp_capable ? 'LLDP' : '', nd.manual ? 'Declared' : '',
                      'via ' + (nd.sources || []).join('+')].filter(Boolean).join('\n');
     const lines = edges.map(e => {
         const a = pos[e.a], b = pos[e.b];
         if (!a || !b) return '';
         const st = _NW_TOPO_EDGE_STYLE[e.source] || _NW_TOPO_EDGE_STYLE.mac;
-        const tip = `${(byId[e.a] || {}).name || ''} ${e.a_port ? '(' + e.a_port + ')' : ''} — ` +
-                    `${(byId[e.b] || {}).name || ''} ${e.b_port ? '(' + e.b_port + ')' : ''}` +
+        const ap = _nwTopoPort(e, 'a'), bp = _nwTopoPort(e, 'b');
+        const tip = `${(byId[e.a] || {}).name || ''} ${ap ? '(' + ap + ')' : ''} — ` +
+                    `${(byId[e.b] || {}).name || ''} ${bp ? '(' + bp + ')' : ''}` +
                     `\n${st.label}${e.detail ? ' — ' + e.detail : ''}`;
         const [l, r] = a.x <= b.x ? [a, b] : [b, a];
         const mx = (l.x + r.x) / 2;
@@ -19482,18 +19542,23 @@ function _nwTopoSvg(graph, view) {
         }
     });
     const drawNode = (nd, p) => {
-        const kids = (lay.children[nd.id] || []).length;
-        let tooltipLines = tipOf(nd).split('\n');
-        if (kids > 0) {
+        const isGroup = nd.kind === 'epgroup';
+        const groupOpen = isGroup && view.epOpen && view.epOpen.has(nd.id);
+        const kids = isGroup ? 1 : (lay.children[nd.id] || []).length;
+        let tooltipLines = isGroup ? [nd.name] : tipOf(nd).split('\n');
+        if (isGroup) {
+            tooltipLines.push(groupOpen ? 'Click to hide these endpoints' : 'Click to show these endpoints');
+        } else if (kids > 0) {
             tooltipLines.push(collapsed.has(nd.id) ? 'Click to expand' : 'Click to collapse');
         }
         const tip = tooltipLines.join('\n');
-        const badgeText = collapsed.has(nd.id) ? '+' + (lay.hiddenCount[nd.id] || 0) : '−';
+        const badgeText = isGroup ? (groupOpen ? '−' : '+' + nd.group_size)
+            : collapsed.has(nd.id) ? '+' + (lay.hiddenCount[nd.id] || 0) : '−';
         return `<g data-topo-node="${escapeHtml(nd.id)}" style="cursor:${kids ? 'pointer' : 'default'}">
             <title>${escapeHtml(tip)}</title>
             ${_nwTopoIcon(nd, p.x, p.y, _nwTopoNodeColor(nd))}
             <text x="${p.x.toFixed(1)}" y="${(p.y + 32).toFixed(1)}" text-anchor="middle"
-              style="font-size:10px" fill="#334155">${escapeHtml(String(nd.name || nd.id).slice(0, 28))}</text>
+              style="font-size:10px" fill="#334155">${escapeHtml(String(nd.name || nd.id).slice(0, 34))}</text>
             ${kids > 0 ? `<circle cx="${(p.x + 15).toFixed(1)}" cy="${(p.y - 15).toFixed(1)}" r="8" fill="#0f172a"/>
                 <text x="${(p.x + 15).toFixed(1)}" y="${(p.y - 11.5).toFixed(1)}" text-anchor="middle"
                   style="font-size:10px; font-weight:700; fill:#fff">${badgeText}</text>` : ''}
@@ -19535,7 +19600,12 @@ function _nwTopoView() {
     if (!(window._nwTopoCollapsed instanceof Set)) {
         window._nwTopoCollapsed = new Set();
     }
-    return { showEndpoints: !!window._nwTopoShowEndpoints, collapsed: window._nwTopoCollapsed };
+    if (!(window._nwTopoEpOpen instanceof Set) || window._nwTopoEpOpenTenant !== currentTenant) {
+        window._nwTopoEpOpen = new Set();
+        window._nwTopoEpOpenTenant = currentTenant;
+    }
+    return { showEndpoints: !!window._nwTopoShowEndpoints, collapsed: window._nwTopoCollapsed,
+             epOpen: window._nwTopoEpOpen };
 }
 
 function _nwTopoRedraw() {
@@ -19564,7 +19634,7 @@ function _nwTopoBindView() {
             const node = ev.target.closest('[data-topo-node]');
             if (node && node.style.cursor === 'pointer') {
                 const nodeId = node.getAttribute('data-topo-node');
-                const set = _nwTopoView().collapsed;
+                const set = nodeId.startsWith('eg:') ? _nwTopoView().epOpen : _nwTopoView().collapsed;
                 if (set.has(nodeId)) {
                     set.delete(nodeId);
                 } else {
@@ -19587,7 +19657,12 @@ function _nwTopoBindView() {
     const expandBtn = document.getElementById('nw-topo-expand');
     if (expandBtn) {
         expandBtn.onclick = () => {
-            _nwTopoView().collapsed.clear();
+            const v = _nwTopoView();
+            v.collapsed.clear();
+            if (v.showEndpoints) {
+                _nwTopoGroupEndpoints((window._nwTopo.nodes || []), (window._nwTopo.edges || []), null)
+                    .nodes.filter(n => n.kind === 'epgroup').forEach(n => v.epOpen.add(n.id));
+            }
             _nwTopoRedraw();
         };
     }
@@ -19598,6 +19673,7 @@ function _nwTopoBindView() {
             const level0Ids = (window._nwTopoLevels || {})[0] || [];
             const set = _nwTopoView().collapsed;
             level0Ids.forEach(id => set.add(id));
+            _nwTopoView().epOpen.clear();
             _nwTopoRedraw();
         };
     }

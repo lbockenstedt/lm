@@ -6,6 +6,7 @@ from access import valid_display_name, valid_identifier, can_bind_spoke
 from role_listeners import (
     LISTENER_PORT_ROLES, listener_conflict, listener_conflict_message,
 )
+import le_cert_access as _lca
 
 
 def _agent_role_preflight(hub, spoke_id):
@@ -128,6 +129,8 @@ async def _load_roles_impl(hub, spoke_id, data):
                     hub.spoke_module_types[hub._primary_key(spoke_id)] = pl["module_type"]
                     logger.info("Agent %s morphed to module_type %s",
                                 spoke_id, pl["module_type"])
+                if rname == "ldap-server" and isinstance(pl, dict) and pl.get("status") == "SUCCESS":
+                    await _auto_request_ldap_server_cert(hub, spoke_id, rcfg)
                 results.append({"role": rname,
                                 **(pl if isinstance(pl, dict) else {"result": pl})})
             except Exception as e:  # noqa: BLE001 — one role's failure ≠ batch fail
@@ -161,6 +164,8 @@ async def _load_roles_impl(hub, spoke_id, data):
             if sub_id:
                 logger.info("Agent %s hosting role sub-spoke %s (module_type=%s)",
                             spoke_id, sub_id, payload.get("module_type"))
+        if role == "ldap-server":
+            await _auto_request_ldap_server_cert(hub, spoke_id, config)
     return payload
 
 
@@ -315,6 +320,134 @@ async def _auto_cluster_ldap_server_config(hub, spoke_id, cfg):
         logger.warning("ldap-server auto-cluster: detection failed, falling back to "
                        "manual config: %s", e)
     return cfg
+
+
+def _domain_from_base_dn(base_dn):
+    """``dc=orange-tme,dc=com`` -> ``orange-tme.com``. None/malformed -> None."""
+    if not base_dn:
+        return None
+    parts = []
+    for comp in str(base_dn).split(","):
+        comp = comp.strip()
+        if comp.lower().startswith("dc="):
+            parts.append(comp[3:].strip())
+    return ".".join(p for p in parts if p) or None
+
+
+async def _le_relay(hub, le_sid, command, body, timeout=None):
+    """Send ``command`` to the connected ``certificates`` (LE) spoke and
+    unwrap the hub transport envelope down to the spoke's own
+    ``{status, data}`` reply (same shape ``net_services._le_request`` exposes
+    to the WebUI routes) — never raises, callers check ``status``."""
+    try:
+        result = await hub.request_response(le_sid, command, body or {},
+                                            timeout=timeout or 30.0)
+    except Exception as e:  # noqa: BLE001
+        return {"status": "ERROR", "message": str(e)}
+    payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+    return payload if isinstance(payload, dict) else {"status": "ERROR", "message": "bad reply"}
+
+
+async def _auto_request_ldap_server_cert(hub, spoke_id, cfg):
+    """Automatically request + distribute a real Let's Encrypt cert for a newly
+    (re)loaded ldap-server node — the LE module exists precisely so this
+    doesn't have to be a manual Setup -> Certificate Management trip.
+    ``install_ldap.sh`` always bootstraps a self-signed cert so LDAPS listens
+    immediately; this replaces it the same way the hub already replaces any
+    other cert-capable spoke's self-signed cert ("ldap-server" has been in
+    ``cert_distribution.CERT_CAPABLE_MODULES`` since cert distribution was
+    built — it's just never been exercised for a live ldap-server node).
+
+    Mirrors the convention already used for this tenant's other
+    ``*.ext.<domain>`` certs (DNS-01 via the Hurricane Electric account-login
+    vault credential — see le.md/henet.md): ONE shared cert at
+    ``ldap.ext.<base_dn's domain>``, with each mirror node added as an
+    additional ``ldap-server`` target on that SAME cert (no per-node re-issue,
+    no extra ACME rate-limit spend for a 2-node pair).
+
+    Best-effort and NEVER blocks the deploy: any missing prerequisite (no LE
+    producer connected, no HE.NET vault credential, no base_dn yet to derive a
+    domain from, no prior ``*.ext.<domain>`` cert to source a registration
+    email from) just skips with a log line — the self-signed cert keeps LDAPS
+    listening, just untrusted, exactly as install_ldap.sh already documents."""
+    try:
+        domain_base = _domain_from_base_dn(cfg.get("base_dn"))
+        if not domain_base:
+            return  # no base_dn yet — nothing to derive a domain from
+        cert_domain = f"ldap.ext.{domain_base}"
+        my_pk = hub._primary_key(spoke_id)
+        tenant_id = hub.state.get_spoke_tenant(my_pk) or "default"
+        le_sid = hub.get_spoke_by_type("certificates")
+        if not le_sid:
+            logger.info("ldap-server auto-cert: no certificates (LE) spoke connected — "
+                       "skipping, self-signed TLS stays in place")
+            return
+        listed = await _le_relay(hub, le_sid, "LE_LIST_CERTS", {})
+        certs = ((listed.get("data") or {}).get("certs") or []) if listed.get("status") == "SUCCESS" else []
+        existing = next((c for c in certs if c.get("domain") == cert_domain), None)
+        target = {"module_type": "ldap-server", "identifier": my_pk}
+        if existing:
+            already = any(t.get("module_type") == "ldap-server" and t.get("identifier") == my_pk
+                         for t in (existing.get("targets") or []))
+            if already:
+                return  # already covered — nothing to do
+            added = await _le_relay(hub, le_sid, "LE_ADD_TARGET",
+                                    {"domain": cert_domain, "target": target})
+            if added.get("status") != "SUCCESS":
+                logger.warning("ldap-server auto-cert: LE_ADD_TARGET for %s failed: %s",
+                               cert_domain, added.get("message"))
+                return
+            targets = (existing.get("targets") or []) + [target]
+            await hub._distribute_one_cert(le_sid, cert_domain, targets,
+                                           material_hash=existing.get("material_hash"))
+            logger.info("ldap-server auto-cert: added %s as a target on existing cert %s",
+                       spoke_id, cert_domain)
+            return
+        # No cert for this domain yet — issue one. Reuse the registration email
+        # already on file for a sibling *.ext.<domain_base> cert (keeps the ACME
+        # account/notification contact consistent); skip rather than invent one.
+        email = next((c.get("email") for c in certs
+                     if isinstance(c.get("domain"), str)
+                     and c["domain"].endswith(f".ext.{domain_base}") and c.get("email")), None)
+        if not email:
+            logger.info("ldap-server auto-cert: no existing *.ext.%s cert to source an ACME "
+                       "registration email from — skipping auto-issue for %s (issue manually "
+                       "via Setup -> Certificate Management once)", domain_base, cert_domain)
+            return
+        try:
+            import cred_vault as _cred_vault
+            he_creds = await _cred_vault.automation_get(hub, "__admin__", "HE.NET")
+        except Exception as e:  # noqa: BLE001
+            logger.info("ldap-server auto-cert: HE.NET vault credential not available (%s) — "
+                       "skipping auto-issue for %s", e, cert_domain)
+            return
+        he_username = he_creds.get("he_username") or he_creds.get("username") or he_creds.get("email")
+        he_password = he_creds.get("he_password") or he_creds.get("password")
+        if not (he_username and he_password):
+            logger.warning("ldap-server auto-cert: HE.NET vault credential missing username/"
+                          "password fields — skipping auto-issue for %s", cert_domain)
+            return
+        issued = await _le_relay(hub, le_sid, "LE_ISSUE_CERT", {
+            "domain": cert_domain, "email": email, "challenge": "dns",
+            "dns_provider": "he-login", "he_username": he_username, "he_password": he_password,
+            "tenant_id": tenant_id, "targets": [target],
+        }, timeout=200.0)
+        if issued.get("status") != "SUCCESS":
+            logger.warning("ldap-server auto-cert: LE_ISSUE_CERT for %s failed: %s",
+                          cert_domain, issued.get("message"))
+            return
+        inner = issued.get("data") or {}
+        _lca.add_tenant(hub, cert_domain, tenant_id)
+        try:
+            await hub.state.save_state_now()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("ldap-server auto-cert: persisting tenant ownership for %s failed: %s",
+                          cert_domain, e)
+        await hub._distribute_one_cert(le_sid, cert_domain, inner.get("targets") or [target],
+                                       material_hash=inner.get("material_hash"))
+        logger.info("ldap-server auto-cert: issued + distributed %s for %s", cert_domain, spoke_id)
+    except Exception as e:  # noqa: BLE001 — never block the deploy on cert automation failure
+        logger.warning("ldap-server auto-cert: detection/issue failed: %s", e)
 
 
 def register(app, hub, ctx):
