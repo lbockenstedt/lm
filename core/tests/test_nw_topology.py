@@ -465,3 +465,76 @@ def test_ip_named_fleet_device_is_not_renamed_by_lldp_junk():
                     "remote_name": "x86_64", "remote_mgmt_ip": "172.21.0.11"}]}
     g = build_topology(fleet=fleet, lldp_by_device=lldp)
     assert [n["name"] for n in g["nodes"]] == ["172.21.0.11"]
+
+
+def test_ip_named_fleet_switch_takes_lldp_hostname_and_merges_netbox_row():
+    # Live admin/default shape: fleet switches are added by address and named
+    # after it; the hostname only arrives via a neighbour's LLDP, and NetBox
+    # holds the same box under its lowercase hostname with no primary IP.
+    fleet = [{"id": "agg", "name": "172.21.0.11", "object_type": "cx_switch",
+              "address": "172.21.0.11"},
+             {"id": "tor", "name": "172.21.1.1", "object_type": "cx_switch",
+              "address": "172.21.1.1"}]
+    lldp = {"tor": [{"local_port": "1/1/49", "remote_chassis": "ec:50:aa:00:00:11",
+                     "remote_port": "1/1/1", "remote_name": "MIPBE-SSPLM-N31-TOR-AGG",
+                     "remote_mgmt_ip": "172.21.0.11"}]}
+    netbox = [{"id": 7, "name": "mipbe-ssplm-n31-tor-agg"}]
+    g = build_topology(fleet=fleet, lldp_by_device=lldp, netbox_devices=netbox)
+    names = sorted(n["name"].casefold() for n in g["nodes"])
+    assert names == ["172.21.1.1", "mipbe-ssplm-n31-tor-agg"]
+    assert len(g["edges"]) == 1
+
+
+def _cx_lldp(*ports):
+    return [{"local_port": lp, "remote_chassis": mac, "remote_port": rp,
+             "remote_name": name, "remote_mgmt_ip": ""}
+            for lp, mac, rp, name in ports]
+
+
+def test_same_switch_scanned_under_several_svis_is_one_node():
+    # Live: CRSW2 was in the fleet 9 times (each SVI + the VSX virtual IP),
+    # all returning the same LLDP table.
+    table = _cx_lldp(("1/1/49", "ec:50:aa:00:00:11", "1/1/1", "AGG"),
+                     ("1/1/50", "ec:50:aa:00:00:22", "1/1/1", "TOR"))
+    fleet = [{"id": "a", "name": "172.21.0.2", "object_type": "cx_switch", "address": "172.21.0.2"},
+             {"id": "b", "name": "MIPBE-SSPLM-N31-CRSW2", "object_type": "cx_switch", "address": "172.21.1.2"},
+             {"id": "c", "name": "172.21.10.254", "object_type": "cx_switch", "address": "172.21.10.254"}]
+    g = build_topology(fleet=fleet, lldp_by_device={"a": table, "b": table, "c": table})
+    switches = [n for n in g["nodes"] if "fleet" in n["sources"]]
+    assert [n["name"] for n in switches] == ["MIPBE-SSPLM-N31-CRSW2"]
+    assert {"172.21.0.2", "172.21.1.2", "172.21.10.254"} <= set(switches[0]["addresses"])
+    assert len(g["edges"]) == 2
+
+
+def test_different_switches_and_junk_lldp_are_not_merged():
+    junk = [{"local_port": ":", "remote_chassis": "84:16:0c:54:af:20", "remote_port": "",
+             "remote_name": "84:16:0c:54:af:20"},
+            {"local_port": ":", "remote_chassis": "b0:26:28:2d:52:90", "remote_port": "",
+             "remote_name": "b0:26:28:2d:52:90"}]
+    fleet = [{"id": "g1", "name": "172.21.2.3", "object_type": "gateway", "address": "172.21.2.3"},
+             {"id": "g2", "name": "172.21.2.4", "object_type": "gateway", "address": "172.21.2.4"},
+             {"id": "s1", "name": "sw1", "object_type": "cx_switch", "address": "10.0.0.1"},
+             {"id": "s2", "name": "sw2", "object_type": "cx_switch", "address": "10.0.0.2"}]
+    lldp = {"g1": junk, "g2": junk,
+            "s1": _cx_lldp(("1/1/1", "ec:50:aa:00:00:11", "1/1/1", "X"),
+                           ("1/1/2", "ec:50:aa:00:00:22", "1/1/1", "Y")),
+            "s2": _cx_lldp(("1/1/1", "ec:50:aa:00:00:11", "1/1/2", "X"),
+                           ("1/1/2", "ec:50:aa:00:00:22", "1/1/2", "Y"))}
+    g = build_topology(fleet=fleet, lldp_by_device=lldp)
+    assert sorted(n["name"] for n in g["nodes"] if "fleet" in n["sources"]) == [
+        "172.21.2.3", "172.21.2.4", "sw1", "sw2"]
+
+
+def test_gateways_reporting_capability_as_remote_port_stay_separate():
+    # Live: both VPNCs' LLDP came back with remote_port "B:R" (the capability
+    # column) for CRSW1 and CRSW2 -- identical tables, different boxes.
+    rows = [{"local_port": "GE0/0/2", "remote_chassis": "18:7a:3b:d8:6e:00",
+             "remote_port": "B:R", "remote_name": "MIPBE-SSPLM-N31-CRSW1"},
+            {"local_port": "GE0/0/3", "remote_chassis": "ec:50:aa:f4:5b:00",
+             "remote_port": "B:R", "remote_name": "MIPBE-SSPLM-N31-CRSW2"}]
+    fleet = [{"id": "v1", "name": "172.21.2.3", "object_type": "gateway", "address": "172.21.2.3"},
+             {"id": "v2", "name": "172.21.2.4", "object_type": "gateway", "address": "172.21.2.4"}]
+    g = build_topology(fleet=fleet, lldp_by_device={"v1": rows, "v2": list(rows)})
+    assert sorted(n["name"] for n in g["nodes"] if "fleet" in n["sources"]) == [
+        "172.21.2.3", "172.21.2.4"]
+    assert all("B:R" not in (e["a_port"], e["b_port"]) for e in g["edges"])
