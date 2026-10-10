@@ -82,9 +82,11 @@ _PREFIXES = [
 ]
 _IPS = [
     {"address": "172.17.1.199/24", "dns_name": "good",
-     "custom_fields": {"mac_address": "aa:bb:cc:dd:ee:01"}},
+     "custom_fields": {"mac_address": "aa:bb:cc:dd:ee:01",
+                       "dhcp_reservation": True}},
     {"address": "172.16.0.50/24", "dns_name": "orphan",
-     "custom_fields": {"mac_address": "aa:bb:cc:dd:ee:02"}},
+     "custom_fields": {"mac_address": "aa:bb:cc:dd:ee:02",
+                       "dhcp_reservation": True}},
 ]
 
 
@@ -143,7 +145,18 @@ def test_preview_never_sends_an_rpc(tmp_path):
 def test_an_ip_without_a_mac_is_not_a_reservation_at_all(tmp_path):
     out, _ = _call(str(tmp_path), _PREFIXES, [
         {"address": "172.17.1.5/24", "custom_fields": {}},
-        {"address": "172.17.1.6/24", "custom_fields": {"mac_address": "  "}},
+        {"address": "172.17.1.6/24", "custom_fields": {"mac_address": "  ",
+                                                        "dhcp_reservation": True}},
+    ])
+    assert out["totals"]["reservations"] == 0
+
+
+def test_a_mac_address_without_the_reservation_opt_in_is_not_a_reservation(tmp_path):
+    """The regression this field exists to prevent: ARP/CPPM discovery stamps
+    mac_address on plain dynamic-lease IPs for identity only — that alone
+    must never mint a Kea reservation."""
+    out, _ = _call(str(tmp_path), _PREFIXES, [
+        {"address": "172.17.1.7/24", "custom_fields": {"mac_address": "aa:bb:cc:dd:ee:04"}},
     ])
     assert out["totals"]["reservations"] == 0
 
@@ -151,7 +164,8 @@ def test_an_ip_without_a_mac_is_not_a_reservation_at_all(tmp_path):
 def test_a_malformed_reservation_ip_is_reported_as_unmatched(tmp_path):
     """Must not raise — a bad record cannot sink the diagnostic."""
     out, _ = _call(str(tmp_path), _PREFIXES, [
-        {"address": "not-an-ip/24", "custom_fields": {"mac_address": "aa:bb:cc:dd:ee:03"}},
+        {"address": "not-an-ip/24", "custom_fields": {"mac_address": "aa:bb:cc:dd:ee:03",
+                                                       "dhcp_reservation": True}},
     ])
     assert out["totals"]["would_skip"] == 1
     assert out["unmatched_reservations"][0]["subnet_match"] is None
