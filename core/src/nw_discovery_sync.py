@@ -710,6 +710,8 @@ class NwDiscoverySyncMixin:
         netbox_push, push_errors, tenant_slug = await self.push_nw_device_inventory(
             device_cfg, device_info, interfaces)
         errors.extend(push_errors)
+        if reachable:
+            self.schedule_lldp_netbox_push(device_cfg.get("tenant_id") or "")
 
         status = "SUCCESS" if (reachable and not errors) else (
             "PARTIAL" if reachable else "ERROR")
@@ -769,6 +771,7 @@ class NwDiscoverySyncMixin:
         buckets, dropped = await self._nw_attribute(ip_records)
         tids = list(buckets.keys())
         if not tids and not mac_only:
+            self.schedule_lldp_netbox_push()
             logger.info("nw discovery sync cycle: %d records pulled, 0 tenants matched, "
                         "%d dropped unattributed", len(records), dropped)
             return {"results": [], "dropped_unattributed": dropped,
@@ -803,10 +806,117 @@ class NwDiscoverySyncMixin:
         # a non-admin viewer sees them immediately. Only when the cycle pushed.
         if pushed > 0:
             self.refresh_module_cache("netbox_devices")
+        # LLDP adjacencies -> NetBox cables (and LLDP-only neighbours -> devices).
+        try:
+            lldp_status = await self.push_lldp_links_to_netbox()
+        except Exception as e:
+            logger.warning("nw discovery sync: LLDP -> NetBox failed: %s", e)
+            lldp_status = {"status": "ERROR", "message": str(e)}
         return {"results": out, "dropped_unattributed": dropped,
+                "lldp_status": lldp_status,
                 "discovered_total": len(records),
                 "mac_only_total": len(mac_only),
                 "mac_only_status": mac_only_status}
+
+    def schedule_lldp_netbox_push(self, tenant_id: str = None,
+                                  max_age_s: float = 300.0) -> bool:
+        """Fire-and-forget :meth:`push_lldp_links_to_netbox` for one tenant
+        (``None`` = all). Coalesced: while a push for that scope is running a
+        new request is dropped, so a scan that polls 40 new devices sends one
+        LLDP sync, not 40. Returns whether a push was started."""
+        tasks = self.__dict__.setdefault("_lldp_netbox_tasks", {})
+        key = "*" if tenant_id is None else (str(tenant_id).strip() or "default").casefold()
+        running = tasks.get(key)
+        if running is not None and not running.done():
+            return False
+        try:
+            tasks[key] = asyncio.get_running_loop().create_task(
+                self.push_lldp_links_to_netbox(tenant_id, max_age_s=max_age_s))
+        except RuntimeError:
+            return False
+        return True
+
+    async def push_lldp_links_to_netbox(self, tenant_id: str = None,
+                                        max_age_s: float = 3600.0) -> Dict[str, Any]:
+        """Record LLDP-confirmed links in NetBox as cables (``NETBOX_SYNC_LLDP``).
+
+        One topology graph and one request per tenant: the same merge the
+        NW → Topology map uses (reciprocal naming, SVI folding), so NetBox gets
+        the switch tree the operator sees. LLDP older than ``max_age_s`` is
+        re-read first (bounded fan-out). Best-effort end to end.
+        """
+        from nw_topology import build_topology, netbox_lldp_links
+
+        def _s(x):
+            return str(x or "").strip()
+
+        netbox = self.get_spoke_by_type("ipam")
+        if not netbox:
+            return {"status": "SKIPPED", "message": "no NetBox (ipam) spoke"}
+        devices = [d for d in ((self.state.system_state.get("global_config", {}) or {})
+                               .get("nw_devices", []) or [])
+                   if isinstance(d, dict) and d.get("id")]
+        groups: Dict[str, Tuple[str, List[Dict[str, Any]]]] = {}
+        for d in devices:
+            tid = _s(d.get("tenant_id")) or "default"
+            groups.setdefault(tid.casefold(), (tid, []))[1].append(d)
+        if tenant_id is not None:
+            want = (_s(tenant_id) or "default").casefold()
+            groups = {k: v for k, v in groups.items() if k == want}
+
+        nw_spokes = list(self.get_all_spokes_by_type("nw") or [])
+        sem = asyncio.Semaphore(4)
+
+        async def _refresh(d, spoke):
+            async with sem:
+                payload = {"device_id": d["id"]}
+                if d.get("tenant_id"):
+                    payload["tenant"] = d["tenant_id"]
+                try:
+                    res = await self.request_response(spoke, "NW_GET_LLDP_NEIGHBORS",
+                                                      payload, timeout=30.0)
+                    await self.nw_cache_set_device(d["id"], "lldp", unwrap_spoke(res))
+                except Exception as e:
+                    logger.debug("nw lldp->netbox: refresh %s: %s", d["id"], e)
+
+        jobs = []
+        for _tid, devs in groups.values():
+            for d in devs:
+                spoke = (d.get("spoke_id") if d.get("spoke_id") in nw_spokes
+                         else (nw_spokes[0] if len(nw_spokes) == 1 else ""))
+                if spoke and time.time() - self.nw_cache_device_fetched_at(d["id"]) > max_age_s:
+                    jobs.append(_refresh(d, spoke))
+        if jobs:
+            await asyncio.gather(*jobs, return_exceptions=True)
+
+        results = []
+        for key, (tid, devs) in groups.items():
+            lldp_by_device = {}
+            for d in devs:
+                env = self.nw_cache_get_device(d["id"], "lldp")
+                rows = env.get("data") if isinstance(env, dict) else None
+                lldp_by_device[d["id"]] = rows if isinstance(rows, list) else []
+            graph = build_topology(fleet=devs, lldp_by_device=lldp_by_device,
+                                   macs_by_device={}, infer_from_macs=False)
+            links = netbox_lldp_links(graph)
+            if not links:
+                results.append({"tenant": key, "status": "SKIPPED", "links": 0})
+                continue
+            slug = _s((self.state.get_tenant(tid) or {}).get("netbox_tenant_slug"))
+            try:
+                res = unwrap_spoke(await self.request_response(
+                    netbox, "NETBOX_SYNC_LLDP",
+                    {"links": links, "tenant_slug": slug}, timeout=180.0)) or {}
+                logger.info("nw lldp->netbox tenant=%s: %d links: %s", key, len(links),
+                            res.get("message") or res.get("status"))
+            except Exception as e:
+                logger.warning("nw lldp->netbox tenant=%s failed: %s", key, e)
+                res = {"status": "ERROR", "message": str(e)}
+            results.append({"tenant": key, "links": len(links),
+                            **{k: res.get(k) for k in ("status", "message", "cabled",
+                                                       "created", "unchanged",
+                                                       "skipped", "errors")}})
+        return {"status": "SUCCESS", "results": results}
 
     async def run_nw_discovery_sync_loop(self):
         """Periodically sync nw-discovered devices → NetBox per schedule.

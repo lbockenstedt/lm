@@ -8,7 +8,7 @@ from api import (
     HTTPException, Request, _hub_msg, _unwrap_spoke, access, get_spoke_or_503,
     logger, uuid,
 )
-from nw_topology import build_topology
+from nw_topology import build_topology, netbox_lldp_links
 from routes.role_pool import PRODUCT_ROLE, ensure_role_loaded, maybe_unload_orphaned_role
 
 
@@ -141,35 +141,23 @@ async def _nw_bg_refresh_device(hub, device_id, endpoint, spoke_id, spoke_cmd,
     await hub.nw_cache_set_device(device_id, endpoint, data)
 
 
-async def _nw_sync_lldp_cables(hub, netbox_spoke, lldp_edges, node_names) -> None:
-    """Push an LLDP-confirmed edge into NetBox as a real ``dcim.cable`` via
-    ``NETBOX_SYNC_CABLE``, one request per edge, sequentially (this runs
-    detached from the request/response cycle, so there is no reader waiting
-    on it — no need for concurrency, and sequential keeps load on NetBox
-    predictable). Conservative and best-effort end to end: ``sync_cable``
-    itself never invents a device and never overwrites an existing cable to a
-    different far end, and any failure here is logged, never raised (a
-    NetBox hiccup must not be visible anywhere in the topology UI)."""
-    for edge in lldp_edges:
-        a_name = node_names.get(edge["a"], "")
-        b_name = node_names.get(edge["b"], "")
-        if not a_name or not b_name:
-            continue
-        try:
-            result = await hub.request_response(
-                netbox_spoke, "NETBOX_SYNC_CABLE",
-                {"a_device": a_name, "a_port": edge["a_port"],
-                 "b_device": b_name, "b_port": edge["b_port"]},
-                timeout=30.0)
-            data = access.unwrap_spoke(result) or {}
-            if data.get("status") not in ("SUCCESS", "UNCHANGED"):
-                logger.info("nw_topology: NetBox cable sync %s:%s <-> %s:%s: %s",
-                           a_name, edge["a_port"], b_name, edge["b_port"],
-                           data.get("message") or data.get("status"))
-        except Exception as e:
-            logger.info("nw_topology: NetBox cable sync %s:%s <-> %s:%s failed: %s",
-                       a_name, edge["a_port"], b_name, edge["b_port"], e)
-
+async def _nw_sync_lldp_netbox(hub, netbox_spoke, links, tenant_slug="") -> None:
+    """Push the map's LLDP-confirmed links into NetBox in ONE
+    ``NETBOX_SYNC_LLDP`` request. The spoke resolves each end SERIAL/MAC-first
+    (name last, case-insensitive, domain stripped), creates an LLDP-only
+    neighbour as a discovered device, and never overwrites a human's cable.
+    Detached from the request/response cycle; failures are logged, never
+    raised (a NetBox hiccup must not be visible in the topology UI)."""
+    try:
+        result = await hub.request_response(
+            netbox_spoke, "NETBOX_SYNC_LLDP",
+            {"links": links, "tenant_slug": tenant_slug}, timeout=180.0)
+        data = access.unwrap_spoke(result) or {}
+        logger.info("nw_topology: NetBox LLDP sync (%d links): %s", len(links),
+                    data.get("message") or data.get("status"))
+    except Exception as e:
+        logger.info("nw_topology: NetBox LLDP sync (%d links) failed: %s",
+                    len(links), e)
 
 
 def validate_nw_address(addr):
@@ -1147,11 +1135,11 @@ def register(app, hub, ctx):
         # guess). Fire-and-forget: a slow/broken NetBox must never make the
         # topology view itself slow or fail.
         if force and netbox:
-            names = {n["id"]: n["name"] for n in graph["nodes"]}
-            lldp_edges = [e for e in graph["edges"]
-                         if e["source"] == "lldp" and e["a_port"] and e["b_port"]]
-            if lldp_edges:
-                asyncio.create_task(_nw_sync_lldp_cables(hub, netbox, lldp_edges, names))
+            links = netbox_lldp_links(graph)
+            if links:
+                slug = str((hub.state.get_tenant(cfg_tid) or {}).get(
+                    "netbox_tenant_slug") or "").strip() if cfg_tid else ""
+                asyncio.create_task(_nw_sync_lldp_netbox(hub, netbox, links, slug))
 
         return graph
 
