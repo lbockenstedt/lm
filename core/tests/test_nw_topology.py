@@ -572,3 +572,23 @@ def test_ip_named_switches_name_each_other_by_port_pair():
     g = build_topology(fleet=fleet, lldp_by_device={"a": crsw1, "b": crsw2})
     assert sorted(n["name"] for n in g["nodes"]) == ["MIPBE-SSPLM-N31-CRSW1", "MIPBE-SSPLM-N31-CRSW2"]
     assert len(g["edges"]) == 1
+
+
+def test_lldp_fqdn_matches_netbox_short_name_case_insensitively():
+    crsw1 = _cx_lldp(("1/1/2", "b0:26:28:2d:52:90", "nic1", "mipbe-ssplm-pxmx02.orange-tme.com"))
+    fleet = [{"id": "c1", "name": "MIPBE-SSPLM-N31-CRSW1", "object_type": "cx_switch", "address": "172.21.0.1"}]
+    nb = [{"name": "MIPBE-SSPLM-PXMX02", "primary_ip": "172.21.5.12/24", "role": "Hypervisor"}]
+    g = build_topology(fleet=fleet, lldp_by_device={"c1": crsw1}, netbox_devices=nb)
+    hosts = [n for n in g["nodes"] if "fleet" not in n["sources"]]
+    assert len(hosts) == 1
+    assert set(hosts[0]["sources"]) >= {"netbox", "lldp"}
+    assert "172.21.5.12" in hosts[0]["addresses"]
+
+
+def test_short_hostname_ignores_ip_mac_and_free_text():
+    from nw_topology import _short_hostname
+    assert _short_hostname("Host.Example.com") == "host"
+    assert _short_hostname("172.21.2.3") == ""
+    assert _short_hostname("aabb.ccdd.eeff") == ""
+    assert _short_hostname("Broadcom P225p Dual-...") == ""
+    assert _short_hostname("plainname") == ""
