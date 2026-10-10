@@ -414,6 +414,10 @@ def test_netbox_row_rerooting_fleet_node_does_not_break_lldp_or_macs():
     ({"kind": "manual", "manual": True, "name": "pdu"}, True),
     ({"kind": "device", "name": "mipbe-ssplm-n31-ilo-pxmx00", "sources": ["netbox"]}, True),
     ({"kind": "neighbor", "name": "core-sw-2", "sources": ["lldp"], "addresses": ["10.0.0.2"]}, True),
+    # Live CRSW1 neighbours with NetBox unavailable and no mgmt address.
+    ({"kind": "neighbor", "name": "MIPBE-SSPLM-N31-TOR-AGG", "sources": ["lldp"]}, True),
+    ({"kind": "neighbor", "name": "mipbe-ssplm-pxmx02.orange-tme.com", "sources": ["lldp"]}, True),
+    ({"kind": "neighbor", "name": "Broadcom P225p NetXtreme-E Dual-...", "sources": ["lldp"]}, False),
     # Live junk: NetBox auto-discovery placeholders, MAC-only and garbled LLDP names.
     ({"kind": "device", "name": "device-bc2411aeef4b", "sources": ["netbox"],
       "addresses": ["172.21.1.14"]}, False),
@@ -538,3 +542,33 @@ def test_gateways_reporting_capability_as_remote_port_stay_separate():
     assert sorted(n["name"] for n in g["nodes"] if "fleet" in n["sources"]) == [
         "172.21.2.3", "172.21.2.4"]
     assert all("B:R" not in (e["a_port"], e["b_port"]) for e in g["edges"])
+
+
+def test_ip_named_gateway_takes_hostname_from_switch_lldp():
+    # Live: VPNCs are in the fleet as 172.21.2.3/.4; CRSW1 advertises them by
+    # name on 1/1/43 and 1/1/44, and each VPNC says GE0/0/2 -> 1/1/43|44.
+    crsw1 = _cx_lldp(("1/1/43", "00:1a:1e:04:2f:00", "GE0/0/2", "MIPBE-SSPLM-N31-VPNC1"),
+                     ("1/1/44", "00:1a:1e:04:2d:50", "GE0/0/2", "MIPBE-SSPLM-N31-VPNC2"))
+    v1 = [{"local_port": "GE0/0/2", "remote_chassis": "18:7a:3b:d8:6e:00",
+           "remote_port": "1/1/43", "remote_name": "MIPBE-SSPLM-N31-CRSW1"}]
+    v2 = [{"local_port": "GE0/0/2", "remote_chassis": "18:7a:3b:d8:6e:00",
+           "remote_port": "1/1/44", "remote_name": "MIPBE-SSPLM-N31-CRSW1"}]
+    fleet = [{"id": "c1", "name": "MIPBE-SSPLM-N31-CRSW1", "object_type": "cx_switch", "address": "172.21.0.1"},
+             {"id": "v1", "name": "172.21.2.3", "object_type": "gateway", "address": "172.21.2.3"},
+             {"id": "v2", "name": "172.21.2.4", "object_type": "gateway", "address": "172.21.2.4"}]
+    g = build_topology(fleet=fleet, lldp_by_device={"c1": crsw1, "v1": v1, "v2": v2})
+    names = sorted(n["name"] for n in g["nodes"])
+    assert names == ["MIPBE-SSPLM-N31-CRSW1", "MIPBE-SSPLM-N31-VPNC1", "MIPBE-SSPLM-N31-VPNC2"]
+    assert len(g["edges"]) == 2
+    assert {(e["a_port"], e["b_port"]) for e in g["edges"]} <= {
+        ("1/1/43", "GE0/0/2"), ("GE0/0/2", "1/1/43"), ("1/1/44", "GE0/0/2"), ("GE0/0/2", "1/1/44")}
+
+
+def test_ip_named_switches_name_each_other_by_port_pair():
+    crsw1 = _cx_lldp(("1/1/47", "ec:50:aa:f4:5b:00", "1/1/48", "MIPBE-SSPLM-N31-CRSW2"))
+    crsw2 = _cx_lldp(("1/1/48", "18:7a:3b:d8:6e:00", "1/1/47", "MIPBE-SSPLM-N31-CRSW1"))
+    fleet = [{"id": "a", "name": "172.21.0.1", "object_type": "cx_switch", "address": "172.21.0.1"},
+             {"id": "b", "name": "172.21.0.2", "object_type": "cx_switch", "address": "172.21.0.2"}]
+    g = build_topology(fleet=fleet, lldp_by_device={"a": crsw1, "b": crsw2})
+    assert sorted(n["name"] for n in g["nodes"]) == ["MIPBE-SSPLM-N31-CRSW1", "MIPBE-SSPLM-N31-CRSW2"]
+    assert len(g["edges"]) == 1
