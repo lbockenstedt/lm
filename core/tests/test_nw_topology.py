@@ -368,7 +368,7 @@ def test_every_node_carries_the_full_shape():
                        manual_devices=[{"name": "M"}])
     want = {"id", "name", "kind", "sources", "addresses", "macs", "device_id",
             "tenant_id", "object_type", "model", "site", "role",
-            "lldp_capable", "manual"}
+            "lldp_capable", "manual", "infra"}
     for n in g["nodes"]:
         assert set(n) == want
 
@@ -406,3 +406,62 @@ def test_netbox_row_rerooting_fleet_node_does_not_break_lldp_or_macs():
     assert len(sw) == 1 and sw[0]["lldp_capable"]
     assert _edge_between(g, "OLKS-MGMTSW", "GATEWAY")["source"] == "lldp"
     assert _edge_between(g, "OLKS-MGMTSW", "printer")["source"] == "mac"
+
+
+@pytest.mark.parametrize("node,expected", [
+    ({"kind": "switch", "sources": ["fleet"]}, True),
+    ({"kind": "device", "sources": ["fleet"], "name": "172.21.0.11"}, True),
+    ({"kind": "manual", "manual": True, "name": "pdu"}, True),
+    ({"kind": "device", "name": "mipbe-ssplm-n31-ilo-pxmx00", "sources": ["netbox"]}, True),
+    ({"kind": "neighbor", "name": "core-sw-2", "sources": ["lldp"], "addresses": ["10.0.0.2"]}, True),
+    # Live junk: NetBox auto-discovery placeholders, MAC-only and garbled LLDP names.
+    ({"kind": "device", "name": "device-bc2411aeef4b", "sources": ["netbox"],
+      "addresses": ["172.21.1.14"]}, False),
+    ({"kind": "device", "name": "CP2102N USB to UART Bridge Controller", "sources": ["netbox"]}, False),
+    ({"kind": "neighbor", "name": "84:16:0c:54:af:21", "sources": ["lldp"]}, False),
+    ({"kind": "neighbor", "name": "x86_64", "sources": ["lldp"]}, False),
+    ({"kind": "neighbor", "name": "fw_version:AFW_214.0.192.0", "sources": ["lldp"]}, False),
+    ({"kind": "neighbor", "name": "", "sources": ["lldp"], "addresses": ["10.0.0.9"]}, False),
+    ({"sources": None, "name": None}, False),
+])
+def test_is_infra(node, expected):
+    from nw_topology import _is_infra
+    assert _is_infra(node) is expected
+
+
+def test_render_flags_infra_and_counts_it():
+    lldp = {"sw1": [{"local_port": "3", "remote_chassis": "84:16:0c:54:af:21",
+                     "remote_name": "84:16:0c:54:af:21"}]}
+    g = build_topology(fleet=FLEET, lldp_by_device=lldp)
+    by_name = {n["name"]: n for n in g["nodes"]}
+    assert by_name["OLKS-MGMTSW"]["infra"] and by_name["GATEWAY"]["infra"]
+    assert not by_name["84:16:0c:54:af:21"]["infra"]
+    assert g["stats"]["infra_nodes"] == 2
+
+
+def test_fleet_name_survives_merge_with_mac_named_lldp_neighbour():
+    """Live shape (MIPBE-SSPLM-N31-CRSW2): another switch's LLDP names this
+    switch only by chassis MAC, a second row then ties that MAC to the fleet
+    switch's IP. The merged node must keep the fleet hostname, not the MAC."""
+    fleet = FLEET + [{"id": "crsw2", "name": "MIPBE-SSPLM-N31-CRSW2",
+                      "object_type": "cx_switch", "address": "172.21.0.10"}]
+    lldp = {"sw1": [{"local_port": "1", "remote_chassis": "ec:50:aa:f4:5b:00",
+                     "remote_name": "ec:50:aa:f4:5b:00"}],
+            "gw1": [{"local_port": "2", "remote_chassis": "ec:50:aa:f4:5b:00",
+                     "remote_name": "ec:50:aa:f4:5b:00",
+                     "remote_mgmt_ip": "172.21.0.10"}]}
+    g = build_topology(fleet=fleet, lldp_by_device=lldp)
+    names = [n["name"] for n in g["nodes"]]
+    assert "MIPBE-SSPLM-N31-CRSW2" in names
+    assert "ec:50:aa:f4:5b:00" not in names
+    sw = next(n for n in g["nodes"] if n["name"] == "MIPBE-SSPLM-N31-CRSW2")
+    assert sw["kind"] == "switch" and sw["device_id"] == "crsw2"
+
+
+def test_ip_named_fleet_device_is_not_renamed_by_lldp_junk():
+    fleet = [{"id": "s9", "name": "172.21.0.11", "object_type": "cx_switch",
+              "address": "172.21.0.11"}]
+    lldp = {"s9": [{"local_port": "1", "remote_chassis": "20:26:09:18:07:31",
+                    "remote_name": "x86_64", "remote_mgmt_ip": "172.21.0.11"}]}
+    g = build_topology(fleet=fleet, lldp_by_device=lldp)
+    assert [n["name"] for n in g["nodes"]] == ["172.21.0.11"]

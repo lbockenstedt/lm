@@ -19292,11 +19292,13 @@ const _NW_TOPO_EDGE_STYLE = {
     mac:    { stroke: '#d97706', dash: '5 4',  label: 'Inferred (MAC)' },
 };
 
-function _nwTopoLayout(nodes, edges, colW, rowH) {
+function _nwTopoLayout(nodes, edges, colW, rowH, collapsed) {
     // Layered left-to-right tree (Aruba Central style): the best-connected
     // device of each component is the root column, and every hop away from it
     // is one column further right. Rows are ordered by neighbour barycentre to
     // keep links from crossing needlessly. Deterministic: no randomness.
+    // `collapsed` node ids keep their place but hide every BFS-tree descendant,
+    // so collapsing never re-roots or reshuffles the rest of the map.
     const ids = new Set(nodes.map(n => n.id));
     const adj = {};
     nodes.forEach(n => { adj[n.id] = new Set(); });
@@ -19307,24 +19309,56 @@ function _nwTopoLayout(nodes, edges, colW, rowH) {
     const loose = nodes.filter(n => !adj[n.id].size);
     const rank = n => (n.kind === 'switch' ? 1 : 0) * 1000 + adj[n.id].size;
     const depth = {};
+    const parent = {};
+    const children = {};
     const comps = [];
     linked.slice().sort((x, y) => rank(y) - rank(x) || String(x.name).localeCompare(String(y.name)))
         .forEach(root => {
             if (depth[root.id] !== undefined) return;
             const comp = [root.id];
             depth[root.id] = 0;
+            children[root.id] = [];
             for (let i = 0; i < comp.length; i++) {
                 [...adj[comp[i]]].sort().forEach(nb => {
-                    if (depth[nb] === undefined) { depth[nb] = depth[comp[i]] + 1; comp.push(nb); }
+                    if (depth[nb] === undefined) {
+                        depth[nb] = depth[comp[i]] + 1;
+                        parent[nb] = comp[i];
+                        children[comp[i]].push(nb);
+                        children[nb] = [];
+                        comp.push(nb);
+                    }
                 });
             }
             comps.push(comp);
         });
+    const hidden = new Set();
+    const hiddenCount = {};
+    if (collapsed) {
+        collapsed.forEach(id => {
+            if (!children[id]) return;
+            const visited = new Set();
+            hiddenCount[id] = 0;
+            const queue = [id];
+            while (queue.length) {
+                const nodeId = queue.shift();
+                if (visited.has(nodeId)) continue;
+                visited.add(nodeId);
+                if (nodeId !== id) hidden.add(nodeId);
+                children[nodeId].forEach(child => {
+                    if (!visited.has(child)) {
+                        queue.push(child);
+                        hiddenCount[id]++;
+                    }
+                });
+            }
+        });
+    }
     const pos = {};
-    let yCursor = 40, maxX = 0;
+    let yCursor = 44, maxX = 0;
     comps.forEach(comp => {
+        const filteredComp = comp.filter(id => !hidden.has(id));
         const layers = [];
-        comp.forEach(id => { (layers[depth[id]] = layers[depth[id]] || []).push(id); });
+        filteredComp.forEach(id => { (layers[depth[id]] = layers[depth[id]] || []).push(id); });
         const nameOf = {};
         nodes.forEach(n => { nameOf[n.id] = String(n.name || n.id); });
         layers.forEach(l => l.sort((x, y) => nameOf[x].localeCompare(nameOf[y])));
@@ -19333,7 +19367,7 @@ function _nwTopoLayout(nodes, edges, colW, rowH) {
         for (let sweep = 0; sweep < 4; sweep++) {
             for (let d = 1; d < layers.length; d++) {
                 const bc = id => {
-                    const prev = [...adj[id]].filter(n => depth[n] === d - 1);
+                    const prev = [...adj[id]].filter(n => depth[n] === d - 1 && !hidden.has(n));
                     return prev.length ? prev.reduce((t, n) => t + row[n], 0) / prev.length : row[id];
                 };
                 layers[d].sort((x, y) => bc(x) - bc(y) || nameOf[x].localeCompare(nameOf[y]));
@@ -19351,7 +19385,7 @@ function _nwTopoLayout(nodes, edges, colW, rowH) {
         });
         yCursor += height + rowH * 0.6;
     });
-    return { pos, loose, width: maxX + 120, height: yCursor };
+    return { pos, loose, width: maxX + 120, height: yCursor, depth, children, hiddenCount, hidden };
 }
 
 function _nwTopoNodeColor(node) {
@@ -19372,13 +19406,21 @@ function _nwTopoIcon(nd, x, y, color) {
            `<g transform="translate(${x.toFixed(1)} ${y.toFixed(1)})">${g}</g>`;
 }
 
-function _nwTopoSvg(graph) {
-    const nodes = graph.nodes || [], edges = graph.edges || [];
-    if (!nodes.length) {
+function _nwTopoSvg(graph, view) {
+    const showEndpoints = !!(view && view.showEndpoints);
+    const collapsed = (view && view.collapsed) || new Set();
+    const allNodes = graph.nodes || [];
+    let nodes = showEndpoints ? allNodes : allNodes.filter(nd => nd.infra !== false);
+    const keep = new Set(nodes.map(n => n.id));
+    let edges = (graph.edges || []).filter(e => keep.has(e.a) && keep.has(e.b));
+    if (!allNodes.length) {
         return `<div class="py-12 text-center text-slate-400 italic">No devices in this tenant's topology yet.</div>`;
     }
+    if (!nodes.length) {
+        return `<div class="py-12 text-center text-slate-400 italic">No infrastructure devices found. Tick “Show endpoints” to see everything.</div>`;
+    }
     const colW = 240, rowH = 64, W0 = 900;
-    const lay = _nwTopoLayout(nodes, edges, colW, rowH);
+    const lay = _nwTopoLayout(nodes, edges, colW, rowH, collapsed);
     const pos = lay.pos;
     const byId = {};
     nodes.forEach(nd => { byId[nd.id] = nd; });
@@ -19402,11 +19444,43 @@ function _nwTopoSvg(graph) {
         return `<path d="${d}" fill="none" stroke="${st.stroke}" stroke-width="1.5"
             ${st.dash ? `stroke-dasharray="${st.dash}"` : ''} opacity="0.85"><title>${escapeHtml(tip)}</title></path>`;
     }).join('');
-    const drawNode = (nd, p) => `<g><title>${escapeHtml(tipOf(nd))}</title>${_nwTopoIcon(nd, p.x, p.y, _nwTopoNodeColor(nd))}
-        <text x="${p.x.toFixed(1)}" y="${(p.y + 32).toFixed(1)}" text-anchor="middle"
-          style="font-size:10px" fill="#334155">${escapeHtml(String(nd.name || nd.id).slice(0, 28))}</text></g>`;
+    window._nwTopoLevels = {};
+    Object.keys(lay.pos).forEach(id => {
+        if (lay.children[id] && lay.children[id].length > 0) {
+            const depth = lay.depth[id];
+            if (!window._nwTopoLevels[depth]) window._nwTopoLevels[depth] = [];
+            window._nwTopoLevels[depth].push(id);
+        }
+    });
+    const drawNode = (nd, p) => {
+        const kids = (lay.children[nd.id] || []).length;
+        let tooltipLines = tipOf(nd).split('\n');
+        if (kids > 0) {
+            tooltipLines.push(collapsed.has(nd.id) ? 'Click to expand' : 'Click to collapse');
+        }
+        const tip = tooltipLines.join('\n');
+        const badgeText = collapsed.has(nd.id) ? '+' + (lay.hiddenCount[nd.id] || 0) : '−';
+        return `<g data-topo-node="${escapeHtml(nd.id)}" style="cursor:${kids ? 'pointer' : 'default'}">
+            <title>${escapeHtml(tip)}</title>
+            ${_nwTopoIcon(nd, p.x, p.y, _nwTopoNodeColor(nd))}
+            <text x="${p.x.toFixed(1)}" y="${(p.y + 32).toFixed(1)}" text-anchor="middle"
+              style="font-size:10px" fill="#334155">${escapeHtml(String(nd.name || nd.id).slice(0, 28))}</text>
+            ${kids > 0 ? `<circle cx="${(p.x + 15).toFixed(1)}" cy="${(p.y - 15).toFixed(1)}" r="8" fill="#0f172a"/>
+                <text x="${(p.x + 15).toFixed(1)}" y="${(p.y - 11.5).toFixed(1)}" text-anchor="middle"
+                  style="font-size:10px; font-weight:700; fill:#fff">${badgeText}</text>` : ''}
+        </g>`;
+    };
     const dots = nodes.filter(nd => pos[nd.id]).map(nd => drawNode(nd, pos[nd.id])).join('');
-
+    // Level headers
+    let levelHeaders = '';
+    Object.keys(window._nwTopoLevels).forEach(d => {
+        const depth = parseInt(d);
+        const allCollapsed = window._nwTopoLevels[d].every(id => collapsed.has(id));
+        const textContent = (allCollapsed ? '▸ ' : '▾ ') + 'Level ' + (depth + 1);
+        levelHeaders += `<text data-topo-level="${d}" x="${(70 + depth * colW).toFixed(1)}" y="18" text-anchor="middle"
+            style="font-size:11px;font-weight:600;cursor:pointer" fill="#475569">
+            <title>Collapse/expand every device at this level</title>${escapeHtml(textContent)}</text>`;
+    });
     // Devices with no known link: a compact wrapped grid instead of a hairball.
     const W = Math.max(W0, lay.width);
     const perRow = Math.max(1, Math.floor((W - 40) / 150));
@@ -19419,7 +19493,85 @@ function _nwTopoSvg(graph) {
                 x: 20 + 75 + (i % perRow) * 150, y: top + 40 + Math.floor(i / perRow) * 76 })).join('');
         H = top + 40 + rows * 76 + 10;
     }
-    return `<svg viewBox="0 0 ${W} ${H}" class="w-full" style="max-height:75vh">${lines}${dots}${looseSvg}</svg>`;
+    return `<svg viewBox="0 0 ${W} ${H}" class="w-full" style="max-height:75vh">${lines}${levelHeaders}${dots}${looseSvg}</svg>`;
+}
+
+// Default view is infrastructure only (node.infra); endpoints are opt-in.
+// Collapse state is per tenant and survives refreshes (node ids are stable).
+function _nwTopoView() {
+    if (window._nwTopoCollapsedTenant !== currentTenant) {
+        window._nwTopoCollapsed = new Set();
+        window._nwTopoCollapsedTenant = currentTenant;
+    }
+    if (!(window._nwTopoCollapsed instanceof Set)) {
+        window._nwTopoCollapsed = new Set();
+    }
+    return { showEndpoints: !!window._nwTopoShowEndpoints, collapsed: window._nwTopoCollapsed };
+}
+
+function _nwTopoRedraw() {
+    const host = document.getElementById('nw-topo-svg');
+    if (!host || !window._nwTopo) return;
+    host.innerHTML = _nwTopoSvg(window._nwTopo, _nwTopoView());
+}
+
+function _nwTopoBindView() {
+    const svg = document.getElementById('nw-topo-svg');
+    if (svg) {
+        svg.onclick = ev => {
+            const lvl = ev.target.closest('[data-topo-level]');
+            if (lvl) {
+                const ids = (window._nwTopoLevels || {})[lvl.getAttribute('data-topo-level')] || [];
+                const set = _nwTopoView().collapsed;
+                const allInSet = ids.every(id => set.has(id));
+                if (allInSet) {
+                    ids.forEach(id => set.delete(id));
+                } else {
+                    ids.forEach(id => set.add(id));
+                }
+                _nwTopoRedraw();
+                return;
+            }
+            const node = ev.target.closest('[data-topo-node]');
+            if (node && node.style.cursor === 'pointer') {
+                const nodeId = node.getAttribute('data-topo-node');
+                const set = _nwTopoView().collapsed;
+                if (set.has(nodeId)) {
+                    set.delete(nodeId);
+                } else {
+                    set.add(nodeId);
+                }
+                _nwTopoRedraw();
+            }
+        };
+    }
+
+    const endpointsCheckbox = document.getElementById('nw-topo-endpoints');
+    if (endpointsCheckbox) {
+        endpointsCheckbox.checked = !!window._nwTopoShowEndpoints;
+        endpointsCheckbox.onchange = () => {
+            window._nwTopoShowEndpoints = endpointsCheckbox.checked;
+            _nwTopoRedraw();
+        };
+    }
+
+    const expandBtn = document.getElementById('nw-topo-expand');
+    if (expandBtn) {
+        expandBtn.onclick = () => {
+            _nwTopoView().collapsed.clear();
+            _nwTopoRedraw();
+        };
+    }
+
+    const collapseBtn = document.getElementById('nw-topo-collapse');
+    if (collapseBtn) {
+        collapseBtn.onclick = () => {
+            const level0Ids = (window._nwTopoLevels || {})[0] || [];
+            const set = _nwTopoView().collapsed;
+            level0Ids.forEach(id => set.add(id));
+            _nwTopoRedraw();
+        };
+    }
 }
 
 async function _renderNwTopologyTab(opts) {
@@ -19474,17 +19626,22 @@ async function _renderNwTopologyTab(opts) {
       <label class="flex items-center gap-1.5 text-xs text-slate-500" title="Draw a link for a switch port that has learned exactly one MAC belonging to a known device. A guess, not an advertised adjacency.">
         <input type="checkbox" id="nw-topo-infer" ${infer ? 'checked' : ''}> Infer links from MAC tables
       </label>
+      <label class="flex items-center gap-1.5 text-xs text-slate-500" title="Include devices known only by a MAC address (hosts, VMs, phones). Off by default: the map shows infrastructure only.">
+        <input type="checkbox" id="nw-topo-endpoints"> Show endpoints
+      </label>
+      <button id="nw-topo-expand" class="px-2 py-1.5 text-xs font-semibold rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Expand all</button>
+      <button id="nw-topo-collapse" class="px-2 py-1.5 text-xs font-semibold rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Collapse all</button>
       <button id="nw-topo-refresh" class="px-3 py-1.5 text-xs font-semibold rounded bg-[#01A982] text-white hover:bg-[#018f6f]">Refresh from devices</button>
     </div>
   </div>
   <div class="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
-    <span><b class="text-slate-700">${st.nodes || 0}</b> devices</span>
+    <span><b class="text-slate-700">${st.infra_nodes ?? st.nodes ?? 0}</b> infrastructure / <b class="text-slate-700">${st.nodes || 0}</b> devices</span>
     <span><b class="text-slate-700">${st.edges || 0}</b> links</span>
     <span><b class="text-slate-700">${st.nodes_without_lldp || 0}</b> without LLDP</span>
     <span><b class="text-slate-700">${st.trunk_ports || 0}</b> trunk/uplink ports</span>
     <span>NetBox inventory: <b class="text-slate-700">${graph.netbox ? 'included' : 'unavailable'}</b></span>
   </div>
-  <div class="border border-slate-200 rounded bg-white overflow-hidden">${_nwTopoSvg(graph)}</div>
+  <div id="nw-topo-svg" class="border border-slate-200 rounded bg-white overflow-hidden">${_nwTopoSvg(graph, _nwTopoView())}</div>
   ${trunks ? `<div>
     <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Trunk / uplink ports</h4>
     <p class="text-xs text-slate-400 mb-2">These ports carry a whole downstream segment, so what is <em>directly</em> attached can't be inferred. Declare the link below if you know it.</p>
@@ -19503,6 +19660,7 @@ async function _renderNwTopologyTab(opts) {
         window._nwTopoInfer = inferBox.checked;
         _renderNwTopologyTab();
     };
+    _nwTopoBindView();
     if (canEditTopo) _renderNwTopologyManual();
 }
 
