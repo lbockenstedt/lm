@@ -38,6 +38,7 @@ def spoke(monkeypatch, tmp_path):
     _FakeSerial.Serial.instances = []
     sp = cs.ConsoleSpoke("console-1", {"console_monitor": False, "auto_identify": False})
     sp.store = sm.PortStore(path=tmp_path / "ports.json")
+    sp.devices = sm.DeviceCache(path=tmp_path / "devices.json")
     sp._monitor_task = object()
     sp._autoprobe_task = object()
     return sp
@@ -104,6 +105,52 @@ def test_no_reconcile_with_empty_identity(spoke):
     # Nothing to match on — old record must survive untouched.
     assert spoke.store.get("old-pid")["alias"] == "core-sw"
     assert spoke.store.get("new-pid").get("alias") is None
+
+
+# ── DeviceCache fallback: alias/tenant survive even a ports.json WIPE ───────
+# (e.g. a console-code update that changes derive_port_id's format, or the
+# agent's state dir being recreated) — not just an ordinary port_id-preserving
+# restart, which PortStore.find_by_identity alone already covers.
+
+def test_emit_probe_result_populates_device_cache(spoke):
+    _run(spoke._emit_probe_result("pid-1", {
+        "vendor": "ARUBA-AOS-CX",
+        "identity": {"hostname": "core-sw", "serial": "SN123"},
+        "logged_in": True,
+    }))
+    cached = spoke.devices.lookup({"serial": "SN123"})
+    assert cached is not None
+    assert cached["port_id"] == "pid-1"
+
+
+def test_reconcile_recovers_alias_from_device_cache_when_ports_json_has_no_match(spoke):
+    # Simulate the gap: devices.json remembers the device from BEFORE an
+    # upgrade that changed port_id derivation (or wiped ports.json outright),
+    # but ports.json itself has no record of it under ANY port_id.
+    spoke.devices.remember({"serial": "SN123"}, port_id="old-format-pid",
+                           alias="core-sw", tenant_id="lrb")
+    assert spoke.store.all_items() == {}
+
+    _run(spoke._emit_probe_result("new-pid", {
+        "identity": {"serial": "SN123"}, "logged_in": True,
+    }))
+
+    assert spoke.store.get("new-pid")["alias"] == "core-sw"
+    assert spoke.store.get("new-pid")["tenant_id"] == "lrb"
+
+
+def test_reconcile_prefers_ports_json_match_over_device_cache(spoke):
+    # ports.json (keyed by port_id, same-session history) is the primary
+    # source; the device cache is only consulted when ports.json has nothing.
+    spoke.store.update("old-pid", alias="fresh-alias",
+                       probe={"identity": {"serial": "SN123"}})
+    spoke.devices.remember({"serial": "SN123"}, port_id="ancient-pid", alias="stale-alias")
+
+    _run(spoke._emit_probe_result("new-pid", {
+        "identity": {"serial": "SN123"}, "logged_in": True,
+    }))
+
+    assert spoke.store.get("new-pid")["alias"] == "fresh-alias"
 
 
 # ── Periodic re-verify of an already-identified port ────────────────────────

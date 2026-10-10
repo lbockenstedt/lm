@@ -64,7 +64,8 @@ serial ports from the hub WebUI's **Console** view (an xterm.js terminal in the 
   (ws_token-gated; ready→continue / error→1011 / disconnect→1000; `CONSOLE_CLOSE` on exit).
 
 ## Files
-- `console/src/serial_manager.py` — enumeration, stable id, `PortStore`, baud detect, `PortChannel`/`SessionManager`.
+- `console/src/serial_manager.py` — enumeration, stable id, `usb_physical_path` (by-path fallback),
+  `PortStore`, `DeviceCache` (device-identity warm cache), baud detect, `PortChannel`/`SessionManager`.
 - `console/src/console_spoke.py` — `ConsoleSpoke(BaseSpoke)` command dispatch + auto-probe loop.
 - `console/src/fingerprint.py` — vendor profiles + `detect_vendor`/`parse_identity`/`run_identify`/`detect_stack`.
 - `console/src/vsf_stack.py` — pure parsers for HPE/Aruba VSF `show vsf` / `show version`.
@@ -80,9 +81,31 @@ serial ports from the hub WebUI's **Console** view (an xterm.js terminal in the 
 
 ## Gotchas / notes
 - xterm.js is dynamic-imported from CDN (like noVNC); vendoring under `WebUI/assets/` is a follow-up.
-- NetBox auto-create currently maps ip/mac/hostname (the `sync_devices` shape); serial→`device.serial`
-  and full match-by-serial need a NetBox-side field mapping — flagged for real-device verification.
+- NetBox auto-create matches ip/mac/hostname/**serial** (serial is the strongest key, surviving
+  IP/hostname churn — see `netbox/src/netbox_sync.py::_resolve_existing_device`); `CONSOLE_PROBE_RESULT`
+  → `_handle_console_probe` (`core/src/hub_vnc_console.py`) ships the fingerprinted serial through on
+  every identify, active or LLM-assisted.
 - Disable auto-identify per agent with role config `auto_identify=false`.
+
+## Surviving a restart / upgrade: port_id stability + the device warm cache
+- Every port gets a stable **software** `port_id` — ConsolePi-inspired (`console/adapters.md`-equivalent
+  reasoning is in `serial_manager.py`'s module docstring): USB serial# first, else `vid:pid@<USB bus-port
+  path>`, else (for a "lame" adapter with no serial# *and* no reported USB location) `vid:pid-<ttyUSBn>` as
+  the last, least-stable resort. `usb_physical_path()` reads the same bus-port path straight out of sysfs
+  (`/sys/class/tty/<dev>/device`) whenever pyserial's own `location` comes back empty, so a serial-less
+  adapter still keys on its physical port rather than kernel enumeration order across a reboot.
+- `PortStore` (`ports.json`) persists every port's settings/probe/alias/tenant keyed by `port_id`, and
+  `find_by_identity()` reconciles a device that reappears under a *different* port_id (reboot renumbering,
+  cable moved to another adapter) by matching on serial or MAC learned from a logged-in identify — **never**
+  hostname alone, which collides too easily to trust for a silent alias/tenant merge.
+- `DeviceCache` (`devices.json`) is a second, **device-identity-keyed** (serial, then MAC — same rule) warm
+  cache, independent of `port_id` entirely. It survives what `ports.json` can't: a code update that changes
+  `derive_port_id`'s own format (which would otherwise orphan every existing record on the next deploy), or
+  the state dir simply being gone. `_emit_probe_result` refreshes it on every successful identify and falls
+  back to it for alias/tenant carry-forward when `ports.json` has no match at all.
+- A hostname-only passive glean on a true "lame" cable (no serial#, no login) still can't be reconciled
+  across a port_id change — the same limitation ConsolePi documents for serial-less adapters moved to a
+  different port. Burn a serial# into the adapter (FTDI + `FTPROG`, or similar) to eliminate it entirely.
 
 ## Probe timing (patience)
 

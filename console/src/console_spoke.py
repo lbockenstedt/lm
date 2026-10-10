@@ -27,7 +27,7 @@ except ImportError:
 try:
     from serial_manager import (
         PortStore, HealthStore, PortChannel, SessionManager, enumerate_ports, detect_baud,
-        open_raw, DEFAULT_BAUD_CANDIDATES, DEFAULT_BAUD, score_sample,
+        open_raw, DEFAULT_BAUD_CANDIDATES, DEFAULT_BAUD, score_sample, device_cache,
     )
     from fingerprint import (run_identify, read_running_config, push_config, PROFILES,
                              passive_identify, run_commands, merge_credentials,
@@ -39,7 +39,7 @@ try:
 except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .serial_manager import (  # type: ignore
         PortStore, HealthStore, PortChannel, SessionManager, enumerate_ports, detect_baud,
-        open_raw, DEFAULT_BAUD_CANDIDATES, DEFAULT_BAUD, score_sample,
+        open_raw, DEFAULT_BAUD_CANDIDATES, DEFAULT_BAUD, score_sample, device_cache,
     )
     from .fingerprint import (run_identify, read_running_config, push_config, PROFILES,  # type: ignore
                               passive_identify, run_commands, merge_credentials,
@@ -75,6 +75,11 @@ class ConsoleSpoke(BaseSpoke):
         self.control_plane = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.store = PortStore()
+        # Device-identity-keyed warm cache (survives a port_id derivation change
+        # or a "lame" cable moved to a different physical port — see
+        # DeviceCache's docstring). Process-wide singleton so every ConsoleSpoke
+        # instance on this host shares one devices.json.
+        self.devices = device_cache()
         self.sessions = SessionManager(on_data=self._on_serial_data)
         # Serial-port enumeration cache. enumerate_ports() calls pyserial
         # comports() + a sysfs walk, which BLOCKS and — on a host with a wedged
@@ -802,30 +807,55 @@ class ConsoleSpoke(BaseSpoke):
                 probe["baud_confident"] = True
             if res.get("detected_baud"):
                 self.store.update(port_id, settings={"baud": res["detected_baud"]})
-        # Reconcile: this identity (serial/MAC learned by logging into the
-        # DEVICE, not the USB adapter) may already be known under a different,
-        # now-absent port_id — e.g. a reboot renumbered /dev/ttyUSBn, or the
-        # cable moved to a different port. Carry the operator's alias/tenant
-        # assignment forward onto this port_id and drop the orphan so it never
-        # lingers in the list as a stale duplicate.
+        # Reconcile: this identity (serial/MAC learned from the DEVICE, not the
+        # USB adapter) may already be known under a different, now-absent
+        # port_id — e.g. a reboot renumbered /dev/ttyUSBn, or the cable moved
+        # to a different port. Carry the operator's alias/tenant assignment
+        # forward onto this port_id and drop the orphan so it never lingers in
+        # the list as a stale duplicate.
         identity = probe.get("identity") or {}
         if identity:
+            fields: Dict[str, Any] = {}
             old_pid = self.store.find_by_identity(identity, exclude_port_id=port_id)
             if old_pid:
                 old = self.store.get(old_pid)
-                fields = {}
                 if old.get("alias") and not self.store.get(port_id).get("alias"):
                     fields["alias"] = old["alias"]
                 if old.get("tenant_id") and not self.store.get(port_id).get("tenant_id"):
                     fields["tenant_id"] = old["tenant_id"]
-                if fields:
-                    self.store.update(port_id, **fields)
                 self.store.delete(old_pid)
                 logger.info("console: device %s reappeared on port %s (was %s) — carried "
                             "alias/tenant forward, dropped the old port record",
                             identity.get("hostname") or identity.get("serial")
                             or identity.get("mac") or "?", port_id, old_pid)
+            else:
+                # No live port_id matched — but the DEVICE itself may still be
+                # remembered in the identity-keyed warm cache, which survives a
+                # ports.json wipe (a derive_port_id format change on upgrade, or
+                # the whole file simply never having been written yet on a
+                # freshly loaded agent). This is what lets alias/tenant survive
+                # a "the console code was updated" restart, not just an
+                # ordinary one.
+                cached = self.devices.lookup(identity)
+                if cached:
+                    if cached.get("alias") and not self.store.get(port_id).get("alias"):
+                        fields["alias"] = cached["alias"]
+                    if cached.get("tenant_id") and not self.store.get(port_id).get("tenant_id"):
+                        fields["tenant_id"] = cached["tenant_id"]
+            if fields:
+                self.store.update(port_id, **fields)
         self.store.update(port_id, probe=probe)
+        # Refresh the warm cache with whatever we now know, so the NEXT restart
+        # (or a future port_id derivation change) has somewhere to recover
+        # alias/tenant/identity from even if this port_id's ports.json record is
+        # gone by then.
+        if identity:
+            saved = self.store.get(port_id)
+            self.devices.remember(
+                identity, port_id=port_id, vendor=str(probe.get("vendor") or ""),
+                product=self._port_product(port_id),
+                alias=saved.get("alias", ""), tenant_id=saved.get("tenant_id", ""),
+            )
         self._probe_attempts[port_id] = time.monotonic()
         if self.control_plane is not None:
             await self.control_plane.send_to_hub("CONSOLE_PROBE_RESULT", {

@@ -30,6 +30,50 @@ def test_derive_port_id_is_stable_across_calls():
     assert a == b  # id follows the adapter, not the kernel-assigned ttyUSB number
 
 
+class _FakePortInfo:
+    """Minimal stand-in for pyserial's ListPortInfo, only the attrs
+    enumerate_ports() reads."""
+    def __init__(self, device, vid=None, pid=None, serial_number=None,
+                 location=None, manufacturer="", product=""):
+        self.device = device
+        self.vid = vid
+        self.pid = pid
+        self.serial_number = serial_number
+        self.location = location
+        self.manufacturer = manufacturer
+        self.product = product
+        self.description = ""
+
+
+class _FakeListPorts:
+    def __init__(self, ports):
+        self._ports = ports
+
+    def comports(self):
+        return self._ports
+
+
+def test_enumerate_ports_falls_back_to_sysfs_busport_when_location_missing(monkeypatch):
+    # A "lame" adapter: no serial#, and this pyserial backend didn't populate
+    # location — enumerate_ports must still land on the stable vid:pid@busport
+    # form (ConsolePi's by-path) rather than the ttyUSBn-order fallback.
+    monkeypatch.setattr(m, "_list_ports", _FakeListPorts(
+        [_FakePortInfo("/dev/ttyUSB0", vid=0x1A86, pid=0x7523)]))
+    monkeypatch.setattr(m, "_by_id_map", lambda: {})
+    monkeypatch.setattr(m, "usb_physical_path", lambda dev: "1-2.3")
+    ports = m.enumerate_ports()
+    assert ports[0]["port_id"] == "usb-1a86:7523@1-2.3"
+
+
+def test_enumerate_ports_uses_pyserial_location_over_sysfs_when_present(monkeypatch):
+    monkeypatch.setattr(m, "_list_ports", _FakeListPorts(
+        [_FakePortInfo("/dev/ttyUSB0", vid=0x1A86, pid=0x7523, location="1-9.9")]))
+    monkeypatch.setattr(m, "_by_id_map", lambda: {})
+    monkeypatch.setattr(m, "usb_physical_path", lambda dev: "SHOULD-NOT-BE-USED")
+    ports = m.enumerate_ports()
+    assert ports[0]["port_id"] == "usb-1a86:7523@1-9.9"
+
+
 def test_score_sample_prefers_printable_with_prompt():
     good = m.score_sample(b"Switch> \r\nlogin: ")
     noise = m.score_sample(bytes([0xFF, 0xFE, 0x00, 0x81, 0x9A]))
@@ -107,6 +151,66 @@ def test_find_by_identity_with_no_identifying_fields_returns_none(tmp_path):
     store.update("old-pid", probe={"identity": {"hostname": "core-sw"}})
     # hostname alone (no serial/mac) isn't trusted as a stable device identity.
     assert store.find_by_identity({"hostname": "core-sw"}, exclude_port_id="new-pid") is None
+
+
+# ── usb_physical_path (ConsolePi-style "lame adapter" by-path fallback) ──────
+
+def test_usb_physical_path_reads_sysfs_device_symlink(tmp_path, monkeypatch):
+    # Simulate .../usb1/1-2/1-2.3/1-2.3:1.0/ttyUSB0 without touching real sysfs.
+    fake_real = str(tmp_path / "usb1" / "1-2" / "1-2.3" / "1-2.3:1.0" / "ttyUSB0")
+    monkeypatch.setattr(m.os.path, "realpath", lambda p: fake_real)
+    assert m.usb_physical_path("/dev/ttyUSB0") == "1-2.3"
+
+
+def test_usb_physical_path_returns_none_when_sysfs_missing(monkeypatch):
+    def _boom(p):
+        raise OSError("no such sysfs path")
+    monkeypatch.setattr(m.os.path, "realpath", _boom)
+    assert m.usb_physical_path("/dev/ttyUSB0") is None
+
+
+def test_usb_physical_path_no_match_when_path_has_no_busport_segment(monkeypatch):
+    monkeypatch.setattr(m.os.path, "realpath", lambda p: "/sys/devices/platform/serial8250/tty/ttyS0")
+    assert m.usb_physical_path("/dev/ttyS0") is None
+
+
+# ── DeviceCache (device-identity-keyed warm cache, independent of port_id) ───
+
+def test_device_cache_remember_and_lookup_by_serial(tmp_path):
+    cache = m.DeviceCache(path=tmp_path / "devices.json")
+    cache.remember({"serial": "SN123", "hostname": "core-sw"}, port_id="pid-1",
+                   alias="Core Switch", tenant_id="t1")
+    found = cache.lookup({"serial": "SN123"})
+    assert found["port_id"] == "pid-1"
+    assert found["alias"] == "Core Switch"
+    assert found["tenant_id"] == "t1"
+
+
+def test_device_cache_lookup_by_mac_case_insensitive(tmp_path):
+    cache = m.DeviceCache(path=tmp_path / "devices.json")
+    cache.remember({"mac": "38:21:C7:BA:E9:35"}, port_id="pid-1")
+    assert cache.lookup({"mac": "38:21:c7:ba:e9:35"})["port_id"] == "pid-1"
+
+
+def test_device_cache_hostname_only_identity_is_not_remembered(tmp_path):
+    # Same safety rule as PortStore.find_by_identity: hostname alone is too
+    # weak (collision-prone) to key a cross-restart merge on.
+    cache = m.DeviceCache(path=tmp_path / "devices.json")
+    cache.remember({"hostname": "core-sw"}, port_id="pid-1")
+    assert cache.all_items() == {}
+    assert cache.lookup({"hostname": "core-sw"}) is None
+
+
+def test_device_cache_persists_across_instances(tmp_path):
+    path = tmp_path / "devices.json"
+    m.DeviceCache(path=path).remember({"serial": "SN999"}, port_id="pid-7", alias="Stack A")
+    reloaded = m.DeviceCache(path=path)
+    assert reloaded.lookup({"serial": "SN999"})["alias"] == "Stack A"
+
+
+def test_device_cache_lookup_unknown_identity_returns_none(tmp_path):
+    cache = m.DeviceCache(path=tmp_path / "devices.json")
+    assert cache.lookup({"serial": "NEVER-SEEN"}) is None
 
 
 # ── Writer-lock takeover (force_attach / SessionManager.takeover) ────────────
