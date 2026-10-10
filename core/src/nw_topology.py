@@ -599,6 +599,83 @@ def _collapse_half_edges(builder) -> None:
             builder._edges.pop(key, None)
 
 
+def _attach_endpoints(builder, macs_by_device, fleet_ids, duplicate_of, trunk_threshold):
+    """Place every endpoint MAC from the polled switches' MAC tables on the
+    port (or non-polled downstream device) where it is physically attached.
+
+    A MAC is learned on every switch between it and the poller, so sightings
+    on an uplink toward another POLLED switch are ignored (that switch reports
+    the true location). Of the rest, the port with the fewest MACs is the most
+    specific. A port facing a non-polled LLDP/NetBox neighbour (a TOR, a
+    hypervisor) means the MAC lives behind that neighbour, so it hangs off it.
+    Nodes that already have a trusted link are left alone.
+    """
+    polled = set()
+    for d, rows in macs_by_device.items():
+        if d in duplicate_of:
+            continue
+        current = builder.current(fleet_ids.get(d, ""))
+        if current:
+            polled.add(current)
+    
+    trusted = {}
+    linked = set()
+    for e in builder._edges.values():
+        if e["source"] == "mac":
+            continue
+        a, b = e["a"], e["b"]
+        trusted[(a, e["a_port"])] = b
+        trusted[(b, e["b_port"])] = a
+        linked.add(a)
+        linked.add(b)
+    
+    cands = {}
+    ip_of = {}
+    for rows in macs_by_device.values():
+        for r in rows or []:
+            if isinstance(r, dict) and _s(r.get("ip")):
+                ip_of.setdefault(norm_mac(_s(r.get("mac"))), _s(r.get("ip")))
+    for d, rows in macs_by_device.items():
+        if d in duplicate_of:
+            continue
+        local = builder.current(fleet_ids.get(d, ""))
+        if not local:
+            continue
+        ports = classify_ports(rows or [], trunk_threshold=trunk_threshold)
+        for port, info in ports.items():
+            nb = trusted.get((local, port))
+            if nb in polled:
+                continue
+            if nb is None and info["count"] >= trunk_threshold:
+                builder.add_trunk(local, port, info["count"])
+            for mac in info["macs"]:
+                cands.setdefault(mac, []).append((info["count"], local, port, nb or ""))
+    
+    own = set()
+    for n in polled:
+        if n in builder._nodes:
+            own.update(builder._nodes[n].get("macs", []))
+    
+    for mac in sorted(cands):
+        if mac in own:
+            continue
+        best = min(cands[mac])
+        count, sw, port, nb = best
+        node = builder.resolve({"mac": mac}) or builder.add_node(
+            {"mac": mac, "name": mac, "ip": ip_of.get(mac, "")}, "endpoint", "mac")
+        if not node or node in (sw, nb) or node in polled:
+            continue
+        if node in linked:
+            continue
+        ep = builder._nodes.get(node) or {}
+        if not ep.get("tenant_id"):
+            ep["tenant_id"] = (builder._nodes.get(sw) or {}).get("tenant_id", "")
+        if nb:
+            builder.add_edge(nb, "", node, "", "mac", f"behind {port} ({count} MACs)")
+        else:
+            builder.add_edge(sw, port, node, "", "mac", "single MAC learned on port" if count == 1 else f"{count} MACs learned on port")
+
+
 def build_topology(fleet: Optional[List[dict]] = None,
                    lldp_by_device: Optional[Dict[str, list]] = None,
                    macs_by_device: Optional[Dict[str, list]] = None,
@@ -723,31 +800,10 @@ def build_topology(fleet: Optional[List[dict]] = None,
         builder.add_edge(a_id, cable.get("a_port"), b_id, cable.get("b_port"),
                          "netbox", _s(cable.get("label")))
 
-    # ── 7. MAC-table inference ──────────────────────────────────────────────
+    # ── 7. MAC-table endpoint placement ─────────────────────────────────────
     if infer_from_macs:
-        for device_id, rows in (macs_by_device or {}).items():
-            if _s(device_id) in duplicate_of:
-                continue
-            local_id = builder.current(fleet_ids.get(_s(device_id), ""))
-            if not local_id:
-                continue
-            for port, info in classify_ports(rows or [],
-                                             trunk_threshold=trunk_threshold).items():
-                if info["kind"] == "access":
-                    if builder.has_link_on_port(local_id, port):
-                        continue  # LLDP or an operator already described it
-                    mac = info["macs"][0]
-                    remote_id = builder.resolve({"mac": mac})
-                    if not remote_id:
-                        continue  # an unknown MAC is not yet a device
-                    builder.add_edge(local_id, port, remote_id, "",
-                                     "mac", "single MAC learned on port")
-                else:
-                    # 2+ MACs: an uplink or a downstream segment. It says
-                    # nothing about what is DIRECTLY attached, so it is
-                    # reported for the UI to offer "declare what is here"
-                    # rather than guessed at.
-                    builder.add_trunk(local_id, port, info["count"])
+        _attach_endpoints(builder, macs_by_device or {}, fleet_ids,
+                          duplicate_of, trunk_threshold)
 
     return builder.render()
 

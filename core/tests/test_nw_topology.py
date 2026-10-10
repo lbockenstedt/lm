@@ -229,25 +229,31 @@ def test_a_port_with_one_known_mac_becomes_an_inferred_link():
     assert edge["a_port"] == "5" or edge["b_port"] == "5"
 
 
-def test_an_unknown_mac_does_not_conjure_a_device():
-    """Every switch learns hundreds of MACs. Turning each into a node would
-    bury the topology under anonymous endpoints."""
+def test_an_unknown_mac_becomes_an_endpoint_on_its_port():
+    """Every endpoint MAC is placed on the port it was learned on, as a
+    non-infra node (hidden by the default infra-only view)."""
     g = build_topology(fleet=FLEET, macs_by_device={"sw1": [
         {"mac": "aa:bb:cc:dd:ee:99", "interface": "5"}]})
-    assert g["edges"] == []
-    assert len(g["nodes"]) == 2
+    ep = next(n for n in g["nodes"] if "aa:bb:cc:dd:ee:99" in n["macs"])
+    assert ep["kind"] == "endpoint" and ep["infra"] is False
+    assert ep["name"] == "aa:bb:cc:dd:ee:99"
+    edge = _edge_between(g, "OLKS-MGMTSW", "aa:bb:cc:dd:ee:99")
+    assert edge and edge["source"] == "mac"
+    assert "5" in (edge["a_port"], edge["b_port"])
 
 
-def test_a_trunk_port_is_reported_not_guessed_at():
-    """Many MACs on one port means a downstream segment, which says nothing
-    about what is DIRECTLY attached. It becomes a hint for the operator to
-    declare, never an invented link."""
+def test_a_trunk_port_is_reported_and_its_macs_hang_off_it():
+    """Many MACs on one port means a downstream segment (unmanaged switch,
+    hypervisor). It is still reported as a "declare what is here" hint, and
+    its MACs are placed on that port as endpoints."""
     rows = [{"mac": "aa:bb:cc:dd:ee:%02x" % i, "interface": "100"}
             for i in range(1, 6)]
     g = build_topology(fleet=FLEET, macs_by_device={"sw1": rows})
-    assert g["edges"] == []
     assert g["stats"]["trunk_ports"] == 1
     assert g["trunks"][0]["port"] == "100" and g["trunks"][0]["mac_count"] == 5
+    assert len(g["edges"]) == 5
+    assert all(e["source"] == "mac" and "100" in (e["a_port"], e["b_port"])
+               for e in g["edges"])
     assert g["trunks"][0]["node_name"] == "OLKS-MGMTSW"
 
 
@@ -340,7 +346,7 @@ def test_declaring_a_device_turns_anonymous_macs_into_a_named_node():
     its MAC. Declaring the device is what lets inference name the far end."""
     macs = {"sw1": [{"mac": "aa:bb:cc:dd:ee:01", "interface": "5"}]}
     before = build_topology(fleet=FLEET, macs_by_device=macs)
-    assert before["edges"] == []
+    assert _edge_between(before, "OLKS-MGMTSW", "aa:bb:cc:dd:ee:01")
     after = build_topology(fleet=FLEET, macs_by_device=macs, manual_devices=[
         {"name": "OLKS-CAMERA-1", "mac": "aa:bb:cc:dd:ee:01"}])
     assert len(after["edges"]) == 1
@@ -592,3 +598,55 @@ def test_short_hostname_ignores_ip_mac_and_free_text():
     assert _short_hostname("aabb.ccdd.eeff") == ""
     assert _short_hostname("Broadcom P225p Dual-...") == ""
     assert _short_hostname("plainname") == ""
+
+
+# ── endpoint placement (edge-port) ───────────────────────────────────────────
+
+_TWO = [
+    {"id": "core", "name": "CORE", "object_type": "cx_switch", "address": "10.0.0.1"},
+    {"id": "acc", "name": "ACCESS", "object_type": "cx_switch", "address": "10.0.0.2"},
+]
+_CORE_ACC = {
+    "core": [{"local_port": "1/1/47", "remote_chassis": "", "remote_port": "1/1/52",
+              "remote_name": "ACCESS", "remote_mgmt_ip": "10.0.0.2"},
+             {"local_port": "1/1/40", "remote_chassis": "", "remote_port": "28",
+              "remote_name": "TOR", "remote_mgmt_ip": "10.0.0.9"}],
+}
+
+
+def test_endpoint_is_placed_on_the_access_switch_not_the_uplink():
+    """The core learns the host on its uplink to ACCESS too; that sighting is
+    ignored because ACCESS is polled and reports the real port."""
+    macs = {"core": [{"mac": "aa:bb:cc:00:00:01", "interface": "1/1/47"}],
+            "acc": [{"mac": "aa:bb:cc:00:00:01", "interface": "1/1/7"}]}
+    g = build_topology(fleet=_TWO, lldp_by_device=_CORE_ACC, macs_by_device=macs)
+    assert _edge_between(g, "ACCESS", "aa:bb:cc:00:00:01")["source"] == "mac"
+    assert _edge_between(g, "CORE", "aa:bb:cc:00:00:01") is None
+    e = _edge_between(g, "ACCESS", "aa:bb:cc:00:00:01")
+    assert "1/1/7" in (e["a_port"], e["b_port"])
+
+
+def test_endpoint_behind_an_unpolled_neighbour_hangs_off_that_neighbour():
+    """TOR speaks LLDP but is not polled: MACs the core learns on the port
+    facing it live behind the TOR."""
+    macs = {"core": [{"mac": "aa:bb:cc:00:00:02", "interface": "1/1/40"}]}
+    g = build_topology(fleet=_TWO, lldp_by_device=_CORE_ACC, macs_by_device=macs)
+    e = _edge_between(g, "TOR", "aa:bb:cc:00:00:02")
+    assert e and e["source"] == "mac" and "1/1/40" in e["detail"]
+    assert _edge_between(g, "CORE", "aa:bb:cc:00:00:02") is None
+
+
+def test_most_specific_port_wins_when_two_unlinked_ports_see_a_mac():
+    many = [{"mac": "aa:bb:cc:00:01:%02x" % i, "interface": "1/1/9"} for i in range(6)]
+    macs = {"core": many + [{"mac": "aa:bb:cc:00:01:00", "interface": "1/1/3"}]}
+    g = build_topology(fleet=_TWO, lldp_by_device=_CORE_ACC, macs_by_device=macs)
+    e = _edge_between(g, "CORE", "aa:bb:cc:00:01:00")
+    assert "1/1/3" in (e["a_port"], e["b_port"])
+
+
+def test_a_switchs_own_mac_and_lldp_linked_nodes_get_no_mac_edge():
+    fleet = [dict(_TWO[0], base_mac="aa:bb:cc:00:02:01"), _TWO[1]]
+    macs = {"acc": [{"mac": "aa:bb:cc:00:02:01", "interface": "1/1/52"},
+                    {"mac": "aa:bb:cc:00:02:01", "interface": "1/1/5"}]}
+    g = build_topology(fleet=fleet, lldp_by_device=_CORE_ACC, macs_by_device=macs)
+    assert not [e for e in g["edges"] if e["source"] == "mac"]

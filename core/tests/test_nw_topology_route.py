@@ -106,14 +106,16 @@ def test_a_refreshed_graph_is_then_served_from_cache(monkeypatch, tmp_path):
     assert not [c_ for c_ in hub.calls if c_[1] == "NW_GET_LLDP_NEIGHBORS"]
 
 
-def test_an_unknown_mac_does_not_become_a_device(monkeypatch, tmp_path):
+def test_an_unknown_mac_becomes_a_non_infra_endpoint(monkeypatch, tmp_path):
     c, hub = _build(monkeypatch, tmp_path)
     _seed(hub, {"acme-sw": {"NW_GET_MAC_TABLE": [
         {"mac": "aa:bb:cc:dd:ee:77", "interface": "5"}]}})
     tok = _mint(hub, "u", tenants=["acme"])
     body = c.get("/api/nw/topology?refresh=1", cookies={"lm_session": tok}).json()
-    assert _names(body) == {"acme"}
-    assert body["edges"] == []
+    assert _names(body) == {"acme", "aa:bb:cc:dd:ee:77"}
+    ep = next(n for n in body["nodes"] if n["name"] == "aa:bb:cc:dd:ee:77")
+    assert ep["infra"] is False
+    assert len(body["edges"]) == 1 and body["edges"][0]["source"] == "mac"
 
 
 def test_declaring_a_device_makes_its_mac_a_named_link(monkeypatch, tmp_path):
