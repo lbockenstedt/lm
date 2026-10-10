@@ -551,6 +551,7 @@ class NwDiscoverySyncMixin:
                 "object_type": device_cfg.get("object_type", ""),
                 "model": str(device_info.get("model", "") or ""),
                 "serial": str(device_info.get("serial", "") or ""),
+                "mac": str(device_info.get("mac", "") or ""),
                 "firmware": str(device_info.get("firmware", "") or ""),
             },
             "interfaces": interfaces or [],
