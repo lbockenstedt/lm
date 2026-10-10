@@ -41,7 +41,7 @@ import datetime as _dt
 import logging
 import re
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from access import attribute_by_prefix, norm_mac  # sibling leaf (no main/api back-import)
@@ -253,7 +253,8 @@ class NwDiscoverySyncMixin:
         # their lease IP → tenant attribution) instead of device-<mac>.
         by_mac, by_ip = await self._nw_identity_index()
         if by_mac or by_ip:
-            stats = self._nw_apply_identity(records, by_mac, by_ip)
+            stats = self._nw_apply_identity(records, by_mac, by_ip,
+                                            getattr(self, "_nw_ip_host_src", None))
             logger.info("nw discovery: identity cross-reference named=%d ip_filled=%d "
                         "(index: %d MACs, %d IPs)", stats["named"], stats["ip_filled"],
                         len(by_mac), len(by_ip))
@@ -268,6 +269,11 @@ class NwDiscoverySyncMixin:
             return {}, {}
         by_mac: Dict[str, Dict[str, str]] = {}
         by_ip: Dict[str, str] = {}
+        # hostname_source per entry: "reservation"/"dns" are operator
+        # assertions, "lease" is the device's own DHCP hostname.
+        src_of = {"DHCP_LIST_RES": "reservation", "DHCP_LIST_LEASES": "lease",
+                  "DNS_LIST": "dns"}
+        self._nw_ip_host_src = ip_src = {}
 
         def _ip(v: Any) -> str:
             s = str(v or "").strip().split("/")[0].strip()
@@ -319,6 +325,7 @@ class NwDiscoverySyncMixin:
                     host = _host(row.get("name"))
                     if ip and host and ip not in by_ip:
                         by_ip[ip] = host
+                        ip_src[ip] = "dns"
                     continue
                 if cmd == "DHCP_LIST_LEASES" and row.get("state") not in (None, 0, "0"):
                     continue
@@ -331,14 +338,17 @@ class NwDiscoverySyncMixin:
                         ent["ip"] = ip
                     if host and not ent["hostname"]:
                         ent["hostname"] = host
+                        ent["hostname_source"] = src_of[cmd]
                 if ip and host and ip not in by_ip:
                     by_ip[ip] = host
+                    ip_src[ip] = src_of[cmd]
         return by_mac, by_ip
 
     @staticmethod
     def _nw_apply_identity(records: List[Dict[str, str]],
                            by_mac: Dict[str, Dict[str, str]],
-                           by_ip: Dict[str, str]) -> Dict[str, int]:
+                           by_ip: Dict[str, str],
+                           ip_src: Optional[Dict[str, str]] = None) -> Dict[str, int]:
         """Fill each sighting's missing ``ip`` (from its MAC's DHCP lease/
         reservation) and ``hostname`` (by MAC, else by IP) in place. Never
         overwrites a value the sighting already carries, and never fills an IP
@@ -361,14 +371,18 @@ class NwDiscoverySyncMixin:
                 result["ip_filled"] += 1
 
             if not rec.get("hostname"):
-                hostname = None
+                hostname, h_src = None, ""
                 if ident and ident.get("hostname"):
                     hostname = ident["hostname"]
+                    h_src = ident.get("hostname_source", "")
                 elif rec.get("ip"):
                     hostname = by_ip.get(rec["ip"])
+                    h_src = (ip_src or {}).get(rec["ip"], "")
 
                 if hostname:
                     rec["hostname"] = hostname
+                    if h_src:
+                        rec["hostname_source"] = h_src
                     result["named"] += 1
 
         return result
