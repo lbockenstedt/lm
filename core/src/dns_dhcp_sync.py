@@ -133,8 +133,18 @@ def build_dhcp_payload(pfx_data: Dict[str, Any],
     """NetBox prefixes + IPs → (subnets, reservations) Kea sync payload.
 
     Subnets come from prefixes (gateway/dns_servers off custom_fields); a
-    reservation is minted for every IP carrying a ``custom_fields.mac_address``.
+    reservation is minted for every IP carrying a truthy
+    ``custom_fields.dhcp_reservation`` AND a ``custom_fields.mac_address``.
     Shared by the loop and ``POST /api/dhcp/sync``.
+
+    ``dhcp_reservation`` is a separate, explicit opt-in from ``mac_address``
+    on purpose: nw/firewall ARP discovery and the CPPM access-tracker sync
+    stamp ``mac_address`` on ANY device they see for identity purposes (and
+    the DHCP-lease write-back fills it in too, for DNS), so a plain dynamic
+    lease picks up a ``mac_address`` the moment the host ARPs on the network.
+    Minting a reservation off ``mac_address`` presence alone turned every such
+    lease into a static reservation on the next sync — a lease and a
+    reservation are different things and must stay that way.
 
     Only prefixes explicitly opted into DHCP become Kea scopes — a bare
     top-level allocation (e.g. a tenant's whole /17) must never turn into a
@@ -188,9 +198,10 @@ def build_dhcp_payload(pfx_data: Dict[str, Any],
 
     reservations: List[Dict[str, Any]] = []
     for ip in (ips_data.get("ip_addresses") or []):
-        mac = ((ip.get("custom_fields") or {}).get("mac_address") or "").strip()
+        cf = ip.get("custom_fields") or {}
+        mac = (cf.get("mac_address") or "").strip()
         address = (ip.get("address") or "").split("/")[0].strip()
-        if mac and address:
+        if mac and address and cf.get("dhcp_reservation"):
             reservations.append({
                 "ip":       address,
                 "mac":      mac,

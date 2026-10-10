@@ -1,10 +1,11 @@
 """A reservation created in the WebUI must be written back to NetBox.
 
 ``core/src/dns_dhcp_sync.py`` rebuilds Kea's ENTIRE ``subnet4`` from NetBox
-(``build_dhcp_payload`` mints a reservation only for an IP carrying
-``custom_fields.mac_address``) and ``config-set``s the result. A reservation
-added straight to Kea by ``POST /api/dhcp/reservation`` is therefore invisible
-to that payload, and the next NetBox change silently DELETES it.
+(``build_dhcp_payload`` mints a reservation only for an IP carrying a truthy
+``custom_fields.dhcp_reservation`` AND a ``mac_address``) and ``config-set``s
+the result. A reservation added straight to Kea by ``POST /api/dhcp/reservation``
+is therefore invisible to that payload, and the next NetBox change silently
+DELETES it.
 
 The loss is completely silent and arbitrarily delayed: the add returns
 SUCCESS, the row appears in the merged Reservations list, and it vanishes
@@ -36,7 +37,7 @@ class WritebackHub(FakeHub):
         self.ip_addresses = ip_addresses if ip_addresses is not None else [
             {"id": 42, "address": "172.17.1.199/24",
              "dns_name": "mipbe-ssplm-winwks-lrb",
-             "custom_fields": {"mac_address": ""}},
+             "custom_fields": {"mac_address": "", "dhcp_reservation": False}},
             {"id": 43, "address": "172.17.1.13/24", "custom_fields": {}},
         ]
         if ipam:
@@ -99,7 +100,8 @@ def test_adding_a_reservation_persists_the_mac_to_netbox():
     # Without the write-back this list is empty and the reservation exists
     # ONLY in Kea, where the next NetBox->Kea sync deletes it.
     assert writes == [{"ip_id": 42,
-                       "custom_fields": {"mac_address": "bc:24:11:df:63:5e"}}]
+                       "custom_fields": {"dhcp_reservation": True,
+                                         "mac_address": "bc:24:11:df:63:5e"}}]
 
 
 def test_the_kea_write_still_happens_and_still_goes_first():
@@ -131,33 +133,37 @@ def test_existing_reply_keys_are_preserved():
 
 # ── delete / update keep NetBox in step ──────────────────────────────────────
 
-def test_deleting_a_reservation_clears_the_netbox_mac():
+def test_deleting_a_reservation_clears_the_dhcp_reservation_flag():
     hub = _hub(ip_addresses=[
         {"id": 42, "address": "172.17.1.199/24",
-         "custom_fields": {"mac_address": "bc:24:11:df:63:5e"}}])
+         "custom_fields": {"mac_address": "bc:24:11:df:63:5e",
+                           "dhcp_reservation": True}}])
     c = _build(_admin(), hub)
     r = c.request("DELETE", "/api/dhcp/reservation",
                   json={"ip": "172.17.1.199", "mac": "bc:24:11:df:63:5e"})
     assert r.status_code == 200
-    # Leaving the mac behind means the very next sync recreates the
-    # reservation the operator just deleted.
+    # mac_address is left alone — it's identity data other feeds (ARP/CPPM)
+    # also depend on; only dhcp_reservation (the actual reservation signal)
+    # flips back to False, so the next sync does not recreate it.
     assert _netbox_writes(hub) == [{"ip_id": 42,
-                                    "custom_fields": {"mac_address": ""}}]
+                                    "custom_fields": {"dhcp_reservation": False}}]
 
 
 def test_readdressing_a_reservation_clears_the_old_ip_too():
     hub = _hub(ip_addresses=[
         {"id": 42, "address": "172.17.1.199/24", "custom_fields": {}},
         {"id": 43, "address": "172.17.1.13/24",
-         "custom_fields": {"mac_address": "bc:24:11:df:63:5e"}}])
+         "custom_fields": {"mac_address": "bc:24:11:df:63:5e",
+                           "dhcp_reservation": True}}])
     c = _build(_admin(), hub)
     r = c.put("/api/dhcp/reservation",
               json={"ip": "172.17.1.199", "old_ip": "172.17.1.13",
                     "mac": "bc:24:11:df:63:5e"})
     assert r.status_code == 200
     assert _netbox_writes(hub) == [
-        {"ip_id": 43, "custom_fields": {"mac_address": ""}},
-        {"ip_id": 42, "custom_fields": {"mac_address": "bc:24:11:df:63:5e"}},
+        {"ip_id": 43, "custom_fields": {"dhcp_reservation": False}},
+        {"ip_id": 42, "custom_fields": {"dhcp_reservation": True,
+                                        "mac_address": "bc:24:11:df:63:5e"}},
     ]
 
 
@@ -168,7 +174,8 @@ def test_update_without_readdressing_touches_only_the_one_ip():
           json={"ip": "172.17.1.199", "old_ip": "172.17.1.199",
                 "mac": "bc:24:11:df:63:5e"})
     assert _netbox_writes(hub) == [{"ip_id": 42,
-                                    "custom_fields": {"mac_address": "bc:24:11:df:63:5e"}}]
+                                    "custom_fields": {"dhcp_reservation": True,
+                                                      "mac_address": "bc:24:11:df:63:5e"}}]
 
 
 # ── the write-back must never break an already-applied Kea write ─────────────
@@ -207,7 +214,8 @@ def test_netbox_failure_is_reported_not_raised():
 def test_already_correct_mac_is_not_rewritten():
     hub = _hub(ip_addresses=[
         {"id": 42, "address": "172.17.1.199/24",
-         "custom_fields": {"mac_address": "BC:24:11:DF:63:5E"}}])
+         "custom_fields": {"mac_address": "BC:24:11:DF:63:5E",
+                           "dhcp_reservation": True}}])
     c = _build(_admin(), hub)
     r = c.post("/api/dhcp/reservation",
                json={"ip": "172.17.1.199", "mac": "bc:24:11:df:63:5e"})
@@ -262,7 +270,8 @@ def test_created_ip_carries_the_mac():
     c.post("/api/dhcp/reservation",
            json={"ip": "172.17.1.199", "mac": "bc:24:11:df:63:5e"})
     assert _netbox_writes(hub) == [
-        {"ip_id": 99, "custom_fields": {"mac_address": "bc:24:11:df:63:5e"}}]
+        {"ip_id": 99, "custom_fields": {"dhcp_reservation": True,
+                                        "mac_address": "bc:24:11:df:63:5e"}}]
 
 
 def test_creation_picks_the_narrowest_containing_prefix():
@@ -296,7 +305,8 @@ def test_existing_netbox_ip_is_never_duplicated():
            json={"ip": "172.17.1.199", "mac": "bc:24:11:df:63:5e"})
     assert not _allocations(hub)
     assert _netbox_writes(hub) == [
-        {"ip_id": 42, "custom_fields": {"mac_address": "bc:24:11:df:63:5e"}}]
+        {"ip_id": 42, "custom_fields": {"dhcp_reservation": True,
+                                        "mac_address": "bc:24:11:df:63:5e"}}]
 
 
 def test_failed_creation_is_reported_not_raised():

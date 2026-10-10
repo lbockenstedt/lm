@@ -386,3 +386,23 @@ def test_output_is_deterministic():
                   macs_by_device={"sw1": [{"mac": "aa:bb:cc:dd:ee:01",
                                            "interface": "5"}]})
     assert build_topology(**kwargs) == build_topology(**kwargs)
+
+
+def test_netbox_row_rerooting_fleet_node_does_not_break_lldp_or_macs():
+    """A NetBox row with its own ``id`` matching a fleet switch by IP re-roots
+    the alias set, so the fleet id cached at inventory time goes stale. This
+    used to raise KeyError (HTTP 500 on /api/nw/topology) and drop MAC edges."""
+    netbox = [{"id": 42, "name": "OLKS-MGMTSW", "primary_ip": "172.16.1.90/24"},
+              {"id": 43, "name": "printer", "mac": "00:11:22:33:44:55"}]
+    lldp = {"sw1": [{"local_port": "24", "remote_chassis": "00:0b:86:aa:bb:cc",
+                     "remote_name": "GATEWAY", "remote_mgmt_ip": "172.16.1.1",
+                     "remote_port": "0/0/1"}]}
+    macs = {"sw1": [{"mac": "00:11:22:33:44:55", "interface": "5", "vlan": "1"}]}
+    g = build_topology(fleet=FLEET, lldp_by_device=lldp, macs_by_device=macs,
+                       netbox_devices=netbox)
+    ids = {n["id"] for n in g["nodes"]}
+    assert all(e["a"] in ids and e["b"] in ids for e in g["edges"])
+    sw = [n for n in g["nodes"] if n["name"] == "OLKS-MGMTSW"]
+    assert len(sw) == 1 and sw[0]["lldp_capable"]
+    assert _edge_between(g, "OLKS-MGMTSW", "GATEWAY")["source"] == "lldp"
+    assert _edge_between(g, "OLKS-MGMTSW", "printer")["source"] == "mac"

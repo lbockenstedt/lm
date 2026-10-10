@@ -198,6 +198,18 @@ class TopologyBuilder:
                 return root
         return ""
 
+    def current(self, node_id: str) -> str:
+        """Live canonical id for an id returned earlier by ``add_node``.
+
+        A later ``add_node`` can merge that node into a set rooted elsewhere
+        (a NetBox record sharing the fleet device's IP, an LLDP neighbour that
+        is the same box), so a cached id must be re-resolved before use.
+        """
+        if not node_id:
+            return ""
+        root = self.aliases.find(node_id)
+        return root if root in self._nodes else ""
+
     def _repoint_edges(self, old_ids: set, new_root: str) -> None:
         """Move edges off ids that were just merged away.
 
@@ -377,7 +389,8 @@ def build_topology(fleet: Optional[List[dict]] = None,
 
     # ── 4. LLDP adjacencies ─────────────────────────────────────────────────
     for device_id, rows in (lldp_by_device or {}).items():
-        local_id = fleet_ids.get(_s(device_id)) or builder.resolve({"id": device_id})
+        local_id = (builder.current(fleet_ids.get(_s(device_id), ""))
+                    or builder.resolve({"id": device_id}))
         if not local_id:
             continue
         if rows:
@@ -394,6 +407,7 @@ def build_topology(fleet: Optional[List[dict]] = None,
             if not remote_id:
                 continue
             builder._nodes[remote_id]["lldp_capable"] = True
+            local_id = builder.current(local_id)
             builder.add_edge(local_id, row.get("local_port"),
                              remote_id, row.get("remote_port"),
                              "lldp", _s(row.get("remote_descr")))
@@ -431,7 +445,7 @@ def build_topology(fleet: Optional[List[dict]] = None,
     # ── 7. MAC-table inference ──────────────────────────────────────────────
     if infer_from_macs:
         for device_id, rows in (macs_by_device or {}).items():
-            local_id = fleet_ids.get(_s(device_id))
+            local_id = builder.current(fleet_ids.get(_s(device_id), ""))
             if not local_id:
                 continue
             for port, info in classify_ports(rows or [],

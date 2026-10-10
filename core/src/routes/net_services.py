@@ -4018,7 +4018,12 @@ def register(app, hub, ctx):
 
         access.unwrap_spoke(await hub.request_response(
             ipam, "NETBOX_UPDATE_IP_ADDR",
-            {"ip_id": new_id, "custom_fields": {"mac_address": mac}},
+            # dhcp_reservation=True is what actually makes build_dhcp_payload
+            # mint the reservation — mac_address alone is also stamped on
+            # plain dynamic-lease IPs by ARP/CPPM discovery and must not by
+            # itself be read as reservation intent.
+            {"ip_id": new_id, "custom_fields": {"mac_address": mac,
+                                                 "dhcp_reservation": True}},
             timeout=30.0))
         # Every other NetBox mutation goes through netbox.py's _netbox_write,
         # which invalidates the cached IP list for all tenants and kicks a
@@ -4031,12 +4036,13 @@ def register(app, hub, ctx):
         # read-side view agreeing with it.)
         _refresh_module_all_tenants(hub, "netbox_ips")
         logger.info("dhcp reservation write-back: created NetBox IP %s (%s) "
-                    "in %s with mac_address=%r", ip, new_id, best[1], mac)
+                    "in %s with mac_address=%r dhcp_reservation=True",
+                    ip, new_id, best[1], mac)
         return {"status": "created", "ip": ip, "ip_id": new_id,
                 "prefix": best[1], "mac_address": mac}
 
     async def _reservation_netbox_writeback(body, *, clear=False):
-        """Mirror a reservation's MAC onto its NetBox IP object.
+        """Mirror a reservation's MAC + reservation flag onto its NetBox IP.
 
         A reservation written straight to Kea is invisible to NetBox, but
         ``core.dns_dhcp_sync`` rebuilds Kea's whole ``subnet4`` from NetBox
@@ -4045,8 +4051,18 @@ def register(app, hub, ctx):
         returned SUCCESS, the row showed up in the list, and it simply
         disappeared some minutes later. NetBox is the declared source of
         truth for reservations (``build_dhcp_payload`` mints one for any IP
-        carrying ``custom_fields.mac_address``), so the MAC has to land there
-        for the reservation to be durable.
+        carrying a truthy ``custom_fields.dhcp_reservation`` AND a
+        ``mac_address``), so both have to land there for the reservation to
+        be durable.
+
+        ``dhcp_reservation`` is deliberately its own field rather than reusing
+        ``mac_address`` presence: ARP/firewall discovery and the CPPM
+        access-tracker sync stamp ``mac_address`` on any device they see,
+        purely for identity, so a plain dynamic-lease IP routinely carries one
+        without ever being a reservation. Clearing (``clear=True``, e.g. on
+        delete or re-addressing) flips ``dhcp_reservation`` back to False but
+        leaves ``mac_address`` untouched — that identity data isn't ours to
+        erase and other feeds depend on it.
 
         When NetBox has no IP object for the address at all, one is CREATED
         (see ``_create_netbox_ip_for_reservation``) rather than merely reported
@@ -4083,16 +4099,23 @@ def register(app, hub, ctx):
                     return {"status": "unchanged", "ip": ip}
                 return await _create_netbox_ip_for_reservation(
                     hub, ipam, ip, mac, body)
-            current = ((match.get("custom_fields") or {})
-                       .get("mac_address") or "").strip()
-            if current.lower() == mac.lower():
+            existing_cf = match.get("custom_fields") or {}
+            current_mac = (existing_cf.get("mac_address") or "").strip()
+            current_res = bool(existing_cf.get("dhcp_reservation"))
+            want_res = not clear
+            if current_mac.lower() == mac.lower() and current_res == want_res:
                 return {"status": "unchanged", "ip": ip, "ip_id": match["id"]}
-            payload = {"ip_id": match["id"],
-                       "custom_fields": {"mac_address": mac}}
+            custom_fields = {"dhcp_reservation": want_res}
+            if not clear:
+                # Clearing leaves mac_address alone (see docstring) — only an
+                # active reservation write sets it.
+                custom_fields["mac_address"] = mac
+            payload = {"ip_id": match["id"], "custom_fields": custom_fields}
             access.unwrap_spoke(await hub.request_response(
                 ipam, "NETBOX_UPDATE_IP_ADDR", payload, timeout=30.0))
             logger.info("dhcp reservation write-back: NetBox IP %s (%s) "
-                        "mac_address=%r", ip, match["id"], mac)
+                        "mac_address=%r dhcp_reservation=%s",
+                        ip, match["id"], mac, want_res)
             return {"status": "ok", "ip": ip, "ip_id": match["id"],
                     "mac_address": mac}
         except Exception as e:  # noqa: BLE001 — never fail an applied Kea write
