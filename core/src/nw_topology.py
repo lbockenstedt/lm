@@ -30,6 +30,7 @@ matters because the interesting failures are all about *identity* — the same
 switch arriving as a chassis MAC from LLDP, an IP from NetBox and a UUID from
 the nw fleet must collapse to ONE node or the map grows phantom devices.
 """
+import re
 from typing import Any, Dict, List, Optional
 
 from nw_topology_macs import classify_ports, is_topology_mac, norm_mac
@@ -145,6 +146,9 @@ class TopologyBuilder:
         root = self.aliases.union(keys)
 
         node = None
+        # The most specific node (a fleet switch over a bare LLDP neighbour)
+        # is the merge base, so its identity is what survives.
+        prior.sort(key=lambda n: _KIND_RANK.get(n["kind"], 99))
         for existing in prior:
             if node is None:
                 node = existing
@@ -165,9 +169,10 @@ class TopologyBuilder:
         # be flattened back to "endpoint" by a later MAC-table sighting.
         if _KIND_RANK.get(kind, 99) < _KIND_RANK.get(node["kind"], 99):
             node["kind"] = kind
-        if not node["name"]:
-            node["name"] = (_s(rec.get("name")) or _s(rec.get("remote_name"))
-                            or _s(rec.get("hostname")))
+        rec_name = (_s(rec.get("name")) or _s(rec.get("remote_name"))
+                    or _s(rec.get("hostname")))
+        if _better_name(node["name"], rec_name):
+            node["name"] = rec_name
         if not node["device_id"] and _s(rec.get("id")):
             node["device_id"] = _s(rec.get("id"))
         for field in ("tenant_id", "object_type", "model", "site", "role"):
@@ -279,6 +284,8 @@ class TopologyBuilder:
     # ── output ───────────────────────────────────────────────────────────────
     def render(self) -> Dict[str, Any]:
         nodes = sorted(self._nodes.values(), key=lambda n: (n["kind"], n["name"], n["id"]))
+        for node in nodes:
+            node["infra"] = _is_infra(node)
         edges = sorted(self._edges.values(),
                        key=lambda e: (e["a"], e["a_port"], e["b"], e["b_port"]))
         by_source: Dict[str, int] = {}
@@ -301,6 +308,7 @@ class TopologyBuilder:
                 "edges_by_source": by_source,
                 "trunk_ports": len(trunks),
                 "nodes_without_lldp": sum(1 for n in nodes if not n["lldp_capable"]),
+                "infra_nodes": sum(1 for n in nodes if n["infra"]),
             },
         }
 
@@ -317,7 +325,9 @@ def _merge_node(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
     each view held something the other lacked."""
     if _KIND_RANK.get(src["kind"], 99) < _KIND_RANK.get(dst["kind"], 99):
         dst["kind"] = src["kind"]
-    for field in ("name", "device_id", "tenant_id", "object_type", "model",
+    if _better_name(dst["name"], src["name"]):
+        dst["name"] = src["name"]
+    for field in ("device_id", "tenant_id", "object_type", "model",
                   "site", "role"):
         if not dst[field] and src[field]:
             dst[field] = src[field]
@@ -331,6 +341,57 @@ def _merge_node(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
 #: nw ``object_type`` → topology node kind.
 _OBJECT_KIND = {"aos_switch": "switch", "cx_switch": "switch",
                 "ex_switch": "switch", "gateway": "gateway"}
+
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_MAC_NAME_RE = re.compile(r"^(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}$|^(?:[0-9a-f]{4}\.){2}[0-9a-f]{4}$"
+                          r"|^[0-9a-f]{12}$", re.IGNORECASE)
+#: NetBox auto-discovery names unknown hosts ``device-<mac>``.
+_NETBOX_PLACEHOLDER_RE = re.compile(r"^device-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def _is_real_hostname(name: str) -> bool:
+    """A name an operator would recognise: not a MAC, not NetBox's
+    ``device-<mac>`` placeholder, not free-text LLDP junk."""
+    name = _s(name)
+    return bool(name and _HOSTNAME_RE.match(name)
+                and re.search(r"[A-Za-z]", name)
+                and not _MAC_NAME_RE.match(name)
+                and not _NETBOX_PLACEHOLDER_RE.match(name))
+
+
+def _better_name(current: str, candidate: str) -> bool:
+    """Whether ``candidate`` should replace a node's ``current`` name: fill an
+    empty one, or upgrade a bare MAC / NetBox placeholder to a real hostname.
+    Any other name (including an IP) is kept -- LLDP junk must not rename it."""
+    if not _s(candidate):
+        return False
+    current = _s(current)
+    if not current:
+        return True
+    is_placeholder = bool(_MAC_NAME_RE.match(current)
+                          or _NETBOX_PLACEHOLDER_RE.match(current))
+    return is_placeholder and _is_real_hostname(candidate)
+
+
+def _is_infra(node: Dict[str, Any]) -> bool:
+    """Whether a node is infrastructure (switch, firewall, hypervisor, ...)
+    rather than an endpoint known only by a MAC.
+
+    The map's default view shows infrastructure only. Fleet devices and
+    operator declarations always count; anything else must carry a real
+    hostname (not a MAC, not NetBox's ``device-<mac>`` placeholder, not the
+    free-text junk some LLDP agents advertise) AND corroboration -- a NetBox
+    record or a management address.
+    """
+    kind = _s(node.get("kind"))
+    sources = node.get("sources") or []
+    if kind in ("switch", "gateway") or kind == "manual" or node.get("manual"):
+        return True
+    if "fleet" in sources:
+        return True
+    if not _is_real_hostname(node.get("name")):
+        return False
+    return "netbox" in sources or bool(node.get("addresses"))
 
 
 def build_topology(fleet: Optional[List[dict]] = None,
