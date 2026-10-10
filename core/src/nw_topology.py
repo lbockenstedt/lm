@@ -712,8 +712,18 @@ def build_topology(fleet: Optional[List[dict]] = None,
         kind = _OBJECT_KIND.get(_s(dev.get("object_type")), "device")
         rec = dev
         if _s(dev.get("id")) in duplicate_of:
-            # Fold the copy's address/name into the canonical device.
-            rec = dict(dev, id=duplicate_of[_s(dev.get("id"))])
+            # Fold the copy's address/name into the canonical device. A VRRP /
+            # active-gateway VIP is scanned under one peer's name but answered
+            # by the other (its LLDP table proves which), so a conflicting
+            # hostname is dropped — keeping it would alias, and merge, both
+            # members of a VSX pair into one node.
+            canon_id = duplicate_of[_s(dev.get("id"))]
+            canon = next((c for c in fleet if isinstance(c, dict)
+                          and _s(c.get("id")) == canon_id), {})
+            rec = dict(dev, id=canon_id)
+            if _s(dev.get("name")).casefold() != _s(canon.get("name")).casefold():
+                rec.pop("name", None)
+                rec.pop("hostname", None)
         node_id = builder.add_node(rec, kind, "fleet")
         if node_id:
             fleet_ids[_s(dev.get("id"))] = node_id
@@ -805,7 +815,208 @@ def build_topology(fleet: Optional[List[dict]] = None,
         _attach_endpoints(builder, macs_by_device or {}, fleet_ids,
                           duplicate_of, trunk_threshold)
 
-    return builder.render()
+    # ── 8. Logical units: VSX pairs fold into one switch, stacks are tagged ──
+    pairs = _vsx_pairs(builder, lldp_seen)
+    return _logical_units(builder.render(), pairs)
+
+
+def _vsx_pairs(builder, lldp_seen) -> List[tuple]:
+    """Polled switch pairs that behave as one VSX switch.
+
+    nw collects no VSX state, so the pair is read from LLDP: the two switches
+    are cabled to each other (the ISL / keepalive) AND at least two other
+    devices are dual-homed to both on the SAME local port number (MCLAG
+    members are wired symmetrically). Two independent switches that merely
+    uplink to each other share no such ports, so they stay separate.
+    """
+    seen: Dict[str, set] = {}
+    for _dev, nid, rows in lldp_seen:
+        me = builder.current(nid)
+        if not me or builder._nodes[me]["kind"] != "switch":
+            continue
+        ports = seen.setdefault(me, set())
+        for local_port, remote_id, _rp, _raw in rows:
+            remote = builder.current(remote_id)
+            if remote and remote != me and local_port:
+                ports.add((local_port, remote))
+    ids = sorted(seen)
+    pairs, used = [], set()
+    for i, x in enumerate(ids):
+        for y in ids[i + 1:]:
+            if x in used or y in used:
+                continue
+            linked = any(r == y for _, r in seen[x]) or any(r == x for _, r in seen[y])
+            shared = ({p for p in seen[x] if p[1] not in (x, y)}
+                      & {p for p in seen[y] if p[1] not in (x, y)})
+            if linked and len({r for _, r in shared}) >= 2:
+                pairs.append((x, y))
+                used.update((x, y))
+    return pairs
+
+
+def _unit_name(n1: str, n2: str) -> str:
+    """Generate unit name by removing common prefix up to last '-' or '.'."""
+    i = 0
+    while i < len(n1) and i < len(n2) and n1[i] == n2[i]:
+        i += 1
+    if i == 0:
+        return n1 + " / " + n2
+    prefix_end = 0
+    for j in range(i - 1, -1, -1):
+        if n1[j] in "-.":
+            prefix_end = j + 1
+            break
+    suffix = n2[prefix_end:]
+    return n1 + " / " + suffix
+
+def _logical_units(graph: dict, vsx_pairs: list) -> dict:
+    """Fold each VSX pair into one logical switch node and tag stacks.
+
+    Edges keep the member's real port and gain ``a_member``/``b_member`` (the
+    member's name) so the UI can label them and the NetBox cable sync still
+    lands on the physical member. The ISL between the members is internal to
+    the unit and is listed on it as ``isl`` instead of drawn. A VSF/backplane
+    stack already answers as one device; its member numbers are read from its
+    ports (``1/1/x``, ``2/1/x``) into ``stack_members``.
+    """
+    nodes = graph["nodes"]
+    edges = graph["edges"]
+    trunks = graph["trunks"]
+    stats = graph["stats"]
+
+    used = set()
+    units = []
+    node_map = {node["id"]: node for node in nodes}
+    new_nodes = []
+    member_of = {}
+
+    for x, y in vsx_pairs:
+        if x not in node_map or y not in node_map or x in used or y in used:
+            continue
+        members = sorted([node_map[x], node_map[y]], key=lambda n: n["name"])
+        unit_id = "unit:" + members[0]["id"] + "+" + members[1]["id"]
+        unit_node = members[0].copy()
+        unit_node.update({
+            "id": unit_id,
+            "name": _unit_name(members[0]["name"], members[1]["name"]),
+            "kind": "switch",
+            "infra": True,
+            "unit": "vsx",
+            "members": [
+                {
+                    "id": m["id"],
+                    "name": m["name"],
+                    "device_id": m["device_id"],
+                    "macs": m["macs"][:],
+                    "addresses": m["addresses"][:],
+                    "sources": m["sources"][:],
+                    "tenant_id": m["tenant_id"]
+                } for m in members
+            ],
+            "sources": list(dict.fromkeys(members[0]["sources"] + members[1]["sources"])),
+            "addresses": list(dict.fromkeys(members[0]["addresses"] + members[1]["addresses"])),
+            "macs": list(dict.fromkeys(members[0]["macs"] + members[1]["macs"])),
+            "lldp_capable": members[0]["lldp_capable"] or members[1]["lldp_capable"],
+            "manual": members[0]["manual"] or members[1]["manual"],
+            "tenant_id": next((m["tenant_id"] for m in members if m["tenant_id"]), "")
+        })
+        units.append(unit_node)
+        used.add(x)
+        used.add(y)
+        member_of[x] = (unit_id, members[0]["name"])
+        member_of[y] = (unit_id, members[1]["name"])
+
+    new_edges = []
+    edge_set = set()
+    for edge in edges:
+        a = edge["a"]
+        b = edge["b"]
+        a_member = ""
+        b_member = ""
+        if a in member_of and b in member_of and member_of[a][0] == member_of[b][0]:
+            # Same unit, drop edge but record isl
+            unit_id = member_of[a][0]
+            for u in units:
+                if u["id"] == unit_id:
+                    if "isl" not in u:
+                        u["isl"] = []
+                    u["isl"].append({
+                        "a_member": member_of[a][1],
+                        "a_port": edge["a_port"],
+                        "b_member": member_of[b][1],
+                        "b_port": edge["b_port"]
+                    })
+            continue
+        new_edge = edge.copy()
+        if a in member_of:
+            new_edge["a"] = member_of[a][0]
+            new_edge["a_member"] = member_of[a][1]
+        if b in member_of:
+            new_edge["b"] = member_of[b][0]
+            new_edge["b_member"] = member_of[b][1]
+        key = (new_edge.get("a", ""), new_edge.get("a_port", ""), new_edge.get("a_member", ""),
+               new_edge.get("b", ""), new_edge.get("b_port", ""), new_edge.get("b_member", ""))
+        if key not in edge_set:
+            edge_set.add(key)
+            new_edges.append(new_edge)
+
+    new_trunks = []
+    for trunk in trunks:
+        node = trunk["node"]
+        if node in member_of:
+            new_trunk = trunk.copy()
+            new_trunk["node"] = member_of[node][0]
+            new_trunk["member"] = member_of[node][1]
+            new_trunk["node_name"] = trunk.get("node_name", "")
+            new_trunks.append(new_trunk)
+        else:
+            new_trunks.append(trunk)
+
+    nodes = [n for n in nodes if n["id"] not in used] + units
+    port_re = re.compile(r"^(\d+)/(\d+/)?[A-Za-z]?\d+$")
+    node_ports = {}
+    for edge in new_edges:
+        a = edge["a"]
+        b = edge["b"]
+        a_port = edge.get("a_port", "")
+        b_port = edge.get("b_port", "")
+        if a not in node_ports:
+            node_ports[a] = set()
+        if b not in node_ports:
+            node_ports[b] = set()
+        if port_re.match(a_port):
+            node_ports[a].add(int(port_re.match(a_port).group(1)))
+        if port_re.match(b_port):
+            node_ports[b].add(int(port_re.match(b_port).group(1)))
+
+    for node in nodes:
+        node_id = node["id"]
+        if node_id in node_ports:
+            ports = list(node_ports[node_id])
+            if len(ports) >= 2 and all(p != 0 for p in ports):
+                node["stack_members"] = sorted(ports)
+                if "unit" not in node:
+                    node["unit"] = "stack"
+
+    stats["logical_units"] = len(units)
+    stats["nodes"] = len(nodes)
+    by_source = {}
+    for edge in new_edges:
+        by_source[edge["source"]] = by_source.get(edge["source"], 0) + 1
+    stats["edges_by_source"] = by_source
+    stats["edges"] = len(new_edges)
+    stats["trunk_ports"] = len(new_trunks)
+    stats["nodes_without_lldp"] = sum(1 for n in nodes if not n.get("lldp_capable", False))
+    stats["infra_nodes"] = sum(1 for n in nodes if n.get("infra", False))
+
+    graph["nodes"] = nodes
+    graph["edges"] = new_edges
+    graph["trunks"] = new_trunks
+
+    graph["nodes"].sort(key=lambda n: (n["kind"], n["name"], n["id"]))
+    graph["edges"].sort(key=lambda e: (e.get("a", ""), e.get("a_port", ""), e.get("b", ""), e.get("b_port", "")))
+
+    return graph
 
 
 def netbox_lldp_links(graph: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -836,11 +1047,19 @@ def netbox_lldp_links(graph: Dict[str, Any]) -> List[Dict[str, Any]]:
             return detail
         return p
 
+    def member(node, name):
+        # A VSX unit is not a NetBox device; its cable lands on the member.
+        for m in (node or {}).get("members") or []:
+            if name and m.get("name") == name:
+                return m
+        return node
+
     out, seen = [], set()
     for edge in (graph or {}).get("edges") or []:
         if not isinstance(edge, dict) or edge.get("source") != "lldp":
             continue
-        a, b = nodes.get(edge.get("a")), nodes.get(edge.get("b"))
+        a = member(nodes.get(edge.get("a")), _s(edge.get("a_member")))
+        b = member(nodes.get(edge.get("b")), _s(edge.get("b_member")))
         if not a or not b or not _s(edge.get("a_port")) or not _s(edge.get("b_port")):
             continue
         detail = _s(edge.get("detail"))

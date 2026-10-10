@@ -19469,7 +19469,7 @@ function _nwTopoGroupEndpoints(nodes, edges, openSet) {
             const e = leafEdge[leaf];
             dropEdges.add(e);
             if (!open) { dropNodes.add(leaf); return; }
-            const port = e.a === par ? e.a_port : e.b_port;
+            const port = _nwTopoPort(e, e.a === par ? 'a' : 'b');
             addEdges.push({ a: gid, a_port: '', b: leaf, b_port: '', source: e.source,
                             detail: port ? 'port ' + port + (e.detail ? ' — ' + e.detail : '') : e.detail });
         });
@@ -19478,6 +19478,15 @@ function _nwTopoGroupEndpoints(nodes, edges, openSet) {
         nodes: nodes.filter(n => !dropNodes.has(n.id)).concat(addNodes),
         edges: edges.filter(e => !dropEdges.has(e)).concat(addEdges),
     };
+}
+
+// A VSX unit's edges carry the physical member that owns the port.
+function _nwTopoPort(e, side) {
+    const port = e[side + '_port'] || '';
+    const member = e[side + '_member'] || '';
+    if (!member) return port;
+    const short = member.split(/[-.]/).filter(Boolean).pop() || member;
+    return port ? short + ' ' + port : short;
 }
 
 function _nwTopoSvg(graph, view) {
@@ -19503,14 +19512,17 @@ function _nwTopoSvg(graph, view) {
     nodes.forEach(nd => { byId[nd.id] = nd; });
     const tipOf = nd => [nd.name, nd.object_type || nd.kind,
                      (nd.addresses || []).join(', '), (nd.macs || []).join(', '),
+                     nd.unit === 'vsx' ? 'VSX pair: ' + (nd.members || []).map(m => m.name).join(' + ') : '',
+                     (nd.stack_members || []).length ? 'Stack members: ' + nd.stack_members.join(', ') : '',
                      nd.lldp_capable ? 'LLDP' : '', nd.manual ? 'Declared' : '',
                      'via ' + (nd.sources || []).join('+')].filter(Boolean).join('\n');
     const lines = edges.map(e => {
         const a = pos[e.a], b = pos[e.b];
         if (!a || !b) return '';
         const st = _NW_TOPO_EDGE_STYLE[e.source] || _NW_TOPO_EDGE_STYLE.mac;
-        const tip = `${(byId[e.a] || {}).name || ''} ${e.a_port ? '(' + e.a_port + ')' : ''} — ` +
-                    `${(byId[e.b] || {}).name || ''} ${e.b_port ? '(' + e.b_port + ')' : ''}` +
+        const ap = _nwTopoPort(e, 'a'), bp = _nwTopoPort(e, 'b');
+        const tip = `${(byId[e.a] || {}).name || ''} ${ap ? '(' + ap + ')' : ''} — ` +
+                    `${(byId[e.b] || {}).name || ''} ${bp ? '(' + bp + ')' : ''}` +
                     `\n${st.label}${e.detail ? ' — ' + e.detail : ''}`;
         const [l, r] = a.x <= b.x ? [a, b] : [b, a];
         const mx = (l.x + r.x) / 2;
@@ -19546,7 +19558,7 @@ function _nwTopoSvg(graph, view) {
             <title>${escapeHtml(tip)}</title>
             ${_nwTopoIcon(nd, p.x, p.y, _nwTopoNodeColor(nd))}
             <text x="${p.x.toFixed(1)}" y="${(p.y + 32).toFixed(1)}" text-anchor="middle"
-              style="font-size:10px" fill="#334155">${escapeHtml(String(nd.name || nd.id).slice(0, 28))}</text>
+              style="font-size:10px" fill="#334155">${escapeHtml(String(nd.name || nd.id).slice(0, 34))}</text>
             ${kids > 0 ? `<circle cx="${(p.x + 15).toFixed(1)}" cy="${(p.y - 15).toFixed(1)}" r="8" fill="#0f172a"/>
                 <text x="${(p.x + 15).toFixed(1)}" y="${(p.y - 11.5).toFixed(1)}" text-anchor="middle"
                   style="font-size:10px; font-weight:700; fill:#fff">${badgeText}</text>` : ''}

@@ -650,3 +650,93 @@ def test_a_switchs_own_mac_and_lldp_linked_nodes_get_no_mac_edge():
                     {"mac": "aa:bb:cc:00:02:01", "interface": "1/1/5"}]}
     g = build_topology(fleet=fleet, lldp_by_device=_CORE_ACC, macs_by_device=macs)
     assert not [e for e in g["edges"] if e["source"] == "mac"]
+
+
+# ── Logical units: VSX pairs and stacks ─────────────────────────────────────
+# Mirrors the live MIPBE N31 core: two CX switches cabled to each other, with
+# the VPNCs and TOR-AGG dual-homed to both on the same port, plus VRRP VIP
+# fleet copies scanned under one peer's name but answered by the other.
+
+def _lldp(lp, chassis, rp, name, ip=""):
+    return {"local_port": lp, "remote_chassis": chassis, "remote_port": rp,
+            "remote_name": name, "remote_mgmt_ip": ip}
+
+
+_CRSW1_MAC, _CRSW2_MAC = "18:7a:3b:d8:6e:00", "ec:50:aa:f4:5b:00"
+_VSX_FLEET = [
+    {"id": "c1", "name": "N31-CRSW1", "object_type": "cx_switch", "address": "172.21.0.11"},
+    {"id": "c2", "name": "N31-CRSW2", "object_type": "cx_switch", "address": "172.21.0.10"},
+    # VIP: named CRSW1 by the scanner, answered (LLDP table) by CRSW2.
+    {"id": "vip", "name": "N31-CRSW1", "object_type": "cx_switch", "address": "172.21.0.254"},
+]
+
+
+def _vsx_lldp():
+    def shared():
+        return [_lldp("1/1/43", "00:1a:1e:04:2f:00", "GE0/0/2", "N31-VPNC1"),
+                _lldp("1/1/51", "ec:eb:b8:f3:2a:e5", "22", "N31-TOR-AGG", "172.21.0.26")]
+    c1 = shared() + [_lldp("1/1/47", _CRSW2_MAC, "1/1/47", "N31-CRSW2"),
+                     _lldp("1/1/49", _CRSW2_MAC, "1/1/49", "N31-CRSW2")]
+    c2 = shared() + [_lldp("1/1/47", _CRSW1_MAC, "1/1/47", "N31-CRSW1"),
+                     _lldp("1/1/49", _CRSW1_MAC, "1/1/49", "N31-CRSW1")]
+    c2[1] = _lldp("1/1/51", "ec:eb:b8:f3:2a:e5", "118", "N31-TOR-AGG", "172.21.0.26")
+    return {"c1": c1, "c2": c2, "vip": [dict(r) for r in c2]}
+
+
+def test_a_vsx_pair_is_one_logical_switch():
+    g = build_topology(fleet=_VSX_FLEET, lldp_by_device=_vsx_lldp())
+    unit = _node(g, "N31-CRSW1 / CRSW2")
+    assert unit is not None and unit["unit"] == "vsx" and unit["infra"]
+    assert [m["name"] for m in unit["members"]] == ["N31-CRSW1", "N31-CRSW2"]
+    assert _node(g, "N31-CRSW1") is None and _node(g, "N31-CRSW2") is None
+    # The ISL is internal to the unit, not a drawn link.
+    assert not any(e["a"] == e["b"] for e in g["edges"])
+    assert len(unit["isl"]) == 2
+    assert g["stats"]["logical_units"] == 1
+    # TOR-AGG is dual-homed: one link per member, labelled with the member.
+    agg = _node(g, "N31-TOR-AGG")
+    to_agg = [e for e in g["edges"] if agg["id"] in (e["a"], e["b"])]
+    members = sorted(e.get("a_member") or e.get("b_member") for e in to_agg)
+    assert members == ["N31-CRSW1", "N31-CRSW2"]
+
+
+def test_a_vip_copy_named_after_the_peer_does_not_fuse_the_pair_into_one_box():
+    # Without the VSX pass the bug was invisible as a "unit"; the members must
+    # still be two distinct physical switches inside it.
+    g = build_topology(fleet=_VSX_FLEET, lldp_by_device=_vsx_lldp())
+    unit = _node(g, "N31-CRSW1 / CRSW2")
+    ids = [m["id"] for m in unit["members"]]
+    assert len(set(ids)) == 2
+
+
+def test_netbox_cables_from_a_vsx_unit_land_on_the_physical_member():
+    from nw_topology import netbox_lldp_links
+    g = build_topology(fleet=_VSX_FLEET, lldp_by_device=_vsx_lldp())
+    ends = {(l["a"]["name"], l["a_port"], l["b"]["name"], l["b_port"])
+            for l in netbox_lldp_links(g)}
+    flat = {x for e in ends for x in e}
+    assert "N31-CRSW1 / CRSW2" not in flat
+    assert any("N31-CRSW1" in e and "1/1/51" in e for e in ends)
+    assert any("N31-CRSW2" in e and "1/1/51" in e for e in ends)
+
+
+def test_two_switches_that_only_uplink_to_each_other_stay_separate():
+    fleet = [{"id": "a", "name": "CORE", "object_type": "cx_switch", "address": "10.0.0.1"},
+             {"id": "b", "name": "ACCESS", "object_type": "cx_switch", "address": "10.0.0.2"}]
+    lldp = {"a": [_lldp("1/1/1", "aa:00:00:00:00:02", "1/1/49", "ACCESS"),
+                  _lldp("1/1/2", "aa:00:00:00:00:09", "eth0", "HOST1")],
+            "b": [_lldp("1/1/49", "aa:00:00:00:00:01", "1/1/1", "CORE"),
+                  _lldp("1/1/2", "aa:00:00:00:00:08", "eth0", "HOST2")]}
+    g = build_topology(fleet=fleet, lldp_by_device=lldp)
+    assert _node(g, "CORE") and _node(g, "ACCESS")
+    assert g["stats"]["logical_units"] == 0
+
+
+def test_a_vsf_stack_is_tagged_with_its_members():
+    lldp = {"sw1": [_lldp("1", "9c:37:08:15:32:80", "10/1/52", "AJ11-TRSW"),
+                    _lldp("2", "9c:37:08:15:32:80", "9/1/52", "AJ11-TRSW")]}
+    g = build_topology(fleet=FLEET, lldp_by_device=lldp)
+    stack = _node(g, "AJ11-TRSW")
+    assert stack["unit"] == "stack" and stack["stack_members"] == [9, 10]
+    # A gateway's 0/0/x ports and a standalone 1/1/x switch are not stacks.
+    assert "unit" not in _node(g, "OLKS-MGMTSW")
