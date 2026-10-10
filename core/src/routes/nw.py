@@ -2145,9 +2145,24 @@ def register(app, hub, ctx):
             hub.state.system_state["global_config"] = gc
             hub.state._mark_dirty()
             await _nw_push_fleet(hub, spoke_id)
-            new_ids = [d["id"] for d in added]
-            _nw_spawn_refresh(f"discovery-poll:{new_ids[0]}",
-                              lambda: _nw_poll_discovered(hub, new_ids))
+
+        # Also backfill any device on THIS spoke that was auto-added by a scan
+        # before the hostname never got read (display name still == its raw
+        # address — the "source" discovery devices never named because the
+        # discovery-poll hook above didn't exist yet, or a poll never landed
+        # before the spoke/hub restarted and reset the in-memory scheduler).
+        # Folding these into the same best-effort poll on every scan heals
+        # them without waiting on the autonomous per-device cadence (3-9h,
+        # reset by any spoke reconnect) or a manual "Poll Now".
+        stale_ids = [d["id"] for d in devices
+                     if isinstance(d, dict) and d.get("spoke_id") == spoke_id
+                     and d.get("id") and d.get("id") not in {a["id"] for a in added}
+                     and str(d.get("name") or "").strip()
+                     == str(d.get("address") or "").strip()]
+        poll_ids = [d["id"] for d in added] + stale_ids
+        if poll_ids:
+            _nw_spawn_refresh(f"discovery-poll:{poll_ids[0]}",
+                              lambda: _nw_poll_discovered(hub, poll_ids))
 
         return {
             "status": "ok",
