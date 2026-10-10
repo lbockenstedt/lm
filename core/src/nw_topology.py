@@ -144,6 +144,7 @@ class TopologyBuilder:
                 prior.append(self._nodes[old_root])
             self._nodes.pop(old_root, None)
         root = self.aliases.union(keys)
+        old_ids = {n["id"] for n in prior if n["id"] != root}
 
         node = None
         # The most specific node (a fleet switch over a bare LLDP neighbour)
@@ -162,7 +163,7 @@ class TopologyBuilder:
                     "lldp_capable": False, "manual": False}
         self._nodes[root] = node
         # Edges already drawn against a merged-away id must follow the node.
-        self._repoint_edges({e["id"] for e in prior if e["id"] != root}, root)
+        self._repoint_edges(old_ids, root)
         if source not in node["sources"]:
             node["sources"].append(source)
         # A more specific kind wins: "switch" learned from the fleet should not
@@ -390,7 +391,7 @@ def _is_infra(node: Dict[str, Any]) -> bool:
     operator declarations always count; anything else must carry a real
     hostname (not a MAC, not NetBox's ``device-<mac>`` placeholder, not the
     free-text junk some LLDP agents advertise) AND corroboration -- a NetBox
-    record or a management address.
+    record, an LLDP advertisement, or a management address.
     """
     kind = _s(node.get("kind"))
     sources = node.get("sources") or []
@@ -400,7 +401,11 @@ def _is_infra(node: Dict[str, Any]) -> bool:
         return True
     if not _is_real_hostname(node.get("name")):
         return False
-    return "netbox" in sources or bool(node.get("addresses"))
+    # A device advertising its own hostname over LLDP (switches, hypervisors
+    # running lldpd) is infrastructure even with NetBox unavailable and no
+    # management address in the advertisement.
+    return ("netbox" in sources or "lldp" in sources
+            or bool(node.get("addresses")))
 
 
 #: LLDP capability codes ("B:R") that older nw parsers stored as the remote port.
@@ -467,6 +472,119 @@ def _same_switch_groups(fleet, lldp_by_device) -> Dict[str, str]:
     return result
 
 
+def _pairwise_identities(builder, lldp_seen) -> None:
+    """Match two fleet devices that see each other on the same port pair.
+
+    X says "lp -> rp" and exactly one other fleet device W says "rp -> lp":
+    W's row describes X (and X's row describes W), even when both are
+    fleet entries named only by IP address.
+    """
+    index = {}
+    for entry_idx, (dev, nid, rows) in enumerate(lldp_seen):
+        for lp, _, rp, raw in rows:
+            if lp and rp:
+                index.setdefault((lp, rp), []).append((entry_idx, raw))
+
+    merges = []
+    for entry_idx, (dev_x, nid_x, rows) in enumerate(lldp_seen):
+        for lp, _, rp, raw_x in rows:
+            if not lp or not rp:
+                continue
+            back = [(j, raw_w) for (j, raw_w) in index.get((rp, lp), []) if j != entry_idx]
+            if len(back) != 1:
+                continue
+            if len(index.get((lp, rp), [])) != 1:
+                continue
+            j, raw_w = back[0]
+            dev_w, nid_w, _ = lldp_seen[j]
+            merges.append((dev_x, nid_x, raw_w))
+            merges.append((dev_w, nid_w, raw_x))
+
+    for dev, nid, raw in merges:
+        x = builder.current(nid)
+        if not x:
+            continue
+        rec = {"id": dev, "remote_chassis": _s(raw.get("remote_chassis")), "remote_name": _s(raw.get("remote_name")), "remote_mgmt_ip": _s(raw.get("remote_mgmt_ip"))}
+        if not any(rec[k] for k in ("remote_chassis", "remote_name", "remote_mgmt_ip")):
+            continue
+        builder.add_node(rec, builder._nodes[x]["kind"], "lldp")
+
+
+def _reciprocal_identities(builder, lldp_seen) -> None:
+    """Name fleet devices from what their LLDP neighbours say about them.
+
+    A gateway added by address is "172.21.2.3" in the fleet, while CRSW1
+    advertises it as "MIPBE-SSPLM-N31-VPNC1" (chassis 00:1a:...) on 1/1/43.
+    The gateway's own table says GE0/0/2 -> CRSW1 port 1/1/43, so CRSW1's
+    row whose remote port is GE0/0/2 (and local port 1/1/43) describes the
+    gateway itself. Only a candidate that every such neighbour agrees on is
+    merged; two VPNCs both on GE0/0/2 with unknown far ports stay apart.
+    ``lldp_seen``: (fleet_dev_id, local_node_id, [(local_port,
+    remote_node_id, remote_port, raw_row), ...]).
+    """
+    by_node = {}
+    for fleet_dev_id, local_node_id, rows in lldp_seen:
+        x = builder.current(local_node_id)
+        if not x:
+            continue
+        if x not in by_node:
+            by_node[x] = []
+        by_node[x].extend([(lp, builder.current(y_raw), rp, raw_row) for lp, y_raw, rp, raw_row in rows if builder.current(y_raw)])
+
+    for fleet_dev_id, local_node_id, rows in lldp_seen:
+        x = builder.current(local_node_id)
+        if not x:
+            continue
+        candidates = None
+        for lp, y_raw, rp, _ in rows:
+            y = builder.current(y_raw)
+            if not y or y == x or y not in by_node or not lp:
+                continue
+            matches = set()
+            for lp2, z, rp2, raw2 in by_node[y]:
+                if rp2 == lp and (not rp or lp2 == rp) and z != y:
+                    matches.add((_s(raw2.get("remote_chassis")), _s(raw2.get("remote_name")), _s(raw2.get("remote_mgmt_ip"))))
+            if not matches:
+                continue
+            candidates = matches if candidates is None else candidates & matches
+        if candidates and len(candidates) == 1:
+            c, n, ip = next(iter(candidates))
+            if any([c, n, ip]):
+                kind = builder._nodes[x]["kind"]
+                builder.add_node({"id": fleet_dev_id, "remote_chassis": c, "remote_name": n, "remote_mgmt_ip": ip}, kind, "lldp")
+
+def _collapse_half_edges(builder) -> None:
+    """Drop an LLDP edge whose far port is unknown when the other end
+    reported the same link with both ports (otherwise drawn twice)."""
+    edges = list(builder._edges.items())
+    for key, e in edges:
+        if e["source"] != "lldp" or (e["a_port"] and e["b_port"]):
+            continue
+        if not e["a_port"] and not e["b_port"]:
+            continue
+        target_node_a = e["a"]
+        target_node_b = e["b"]
+        target_port = e["a_port"] if e["a_port"] else e["b_port"]
+        other_edge = None
+        for key2, f in edges:
+            if key2 == key or f["source"] != "lldp":
+                continue
+            if {f["a"], f["b"]} != {target_node_a, target_node_b}:
+                continue
+            if not f["a_port"] or not f["b_port"]:
+                continue
+            if e["a_port"]:
+                if f["a_port"] == target_port and f["a"] == target_node_a:
+                    other_edge = f
+                    break
+            else:
+                if f["b_port"] == target_port and f["b"] == target_node_b:
+                    other_edge = f
+                    break
+        if other_edge:
+            builder._edges.pop(key, None)
+
+
 def build_topology(fleet: Optional[List[dict]] = None,
                    lldp_by_device: Optional[Dict[str, list]] = None,
                    macs_by_device: Optional[Dict[str, list]] = None,
@@ -527,6 +645,7 @@ def build_topology(fleet: Optional[List[dict]] = None,
         builder.add_node(rec, _s(dev.get("kind")) or "manual", "manual")
 
     # ── 4. LLDP adjacencies ─────────────────────────────────────────────────
+    lldp_seen: List[tuple] = []
     for device_id, rows in (lldp_by_device or {}).items():
         if _s(device_id) in duplicate_of:
             continue  # same table as its canonical device
@@ -536,6 +655,8 @@ def build_topology(fleet: Optional[List[dict]] = None,
             continue
         if rows:
             builder._nodes[local_id]["lldp_capable"] = True
+        seen_rows: List[tuple] = []
+        lldp_seen.append((_s(device_id), local_id, seen_rows))
         for row in (rows or []):
             if not isinstance(row, dict):
                 continue
@@ -552,6 +673,11 @@ def build_topology(fleet: Optional[List[dict]] = None,
             builder.add_edge(local_id, row.get("local_port"),
                              remote_id, _lldp_port(row.get("remote_port")),
                              "lldp", _s(row.get("remote_descr")))
+            seen_rows.append((_s(row.get("local_port")), remote_id,
+                              _lldp_port(row.get("remote_port")), row))
+    _pairwise_identities(builder, lldp_seen)
+    _reciprocal_identities(builder, lldp_seen)
+    _collapse_half_edges(builder)
 
     # ── 5. Operator-declared links ──────────────────────────────────────────
     # Declared BEFORE inference so a human assertion always occupies the port
