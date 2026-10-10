@@ -132,6 +132,35 @@ def _by_id_map() -> Dict[str, str]:
     return out
 
 
+_USB_BUSPORT_RE = re.compile(r"^\d+-[\d.]+(?=:)")
+
+
+def usb_physical_path(dev: str) -> Optional[str]:
+    """Stable USB bus/port path for a tty device — ConsolePi's "lame adapter"
+    fallback (see adapters.md: cheap USB-serial chips burn no/duplicate serial#,
+    so the only thing left to key on is the *physical port it's plugged into*).
+
+    pyserial's ``ListPortInfo.location`` is normally this same udev ``ID_PATH``
+    value, but it is backend/platform dependent and can come back ``None`` —
+    which used to drop ``derive_port_id`` all the way to its LEAST stable
+    fallback (``vid:pid-<ttyUSBn>``, which renumbers across a reboot whenever
+    more than one identical adapter is attached). Walking sysfs directly gives
+    the same by-path string pyserial would have, so the stable branch of
+    ``derive_port_id`` actually gets used."""
+    base = os.path.basename(dev)
+    try:
+        real = os.path.realpath(f"/sys/class/tty/{base}/device")
+    except OSError:
+        return None
+    # The sysfs chain ends .../usb1/1-2/1-2.3/1-2.3:1.0/ttyUSB0 — "1-2.3" (the
+    # bus-port path) is the directory name right before the ":<iface>" suffix.
+    for part in reversed(real.split(os.sep)):
+        m = _USB_BUSPORT_RE.match(part)
+        if m:
+            return m.group(0)
+    return None
+
+
 def enumerate_ports() -> List[Dict[str, Any]]:
     """Discover serial ports (USB adapters + on-board UARTs) with a stable port_id."""
     ports: List[Dict[str, Any]] = []
@@ -145,7 +174,11 @@ def enumerate_ports() -> List[Dict[str, Any]]:
             sn = getattr(p, "serial_number", None)
             vid = getattr(p, "vid", None)
             pid = getattr(p, "pid", None)
-            loc = getattr(p, "location", None)
+            # pyserial doesn't always populate location (backend/platform
+            # dependent) — fall back to reading the same USB bus-port path
+            # straight out of sysfs so a serial-less ("lame") adapter still
+            # keys on its stable physical port rather than ttyUSBn order.
+            loc = getattr(p, "location", None) or usb_physical_path(dev)
             stable = byid.get(os.path.realpath(dev))
             port_id = f"byid-{stable}" if stable else derive_port_id(dev, sn, vid, pid, loc)
             is_usb = bool(vid) or "ttyUSB" in dev or "ttyACM" in dev
@@ -321,7 +354,13 @@ class PortStore:
         than the USB adapter/cable. Lets a device's alias/tenant carry forward
         automatically when it reappears under a new port_id — e.g. a reboot
         renumbers /dev/ttyUSBn, or the cable gets moved to a different adapter —
-        without leaving the old port_id behind as an orphaned duplicate."""
+        without leaving the old port_id behind as an orphaned duplicate.
+
+        Hostname is deliberately NOT a match key here (see
+        test_find_by_identity_with_no_identifying_fields_returns_none):
+        hostnames collide (generic defaults, operator naming conventions) in a
+        way serial#/MAC don't, so trusting one would risk silently merging two
+        different devices' alias/tenant assignments."""
         serial = str((identity or {}).get("serial") or "").strip()
         mac = str((identity or {}).get("mac") or "").strip().lower()
         if not serial and not mac:
@@ -348,6 +387,95 @@ class PortStore:
                 entry[k] = v
         self._save()
         return entry
+
+
+class DeviceCache:
+    """Device-IDENTITY-keyed warm cache, deliberately independent of ``port_id``.
+
+    ``PortStore`` is keyed by ``port_id`` — derived from the USB adapter's own
+    signature (serial#/vid:pid/by-id/by-path). That is stable across an
+    ordinary restart or replug, but NOT across: (a) a *code* change to
+    ``derive_port_id`` itself (a new port_id format orphans every existing
+    ``ports.json`` entry on the next deploy — the "console code is updated"
+    complaint), or (b) a "lame" cable with no serial# moved to a different
+    physical port (ConsolePi's acknowledged limit — see adapters.md).
+
+    ``DeviceCache`` instead keys on the DOWNSTREAM DEVICE's own learned
+    identity (serial, then MAC — same safe-match rule as
+    :meth:`PortStore.find_by_identity`; never hostname), in its own file, so a
+    device's alias/tenant/last-known identity survives both cases and can warm
+    NetBox reconciliation / the port list immediately after a restart, even if
+    the port_id that used to hold that record is gone for good."""
+
+    def __init__(self, path: Optional[Path] = None):
+        self.path = path or (_state_dir() / "devices.json")
+        self._data: Dict[str, Dict[str, Any]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            self._data = json.loads(self.path.read_text())
+        except Exception:  # noqa: BLE001 - missing/corrupt → start empty
+            self._data = {}
+
+    def _save(self) -> None:
+        tmp = self.path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(self._data, indent=2))
+            os.replace(tmp, self.path)  # atomic
+        except Exception as e:  # noqa: BLE001
+            logger.warning("DeviceCache save failed: %s", e)
+
+    @staticmethod
+    def device_key(identity: Dict[str, Any]) -> Optional[str]:
+        """Same priority/rules as :meth:`PortStore.find_by_identity`: serial,
+        then MAC — never hostname (hostnames collide; see that method's
+        docstring). ``None`` when a device yielded neither (nothing safe to
+        key on; a hostname-only passive glean on a "lame" cable can't be
+        reconciled across a port_id change — an accepted limitation shared
+        with ConsolePi, see adapters.md)."""
+        serial = str((identity or {}).get("serial") or "").strip()
+        if serial:
+            return f"serial:{serial.lower()}"
+        mac = str((identity or {}).get("mac") or "").strip().lower()
+        if mac:
+            return f"mac:{mac}"
+        return None
+
+    def remember(self, identity: Dict[str, Any], *, port_id: str,
+                 vendor: str = "", product: str = "",
+                 alias: str = "", tenant_id: str = "") -> None:
+        """Record/refresh the last-known state for whichever device ``identity``
+        describes. A no-op when the identity is too thin to key on."""
+        key = self.device_key(identity)
+        if not key:
+            return
+        self._data[key] = {
+            "identity": identity, "port_id": port_id, "vendor": vendor,
+            "product": product, "alias": alias, "tenant_id": tenant_id,
+            "updated": time.time(),
+        }
+        self._save()
+
+    def lookup(self, identity: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Last-known cache record for ``identity`` (by serial/MAC/hostname, in
+        that priority), or ``None`` if this device was never recorded."""
+        key = self.device_key(identity)
+        return self._data.get(key) if key else None
+
+    def all_items(self) -> Dict[str, Dict[str, Any]]:
+        return dict(self._data)
+
+
+_DEVICE_CACHE: Optional[DeviceCache] = None
+
+
+def device_cache() -> DeviceCache:
+    """Process-wide device cache (lazy so tests can substitute ``_DEVICE_CACHE``)."""
+    global _DEVICE_CACHE
+    if _DEVICE_CACHE is None:
+        _DEVICE_CACHE = DeviceCache()
+    return _DEVICE_CACHE
 
 
 class TelemetryStore:
