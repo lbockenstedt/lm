@@ -740,3 +740,23 @@ def test_a_vsf_stack_is_tagged_with_its_members():
     assert stack["unit"] == "stack" and stack["stack_members"] == [9, 10]
     # A gateway's 0/0/x ports and a standalone 1/1/x switch are not stacks.
     assert "unit" not in _node(g, "OLKS-MGMTSW")
+
+
+def test_macs_learned_on_a_lag_follow_the_lldp_neighbour_on_its_member_port():
+    """AOS-CX: LLDP names the physical member (1/1/51) but the MAC table learns
+    on the LAG (lag251). The neighbour's chassis MAC on lag251 ties the LAG to
+    it, so the TORs behind the aggregation switch hang off it, not the core."""
+    fleet = [{"id": "c1", "name": "CRSW1", "object_type": "cx_switch",
+              "address": "10.0.1.1", "tenant_id": "t"}]
+    lldp = {"c1": [{"local_port": "1/1/51", "remote_chassis": "ec:eb:b8:f3:2a:e5",
+                    "remote_port": "1/1/49", "remote_name": "TOR-AGG"}]}
+    tors = ["98:f2:b3:b8:05:00", "98:f2:b3:b8:25:a0", "98:f2:b3:b8:c7:a0",
+            "98:f2:b3:b8:c8:80", "98:f2:b3:b8:d6:40"]
+    macs = {"c1": [{"mac": "ec:eb:b8:f3:2a:e5", "vlan": "100", "interface": "lag251"}]
+            + [{"mac": m, "vlan": "100", "interface": "lag251"} for m in tors]}
+    g = build_topology(fleet=fleet, lldp_by_device=lldp, macs_by_device=macs)
+    for m in tors:
+        assert _edge_between(g, "TOR-AGG", m), m
+        assert not _edge_between(g, "CRSW1", m), m
+    assert not any(e.get("a_port") == "lag251" or e.get("b_port") == "lag251"
+                   for e in g["edges"] if e.get("source") == "mac")

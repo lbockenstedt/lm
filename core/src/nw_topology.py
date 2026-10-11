@@ -599,6 +599,48 @@ def _collapse_half_edges(builder) -> None:
             builder._edges.pop(key, None)
 
 
+def _lag_aliases(builder, macs_by_device, fleet_ids, duplicate_of, trusted):
+    """Map logical ports (LAGs) that LLDP never names to their neighbour.
+
+    LLDP reports the physical member (1/1/51) but AOS-CX learns MACs on the
+    LAG (lag251). The neighbour's own chassis MAC shows up in the MAC table on
+    that LAG, so a LAG whose chassis-MAC hits all point to one LLDP neighbour
+    faces that neighbour.
+    """
+    result = {}
+    for d, rows in macs_by_device.items():
+        if d in duplicate_of:
+            continue
+        local = builder.current(fleet_ids.get(d, ""))
+        if not local:
+            continue
+        neighbours = {nb for (n, _p), nb in trusted.items() if n == local}
+        mac_owner = {}
+        for nb in neighbours:
+            for mac in builder._nodes.get(nb, {}).get("macs", []):
+                if mac in mac_owner:
+                    if mac_owner[mac] != nb:
+                        mac_owner[mac] = None
+                else:
+                    mac_owner[mac] = nb
+        hits = {}
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            port = str(row.get("interface") or "").strip()
+            mac = norm_mac(str(row.get("mac") or ""))
+            if port and mac and mac in mac_owner:
+                nb = mac_owner[mac]
+                if nb is not None:
+                    if port not in hits:
+                        hits[port] = set()
+                    hits[port].add(nb)
+        for port, nb_set in hits.items():
+            if len(nb_set) == 1 and (local, port) not in trusted:
+                result[(local, port)] = next(iter(nb_set))
+    return result
+
+
 def _attach_endpoints(builder, macs_by_device, fleet_ids, duplicate_of, trunk_threshold):
     """Place every endpoint MAC from the polled switches' MAC tables on the
     port (or non-polled downstream device) where it is physically attached.
@@ -628,6 +670,7 @@ def _attach_endpoints(builder, macs_by_device, fleet_ids, duplicate_of, trunk_th
         trusted[(b, e["b_port"])] = a
         linked.add(a)
         linked.add(b)
+    trusted.update(_lag_aliases(builder, macs_by_device, fleet_ids, duplicate_of, trusted))
     
     cands = {}
     ip_of = {}
