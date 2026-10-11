@@ -265,8 +265,7 @@ class NwDiscoverySyncMixin:
         (Unbound A records) identity so ARP/MAC-table sightings, which carry no
         hostname, get one — and MAC-only sightings get their lease IP. Returns
         ``(by_mac, by_ip)``; higher-priority sources win. Never raises."""
-        if self._nw_discovery_cfg().get("enrich_from_dhcp", True) is False:
-            return {}, {}
+        use_dhcp = self._nw_discovery_cfg().get("enrich_from_dhcp", True) is not False
         by_mac: Dict[str, Dict[str, str]] = {}
         by_ip: Dict[str, str] = {}
         # hostname_source per entry: "reservation"/"dns" are operator
@@ -291,7 +290,7 @@ class NwDiscoverySyncMixin:
                 ("DHCP_LIST_LEASES", "dhcp", "leases"),
                 ("DNS_LIST", "dns", "records")]
         jobs = []  # (command, spoke_id, list_key)
-        for cmd, mtype, key in plan:
+        for cmd, mtype, key in (plan if use_dhcp else []):
             for sid in dict.fromkeys(self.get_all_spokes_by_type(mtype) or []):
                 jobs.append((cmd, sid, key))
 
@@ -342,7 +341,107 @@ class NwDiscoverySyncMixin:
                 if ip and host and ip not in by_ip:
                     by_ip[ip] = host
                     ip_src[ip] = src_of[cmd]
+        self._nw_add_device_identities(by_mac, by_ip, ip_src)
         return by_mac, by_ip
+
+    def _nw_add_device_identities(self, by_mac: Dict[str, Dict[str, str]],
+                                  by_ip: Dict[str, str],
+                                  ip_src: Dict[str, str]) -> None:
+        """Fill identity-index GAPS from what the network devices themselves
+        report: LLDP neighbour advertisements (system name + mgmt IP + chassis
+        MAC) and the NW fleet's own polled names. A static infrastructure box
+        (gateway, switch, AP) has no DHCP lease or DNS record, so without this
+        its ARP sighting reaches NetBox nameless and becomes ``DEVICE-<mac>``.
+        DHCP/DNS entries already present always win."""
+        for ident in self._nw_lldp_identities():
+            mac, ip, name = ident["mac"], ident["ip"], ident["name"]
+            if mac:
+                ent = by_mac.setdefault(mac, {"ip": "", "hostname": ""})
+                if ip and not ent["ip"]:
+                    ent["ip"] = ip
+                if name and not ent["hostname"]:
+                    ent["hostname"] = name
+                    ent["hostname_source"] = "lldp"
+            if ip and name and ip not in by_ip:
+                by_ip[ip] = name
+                ip_src[ip] = "lldp"
+        try:
+            from nw_topology import _is_real_hostname
+            fleet = (self.state.system_state.get("global_config", {})
+                     .get("nw_devices", []) or [])
+            for dev in fleet:
+                if not isinstance(dev, dict):
+                    continue
+                ip = str(dev.get("address") or "").strip().split("/")[0].strip()
+                name = str(dev.get("name") or "").strip()
+                if ip and _is_real_hostname(name) and ip not in by_ip:
+                    by_ip[ip] = name
+                    ip_src[ip] = "nw"
+        except Exception as e:  # noqa: BLE001 - enrichment is best-effort
+            logger.debug("nw identity index: fleet names skipped: %s", e)
+
+    def _nw_lldp_self_identity(self, address: str) -> Dict[str, str]:
+        """What neighbours' LLDP says about the box managed at ``address``:
+        ``{"name", "mac"}`` from the advertisement whose management IP is that
+        address (empty values when none / ambiguous)."""
+        address = str(address or "").strip().split("/")[0].strip()
+        names, macs = set(), set()
+        if address:
+            for ident in self._nw_lldp_identities():
+                if ident["ip"] == address:
+                    if ident["name"]:
+                        names.add(ident["name"])
+                    if ident["mac"]:
+                        macs.add(ident["mac"])
+        return {"name": next(iter(names)) if len(names) == 1 else "",
+                "mac": next(iter(macs)) if len(macs) == 1 else ""}
+
+    def _nw_lldp_identities(self) -> List[Dict[str, str]]:
+        """Every identity the nw LLDP cache has learned about a neighbour: one
+        ``{"mac", "ip", "name"}`` per distinct advertisement (system name,
+        management IP, chassis MAC). Lets ARP/MAC sightings and polls that
+        carry no hostname borrow the name the box advertises itself (e.g. an
+        ArubaOS gateway whose poll returns neither hostname nor base MAC).
+        Reads only the in-memory cache; never raises."""
+        cache = getattr(self, "nw_device_cache", None) or {}
+        if not isinstance(cache, dict):
+            return []
+        out = []
+        seen = set()
+        try:
+            from nw_topology import _is_real_hostname
+            for entry in list(cache.values()):
+                if not isinstance(entry, dict):
+                    continue
+                env = entry.get("lldp")
+                rows = env.get("data") if isinstance(env, dict) else None
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    name = str(row.get("remote_name") or "").strip().rstrip(".")
+                    if name and not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", name):
+                        name = name.split(".", 1)[0]
+                    if not _is_real_hostname(name):
+                        name = ""
+                    ip = str(row.get("remote_mgmt_ip") or "").strip().split("/")[0].strip()
+                    if not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", ip) or ip.startswith("0."):
+                        ip = ""
+                    raw = str(row.get("remote_chassis") or "").strip()
+                    mac = (norm_mac(raw) if norm_mac else raw.lower()) if raw else ""
+                    if not re.fullmatch(r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}", mac or ""):
+                        mac = ""
+                    if not name and not (mac and ip):
+                        continue
+                    key = (mac, ip, name.lower())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append({"mac": mac, "ip": ip, "name": name})
+        except Exception as e:
+            logger.debug("nw lldp identities: %s", e)
+        return out
 
     @staticmethod
     def _nw_apply_identity(records: List[Dict[str, str]],
@@ -557,6 +656,10 @@ class NwDiscoverySyncMixin:
             errors.append("NetBox spoke not connected — poll only (no push)")
             return {}, errors, tenant_slug
 
+        base_mac = str(device_info.get("mac", "") or "")
+        if not base_mac:
+            base_mac = self._nw_lldp_self_identity(
+                device_cfg.get("address", "")).get("mac", "")
         payload = {
             "device": {
                 "id": device_cfg.get("id", device_id),
@@ -565,7 +668,7 @@ class NwDiscoverySyncMixin:
                 "object_type": device_cfg.get("object_type", ""),
                 "model": str(device_info.get("model", "") or ""),
                 "serial": str(device_info.get("serial", "") or ""),
-                "mac": str(device_info.get("mac", "") or ""),
+                "mac": base_mac,
                 "firmware": str(device_info.get("firmware", "") or ""),
             },
             "interfaces": interfaces or [],
@@ -588,6 +691,10 @@ class NwDiscoverySyncMixin:
             }
             if netbox_push["status"] == "ERROR" or netbox_push["errors"]:
                 errors.append(f"netbox: {netbox_push['message'] or 'error'}")
+                logger.warning("nw device push %s (%s) -> NetBox %s: %s",
+                               device_id, payload["device"]["name"],
+                               netbox_push["status"] or "error",
+                               netbox_push["message"] or "no message")
             return netbox_push, errors, tenant_slug
         except Exception as e:
             errors.append(f"netbox push: {e}")
@@ -638,9 +745,18 @@ class NwDiscoverySyncMixin:
         if not isinstance(device_info, dict):
             return False
         hostname = str(device_info.get("hostname") or "").strip()
+        current = str(device_cfg.get("name") or "").strip()
+        src = "device hostname"
+        if not hostname and (not current or re.fullmatch(
+                r"\d{1,3}(?:\.\d{1,3}){3}", current)):
+            # The poll read no hostname and the device is still known only by
+            # its IP: adopt the system name its LLDP neighbours report for
+            # that management address.
+            hostname = self._nw_lldp_self_identity(
+                device_cfg.get("address") or current).get("name", "")
+            src = "LLDP neighbour advertisement"
         if not hostname:
             return False
-        current = str(device_cfg.get("name") or "").strip()
         if hostname == current:
             return False
         device_cfg["name"] = hostname
@@ -648,8 +764,8 @@ class NwDiscoverySyncMixin:
             self.state._mark_dirty()
         except Exception:  # noqa: BLE001 - persistence is best-effort
             logger.debug("nw name reconcile: mark_dirty failed", exc_info=True)
-        logger.info("nw: reset device %s display name '%s' -> '%s' (device hostname)",
-                    device_cfg.get("id"), current or "(unset)", hostname)
+        logger.info("nw: reset device %s display name '%s' -> '%s' (%s)",
+                    device_cfg.get("id"), current or "(unset)", hostname, src)
         return True
 
     async def poll_nw_device(self, device_id: str) -> Dict[str, Any]:
@@ -924,13 +1040,17 @@ class NwDiscoverySyncMixin:
                     {"links": links, "tenant_slug": slug}, timeout=180.0)) or {}
                 logger.info("nw lldp->netbox tenant=%s: %d links: %s", key, len(links),
                             res.get("message") or res.get("status"))
+                if res.get("errors") and res.get("details"):
+                    logger.warning("nw lldp->netbox tenant=%s errors: %s", key,
+                                   "; ".join(str(m) for m in res["details"][:5]))
             except Exception as e:
                 logger.warning("nw lldp->netbox tenant=%s failed: %s", key, e)
                 res = {"status": "ERROR", "message": str(e)}
             results.append({"tenant": key, "links": len(links),
                             **{k: res.get(k) for k in ("status", "message", "cabled",
                                                        "created", "unchanged",
-                                                       "skipped", "errors")}})
+                                                       "skipped", "renamed",
+                                                       "errors")}})
         return {"status": "SUCCESS", "results": results}
 
     async def run_nw_discovery_sync_loop(self):
