@@ -163,9 +163,24 @@ class SpokeRegistryMixin:
 
         ``agent_info`` is populated from every ``AGENT_RELAY_UP`` frame, so a
         pxmx-dialed agent indexes to the pxmx spoke and a cs-dialed agent
-        indexes to the cs spoke. Returns None when the agent is not connected
-        / not yet heartbeat-indexed (e.g. the first ~30s after connect, before
-        any relayed frame arrives).
+        indexes to the cs spoke. ``agent_info`` is in-memory only though —
+        wiped on hub restart and evicted on spoke disconnect — so a quiet
+        agent (no relayed frame since the last restart, or one that just
+        hasn't sent anything in a while) can read as unindexed even though
+        it's genuinely connected. Before falling back, this also tries the
+        DURABLE composite heartbeat key ``{spoke_pk}:{agent_pk}`` (persisted
+        via ``spoke_last_seen``, re-seeded into ``heartbeat.last_seen`` on
+        boot — same source ``_spoke_effective_tenants``/
+        ``_offline_relay_agents`` use) so a tenant-pinned host's VMs don't
+        silently drop out of ``_merge_pinned_agent_vms`` (``fallback_hypervisor=
+        False``) just because ``agent_info`` hasn't been (re)populated yet —
+        this was the reported "pinned host's VMs still missing" gap: the
+        agent_config pin was correct but the merge couldn't resolve a spoke
+        for the agent and silently skipped it.
+
+        Returns None when the agent is not connected / not yet indexed by
+        EITHER signal (e.g. the first ~30s after connect, before any relayed
+        frame OR heartbeat has landed).
 
         When ``fallback_hypervisor`` is True, a missing index falls back to the
         pxmx (``hypervisor``) spoke — correct for the all-in-one path where
@@ -173,11 +188,19 @@ class SpokeRegistryMixin:
         cs-dialed agent (e.g. the CS bridge relaying commands) pass
         ``fallback_hypervisor=False`` and skip when None is returned.
         """
-        info = self.agent_info.get(self._agent_primary_key(agent_id))
+        agent_pk = self._agent_primary_key(agent_id)
+        info = self.agent_info.get(agent_pk)
         if info:
             sid = info.get("spoke_id")
             if sid and self._primary_key(sid) in self.active_connections:
                 return sid
+        hb_last = getattr(getattr(self, "heartbeat", None), "last_seen", None) or {}
+        for key in hb_last:
+            if isinstance(key, str) and ":" in key:
+                spoke_pk, apk = key.split(":", 1)
+                spoke_pk = self._primary_key(spoke_pk)
+                if apk == agent_pk and spoke_pk in self.active_connections:
+                    return spoke_pk
         if fallback_hypervisor:
             return self.get_hypervisor_spoke()
         return None
