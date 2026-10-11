@@ -760,3 +760,37 @@ def test_macs_learned_on_a_lag_follow_the_lldp_neighbour_on_its_member_port():
         assert not _edge_between(g, "CRSW1", m), m
     assert not any(e.get("a_port") == "lag251" or e.get("b_port") == "lag251"
                    for e in g["edges"] if e.get("source") == "mac")
+
+
+_CX = [{"id": "c1", "name": "CRSW1", "object_type": "cx_switch",
+        "address": "10.0.1.1", "tenant_id": "t"}]
+
+
+def test_a_nic_firmware_lldp_agent_folds_into_its_host_and_keeps_the_lag():
+    # Live: 1/1/2 hears pxmx02 AND the NIC's own agent ("Broadcom ...", sibling
+    # MAC). The agent must not become a device, nor hide pxmx02 from lag2.
+    lldp = {"c1": [
+        {"local_port": "1/1/2", "remote_chassis": "b0:26:28:2d:52:90",
+         "remote_port": "b0:26:28:2d:52:91", "remote_name": "pxmx02"},
+        {"local_port": "1/1/2", "remote_chassis": "b0:26:28:2d:52:91",
+         "remote_port": "b0:26:28:2d:52:91",
+         "remote_name": "Broadcom P225p NetXtreme-E Dual-port 10Gb/25Gb"}]}
+    vms = ["bc:24:11:df:63:5e", "bc:24:11:2f:4b:1e"]
+    macs = {"c1": [{"mac": m, "vlan": "100", "interface": "lag2"}
+                   for m in ["b0:26:28:2d:52:90"] + vms]}
+    g = build_topology(fleet=_CX, lldp_by_device=lldp, macs_by_device=macs)
+    assert not any("Broadcom" in (n.get("name") or "") for n in g["nodes"])
+    for m in vms:
+        assert _edge_between(g, "pxmx02", m), m
+
+
+def test_an_lldp_port_id_mac_ties_the_lag_to_the_host():
+    # pxmx03 advertises its NIC MAC as the port id; the chassis MAC is never
+    # learned, but the NIC MAC is (on lag4).
+    lldp = {"c1": [{"local_port": "1/1/4", "remote_chassis": "b8:83:03:4d:fb:14",
+                    "remote_port": "b4:7a:f1:7a:74:e6", "remote_name": "pxmx03"}]}
+    macs = {"c1": [{"mac": "b4:7a:f1:7a:74:e6", "vlan": "100", "interface": "lag4"},
+                   {"mac": "bc:24:11:e7:ce:99", "vlan": "100", "interface": "lag4"}]}
+    g = build_topology(fleet=_CX, lldp_by_device=lldp, macs_by_device=macs)
+    assert _edge_between(g, "pxmx03", "bc:24:11:e7:ce:99")
+    assert not _edge_between(g, "CRSW1", "bc:24:11:e7:ce:99")

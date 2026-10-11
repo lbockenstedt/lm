@@ -486,6 +486,28 @@ def _same_switch_groups(fleet, lldp_by_device) -> Dict[str, str]:
     return result
 
 
+def _drop_nic_agents(rows):
+    """Drop a NIC firmware's own LLDP agent (e.g. "Broadcom P225p NetXtreme-E
+    ...") when the host behind that NIC also advertises on the same port: its
+    chassis is a sibling MAC of the host's (same first 5 octets) and its name
+    is free text, so keeping it puts a phantom device on the map."""
+    good = [r for r in rows if isinstance(r, dict)]
+    hosts = {}
+    for r in good:
+        name = _s(r.get("remote_name"))
+        mac = norm_mac(_s(r.get("remote_chassis")))
+        if name and " " not in name and is_topology_mac(mac):
+            hosts.setdefault(_s(r.get("local_port")), set()).add(mac[:14])
+    out = []
+    for r in good:
+        name = _s(r.get("remote_name"))
+        mac = norm_mac(_s(r.get("remote_chassis")))
+        if " " in name and is_topology_mac(mac) and mac[:14] in hosts.get(_s(r.get("local_port")), ()):
+            continue
+        out.append(r)
+    return out
+
+
 def _pairwise_identities(builder, lldp_seen) -> None:
     """Match two fleet devices that see each other on the same port pair.
 
@@ -614,10 +636,24 @@ def _lag_aliases(builder, macs_by_device, fleet_ids, duplicate_of, trusted):
         local = builder.current(fleet_ids.get(d, ""))
         if not local:
             continue
-        neighbours = {nb for (n, _p), nb in trusted.items() if n == local}
+        # From the edges, not ``trusted``: a port can carry two LLDP
+        # neighbours (a host plus its NIC's firmware agent) and ``trusted``
+        # keeps only one of them per port.
+        # A host may advertise its NIC MAC as the LLDP port id; that MAC is
+        # what the switch learns, so it identifies the neighbour too.
+        neighbours = set()
+        port_macs = {}
+        for e in builder._edges.values():
+            if e["source"] != "mac" and local in (e["a"], e["b"]):
+                nb, nb_port = (e["b"], e["b_port"]) if e["a"] == local else (e["a"], e["a_port"])
+                neighbours.add(nb)
+                pm = norm_mac(_s(nb_port))
+                if pm and is_topology_mac(pm):
+                    port_macs.setdefault(nb, set()).add(pm)
+        neighbours.discard(local)
         mac_owner = {}
         for nb in neighbours:
-            for mac in builder._nodes.get(nb, {}).get("macs", []):
+            for mac in list(builder._nodes.get(nb, {}).get("macs", [])) + sorted(port_macs.get(nb, ())):
                 if mac in mac_owner:
                     if mac_owner[mac] != nb:
                         mac_owner[mac] = None
@@ -801,9 +837,7 @@ def build_topology(fleet: Optional[List[dict]] = None,
             builder._nodes[local_id]["lldp_capable"] = True
         seen_rows: List[tuple] = []
         lldp_seen.append((_s(device_id), local_id, seen_rows))
-        for row in (rows or []):
-            if not isinstance(row, dict):
-                continue
+        for row in _drop_nic_agents(rows or []):
             neighbour = {
                 "remote_chassis": row.get("remote_chassis"),
                 "remote_name": row.get("remote_name"),
