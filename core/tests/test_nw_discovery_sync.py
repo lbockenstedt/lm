@@ -413,3 +413,83 @@ async def test_identity_enrichment_opt_out_and_spoke_failure_tolerated():
     records2, info2 = await h2._nw_pull_discovered()
     assert not info2["errors"]
     assert {r["mac"]: r for r in records2}["aa:bb:cc:dd:ee:05"]["hostname"] == "lease-name"
+
+
+# ── LLDP / fleet identity: static infrastructure has no DHCP/DNS name ────────
+
+def _lldp_cache(*rows):
+    return {"sw-a": {"lldp": {"status": "SUCCESS", "data": list(rows)}}}
+
+
+_VPNC_ROW = {"local_port": "1/1/7", "remote_port": "GE0/0/0",
+             "remote_chassis": "00:1A:1E:04:2F:00",
+             "remote_name": "MIPBE-SSPLM-N31-VPNC1.example.com",
+             "remote_mgmt_ip": "172.21.2.3"}
+
+
+@pytest.mark.asyncio
+async def test_identity_index_learns_lldp_and_fleet_names_without_dhcp():
+    gc = _global_config()
+    gc["nw_netbox_device_sync"]["enrich_from_dhcp"] = False
+    h = _SyncHub(global_config=gc)
+    h.nw_device_cache = _lldp_cache(
+        _VPNC_ROW,
+        # Junk / IP-only names never become hostnames.
+        {"remote_chassis": "aa:bb:cc:00:00:01", "remote_name": "10.9.9.9",
+         "remote_mgmt_ip": "10.9.9.9"})
+    by_mac, by_ip = await h._nw_identity_index()
+    ent = by_mac["00:1a:1e:04:2f:00"]
+    assert ent["hostname"] == "MIPBE-SSPLM-N31-VPNC1"
+    assert ent["hostname_source"] == "lldp" and ent["ip"] == "172.21.2.3"
+    assert by_ip["172.21.2.3"] == "MIPBE-SSPLM-N31-VPNC1"
+    assert by_ip["10.20.0.1"] == "core-sw1"        # NW fleet's own name
+    assert "10.9.9.9" not in by_ip
+    assert h._nw_ip_host_src["172.21.2.3"] == "lldp"
+
+
+def test_lldp_never_overrides_dhcp_or_dns_identity():
+    h = _SyncHub(global_config=_global_config())
+    h.nw_device_cache = _lldp_cache(_VPNC_ROW)
+    by_mac = {"00:1a:1e:04:2f:00": {"ip": "172.21.2.3", "hostname": "res-name",
+                                     "hostname_source": "reservation"}}
+    by_ip = {"172.21.2.3": "dns-name"}
+    src = {"172.21.2.3": "dns"}
+    h._nw_add_device_identities(by_mac, by_ip, src)
+    assert by_mac["00:1a:1e:04:2f:00"]["hostname"] == "res-name"
+    assert by_ip["172.21.2.3"] == "dns-name" and src["172.21.2.3"] == "dns"
+
+
+def test_reconcile_name_falls_back_to_lldp_for_ip_named_device():
+    h = _SyncHub(global_config=_global_config())
+    h.nw_device_cache = _lldp_cache(_VPNC_ROW)
+    cfg = {"id": "fb8e", "name": "172.21.2.3", "address": "172.21.2.3"}
+    assert h.reconcile_nw_device_name(cfg, {"hostname": ""}) is True
+    assert cfg["name"] == "MIPBE-SSPLM-N31-VPNC1"
+    # A human-chosen name is never replaced by LLDP.
+    cfg2 = {"id": "x", "name": "edge-gw", "address": "172.21.2.3"}
+    assert h.reconcile_nw_device_name(cfg2, {}) is False
+    assert cfg2["name"] == "edge-gw"
+
+
+def test_lldp_self_identity_ambiguous_names_are_not_used():
+    h = _SyncHub(global_config=_global_config())
+    h.nw_device_cache = _lldp_cache(
+        _VPNC_ROW, dict(_VPNC_ROW, remote_name="OTHER-BOX",
+                        remote_chassis="00:1a:1e:04:2f:99"))
+    assert h._nw_lldp_self_identity("172.21.2.3") == {"name": "", "mac": ""}
+
+
+@pytest.mark.asyncio
+async def test_push_inventory_fills_missing_base_mac_from_lldp():
+    h = _SyncHub(responses={("netbox-1", "NETBOX_SYNC_NW_DEVICE"): {
+        "payload": {"data": {"status": "SUCCESS", "pushed": 0, "errors": 0}}}},
+        global_config=_global_config())
+    h.nw_device_cache = _lldp_cache(_VPNC_ROW)
+    cfg = {"id": "fb8e", "name": "MIPBE-SSPLM-N31-VPNC1", "address": "172.21.2.3"}
+    await h.push_nw_device_inventory(cfg, {"mac": ""}, [])
+    sent = next(p for _, c, p in h.request_log if c == "NETBOX_SYNC_NW_DEVICE")
+    assert sent["device"]["mac"] == "00:1a:1e:04:2f:00"
+    # A MAC the poll did read is kept.
+    await h.push_nw_device_inventory(cfg, {"mac": "11:22:33:44:55:66"}, [])
+    sent = [p for _, c, p in h.request_log if c == "NETBOX_SYNC_NW_DEVICE"][-1]
+    assert sent["device"]["mac"] == "11:22:33:44:55:66"
