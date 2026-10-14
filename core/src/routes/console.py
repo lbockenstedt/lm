@@ -1500,6 +1500,85 @@ def register(app, hub, ctx):
         await _console_push_llm_flag(hub, hub.get_all_spokes_by_type("console") or [], enabled)
         return {"enabled": enabled, "available": llm.find_ab(hub) is not None}
 
+    # ── Direct Port Access (DPA) knob + per-port override ────────────────────
+    def _console_dpa_spoke(hub, body):
+        """The console spoke named by body["spoke_id"] (or the first one), only
+        if it really is a connected console spoke."""
+        sid = _console_spoke_or_none(hub, body)
+        consoles = hub.get_all_spokes_by_type("console") or []
+        return sid if sid and sid in consoles else None
+
+    def _console_dpa_result(r):
+        """Unwrap a DPA command reply, turning a spoke-side validation ERROR
+        into an HTTP 400 so the WebUI shows the reason."""
+        data = _console_unwrap(r)
+        if isinstance(data, dict) and data.get("status") == "ERROR":
+            raise HTTPException(status_code=400, detail=data.get("message") or "DPA request failed")
+        return data if isinstance(data, dict) else {}
+
+    @app.get("/api/console/dpa")
+    async def console_dpa_get(request: Request):
+        """Direct Port Access config + status for one console spoke (admin)."""
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        body = {"spoke_id": request.query_params.get("spoke_id", "")}
+        sid = _console_dpa_spoke(hub, body)
+        if not sid:
+            raise HTTPException(status_code=503, detail="No spoke connected")
+        r = await hub.request_response(sid, "CONSOLE_GET_DPA", {}, timeout=15.0)
+        return {"spoke_id": sid, **_console_dpa_result(r)}
+
+    @app.post("/api/console/dpa")
+    async def console_dpa_set(request: Request):
+        """Update the persisted DPA knob on a console spoke (admin); applied
+        live. The SSH password is forwarded once to the spoke (stored there only
+        as a hash) and never logged or echoed."""
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        sid = _console_dpa_spoke(hub, body)
+        if not sid:
+            raise HTTPException(status_code=503, detail="No spoke connected")
+        payload = {
+            k: v for k, v in body.items()
+            if k in ("enabled", "ssh_enabled", "telnet_enabled", "ssh_bind", "ssh_base",
+                     "telnet_bind", "telnet_base", "allow", "advertise_host",
+                     "authorized_keys", "password", "clear_password")
+        }
+        r = await hub.request_response(sid, "CONSOLE_SET_DPA", payload, timeout=60.0)
+        return {"spoke_id": sid, **_console_dpa_result(r)}
+
+    @app.post("/api/console/dpa-port")
+    async def console_dpa_port(request: Request):
+        """Pin (or clear, with port null) the DPA TCP port for one serial port."""
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        sid = _console_dpa_spoke(hub, body)
+        if not sid:
+            raise HTTPException(status_code=503, detail="No spoke connected")
+        await _assert_port_tenant(request, sid, body.get("port_id"))
+        payload = {
+            "port_id": body.get("port_id"),
+            "proto": body.get("proto") or "ssh",
+            "port": body.get("port")
+        }
+        r = await hub.request_response(sid, "CONSOLE_SET_DPA_PORT", payload, timeout=15.0)
+        return _console_dpa_result(r)
+
     @app.post("/api/console/capture")
     async def console_capture(request: Request):
         """Return the recent passive-capture buffer for a port — whatever the

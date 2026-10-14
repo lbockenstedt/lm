@@ -12,6 +12,13 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-10-05
 
+### Console
+- **Direct Port Access over SSH, with a live on/off knob.** Console → 🔌 Direct Port
+  Access enables per-port SSH listeners on a console server, using a password and/or
+  keys. The setting persists across agent restarts. Each port row now shows a
+  click-to-copy `🔐 DPA host:port` badge, and the port's ⚙ Settings let you pin a
+  specific SSH/telnet port. See [console.md](console.md#direct-port-access-dpa--enabling-it).
+
 ### DHCP / DNS / multitenancy
 - **Tenant isolation for DHCP/DNS.** A tenant-bound DHCP/DNS spoke now only gets
   its own tenant's NetBox subnets/records; the shared tenant is the only one

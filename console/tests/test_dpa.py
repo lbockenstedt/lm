@@ -229,3 +229,183 @@ def test_bridge_no_device_refuses():
         assert writer.closed and b"not available" in bytes(writer.buf)
 
     asyncio.new_event_loop().run_until_complete(run())
+
+
+# ── source allow-list (CIDR, not string prefix) ──────────────────────────────
+def test_allow_list_is_cidr_not_string_prefix():
+    nets = dpa.parse_allow("10.1.0.0/16, 192.168.5.7")
+    assert dpa.ip_allowed("10.1.2.3", nets)
+    assert dpa.ip_allowed("192.168.5.7", nets)
+    # The old startswith() check let "10.1" admit 10.100.x.x.
+    assert not dpa.ip_allowed("10.100.2.3", nets)
+    assert not dpa.ip_allowed("192.168.5.70", nets)
+
+
+def test_allow_list_empty_allows_all_and_bad_entries_dropped():
+    assert dpa.ip_allowed("8.8.8.8", [])
+    assert [str(n) for n in dpa.parse_allow(["nope", "10.0.0.1"])] == ["10.0.0.1/32"]
+
+
+def test_allow_list_ipv4_mapped_and_garbage_peer():
+    nets = dpa.parse_allow(["127.0.0.1"])
+    assert dpa.ip_allowed("::ffff:127.0.0.1", nets)
+    assert not dpa.ip_allowed("", nets)
+
+
+# ── per-port override ────────────────────────────────────────────────────────
+class _DictStore:
+    def __init__(self, data=None):
+        self.data = data or {}
+
+    def all_items(self):
+        return dict(self.data)
+
+    def settings(self, pid):
+        return {}
+
+    def update(self, pid, **kw):
+        self.data.setdefault(pid, {}).update(kw)
+
+
+def _mgr(store, **kw):
+    return dpa.DpaManager(
+        store=store, enumerate_ports=lambda: [], open_session=None, write_session=None,
+        close_session=None, register_sink=None, unregister_sink=None,
+        port_device=lambda pid: None, port_name=lambda pid: pid, **kw)
+
+
+def test_override_wins_and_auto_ports_avoid_it():
+    store = _DictStore({"p1": {"dpa_ssh_port_override": 3001}, "p2": {}})
+    m = _mgr(store, proto="ssh", store_key="dpa_ssh_port", base=3001, span=10)
+    assert m.desired_port("p1") == 3001
+    assert m.desired_port("p2") == 3002  # 3001 is pinned by p1
+
+
+def test_override_displaces_stale_auto_assignment():
+    store = _DictStore({"p1": {"dpa_ssh_port": 3001}, "p2": {"dpa_ssh_port_override": 3001}})
+    m = _mgr(store, proto="ssh", store_key="dpa_ssh_port", base=3001, span=10)
+    assert m.desired_port("p2") == 3001
+    assert m.desired_port("p1") == 3002
+
+
+def test_validate_override():
+    store = _DictStore({"p2": {"dpa_ssh_port_override": 4000}})
+    m = _mgr(store, proto="ssh", store_key="dpa_ssh_port")
+    assert m.validate_override("p1", 80)
+    assert m.validate_override("p1", 4000)          # pinned to p2
+    assert m.validate_override("p1", 4001) is None
+    assert m.validate_override("p2", 4000) is None  # re-pinning own port is fine
+
+
+def test_reconcile_rebinds_on_override_and_back_on_clear():
+    async def run():
+        store = _DictStore({"p1": {}})
+        m = _mgr(store, proto="telnet", bind="127.0.0.1", base=0, span=1)
+        bound = []
+
+        class _Srv:
+            def close(self):
+                pass
+
+            async def wait_closed(self):
+                pass
+
+        async def listen(pid, host, port):
+            bound.append(port)
+            return _Srv()
+
+        m.listen = listen
+        m.enumerate_ports = lambda: [{"port_id": "p1"}]
+        m.base, m.span = 5000, 5
+        await m.reconcile()
+        assert m.assignment("p1") == 5000
+        store.data["p1"]["dpa_port_override"] = 6000
+        await m.reconcile()
+        assert m.assignment("p1") == 6000
+        store.data["p1"]["dpa_port_override"] = None
+        await m.reconcile()
+        assert m.assignment("p1") == 5000
+        assert bound == [5000, 6000, 5000]
+
+    asyncio.new_event_loop().run_until_complete(run())
+
+
+# ── raw (ssh) bridge mode ────────────────────────────────────────────────────
+def test_bridge_raw_mode_skips_telnet_negotiation_and_stripping():
+    async def run():
+        sessions = _FakeSessions(writable=True)
+        payload = bytes([dpa.IAC, dpa.DO, 1, ord("x")])  # must pass through untouched
+        reader = _FakeReader([payload])
+        writer = _FakeWriter()
+        mgr, sinks = _make_manager(sessions, reader)
+        mgr.proto = "ssh"
+
+        async def feed_serial():
+            for _ in range(50):
+                if sinks:
+                    break
+                await asyncio.sleep(0.001)
+            await asyncio.sleep(0.01)
+            sid = next(iter(sinks), None)
+            if sid:
+                sinks[sid](b"")
+
+        await asyncio.gather(mgr.bridge(reader, writer, "p1"), feed_serial())
+        assert (sessions.opened[0], payload) in sessions.writes
+        assert not bytes(writer.buf).startswith(dpa.TELNET_INIT)
+
+    asyncio.new_event_loop().run_until_complete(run())
+
+
+def test_bridge_wires_break_handler():
+    async def run():
+        sessions = _FakeSessions(writable=True)
+        breaks = []
+
+        class _BreakReader(_FakeReader):
+            def set_break_handler(self, cb):
+                cb()  # simulate an SSH ~B arriving
+
+        mgr, _ = _make_manager(sessions, None)
+        await mgr.bridge(_BreakReader([]), _FakeWriter(), "p1", telnet=False,
+                         on_break=breaks.append)
+        assert breaks == [sessions.opened[0]]
+
+    asyncio.new_event_loop().run_until_complete(run())
+
+
+# ── stop() is final (race: stale reconcile after a CONSOLE_SET_DPA rebuild) ──
+def test_stopped_manager_cannot_resurrect_or_leak_listeners():
+    async def run():
+        store = _DictStore({"p1": {}, "p2": {}})
+        m = _mgr(store, proto="telnet", bind="127.0.0.1", base=5000, span=5)
+        m.enumerate_ports = lambda: [{"port_id": "p1"}, {"port_id": "p2"}]
+        closed, gate = [], asyncio.Event()
+
+        class _Srv:
+            def __init__(self, port):
+                self.port = port
+
+            def close(self):
+                closed.append(self.port)
+
+            async def wait_closed(self):
+                pass
+
+        async def listen(pid, host, port):
+            if pid == "p2":
+                await gate.wait()  # bind still in flight when stop() runs
+            return _Srv(port)
+
+        m.listen = listen
+        rec = asyncio.ensure_future(m.reconcile())
+        await asyncio.sleep(0.01)
+        await m.stop()           # rebuild tears this manager down mid-reconcile
+        gate.set()
+        await rec
+        assert m._servers == {}
+        assert 5001 in closed    # the late bind was closed, not leaked
+        await m.reconcile()      # a stale caller can't bring it back
+        assert m._servers == {}
+
+    asyncio.new_event_loop().run_until_complete(run())

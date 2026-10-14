@@ -252,28 +252,51 @@ A deliberate, admin/`console_write`-gated write path, separate from the read-onl
   heuristic — verify on real hardware before relying on them.
 
 ## Direct Port Access (DPA) — enabling it
-DPA exposes each serial port over a per-port **telnet** listener (auto-assigned from
-`console_dpa_base`=2200) so you can attach a terminal straight to the line (à la ser2net).
-The endpoint then shows as a `🔌 telnet <bind>:<port>` badge in the **Console** port list
-and in the `CONSOLE_LIST_PORTS` `dpa` field.
+DPA lets you reach a serial line **directly on the console server**, without the WebUI
+(à la ser2net or a Cisco terminal server). Each detected port gets its own **SSH**
+listener, auto-assigned from base **3001**. Optional legacy **telnet** listeners start
+at base 2200. Each console port row shows a `🔐 DPA <host>:<port>` badge. Click it to
+copy `ssh -p <port> <host>`. A 📌 marks a port you pinned. The same data appears in
+the `CONSOLE_LIST_PORTS` `dpa` field.
 
-**It is OFF by default** — telnet is unauthenticated/unencrypted, so the localhost bind
-(or an explicit source-IP allow-list when widened) is the guard. If you don't see a DPA
-badge on the Console page, DPA simply isn't enabled yet.
+**It is OFF by default.** To turn it on, an admin opens **Console → 🔌 Direct Port Access**,
+picks the console server, and sets:
 
-Enable it when loading the console role: **Setup → Spokes & Agents → Load Role**, tick
-**console**, then **Enable Direct Port Access**. Keep the bind at `127.0.0.1` (reach it by
-SSH-tunnelling to the console host) unless you deliberately widen it, in which case set a
-comma-separated **source-IP allow-list**. This maps to the role config keys
-`console_dpa_enabled` / `console_dpa_bind` / `console_dpa_allow` (`console/src/console_spoke.py::_ensure_dpa_task`).
+- **Enable Direct Port Access**: the master knob. It is persisted on the console host in
+  `<state>/dpa.json`, so it survives agent restarts, and it applies live, with no role reload.
+- **SSH** (recommended), with bind (default `0.0.0.0`) and base port (default 3001).
+  You must set a **password** (≥ 8 chars, stored scrypt- or PBKDF2-hashed, never returned
+  to the UI), **authorized public keys**, or both. With neither, no one can log in.
+  The SSH username is ignored. The host key is generated once (`<state>/dpa_ssh_host_key`),
+  and its fingerprint is shown in the modal.
+- **Telnet** (legacy, unauthenticated), with bind (default `127.0.0.1`) and base 2200.
+  Binding it beyond localhost requires a source **allow-list**.
+- **Allow-list**: comma-separated IPs/CIDRs, applied to both transports before auth.
+  Empty means any source.
+- **Advertised host**: the IP/name shown in the badge. Blank auto-detects the console
+  server's address on the route toward the hub.
 
-- **The console role must not already be loaded** to pass this config — the Load Role modal
-  only lists roles that aren't loaded. To turn DPA on/off for an already-loaded console role,
-  **Unload** it first, then Load it again with the box ticked (or not).
-- **Applies at load only.** Like all interactive role config (netbox/ldap admin creds too),
-  it is not re-applied when the agent reboots or the hub re-adopts the role config-less, so
-  DPA reverts to off after an agent restart. *Follow-ups:* persist the role config for
-  re-push on reconnect, and a live on/off toggle on the Console page (`CONSOLE_SET_DPA`).
+**Per-port override.** In a port's ⚙ **Settings**, the DPA section shows the SSH command
+and **SSH / telnet port** fields. Blank means auto. A pinned port is validated
+(1024–65535, not used by another port or transport) and the listener rebinds immediately.
+Auto-assigned ports are stable and persisted per serial port.
+
+Sessions follow the console's one-writer/many-observer rule: the first DPA client
+writes and later ones are read-only. An SSH **break** (`~B`) sends a serial BREAK.
+SSH needs `asyncssh` (in `console/requirements.txt`). On a console host where the role
+was loaded before this existed, it is installed automatically the first time SSH DPA is
+enabled.
+
+The older Load Role checkbox (`console_dpa_enabled` / `console_dpa_bind` /
+`console_dpa_allow`) still works as an initial default that means "telnet on". Once
+the Console-page knob is saved, `dpa.json` takes precedence.
+
+Hub API (admin): `GET/POST /api/console/dpa?spoke_id=` → spoke `CONSOLE_GET_DPA` /
+`CONSOLE_SET_DPA`. Per-port (tenant-scoped): `POST /api/console/dpa-port`
+`{spoke_id, port_id, proto: ssh|telnet, port|null}` → `CONSOLE_SET_DPA_PORT`.
+
+*Follow-ups:* authenticate SSH DPA against LM users via the hub, and an LM-proxy DPA
+front door, so many console servers are reachable through one address.
 
 ## How it works
 
