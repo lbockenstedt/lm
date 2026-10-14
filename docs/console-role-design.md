@@ -29,7 +29,7 @@ VNC *relay pattern* (session registry, queue-consumer discipline, request/respon
 | Serial adapter auto-detect | scans ttyUSB/ttyACM/ttyAMA | pyserial `list_ports` + `/dev/serial/by-id` scan on the console sub-spoke | Yes |
 | Stable port naming | udev rules by serial#/vendor | software-derived stable `port_id` from USB serial#/`ID_PATH` + editable alias in role config; udev-writing later | Stable ID Yes; udev Defer |
 | Per-port baud/flow/parity | ser2net cfg, 9600 8N1 | per-port settings in role config, applied on open; editable in WebUI | Yes |
-| Telnet (ser2net) | 7000/8000/9000 | Off by default. Opt-in **Direct Port Access** (`console_dpa_enabled`) per-port auto-assigned telnet from base 2200, localhost-bound; see §7 | Opt-in |
+| Telnet (ser2net) | 7000/8000/9000 | Off by default. Opt-in **Direct Port Access**: per-port SSH (base 3001, password/keys) and/or legacy localhost telnet (base 2200); see §8 | Opt-in |
 | SSH menu | consolepi-menu TUI | replaced by hub WebUI terminal | No |
 | Web interface | Flask :5000, no auth | native lm WebUI + `/api/console/*`, gated by session auth + `console` right | Yes |
 | Remote/clustered | mDNS + gdrive CSV | hub already aggregates every console sub-spoke; native | Yes |
@@ -199,29 +199,28 @@ credential/settings UI + banner/vendor display → E in-repo role + permissions 
 engine (banner, vendor profiles, encrypted creds, read-only harvest, NetBox match+create)** → G docs + tests.
 
 ## 8. Direct Port Access (DPA) — reverse terminal-server (opt-in)
-A reverse Telnet listener per port (à la ser2net / a Cisco terminal server): enable
-`console_dpa_enabled` and each detected serial port gets an auto-assigned TCP port
-(stable, persisted as `dpa_port`, from base `console_dpa_base`=2200 within a
-`console_dpa_span`=200 window). Connecting a terminal to that port (e.g. `telnet
-host 2201`) attaches straight to the serial line — the connection is bridged onto
-the same one-writer/many-observer `SessionManager` (first DPA client writes, the
-rest are read-only), and the passive monitor/capture is unaffected. The endpoint is
-surfaced in the WebUI port list and the `CONSOLE_LIST_PORTS` snapshot (`dpa` field).
+DPA is a reverse listener per serial port (à la ser2net / a Cisco terminal server),
+with two transports on one `DpaManager` (`console/src/dpa.py`):
 
-Security: this reverses the original "hub WebUI relay only" decision, so it is
-**OFF by default** and binds **127.0.0.1** (`console_dpa_bind`). Telnet is
-unauthenticated/unencrypted — the localhost bind (or an explicit `console_dpa_allow`
-source-IP allow-list when widening the bind) is the guard. **Encrypted, authenticated
-SSH is the planned follow-up transport** (needs an `asyncssh` dependency + host-key
-generation + auth); it plugs into the same `DpaManager.bridge` and is the
-recommended path for remote access. Code: `console/src/dpa.py` (`allocate_port`,
-`strip_telnet`, `DpaManager`), wired in `console/src/console_spoke.py`
-(`_ensure_dpa_task`, local-sink interception in `_on_serial_data`).
+- **SSH** (`console/src/dpa_ssh.py`, asyncssh) runs on base **3001**, persisted as `dpa_ssh_port`.
+  Auth is a spoke-local password (scrypt, or PBKDF2-SHA256 where scrypt is missing)
+  and/or authorized keys. The ed25519 host key is persisted. It uses raw byte mode
+  (`line_editor=False`), resize-safe, and `~B` sends a serial BREAK.
+- **Telnet** (legacy) runs on base **2200**, persisted as `dpa_port`. It is unauthenticated
+  and binds 127.0.0.1 by default. Binding it wider requires an allow-list.
 
-**Enabling it (operator):** tick **Enable Direct Port Access** under the `console` role
-in **Setup → Spokes & Agents → Load Role** (config keys `console_dpa_enabled` /
-`console_dpa_bind` / `console_dpa_allow`). The role can't already be loaded to pass this
-config, so unload+reload to change it. The config applies at load only — it is not
-re-applied on an agent reboot or config-less hub re-adopt (a property of all interactive
-role config), so durable re-push of the role config and a live `CONSOLE_SET_DPA` toggle
-are the tracked follow-ups.
+Each port's TCP port is auto-allocated stably within a 200-port window, or pinned by a
+per-port override (`dpa_ssh_port_override` / `dpa_port_override`) that auto ports avoid.
+A source allow-list (CIDR, via `ipaddress`) gates both transports before auth.
+Connections bridge onto the same one-writer/many-observer `SessionManager`.
+
+**Config knob** (`console/src/dpa_config.py`). Precedence is defaults (OFF)
+< legacy role config `console_dpa_*` (back-compat: means telnet on) < `<state>/dpa.json`.
+It is changed live by `CONSOLE_SET_DPA` (WebUI Console → 🔌 Direct Port Access), read by
+`CONSOLE_GET_DPA`, with per-port overrides via `CONSOLE_SET_DPA_PORT`. Because it is persisted
+on the spoke, it survives restarts and config-less re-adopts. The port list's `dpa` field
+is `{host, ssh_port, ssh_override, telnet_port, bind, telnet_override, proto}`. The
+advertised `host` is set explicitly or auto-detected toward the hub.
+
+Follow-ups: LM-user auth via the hub, and an LM-proxy DPA front door for many console
+servers.
