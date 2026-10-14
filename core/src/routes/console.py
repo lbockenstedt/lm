@@ -1516,6 +1516,19 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail=data.get("message") or "DPA request failed")
         return data if isinstance(data, dict) else {}
 
+    async def _console_dpa_refresh_ports(hub, sid):
+        """Re-cache the spoke's port list right after a DPA change. The Console
+        page is served from the warm cache (refreshed every ~30s), so without
+        this the reload that follows a save keeps showing rows without the
+        DPA badge. Best-effort: a slow spoke just falls back to the loop."""
+        refresh = getattr(hub, "refresh_console_ports_cache", None)
+        if refresh is None:
+            return
+        try:
+            await refresh([sid], timeout=15.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("console DPA: port cache refresh for %s failed: %s", sid, exc)
+
     @app.get("/api/console/dpa")
     async def console_dpa_get(request: Request):
         """Direct Port Access config + status for one console spoke (admin)."""
@@ -1555,7 +1568,9 @@ def register(app, hub, ctx):
                      "authorized_keys", "password", "clear_password")
         }
         r = await hub.request_response(sid, "CONSOLE_SET_DPA", payload, timeout=60.0)
-        return {"spoke_id": sid, **_console_dpa_result(r)}
+        result = {"spoke_id": sid, **_console_dpa_result(r)}
+        await _console_dpa_refresh_ports(hub, sid)
+        return result
 
     @app.post("/api/console/dpa-port")
     async def console_dpa_port(request: Request):
@@ -1577,7 +1592,9 @@ def register(app, hub, ctx):
             "port": body.get("port")
         }
         r = await hub.request_response(sid, "CONSOLE_SET_DPA_PORT", payload, timeout=15.0)
-        return _console_dpa_result(r)
+        result = _console_dpa_result(r)
+        await _console_dpa_refresh_ports(hub, sid)
+        return result
 
     @app.post("/api/console/capture")
     async def console_capture(request: Request):
