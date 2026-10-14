@@ -21724,6 +21724,7 @@ async function pxmxCreateVmSubmit() {
 // terminal wired to the hub's /ws/console-serial/{session_id} byte relay. xterm
 // is dynamic-imported from CDN once (mirrors how noVNC is loaded below).
 let _consolePorts = [];
+let _consoleSpokes = [];
 let _xtermMod = null;
 
 async function loadConsoleData() {
@@ -21737,9 +21738,46 @@ async function loadConsoleData() {
         }
         const data = await res.json();
         _consolePorts = data.ports || [];
+        _consoleSpokes = data.consoles || [];
         _renderConsolePorts(el, data);
     } catch (e) {
         el.innerHTML = `<div class="py-12 text-center text-red-400 italic">Error: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+// Direct Port Access endpoint for a console row: the ssh command to reach this
+// serial line straight on the console server (click to copy), plus the telnet
+// endpoint when that transport is on. Hidden when DPA is off for the agent.
+function _consoleDpaSshCmd(p) {
+    const d = p.dpa || {};
+    if (!d.ssh_port) return '';
+    return `ssh -p ${d.ssh_port} ${d.host || '<console-server>'}`;
+}
+
+function _consoleDpaBadge(p) {
+    const d = p.dpa;
+    if (!d || (!d.ssh_port && !d.telnet_port)) return '';
+    const pin = '<span title="Port pinned by an operator override">📌</span>';
+    const parts = [];
+    if (d.ssh_port) {
+        const cmd = _consoleDpaSshCmd(p);
+        parts.push(`<button type="button" onclick="_consoleCopyDpa(this)" data-cmd="${escapeHtml(cmd)}" class="font-mono px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200 hover:bg-sky-100" title="Direct Port Access over SSH — host ${escapeHtml(String(d.host || '?'))}, port ${escapeHtml(String(d.ssh_port))}. Click to copy.">🔐 DPA ${escapeHtml(String(d.host || '?'))}:${escapeHtml(String(d.ssh_port))}${d.ssh_override ? ' ' + pin : ''}</button>`);
+    }
+    if (d.telnet_port) {
+        const tb = String(d.bind || '127.0.0.1');
+        const th = (tb === '0.0.0.0' || tb === '::') ? (d.host || tb) : tb;
+        parts.push(`<span class="font-mono px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200" title="Direct Port Access over telnet (unauthenticated, unencrypted; bound to ${escapeHtml(tb)})">🔌 telnet ${escapeHtml(String(th))}:${escapeHtml(String(d.telnet_port))}${d.telnet_override ? ' ' + pin : ''}</span>`);
+    }
+    return `<div class="text-[11px] mt-0.5 space-x-1">${parts.join(' ')}</div>`;
+}
+
+async function _consoleCopyDpa(btn) {
+    const cmd = btn.getAttribute('data-cmd') || '';
+    try {
+        await navigator.clipboard.writeText(cmd);
+        showToast(`Copied: ${cmd}`, 'success');
+    } catch (e) {
+        showToast(cmd, 'info');
     }
 }
 
@@ -21776,8 +21814,7 @@ function _renderConsolePorts(el, data) {
         const profileBtn = hasConsoleView() ? `<button onclick="profileDevice('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile this device: use the known fingerprint if we have one, otherwise ask the AI to identify it from its (scrubbed) console output">🔎 Profile Device</button>` : '';
         const captureBtn = (p.capture_bytes || p.monitoring || (p.probe && p.probe.banner))
             ? `<button onclick="openConsoleCaptureModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50" title="View recent console output captured from this port">Capture</button>` : '';
-        const dpaBadge = (p.dpa && p.dpa.telnet_port)
-            ? `<div class="text-[11px] mt-0.5"><span class="font-mono px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200" title="Direct Port Access — connect a terminal straight to this serial line (unencrypted telnet; bound to ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))})">🔌 ${escapeHtml(String(p.dpa.proto || 'telnet'))} ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))}:${escapeHtml(String(p.dpa.telnet_port))}</span></div>` : '';
+        const dpaBadge = _consoleDpaBadge(p);
         return `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${staleBadge}${disconnectedBadge}${monDot}${bootBadge}${stackBadge}</div>
               <div class="text-xs font-mono text-slate-400" title="${escapeHtml(p.spoke_id || '')}">${escapeHtml(tenantId)}:${escapeHtml(agentName)}:${escapeHtml(p.device)}:${escapeHtml(String(baud))}</div>
@@ -21801,7 +21838,10 @@ function _renderConsolePorts(el, data) {
     const diagBtn = hasConsoleView()
         ? `<button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button>`
         : '';
-    const adminTools = diagBtn + ((admin || isTenantAdmin())
+    const dpaBtn = admin
+        ? `<button onclick="openConsoleDpaModal()" class="text-[11px] px-3 py-1.5 rounded border border-sky-400 text-sky-700 hover:bg-slate-50" title="Direct Port Access: SSH (or telnet) straight to a serial port on the console server">🔌 Direct Port Access</button>`
+        : '';
+    const adminTools = diagBtn + dpaBtn + ((admin || isTenantAdmin())
         ? `<button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button>`
         : '');
     const tools = (profileAllBtn || adminTools)
@@ -23588,6 +23628,19 @@ function openConsoleSettingsModal(spokeId, portId) {
     const baudOpts = bauds.map(b => `<option value="${b}" ${Number(s.baud) === b ? 'selected' : ''}>${b}</option>`).join('');
     const parOpts = ['N', 'E', 'O'].map(x => `<option value="${x}" ${(s.parity || 'N') === x ? 'selected' : ''}>${x}</option>`).join('');
     const flowOpts = ['none', 'rtscts', 'xonxoff'].map(x => `<option value="${x}" ${(s.flow || 'none') === x ? 'selected' : ''}>${x}</option>`).join('');
+    // Direct Port Access: show the endpoint and let the operator pin this serial
+    // port to a specific TCP port (blank = auto-assign). Only when DPA is on.
+    const d = p.dpa || {};
+    const dpaField = (proto, cur, pinned, label) => `<div><label class="text-[11px] text-slate-500">${label} port <span class="text-slate-400">(current ${escapeHtml(String(cur))}${pinned ? ', pinned' : ', auto'})</span></label>
+                <input id="console-cfg-dpa-${proto}" type="number" min="1024" max="65535" placeholder="auto" value="${pinned ? escapeHtml(String(cur)) : ''}" data-orig="${pinned ? escapeHtml(String(cur)) : ''}" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></div>`;
+    const dpaSection = (d.ssh_port || d.telnet_port) ? `<div class="pt-2 border-t border-slate-100">
+            <div class="text-xs text-slate-500 uppercase font-bold mb-1">Direct Port Access <span class="normal-case text-slate-400 font-normal">— leave blank to auto-assign</span></div>
+            ${d.ssh_port ? `<div class="text-[11px] font-mono text-sky-700 mb-1">${escapeHtml(_consoleDpaSshCmd(p))}</div>` : ''}
+            <div class="grid grid-cols-2 gap-3">
+              ${d.ssh_port ? dpaField('ssh', d.ssh_port, d.ssh_override, 'SSH') : ''}
+              ${d.telnet_port ? dpaField('telnet', d.telnet_port, d.telnet_override, 'Telnet') : ''}
+            </div>
+          </div>` : '';
     const modal = document.createElement('div');
     modal.id = 'console-settings-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
@@ -23614,6 +23667,7 @@ function openConsoleSettingsModal(spokeId, portId) {
                 <input id="console-cfg-chunk" type="number" min="1" max="4096" value="${Number.isFinite(+s.paste_chunk) ? +s.paste_chunk : 64}" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></div>
             </div>
           </div>
+          ${dpaSection}
           <div class="pt-3 flex justify-end gap-3">
             <button onclick="this.closest('#console-settings-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
             <button onclick="saveConsoleSettings('${spokeId.replace(/'/g, "\\'")}','${portId.replace(/'/g, "\\'")}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>
@@ -23642,9 +23696,199 @@ async function saveConsoleSettings(spokeId, portId) {
             method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
+        for (const proto of ['ssh', 'telnet']) {
+            const inp = document.getElementById(`console-cfg-dpa-${proto}`);
+            if (!inp || inp.value.trim() === (inp.dataset.orig || '')) continue;
+            const v = inp.value.trim();
+            const r = await fetch('/api/console/dpa-port', {
+                method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ spoke_id: spokeId, port_id: portId, proto, port: v ? parseInt(v, 10) : null }),
+            });
+            if (!r.ok) {
+                const d = await r.json().catch(() => ({}));
+                showToast(`DPA ${proto} port: ${d.detail || 'override failed'}`, 'error');
+                return;
+            }
+        }
         if (res.ok) { showToast('Settings saved', 'success'); document.getElementById('console-settings-modal')?.remove(); loadConsoleData(); }
         else { const d = await res.json().catch(() => ({})); showToast(d.detail || 'Save failed', 'error'); }
     } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
+}
+
+// Direct Port Access knob (admin): per console agent, persisted on the agent
+// and applied live. The SSH password is write-only (never read back).
+function openConsoleDpaModal() {
+  const existing = document.getElementById('console-dpa-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'console-dpa-modal';
+  modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+  modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
+    <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+      <h3 class="text-lg font-bold text-[#263040]">Direct Port Access</h3>
+      <button onclick="this.closest('#console-dpa-modal').remove()" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+    </div>
+    <div class="p-6 space-y-4">
+      <div><label class="text-xs text-slate-500 uppercase font-bold">Spoke</label>
+        <select id="dpa-spoke" onchange="_consoleDpaLoad(this.value)" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></select></div>
+      <div id="dpa-status" class="text-xs text-slate-500"></div>
+      <div><label class="flex items-center space-x-2">
+        <input type="checkbox" id="dpa-enabled" class="rounded">
+        <span class="text-sm">Enable Direct Port Access</span>
+      </label></div>
+      <div><label class="flex items-center space-x-2">
+        <input type="checkbox" id="dpa-ssh-enabled" class="rounded">
+        <span class="text-sm">SSH (authenticated, encrypted)</span>
+      </label>
+      <div class="ml-6 mt-1 grid grid-cols-2 gap-2">
+        <div><label class="text-xs text-slate-500">Bind address</label>
+          <input id="dpa-ssh-bind" placeholder="0.0.0.0" class="w-full border border-slate-300 rounded-md px-3 py-1 text-sm"></div>
+        <div><label class="text-xs text-slate-500">Base port</label>
+          <input id="dpa-ssh-base" type="number" placeholder="3001" class="w-full border border-slate-300 rounded-md px-3 py-1 text-sm"></div>
+      </div></div>
+      <div><label class="flex items-center space-x-2">
+        <input type="checkbox" id="dpa-telnet-enabled" class="rounded">
+        <span class="text-sm">Telnet (unauthenticated — keep on 127.0.0.1)</span>
+      </label>
+      <div class="ml-6 mt-1 grid grid-cols-2 gap-2">
+        <div><label class="text-xs text-slate-500">Bind address</label>
+          <input id="dpa-telnet-bind" placeholder="127.0.0.1" class="w-full border border-slate-300 rounded-md px-3 py-1 text-sm"></div>
+        <div><label class="text-xs text-slate-500">Base port</label>
+          <input id="dpa-telnet-base" type="number" placeholder="2200" class="w-full border border-slate-300 rounded-md px-3 py-1 text-sm"></div>
+      </div></div>
+      <div><label class="text-xs text-slate-500 uppercase font-bold">Advertise host</label>
+        <input id="dpa-advertise-host" placeholder="auto-detect" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+        <div class="text-xs text-slate-500 mt-1">Address shown to users in the ssh command (leave blank to auto-detect)</div></div>
+      <div><label class="text-xs text-slate-500 uppercase font-bold">Allow from</label>
+        <input id="dpa-allow" placeholder="source IPs/CIDRs, comma-separated (blank = any)" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></div>
+      <div><label class="text-xs text-slate-500 uppercase font-bold">Password</label>
+        <input id="dpa-password" type="password" autocomplete="new-password" placeholder="leave blank to keep current" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+        <div><label class="flex items-center space-x-2 mt-1">
+          <input type="checkbox" id="dpa-clear-password" class="rounded">
+          <span class="text-sm">Remove password</span>
+        </label></div></div>
+      <div><label class="text-xs text-slate-500 uppercase font-bold">Authorized SSH keys</label>
+        <textarea id="dpa-keys" rows="3" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono mt-1 text-xs" placeholder="authorized SSH public keys, one per line"></textarea></div>
+      <div class="pt-3 flex justify-end gap-3">
+        <button onclick="this.closest('#console-dpa-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
+        <button onclick="saveConsoleDpa()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>
+      </div>
+    </div></div>`;
+  document.body.appendChild(modal);
+
+  const spokeSelect = modal.querySelector('#dpa-spoke');
+  _consoleSpokes.forEach(spokeId => {
+    const port = _consolePorts.find(p => p.spoke_id === spokeId);
+    const label = (port && port.agent_name) || spokeId;
+    const option = document.createElement('option');
+    option.value = spokeId;
+    option.textContent = label;
+    spokeSelect.appendChild(option);
+  });
+
+  if (_consoleSpokes.length > 0) {
+    _consoleDpaLoad(_consoleSpokes[0]);
+  }
+}
+
+async function _consoleDpaLoad(spokeId) {
+  const statusEl = document.getElementById('dpa-status');
+  try {
+    const res = await fetch(`/api/console/dpa?spoke_id=${encodeURIComponent(spokeId)}`, {credentials:'same-origin'});
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      statusEl.textContent = d.detail || 'Failed to load';
+      return;
+    }
+    const data = await res.json();
+
+    const config = data.config;
+    const status = data.runtime || {};
+
+    document.getElementById('dpa-enabled').checked = !!config.enabled;
+    document.getElementById('dpa-ssh-enabled').checked = !!config.ssh_enabled;
+    document.getElementById('dpa-telnet-enabled').checked = !!config.telnet_enabled;
+    document.getElementById('dpa-ssh-bind').value = config.ssh_bind || '';
+    document.getElementById('dpa-ssh-base').value = config.ssh_base ? String(config.ssh_base) : '';
+    document.getElementById('dpa-telnet-bind').value = config.telnet_bind || '';
+    document.getElementById('dpa-telnet-base').value = config.telnet_base ? String(config.telnet_base) : '';
+    document.getElementById('dpa-advertise-host').value = config.advertise_host || '';
+    document.getElementById('dpa-allow').value = (config.allow || []).join(', ');
+    document.getElementById('dpa-password').value = '';
+    document.getElementById('dpa-clear-password').checked = false;
+    document.getElementById('dpa-keys').value = config.authorized_keys || '';
+
+    let statusText = `Password: ${config.has_password ? 'set' : 'not set'} · Advertised host: ${escapeHtml(status.advertise_host || '?')} · Listeners: ssh ${status.ssh_listeners}, telnet ${status.telnet_listeners}`;
+    if (status.host_key_fingerprint) {
+      statusText += ` · Host key: ${escapeHtml(status.host_key_fingerprint)}`;
+    }
+    if (!status.ssh_available && status.ssh_error) {
+      statusText += ` · <span class="text-red-600">SSH unavailable: ${escapeHtml(status.ssh_error)}</span>`;
+    }
+
+    statusEl.innerHTML = statusText;
+  } catch (e) {
+    statusEl.textContent = 'Load failed: ' + e.message;
+  }
+}
+
+async function saveConsoleDpa() {
+  const spokeId = document.getElementById('dpa-spoke').value;
+  const enabled = document.getElementById('dpa-enabled').checked;
+  const sshEnabled = document.getElementById('dpa-ssh-enabled').checked;
+  const telnetEnabled = document.getElementById('dpa-telnet-enabled').checked;
+  const sshBind = document.getElementById('dpa-ssh-bind').value.trim();
+  const telnetBind = document.getElementById('dpa-telnet-bind').value.trim();
+  const advertiseHost = document.getElementById('dpa-advertise-host').value.trim();
+  const sshBase = parseInt(document.getElementById('dpa-ssh-base').value);
+  const telnetBase = parseInt(document.getElementById('dpa-telnet-base').value);
+  const allow = document.getElementById('dpa-allow').value.split(/[, ]+/).map(s => s.trim()).filter(Boolean);
+  const authorizedKeys = document.getElementById('dpa-keys').value;
+
+  const body = {
+    spoke_id: spokeId,
+    enabled,
+    ssh_enabled: sshEnabled,
+    telnet_enabled: telnetEnabled,
+    ssh_bind: sshBind,
+    telnet_bind: telnetBind,
+    advertise_host: advertiseHost,
+    allow,
+    authorized_keys: authorizedKeys
+  };
+
+  if (sshBase && !isNaN(sshBase)) body.ssh_base = sshBase;
+  if (telnetBase && !isNaN(telnetBase)) body.telnet_base = telnetBase;
+
+  const passwordValue = document.getElementById('dpa-password').value;
+  if (passwordValue) {
+    body.password = passwordValue;
+  }
+
+  if (document.getElementById('dpa-clear-password').checked) {
+    body.clear_password = true;
+  }
+
+  try {
+    const res = await fetch('/api/console/dpa', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    if (res.ok) {
+      showToast('Direct Port Access saved', 'success');
+      document.getElementById('console-dpa-modal').remove();
+      loadConsoleData();
+    } else {
+      const d = await res.json().catch(() => ({}));
+      showToast(d.detail || 'Save failed', 'error');
+    }
+  } catch (e) {
+    showToast('Save failed: ' + e.message, 'error');
+  }
 }
 
 async function openConsolePortTenantModal(spokeId, portId, currentTenantId) {

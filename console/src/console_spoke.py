@@ -36,6 +36,8 @@ try:
                              count_line_reconnects, set_patience,
                              check_line_responsive, FACTORY_DEFAULT_CREDENTIALS)
     from dpa import DpaManager
+    from dpa_config import DpaConfigStore, detect_advertise_host
+    import dpa_ssh
 except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .serial_manager import (  # type: ignore
         PortStore, HealthStore, PortChannel, SessionManager, enumerate_ports, detect_baud,
@@ -48,6 +50,8 @@ except ImportError:  # loaded as a package (agent role loader) or from repo root
                               count_line_reconnects, set_patience,
                               check_line_responsive, FACTORY_DEFAULT_CREDENTIALS)
     from .dpa import DpaManager  # type: ignore
+    from .dpa_config import DpaConfigStore, detect_advertise_host  # type: ignore
+    from . import dpa_ssh  # type: ignore
 
 logger = logging.getLogger("ConsoleSpoke")
 
@@ -145,12 +149,20 @@ class ConsoleSpoke(BaseSpoke):
         # needs to spot a flapping port instead of starting empty.
         self._health_store = HealthStore()
         self._health: Dict[str, Dict[str, Any]] = self._health_store.load()
-        # Direct Port Access (DPA): reverse Telnet terminal-server. OFF by
-        # default; when enabled, bytes for a DPA session are delivered to a local
-        # sink (the TCP client) instead of pushed to the hub. See dpa.py.
+        # Direct Port Access (DPA): per-port SSH (and optional telnet) terminal
+        # server. OFF by default; the knob is persisted on this host (dpa.json,
+        # see dpa_config.py) and changed live via CONSOLE_SET_DPA. Bytes for a
+        # DPA session go to a local sink (the TCP client), not to the hub.
         self._local_sinks: Dict[str, Any] = {}  # session_id → callable(bytes)
-        self._dpa: Optional[DpaManager] = None
+        self._dpa_cfg = DpaConfigStore(self.store.path.parent / "dpa.json", config)
+        self._dpa: Optional[DpaManager] = None      # telnet transport
+        self._dpa_ssh: Optional[DpaManager] = None  # ssh transport
+        self._dpa_ssh_status: Dict[str, Any] = {"available": None, "error": None,
+                                                "fingerprint": None}
+        self._dpa_advertise_auto = ""
         self._dpa_task = None
+        self._dpa_applied = False
+        self._dpa_apply_lock: Optional[asyncio.Lock] = None
 
     # ── reader-thread → hub bridge ────────────────────────────────────────────
     def _on_serial_data(self, session_id: str, data: bytes) -> None:
@@ -409,6 +421,24 @@ class ConsoleSpoke(BaseSpoke):
             self.config["console_llm_identify"] = enabled
             logger.info("console: LLM-assisted identify %s", "enabled" if enabled else "disabled")
             return {"status": "SUCCESS", "enabled": enabled}
+
+        if cmd == "CONSOLE_GET_DPA":
+            return {"status": "SUCCESS", **self._dpa_describe()}
+
+        if cmd == "CONSOLE_SET_DPA":
+            # Runtime DPA knob (Console page → Direct Port Access). Persisted on
+            # this host so it survives agent restarts; applied immediately.
+            ok, err = self._dpa_cfg.update(data or {})
+            if not ok:
+                return {"status": "ERROR", "message": err}
+            logger.info("console: DPA config updated (enabled=%s)", self._dpa_cfg.effective()["enabled"])
+            await self._dpa_apply()
+            self._ensure_dpa_task()  # hot-plug reconcile loop (no-op if off/running)
+            return {"status": "SUCCESS", **self._dpa_describe()}
+
+        if cmd == "CONSOLE_SET_DPA_PORT":
+            # Per-serial-port TCP port override (null/"" clears → auto-assign).
+            return await self._dpa_set_port(data or {})
 
         if cmd == "CONSOLE_AUTOPROBE":
             pid = data.get("port_id")
@@ -1106,31 +1136,51 @@ class ConsoleSpoke(BaseSpoke):
         return port_id
 
     def _dpa_info(self, port_id: str):
-        """DPA endpoint descriptor for the port list (None when DPA is off or the
-        listener isn't up yet)."""
-        if self._dpa is None:
+        """DPA endpoint descriptor for the port list (None when DPA is off or no
+        listener is up for this port). ``telnet_port``/``bind``/``proto`` keep
+        the original telnet-only shape for older WebUIs."""
+        if not self._dpa_cfg.effective().get("enabled"):
             return None
-        tcp = self._dpa.assignment(port_id)
-        if not tcp:
+        rec = self.store.get(port_id)
+        out: Dict[str, Any] = {"host": self._dpa_advertise_host()}
+        if self._dpa_ssh is not None:
+            tcp = self._dpa_ssh.assignment(port_id)
+            if tcp:
+                out.update(ssh_port=tcp, ssh_bind=self._dpa_ssh.bind,
+                           ssh_override=isinstance(rec.get("dpa_ssh_port_override"), int))
+        if self._dpa is not None:
+            tcp = self._dpa.assignment(port_id)
+            if tcp:
+                out.update(telnet_port=tcp, bind=self._dpa.bind,
+                           telnet_override=isinstance(rec.get("dpa_port_override"), int))
+        if "ssh_port" not in out and "telnet_port" not in out:
             return None
-        return {"telnet_port": tcp, "bind": self._dpa.bind, "proto": "telnet"}
+        out["proto"] = "ssh" if "ssh_port" in out else "telnet"
+        return out
 
-    def _ensure_dpa_task(self) -> None:
-        """Start Direct Port Access once, if enabled (config console_dpa_enabled,
-        default OFF). Each detected port gets its own auto-assigned TCP listener
-        (Telnet) bound to console_dpa_bind (default 127.0.0.1) so connecting to
-        that port attaches straight to the serial line."""
-        if self._dpa_task is not None or not self.config.get("console_dpa_enabled", False):
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        self._loop = self._loop or loop
-        allow = self.config.get("console_dpa_allow") or []
-        if isinstance(allow, str):
-            allow = [a for a in allow.replace(",", " ").split() if a]
-        self._dpa = DpaManager(
+    def _dpa_advertise_host(self) -> str:
+        return self._dpa_cfg.effective().get("advertise_host") or self._dpa_advertise_auto
+
+    def _dpa_hub_url(self) -> str:
+        return str(getattr(self.control_plane, "hub_url", "") or os.environ.get("LM_HUB_URL", "")
+                   or self.config.get("hub_url", "") or "")
+
+    def _dpa_describe(self) -> Dict[str, Any]:
+        st = self._dpa_ssh_status
+        return {
+            "config": self._dpa_cfg.public(),
+            "runtime": {
+                "ssh_available": st.get("available"),
+                "ssh_error": st.get("error"),
+                "host_key_fingerprint": st.get("fingerprint"),
+                "advertise_host": self._dpa_advertise_host(),
+                "ssh_listeners": len(self._dpa_ssh._servers) if self._dpa_ssh else 0,
+                "telnet_listeners": len(self._dpa._servers) if self._dpa else 0,
+            },
+        }
+
+    def _dpa_manager(self, *, proto: str, bind: str, base: int, allow, loop) -> DpaManager:
+        return DpaManager(
             store=self.store,
             enumerate_ports=self._enum_cached,
             open_session=self._open_user_session,
@@ -1140,23 +1190,139 @@ class ConsoleSpoke(BaseSpoke):
             unregister_sink=self._unregister_local_sink,
             port_device=self._port_device,
             port_name=self._port_name,
-            bind=self.config.get("console_dpa_bind", "127.0.0.1"),
-            base=int(self.config.get("console_dpa_base", 2200)),
+            bind=bind, base=base,
             span=int(self.config.get("console_dpa_span", 200)),
-            allow=allow,
-            loop=loop,
+            allow=allow, loop=loop,
+            proto=proto, store_key="dpa_ssh_port" if proto == "ssh" else "dpa_port",
         )
+
+    def _dpa_send_break(self, sid: str) -> None:
+        asyncio.ensure_future(asyncio.to_thread(self.sessions.send_break, sid))
+
+    def _dpa_lock(self) -> asyncio.Lock:
+        """Serialises every listener mutation (apply, periodic reconcile, port
+        override) so a stale manager can never be reconciled after a rebuild."""
+        if self._dpa_apply_lock is None:
+            self._dpa_apply_lock = asyncio.Lock()
+        return self._dpa_apply_lock
+
+    async def _dpa_apply(self) -> None:
+        """(Re)build the transport managers from the effective config and bring
+        listeners up immediately. Live sessions on a torn-down listener stay
+        attached until the client disconnects."""
+        async with self._dpa_lock():
+            self._dpa_applied = True
+            loop = asyncio.get_running_loop()
+            self._loop = self._loop or loop
+            cfg = self._dpa_cfg.effective()
+            for mgr in (self._dpa, self._dpa_ssh):
+                if mgr is not None:
+                    await mgr.stop()
+            self._dpa = self._dpa_ssh = None
+            if not cfg["enabled"]:
+                logger.info("console: Direct Port Access disabled")
+                return
+            if not cfg.get("advertise_host"):
+                self._dpa_advertise_auto = await asyncio.to_thread(
+                    detect_advertise_host, self._dpa_hub_url())
+            if cfg["telnet_enabled"]:
+                self._dpa = self._dpa_manager(proto="telnet", bind=cfg["telnet_bind"],
+                                              base=cfg["telnet_base"], allow=cfg["allow"], loop=loop)
+            if cfg["ssh_enabled"]:
+                mod, err = await asyncio.to_thread(dpa_ssh.ensure_asyncssh)
+                self._dpa_ssh_status = {"available": mod is not None, "error": err, "fingerprint": None}
+                if mod is not None:
+                    try:
+                        key = await asyncio.to_thread(dpa_ssh.load_or_create_host_key, mod,
+                                                      self.store.path.parent / "dpa_ssh_host_key")
+                    except Exception as e:  # noqa: BLE001
+                        self._dpa_ssh_status.update(available=False, error=f"host key: {e}")
+                        key = None
+                    if key is not None:
+                        self._dpa_ssh_status["fingerprint"] = dpa_ssh.host_key_fingerprint(key)
+                        mgr = self._dpa_manager(proto="ssh", bind=cfg["ssh_bind"],
+                                                base=cfg["ssh_base"], allow=cfg["allow"], loop=loop)
+                        mgr.listen = dpa_ssh.make_listen(
+                            mgr, mod, key, auth=self._dpa_cfg.effective,
+                            send_break=self._dpa_send_break)
+                        self._dpa_ssh = mgr
+                else:
+                    logger.warning("console: DPA SSH unavailable: %s", err)
+            for mgr in (self._dpa_ssh, self._dpa):
+                if mgr is not None:
+                    try:
+                        await mgr.reconcile()
+                    except Exception:  # noqa: BLE001
+                        logger.exception("console DPA %s reconcile failed", mgr.proto)
+            logger.info("console: Direct Port Access enabled (ssh=%s on %s:%d+, telnet=%s on %s:%d+, host=%s)",
+                        self._dpa_ssh is not None, cfg["ssh_bind"], cfg["ssh_base"],
+                        self._dpa is not None, cfg["telnet_bind"], cfg["telnet_base"],
+                        self._dpa_advertise_host() or "?")
+
+    async def _dpa_set_port(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        pid = data.get("port_id")
+        proto = (data.get("proto") or "ssh").lower()
+        if not pid:
+            return {"status": "ERROR", "message": "port_id is required"}
+        if proto not in ("ssh", "telnet"):
+            return {"status": "ERROR", "message": "proto must be ssh or telnet"}
+        raw = data.get("port")
+        if raw in (None, "", 0, "0"):
+            tcp = None
+        else:
+            try:
+                tcp = int(raw)
+            except (TypeError, ValueError):
+                return {"status": "ERROR", "message": "port must be an integer"}
+        async with self._dpa_lock():
+            mgr = self._dpa_ssh if proto == "ssh" else self._dpa
+            key = "dpa_ssh_port_override" if proto == "ssh" else "dpa_port_override"
+            if tcp is not None:
+                err = (mgr.validate_override(pid, tcp) if mgr is not None
+                       else (None if 1024 <= tcp <= 65535 else "port must be 1024-65535"))
+                other = self._dpa if proto == "ssh" else self._dpa_ssh
+                if not err and other is not None and tcp in other._assigned.values():
+                    err = f"port {tcp} is in use by the other DPA transport"
+                if err:
+                    return {"status": "ERROR", "message": err}
+            self.store.update(pid, **{key: tcp})
+            if mgr is not None:
+                await mgr.reconcile()
+                if tcp is not None and mgr.assignment(pid) != tcp:
+                    return {"status": "ERROR", "port_id": pid, "proto": proto,
+                            "message": f"override saved but port {tcp} could not be bound (in use on this host?)"}
+            return {"status": "SUCCESS", "port_id": pid, "proto": proto, "port": tcp,
+                    "dpa": self._dpa_info(pid)}
+
+    def _ensure_dpa_task(self) -> None:
+        """Start the DPA supervisor once. It applies the persisted/role config
+        (OFF by default) and then reconciles listeners as ports come and go;
+        CONSOLE_SET_DPA re-applies live."""
+        if self._dpa_task is not None or not self._dpa_cfg.effective().get("enabled"):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._loop = self._loop or loop
         self._dpa_task = loop.create_task(self._dpa_loop())
-        logger.info("console: Direct Port Access enabled (bind=%s, base=%d)",
-                    self._dpa.bind, self._dpa.base)
 
     async def _dpa_loop(self) -> None:
         await asyncio.sleep(5)
-        while True:
+        if not self._dpa_applied:
             try:
-                await self._dpa.reconcile()  # start/stop listeners as ports appear/vanish
+                await self._dpa_apply()
             except Exception:  # noqa: BLE001
-                logger.exception("console DPA reconcile failed")
+                logger.exception("console DPA apply failed")
+        while True:
+            async with self._dpa_lock():  # never race a live CONSOLE_SET_DPA rebuild
+                for mgr in (self._dpa_ssh, self._dpa):
+                    if mgr is None:
+                        continue
+                    try:
+                        await mgr.reconcile()  # start/stop listeners as ports appear/vanish
+                    except Exception:  # noqa: BLE001
+                        logger.exception("console DPA reconcile failed")
             await asyncio.sleep(15)
 
     async def _monitor_loop(self) -> None:
