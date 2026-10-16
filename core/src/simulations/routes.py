@@ -2990,12 +2990,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.get("/sim/api/spokes")
     async def get_spokes_list(request: Request, tenant_id: str = Depends(get_tenant_id)):
-        """Spoke Management list: every known spoke with its module type,
+        """Spoke Management list: the selected tenant's spokes with module type,
         connection/approval state, tenant binding, and (for cs spokes) VM
-        count. Tenant-scoped: non-admins see only their own tenant's approved
-        spokes; admins see all spokes (approved + pending, bound + unbound) so
-        they can assign the unbound ones. VM count is read from the
-        simulations_cache (the cached CS_TELEMETRY relay payload)."""
+        count. Always scoped to the requested tenant — another tenant's spokes
+        are never listed, not even for a Global Admin. Non-admins see only the
+        tenant's approved spokes; admins also see its pending spokes plus
+        unbound (no tenant) ones so they can assign them. VM count is read from
+        the simulations_cache (the cached CS_TELEMETRY relay payload)."""
         sess = session_user_fn(request)
         admin = bool(sess and is_admin_fn(sess))
         user_tenants = _user_tenants(sess)
@@ -3013,10 +3014,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             if not _is_sim_spoke(sid, live_types, m):
                 continue
             t_id = m.get("tenant_id")
-            if not admin:
-                # Non-admin: only their own tenant's approved spokes.
-                if t_id not in user_tenants or not approved.get(hub._primary_key(sid), False):
+            if admin:
+                if t_id and t_id != tenant_id:
                     continue
+            elif (not t_id or t_id != tenant_id or t_id not in user_tenants
+                  or not approved.get(hub._primary_key(sid), False)):
+                continue
             vm_count = None
             cdata = cache.get(sid) or {}
             hosts = cdata.get("proxmox_hosts") or []
@@ -3215,12 +3218,28 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         logger.info("Spoke %s claimed for tenant %s via PSK.", spoke_id, tenant_id)
         return {"status": "success", "spoke_id": spoke_id, "tenant_id": tenant_id}
 
+    def _require_spoke_in_tenant(spoke_id: str, tenant_id, allow_unbound: bool = False):
+        """404 unless ``spoke_id`` is bound to ``tenant_id`` (or, when
+        ``allow_unbound``, bound to no tenant) — so a spoke-management action
+        in tenant A's context can never read or touch tenant B's spoke."""
+        try:
+            bound = hub.state.get_spoke_tenant(spoke_id)
+        except Exception:
+            bound = None
+        if bound:
+            if bound == tenant_id:
+                return
+        elif allow_unbound:
+            return
+        raise HTTPException(status_code=404, detail="Spoke not found")
+
     # ── spoke management parity (Wave 6) — admin-only {tenant}-first routes ──
     # label / assigned-site / approve / config-patch / delete / config-diag.
     @app.patch("/sim/api/{tenant}/spokes/{spoke_id}/label")
     async def cs_spoke_set_label(request: Request, tenant: str, spoke_id: str,
                                   tenant_id: str = Depends(get_tenant_id)):
         _require_admin(request)
+        _require_spoke_in_tenant(spoke_id, tenant_id, allow_unbound=True)
         body = await request.json()
         label = (body or {}).get("label")
         if not label or not str(label).strip():
@@ -3233,6 +3252,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def cs_spoke_set_assigned_site(request: Request, tenant: str, spoke_id: str,
                                           tenant_id: str = Depends(get_tenant_id)):
         _require_admin(request)
+        _require_spoke_in_tenant(spoke_id, tenant_id, allow_unbound=True)
         body = await request.json()
         site = (body or {}).get("site", "")
         hub.state.update_module_metadata(spoke_id, {"assigned_site": site or ""})
@@ -3243,6 +3263,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def cs_spoke_approve(request: Request, tenant: str, spoke_id: str,
                                 tenant_id: str = Depends(get_tenant_id)):
         _require_admin(request)
+        _require_spoke_in_tenant(spoke_id, tenant_id, allow_unbound=True)
         raw = await request.body()
         body = {}
         if raw:
@@ -3275,6 +3296,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def cs_spoke_delete(request: Request, spoke_id: str,
                               tenant_id: str = Depends(get_tenant_id)):
         _require_admin(request)
+        _require_spoke_in_tenant(spoke_id, tenant_id, allow_unbound=True)
         # Close the live WS (if any) then drop registration + metadata + keys.
         ws = hub.active_connections.get(hub._primary_key(spoke_id))
         if ws is not None:
@@ -3296,6 +3318,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def cs_spoke_config_diag(tenant: str, spoke_id: str,
                                    tenant_id: str = Depends(get_tenant_id)):
         # Desired (store-pushed) vs applied (last relayed telemetry) for a spoke.
+        _require_spoke_in_tenant(spoke_id, tenant_id)
         diag = {"spoke_id": spoke_id, "tenant_id": tenant_id}
         try:
             diag["applied_config"] = await service.get_spoke_config(tenant_id, spoke_id)
