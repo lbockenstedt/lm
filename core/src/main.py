@@ -1006,6 +1006,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # module_metadata[spoke_id]["tenant_id"]. Mirrors spoke_telemetry's
         # in-memory pattern; not persisted (spoke re-pushes on reconnect).
         self.simulations_cache: Dict[str, dict] = {}
+        # cs full-config sync (see push_cs_full_config): last full push per pk
+        # (dedups reconnect vs CS_CONFIG_REQUEST vs drift/backstop pushes), the
+        # connect-phase deferral marker (spoke_id -> (marked_at, due)), and
+        # strong refs for the fire-and-forget push tasks.
+        self._cs_full_push_ts: Dict[str, float] = {}
+        self._cs_connect_defer: Dict[str, list] = {}
+        self._cs_push_tasks: set = set()
         # Warm-load persistence for the Client-Sim telemetry cache: on a hub
         # restart the Clients + VM Server views were blank until EVERY spoke
         # reconnected and re-pushed CS_TELEMETRY (the cache was in-memory only).
@@ -1351,6 +1358,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     _MSG_CLASS_DEFAULT = {
         "HEARTBEAT": "skippable",
         "CS_TELEMETRY": "coalesce",
+        "CS_CONFIG_REQUEST": "must",
         "SPOKE_LOG": "coalesce",
         "COMMAND_RESULT": "must",
         "LOADTEST_PROBE": "must",
@@ -2680,7 +2688,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # never fires until an admin re-saves Setup/Proxmox). Mirrors
                 # the NAC/IPAM reconnect re-push (multi-instance-spoke-config-
                 # push), which was never extended to cs.
-                await self.push_cs_hub_config(spoke_id)
+                #
+                # During handle_connection the push is DEFERRED until after the
+                # mailbox flush: awaiting it inline ran before the message loop
+                # existed, so its request_response could never see the reply →
+                # always a 30s timeout → spoke marked draining → push queued, and
+                # stale queued CS_CONFIG_UPDATEs then flushed on top of it.
+                _defer = self._cs_connect_defer.get(spoke_id)
+                if _defer is not None and (time.time() - _defer[0]) < 120:
+                    _defer[1] = True
+                    return
+                await self.push_cs_full_config(spoke_id, reason="config")
                 return
 
             # Handle Firewall multi-instance config
@@ -2990,6 +3008,81 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             except Exception as e:  # noqa: BLE001
                 logger.warning("provision_tenant_ou %s on %s: %s", slug, sid, e)
 
+    # Window in which a second full push to the same spoke is skipped as a
+    # duplicate (reconnect push + the spoke's CS_CONFIG_REQUEST land together).
+    _CS_FULL_PUSH_DEDUP_S = 60.0
+
+    def _spawn_cs_push(self, coro) -> None:
+        t = asyncio.create_task(coro)
+        self._cs_push_tasks.add(t)
+        t.add_done_callback(self._cs_push_tasks.discard)
+
+    async def push_cs_full_config(self, spoke_id: str, reason: str = "reconnect") -> None:
+        """Deliver the tenant's FULL cs config (every hub-owned key) to one
+        spoke as a single ``CS_CONFIG_UPDATE`` (``full_config`` + ``config_hash``),
+        via the routes-registered ``_cs_full_config_push`` so it gets the same
+        effective-list / config_source / quota-apportionment treatment as the
+        save routes. Falls back to the legacy reconnect push
+        (``push_cs_hub_config``) when the simulations routes aren't registered
+        or the full push fails. Never raises."""
+        try:
+            self._cs_full_push_ts[self._primary_key(spoke_id)] = time.time()
+        except Exception:  # noqa: BLE001
+            pass
+        full = getattr(self, "_cs_full_config_push", None)
+        if callable(full):
+            try:
+                if await full(spoke_id, reason=reason):
+                    return
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cs full-config push (%s) to %s failed, falling back "
+                               "to legacy re-push: %s", reason, spoke_id, exc)
+        try:
+            await self.push_cs_hub_config(spoke_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("cs legacy config re-push to %s failed: %s", spoke_id, exc)
+
+    async def _handle_cs_config_request(self, spoke_id: str, spoke_hash: str) -> None:
+        """CS_CONFIG_REQUEST: the spoke asks for config after connecting. Push the
+        full config unless its hash already matches, or a full push to it went
+        out within the dedup window (the reconnect push is usually in flight)."""
+        try:
+            pk = self._primary_key(spoke_id)
+            if (time.time() - self._cs_full_push_ts.get(pk, 0.0)) < self._CS_FULL_PUSH_DEDUP_S:
+                return
+            expected_fn = getattr(self, "_cs_expected_config_hash", None)
+            if spoke_hash and callable(expected_fn):
+                try:
+                    if spoke_hash == await expected_fn(spoke_id):
+                        return
+                except Exception:  # noqa: BLE001 — unknown expected hash → push
+                    pass
+            await self.push_cs_full_config(spoke_id, reason="request")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("CS_CONFIG_REQUEST from %s failed: %s", spoke_id, exc)
+
+    async def _cs_github_pull_if_empty(self, tenant_id: str) -> None:
+        """Hub is the sole GitHub client: for a github-managed tenant whose config
+        the hub hasn't pulled yet, pull it NOW so a push delivers the real config
+        (not an empty hub-owned override). Best-effort."""
+        try:
+            _sot = await self.simulations_store.get_source_of_truth(tenant_id)
+            _have = bool((await self.simulations_store.get_sim_conf_content(tenant_id) or "").strip())
+            if _sot == "github" and not _have:
+                from simulations import github_config_client as _ghc
+                _gh_cfg = await self.simulations_store.get_github_config(tenant_id, resolve=True) or {}
+                if _ghc.is_configured(_gh_cfg):
+                    _pulled = await _ghc.pull(_gh_cfg)
+                    if _pulled:
+                        if _pulled.get("sim_conf") is not None:
+                            await self.simulations_store.set_sim_conf_content(
+                                tenant_id, _pulled["sim_conf"])
+                        if _pulled.get("user_overrides") is not None:
+                            await self.simulations_store.set_user_overrides_content(
+                                tenant_id, _pulled["user_overrides"])
+        except Exception as exc:  # noqa: BLE001 — best-effort pull, never block a push
+            logger.debug("cs github pull-if-empty for %s failed: %s", tenant_id, exc)
+
     async def push_cs_hub_config(self, spoke_id: str) -> None:
         """Re-push the tenant's hub-owned CS provisioning config
         (``usb_vidpids``/``usb_ignored_vidpids``/``usb_auto_provision``,
@@ -3019,28 +3112,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             tenant_id = None
         if not tenant_id:
             return
-        # Hub is the sole GitHub client: for a github-managed tenant whose config
-        # the hub hasn't pulled yet, pull it NOW so this reconnect delivers the
-        # real config (not an empty hub-owned override) and the spoke never has
-        # to touch GitHub itself. One central puller — see github_config_client.
-        try:
-            _sot = await self.simulations_store.get_source_of_truth(tenant_id)
-            _have = bool((await self.simulations_store.get_sim_conf_content(tenant_id) or "").strip())
-            if _sot == "github" and not _have:
-                from simulations import github_config_client as _ghc
-                _gh_cfg = await self.simulations_store.get_github_config(tenant_id, resolve=True) or {}
-                if _ghc.is_configured(_gh_cfg):
-                    _pulled = await _ghc.pull(_gh_cfg)
-                    if _pulled:
-                        if _pulled.get("sim_conf") is not None:
-                            await self.simulations_store.set_sim_conf_content(
-                                tenant_id, _pulled["sim_conf"])
-                        if _pulled.get("user_overrides") is not None:
-                            await self.simulations_store.set_user_overrides_content(
-                                tenant_id, _pulled["user_overrides"])
-        except Exception as exc:  # noqa: BLE001 — best-effort pull, never block reconnect
-            logger.debug("push_cs_hub_config: github pull-if-empty for %s failed: %s",
-                         tenant_id, exc)
+        # Hub is the sole GitHub client: pull a github-managed tenant's config
+        # now if the hub doesn't have it yet. Called unbound so the stub hubs in
+        # the unit tests (which only carry the attributes used here) still work.
+        await LabManagerHub._cs_github_pull_if_empty(self, tenant_id)
         # Advertise follower mode to the (re)connecting spoke: 'hub' once the hub
         # has the config (hub-owned, or github pulled above) so repo_sync no-ops
         # and the spoke serves hub-delivered files as its whole config; 'github'
@@ -5702,6 +5777,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             type="SPOKE_UPDATE_SESSION_KEY",
                             data={"secret": session_secret}))
                     await self.send_to_spoke(key_msg, signing_secret=None)
+                self._cs_connect_defer[spoke_id] = [time.time(), False]
                 await self.push_config_to_spoke(spoke_id)
 
                 # Role self-heal (hub half): if this is a base agent, re-push
@@ -5748,6 +5824,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # flush must read the guid-keyed queue or a reconnecting spoke's
             # pending messages would be stranded under the stale name.
             await self.mailbox.flush_mailbox(pk, self.send_to_spoke)
+
+            # cs reconnect config push, deferred from push_config_to_spoke so it
+            # lands AFTER any queued (older) CS_CONFIG_UPDATE and runs as a task
+            # while the message loop below receives its reply.
+            _cs_defer = self._cs_connect_defer.pop(spoke_id, None) if spoke_id else None
+            if _cs_defer and _cs_defer[1]:
+                self._spawn_cs_push(self.push_cs_full_config(spoke_id, reason="reconnect"))
 
             # 3. Message Loop
             async for message_json in websocket:
@@ -6076,6 +6159,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         continue
                     await self._handle_cs_telemetry(spoke_id, payload.get("data", {}))
                     self._telemetry_processed += 1
+                    continue
+
+                # --- Client-Sim config pull (sent once per spoke connect) ---
+                # Re-push the full config when the spoke's hash differs from what
+                # the hub would send now. Runs as a task: the push's reply arrives
+                # through this same loop.
+                if payload.get("type") == "CS_CONFIG_REQUEST":
+                    _rd = payload.get("data", {}) or {}
+                    self._spawn_cs_push(self._handle_cs_config_request(
+                        spoke_id, str(_rd.get("config_hash") or "")))
                     continue
 
                 # --- Client-Sim per-op progress (realtime operations feed) ---
@@ -10525,6 +10618,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         _scrub_loop = getattr(self, "_clients_scrub_loop", None)
         if _scrub_loop is not None:
             asyncio.create_task(_scrub_loop())
+        # cs config sync: every 5m re-push the full config to any hash-capable cs
+        # spoke whose reported cs_config_hash drifted from the hub's; every 1h
+        # push it unconditionally (backstop). Registered by
+        # register_simulations_routes.
+        _cs_sync_loop = getattr(self, "_cs_config_sync_loop", None)
+        if _cs_sync_loop is not None:
+            asyncio.create_task(_cs_sync_loop())
         # Hub-as-sole-GitHub-client: ONE central puller that syncs each
         # github-managed tenant's simulation.conf / user-overrides.conf from its
         # repo and pushes changes down to that tenant's spokes (replaces the

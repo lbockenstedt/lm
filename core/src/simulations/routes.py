@@ -42,6 +42,18 @@ logger = logging.getLogger("SimRoutes")
 # must be live or fail.
 _QUEUEABLE_FLEET_ACTIONS = frozenset({"clear_usb_quarantine", "clear_usb_exclusions"})
 
+# CS_CONFIG_UPDATE envelope keys that are not config (excluded from the hash).
+_CS_CONFIG_META_KEYS = ("config_hash", "full_config")
+
+
+def _cs_config_hash(payload: dict) -> str:
+    """Stable sha256 of a per-spoke cs config payload (meta keys excluded). The
+    spoke echoes the hash of the last full push it applied in CS_TELEMETRY
+    (``cs_config_hash``); a mismatch with this value means it drifted."""
+    import hashlib
+    body = {k: v for k, v in (payload or {}).items() if k not in _CS_CONFIG_META_KEYS}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
+
 # Pure helpers + the short-TTL caches live in helpers.py; imported back so
 # behavior is unchanged (the route handlers mutate the cache dicts in place
 # via these references). main.py also imports _normalize_usb_vidpids/
@@ -477,7 +489,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             return obj
 
     async def _push_config(tenant_id: str, payload: dict,
-                           force_live: bool = False) -> "_PushResult":
+                           force_live: bool = False,
+                           spoke_filter: Optional[set] = None,
+                           full: bool = False,
+                           hash_only: bool = False):
         """Best-effort CS_CONFIG_UPDATE push to ALL of the tenant's Client-Sim
         spokes. Returns a _PushResult whose int value is the NUMBER of spokes
         the config reached (0 if none connected/assigned; N if pushed to N
@@ -501,7 +516,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         spokes gets the config on ALL of them, not just ``bound[0]``); falls
         back to the singular get_client_sim_spoke on an older hub build without
         it. Pushes CONCURRENTLY so a slow/queued spoke doesn't serialise the
-        fan-out (3 spokes = one ~5s round-trip, not three)."""
+        fan-out (3 spokes = one ~5s round-trip, not three).
+
+        cs config sync extensions: ``spoke_filter`` (a set of spoke ids, matched
+        by primary key) restricts DELIVERY to those spokes while quota/placement
+        apportionment still spans every bound spoke; ``full`` stamps each
+        per-spoke payload with ``full_config: True`` + its ``config_hash`` (the
+        spoke diffs full pushes per key and echoes the hash in telemetry);
+        ``hash_only`` sends nothing and returns ``{spoke_id: config_hash}``."""
         # Never let a hub-config push carry a TENANT-ONLY vid:pid list. The
         # global USB/PCI approvals live in a SEPARATE store (not in the tenant's
         # hub_config), so a raw hub-config Save/reset/patch would push the
@@ -543,7 +565,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 if sid:
                     spoke_ids = [sid]
         if not spoke_ids:
-            return _PushResult(0)
+            return {} if hash_only else _PushResult(0)
         # Always refresh the spoke's in-memory github_config (the Source-of-Truth
         # push token) so a spoke that restarted AFTER the key was installed — and
         # before the operator re-saved the GitHub creds — still has the token when
@@ -744,11 +766,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 p["ssid_placement"] = out_place
             return p
 
+        def _final_payload(sid: str) -> dict:
+            p = _payload_for(sid)
+            if not full:
+                return p
+            return {**p, "full_config": True, "config_hash": _cs_config_hash(p)}
+
         async def _one(sid: str):
             """Push to one spoke. Returns (1, queued, msg) on delivery (live OR
             queued — a queued push still counts, it WILL apply on reconnect),
             (0, False, '') on transport failure."""
-            payload = _payload_for(sid)
+            payload = _final_payload(sid)
             # force_live (reconcile unsticking a queued-only spoke) bypasses the
             # drain-aware shortcut: skip is_draining → queue, and attempt a real
             # live request_response so a stale drain window doesn't keep
@@ -788,10 +816,25 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", sid, exc)
                 return 0, False, ""
 
-        results = await asyncio.gather(*[_one(sid) for sid in spoke_ids])
+        targets = spoke_ids
+        if spoke_filter is not None:
+            _pk = getattr(hub, "_primary_key", None)
+
+            def _key(s):
+                try:
+                    return _pk(s) if callable(_pk) else s
+                except Exception:  # noqa: BLE001
+                    return s
+            want = {_key(s) for s in spoke_filter} | set(spoke_filter)
+            targets = [s for s in spoke_ids if s in want or _key(s) in want]
+        if hash_only:
+            return {sid: _cs_config_hash(_payload_for(sid)) for sid in targets}
+        if not targets:
+            return _PushResult(0)
+        results = await asyncio.gather(*[_one(sid) for sid in targets])
         pushed = sum(r[0] for r in results)
         any_queued = any(r[1] for r in results)
-        queued_msgs = [f"{sid}: {r[2]}" for sid, r in zip(spoke_ids, results)
+        queued_msgs = [f"{sid}: {r[2]}" for sid, r in zip(targets, results)
                        if r[1] and r[2]]
         return _PushResult(pushed, queued=any_queued,
                           message="; ".join(queued_msgs) if any_queued else "")
@@ -2206,6 +2249,172 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # re-push + a unit-test hook for the per-site apportionment in _push_config).
     try:
         hub._push_sim_quotas = _push_sim_quotas
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ── cs full-config sync (reconnect / CS_CONFIG_REQUEST / drift / backstop) ──
+    # A cs spoke that was out of contact longer than the mailbox backlog window
+    # (or restarted while the hub's reconnect push timed out) came back on stale
+    # config: nothing re-delivered the ~20 per-route partial pushes it missed.
+    # _cs_full_config assembles EVERY hub-owned key once; the spoke diffs a
+    # full push per key (unchanged keys are no-ops, no side effects) and echoes
+    # the push's config_hash in CS_TELEMETRY so the hub can detect drift.
+    _CS_SYNC_INTERVAL_S = 300        # drift check cadence
+    _CS_SYNC_BACKSTOP_S = 3600       # unconditional full push at least this often
+    _CS_SYNC_DRIFT_GRACE_S = 120     # let telemetry catch up after a full push
+
+    async def _cs_full_config(tenant_id: str) -> dict:
+        """Every hub-owned cs config key for the tenant (pre-_push_config: the
+        effective USB/PCI lists, config_source, github_config and per-spoke
+        quota apportionment are filled in there). Creds/sites/override text are
+        included only when the hub actually holds them, so a hub with no data
+        never wipes spoke-local state."""
+        p: dict = {}
+        sim_ov = await store.get_sim_conf_content(tenant_id) or ""
+        user_ov = await store.get_user_overrides_content(tenant_id) or ""
+        if sim_ov:
+            p["sim_conf_override"] = sim_ov
+        if user_ov:
+            p["user_conf_override"] = user_ov
+        if sim_ov or user_ov:
+            p["config_source"] = "hub"   # recomputed by _push_config
+        try:
+            gc = hub.state.get_global_config() or {}
+            for rk in ("agent_relay_timeout_long_s", "agent_relay_timeout_fast_s"):
+                if gc.get(rk) is not None:
+                    p[rk] = gc.get(rk)
+        except Exception:  # noqa: BLE001
+            pass
+        hc = await store.get_hub_config(tenant_id) or {}
+        if hc.get("hub_config_enabled"):
+            p.update(dict(hc.get("hub_config") or {}))
+            # Placeholders: _push_config swaps in the effective (global+tenant) lists.
+            for k in ("usb_vidpids", "usb_ignored_vidpids", "t1_pci_vidpids", "t3_pci_vidpids"):
+                p[k] = "[]"
+        else:
+            # hub_config off: global approvals still reach the spoke (mirrors
+            # push_cs_hub_config's USB-only branch), but only non-empty lists.
+            for k, fn in (("usb_vidpids", _effective_usb_vidpids),
+                          ("usb_ignored_vidpids", _effective_usb_ignored),
+                          ("t1_pci_vidpids", _effective_t1_pci),
+                          ("t3_pci_vidpids", _effective_t3_pci)):
+                if await fn(tenant_id):
+                    p[k] = "[]"
+        for key, getter in (("central_config", store.get_central_config),
+                            ("central_sites_config", store.get_central_sites_config),
+                            ("mist_config", store.get_mist_config),
+                            ("mist_sites_config", store.get_mist_sites_config),
+                            ("central_on_prem_config", store.get_central_on_prem_config),
+                            ("central_on_prem_sites_config", store.get_central_on_prem_sites_config)):
+            try:
+                v = await getter(tenant_id)
+            except Exception:  # noqa: BLE001
+                v = None
+            if isinstance(v, dict) and v:
+                p[key] = v
+        # Quota / stacking / pool bundle — the same set _push_sim_quotas sends.
+        p["effective_sim_quotas"] = await _effective_sim_quotas(tenant_id)
+        p["sim_shareable"] = await _sim_shareable(tenant_id)
+        p["sim_knob_overrides"] = await _knob_overrides_for_tenant(tenant_id)
+        p.update(await _sim_stacking(tenant_id))
+        p.update(await _pool_config(tenant_id))
+        return p
+
+    def _cs_tenant_of(spoke_id: str) -> Optional[str]:
+        try:
+            return hub.state.get_spoke_tenant(spoke_id)
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _cs_full_config_push(spoke_id: str, reason: str = "reconnect") -> int:
+        """Full-config push to ONE spoke. Returns spokes reached (0 = the spoke
+        isn't one of its tenant's connected cs spokes yet → caller falls back)."""
+        tenant_id = _cs_tenant_of(spoke_id)
+        if not tenant_id:
+            return 0
+        pull = getattr(hub, "_cs_github_pull_if_empty", None)
+        if callable(pull):
+            await pull(tenant_id)
+        res = await _push_config(tenant_id, await _cs_full_config(tenant_id),
+                                 spoke_filter={spoke_id}, full=True)
+        logger.info("cs full config push (%s) to %s (tenant %s): %s%s", reason,
+                    spoke_id, tenant_id, int(res),
+                    " queued" if getattr(res, "queued", False) else "")
+        return int(res)
+
+    async def _cs_expected_config_hash(spoke_id: str) -> str:
+        tenant_id = _cs_tenant_of(spoke_id)
+        if not tenant_id:
+            return ""
+        hashes = await _push_config(tenant_id, await _cs_full_config(tenant_id),
+                                    spoke_filter={spoke_id}, hash_only=True)
+        return next(iter(hashes.values()), "") if hashes else ""
+
+    async def _cs_config_sync_once(now: Optional[float] = None) -> int:
+        """One drift/backstop pass. Only spokes whose telemetry carries
+        ``cs_config_hash`` (they diff full pushes) are targeted; legacy spokes
+        keep the reconnect push only. Returns spokes pushed."""
+        now = time.time() if now is None else now
+        ts = getattr(hub, "_cs_full_push_ts", None)
+        if ts is None:
+            ts = {}
+            hub._cs_full_push_ts = ts
+        pk = getattr(hub, "_primary_key", None) or (lambda s: s)
+        is_draining = getattr(hub, "is_draining", None)
+        cache = getattr(hub, "simulations_cache", {}) or {}
+        pushed = 0
+        for tid in _all_tenant_ids():
+            try:
+                sids = [s for s in (hub.get_client_sim_spokes(tid) or [])
+                        if _cs_tenant_of(s) == tid
+                        and "cs_config_hash" in (cache.get(s) or {})]
+                if not sids:
+                    continue
+                payload = await _cs_full_config(tid)
+                expected = await _push_config(tid, payload, spoke_filter=set(sids),
+                                              hash_only=True)
+                due = []
+                for s in sids:
+                    if callable(is_draining) and is_draining(s):
+                        continue
+                    since = now - ts.get(pk(s), 0.0)
+                    reported = (cache.get(s) or {}).get("cs_config_hash") or ""
+                    if since >= _CS_SYNC_BACKSTOP_S:
+                        due.append(s)
+                    elif since >= _CS_SYNC_DRIFT_GRACE_S and reported != expected.get(s):
+                        logger.info("cs config drift on %s (tenant %s): spoke hash %s != hub %s",
+                                    s, tid, reported[:12] or "<none>",
+                                    str(expected.get(s) or "")[:12])
+                        due.append(s)
+                if not due:
+                    continue
+                for s in due:
+                    ts[pk(s)] = now
+                res = await _push_config(tid, payload, spoke_filter=set(due), full=True)
+                pushed += int(res)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — one tenant never blocks the rest
+                logger.warning("cs config sync for tenant %s failed: %s", tid, exc)
+        return pushed
+
+    async def _cs_config_sync_loop() -> None:
+        await asyncio.sleep(_CS_SYNC_DRIFT_GRACE_S)
+        while True:
+            try:
+                await _cs_config_sync_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cs config sync loop error: %s", exc)
+            await asyncio.sleep(_CS_SYNC_INTERVAL_S)
+
+    try:
+        hub._cs_full_config = _cs_full_config
+        hub._cs_full_config_push = _cs_full_config_push
+        hub._cs_expected_config_hash = _cs_expected_config_hash
+        hub._cs_config_sync_once = _cs_config_sync_once
+        hub._cs_config_sync_loop = _cs_config_sync_loop
     except Exception:  # noqa: BLE001
         pass
 
