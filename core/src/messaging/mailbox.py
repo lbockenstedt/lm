@@ -65,6 +65,26 @@ def _is_spoke_update(message: Message) -> bool:
         return False
 
 
+def _is_cs_config_update(message: Message) -> bool:
+    try:
+        return (getattr(message.payload, "type", None) == "CS_CONFIG_UPDATE"
+                and isinstance(message.payload.data, dict))
+    except Exception:
+        return False
+
+
+def merge_cs_config_updates(older: Any, newer: Any) -> Dict[str, Any]:
+    """Fold two partial CS_CONFIG_UPDATE patches: newer wins per key. The
+    full-push meta (config_hash / full_config) survives only from ``newer`` —
+    an older full push's hash no longer describes the merged content."""
+    result = dict(older) if isinstance(older, dict) else {}
+    result.pop("config_hash", None)
+    result.pop("full_config", None)
+    if isinstance(newer, dict):
+        result.update(newer)
+    return result
+
+
 def _spoke_update_key(spoke_id: str, message: Message) -> str:
     """Coalesce/cooldown key: spoke + repo + branch (NOT message_id — a re-push
     of the same repo tip must collide with the prior one)."""
@@ -321,6 +341,22 @@ class Mailbox:
             dropped = before - len(self.spoke_queues[spoke_id])
             if dropped:
                 logger.info(f"Coalesced {dropped} superseded SPOKE_UPDATE(s) for {spoke_id} ({new_key})")
+
+        # Merge queued CS_CONFIG_UPDATEs: each is a PARTIAL patch, so dropping an
+        # older one would lose its keys — fold every older queued patch under the
+        # new one (newer value wins per key) and keep a single message. Otherwise
+        # a long-offline spoke gets N stale patches replayed on reconnect.
+        if _is_cs_config_update(message):
+            older = [m for m in self.spoke_queues[spoke_id] if _is_cs_config_update(m)]
+            if older:
+                merged: Dict[str, Any] = {}
+                for m in older + [message]:
+                    merged = merge_cs_config_updates(merged, m.payload.data)
+                message.payload.data = merged
+                self.spoke_queues[spoke_id] = [
+                    m for m in self.spoke_queues[spoke_id] if not _is_cs_config_update(m)]
+                logger.info(f"Merged {len(older)} queued CS_CONFIG_UPDATE(s) for {spoke_id} "
+                            f"into {message.header.message_id}")
 
         self.spoke_queues[spoke_id].append(message)
         logger.info(f"Queued message {message.header.message_id} for offline spoke {spoke_id}")
