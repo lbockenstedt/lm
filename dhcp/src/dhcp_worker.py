@@ -871,6 +871,11 @@ class DhcpWorkerOps:
     def diagnostics(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         return self.mgr.diagnostics()
 
+    def packet_trace(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_PACKET_TRACE`` — this node's DHCPv4 request/error trace."""
+        return self.mgr.packet_trace(data.get("mac") or "", data.get("minutes", 30),
+                                     data.get("capture_seconds", 0))
+
     def stats(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         return self.mgr.get_stats()
 
@@ -900,6 +905,7 @@ class DhcpWorkerOps:
             "KEAW_DEL_LEASE6": self.delete_lease6,
             "KEAW_DIAGNOSTICS": self.diagnostics,
             "KEAW_STATS": self.stats,
+            "KEAW_PACKET_TRACE": self.packet_trace,
         }
 
 

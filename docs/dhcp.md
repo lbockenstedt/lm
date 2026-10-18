@@ -37,7 +37,7 @@ None (no installer present).
 
 ## Key commands / handlers (`dhcp_spoke.handle_command`)
 
-`GET_VERSION`, `UPDATE_CONFIG` (rebuild manager), `DHCP_STATUS`, `DHCP_DIAGNOSTICS` (DHCP4/control-agent units, restart counts, config test, interfaces, UDP/67 and CA listeners, CA version/reachability, scopes, lease DB/count, and recent warnings; relayed by `GET /api/dhcp/diagnostics`), `DHCP_LIST_SUBNETS`, `DHCP_LIST_LEASES` (optional `subnet` CIDR filter — matched against configured subnet `subnet` strings, resolved to a Kea `subnet-id` internally), `DHCP_LIST_RES`, `DHCP_ADD_RES` (`ip`+`mac`+`subnet_id` required), `DHCP_UPDATE_RES` (delete-then-add), `DHCP_DEL_RES` (by `ip` only — scans every subnet and removes the reservation whose `ip-address` matches, across all subnets), `DHCP_SYNC` (`sync(subnets, reservations)` — only-add-missing against existing IPs, best-effort with added/skipped counts), `DHCP_STATS` (`get_stats` via Kea `statistic-get-all` — global + per-subnet pool utilization `{total,assigned,declined,utilization_pct}` and headline packet counters discover/request/offer/ack/nak; relayed by `GET /api/dhcp/stats`).
+`GET_VERSION`, `UPDATE_CONFIG` (rebuild manager), `DHCP_STATUS`, `DHCP_DIAGNOSTICS` (DHCP4/control-agent units, restart counts, config test, interfaces, UDP/67 and CA listeners, CA version/reachability, scopes, lease DB/count, and recent warnings; relayed by `GET /api/dhcp/diagnostics`), `DHCP_LIST_SUBNETS`, `DHCP_LIST_LEASES` (optional `subnet` CIDR filter — matched against configured subnet `subnet` strings, resolved to a Kea `subnet-id` internally), `DHCP_LIST_RES`, `DHCP_ADD_RES` (`ip`+`mac`+`subnet_id` required), `DHCP_UPDATE_RES` (delete-then-add), `DHCP_DEL_RES` (by `ip` only — scans every subnet and removes the reservation whose `ip-address` matches, across all subnets), `DHCP_SYNC` (`sync(subnets, reservations)` — only-add-missing against existing IPs, best-effort with added/skipped counts), `DHCP_STATS` (`get_stats` via Kea `statistic-get-all` — global + per-subnet pool utilization `{total,assigned,declined,utilization_pct}` and headline packet counters discover/request/offer/ack/nak; relayed by `GET /api/dhcp/stats`), `DHCP_PACKET_TRACE` (per-client request trace — see below; relayed by `POST /api/dhcp/packet-trace`).
 
 ## High availability (two-node Kea pair)
 
@@ -116,6 +116,32 @@ themselves — change those via a direct `POST /api/dhcp/dns-hook` call (or the
 **On by default, hub-managed.** The desired state lives in `global_config.dhcp_dns_hook` (`enabled` default **true**, plus optional `targets`/`domain`/`ttl`/`register_ptr`). Every DNS/DHCP sync tick (`run_dns_dhcp_sync_loop`, even while `dns_dhcp_sync` itself is disabled), `DnsDhcpSyncMixin._reconcile_dns_hook` reads `DHCP_DNS_HOOK_STATUS` from each DHCP spoke (each HA member), and sends `DHCP_DNS_HOOK_CONFIG` only to a node that has drifted. The on/off knob is **System → Sync → DHCP → DNS (real-time)**, which also offers *Also register PTR records*. The Diagnostics *Enable*/*Disable* button and `POST /api/dhcp/dns-hook` save their settings into the same key, so the reconcile never reverts them. The last check is reported as `status.dns_hook` in `GET /api/dns-dhcp/sync-status`. The default `127.0.0.1@8953` target assumes Unbound runs on the Kea host.
 
 **Domain.** A single-label lease hostname gets the `domain-name` option of the lease's own Kea subnet (the scope's NetBox `domain_name`), falling back to the hook's global `domain`. This matches the NetBox → DNS sync.
+
+## Client request trace (is Kea seeing my client?)
+
+Use this when a client's configuration looks correct but it still gets no address. Go to **DHCP → Diagnostics → Client request trace**, enter the client MAC (or leave it blank to see every client), pick a look-back window, and optionally a live capture of up to 60s. Then make the client retry (re-plug it, or `dhclient -r && dhclient`) while the capture runs. The trace is read-only and changes nothing.
+
+Each Kea node collects evidence from three sources:
+
+- **Kea's journal:** `DHCP4_PACKET_RECEIVED`, `DHCP4_LEASE_ALLOC`, `DHCP4_PACKET_SEND`, and warnings/errors such as no subnet, pool exhausted, or HA dropped, for that MAC over the window.
+- **A raw UDP 67/68 capture:** shows packets reaching the NIC even when Kea never logs them, plus relay giaddr and option 82. It uses an AF_PACKET socket rather than tcpdump, which is not installed on the Kea nodes, and needs the worker's root privileges.
+- **Kea counter deltas:** `pkt4-*-received/sent/parse-failed/receive-drop` over the capture.
+
+It also returns the client's current leases and any matching reservations.
+
+**Verdicts:**
+
+| Verdict | Meaning |
+|---|---|
+| `ACKED` | Kea acknowledged the client. |
+| `NAKED` | Kea sent a NAK, for example because the client is on the wrong subnet. |
+| `NO_OFFER` | Kea saw a DISCOVER but sent no offer. Check the subnet or pool selection. |
+| `NOT_PROCESSED` | The packet arrived on the wire, but Kea did not log it. Check the interface, the HA standby, or whether the packet was dropped. |
+| `NO_REQUEST_SEEN` | Nothing reached this server. Check the relay/ip-helper, the VLAN, or the client itself. |
+
+In HA (hot-standby), the trace runs on both members. The node that progressed furthest becomes `trace_source`, and per-node results are listed under `members`. The standby normally shows nothing because its HA hook drops client packets.
+
+**API:** `POST /api/dhcp/packet-trace` (admin only), body `{"mac": "aa:bb:..", "minutes": 30, "capture_seconds": 0-60}`. On the hub loopback, use `POST /admin/ops/dhcp-packet-trace` with `{"spoke_id", "mac", "minutes", "capture_seconds"}`. The worker op is `KEAW_PACKET_TRACE`. Kea nodes need an lm checkout that includes this feature. An older worker reports the op as unknown in `members[].error`.
 
 ## NetBox auto-sync (source of truth)
 

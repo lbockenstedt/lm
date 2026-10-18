@@ -350,7 +350,7 @@ def register(app, hub, ctx):
         "DNS_STATS", "DNS_FORWARDERS", "DNS_CLIENT_QUERIES",
         "DHCP_LIST_SUBNETS", "DHCP_LIST_LEASES",
         "DHCP_LIST_RES", "DHCP_STATUS", "DHCP_DIAGNOSTICS", "DHCP_HA_STATUS",
-        "DHCP_STATS", "DHCP_DNS_HOOK_STATUS"})
+        "DHCP_STATS", "DHCP_DNS_HOOK_STATUS", "DHCP_PACKET_TRACE"})
     _swr_inflight = set()
     _swr_gen = [0]
 
@@ -4266,6 +4266,47 @@ def register(app, hub, ctx):
             if isinstance(data.get("cluster"), dict):
                 data["cluster"] = _redact_dhcp_cluster(data["cluster"])
                 data["members"] = {}
+        return data
+
+    @app.post("/api/dhcp/packet-trace")
+    async def dhcp_packet_trace(request: Request, tenant: str = None):
+        """Per-client DHCPv4 request/error trace from the Kea server(s): is the
+        server receiving the client's DISCOVER/REQUEST, and where does the
+        exchange stop. Admin-only — the evidence (raw capture, every client's
+        MAC when no ``mac`` is given) spans tenants.
+
+        Body: ``{"mac": "aa:bb:..", "minutes": 30, "capture_seconds": 0-60}``.
+        ``capture_seconds`` > 0 sniffs UDP/67-68 on the Kea host(s) for that
+        long — run it while the client is retrying. Never cached."""
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        try:
+            capture = max(0, min(int(float(body.get("capture_seconds") or 0)), 60))
+        except (TypeError, ValueError):
+            capture = 0
+        payload = {"mac": str(body.get("mac") or "").strip(),
+                   "minutes": body.get("minutes", 30),
+                   "capture_seconds": capture}
+        logger.info("relay POST /api/dhcp/packet-trace mac=%s capture=%ss",
+                    payload["mac"] or "*", capture)
+        data = await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
+                                  "DHCP_PACKET_TRACE", payload,
+                                  log_name="dhcp_packet_trace",
+                                  timeout=capture + 45)
+        if isinstance(data, dict):
+            if data.get("trace_source"):
+                data = {**data, "trace_source_name":
+                         _dhcp_member_display_name(data["trace_source"])}
+            if isinstance(data.get("members"), dict):
+                data = {**data, "members": {
+                    mid: ({**r, "display_name": _dhcp_member_display_name(mid)}
+                          if isinstance(r, dict) else r)
+                    for mid, r in data["members"].items()}}
         return data
 
     @app.get("/api/dhcp/ha")
