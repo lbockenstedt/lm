@@ -347,11 +347,14 @@ def build_ha_hooks(this_name: str, peers: List[Dict[str, Any]], mode: str,
     ]
 
 
-#: The ONLY keys the DHCP coordinator owns. Everything else in a node's running
-#: ``Dhcp4`` config — interfaces-config, lease-database, option-def, loggers,
-#: client-classes, expired-leases-processing, unrelated hooks — belongs to that
-#: node and is carried through untouched.
-COORDINATOR_OWNED_KEYS = ("subnet4",)
+#: The ONLY keys the DHCP coordinator owns: the shared scopes plus the global
+#: ``authoritative`` flag (see ``kea_manager.DHCP4_COORDINATOR_GLOBALS`` — both
+#: HA peers must NAK a wrong-subnet INIT-REBOOT request identically). Everything
+#: else in a node's running ``Dhcp4`` config — interfaces-config,
+#: lease-database, option-def, loggers, client-classes,
+#: expired-leases-processing, unrelated hooks — belongs to that node and is
+#: carried through untouched.
+COORDINATOR_OWNED_KEYS = ("subnet4", "authoritative")
 
 
 def build_node_config(node_dhcp4: Dict[str, Any], this_name: str,
