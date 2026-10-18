@@ -39,7 +39,7 @@ try:
         coerce_mode, config_fingerprint, parse_ha_status, resolve_hook_dir,
         summarize_ha,
     )
-    from kea_manager import build_subnet4, build_subnet6
+    from kea_manager import DHCP4_COORDINATOR_GLOBALS, build_subnet4, build_subnet6
 except ImportError:  # loaded as a package (src.X) by the sibling entrypoint
     from src.kea_ha import (  # type: ignore
         DEFAULT_DESIRED_STATE, DEFAULT_DESIRED_STATE6, KeaHAConfigError,
@@ -47,7 +47,9 @@ except ImportError:  # loaded as a package (src.X) by the sibling entrypoint
         coerce_mode, config_fingerprint, parse_ha_status, resolve_hook_dir,
         summarize_ha,
     )
-    from src.kea_manager import build_subnet4, build_subnet6  # type: ignore
+    from src.kea_manager import (  # type: ignore
+        DHCP4_COORDINATOR_GLOBALS, build_subnet4, build_subnet6,
+    )
 
 logger = logging.getLogger("KeaCluster")
 
@@ -354,7 +356,8 @@ class KeaHACoordinator:
         """The coordinator-owned slice both nodes must share, identically."""
         kea_subnets, applied, skipped = build_subnet4(list(subnets or []),
                                                       list(reservations or []))
-        return {"subnet4": kea_subnets, "_applied": applied, "_skipped": skipped}
+        return {"subnet4": kea_subnets, **DHCP4_COORDINATOR_GLOBALS,
+                "_applied": applied, "_skipped": skipped}
 
     def render(self, subnets: Iterable[Any], reservations: Iterable[Any],
                node_configs: Optional[Dict[str, Dict[str, Any]]] = None
