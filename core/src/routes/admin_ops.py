@@ -454,6 +454,38 @@ def register(app, hub, ctx):
         logger.warning("admin_ops: dhcp-diagnostics driven via loopback for spoke=%s", spoke_id)
         return {"status": "ok", "target": spoke_id, "result": result}
 
+    @app.post("/admin/ops/dhcp-packet-trace")
+    async def admin_ops_dhcp_packet_trace(request: Request):
+        """Loopback twin of ``POST /api/dhcp/packet-trace``: relay
+        ``DHCP_PACKET_TRACE`` to a DHCP module (HA modules fan out to both Kea
+        nodes). Body: ``{"spoke_id", "mac", "minutes", "capture_seconds"}``."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        spoke_id = body.get("spoke_id")
+        if not spoke_id:
+            raise HTTPException(status_code=400, detail="spoke_id is required")
+        if hub._primary_key(spoke_id) not in hub.active_connections:
+            raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        try:
+            capture = max(0, min(int(float(body.get("capture_seconds") or 0)), 60))
+        except (TypeError, ValueError):
+            capture = 0
+        payload = {"mac": str(body.get("mac") or ""), "minutes": body.get("minutes", 30),
+                   "capture_seconds": capture}
+        try:
+            result = await hub.request_response(spoke_id, "DHCP_PACKET_TRACE", payload,
+                                                timeout=capture + 45.0)
+        except Exception as e:
+            logger.exception("admin_ops: dhcp-packet-trace failed for %s", spoke_id)
+            raise HTTPException(status_code=500, detail=str(e))
+        logger.warning("admin_ops: dhcp-packet-trace driven via loopback for spoke=%s mac=%s",
+                       spoke_id, payload["mac"] or "*")
+        return {"status": "ok", "target": spoke_id, "result": result}
+
     @app.post("/admin/ops/approve-agent")
     async def admin_ops_approve_agent(request: Request):
         """Approve a pending relayed node-agent — identical logic to the WebUI

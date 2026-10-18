@@ -47,6 +47,7 @@ DHCP_WORKER_OPS = (
     "KEAW_DEL_LEASE",      # delete active lease by IP
     "KEAW_DIAGNOSTICS",    # full local diagnostics evidence
     "KEAW_STATS",          # statistic-get-all
+    "KEAW_PACKET_TRACE",   # per-client DHCPv4 request/error trace
 )
 
 HOT_STANDBY = "hot-standby"
