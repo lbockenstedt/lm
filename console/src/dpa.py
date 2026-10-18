@@ -265,7 +265,9 @@ class DpaManager:
             cur = self._assigned.get(pid)
             if pid not in overrides and cur in overrides.values():
                 await self._stop_listener(pid)
-        for pid in sorted(present, key=lambda x: x not in overrides):  # pinned first
+        # Pinned first, then by id: set order varies per process (hash seed),
+        # which would otherwise shuffle first-boot auto port numbers.
+        for pid in sorted(present, key=lambda x: (x not in overrides, x)):
             if pid not in self._servers:
                 await self._start_listener(pid)
 
