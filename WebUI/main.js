@@ -27174,6 +27174,101 @@ async function applyDhcpHaConfig() {
 // above. Status-only render when the GET failed/is unreachable — an older
 // dhcp spoke without the DHCP_DNS_HOOK_STATUS command must not break the
 // rest of the Diagnostics tab (hence the null guard, not an error banner).
+// ── DHCP client request trace (POST /api/dhcp/packet-trace) ─────────────
+// "Is the DHCP server even seeing my client?" — Kea's per-MAC log, an
+// optional raw UDP/67-68 capture on the Kea node(s), counter deltas, and a
+// verdict for where the DORA exchange stops. Admin-only (server-enforced).
+function _dhcpPacketTracePanel() {
+    if (!(typeof isAdmin === 'function' && isAdmin())) return '';
+    const last = window._dhcpPacketTraceLast || {};
+    return `
+        <div class="bg-white border border-slate-200 rounded-lg p-4 mt-4">
+            <div class="text-sm font-semibold text-slate-700">Client request trace</div>
+            <div class="text-xs text-slate-400 mb-3">Shows whether the Kea server(s) are receiving a client's DHCP requests and where the exchange stops (DISCOVER → OFFER → REQUEST → ACK). For a packet-level check, set a capture window and make the client retry (unplug/replug, renew) while it runs. Leave the MAC empty to list every client Kea has heard from.</div>
+            <div class="flex flex-wrap items-end gap-3">
+                <label class="text-xs text-slate-600">Client MAC
+                    <input id="dhcp-trace-mac" type="text" placeholder="aa:bb:cc:dd:ee:ff" value="${escapeHtml(last.mac || '')}" class="mt-1 block w-48 px-2 py-1.5 border border-slate-300 rounded text-xs font-mono"></label>
+                <label class="text-xs text-slate-600">Log window (min)
+                    <input id="dhcp-trace-minutes" type="number" min="1" max="1440" value="${escapeHtml(String(last.minutes || 30))}" class="mt-1 block w-24 px-2 py-1.5 border border-slate-300 rounded text-xs"></label>
+                <label class="text-xs text-slate-600">Live capture (s, 0–60)
+                    <input id="dhcp-trace-capture" type="number" min="0" max="60" value="${escapeHtml(String(last.capture_seconds != null ? last.capture_seconds : 20))}" class="mt-1 block w-24 px-2 py-1.5 border border-slate-300 rounded text-xs"></label>
+                <button id="dhcp-trace-btn" onclick="runDhcpPacketTrace()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982] text-white hover:bg-[#008f6e]">Trace</button>
+            </div>
+            <div id="dhcp-trace-result" class="mt-4">${window._dhcpPacketTraceHtml || ''}</div>
+        </div>`;
+}
+
+async function runDhcpPacketTrace() {
+    const mac = (document.getElementById('dhcp-trace-mac') || {}).value || '';
+    const minutes = Number((document.getElementById('dhcp-trace-minutes') || {}).value || 30);
+    const capture = Number((document.getElementById('dhcp-trace-capture') || {}).value || 0);
+    const out = document.getElementById('dhcp-trace-result');
+    const btn = document.getElementById('dhcp-trace-btn');
+    window._dhcpPacketTraceLast = { mac, minutes, capture_seconds: capture };
+    if (btn) { btn.disabled = true; btn.textContent = capture > 0 ? `Capturing ${capture}s…` : 'Tracing…'; }
+    if (out) out.innerHTML = `<p class="text-xs text-slate-500">${capture > 0 ? `Listening on the Kea node(s) for ${capture}s — make the client retry now.` : 'Reading Kea logs…'}</p>`;
+    try {
+        const d = await apiJson('/api/dhcp/packet-trace' + _tenantQS(), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mac: mac.trim(), minutes, capture_seconds: capture }),
+        });
+        window._dhcpPacketTraceHtml = _dhcpPacketTraceResult(d);
+    } catch (err) {
+        window._dhcpPacketTraceHtml = `<p class="text-xs text-red-600">Trace failed: ${escapeHtml(err.message || String(err))}</p>`;
+    }
+    if (out) out.innerHTML = window._dhcpPacketTraceHtml;
+    if (btn) { btn.disabled = false; btn.textContent = 'Trace'; }
+}
+
+function _dhcpPacketTraceResult(d) {
+    if (!d || d.status === 'ERROR') return `<p class="text-xs text-red-600">${escapeHtml((d && (d.message || d.error)) || 'No result')}</p>`;
+    const counts = o => Object.entries(o || {}).map(([k, v]) => `${escapeHtml(k)}×${v}`).join(', ') || '—';
+    const pre = (title, lines) => lines.length ? `<div class="text-xs font-semibold text-slate-700 mt-3 mb-1">${title}</div><pre class="text-[11px] whitespace-pre-wrap break-all text-slate-600 max-h-72 overflow-auto bg-slate-50 rounded p-2">${escapeHtml(lines.join('\n'))}</pre>` : '';
+    const evLines = (d.events || []).map(e => `${e.ts} ${e.level} ${e.msg_id} ${e.text}`);
+    const probLines = (d.server_problems || []).map(e => `${e.ts} ${e.level} ${e.msg_id} ${e.text}`);
+    const cap = d.capture || {};
+    const capLines = (cap.packets || []).map(p => `+${p.t}s ${p.direction === 'out' ? 'OUT' : 'IN '} ${p.interface} ${p.type} ${p.src} → ${p.dst} chaddr=${p.chaddr} xid=${p.xid}${p.giaddr !== '0.0.0.0' ? ` giaddr=${p.giaddr}` : ''}${p.yiaddr !== '0.0.0.0' ? ` yiaddr=${p.yiaddr}` : ''}${p.requested_ip ? ` req=${p.requested_ip}` : ''}${p.server_id ? ` server-id=${p.server_id}` : ''}${p.hostname ? ` host=${p.hostname}` : ''}`);
+    const capNote = cap.ran ? `<div class="text-xs text-slate-500 mt-2">Live capture: ${cap.seconds}s, ${(cap.packets || []).length} packet(s)${cap.truncated ? ' (truncated)' : ''}.</div>` : (cap.error ? `<div class="text-xs text-amber-700 mt-2">Live capture unavailable: ${escapeHtml(cap.error)}</div>` : '');
+    const delta = Object.keys(d.counters_delta || {}).length ? `<div class="text-xs text-slate-500 mt-1">Kea counters during capture: ${counts(d.counters_delta)}</div>` : '';
+    const errs = (d.errors || []).length ? `<div class="text-xs text-amber-700 mt-2">${(d.errors || []).map(escapeHtml).join('<br>')}</div>` : '';
+    const members = d.members ? Object.entries(d.members).map(([id, r]) => `<li>${escapeHtml(r.display_name || id)}: ${r.status === 'SUCCESS' ? escapeHtml(((r.verdict || {}).code) || `${(r.events_total || 0)} event(s)`) : `<span class="text-red-600">${escapeHtml(r.message || r.error || 'error')}</span>`}</li>`).join('') : '';
+    const memberBlock = members ? `<div class="text-xs text-slate-500 mt-2">Per node${d.trace_source_name ? ` (details below from ${escapeHtml(d.trace_source_name)})` : ''}:<ul class="list-disc pl-5">${members}</ul></div>` : '';
+    if (!d.mac) {
+        const rows = (d.clients || []).map(c => `<tr class="border-b border-slate-100"><td class="px-3 py-1.5 font-mono text-xs">${escapeHtml(c.mac)}</td><td class="px-3 py-1.5 text-xs">${escapeHtml(c.last_seen)}</td><td class="px-3 py-1.5 text-xs">${counts(c.received)}</td><td class="px-3 py-1.5 text-xs">${counts(c.sent)}</td><td class="px-3 py-1.5 font-mono text-xs">${escapeHtml(c.last_lease || '—')}</td><td class="px-3 py-1.5 text-xs">${c.problems || 0}</td></tr>`).join('');
+        return memberBlock + (rows ? tableWrap(tableHead(['MAC', 'Last seen', 'Received', 'Sent', 'Last lease', 'Problems']) + `<tbody>${rows}</tbody>`) : `<p class="text-xs text-slate-500">Kea logged no client packets in the last ${d.minutes} min.</p>`)
+            + capNote + delta + pre('Captured packets', capLines) + pre('Server warnings/errors', probLines) + errs;
+    }
+    const v = d.verdict || {};
+    const good = v.code === 'ACKED';
+    const s = d.summary || {};
+    const leases = (d.leases || []).map(l => `${l.ip} (subnet ${l.subnet_id})`).join(', ') || 'none';
+    const res = (d.reservations || []).map(r => `${r.ip} in ${r.subnet}`).join(', ') || 'none';
+    return `
+        <div class="p-3 rounded-lg border ${good ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-amber-50 border-amber-200 text-amber-800'}">
+            <div class="text-sm font-semibold">${escapeHtml(v.code || 'UNKNOWN')}</div>
+            <div class="text-xs mt-1">${escapeHtml(v.message || '')}</div>
+            ${(v.findings || []).length ? `<ul class="list-disc pl-5 mt-2 text-xs space-y-1">${v.findings.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul>` : ''}
+        </div>
+        ${memberBlock}
+        <div class="grid md:grid-cols-2 gap-2 mt-3 text-xs text-slate-600">
+            <div>Kea received: ${counts(s.kea_received)}</div>
+            <div>Kea sent: ${counts(s.kea_sent)}</div>
+            <div>Captured from client: ${counts(s.captured_from_client)}</div>
+            <div>Captured to client: ${counts(s.captured_to_client)}</div>
+            <div>Interfaces: ${escapeHtml((s.interfaces || []).join(', ') || '—')} · Kea listens on: ${escapeHtml((d.interfaces_configured || []).join(', ') || '—')}</div>
+            <div>Relays / sources: ${escapeHtml((s.relays_or_sources || []).join(', ') || '—')}</div>
+            <div>Current lease: ${escapeHtml(d.leases == null ? 'unavailable' : leases)}</div>
+            <div>Reservation: ${escapeHtml(res)}</div>
+            <div>First / last seen: ${escapeHtml(s.first_seen || '—')} / ${escapeHtml(s.last_seen || '—')}</div>
+            <div>Server IPs: ${escapeHtml((d.server_ips || []).join(', ') || '—')}</div>
+        </div>
+        ${capNote}${delta}
+        ${pre(`Kea log for ${d.mac} (last ${d.minutes} min, ${d.events_total || 0} event(s))`, evLines)}
+        ${pre('Captured packets', capLines)}
+        ${pre('Server warnings/errors (all clients)', probLines)}
+        ${errs}`;
+}
+
 function _dhcpDnsHookPanel(dnsHook) {
     if (!dnsHook) return '';
     const settings = dnsHook.settings || {};
@@ -31559,6 +31654,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     <div class="text-sm font-semibold text-slate-700 mb-2">Recent service warnings/errors</div>
                     <pre class="text-[11px] whitespace-pre-wrap break-all text-slate-600">${escapeHtml(d.last_errors.join('\n'))}</pre>
                 </div>` : ''}
+                ${_dhcpPacketTracePanel()}
                 ${_dhcpDnsHookPanel(dnsHook)}`;
             return;
         }

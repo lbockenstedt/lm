@@ -11,6 +11,11 @@ import shutil
 import subprocess
 import zlib
 
+try:
+    import kea_packet_trace as pkt_trace
+except ImportError:  # loaded as a package (src.X)
+    from src import kea_packet_trace as pkt_trace  # type: ignore
+
 logger = logging.getLogger("KeaManager")
 
 
@@ -1443,6 +1448,97 @@ class KeaManager:
             "last_errors": recent_errors,
             "recommendations": recommendations,
         }
+
+    def packet_trace(self, mac: str = "", minutes: Any = 30,
+                     capture_seconds: Any = 0) -> dict:
+        """DHCPv4 request/error trace: is this server seeing the client, and
+        where does the exchange stop?
+
+        Read-only. Combines Kea's journal (``DHCP4_PACKET_RECEIVED`` /
+        ``PACKET_SEND`` / ``LEASE_ALLOC`` are INFO-level), an optional raw
+        UDP/67-68 capture of ``capture_seconds`` while the client retries, the
+        ``pkt4-*`` counter delta across that window, and the client's current
+        lease/reservation. See ``kea_packet_trace``.
+        """
+        try:
+            mac = pkt_trace.normalize_mac(mac)
+        except ValueError as e:
+            return {"status": "ERROR", "message": str(e)}
+        minutes = pkt_trace.clamp_int(minutes, 30, 1, pkt_trace.MAX_LOOKBACK_MINUTES)
+        capture_seconds = pkt_trace.clamp_int(
+            capture_seconds, 0, 0, pkt_trace.MAX_CAPTURE_SECONDS)
+
+        errors = []
+
+        def counters():
+            try:
+                return pkt_trace.packet_counters(
+                    self._rpc("dhcp4", "statistic-get-all", {}))
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"statistic-get-all: {e}")
+                return None
+
+        before = counters()
+        capture = pkt_trace.capture_dhcp(capture_seconds, mac)
+        after = counters() if capture_seconds else before
+        journal = pkt_trace.read_kea_journal(minutes, mac)
+        if journal["error"]:
+            errors.append(f"journal: {journal['error']}")
+        if capture["error"]:
+            errors.append(f"capture: {capture['error']}")
+
+        config = {}
+        try:
+            config = self.get_config()
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"config-get: {e}")
+        interfaces = [str(v).strip() for v in
+                      ((config.get("interfaces-config", {}) or {})
+                       .get("interfaces", []) or []) if str(v).strip()]
+        local_ips = pkt_trace.local_ipv4s()
+        events = journal["events"]
+        result = {
+            "status": "SUCCESS",
+            "mac": mac,
+            "minutes": minutes,
+            "capture": capture,
+            "counters": after or {},
+            "counters_delta": (pkt_trace.counter_delta(before, after)
+                               if capture_seconds and before is not None
+                               and after is not None else {}),
+            "interfaces_configured": interfaces,
+            "server_ips": local_ips,
+            "events": events[-pkt_trace.MAX_EVENTS:],
+            "events_total": len(events),
+            "server_problems": journal["problems"],
+            "errors": errors,
+        }
+        if not mac:
+            result["clients"] = pkt_trace.summarize_all_clients(events)
+            return result
+
+        result["summary"] = pkt_trace.summarize_client(events, capture["packets"])
+        result["verdict"] = pkt_trace.verdict_for_client(
+            mac, events, capture, minutes, interfaces, local_ips)
+        try:
+            leases = self._rpc("dhcp4", "lease4-get-by-hw-address",
+                               {"hw-address": mac}).get("leases", []) or []
+            result["leases"] = [
+                {"ip": l.get("ip-address", ""), "subnet_id": l.get("subnet-id"),
+                 "state": l.get("state"), "cltt": l.get("cltt"),
+                 "valid_lft": l.get("valid-lft"), "hostname": l.get("hostname", "")}
+                for l in leases]
+        except Exception as e:  # noqa: BLE001
+            result["leases"] = None
+            errors.append(f"lease4-get-by-hw-address: {e}")
+        result["reservations"] = [
+            {"ip": r.get("ip-address", ""), "subnet_id": sub.get("id"),
+             "subnet": sub.get("subnet", ""), "hostname": r.get("hostname", "")}
+            for sub in (config.get("subnet4", []) or [])
+            for r in (sub.get("reservations", []) or [])
+            if _normalize_mac(r.get("hw-address", "")) == mac
+        ]
+        return result
 
     @staticmethod
     def _run_diag(cmd, timeout=5):

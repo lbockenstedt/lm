@@ -13,6 +13,7 @@ except ImportError:
     from core.src.base_spoke import BaseSpoke
 
 from kea_manager import KeaManager
+from kea_packet_trace import VERDICT_RANK, clamp_int, MAX_CAPTURE_SECONDS, MAX_LOOKBACK_MINUTES
 
 from kea_ha import (
     DEFAULT_CLUSTER_CONFIG, DEFAULT_DESIRED_STATE, DHCP_WORKER_OPS,
@@ -73,6 +74,15 @@ def _topology_fingerprint(members, mode):
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+
+def _packet_trace_args(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Clamp DHCP_PACKET_TRACE arguments (the capture length drives RPC timeouts)."""
+    data = data or {}
+    return {"mac": str(data.get("mac") or ""),
+            "minutes": clamp_int(data.get("minutes"), 30, 1, MAX_LOOKBACK_MINUTES),
+            "capture_seconds": clamp_int(data.get("capture_seconds"), 0, 0,
+                                         MAX_CAPTURE_SECONDS)}
+
 class _DisabledTransport:
     """Null transport used when the core cluster module isn't available.
 
@@ -123,6 +133,7 @@ class DHCPSpoke(BaseSpoke):
       DHCP_DEL_RES      — remove a static reservation by IP
       DHCP_STATUS       — Kea health + subnet count
       DHCP_DIAGNOSTICS  — service/config/interface/listener/lease evidence
+      DHCP_PACKET_TRACE — per-client request/error trace {mac, minutes, capture_seconds}
       DHCP_HA_STATUS     — HA member state, lease sync, drift, recommendations
       DHCP_HA_CONFIG     — set the HA member pair + mode (+ worker secret)
       DHCP_HA_APPLY      — re-apply the current desired config to both nodes
@@ -613,6 +624,33 @@ class DHCPSpoke(BaseSpoke):
             "recommendations": recommendations,
         }
 
+    async def _ha_packet_trace(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """``DHCP_PACKET_TRACE`` across both Kea nodes.
+
+        In hot-standby only the primary answers clients, so a client can look
+        "unprocessed" on the standby and fine on the primary. Each node's own
+        trace is returned under ``members``; the top-level verdict is the
+        node that got furthest through the exchange.
+        """
+        args = _packet_trace_args(data)
+        fan = await self._transport.fanout(
+            "KEAW_PACKET_TRACE", args, timeout=args["capture_seconds"] + 30.0)
+        members: Dict[str, Any] = {}
+        for member_id, reply in (fan.get("results") or {}).items():
+            members[member_id] = reply if isinstance(reply, dict) else {
+                "status": "ERROR", "message": "malformed reply"}
+        ok = {m: r for m, r in members.items() if r.get("status") == "SUCCESS"}
+        if not ok:
+            errors = "; ".join(f"[{m}] {r.get('message') or r.get('error') or 'no response'}"
+                               for m, r in members.items()) or "no DHCP node answered"
+            return {"status": "ERROR", "message": f"packet trace failed: {errors}"}
+        best = max(ok, key=lambda m: VERDICT_RANK.get(
+            (ok[m].get("verdict") or {}).get("code"), -1))
+        out = dict(ok[best])
+        out["trace_source"] = best
+        out["members"] = members
+        return out
+
     async def _ha_stats(self) -> Dict[str, Any]:
         """Per-node Kea statistics plus summed pool/packet totals."""
         fan = await self._transport.fanout("KEAW_STATS", {}, timeout=20.0)
@@ -912,6 +950,8 @@ class DHCPSpoke(BaseSpoke):
                 return await self._ha_list("KEAW_LIST_RES", {}, "reservations")
             if cmd == "DHCP_DIAGNOSTICS":
                 return await self._ha_diagnostics()
+            if cmd == "DHCP_PACKET_TRACE":
+                return await self._ha_packet_trace(data)
             if cmd == "DHCP_STATS":
                 return await self._ha_stats()
             if cmd == "DHCP_STATUS":
@@ -1038,6 +1078,11 @@ class DHCPSpoke(BaseSpoke):
 
         if cmd == "DHCP_DIAGNOSTICS":
             return await asyncio.to_thread(self.mgr.diagnostics)
+
+        if cmd == "DHCP_PACKET_TRACE":
+            args = _packet_trace_args(data)
+            return await asyncio.to_thread(self.mgr.packet_trace, args["mac"],
+                                           args["minutes"], args["capture_seconds"])
 
         if cmd == "DHCP_STATS":
             return await asyncio.to_thread(self.mgr.get_stats)
