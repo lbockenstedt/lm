@@ -135,6 +135,7 @@ It also returns the client's current leases and any matching reservations.
 |---|---|
 | `ACKED` | Kea acknowledged the client. |
 | `NAKED` | Kea sent a NAK, for example because the client is on the wrong subnet. |
+| `INIT_REBOOT_IGNORED` | The client is rebooting and asking to keep an address (usually from a VLAN it was moved off), and Kea neither ACKed nor NAKed it. See the `authoritative` note below. |
 | `NO_OFFER` | Kea saw a DISCOVER but sent no offer. Check the subnet or pool selection. |
 | `NOT_PROCESSED` | The packet arrived on the wire, but Kea did not log it. Check the interface, the HA standby, or whether the packet was dropped. |
 | `NO_REQUEST_SEEN` | Nothing reached this server. Check the relay/ip-helper, the VLAN, or the client itself. |
@@ -166,6 +167,7 @@ Module view tabs: **Overview** (pool-utilization / assigned-leases / packet-coun
 ## Notable behaviors & gotchas
 
 - **`KEA_URL` default is :8001** (chosen specifically so it doesn't collide with the hub) — but a co-located install (Kea sharing a box with NetBox, a legacy webui-spoke, or a custom Kea CA port such as the netbox `install_kea.sh` convention of :8760) may still need `KEA_URL` overridden via hub push to match wherever that box's Kea Control Agent actually listens. A mismatched `KEA_URL` shows up as `DHCP_STATUS`/`DHCP_STATS` failing to reach Kea and empty Subnets/Leases/Reservations tabs.
+- **Kea runs `authoritative: true` (DHCPv4).** Every v4 sync (standalone `sync()` and the HA `owned_config` render; see `kea_manager.DHCP4_COORDINATOR_GLOBALS` and `kea_ha.COORDINATOR_OWNED_KEYS`) pushes it, so it overrides a node's local value. Without it, Kea silently drops an INIT-REBOOT DHCPREQUEST for an address that doesn't fit the client's subnet when it has no lease for that client. A device moved to another VLAN then keeps asking for its old address until the old lease expires. With it, Kea sends a DHCPNAK and the client falls back to DISCOVER right away. Kea's Dhcp6 has no equivalent setting.
 - **Only spoke of this group with no FastAPI dep** (`requirements.txt` lacks `fastapi`/`uvicorn`) — a pure spoke.
 - **Kea error handling** — `result != 0` raises `RuntimeError(result.text)`; `_cmd` returns `arguments` only.
 
