@@ -81,13 +81,17 @@ def _post(hub, action="clear_usb_quarantine"):
 
 
 def test_fan_out_is_concurrent():
-    hub = _Hub(n=5, delay=0.2)
+    # Serial would take 5 x 0.5s = 2.5s; concurrent ~0.5s. Build the app before
+    # starting the clock and leave a wide margin so slow CI runners don't flake.
+    hub = _Hub(n=5, delay=0.5)
+    client = _client(hub)
     t0 = time.monotonic()
-    r = _post(hub, "clear_usb_history")
+    r = client.post("/sim/api/10/proxmx/command?tenant_id=10",
+                    json={"action": "clear_usb_history", "all_spokes": True})
     elapsed = time.monotonic() - t0
     assert r.status_code == 200
     assert r.json()["pushed_to_spokes"] == 5
-    assert elapsed < 0.6, elapsed
+    assert elapsed < 1.5, elapsed
 
 
 def test_quarantine_all_timeouts_are_queued_not_502():
