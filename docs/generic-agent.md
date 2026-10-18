@@ -118,6 +118,14 @@ role's live status.
   (`SPOKE_UPDATE`) restarts the whole agent process; on the next boot `LOADED_ROLES` is
   read back and every role is re-loaded automatically, so a self-update or reboot never
   silently drops a role.
+- **Cluster worker sidecars follow code updates.** `lm-dhcp-worker` / `lm-dns-worker`
+  run from the same `/opt/lm` checkout but are separate systemd units, so the agent
+  restart above does not reload them. Whenever the hub polls role status
+  (`_active_deploy_roles`), the agent restarts an *active* worker whose `*.py` files
+  (its `src/` dir plus `core/src/messaging/`) are newer than its running process —
+  once per code version, after a 10 s settle (`_restart_stale_service_workers`).
+  Without this a worker kept old code indefinitely and new coordinator ops (e.g.
+  `KEAW_PACKET_TRACE`) failed with "unsupported worker operation".
 - **Mutual auth + reconnect.** Both the base connection and every `RoleConnection`
   perform the standard hub mutual-auth handshake (`HUB_VERIFIED`/`HUB_OK`) and
   reconnect with backoff on a dropped socket. If the hub is unreachable at boot, the

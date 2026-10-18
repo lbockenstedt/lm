@@ -11,6 +11,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -521,11 +522,120 @@ def _heal_deploy_role_sidecars(installed_roles: list) -> list:
     return actions
 
 
+# Python cluster-worker sidecars that run straight out of this agent's own
+# /opt/lm checkout. They have no self-update: the agent's SPOKE_UPDATE pulls new
+# code onto disk and restarts the AGENT, but the long-running worker keeps the
+# old modules loaded. Production symptom: the coordinator (already on new code)
+# sent KEAW_PACKET_TRACE and both Kea nodes answered "unsupported worker
+# operation" — lm-dhcp-worker had been up for two days across several pulls.
+# (kea-ha-agent is Kea's own kea-ctrl-agent, not LM code, so it is not here.)
+_PY_WORKER_SIDECARS = {
+    "dhcp-server": "lm-dhcp-worker",
+    "dns-server": "lm-dns-worker",
+}
+# Don't restart while a pull may still be writing files.
+_STALE_WORKER_SETTLE_S = 10.0
+# unit -> code mtime we already restarted for, so a restart that doesn't take
+# (or a clock oddity) can never turn into a restart loop.
+_stale_worker_restarted_for: dict = {}
+
+
+def _proc_start_epoch(pid: int):
+    """Wall-clock start time of ``pid`` from /proc, or None."""
+    try:
+        with open("/proc/stat", encoding="ascii") as f:
+            btime = next(int(line.split()[1]) for line in f if line.startswith("btime "))
+        with open(f"/proc/{int(pid)}/stat", encoding="ascii") as f:
+            # comm (field 2) may contain spaces; fields resume after the last ')'.
+            fields = f.read().rpartition(")")[2].split()
+        return btime + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, StopIteration, IndexError):
+        return None
+
+
+def _worker_code_mtime(workdir: str):
+    """Newest *.py mtime across the worker's own src dir and the shared
+    core/src/messaging (service_cluster.ServiceWorkerClient), or None."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.normpath(workdir)))
+    newest = None
+    for d in (workdir, os.path.join(repo_root, "core", "src", "messaging")):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".py"):
+                continue
+            try:
+                m = os.path.getmtime(os.path.join(d, name))
+            except OSError:
+                continue
+            newest = m if newest is None or m > newest else newest
+    return newest
+
+
+def _restart_stale_service_workers(installed_roles: list, now: float = None) -> list:
+    """Restart an ACTIVE LM Python worker sidecar whose code on disk is newer
+    than its running process (see ``_PY_WORKER_SIDECARS``). Never starts a
+    stopped/unloaded worker — that stays ``_heal_deploy_role_sidecars``' call.
+    Returns the actions taken."""
+    now = time.time() if now is None else now
+    actions = []
+    for role, unit in _PY_WORKER_SIDECARS.items():
+        if role not in installed_roles:
+            continue
+        try:
+            out = subprocess.run(
+                ["systemctl", "show", "-p", "ActiveState", "-p", "MainPID",
+                 "-p", "WorkingDirectory", unit],
+                capture_output=True, text=True, check=False, timeout=10,
+            ).stdout or ""
+        except (OSError, subprocess.SubprocessError):
+            continue
+        props = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+        try:
+            pid = int(props.get("MainPID") or 0)
+        except ValueError:
+            pid = 0
+        workdir = props.get("WorkingDirectory") or ""
+        if props.get("ActiveState") != "active" or pid <= 0 or not workdir:
+            continue
+        started = _proc_start_epoch(pid)
+        code = _worker_code_mtime(workdir)
+        if started is None or code is None:
+            continue
+        if code <= started + 1 or now - code < _STALE_WORKER_SETTLE_S:
+            continue
+        if _stale_worker_restarted_for.get(unit) == code:
+            continue
+        _stale_worker_restarted_for[unit] = code
+        try:
+            result = subprocess.run(["systemctl", "restart", unit],
+                                    capture_output=True, text=True,
+                                    check=False, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e:
+            logger.warning("self-heal: restart stale %s failed: %s", unit, e)
+            continue
+        if result.returncode == 0:
+            actions.append(f"restarted {unit} (running code older than checkout)")
+            logger.info("self-heal: restarted %s — process started %s, code updated %s",
+                        unit, time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(started)),
+                        time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(code)))
+        else:
+            logger.warning("self-heal: restart stale %s failed: %s", unit,
+                           (result.stderr or result.stdout or "").strip())
+    return actions
+
+
 def _active_deploy_roles(installed_roles: list) -> list:
     try:
         _heal_deploy_role_sidecars(installed_roles)
     except Exception as e:  # noqa: BLE001 — self-heal must never break role reporting
         logger.warning("self-heal (deploy role sidecars) failed: %s", e)
+    try:
+        _restart_stale_service_workers(installed_roles)
+    except Exception as e:  # noqa: BLE001 — self-heal must never break role reporting
+        logger.warning("self-heal (stale service workers) failed: %s", e)
     active = []
     for role, units in _DEPLOY_ROLE_UNITS.items():
         if role not in installed_roles:
