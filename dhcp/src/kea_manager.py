@@ -202,6 +202,17 @@ def _carve_pools(base_ranges: list, exclusions: list) -> list:
     return result_pools
 
 
+#: Global ``Dhcp4`` settings the coordinator owns on every node, alongside
+#: ``subnet4``. ``authoritative`` makes Kea answer a DHCPREQUEST for an address
+#: that is wrong for the client's subnet (e.g. a client moved to another VLAN,
+#: still in INIT-REBOOT asking for its old lease) with a DHCPNAK, so the client
+#: falls back to DISCOVER and gets a correct address. Kea's default (false)
+#: silently DROPS such requests when it has no lease for the client, leaving
+#: the client retrying its stale address until the old lease expires.
+#: DHCPv4-only: Kea has no ``authoritative`` for Dhcp6.
+DHCP4_COORDINATOR_GLOBALS = {"authoritative": True}
+
+
 def build_subnet4(subnets: list, reservations: list) -> tuple:
     """Translate LM/NetBox intent into Kea's ``subnet4`` list.
 
@@ -563,6 +574,7 @@ class KeaManager:
         kea_subnets, _applied, _skipped = build_subnet4(subnets, reservations)
 
         cfg["subnet4"] = kea_subnets
+        cfg.update(copy.deepcopy(DHCP4_COORDINATOR_GLOBALS))
         try:
             self._set_config(cfg)
         except Exception as e:

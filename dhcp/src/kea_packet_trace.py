@@ -403,6 +403,19 @@ def verdict_for_client(mac: str, events: List[Dict[str, Any]],
             "subnet selection picked a different scope). The client should "
             "restart with DISCOVER; if it keeps NAKing, check which subnet "
             "the relay address/interface maps to.")
+    elif "REQUEST" in rx and any(e.get("msg_id") == "DHCP4_INIT_REBOOT" for e in recent):
+        asked = next((m.group(1) for e in reversed(recent)
+                      if e.get("msg_id") == "DHCP4_INIT_REBOOT"
+                      for m in [re.search(r"requests address (\S+)", e.get("text", ""))]
+                      if m), "its previous address")
+        code, msg = "INIT_REBOOT_IGNORED", (
+            f"Client is in INIT-REBOOT asking to keep {asked} and Kea sent no "
+            f"ACK/NAK. A non-authoritative Kea silently drops this when it has "
+            f"no lease for the client (typically the device moved VLANs and "
+            f"still holds an address from the old subnet), so the client keeps "
+            f"retrying until that lease expires. LM pushes \"authoritative\": "
+            f"true on DHCP sync so Kea NAKs it and the client re-DISCOVERs; if "
+            f"this persists, re-run a DHCP sync, or release/renew on the client.")
     elif "REQUEST" in rx:
         code, msg = "REQUEST_UNANSWERED", (
             "Kea received DHCPREQUEST but sent no ACK/NAK. In HA hot-standby "
