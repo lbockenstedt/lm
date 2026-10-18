@@ -91,6 +91,101 @@ def _dhcp_rescope_stats(before, after):
     return out
 
 
+# ── DNS query telemetry tenant scoping ──────────────────────────────────────
+# Query telemetry (Queries by Destination / per-device log / search) is always
+# attributable by its client SOURCE IP, unlike DNS records (CNAME/TXT carry no
+# IP — which is why the records-only ``dns`` subnet toggle defaults OFF). So it
+# is scoped to the selected/session tenant's NetBox prefixes unconditionally.
+# The spoke already filters on ``source_prefixes``; the hub re-applies the same
+# filter so an older spoke (or a clustered coordinator that drops an empty
+# list) can never fail open into another tenant's queries.
+
+def _dns_prefix_nets(prefixes):
+    nets = []
+    for p in prefixes or []:
+        try:
+            nets.append(ipaddress.ip_network(str(p), strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def _dns_ip_in_nets(ip, nets):
+    try:
+        addr = ipaddress.ip_address(str(ip))
+    except ValueError:
+        return False
+    return any(addr.version == n.version and addr in n for n in nets)
+
+
+def _dns_scope_query_names(rows, nets):
+    """Keep only the sources inside ``nets``; re-derive each row's count from
+    the surviving sources and drop rows left with none."""
+    out = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        sources = [s for s in (row.get("sources") or [])
+                   if isinstance(s, dict) and _dns_ip_in_nets(s.get("ip"), nets)]
+        if not sources:
+            continue
+        out.append({**row, "sources": sources,
+                    "count": sum(int(s.get("count") or 0) for s in sources)})
+    out.sort(key=lambda r: r["count"], reverse=True)
+    return out
+
+
+def _dns_rescope_stats(data, prefixes):
+    """Tenant-scope a DNS_STATS envelope. ``prefixes`` None → unchanged (admin,
+    no tenant selected). Otherwise ``query_names`` is filtered by source IP and
+    the server-wide headline counters — Unbound's lifetime totals for EVERY
+    tenant sharing the resolver — are replaced with ones derived from the
+    tenant's own rows (mirrors ``_dhcp_rescope_stats``). Cache/recursion
+    counters cannot be attributed to a client, so they are withheld (None)."""
+    if prefixes is None or not isinstance(data, dict):
+        return data
+    nets = _dns_prefix_nets(prefixes)
+    rows = _dns_scope_query_names(data.get("query_names"), nets)
+    out = {k: v for k, v in data.items()
+           if k not in ("members", "query_names_tracked")}
+    out["query_names"] = rows
+    types = {}
+    for r in rows:
+        t = r.get("type") or "?"
+        types[t] = types.get(t, 0) + r["count"]
+    out["query_types"] = dict(sorted(types.items(), key=lambda kv: kv[1], reverse=True))
+    out["global"] = {
+        "total_queries": sum(r["count"] for r in rows),
+        "cache_hits": None, "cache_misses": None, "cache_hit_ratio": None,
+        "num_recursive": None, "recursion_time_avg": None, "prefetch": None,
+    }
+    out["tenant_scoped"] = True
+    return out
+
+
+def _dns_rescope_client_queries(data, prefixes):
+    """Tenant-scope a DNS_CLIENT_QUERIES envelope by each query's client IP and
+    re-derive ``total``/``top_names`` from what survives."""
+    if prefixes is None or not isinstance(data, dict):
+        return data
+    nets = _dns_prefix_nets(prefixes)
+    queries = [q for q in (data.get("queries") or [])
+               if isinstance(q, dict) and _dns_ip_in_nets(q.get("client"), nets)]
+    summary = {}
+    for q in queries:
+        k = (q.get("name"), q.get("type"))
+        summary[k] = summary.get(k, 0) + 1
+    top = sorted(({"name": n, "type": t, "count": c} for (n, t), c in summary.items()),
+                 key=lambda x: x["count"], reverse=True)[:100]
+    out = dict(data)
+    if len(queries) != len(data.get("queries") or []):
+        out["total"] = len(queries)
+    out["queries"] = queries
+    out["top_names"] = top
+    out["tenant_scoped"] = True
+    return out
+
+
 def register(app, hub, ctx):
     """Register net_services routes on the Hub app."""
     _filter_session = ctx._filter_session
@@ -1060,6 +1155,30 @@ def register(app, hub, ctx):
     # the widest selectable window.
     _DNS_STATS_RANGE_DAYS = {"day": 1, "week": 7, "month": 30}
 
+    async def _dns_query_source_prefixes(request: Request, tenant: str = None):
+        """Source-IP prefixes that scope DNS query telemetry for this request,
+        or None for an unscoped (admin, no tenant selected) view.
+
+        Same tenant resolution as ``_filter_tenant``: the picker-selected tenant
+        (access-checked) for admins and multi-tenant users, else the session
+        tenant. Not gated on the records-only ``dns`` subnet toggle — see the
+        module-level note above ``_dns_prefix_nets``. A tenant with no NetBox
+        prefixes fails CLOSED (``[]``), except the shared tenant, which owns the
+        shared resolver and so sees all of it (as ``filter_tenant`` does)."""
+        sess = _session_user(request)
+        tid = _effective_tenant(request, tenant)
+        if not tid:
+            if sess and not _is_admin(sess):
+                return []
+            return None
+        if sess and not _is_admin(sess):
+            prefixes = await access.resolve_prefixes_for_session_tenant(hub, sess, tid)
+        else:
+            prefixes = await access.resolve_prefixes_for_tenant(hub, tid)
+        if not prefixes and access.tenant_is_shared(tid):
+            return None
+        return list(prefixes or [])
+
     @app.get("/api/dns/stats")
     async def dns_stats(request: Request, tenant: str = None, search: str = None,
                         host: str = None, range: str = None):
@@ -1081,22 +1200,14 @@ def register(app, hub, ctx):
         IP is used for both search and display, so "queried by what host" degrades
         gracefully when no lease/hostname mapping is available.
 
-        A non-admin (or an admin/multi-tenant user with a tenant explicitly
-        selected via the picker) only sees query-name rows whose SOURCE IP
-        falls within their tenant's NetBox prefixes — mirroring the same
-        subnet-based tenant isolation ``_filter_tenant`` applies to DNS
-        records. An admin with no tenant selected sees every source
-        (unfiltered), same as records."""
+        A non-admin, or an admin/multi-tenant user with a tenant selected in
+        the picker, only sees query-name rows (and sources) whose SOURCE IP
+        falls within that tenant's NetBox prefixes, and the headline counters
+        are re-derived from those rows — see ``_dns_query_source_prefixes`` /
+        ``_dns_rescope_stats``. An admin with no tenant selected sees every
+        source (unfiltered)."""
         logger.debug("relay GET /api/dns/stats")
-        source_prefixes = None  # None => no tenant scoping (admin, unfiltered)
-        tid = _effective_tenant(request, tenant)
-        if tid:
-            if access.filter_enabled(hub, "dns"):
-                source_prefixes = await access.resolve_prefixes_for_tenant(hub, tid) or []
-        else:
-            sess = _session_user(request)
-            if sess and not _is_admin(sess) and access.filter_enabled(hub, "dns"):
-                source_prefixes = await access.resolve_prefixes(hub, sess) or []
+        source_prefixes = await _dns_query_source_prefixes(request, tenant)
         payload = {}
         if search:
             payload["search"] = search
@@ -1112,7 +1223,10 @@ def register(app, hub, ctx):
             _spoke_ref("dns", request, tenant), "DNS_STATS",
             payload, log_name="dns_stats",
         )
-        query_names = data.get("query_names")
+        if isinstance(data, dict):
+            # _cached_relay may hand back the shared warm-cache object.
+            data = _dns_rescope_stats(dict(data), source_prefixes)
+        query_names = data.get("query_names") if isinstance(data, dict) else None
         if isinstance(query_names, list) and query_names:
             ip_to_host = await _dns_stats_ip_to_host(request, tenant)
             needle = (host or "").strip().lower()
@@ -1145,15 +1259,7 @@ def register(app, hub, ctx):
                 if name.lower() == low:
                     client = ip
                     break
-        source_prefixes = None
-        tid = _effective_tenant(request, tenant)
-        if tid:
-            if access.filter_enabled(hub, "dns"):
-                source_prefixes = await access.resolve_prefixes_for_tenant(hub, tid) or []
-        else:
-            sess = _session_user(request)
-            if sess and not _is_admin(sess) and access.filter_enabled(hub, "dns"):
-                source_prefixes = await access.resolve_prefixes(hub, sess) or []
+        source_prefixes = await _dns_query_source_prefixes(request, tenant)
         payload = {"client": client, "minutes": max(1, min(int(minutes), 43200))}
         if search:
             payload["search"] = search
@@ -1162,6 +1268,7 @@ def register(app, hub, ctx):
         data = await _relay_spoke(_dns_spoke_for_request(request, tenant),
                                   "DNS_CLIENT_QUERIES", payload,
                                   log_name="dns_client_queries")
+        data = _dns_rescope_client_queries(data, source_prefixes)
         for q in data.get("queries") or []:
             if isinstance(q, dict):
                 q["host"] = ip_to_host.get(q.get("client", ""), "")
