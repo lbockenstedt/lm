@@ -27476,6 +27476,12 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
             const statErrors = (d.member_errors && typeof d.member_errors === 'object')
                 ? Object.entries(d.member_errors) : [];
             const sourceLine = d.cluster ? `<div class="text-xs text-slate-400 mb-3">Combined across ${d.members_reporting == null ? (d.member_count || 0) : d.members_reporting} of ${d.member_count || 0} resolver(s).</div>` : '';
+            // Tenant-scoped: the resolver is shared, so its server-wide cache /
+            // recursion counters can't be attributed to one tenant. The hub
+            // withholds them (null) and derives totals from this tenant's own
+            // devices' queries instead.
+            const scoped = !!d.tenant_scoped;
+            const scopeLine = scoped ? `<div class="text-xs text-slate-400 mb-3">Showing only queries from this tenant's subnets (last month). Cache and recursion counters are server-wide and hidden on a shared resolver.</div>` : '';
             const statErrorBanner = statErrors.length
                 ? `<div class="mb-3 p-3 rounded-md bg-amber-50 border border-amber-200 text-xs text-amber-800">
                     <span class="font-semibold">${statErrors.length} resolver(s) did not report statistics</span>
@@ -27485,7 +27491,11 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     </ul>
                 </div>`
                 : '';
-            const tiles = [
+            const tiles = scoped ? [
+                _ddTile('Total Queries', (g.total_queries || 0).toLocaleString(), 'from this tenant'),
+                _ddTile('Cache Hit Ratio', '—', 'server-wide only'),
+                _ddTile('Recursive Replies', '—', 'server-wide only'),
+            ].join('') : [
                 _ddTile('Total Queries', (g.total_queries || 0).toLocaleString()),
                 _ddTile('Cache Hit Ratio', `${g.cache_hit_ratio || 0}%`, `${(g.cache_hits || 0).toLocaleString()} hits / ${(g.cache_misses || 0).toLocaleString()} miss`,
                         (g.cache_hit_ratio || 0) >= 70 ? 'text-emerald-600' : 'text-amber-600'),
@@ -27500,7 +27510,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     <span class="w-20 text-right text-xs font-mono text-slate-500">${c.toLocaleString()}</span>
                 </div>`).join('');
             container.innerHTML = `
-                ${sourceLine}${statErrorBanner}
+                ${sourceLine}${scopeLine}${statErrorBanner}
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">${tiles}</div>
                 <div class="bg-white border border-slate-200 rounded-lg p-4 mb-4">
                     <div class="text-sm font-semibold text-slate-700 mb-2">Queries by Type</div>
