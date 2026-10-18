@@ -460,7 +460,9 @@ class DNSSpoke(BaseSpoke):
         payload = {}
         if search:
             payload["search"] = search
-        if source_prefixes:
+        # `is not None`: an empty list is a tenant with no prefixes and must
+        # reach each member so it fails CLOSED, not be dropped (= unfiltered).
+        if source_prefixes is not None:
             payload["source_prefixes"] = source_prefixes
         fan = await self._transport.fanout("DNSW_STATS", payload, timeout=20.0)
         per_member: Dict[str, Any] = {}
