@@ -55,7 +55,10 @@ one).
 
 In **centralized** mode the **hub** runs `MistHubPoller` + serves
 browse/available/test from the Mist config directly. In **distributed** mode
-the hub forwards `CS_MIST_*` to the cs spoke, which runs `MistPoller`.
+the hub forwards `CS_MIST_*` to the cs spoke, which runs `MistPoller`. The hub
+pushes the resolved `processing_modes` to cs spokes (full-config sync + on a
+mode change); a spoke whose `mist_api` is `"centralized"` idles its
+`MistPoller` so it never duplicates the hub's poll.
 
 ## The bare-type / prefix seam (important)
 
