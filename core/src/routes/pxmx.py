@@ -696,14 +696,22 @@ async def _merge_pinned_agent_vms(hub, data, tid, visible_spokes, timeout=10.0, 
         return data
 
     async def _one(apk, sp):
+        # agent_config is keyed by the hub-side guid, but the spoke indexes its
+        # connected agents by the agent's raw name — sending the guid made the
+        # spoke answer "not connected" and every pinned host's VMs were dropped.
+        wire_id = hub._agent_relay_name(apk)
         try:
-            r = await hub.request_response(sp, "PXMX_LIST_VMS", {"agent_id": apk},
+            r = await hub.request_response(sp, "PXMX_LIST_VMS", {"agent_id": wire_id},
                                            timeout=timeout)
         except Exception as e:
             logger.warning("pinned-agent VM merge: agent %s (spoke %s) failed: %s",
                            apk, sp, e)
             return {}
-        return r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
+        env = r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
+        if isinstance(env, dict) and env.get("status") == "ERROR":
+            logger.warning("pinned-agent VM merge: agent %s (as %r, spoke %s) returned error: %s",
+                           apk, wire_id, sp, env.get("message") or env.get("error"))
+        return env
 
     envs = await asyncio.gather(*(_one(apk, sp) for apk, sp in reqs))
     owned: dict = {}
