@@ -242,7 +242,7 @@ def register(app, hub, ctx):
             # Whole-host owned VMs: one PXMX_LIST_VMS per pinned agent, scoped to
             # that agent's host (see owned_agent_reqs above). Appended AFTER the
             # per-spoke fan-out so slicing stays deterministic.
-            *[_req(sp, "PXMX_LIST_VMS", {"agent_id": apk})
+            *[_req(sp, "PXMX_LIST_VMS", {"agent_id": hub._agent_relay_name(apk)})
               for apk, sp in owned_agent_reqs],
         )
         devices_r, prefixes_r, ips_r, sessions_r = _core[:4]

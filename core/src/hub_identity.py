@@ -449,7 +449,14 @@ class HubIdentityMixin:
         so a relay to a just-disconnected agent still targets the right name.
         """
         apk = self._agent_primary_key(agent_id)
-        return (self.agent_info.get(apk) or {}).get("agent_id") or agent_id
+        name = (self.agent_info.get(apk) or {}).get("agent_id")
+        if name:
+            return name
+        # agent_info not (re)populated yet → reverse the name→guid alias.
+        for raw, guid in (getattr(self, "agent_id_alias", {}) or {}).items():
+            if guid == apk and raw != apk:
+                return raw
+        return agent_id
 
     def _reconcile_spoke_identity(self, new_id: str, install_uuid: str,
                                   hostname: str, is_agent: bool = False,
