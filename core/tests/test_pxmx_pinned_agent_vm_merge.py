@@ -33,10 +33,14 @@ def _vm(vmid, node="n1", cluster="c1"):
 
 
 class _FakeHub:
-    def __init__(self, agent_config, agent_spokes, responses):
+    def __init__(self, agent_config, agent_spokes, responses, relay_names=None):
         self.state = type("S", (), {"system_state": {"agent_config": agent_config}})()
         self._agent_spokes = agent_spokes
         self._responses = responses
+        self._relay_names = relay_names or {}
+
+    def _agent_relay_name(self, agent_id):
+        return self._relay_names.get(agent_id, agent_id)
 
     def get_spoke_for_agent(self, agent_id, fallback_hypervisor=True):
         return self._agent_spokes.get(agent_id)
@@ -116,3 +120,24 @@ def test_dedupe_by_unique_id_against_already_filtered_vm():
     )
     out = _run(_merge_pinned_agent_vms(hub, filtered, "default", {"shared-pxmx"}))
     assert sorted(v["vmid"] for v in out["vms"]) == [1, 2]
+
+
+def test_pinned_agent_queried_by_wire_name_not_guid():
+    """agent_config is keyed by the hub-side install guid, but the spoke
+    indexes connected agents by the agent's raw name. The merge must send the
+    raw name, or the spoke answers "not connected" and the pinned host's
+    off-subnet/IP-less VMs vanish (the reported Admin/Default gap)."""
+    guid = "c3b11aff-5f63-4ed2-ac98-9bca95bf78d5"
+    filtered = {"vms": [_vm(1)]}
+    hub = _FakeHub(
+        agent_config={guid: {"client_simulation": {"tenant_id": "default"}}},
+        agent_spokes={guid: "shared-pxmx"},
+        responses={("shared-pxmx", "PXMX_LIST_VMS", "mipbe-ssplm-pxmx01"):
+                   {"payload": {"data": {"vms": [_vm(1), _vm(2), _vm(3)]}}},
+                   ("shared-pxmx", "PXMX_LIST_VMS", guid):
+                   {"payload": {"data": {"status": "ERROR",
+                                         "message": "not connected"}}}},
+        relay_names={guid: "mipbe-ssplm-pxmx01"},
+    )
+    out = _run(_merge_pinned_agent_vms(hub, filtered, "default", {"shared-pxmx"}))
+    assert sorted(v["vmid"] for v in out["vms"]) == [1, 2, 3]

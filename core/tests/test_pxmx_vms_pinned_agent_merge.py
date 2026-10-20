@@ -81,6 +81,9 @@ class _Hub:
     def get_all_spokes_by_type(self, module_type):
         return [self._shared_spoke] if module_type == "hypervisor" else []
 
+    def _agent_relay_name(self, agent_id):
+        return agent_id
+
     def get_spoke_for_agent(self, agent_id, fallback_hypervisor=True):
         if agent_id in (self._pinned_agent, self._other_agent):
             return self._shared_spoke
