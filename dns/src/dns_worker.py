@@ -14,6 +14,7 @@ coordinator can tell a rebooted resolver from a drifted one.
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -31,6 +32,15 @@ try:
 except ImportError:  # loaded as a package (src.X)
     from src.dns_cluster import (  # type: ignore
         derive_managed_records, digest_of_parsed, records_digest, validate_records)
+
+try:
+    from dns_overrides import (
+        EMPTY_DIGEST, DnsOverrideError, overrides_digest, render_unbound,
+        validate_overrides)
+except ImportError:  # loaded as a package (src.X)
+    from src.dns_overrides import (  # type: ignore
+        EMPTY_DIGEST, DnsOverrideError, overrides_digest, render_unbound,
+        validate_overrides)
 
 logger = logging.getLogger("DNSWorker")
 
@@ -193,6 +203,80 @@ class DnsWorkerOps:
     def remove_forwarder(self, data: Dict[str, Any]) -> Dict[str, Any]:
         return self.mgr.remove_forwarder(data.get("zone", ""))
 
+    # ── Per-client override views ───────────────────────────────────────────
+
+    @property
+    def _overrides_marker_path(self) -> str:
+        return os.path.join(os.path.dirname(self.state_path) or ".",
+                            "overrides-applied.json")
+
+    def _load_overrides_marker(self) -> Dict[str, Any]:
+        try:
+            with open(self._overrides_marker_path) as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not read override marker: %s", e)
+            return {}
+
+    @staticmethod
+    def _text_sha(text: Any) -> str:
+        return hashlib.sha256((text or "").encode()).hexdigest()
+
+    def overrides_apply(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """``DNSW_OVERRIDES_APPLY`` — re-validate, render and serve an override set."""
+        try:
+            clean = validate_overrides(data.get("overrides"))
+        except DnsOverrideError as e:
+            return {"status": "ERROR", "rejected": True,
+                    "message": f"invalid override set: {e}"}
+        digest = overrides_digest(clean)
+        claimed = str(data.get("digest") or "")
+        if claimed and claimed != digest:
+            return {"status": "ERROR", "rejected": True,
+                    "message": (f"override digest mismatch (coordinator "
+                                f"{claimed[:12]}…, local {digest[:12]}…)")}
+        text = render_unbound(clean)
+        result = self.mgr.write_overrides(text)
+        if result.get("status") != "SUCCESS":
+            return result
+        marker = {"version": data.get("version"), "digest": digest,
+                  "file_sha": self._text_sha(text), "at": time.time()}
+        try:
+            directory = os.path.dirname(self._overrides_marker_path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            tmp = self._overrides_marker_path + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(marker, fh)
+            os.replace(tmp, self._overrides_marker_path)
+        except Exception as e:  # noqa: BLE001 — the config is already live
+            logger.warning("Could not persist override marker: %s", e)
+        return {"status": "SUCCESS", "digest": digest,
+                "version": data.get("version"), "changed": result.get("changed"),
+                "profiles": len(clean["profiles"]),
+                "assignments": len(clean["assignments"])}
+
+    def overrides_state(self, _data: Dict[str, Any]) -> Dict[str, Any]:
+        """``DNSW_OVERRIDES_STATE`` — the override set this resolver is serving.
+
+        The digest is only trusted while the file on disk still matches what
+        this worker wrote; an out-of-band edit reports ``digest: None`` so the
+        coordinator re-pushes."""
+        text = self.mgr.read_overrides()
+        marker = self._load_overrides_marker()
+        if text is None and not marker:
+            digest = EMPTY_DIGEST
+        elif marker.get("file_sha") == self._text_sha(text):
+            digest = marker.get("digest")
+        else:
+            digest = None
+        return {"status": "SUCCESS", "digest": digest,
+                "version": marker.get("version"),
+                "present": text is not None}
+
     def op_table(self) -> Dict[str, Any]:
         return {
             "DNSW_APPLY": self.apply,
@@ -205,6 +289,8 @@ class DnsWorkerOps:
             "DNSW_FORWARDER_ADD": self.add_forwarder,
             "DNSW_FORWARDER_UPDATE": self.update_forwarder,
             "DNSW_FORWARDER_REMOVE": self.remove_forwarder,
+            "DNSW_OVERRIDES_APPLY": self.overrides_apply,
+            "DNSW_OVERRIDES_STATE": self.overrides_state,
             "DNSW_STANDDOWN": self.standdown,
         }
 
