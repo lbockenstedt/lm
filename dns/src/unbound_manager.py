@@ -85,6 +85,8 @@ class UnboundManager:
         self.conf_path = conf_path
         self.forwarders_path = os.path.join(
             os.path.dirname(self.conf_path), "lm-forwarders.conf")
+        self.overrides_path = os.path.join(
+            os.path.dirname(self.conf_path), "lm-overrides.conf")
         os.makedirs(os.path.dirname(self.conf_path), exist_ok=True)
         self._ensure_conf_included()
         # mtime-keyed memo for list_records(): status/add/update/delete all
@@ -1159,6 +1161,68 @@ class UnboundManager:
         result = self._write_forwarders(kept)
         return {**result, "changed": result.get("status") == "SUCCESS",
                 "zone": zone}
+
+    # ── Per-client override views ─────────────────────────────────────
+
+    def read_overrides(self):
+        """Current managed override file contents, or ``None`` if absent."""
+        try:
+            with open(self.overrides_path, encoding="utf-8") as fh:
+                return fh.read()
+        except FileNotFoundError:
+            return None
+
+    def _checkconf(self) -> dict:
+        """Validate the full config Unbound would load. Skipped (ok) when
+        ``unbound-checkconf`` is not installed — reload is then the only gate."""
+        if not shutil.which("unbound-checkconf"):
+            return {"ok": True, "error": "", "skipped": True}
+        result = self._run_diag(["unbound-checkconf"], timeout=20)
+        return {"ok": result["ok"], "error": result["error"]}
+
+    def write_overrides(self, text: str) -> dict:
+        """Atomically replace ``lm-overrides.conf``, validate, and reload.
+
+        A rejected config is put back before Unbound ever reloads it: an
+        ``unbound-control reload`` of an invalid file stops the resolver, so the
+        file is checked with ``unbound-checkconf`` first. Any failure restores
+        the previous file and reports ``rejected`` so the coordinator rolls the
+        whole cluster back instead of retrying a config that can never load.
+        """
+        old = self.read_overrides()
+        if old == text:
+            return {"status": "SUCCESS", "changed": False, "reloaded": True}
+        tmp_path = self.overrides_path + ".tmp"
+
+        def _restore():
+            if old is None:
+                if os.path.exists(self.overrides_path):
+                    os.remove(self.overrides_path)
+            else:
+                with open(self.overrides_path, "w", encoding="utf-8") as fh:
+                    fh.write(old)
+
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.replace(tmp_path, self.overrides_path)
+        except Exception as exc:  # noqa: BLE001
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            return {"status": "ERROR", "rejected": True, "reloaded": False,
+                    "message": f"could not write {self.overrides_path}: {exc}"}
+        check = self._checkconf()
+        if not check["ok"]:
+            _restore()
+            return {"status": "ERROR", "rejected": True, "reloaded": False,
+                    "message": f"unbound-checkconf rejected the override config: {check['error']}"}
+        result = self._reload()
+        if not result["ok"]:
+            _restore()
+            self._reload()
+            return {"status": "ERROR", "rejected": True, "reloaded": False,
+                    "message": f"unbound-control reload failed: {result['error']}"}
+        return {"status": "SUCCESS", "changed": True, "reloaded": True}
 
     # ── Helpers ───────────────────────────────────────────────────────
 

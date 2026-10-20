@@ -20,6 +20,10 @@ CI/tooling changes are omitted unless they change what an operator sees.
   specific SSH/telnet port. See [console.md](console.md#direct-port-access-dpa--enabling-it).
 
 ### DHCP / DNS / multitenancy
+- **Per-client DNS override profiles.** DNS → **Overrides** lets a Global Admin define
+  named profiles (e.g. `PAVO-DEVICE`) of custom answers and blocked names; apply one to a
+  device from **Records → Override…** (tenant Admins: their own devices) or to a subnet,
+  and only those clients get the custom answers. See [dns.md](dns.md#per-client-override-profiles).
 - **Tenant isolation for DHCP/DNS.** A tenant-bound DHCP/DNS spoke now only gets
   its own tenant's NetBox subnets/records; the shared tenant is the only one
   that may manage other tenants, and automatic instance failover never moves a

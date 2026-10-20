@@ -442,7 +442,7 @@ def register(app, hub, ctx):
     _SWR_PREFIX = "netsvc_"
     _SWR_READ_CMDS = frozenset({
         "DNS_LIST", "DNS_STATUS", "DNS_DIAGNOSTICS", "DNS_CLUSTER_STATUS",
-        "DNS_STATS", "DNS_FORWARDERS", "DNS_CLIENT_QUERIES",
+        "DNS_STATS", "DNS_FORWARDERS", "DNS_CLIENT_QUERIES", "DNS_OVERRIDES",
         "DHCP_LIST_SUBNETS", "DHCP_LIST_LEASES",
         "DHCP_LIST_RES", "DHCP_STATUS", "DHCP_DIAGNOSTICS", "DHCP_HA_STATUS",
         "DHCP_STATS", "DHCP_DNS_HOOK_STATUS", "DHCP_PACKET_TRACE"})
@@ -1321,6 +1321,102 @@ def register(app, hub, ctx):
             log_name="dns_update_forwarder",
             timeout=30,
         )
+
+    # ── Per-client DNS override profiles (Unbound views) ─────────────────────
+    # Profiles are shared resolver config → Global Admin only (also enforced by
+    # the /api/dns/ admin write gate in api.py). Assignments follow the DNS
+    # record model: a tenant-admin may apply/remove a profile only for a single
+    # device IP inside their own tenant subnets; subnets stay admin-only.
+    def _dns_override_host_ip(target):
+        try:
+            net = ipaddress.ip_network(str(target or "").strip(), strict=False)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="target must be an IP address or subnet")
+        return str(net.network_address) if net.num_addresses == 1 else ""
+
+    async def _dns_override_constrain(request, target):
+        sess = _session_user(request)
+        if _is_admin(sess):
+            return
+        ip = _dns_override_host_ip(target)
+        if not ip:
+            raise HTTPException(status_code=403,
+                                detail="Only a Global Admin may apply a DNS override to a whole subnet")
+        await _constrain_shared_write(request, {"ip": ip}, ["ip"], "DNS override")
+
+    async def _dns_override_body(request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="JSON object body required")
+        return body
+
+    @app.get("/api/dns/overrides")
+    async def dns_overrides(request: Request, tenant: str = None):
+        """Override profiles, their client assignments, and per-resolver
+        convergence. A tenant-scoped caller sees every profile (so they can
+        pick one) but only assignments inside their own subnets."""
+        source_prefixes = await _dns_query_source_prefixes(request, tenant)
+        data = await _relay_spoke(_dns_spoke_for_request(request, tenant),
+                                  "DNS_OVERRIDES", {}, log_name="dns_overrides")
+        if source_prefixes is not None and isinstance(data, dict):
+            nets = _dns_prefix_nets(source_prefixes)
+            kept = []
+            for a in data.get("assignments") or []:
+                try:
+                    net = ipaddress.ip_network(str((a or {}).get("target")), strict=False)
+                except ValueError:
+                    continue
+                if any(net.version == n.version and net.subnet_of(n) for n in nets):
+                    kept.append(a)
+            data = {**data, "assignments": kept, "tenant_scoped": True}
+        return data
+
+    @app.put("/api/dns/overrides/profile")
+    async def dns_override_profile_set(request: Request, tenant: str = None):
+        """Create, replace or rename (``old_name``) an override profile."""
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        body = await _dns_override_body(request)
+        payload = {"profile": body.get("profile") or {}}
+        if body.get("old_name"):
+            payload["old_name"] = body["old_name"]
+        return await _relay_spoke(_dns_spoke_for_request(request, tenant),
+                                  "DNS_OVERRIDE_PROFILE_SET", payload,
+                                  log_name="dns_override_profile_set", timeout=45)
+
+    @app.delete("/api/dns/overrides/profile")
+    async def dns_override_profile_delete(request: Request, tenant: str = None):
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        body = await _dns_override_body(request)
+        return await _relay_spoke(_dns_spoke_for_request(request, tenant),
+                                  "DNS_OVERRIDE_PROFILE_DELETE",
+                                  {"name": body.get("name", ""), "force": bool(body.get("force"))},
+                                  log_name="dns_override_profile_delete", timeout=45)
+
+    @app.post("/api/dns/override-assignment")
+    async def dns_override_assign(request: Request, tenant: str = None):
+        """Apply a profile to a device IP (or, admin only, a subnet)."""
+        body = await _dns_override_body(request)
+        target = body.get("target") or body.get("ip") or ""
+        await _dns_override_constrain(request, target)
+        return await _relay_spoke(_dns_spoke_for_request(request, tenant),
+                                  "DNS_OVERRIDE_ASSIGN",
+                                  {"target": target, "profile": body.get("profile", ""),
+                                   "label": body.get("label", "")},
+                                  log_name="dns_override_assign", timeout=45)
+
+    @app.delete("/api/dns/override-assignment")
+    async def dns_override_unassign(request: Request, tenant: str = None):
+        body = await _dns_override_body(request)
+        target = body.get("target") or body.get("ip") or ""
+        await _dns_override_constrain(request, target)
+        return await _relay_spoke(_dns_spoke_for_request(request, tenant),
+                                  "DNS_OVERRIDE_UNASSIGN", {"target": target},
+                                  log_name="dns_override_unassign", timeout=45)
 
     @app.post("/api/dns/sync")
     async def dns_sync_from_netbox():
