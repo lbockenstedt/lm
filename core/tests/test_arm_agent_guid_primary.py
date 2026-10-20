@@ -330,6 +330,16 @@ def test_agent_relay_name_translates_guid_to_raw_name(tmp_path):
     assert hub._agent_relay_name("never-seen") == "never-seen"
 
 
+def test_agent_relay_name_falls_back_to_alias_when_agent_info_missing(tmp_path):
+    """agent_info is in-memory and lags (re)connect; the alias still knows the
+    raw name, so a guid must not leak onto the wire as the target agent id."""
+    state = _fresh_state(tmp_path)
+    hub = _ArmAgentHub(state, _make_km())
+    hub.agent_id_alias["node-agent"] = "AGUID-1"
+    assert hub._agent_relay_name("AGUID-1") == "node-agent"
+    assert hub._agent_relay_name("node-agent") == "node-agent"
+
+
 # ── composite parent half resolves through the spoke primary key ─────────────
 
 def test_composite_uses_spoke_primary_key_for_parent_half(tmp_path):
