@@ -23,6 +23,7 @@ import logging
 import re
 import time
 from .service import SimulationsService, _PASS, _FAIL
+from .store import SimulationsStore
 from .aruba import test_central_from_config, get_central_available_from_config, browse_all_from_config
 from .mist import (
     test_mist_from_config, get_mist_available_from_config, browse_mist_from_config,
@@ -2263,6 +2264,21 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     _CS_SYNC_BACKSTOP_S = 3600       # unconditional full push at least this often
     _CS_SYNC_DRIFT_GRACE_S = 120     # let telemetry catch up after a full push
 
+    async def _cs_processing_modes(tenant_id: str) -> dict:
+        """Resolved per-feature polling owner for the tenant's cs spokes. The
+        spoke idles its Central / Central On-Prem / Mist poller for every
+        "centralized" feature, because the hub's own poller owns it then."""
+        modes = await store.get_processing_modes(tenant_id)
+        S = SimulationsStore
+
+        def _m(centralized: bool) -> str:
+            return "centralized" if centralized else "distributed"
+        return {
+            "central_api": _m(S.central_api_is_centralized(modes)),
+            "central_on_prem_api": _m(S.central_on_prem_api_is_centralized(modes)),
+            "mist_api": _m(S.mist_api_is_centralized(modes)),
+        }
+
     async def _cs_full_config(tenant_id: str) -> dict:
         """Every hub-owned cs config key for the tenant (pre-_push_config: the
         effective USB/PCI lists, config_source, github_config and per-spoke
@@ -2312,6 +2328,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 v = None
             if isinstance(v, dict) and v:
                 p[key] = v
+        p["processing_modes"] = await _cs_processing_modes(tenant_id)
         # Quota / stacking / pool bundle — the same set _push_sim_quotas sends.
         p["effective_sim_quotas"] = await _effective_sim_quotas(tenant_id)
         p["sim_shareable"] = await _sim_shareable(tenant_id)
@@ -3540,11 +3557,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if not feature:
             raise HTTPException(status_code=400, detail="missing feature")
         await store.set_processing_mode(tenant_id, feature, value)
-        # central_api maps to the spoke's central_api.mode; other features are
-        # hub-stored only for now.
+        # central_api maps to the legacy webui-spoke's central_api.mode; every
+        # polling feature also pushes the resolved processing_modes so the live
+        # spoke idles its poller when the hub owns that API.
         payload: dict = {}
         if feature == "central_api" and value:
             payload = {"central_api": {"mode": "central" if value == "centralized" else "classic"}}
+        if feature in ("central_api", "central_on_prem_api", "mist_api"):
+            payload["processing_modes"] = await _cs_processing_modes(tenant_id)
         pushed = await _push_config(tenant_id, payload) if payload else 0
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
