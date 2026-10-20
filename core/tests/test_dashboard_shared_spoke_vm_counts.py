@@ -47,6 +47,9 @@ class _Hub:
     def get_spoke_by_type(self, t):
         return {"ipam": "ipam-1", "nac": "nac-1"}.get(t)
 
+    def _agent_relay_name(self, agent_id):
+        return agent_id
+
     def get_spoke_for_agent(self, agent_id, fallback_hypervisor=True):
         return self._agent_spokes.get(agent_id)
 
