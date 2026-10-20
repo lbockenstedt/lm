@@ -11834,6 +11834,7 @@ function _renderSettingsNetboxSsoTile(content) {
             <div id="nbsso-auth-mode" class="hidden text-xs rounded-md p-2 mb-3 border"></div>
             <div id="nbsso-oidc-warn" class="hidden text-xs text-amber-600 border border-amber-200 bg-amber-50 rounded-md p-2 mb-3"></div>
             <div id="nbsso-target-warn" class="hidden text-xs text-amber-600 border border-amber-200 bg-amber-50 rounded-md p-2 mb-3"></div>
+            <div class="space-y-1 mb-3"><label class="${labelCls}">NetBox host <span class="text-slate-400 normal-case font-normal">(agent that runs NetBox — receives the hub's Entra certificate)</span></label><select id="nbsso-target" class="${inputCls} font-mono text-xs"></select></div>
             <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="nbsso-enabled" class="w-4 h-4 text-green-600 rounded">Enable Entra SSO on NetBox (shows the <b>Sign in with Microsoft</b> button)</label>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="space-y-1"><label class="${labelCls}">Tenant ID <span class="text-slate-400 normal-case font-normal">(from hub SSO)</span></label><input id="nbsso-tenant" type="text" readonly class="${inputCls} font-mono text-xs bg-slate-50"></div>
@@ -11945,8 +11946,17 @@ async function loadNetboxSso() {
         if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         const ow = document.getElementById('nbsso-oidc-warn');
         if (ow) { if (!oidc.configured) { ow.textContent = 'Hub Entra SSO is not configured yet — set it up in Settings → Cloud → Azure → SSO first (NetBox reuses its tenant + client ID).'; ow.classList.remove('hidden'); } else ow.classList.add('hidden'); }
+        const cands = d.netbox_server_agents || [];
+        const sel = document.getElementById('nbsso-target');
+        if (sel) {
+            const opts = [...cands];
+            if (c.target_agent && !opts.includes(c.target_agent)) opts.unshift(c.target_agent);
+            const pick = c.target_agent || (cands.length === 1 ? cands[0] : '');
+            sel.innerHTML = '<option value="">— select —</option>' + opts.map(a =>
+                `<option value="${escapeHtml(a)}"${a === pick ? ' selected' : ''}>${escapeHtml(a)}${cands.includes(a) ? '' : ' (offline / no NetBox)'}</option>`).join('');
+        }
         const tw = document.getElementById('nbsso-target-warn');
-        if (tw) { if (!(d.netbox_server_agents || []).length) { tw.textContent = 'No connected netbox-server host found. The agent that deployed the "NetBox Server" role must be online to receive the SSO config (it will be queued until then).'; tw.classList.remove('hidden'); } else tw.classList.add('hidden'); }
+        if (tw) { if (!cands.length) { tw.textContent = 'No connected agent reports a NetBox install. The agent on the NetBox host (the one that deployed the "NetBox Server" role) must be online to enable SSO.'; tw.classList.remove('hidden'); } else tw.classList.add('hidden'); }
     } catch (e) { console.error('loadNetboxSso failed', e); }
 }
 
@@ -11966,6 +11976,7 @@ async function saveNetboxSso() {
         redirect_uri: v('nbsso-redirect'),
         allowed_group: v('nbsso-allowed'),
         group_map: _nbssoCollectMap(),
+        target_agent: v('nbsso-target'),
     };
     const secret = v('nbsso-secret');
     if (secret) cfg.client_secret = secret;  // blank = keep stored
@@ -11973,7 +11984,7 @@ async function saveNetboxSso() {
     try {
         const d = await apiJson('/setup/netbox-sso', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) });
         const msg = document.getElementById('nbsso-msg');
-        if (d.no_target) { if (msg) msg.textContent = 'Saved — queued (no netbox-server host online yet).'; showToast('Saved; will apply when the netbox-server host connects.', 'success'); }
+        if (d.no_target) { if (msg) msg.textContent = 'Saved (no NetBox host selected).'; showToast('Saved — no NetBox host selected.', 'success'); }
         else { if (msg) msg.textContent = `Applied to ${(d.pushed || []).length} host(s)${(d.queued || []).length ? ', queued ' + d.queued.length : ''} (auth: ${d.auth_mode || 'secret'}).`; showToast('NetBox SSO pushed to the netbox-server host.', 'success'); }
         loadNetboxSso();
     } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
