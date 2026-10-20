@@ -1,6 +1,6 @@
 ---
 summary: "DNS management spoke coordinating one or more Unbound resolver workers. Repo: dns. moduletype = 'dns'."
-keywords: [auto, backends, behaviors, dns, dns_delete, dns_forwarders, dns_update, list_forwards, lm, stats_noreset]
+keywords: [auto, backends, behaviors, dns, dns_delete, dns_forwarders, dns_update, list_forwards, lm, stats_noreset, override, dns_overrides, views, access-control-view, split-horizon, per-client]
 ---
 
 # dns — DNS (Unbound)
@@ -13,9 +13,9 @@ The `dns` role is management-only and does not install, start, or invoke a local
 
 ## What it does
 
-The `dns` module manages DNS records across one or more **Unbound** resolver workers and shows their query statistics and configured upstream forwarders. DNS Server installation enables Unbound extended statistics so the **Overview** tab includes the per-query-type A/AAAA/PTR/etc. breakdown; the parser supports aggregate and per-thread Unbound counter formats. Records are simple name/type/value entries (A/AAAA get an automatic PTR companion; CNAME and PTR are also supported) — add one by hand, or let it fill in automatically from NetBox. Global Admins can add persistent per-zone forwarders from the **Forwarders** tab; the change is applied to every resolver worker.
+The `dns` module manages DNS records across one or more **Unbound** resolver workers and shows their query statistics and configured upstream forwarders. DNS Server installation enables Unbound extended statistics so the **Overview** tab includes the per-query-type A/AAAA/PTR/etc. breakdown; the parser supports aggregate and per-thread Unbound counter formats. Records are simple name/type/value entries (A/AAAA get an automatic PTR companion; CNAME and PTR are also supported) — add one by hand, or let it fill in automatically from NetBox. Global Admins can add persistent per-zone forwarders from the **Forwarders** tab; the change is applied to every resolver worker. **Override profiles** (the **Overrides** tab) give chosen clients different DNS answers: a Global Admin defines a named profile (e.g. `PAVO-DEVICE`) of custom answers and blocked names, and anyone who can edit a device's DNS applies it to that device — see [Per-client override profiles](#per-client-override-profiles).
 
-In the WebUI, open a node's **DNS** module from the sidebar to reach the **Overview**, **Records**, **Diagnostics**, and **Forwarders** tabs (**Overview** is the default first tab) — see the [WebUI](#webui) section below for what each tab shows.
+In the WebUI, open a node's **DNS** module from the sidebar to reach the **Overview**, **Records**, **Forwarders**, **Overrides**, and **Diagnostics** tabs (**Overview** is the default first tab) — see the [WebUI](#webui) section below for what each tab shows.
 
 ## Entrypoints
 
@@ -37,7 +37,7 @@ None (no installer present).
 
 ## Key commands / handlers (`dns_spoke.handle_command`)
 
-`GET_VERSION`, `UPDATE_CONFIG` (rebuild manager), `DNS_STATUS`, `DNS_DIAGNOSTICS` (service/config/control status, port-53 listeners, configured/local addresses, and loopback/LAN DNS probes; relayed by `GET /api/dns/diagnostics`), `DNS_LIST` (regex-parses `local-data:`/`local-data-ptr:` directives out of the managed conf.d file — `<name>. <ttl> IN <type> <value>`; memoized on the conf file's mtime — NOT `unbound-control list_local_data`), `DNS_ADD` (append to the parsed record list + full conf rewrite + `unbound-control reload`), `DNS_DELETE` (filter out the matching record + full conf rewrite + reload), `DNS_UPDATE` (delete-then-add, non-atomic), `DNS_SYNC` (`sync_records` — only-add-missing against existing names, added/skipped counts), `DNS_STATS` (`get_stats` via `unbound-control stats_noreset` — total queries, cache hit/miss + ratio, recursion latency, uptime, per-type breakdown; relayed by `GET /api/dns/stats`), `DNS_FORWARDERS` (`list_forwarders` via `unbound-control list_forwards` — per-zone upstream servers; relayed by `GET /api/dns/forwarders`), `DNS_FORWARDER_ADD` (Global-Admin-only persistent forwarding-zone creation; relayed by `POST /api/dns/forwarders`), `DNS_FORWARDER_UPDATE` (in-place replacement of upstream resolvers for a zone; relayed by `PUT /api/dns/forwarders`), and `DNS_FORWARDER_REMOVE` (removal of managed forwarding zone; relayed by `DELETE /api/dns/forwarders`).
+`GET_VERSION`, `UPDATE_CONFIG` (rebuild manager), `DNS_STATUS`, `DNS_DIAGNOSTICS` (service/config/control status, port-53 listeners, configured/local addresses, and loopback/LAN DNS probes; relayed by `GET /api/dns/diagnostics`), `DNS_LIST` (regex-parses `local-data:`/`local-data-ptr:` directives out of the managed conf.d file — `<name>. <ttl> IN <type> <value>`; memoized on the conf file's mtime — NOT `unbound-control list_local_data`), `DNS_ADD` (append to the parsed record list + full conf rewrite + `unbound-control reload`), `DNS_DELETE` (filter out the matching record + full conf rewrite + reload), `DNS_UPDATE` (delete-then-add, non-atomic), `DNS_SYNC` (`sync_records` — only-add-missing against existing names, added/skipped counts), `DNS_STATS` (`get_stats` via `unbound-control stats_noreset` — total queries, cache hit/miss + ratio, recursion latency, uptime, per-type breakdown; relayed by `GET /api/dns/stats`), `DNS_FORWARDERS` (`list_forwarders` via `unbound-control list_forwards` — per-zone upstream servers; relayed by `GET /api/dns/forwarders`), `DNS_FORWARDER_ADD` (Global-Admin-only persistent forwarding-zone creation; relayed by `POST /api/dns/forwarders`), `DNS_FORWARDER_UPDATE` (in-place replacement of upstream resolvers for a zone; relayed by `PUT /api/dns/forwarders`), `DNS_FORWARDER_REMOVE` (removal of managed forwarding zone; relayed by `DELETE /api/dns/forwarders`), and the override-profile commands `DNS_OVERRIDES` / `DNS_OVERRIDE_PROFILE_SET` / `DNS_OVERRIDE_PROFILE_DELETE` / `DNS_OVERRIDE_ASSIGN` / `DNS_OVERRIDE_UNASSIGN` (see [Per-client override profiles](#per-client-override-profiles)).
 
 ## Resolver workers (one or more Unbound hosts, one DNS module)
 
@@ -47,7 +47,7 @@ A DNS module drives **one or more Unbound hosts** and becomes the authoritative 
 
 **The hop is always encrypted AND verified.** The PSK rides in the first handshake frame, so the coordinator URL defaults to `wss://`, a `ws://` URL to a **remote** host is rejected outright, and — unlike the hub leg — there is **no unverified mode at all**. The installer mints (or accepts) a coordinator certificate at `/etc/lm-dns/tls/`, wires it into the unit as `LM_TLS_CERT`/`LM_TLS_KEY`, and each worker install requires `--ca-cert` (that certificate, pinned as `LM_CLUSTER_CA_CERT`). A configured CA path that does not exist fails closed. `LM_CLUSTER_TLS_CHECK_HOSTNAME=0` relaxes only the SAN match for a self-signed-by-IP coordinator; the trust anchor is still enforced. The listener **refuses to bind** plaintext on `0.0.0.0` (`AGENT_LISTENER_REQUIRE_TLS`): with no cert it leaves the port closed and logs why.
 
-**The worker is not a generic agent.** Its op table is fixed at import: `DNSW_APPLY`, `DNSW_STATE`, `DNSW_STATUS`, `DNSW_DIAGNOSTICS`, `DNSW_STATS`, `DNSW_FORWARDERS`, `DNSW_FORWARDER_ADD`, `DNSW_FORWARDER_UPDATE`, `DNSW_FORWARDER_REMOVE`, `DNSW_STANDDOWN`. There is no `RUN_COMMAND`, no `WRITE_FILE`, no caller-supplied path or URL. The conf path is fixed at start from local config. Forwarders are per-resolver, so the **Forwarders** tab in cluster mode aggregates `DNSW_FORWARDERS` from every member (tagged with the member it came from) instead of reading the coordinator box's own Unbound, which may not exist. Adds fan out to every member and roll back successful members if any resolver rejects the change.
+**The worker is not a generic agent.** Its op table is fixed at import: `DNSW_APPLY`, `DNSW_STATE`, `DNSW_STATUS`, `DNSW_DIAGNOSTICS`, `DNSW_STATS`, `DNSW_FORWARDERS`, `DNSW_FORWARDER_ADD`, `DNSW_FORWARDER_UPDATE`, `DNSW_FORWARDER_REMOVE`, `DNSW_OVERRIDES_APPLY`, `DNSW_OVERRIDES_STATE`, `DNSW_STANDDOWN`. There is no `RUN_COMMAND`, no `WRITE_FILE`, no caller-supplied path or URL. The conf path is fixed at start from local config. Forwarders are per-resolver, so the **Forwarders** tab in cluster mode aggregates `DNSW_FORWARDERS` from every member (tagged with the member it came from) instead of reading the coordinator box's own Unbound, which may not exist. Adds fan out to every member and roll back successful members if any resolver rejects the change.
 
 **Desired state — persisted first, fail closed.** Every write (`DNS_SYNC` / `DNS_ADD` / `DNS_UPDATE` / `DNS_DELETE`) lands in the coordinator's versioned, digested desired state (`/var/lib/lm-dns/desired.json`), which is written to disk **before** anything is fanned out: if the write fails, no worker is touched and the coordinator stays exactly where it was. A desired-state file that exists but cannot be read (or whose digest does not match its own records) **blocks every mutation and the reconcile loop** with an actionable error — starting clean there would silently republish an empty record set to both resolvers. Mutations and reconcile passes are serialized under one lock, so two concurrent changes can never interleave their fan-outs. Once persisted the set is fanned out to every member. Records are **validated before they are versioned** — a name or value containing a quote, newline, whitespace or config punctuation is rejected outright, because Unbound's `local-data: "…"` is quote-delimited and line-oriented and would otherwise accept injected directives. An identical re-sync does not bump the version, so the periodic NetBox loop doesn't make every worker look momentarily stale.
 
@@ -84,11 +84,11 @@ NetBox is the IPAM source of truth. The hub's `DnsDhcpSyncMixin` (`core/src/dns_
 
 ## WebUI
 
-Module view tabs: **Overview** (total-queries / cache-hit-ratio / recursion / uptime tiles + queries-by-type breakdown, `GET /api/dns/stats`; the default first tab, formerly named "Statistics"), **Records**, **Diagnostics** (live service/config checks, port-53 listener ownership, detected LAN addresses, local query probes, and recommended checks), **Forwarders** (per-zone upstream resolvers, `GET /api/dns/forwarders`), and **External DNS** (internet-facing DNS providers such as HE.NET — appears once an external-DNS spoke is connected; one tile per provider; see [henet.md](henet.md)).
+Module view tabs: **Overview** (total-queries / cache-hit-ratio / recursion / uptime tiles + queries-by-type breakdown, `GET /api/dns/stats`; the default first tab, formerly named "Statistics"), **Records**, **Diagnostics** (live service/config checks, port-53 listener ownership, detected LAN addresses, local query probes, and recommended checks), **Forwarders** (per-zone upstream resolvers, `GET /api/dns/forwarders`), **Overrides** (override profiles, the clients they are applied to, and per-resolver convergence, `GET /api/dns/overrides`; the **Records** tab also gains an **Override** column with an **Override…** action on A/AAAA rows once a profile exists), and **External DNS** (internet-facing DNS providers such as HE.NET — appears once an external-DNS spoke is connected; one tile per provider; see [henet.md](henet.md)).
 
 ## Key files
 
-`src/main.py`, `src/dns_spoke.py`, `src/unbound_manager.py`, `src/__init__.py` (empty), `.env.template`, `requirements.txt`, `VERSION`.
+`src/main.py`, `src/dns_spoke.py`, `src/unbound_manager.py`, `src/dns_overrides.py` (override profiles: validation, Unbound rendering, coordinator), `src/dns_worker.py`, `src/__init__.py` (empty), `.env.template`, `requirements.txt`, `VERSION`.
 
 ## Notable behaviors & gotchas
 
@@ -132,6 +132,8 @@ Module view tabs: **Overview** (total-queries / cache-hit-ratio / recursion / up
 - **Add a forwarder:** Forwarders tab → **+ Add Forwarder** → specify zone and upstream server IP addresses (`POST /api/dns/forwarders`).
 - **Edit a forwarder:** Forwarders tab → Edit action on a forwarder row → update upstream addresses (`PUT /api/dns/forwarders`).
 - **Delete a forwarder:** Forwarders tab → Delete action on a forwarder row → confirms and deletes forwarder (`DELETE /api/dns/forwarders`).
+- **Define an override profile (Global Admin):** Overrides tab → **+ Add Profile** → name (e.g. `PAVO-DEVICE`), one answer per line as `name TYPE value [ttl]`, and optional blocked names.
+- **Apply a profile to a device:** Records tab → **Override…** on the device's A/AAAA row → pick the profile (or *None* to remove it). Or Overrides tab → **+ Assign** → IP (a Global Admin may enter a subnet).
 - **Confirm the module is alive:** the module tile / `DNS_STATUS` should show Unbound `running` plus a non-zero `record_count` if you have records configured.
 
 ## Troubleshooting / common questions
@@ -142,6 +144,33 @@ Module view tabs: **Overview** (total-queries / cache-hit-ratio / recursion / up
 - **"Records I added by hand disappeared after a sync."** Sync (both the loop and the button) is only-add-missing — it never deletes. If a manually-added record vanished, check whether someone ran an explicit `DNS_UPDATE`/`DNS_DELETE` on it (those are the only paths that touch existing entries), and remember the managed conf.d file is fully regenerated on every write — anything edited directly on the box outside the DNS module (bypassing Lab Manager entirely) will get clobbered on the next write.
 - **"Is this dnsmasq or Unbound?"** Unbound — confirmed by the `unbound-control` CLI dependency and the `status`/`stats_noreset`/`list_forwards`/`reload` verbs it actually issues. There is no dnsmasq involved in this module.
 - **"Why is `DNS_UPDATE` described as delete-then-add / non-atomic?"** Functionally it replaces the first record matching name+type (dropping duplicates, adding if no match) and then does one rewrite + one reload — so Unbound itself never serves a half-updated file. The "non-atomic" framing refers to the record-list logic (remove old entry, add new one) rather than two separate live `unbound-control` calls.
+
+## Per-client override profiles
+
+Give specific clients (a device IP or a subnet) different DNS answers than everyone else — e.g. point a lab device's `api.vendor.com` at a test server, or NXDOMAIN its telemetry host — without touching anyone else's resolution.
+
+**Model.** A **profile** is a named set of answers plus blocked names. An **assignment** binds one client IP or subnet to one profile. Both live in the DNS coordinator's versioned, digested state (`/var/lib/lm-dns/overrides.json`, override with `LM_DNS_OVERRIDES_STATE`; defaults to `overrides.json` next to the desired-state file).
+
+- Answers: one per line, `name TYPE value [ttl]` — `TYPE` is `A`, `AAAA` or `CNAME`; TTL defaults to 300. `*.zone` answers the zone **and every name under it** with the given data; `*` answers every name.
+- Blocked names return NXDOMAIN for the name and everything under it (`*` cannot be blocked).
+- Rejected inside one profile, because Unbound would silently ignore one of them: an exact name under a `*.zone` wildcard, two overlapping wildcards, or an answered name under a blocked one.
+- Limits: 64 profiles, 500 entries per profile, 4096 assignments. A `/0` target is refused.
+
+**How it is served.** Each profile renders as an Unbound `view:` (`lm-ov-<name>`, `view-first: yes`) in `/etc/unbound/conf.d/lm-overrides.conf`, and each assignment as `access-control-view: <cidr> lm-ov-<name>`. A client in an assigned range is answered from its profile first; any name the profile doesn't cover falls through to the normal records, forwarders and recursion. Every worker validates and re-renders the set itself, runs `unbound-checkconf` (when installed) before `unbound-control reload`, and restores the previous file on any failure.
+
+**Cluster semantics.** A change is all-or-nothing across connected resolvers: if any connected worker rejects it (bad config, failed reload, or a worker too old to know `DNSW_OVERRIDES_APPLY`), the workers that already took it are rolled back and nothing is persisted. An **offline** worker doesn't block the change — the response is `PARTIAL` and the 30s reconcile loop pushes the set when it reconnects. A hand-edited `lm-overrides.conf` is detected (the worker's marker hash no longer matches) and re-pushed. Description/label-only edits are saved without reloading any resolver.
+
+**Access.**
+- `GET /api/dns/overrides` — every profile; assignments are filtered to the caller's tenant prefixes when tenant-scoped (`tenant_scoped: true`).
+- `PUT /api/dns/overrides/profile` `{profile, old_name?}` / `DELETE /api/dns/overrides/profile` `{name, force?}` — **Global Admin only**. Delete refuses while the profile is assigned unless `force` (which also removes its assignments).
+- `POST /api/dns/override-assignment` `{target, profile, label?}` / `DELETE /api/dns/override-assignment` `{target}` — Global Admin for any IP/subnet; a tenant Admin only for a **single host IP inside their own subnets** (same constrained-write gate as records).
+
+**Gotchas.**
+- One profile per client: Unbound picks the **longest matching** `access-control-view`, so a device assignment beats its subnet's, and profiles don't stack.
+- An `access-control-view` entry implicitly **allows** that client to query the resolver, even if no `access-control` line covered it before.
+- If the resolver has a more-specific `access-control:` line *inside* an assigned subnet, clients matching that line get **no** view (Unbound does not inherit views across ACL entries). Assign the narrower range explicitly.
+- CNAME answers are returned as-is; Unbound does not chase the target inside a view, so the client resolves the target itself (normally).
+- The Records tab matches IPv6 devices only on an exact `/128` assignment (subnet inheritance is shown for IPv4).
 
 ## Related pages
 
