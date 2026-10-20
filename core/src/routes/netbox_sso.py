@@ -1,17 +1,22 @@
-"""NetBox Entra SSO — reuse the LM hub's Entra app for NetBox, pushed turn-key.
+"""NetBox Entra SSO — reuse the LM hub's Entra connection for NetBox, turn-key.
 
-The LM hub already holds the Entra tenant_id + client_id (cert-authenticated). NetBox
-can't use that cert (its OIDC backend needs a client secret), but it CAN reuse the
-SAME app registration: add NetBox's redirect URI + one client secret to that app in
-Azure. This route stores the NetBox-side extras (secret, redirect, group map,
-allowed group) and pushes tenant+client_id (from the hub OIDC config) + those to the
-netbox-server host's agent, which applies the SSO block live (NETBOX_APPLY_SSO).
+NetBox logs in through the SAME Entra app registration as the hub, ported from
+the hub's Azure SSO config: tenant + client_id, the hub's client certificate +
+key (NetBox authenticates with a cert-signed client assertion via the agent's
+``lm_sso_backend``, so no client secret is needed), the allowed group, and the
+Permission Groups' Entra group → NetBox group map (Global Admin groups →
+NetBox superuser). The only Azure-side step is registering NetBox's redirect URI
+on that app. A client secret is still accepted as a fallback when the hub has
+no certificate. Pushed to the netbox-server host's agent (NETBOX_APPLY_SSO —
+an app-layer-encrypted frame), which also turns on the "Sign in with
+Microsoft" button on NetBox's login page.
 
 Under ``/setup/`` so the access-control middleware admin-gates it.
 """
 from __future__ import annotations
 
 from api import HTTPException, Request, logger
+from security.credential_store import resolve_private_key_material
 from security.oidc import get_oidc_config
 
 
@@ -41,6 +46,37 @@ def register(app, hub, ctx):
                 out[dg] = g.get("name") or dg
         return out
 
+    def _admin_entra_groups() -> list:
+        """Entra group ids of Permission Groups granting Global Admin — their
+        members become NetBox superusers."""
+        out = []
+        for g in (hub.state.system_state.get("permission_groups", {}) or {}).values():
+            p = g.get("permissions") or {}
+            dg = (g.get("ldap_group") or "").strip()
+            if dg and (p.get("admin") or p.get("role") == "admin") and dg not in out:
+                out.append(dg)
+        return out
+
+    def _hub_cert(oidc) -> tuple:
+        """(cert_pem, key_pem) of the hub's Entra client cert, or ("", "")."""
+        try:
+            cert = resolve_private_key_material(oidc.cert_path) if oidc.cert_path else None
+            key = resolve_private_key_material(oidc.key_path) if oidc.key_path else None
+        except Exception as e:  # noqa: BLE001
+            logger.warning("netbox-sso: could not read the hub Entra cert/key: %s", e)
+            return "", ""
+        if not (cert and key):
+            return "", ""
+        return cert.decode("utf-8", "replace"), key.decode("utf-8", "replace")
+
+    def _effective(cfg: dict, oidc) -> dict:
+        """NetBox-side values with the hub's Azure connection filled in."""
+        return {
+            "allowed_group": cfg["allowed_group"] or oidc.allowed_group,
+            "group_map": cfg["group_map"] or _suggested_group_map(),
+            "superuser_groups": _admin_entra_groups(),
+        }
+
     def _netbox_server_agents() -> list:
         return [sid for sid in getattr(hub, "netbox_server_agents", set())
                 if sid in hub.active_connections]
@@ -49,13 +85,18 @@ def register(app, hub, ctx):
     async def get_netbox_sso():
         cfg = _cfg()
         oidc = get_oidc_config(hub)
+        cert_ok = all(_hub_cert(oidc))
         return {
             # Never echo the stored secret; report only whether one is set.
             "config": {"enabled": cfg["enabled"], "redirect_uri": cfg["redirect_uri"],
                        "group_map": cfg["group_map"], "allowed_group": cfg["allowed_group"],
                        "secret_set": bool(cfg["client_secret"])},
             "oidc": {"tenant_id": oidc.tenant_id, "client_id": oidc.client_id,
-                     "configured": bool(oidc.tenant_id and oidc.client_id)},
+                     "configured": bool(oidc.tenant_id and oidc.client_id),
+                     "allowed_group": oidc.allowed_group,
+                     "cert_available": cert_ok},
+            "auth_mode": "certificate" if cert_ok else ("secret" if cfg["client_secret"] else "none"),
+            "effective": _effective(cfg, oidc),
             "suggested_group_map": _suggested_group_map(),
             "netbox_server_agents": _netbox_server_agents(),
         }
@@ -80,22 +121,31 @@ def register(app, hub, ctx):
         _save(cur)
 
         oidc = get_oidc_config(hub)
+        cert_pem, key_pem = _hub_cert(oidc) if cur["enabled"] else ("", "")
         if cur["enabled"]:
             if not (oidc.tenant_id and oidc.client_id):
                 raise HTTPException(status_code=400,
                                     detail="configure Entra SSO on the hub first (Settings → Azure → SSO)")
-            if not cur["client_secret"]:
-                raise HTTPException(status_code=400, detail="a client secret is required to enable NetBox SSO")
+            if not (cert_pem and key_pem) and not cur["client_secret"]:
+                raise HTTPException(status_code=400,
+                                    detail="the hub has no Entra client certificate to share — generate one "
+                                           "in Settings → Azure → SSO, or paste a client secret")
 
+        eff = _effective(cur, oidc)
         payload = {
             "enabled": cur["enabled"],
             "tenant": oidc.tenant_id,
             "client_id": oidc.client_id,
             "client_secret": cur["client_secret"],
             "redirect_uri": cur["redirect_uri"],
-            "group_map": cur["group_map"],
-            "allowed_group": cur["allowed_group"],
+            "group_map": eff["group_map"],
+            "allowed_group": eff["allowed_group"],
+            "superuser_groups": eff["superuser_groups"],
         }
+        if cert_pem and key_pem:
+            # Same app + cert the hub logs in with (frame is AEAD-encrypted).
+            payload["client_cert_pem"] = cert_pem
+            payload["client_key_pem"] = key_pem
         targets = _netbox_server_agents()
         pushed, queued, failed = [], [], []
         for sid in targets:
@@ -108,7 +158,8 @@ def register(app, hub, ctx):
         logger.info("netbox-sso: %s → %d pushed, %d queued, %d failed",
                     "enabled" if cur["enabled"] else "disabled", len(pushed), len(queued), len(failed))
         return {"status": "ok", "pushed": pushed, "queued": queued, "failed": failed,
-                "no_target": not targets}
+                "no_target": not targets,
+                "auth_mode": "certificate" if payload.get("client_key_pem") else "secret"}
 
     @app.post("/setup/netbox-sso/test")
     async def test_netbox_sso(request: Request):
