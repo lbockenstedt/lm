@@ -107,7 +107,9 @@ def register(app, hub, ctx):
             body = await request.json()
         except Exception:
             body = {}
-        incoming = (body or {}).get("config", body) or {}
+        return await _apply((body or {}).get("config", body) or {})
+
+    async def _apply(incoming: dict) -> dict:
         cur = _cfg()
         cur["enabled"] = bool(incoming.get("enabled", cur["enabled"]))
         cur["redirect_uri"] = str(incoming.get("redirect_uri", cur["redirect_uri"]) or "").strip()
@@ -166,6 +168,9 @@ def register(app, hub, ctx):
         """Ask the netbox-server agent to probe NetBox's OIDC begin URL and
         confirm it redirects to Entra with the expected tenant/client_id/redirect
         — a browserless 'test login'."""
+        return await _test()
+
+    async def _test() -> dict:
         targets = _netbox_server_agents()
         if not targets:
             raise HTTPException(status_code=503, detail="no connected netbox-server host to test against")
@@ -183,3 +188,8 @@ def register(app, hub, ctx):
                                 detail=(data or {}).get("message", "test failed") if isinstance(data, dict) else "test failed")
         return {"status": "ok", "host": targets[0], **{k: data[k] for k in
                 ("ok", "redirects_to_entra", "http_code", "found", "matches", "message") if k in data}}
+
+    # Shared with the loopback /admin/ops/netbox-sso routes (admin_ops.py).
+    hub.netbox_sso_apply = _apply
+    hub.netbox_sso_test = _test
+    hub.netbox_sso_status = get_netbox_sso
