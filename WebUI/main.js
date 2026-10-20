@@ -11818,9 +11818,10 @@ function _renderSettingsIconsTile(content) {
 }
 
 // ── Settings → Azure → NetBox SSO (reuse the LM Entra app for NetBox) ───────
-// Reuses the hub's Entra tenant/client_id; NetBox needs a client SECRET on that
-// same app (its OIDC backend can't use the cert). Pushes the config to the
-// netbox-server host's agent, which applies it live + restarts NetBox.
+// Ports the hub's Azure SSO connection to NetBox: tenant/client_id, the hub's
+// client certificate (no secret needed), allowed group, and the Permission
+// Groups' Entra group map. Pushes to the netbox-server host's agent, which
+// installs the "Sign in with Microsoft" button + restarts NetBox.
 function _renderSettingsNetboxSsoTile(content) {
     const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
     content.innerHTML = `
@@ -11829,23 +11830,24 @@ function _renderSettingsNetboxSsoTile(content) {
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">NetBox SSO — reuse the LM Entra app</h3>
                 <span id="nbsso-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
             </div>
-            <p class="text-xs text-slate-400 mb-3">Log into <b>NetBox</b> with the <b>same Entra app</b> the LM hub uses (same tenant + client ID — the same accounts). NetBox's OIDC backend can't use the hub's certificate, so on that <b>same app registration</b> in Azure you add: (1) redirect URI <code>https://&lt;netbox-host&gt;/oauth/complete/oidc/</code>, and (2) one <b>client secret</b> (paste it below). LM pushes the config to the netbox-server host's agent, which applies it live and restarts NetBox.</p>
+            <p class="text-xs text-slate-400 mb-3">Log into <b>NetBox</b> with the <b>same Entra connection</b> the LM hub uses — tenant, client ID, the hub's <b>client certificate</b>, allowed group and Permission Group mappings are carried over (Global Admin groups become NetBox superusers). Enabling adds a <b>Sign in with Microsoft</b> button to NetBox's login page; local NetBox logins keep working. The one Azure-side step: on that same app registration add the redirect URI <code>https://&lt;netbox-host&gt;/oauth/complete/oidc/</code>.</p>
+            <div id="nbsso-auth-mode" class="hidden text-xs rounded-md p-2 mb-3 border"></div>
             <div id="nbsso-oidc-warn" class="hidden text-xs text-amber-600 border border-amber-200 bg-amber-50 rounded-md p-2 mb-3"></div>
             <div id="nbsso-target-warn" class="hidden text-xs text-amber-600 border border-amber-200 bg-amber-50 rounded-md p-2 mb-3"></div>
-            <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="nbsso-enabled" class="w-4 h-4 text-green-600 rounded">Enable Entra SSO on NetBox</label>
+            <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="nbsso-enabled" class="w-4 h-4 text-green-600 rounded">Enable Entra SSO on NetBox (shows the <b>Sign in with Microsoft</b> button)</label>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="space-y-1"><label class="${labelCls}">Tenant ID <span class="text-slate-400 normal-case font-normal">(from hub SSO)</span></label><input id="nbsso-tenant" type="text" readonly class="${inputCls} font-mono text-xs bg-slate-50"></div>
                 <div class="space-y-1"><label class="${labelCls}">Client ID <span class="text-slate-400 normal-case font-normal">(from hub SSO)</span></label><input id="nbsso-client" type="text" readonly class="${inputCls} font-mono text-xs bg-slate-50"></div>
-                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Client secret <span class="text-slate-400 normal-case font-normal">(add on the LM app in Azure)</span></label><input id="nbsso-secret" type="password" placeholder="paste the client secret" class="${inputCls} font-mono text-xs" autocomplete="new-password"></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Client secret <span class="text-slate-400 normal-case font-normal">(optional — only if the hub has no certificate)</span></label><input id="nbsso-secret" type="password" placeholder="not needed — uses the hub certificate" class="${inputCls} font-mono text-xs" autocomplete="new-password"></div>
                 <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Redirect URI</label><input id="nbsso-redirect" type="text" placeholder="https://<netbox-host>/oauth/complete/oidc/" class="${inputCls} font-mono text-xs"></div>
-                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Restrict login to Entra group <span class="text-slate-400 normal-case font-normal">(optional — object ID)</span></label><input id="nbsso-allowed" type="text" placeholder="group object ID (blank = any user in tenant)" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Restrict login to Entra group <span class="text-slate-400 normal-case font-normal">(optional — object ID; blank = same as hub SSO)</span></label><input id="nbsso-allowed" type="text" placeholder="blank = inherit the hub's allowed group" class="${inputCls} font-mono text-xs"></div>
             </div>
             <div class="mt-4">
                 <div class="flex items-center justify-between mb-1">
                     <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Entra group → NetBox group map</div>
                     <button type="button" onclick="nbssoSeedGroupMap()" class="text-[#01A982] hover:underline text-xs font-bold">Seed from Permission Groups</button>
                 </div>
-                <p class="text-[11px] text-slate-400 mb-2">Each login sets the user's NetBox groups to exactly the mapped set. Left = Entra group object ID, right = NetBox group name.</p>
+                <p class="text-[11px] text-slate-400 mb-2">Each login sets the user's NetBox groups to exactly the mapped set. Left = Entra group object ID, right = NetBox group name. Leave empty to use the Permission Groups mapping automatically.</p>
                 <div id="nbsso-map-rows" class="space-y-2"></div>
                 <button type="button" onclick="nbssoAddMapRow()" class="mt-2 text-xs font-bold text-slate-500 hover:text-slate-700">+ Add mapping</button>
             </div>
@@ -11923,7 +11925,21 @@ async function loadNetboxSso() {
         set('nbsso-tenant', oidc.tenant_id); set('nbsso-client', oidc.client_id);
         set('nbsso-redirect', c.redirect_uri); set('nbsso-allowed', c.allowed_group);
         const secEl = document.getElementById('nbsso-secret');
-        if (secEl) secEl.placeholder = c.secret_set ? '•••••••• (stored — leave blank to keep)' : 'paste the client secret';
+        if (secEl) secEl.placeholder = oidc.cert_available ? 'not needed — uses the hub certificate' : (c.secret_set ? '•••••••• (stored — leave blank to keep)' : 'paste the client secret');
+        const alEl = document.getElementById('nbsso-allowed');
+        if (alEl) alEl.placeholder = oidc.allowed_group ? `blank = inherit hub (${oidc.allowed_group})` : 'blank = any user in tenant';
+        const am = document.getElementById('nbsso-auth-mode');
+        if (am) {
+            const eff = d.effective || {};
+            const nMap = Object.keys(eff.group_map || {}).length, nSu = (eff.superuser_groups || []).length;
+            const certMode = d.auth_mode === 'certificate';
+            am.className = 'text-xs rounded-md p-2 mb-3 border ' + (d.auth_mode === 'none' ? 'border-amber-200 bg-amber-50 text-amber-700' : 'border-green-200 bg-green-50 text-green-700');
+            am.textContent = (certMode ? '✓ Auth: hub Entra certificate (no secret needed)'
+                : d.auth_mode === 'secret' ? '✓ Auth: stored client secret (hub has no certificate)'
+                : '⚠ No credential — generate the hub certificate in Settings → Azure → SSO, or paste a client secret')
+                + ` · ${nMap} group mapping(s) · ${nSu} Global Admin group(s) → NetBox superuser`;
+            am.classList.remove('hidden');
+        }
         _nbssoRenderMap(c.group_map);
         const pill = document.getElementById('nbsso-state-pill');
         if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
@@ -11958,7 +11974,7 @@ async function saveNetboxSso() {
         const d = await apiJson('/setup/netbox-sso', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) });
         const msg = document.getElementById('nbsso-msg');
         if (d.no_target) { if (msg) msg.textContent = 'Saved — queued (no netbox-server host online yet).'; showToast('Saved; will apply when the netbox-server host connects.', 'success'); }
-        else { if (msg) msg.textContent = `Applied to ${(d.pushed || []).length} host(s)${(d.queued || []).length ? ', queued ' + d.queued.length : ''}.`; showToast('NetBox SSO pushed to the netbox-server host.', 'success'); }
+        else { if (msg) msg.textContent = `Applied to ${(d.pushed || []).length} host(s)${(d.queued || []).length ? ', queued ' + d.queued.length : ''} (auth: ${d.auth_mode || 'secret'}).`; showToast('NetBox SSO pushed to the netbox-server host.', 'success'); }
         loadNetboxSso();
     } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
     finally { if (btn) btn.disabled = false; }
