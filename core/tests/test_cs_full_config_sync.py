@@ -129,6 +129,24 @@ def test_full_push_reaches_only_requested_spoke_with_all_keys_and_hash():
     assert "0bda:8812" in payload["usb_vidpids"]
 
 
+def test_full_push_carries_resolved_processing_modes():
+    # Unset modes default to centralized (hub polls) -> spoke pollers idle.
+    hub = _build(["s1"])
+    asyncio.run(hub._cs_full_config_push("s1"))
+    assert hub.pushed[0][2]["processing_modes"] == {
+        "central_api": "centralized", "central_on_prem_api": "centralized",
+        "mist_api": "centralized"}
+
+    async def _modes(tenant_id):
+        return {"central_api": "distributed"}
+    hub = _build(["s1"])
+    hub.simulations_store.get_processing_modes = _modes
+    asyncio.run(hub._cs_full_config_push("s1"))
+    pm = hub.pushed[0][2]["processing_modes"]
+    assert pm["central_api"] == "distributed"
+    assert pm["mist_api"] == "centralized"
+
+
 def test_full_push_unbound_spoke_is_noop():
     hub = _build(["s1"])
     hub.state.bindings = {}
@@ -176,3 +194,34 @@ def test_sync_waits_grace_after_a_recent_full_push():
     hub.simulations_cache = {"s1": {"cs_config_hash": "old"}}
     assert asyncio.run(hub._cs_config_sync_once(now=now)) == 0
     assert hub.pushed == []
+
+
+def test_processing_mode_patch_pushes_resolved_modes():
+    from fastapi.testclient import TestClient
+    hub = _Hub(["s1"])
+    saved = {}
+
+    async def _set(tid, feature, value):
+        saved[feature] = value
+
+    async def _get(tid):
+        return dict(saved)
+    hub.simulations_store.set_processing_mode = _set
+    hub.simulations_store.get_processing_modes = _get
+    app = FastAPI()
+    register_simulations_routes(
+        app, hub,
+        session_user_fn=lambda req: {"username": "admin"},
+        resolve_tenant_fn=lambda req: "t1",
+        is_admin_fn=lambda u: True,
+        check_tenant_access_fn=None,
+        sessions=None,
+        has_cs_access_fn=lambda u: True,
+    )
+    r = TestClient(app).patch("/sim/api/hub/tenants/t1/processing-modes",
+                              json={"mist_api": "distributed"})
+    assert r.status_code == 200, r.text
+    payload = hub.pushed[-1][2]
+    assert payload["processing_modes"]["mist_api"] == "distributed"
+    assert payload["processing_modes"]["central_api"] == "centralized"
+    assert "central_api" not in payload  # legacy key only for central_api changes
