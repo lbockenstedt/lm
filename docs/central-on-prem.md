@@ -77,6 +77,13 @@ browse/available/test from the on-prem config directly — the spoke is not
 contacted. In **distributed** mode the hub forwards `CS_CENTRAL_ON_PREM_*`
 commands to the cs spoke, which runs its own on-prem `CentralPoller` instance.
 
+The hub pushes the resolved `processing_modes` (`central_api`,
+`central_on_prem_api`, `mist_api` → `"centralized"|"distributed"`) to cs spokes
+in the full-config sync and on every mode change. A spoke idles each poller
+whose feature is `"centralized"` and relays an empty status block for it, so
+the hub dashboard shows only the hub's row. A spoke that never received modes
+(standalone, or an older hub) keeps polling.
+
 ## Hub poller — one class, two instances
 
 `core/src/simulations/central_hub_poller.py` is **parameterized** by an
