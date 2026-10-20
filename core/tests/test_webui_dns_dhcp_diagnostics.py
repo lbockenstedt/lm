@@ -46,7 +46,7 @@ def test_overview_stays_the_default_tab():
 def test_no_tabs_were_lost_in_the_reorder():
     src = MAIN_JS.read_text(encoding="utf-8")
     assert sorted(_submenu("dns", src)) == sorted(
-        ["Overview", "Records", "Forwarders", "External DNS", "Diagnostics"])
+        ["Overview", "Records", "Forwarders", "Overrides", "External DNS", "Diagnostics"])
     assert sorted(_submenu("dhcp", src)) == sorted(
         ["Overview", "Subnets", "Leases", "Reservations", "Diagnostics"])
 

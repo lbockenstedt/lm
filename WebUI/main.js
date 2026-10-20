@@ -218,6 +218,8 @@ const ROUTES = {
     loadDNSData:            { m: 'GET',  p: '/api/dns/records',           api: 'dns_list_records' },
     showDnsRecordModal:     { m: 'POST', p: '/api/dns/record',            api: 'dns_add_record/dns_update_record', via: 'saveDnsRecord' }, // (modal)
     showDnsForwarderModal:  { m: 'POST', p: () => '/api/dns/forwarders' + _tenantQS(), api: 'dns_add_forwarder', via: 'saveDnsForwarder' }, // (modal; p is a thunk, NEVER invoke it here — ROUTES is a top-level const evaluated at load, before `let currentTenant` initializes, so calling _tenantQS() eagerly throws a TDZ ReferenceError that aborts main.js and takes the whole UI down. saveDnsForwarder() builds its own tenant-scoped URL at call time; this thunk exists only so the tenant-scoping invariant test can verify the endpoint carries _tenantQS())
+    showDnsOverrideProfileModal:{ m: 'PUT|DELETE', p: '/api/dns/overrides/profile', api: 'dns_override_profile_set/delete (admin)', via: 'saveDnsOverrideProfile' }, // (modal)
+    showDnsOverrideAssignModal:{ m: 'POST|DELETE', p: '/api/dns/override-assignment', api: 'dns_override_assign/unassign', via: 'saveDnsOverrideAssignment' }, // (modal)
     loadDHCPData:           { m: 'GET',  p: '/api/dhcp/{subnets|leases|reservations}', api: 'dhcp_list_subnets/dhcp_list_leases/dhcp_list_reservations' },
     showDhcpReservationModal:{ m: 'GET', p: '/api/dhcp/subnets',          api: 'dhcp_list_subnets', via: '_loadDhcpSubnetOptions' }, // (modal)
 
@@ -1835,7 +1837,7 @@ const VIEW_SUBMENUS = {
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
-    dns: ['Overview', 'Records', 'Forwarders', 'External DNS', 'Diagnostics'],
+    dns: ['Overview', 'Records', 'Forwarders', 'Overrides', 'External DNS', 'Diagnostics'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations', 'Diagnostics'],
     nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other', 'Topology', 'Scan'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
@@ -27404,7 +27406,13 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
         const addForwarderBtn = (subMenu === 'Forwarders' && isAdmin())
             ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" title="Add a new persistent upstream DNS forwarder" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Forwarder</button>`
             : '';
-        navActions.innerHTML = addRecordBtn + addForwarderBtn;
+        const addProfileBtn = (subMenu === 'Overrides' && isAdmin())
+            ? `<button id="dns-override-profile-add-btn" onclick="showDnsOverrideProfileModal()" title="Define a new DNS override profile (custom answers for chosen clients)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Profile</button>`
+            : '';
+        const assignOverrideBtn = (subMenu === 'Overrides' && (isAdmin() || isTenantAdmin()))
+            ? `<button id="dns-override-assign-btn" onclick="showDnsOverrideAssignModal()" title="Apply an override profile to a device IP or subnet" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm ml-2">+ Assign</button>`
+            : '';
+        navActions.innerHTML = addRecordBtn + addForwarderBtn + addProfileBtn + assignOverrideBtn;
     }
 
     const th = tableHead, tw = tableWrap;  // shared table helpers
@@ -27729,7 +27737,20 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
             return;
         }
 
+        // ── Overrides: per-client answer profiles (Unbound views) ──────────
+        if (subMenu === 'Overrides') {
+            const { ok, data: d, detail } = await _spokeFetch('/api/dns/overrides' + _tenantQS());
+            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS spoke not connected'); return; }
+            if (d.status && d.status !== 'SUCCESS') {
+                container.innerHTML = _spokeErrorBanner(d.message, 'DNS overrides unavailable'); return;
+            }
+            window._dnsOverrides = d;
+            container.innerHTML = _dnsOverridesView(d, editIcon, delIcon);
+            return;
+        }
+
         // ── Records (default) ─────────────────────────────────────────────
+        const overridesP = _spokeFetch('/api/dns/overrides' + _tenantQS()).catch(() => ({ ok: false }));
         const { ok, data: d, detail } = await _spokeFetch('/api/dns/records?tenant=' + encodeURIComponent(currentTenant));
         if (!ok) {
             container.innerHTML = `${_spokeErrorBanner(detail, 'DNS spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-400">Verify the Unbound configuration in Setup → DNS.</p>'}`;
@@ -27744,16 +27765,31 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
         // tagged _tenant by the merge fanout (see net_services.py's
         // _dns_merge_fanout) — show a Tenant column then.
         const showTenantCol = records.some(r => r && r._tenant);
-        const cols = (showTenantCol ? ['Tenant'] : []).concat(['Name', 'Type', 'Value', 'TTL', '']);
-        const rows = records.map(r => {
+        // Per-client override profiles: show which profile (if any) each
+        // device's address is assigned, and offer one-click apply/remove.
+        const ovr = await overridesP;
+        const overrides = (ovr && ovr.ok && ovr.data && ovr.data.status === 'SUCCESS') ? ovr.data : null;
+        window._dnsOverrides = overrides;
+        const showOverrideCol = !!(overrides && (overrides.profiles || []).length);
+        const canAssign = isAdmin() || isTenantAdmin();
+        const cols = (showTenantCol ? ['Tenant'] : []).concat(['Name', 'Type', 'Value', 'TTL'], showOverrideCol ? ['Override'] : [], ['']);
+        const rows = records.map((r, idx) => {
             const eName = String(r.name).replace(/'/g, "\\'");
             const eType = String(r.type).replace(/'/g, "\\'");
+            const isHost = r.type === 'A' || r.type === 'AAAA';
+            const assigned = (showOverrideCol && isHost) ? _dnsOverrideFor(r.value) : null;
+            const overrideCell = !showOverrideCol ? '' : `<td class="px-4 py-2 text-xs whitespace-nowrap">${
+                !isHost ? '<span class="text-slate-300">—</span>'
+                : `${assigned ? `<span class="px-2 py-0.5 rounded-full font-medium ${assigned.exact ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'}" title="${assigned.exact ? 'Assigned to this device' : 'Inherited from subnet ' + escapeHtml(assigned.target)}">${escapeHtml(assigned.profile)}</span>` : '<span class="text-slate-400">none</span>'}${
+                    canAssign ? ` <button onclick="dnsOverrideForRecord(${idx})" title="Apply or remove a DNS override profile for this device" class="ml-1 text-[#01A982] hover:underline font-bold">Override…</button>` : ''}`
+            }</td>`;
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                 ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(r._tenant || '—')}</td>` : ''}
                 <td class="px-4 py-2 font-mono font-medium">${escapeHtml(r.name)}</td>
                 <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${escapeHtml(r.type)}</span></td>
                 <td class="px-4 py-2 font-mono text-xs">${escapeHtml(r.value)}</td>
                 <td class="px-4 py-2 text-center text-xs">${escapeHtml(String(r.ttl))}</td>
+                ${overrideCell}
                 <td class="px-4 py-2 whitespace-nowrap">
                     <button onclick="editDnsRecord('${eName}','${eType}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
                     <button onclick="deleteDnsRecord('${eName}','${eType}')" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
@@ -30709,6 +30745,265 @@ async function deleteDnsForwarder(zone) {
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     }
+}
+
+// ── DNS override profiles (per-client answers via Unbound views) ─────────────
+// An admin defines named profiles (e.g. "PAVO-DEVICE") holding custom answers
+// and blocked names; a profile is then assigned to a device IP or subnet and
+// every query from that client is answered from the profile first, falling
+// back to normal resolution for anything the profile doesn't cover.
+
+// Admin writes go to the picked tenant's DNS spoke; a tenant Admin must name
+// an owned tenant explicitly (shared-infra write constraint).
+function _dnsOverrideQS() {
+    return isTenantAdmin() ? _taTenantQuery() : _tenantQS();
+}
+
+// The assignment (if any) that applies to client `ip`: an exact /32 or /128
+// wins, else the longest IPv4 prefix containing it. Returns
+// {target, profile, label, exact} or null.
+function _dnsOverrideFor(ip) {
+    const d = window._dnsOverrides;
+    const value = String(ip || '').trim();
+    if (!d || !value) return null;
+    let best = null, bestLen = -1;
+    for (const a of (d.assignments || [])) {
+        const target = String(a.target || '');
+        const [net, bits] = target.split('/');
+        const len = parseInt(bits, 10);
+        let hit = false;
+        if (value.includes(':')) hit = net.toLowerCase() === value.toLowerCase() && len === 128;
+        else if (!net.includes(':')) hit = _isIPInCIDR(value, target);
+        if (hit && len > bestLen) { best = a; bestLen = len; }
+    }
+    if (!best) return null;
+    return { ...best, exact: bestLen === (value.includes(':') ? 128 : 32) };
+}
+
+function _dnsOverrideRecordLines(profile) {
+    return (profile.records || []).map(r =>
+        `${r.name} ${r.type} ${r.value}${r.ttl && r.ttl !== 300 ? ' ' + r.ttl : ''}`).join('\n');
+}
+
+function _dnsOverridesView(d, editIcon, delIcon) {
+    const admin = isAdmin();
+    const canAssign = admin || isTenantAdmin();
+    const profiles = d.profiles || [];
+    const assignments = d.assignments || [];
+    const members = d.members || [];
+    const counts = {};
+    assignments.forEach(a => { counts[a.profile] = (counts[a.profile] || 0) + 1; });
+    const convColor = { converged: 'bg-green-100 text-green-700', drifted: 'bg-amber-100 text-amber-800',
+        unreachable: 'bg-red-100 text-red-700', unknown: 'bg-slate-100 text-slate-600' };
+    const memberHtml = members.length ? `<div class="flex flex-wrap gap-2 mb-4 text-xs">${members.map(m =>
+        `<span class="px-2 py-1 rounded-md ${convColor[m.convergence] || convColor.unknown}" title="${escapeHtml(m.error || m.convergence)}">${escapeHtml(m.display_name || m.id)}: ${escapeHtml(m.convergence)}</span>`).join('')}</div>` : '';
+    const intro = `<p class="text-sm text-slate-500 mb-3">Override profiles give chosen clients different DNS answers. Assign a profile to a device IP (or an admin can assign a whole subnet); that client's queries are answered from the profile first and fall back to normal resolution for everything else. Apply a profile to a single device from the <b>Records</b> tab with <b>Override…</b>.</p>`;
+    const profRows = profiles.map(p => {
+        const n = String(p.name).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        return `<tr class="border-b border-slate-100 hover:bg-slate-50">
+            <td class="px-4 py-2 font-mono font-medium">${escapeHtml(p.name)}</td>
+            <td class="px-4 py-2 text-xs text-slate-600">${escapeHtml(p.description || '')}</td>
+            <td class="px-4 py-2 text-xs font-mono whitespace-pre-line">${escapeHtml((p.records || []).slice(0, 4).map(r => `${r.name} ${r.type} ${r.value}`).join('\n'))}${(p.records || []).length > 4 ? `\n… +${p.records.length - 4} more` : ''}</td>
+            <td class="px-4 py-2 text-xs font-mono">${escapeHtml((p.block || []).slice(0, 4).join(', '))}${(p.block || []).length > 4 ? ` … +${p.block.length - 4}` : ''}</td>
+            <td class="px-4 py-2 text-center text-xs">${counts[p.name] || 0}</td>
+            <td class="px-4 py-2 whitespace-nowrap">${admin ? `
+                <button onclick="editDnsOverrideProfile('${n}')" class="text-slate-400 hover:text-[#01A982] mr-2" title="Edit profile">${editIcon}</button>
+                <button onclick="deleteDnsOverrideProfile('${n}')" class="text-slate-400 hover:text-red-500" title="Delete profile">${delIcon}</button>` : ''}</td>
+        </tr>`;
+    }).join('');
+    const asgRows = assignments.map(a => {
+        const t = String(a.target).replace(/'/g, "\\'");
+        const removable = admin || (canAssign && /\/(32|128)$/.test(a.target));
+        return `<tr class="border-b border-slate-100 hover:bg-slate-50">
+            <td class="px-4 py-2 font-mono">${escapeHtml(a.target)}</td>
+            <td class="px-4 py-2 text-xs text-slate-600">${escapeHtml(a.label || '')}</td>
+            <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">${escapeHtml(a.profile)}</span></td>
+            <td class="px-4 py-2 whitespace-nowrap">${removable ? `<button onclick="removeDnsOverrideAssignment('${t}')" class="text-slate-400 hover:text-red-500" title="Remove this override (client returns to normal DNS)">${delIcon}</button>` : ''}</td>
+        </tr>`;
+    }).join('');
+    return `<div class="p-4">${intro}${memberHtml}
+        <h4 class="text-sm font-bold text-[#263040] mb-2">Profiles</h4>
+        ${profiles.length ? `<div class="mb-6">${tableWrap(tableHead(['Name', 'Description', 'Answers', 'Blocked', 'Clients', '']) + `<tbody>${profRows}</tbody>`)}</div>`
+            : `<p class="text-sm text-slate-400 mb-6">No override profiles defined${admin ? ' — use <b>+ Add Profile</b>.' : '.'}</p>`}
+        <h4 class="text-sm font-bold text-[#263040] mb-2">Assigned clients</h4>
+        ${assignments.length ? tableWrap(tableHead(['Client IP / Subnet', 'Label', 'Profile', '']) + `<tbody>${asgRows}</tbody>`)
+            : `<p class="text-sm text-slate-400">No clients have an override applied.</p>`}
+    </div>`;
+}
+
+function editDnsOverrideProfile(name) {
+    const p = ((window._dnsOverrides || {}).profiles || []).find(x => x.name === name);
+    if (p) showDnsOverrideProfileModal(p);
+}
+
+function showDnsOverrideProfileModal(editItem) {
+    const isEdit = !!editItem;
+    const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    openModal('dns-override-profile-modal', `
+        <h3 class="text-lg font-bold text-[#263040]">${isEdit ? 'Edit Override Profile' : 'Add Override Profile'}</h3>
+        <div class="space-y-3">
+            <div class="space-y-1">
+                <label class="text-xs text-slate-500 font-bold uppercase">Name</label>
+                <input id="dns-ovp-name" class="${inputCls}" value="${escapeHtml(isEdit ? editItem.name : '')}" placeholder="PAVO-DEVICE" title="Letters, digits, '-', '_' or '.' (max 48)">
+            </div>
+            <div class="space-y-1">
+                <label class="text-xs text-slate-500 font-bold uppercase">Description</label>
+                <input id="dns-ovp-desc" class="${inputCls}" value="${escapeHtml(isEdit ? (editItem.description || '') : '')}" placeholder="What clients with this profile see">
+            </div>
+            <div class="space-y-1">
+                <label class="text-xs text-slate-500 font-bold uppercase">Answers</label>
+                <textarea id="dns-ovp-records" rows="6" class="${inputCls} font-mono text-xs" placeholder="api.example.com A 10.1.2.3&#10;*.cdn.example.com A 10.1.2.4 60&#10;portal.example.com CNAME lab.example.net">${escapeHtml(isEdit ? _dnsOverrideRecordLines(editItem) : '')}</textarea>
+                <p class="text-xs text-slate-400">One per line: <span class="font-mono">name TYPE value [ttl]</span>. TYPE is A, AAAA or CNAME. <span class="font-mono">*.zone</span> answers every name under that zone.</p>
+            </div>
+            <div class="space-y-1">
+                <label class="text-xs text-slate-500 font-bold uppercase">Blocked names</label>
+                <textarea id="dns-ovp-block" rows="3" class="${inputCls} font-mono text-xs" placeholder="telemetry.example.com&#10;*.ads.example.net">${escapeHtml(isEdit ? (editItem.block || []).join('\n') : '')}</textarea>
+                <p class="text-xs text-slate-400">One per line; these return NXDOMAIN (including every name below them).</p>
+            </div>
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+            <button onclick="saveDnsOverrideProfile()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Profile'}</button>
+            <button onclick="document.getElementById('dns-override-profile-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+        </div>`, { card: 'w-full max-w-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
+    const modal = document.getElementById('dns-override-profile-modal');
+    if (modal && isEdit) modal.dataset.editName = editItem.name;
+}
+
+// "name TYPE value [ttl]" lines -> record objects; throws on a malformed line.
+function _parseDnsOverrideRecords(text) {
+    const out = [];
+    String(text || '').split('\n').forEach((raw, i) => {
+        const line = raw.replace(/#.*/, '').trim();
+        if (!line) return;
+        const parts = line.split(/\s+/);
+        if (parts.length < 3 || parts.length > 4) throw new Error(`Answers line ${i + 1}: expected "name TYPE value [ttl]"`);
+        const rec = { name: parts[0], type: parts[1].toUpperCase(), value: parts[2] };
+        if (parts[3] !== undefined) rec.ttl = parseInt(parts[3], 10);
+        out.push(rec);
+    });
+    return out;
+}
+
+async function saveDnsOverrideProfile() {
+    const modal = document.getElementById('dns-override-profile-modal');
+    const editing = modal && modal.dataset.editName;
+    let records;
+    try { records = _parseDnsOverrideRecords(document.getElementById('dns-ovp-records')?.value); }
+    catch (e) { showToast(e.message, 'error'); return; }
+    const profile = {
+        name: (document.getElementById('dns-ovp-name')?.value || '').trim(),
+        description: (document.getElementById('dns-ovp-desc')?.value || '').trim(),
+        records,
+        block: (document.getElementById('dns-ovp-block')?.value || '').split('\n').map(x => x.replace(/#.*/, '').trim()).filter(Boolean),
+    };
+    if (!profile.name) { showToast('Profile name is required', 'error'); return; }
+    const payload = { profile };
+    if (editing) payload.old_name = editing;
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dns/overrides/profile' + _tenantQS(), {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+        if (ok && (d.status === 'SUCCESS' || d.status === 'PARTIAL')) {
+            modal.remove();
+            showToast(d.status === 'PARTIAL' ? `Profile ${profile.name} saved; offline DNS servers will catch up when they reconnect.` : `Profile ${profile.name} saved.`, d.status === 'PARTIAL' ? 'warning' : 'success');
+            loadDNSData('Overrides');
+        } else {
+            showToast('Error: ' + (detail || d?.message || 'Saving profile failed'), 'error');
+        }
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+async function deleteDnsOverrideProfile(name) {
+    const inUse = ((window._dnsOverrides || {}).assignments || []).filter(a => a.profile === name).length;
+    const msg = inUse ? `Delete profile ${name}? It is applied to ${inUse} client(s); they return to normal DNS.` : `Delete profile ${name}?`;
+    if (!await showConfirmToast(msg)) return;
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dns/overrides/profile' + _tenantQS(), {
+            method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, force: inUse > 0 }),
+        });
+        if (ok && (d.status === 'SUCCESS' || d.status === 'PARTIAL')) { showToast(`Profile ${name} deleted.`, 'success'); loadDNSData('Overrides'); }
+        else showToast('Error: ' + (detail || d?.message || 'Delete failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// Assign modal. `preset` = {target, label, lock} when launched from a record row.
+function showDnsOverrideAssignModal(preset) {
+    const d = window._dnsOverrides || {};
+    const profiles = d.profiles || [];
+    if (!profiles.length) { showToast('No override profiles are defined yet' + (isAdmin() ? ' — add one first.' : '. Ask a Global Admin to create one.'), 'error'); return; }
+    const p = preset || {};
+    const current = p.target ? _dnsOverrideFor(p.target) : null;
+    const currentProfile = current && current.exact ? current.profile : '';
+    const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    const opts = (p.lock ? [`<option value="">None (normal DNS)</option>`] : [])
+        .concat(profiles.map(x => `<option value="${escapeHtml(x.name)}" ${x.name === currentProfile ? 'selected' : ''}>${escapeHtml(x.name)}${x.description ? ' — ' + escapeHtml(x.description) : ''}</option>`)).join('');
+    openModal('dns-override-assign-modal', `
+        <h3 class="text-lg font-bold text-[#263040]">DNS Override</h3>
+        <div class="space-y-3">
+            <div class="space-y-1">
+                <label class="text-xs text-slate-500 font-bold uppercase">Client IP${isAdmin() ? ' or subnet' : ''}</label>
+                <input id="dns-ova-target" value="${escapeHtml(p.target || '')}" ${p.lock ? 'readonly' : ''} class="${inputCls}${p.lock ? ' bg-slate-50 cursor-not-allowed' : ''}" placeholder="${isAdmin() ? '10.1.2.3 or 10.1.2.0/24' : '10.1.2.3'}">
+                ${current && !current.exact ? `<p class="text-xs text-amber-700">Currently inherits <b>${escapeHtml(current.profile)}</b> from ${escapeHtml(current.target)}. A device assignment takes precedence.</p>` : ''}
+            </div>
+            <div class="space-y-1">
+                <label class="text-xs text-slate-500 font-bold uppercase">Profile</label>
+                <select id="dns-ova-profile" class="${inputCls}">${opts}</select>
+            </div>
+            <div class="space-y-1">
+                <label class="text-xs text-slate-500 font-bold uppercase">Label</label>
+                <input id="dns-ova-label" value="${escapeHtml(p.label || '')}" class="${inputCls}" placeholder="Device name (optional)">
+            </div>
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+            <button onclick="saveDnsOverrideAssignment()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Apply</button>
+            <button onclick="document.getElementById('dns-override-assign-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    const modal = document.getElementById('dns-override-assign-modal');
+    if (modal) {
+        modal.dataset.returnTab = p.lock ? 'Records' : 'Overrides';
+        modal.dataset.hadExact = currentProfile ? '1' : '';
+    }
+}
+
+function dnsOverrideForRecord(idx) {
+    const r = (window._dnsRecords || [])[idx];
+    if (!r) return;
+    showDnsOverrideAssignModal({ target: r.value, label: r.name, lock: true });
+}
+
+async function saveDnsOverrideAssignment() {
+    const modal = document.getElementById('dns-override-assign-modal');
+    const target = (document.getElementById('dns-ova-target')?.value || '').trim();
+    const profile = document.getElementById('dns-ova-profile')?.value || '';
+    const label = (document.getElementById('dns-ova-label')?.value || '').trim();
+    const tab = (modal && modal.dataset.returnTab) || 'Overrides';
+    if (!target) { showToast('Client IP is required', 'error'); return; }
+    if (!profile && !(modal && modal.dataset.hadExact)) { modal.remove(); return; }
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dns/override-assignment' + _dnsOverrideQS(), {
+            method: profile ? 'POST' : 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(profile ? { target, profile, label } : { target }),
+        });
+        if (ok && (d.status === 'SUCCESS' || d.status === 'PARTIAL')) {
+            modal.remove();
+            showToast(profile ? `${target} now uses ${profile}.` : `Override removed from ${target}.`, 'success');
+            loadDNSData(tab);
+        } else {
+            showToast('Error: ' + (detail || d?.message || 'Override failed'), 'error');
+        }
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+async function removeDnsOverrideAssignment(target) {
+    if (!await showConfirmToast(`Remove the DNS override from ${target}?`)) return;
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dns/override-assignment' + _dnsOverrideQS(), {
+            method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target }),
+        });
+        if (ok && (d.status === 'SUCCESS' || d.status === 'PARTIAL')) { showToast(`Override removed from ${target}.`, 'success'); loadDNSData('Overrides'); }
+        else showToast('Error: ' + (detail || d?.message || 'Remove failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 async function deleteDnsRecord(name, rtype) {
