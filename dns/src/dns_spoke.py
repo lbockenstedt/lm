@@ -18,6 +18,11 @@ from dns_cluster import (
     DnsClusterCoordinator, DnsDesiredState, DnsRecordError,
     DnsStateUnavailable, load_cluster_config, save_cluster_config,
 )
+from dns_overrides import (
+    DEFAULT_OVERRIDES_STATE, DnsOverrideCoordinator, DnsOverrideError,
+    DnsOverrideState, DnsOverrideStateUnavailable, assign, delete_profile,
+    unassign, upsert_profile,
+)
 
 logger = logging.getLogger("DNSSpoke")
 
@@ -25,6 +30,11 @@ logger = logging.getLogger("DNSSpoke")
 #: re-pushes to any that drifted. Also the reconnect-convergence window: a
 #: resolver that reboots is brought back to the desired set within one pass.
 RECONCILE_INTERVAL_S = 30.0
+
+_OVERRIDE_COMMANDS = (
+    "DNS_OVERRIDES", "DNS_OVERRIDE_PROFILE_SET", "DNS_OVERRIDE_PROFILE_DELETE",
+    "DNS_OVERRIDE_ASSIGN", "DNS_OVERRIDE_UNASSIGN",
+)
 
 
 class _DisabledTransport:
@@ -78,6 +88,11 @@ class DNSSpoke(BaseSpoke):
       DNS_CLUSTER_STATUS    — member stats, convergence, drift, recommendations
       DNS_CLUSTER_CONFIG    — set the resolver member list (+ worker secret)
       DNS_CLUSTER_RECONCILE — force an immediate reconcile pass
+      DNS_OVERRIDES               — per-client override profiles + assignments
+      DNS_OVERRIDE_PROFILE_SET    — create/replace/rename an override profile
+      DNS_OVERRIDE_PROFILE_DELETE — delete an (unassigned) override profile
+      DNS_OVERRIDE_ASSIGN         — apply a profile to a client IP or subnet
+      DNS_OVERRIDE_UNASSIGN       — remove a client's override
     """
 
     def __init__(self, spoke_id: str, config: Dict[str, Any]):
@@ -96,6 +111,15 @@ class DNSSpoke(BaseSpoke):
             os.getenv("LM_DNS_DESIRED_STATE", DEFAULT_DESIRED_STATE)))
         self._transport = self._build_transport(members)
         self.cluster = DnsClusterCoordinator(self._transport, self.desired)
+        desired_path = self.desired.state_path or DEFAULT_DESIRED_STATE
+        self.overrides = DnsOverrideCoordinator(
+            self._transport,
+            DnsOverrideState(config.get(
+                "overrides_state",
+                os.getenv("LM_DNS_OVERRIDES_STATE", os.path.join(
+                    os.path.dirname(desired_path) or ".",
+                    os.path.basename(DEFAULT_OVERRIDES_STATE))))),
+            self.cluster.transaction)
         self._reconcile_task: Optional[asyncio.Task] = None
 
     # ── Cluster plumbing ────────────────────────────────────────────────────
@@ -159,6 +183,7 @@ class DNSSpoke(BaseSpoke):
                 if result.get("reconciled"):
                     logger.info("DNS reconcile re-pushed v%s to %s",
                                 result.get("version"), result["reconciled"])
+                await self.overrides.reconcile()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 — a bad pass must not kill the loop
@@ -682,6 +707,28 @@ class DNSSpoke(BaseSpoke):
             "cluster": report,
         }
 
+    async def _handle_override(self, cmd: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Per-client override profiles (Unbound views) across every worker."""
+        try:
+            if cmd == "DNS_OVERRIDES":
+                return await self.overrides.snapshot()
+            if cmd == "DNS_OVERRIDE_PROFILE_SET":
+                change = upsert_profile(data.get("profile") or {},
+                                        old_name=data.get("old_name") or None)
+            elif cmd == "DNS_OVERRIDE_PROFILE_DELETE":
+                change = delete_profile(data.get("name") or "",
+                                        force=bool(data.get("force")))
+            elif cmd == "DNS_OVERRIDE_ASSIGN":
+                change = assign(data.get("target") or data.get("ip"),
+                                data.get("profile") or "", data.get("label") or "")
+            else:
+                change = unassign(data.get("target") or data.get("ip"))
+            return await self.overrides.mutate(change)
+        except DnsOverrideError as e:
+            return {"status": "ERROR", "message": str(e)}
+        except DnsOverrideStateUnavailable as e:
+            return {"status": "ERROR", "message": str(e), "state_unavailable": True}
+
     # ── Command dispatch ────────────────────────────────────────────────────
 
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -767,12 +814,15 @@ class DNSSpoke(BaseSpoke):
                 return await self._cluster_remove_forwarder(data)
             if cmd in ("DNS_FORWARDER_UPDATE", "DNS_FORWARDER_EDIT"):
                 return await self._cluster_update_forwarder(data)
+            if cmd in _OVERRIDE_COMMANDS:
+                return await self._handle_override(cmd, data or {})
 
         if cmd in {
             "DNS_SYNC", "DNS_LIST", "DNS_ADD", "DNS_UPDATE", "DNS_DELETE",
             "DNS_STATUS", "DNS_DIAGNOSTICS", "DNS_STATS", "DNS_CLIENT_QUERIES",
             "DNS_FORWARDERS", "DNS_FORWARDER_ADD", "DNS_FORWARDER_REMOVE",
             "DNS_FORWARDER_DELETE", "DNS_FORWARDER_UPDATE", "DNS_FORWARDER_EDIT",
+            *_OVERRIDE_COMMANDS,
         }:
             return {
                 "status": "ERROR",
