@@ -559,6 +559,32 @@ def register(app, hub, ctx):
                 "dns": hub.dns_dhcp_sync_status.get("dns"),
                 "dhcp": hub.dns_dhcp_sync_status.get("dhcp")}
 
+    @app.get("/admin/ops/netbox-sso")
+    async def admin_ops_netbox_sso_get(request: Request):
+        """Loopback mirror of GET /setup/netbox-sso (no secret/key echoed)."""
+        _guard(request)
+        return await hub.netbox_sso_status()
+
+    @app.post("/admin/ops/netbox-sso")
+    async def admin_ops_netbox_sso_set(request: Request):
+        """Loopback mirror of POST /setup/netbox-sso (the Settings → Azure →
+        NetBox SSO knob): body ``{"config": {"enabled": true, "redirect_uri":
+        ...}}``. Pushes the hub's Entra connection to the netbox-server agent."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        res = await hub.netbox_sso_apply((body or {}).get("config", body) or {})
+        logger.warning("admin_ops: netbox-sso applied via loopback")
+        return res
+
+    @app.post("/admin/ops/netbox-sso/test")
+    async def admin_ops_netbox_sso_test(request: Request):
+        """Loopback mirror of POST /setup/netbox-sso/test."""
+        _guard(request)
+        return await hub.netbox_sso_test()
+
     @app.get("/admin/ops/dhcp-sync-preview")
     async def admin_ops_dhcp_sync_preview(request: Request):
         """Read-only: show EXACTLY what a NetBox -> Kea DHCP sync would push,
