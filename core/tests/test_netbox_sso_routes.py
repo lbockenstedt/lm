@@ -141,3 +141,19 @@ def test_get_reports_cert_mode_and_never_leaks_key(cert, monkeypatch):
     assert d["oidc"]["cert_available"] is True
     assert d["effective"]["superuser_groups"] == ["entra-admins"]
     assert "PRIVATE KEY" not in r.text
+
+
+def test_hub_hooks_drive_same_apply_for_admin_ops(cert, monkeypatch):
+    """/admin/ops/netbox-sso calls hub.netbox_sso_apply — same push as the UI."""
+    import asyncio
+    for k in ("LM_OIDC_CLIENT_CERT", "LM_OIDC_CLIENT_KEY", "LM_OIDC_ALLOWED_GROUP"):
+        monkeypatch.delenv(k, raising=False)
+    hub = _Hub(_state(cert))
+    _client(hub)
+    res = asyncio.run(hub.netbox_sso_apply(
+        {"enabled": True, "redirect_uri": "https://nb.example/oauth/complete/oidc/"}))
+    assert res["auth_mode"] == "certificate" and res["pushed"] == ["agent-nb"]
+    payload = hub.pushes[-1][2]
+    assert payload["client_key_pem"] and payload["superuser_groups"] == ["entra-admins"]
+    status = asyncio.run(hub.netbox_sso_status())
+    assert status["config"]["enabled"] is True and "client_key_pem" not in str(status)
