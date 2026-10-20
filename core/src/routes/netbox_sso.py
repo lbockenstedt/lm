@@ -11,9 +11,18 @@ no certificate. Pushed to the netbox-server host's agent (NETBOX_APPLY_SSO —
 an app-layer-encrypted frame), which also turns on the "Sign in with
 Microsoft" button on NetBox's login page.
 
+Targeting: the push carries the hub's Entra private key, so it goes ONLY to the
+agent an admin explicitly picked (``target_agent``) — never to whatever agent
+self-advertises a capability (the retired ``netbox_server`` auth flag was the
+cross-tenant H2 finding). The UI offers connected, approved generic agents that
+report a NetBox install (GET_DEPLOY_STATUS); the hub re-checks the picked agent
+right before every push that carries the key.
+
 Under ``/setup/`` so the access-control middleware admin-gates it.
 """
 from __future__ import annotations
+
+import asyncio
 
 from api import HTTPException, Request, logger
 from security.credential_store import resolve_private_key_material
@@ -21,11 +30,12 @@ from security.oidc import get_oidc_config
 
 
 def register(app, hub, ctx):
-    _FIELDS = ("enabled", "client_secret", "redirect_uri", "group_map", "allowed_group")
+    _FIELDS = ("enabled", "client_secret", "redirect_uri", "group_map", "allowed_group",
+               "target_agent")
 
     def _cfg() -> dict:
         c = {"enabled": False, "client_secret": "", "redirect_uri": "",
-             "group_map": {}, "allowed_group": ""}
+             "group_map": {}, "allowed_group": "", "target_agent": ""}
         c.update((hub.state.system_state.get("global_config", {}) or {}).get("netbox_sso", {}) or {})
         if not isinstance(c.get("group_map"), dict):
             c["group_map"] = {}
@@ -77,9 +87,30 @@ def register(app, hub, ctx):
             "superuser_groups": _admin_entra_groups(),
         }
 
-    def _netbox_server_agents() -> list:
-        return [sid for sid in getattr(hub, "netbox_server_agents", set())
-                if sid in hub.active_connections]
+    def _approved_connected(sid: str) -> bool:
+        if not sid or sid not in hub.active_connections:
+            return False
+        approved = getattr(hub, "approved_modules", None)
+        return True if approved is None else bool(approved.get(sid))
+
+    async def _reports_netbox(sid: str) -> bool:
+        """Does ``sid`` (a connected generic agent) report a NetBox install?"""
+        try:
+            res = await hub.request_response(sid, "GET_DEPLOY_STATUS", {}, timeout=8.0)
+            data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+        except Exception:  # noqa: BLE001
+            return False
+        if not isinstance(data, dict):
+            return False
+        return bool(data.get("netbox_installed")
+                    or "netbox-server" in (data.get("installed_deploy_roles") or []))
+
+    async def _candidates() -> list:
+        """Connected, approved generic agents that report a NetBox install."""
+        sids = [sid for sid in (hub.get_all_spokes_by_type("agent") or [])
+                if _approved_connected(sid)]
+        oks = await asyncio.gather(*[_reports_netbox(sid) for sid in sids])
+        return sorted(sid for sid, ok in zip(sids, oks) if ok)
 
     @app.get("/setup/netbox-sso")
     async def get_netbox_sso():
@@ -89,6 +120,7 @@ def register(app, hub, ctx):
         return {
             # Never echo the stored secret; report only whether one is set.
             "config": {"enabled": cfg["enabled"], "redirect_uri": cfg["redirect_uri"],
+                       "target_agent": cfg["target_agent"],
                        "group_map": cfg["group_map"], "allowed_group": cfg["allowed_group"],
                        "secret_set": bool(cfg["client_secret"])},
             "oidc": {"tenant_id": oidc.tenant_id, "client_id": oidc.client_id,
@@ -98,7 +130,7 @@ def register(app, hub, ctx):
             "auth_mode": "certificate" if cert_ok else ("secret" if cfg["client_secret"] else "none"),
             "effective": _effective(cfg, oidc),
             "suggested_group_map": _suggested_group_map(),
-            "netbox_server_agents": _netbox_server_agents(),
+            "netbox_server_agents": await _candidates(),
         }
 
     @app.post("/setup/netbox-sso")
@@ -111,6 +143,9 @@ def register(app, hub, ctx):
 
     async def _apply(incoming: dict) -> dict:
         cur = _cfg()
+        prev_target = cur["target_agent"]
+        if "target_agent" in incoming:
+            cur["target_agent"] = str(incoming.get("target_agent") or "").strip()
         cur["enabled"] = bool(incoming.get("enabled", cur["enabled"]))
         cur["redirect_uri"] = str(incoming.get("redirect_uri", cur["redirect_uri"]) or "").strip()
         cur["allowed_group"] = str(incoming.get("allowed_group", cur["allowed_group"]) or "").strip()
@@ -120,7 +155,6 @@ def register(app, hub, ctx):
         new_secret = incoming.get("client_secret")
         if new_secret:
             cur["client_secret"] = str(new_secret)
-        _save(cur)
 
         oidc = get_oidc_config(hub)
         cert_pem, key_pem = _hub_cert(oidc) if cur["enabled"] else ("", "")
@@ -132,6 +166,18 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400,
                                     detail="the hub has no Entra client certificate to share — generate one "
                                            "in Settings → Azure → SSO, or paste a client secret")
+            if not cur["target_agent"]:
+                raise HTTPException(status_code=400,
+                                    detail="pick the NetBox host (target agent) to configure")
+            # The payload carries the Entra key: only to an approved agent that
+            # actually runs NetBox, re-checked now rather than trusted from config.
+            if not _approved_connected(cur["target_agent"]):
+                raise HTTPException(status_code=409,
+                                    detail=f"{cur['target_agent']} is not a connected, approved agent")
+            if not await _reports_netbox(cur["target_agent"]):
+                raise HTTPException(status_code=409,
+                                    detail=f"{cur['target_agent']} does not report a NetBox install")
+        _save(cur)
 
         eff = _effective(cur, oidc)
         payload = {
@@ -148,7 +194,13 @@ def register(app, hub, ctx):
             # Same app + cert the hub logs in with (frame is AEAD-encrypted).
             payload["client_cert_pem"] = cert_pem
             payload["client_key_pem"] = key_pem
-        targets = _netbox_server_agents()
+        targets = [cur["target_agent"]] if cur["target_agent"] else []
+        if prev_target and prev_target != cur["target_agent"]:
+            # Moved hosts: strip SSO (and the key) from the old one.
+            try:
+                await hub.push_or_queue_to_spoke(prev_target, "NETBOX_APPLY_SSO", {"enabled": False})
+            except Exception as e:  # noqa: BLE001
+                logger.warning("netbox-sso: disable on previous host %s failed: %s", prev_target, e)
         pushed, queued, failed = [], [], []
         for sid in targets:
             try:
@@ -171,10 +223,10 @@ def register(app, hub, ctx):
         return await _test()
 
     async def _test() -> dict:
-        targets = _netbox_server_agents()
-        if not targets:
-            raise HTTPException(status_code=503, detail="no connected netbox-server host to test against")
         cfg = _cfg()
+        targets = [cfg["target_agent"]] if _approved_connected(cfg["target_agent"]) else []
+        if not targets:
+            raise HTTPException(status_code=503, detail="the selected NetBox host is not connected")
         oidc = get_oidc_config(hub)
         payload = {"tenant": oidc.tenant_id, "client_id": oidc.client_id,
                    "redirect_uri": cfg["redirect_uri"]}

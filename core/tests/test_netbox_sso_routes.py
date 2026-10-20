@@ -29,11 +29,21 @@ class _State:
 
 
 class _Hub:
-    def __init__(self, system_state, agents=("agent-nb",)):
+    def __init__(self, system_state, agents=("agent-nb",), netbox_agents=("agent-nb",)):
         self.state = _State(system_state)
-        self.netbox_server_agents = set(agents)
         self.active_connections = set(agents)
+        self.approved_modules = {a: True for a in agents}
+        self.netbox_agents = set(netbox_agents)
         self.pushes = []
+
+    def get_all_spokes_by_type(self, module_type):
+        return sorted(self.active_connections) if module_type == "agent" else []
+
+    async def request_response(self, sid, msg_type, payload, timeout=None):
+        assert msg_type == "GET_DEPLOY_STATUS"
+        nb = sid in self.netbox_agents
+        return {"payload": {"data": {"status": "SUCCESS", "netbox_installed": nb,
+                                     "installed_deploy_roles": ["netbox-server"] if nb else []}}}
 
     async def push_or_queue_to_spoke(self, sid, msg_type, payload):
         self.pushes.append((sid, msg_type, payload))
@@ -77,7 +87,8 @@ def test_enable_ports_hub_entra_connection_with_cert(cert, monkeypatch):
         monkeypatch.delenv(k, raising=False)
     hub = _Hub(_state(cert))
     r = _client(hub).post("/setup/netbox-sso", json={"config": {
-        "enabled": True, "redirect_uri": "https://nb.example/oauth/complete/oidc/"}})
+        "enabled": True, "target_agent": "agent-nb",
+        "redirect_uri": "https://nb.example/oauth/complete/oidc/"}})
     assert r.status_code == 200, r.text
     assert r.json()["auth_mode"] == "certificate"
     (sid, mtype, p), = hub.pushes
@@ -96,7 +107,7 @@ def test_explicit_netbox_values_override_inherited(cert, monkeypatch):
     monkeypatch.delenv("LM_OIDC_ALLOWED_GROUP", raising=False)
     hub = _Hub(_state(cert))
     _client(hub).post("/setup/netbox-sso", json={"config": {
-        "enabled": True, "allowed_group": "nb-only", "group_map": {"x": "NB X"}}})
+        "enabled": True, "target_agent": "agent-nb", "allowed_group": "nb-only", "group_map": {"x": "NB X"}}})
     p = hub.pushes[-1][2]
     assert p["allowed_group"] == "nb-only"
     assert p["group_map"] == {"x": "NB X"}
@@ -106,7 +117,7 @@ def test_enable_without_cert_or_secret_is_rejected(monkeypatch):
     for k in ("LM_OIDC_CLIENT_CERT", "LM_OIDC_CLIENT_KEY"):
         monkeypatch.delenv(k, raising=False)
     hub = _Hub(_state(None))
-    r = _client(hub).post("/setup/netbox-sso", json={"config": {"enabled": True}})
+    r = _client(hub).post("/setup/netbox-sso", json={"config": {"enabled": True, "target_agent": "agent-nb"}})
     assert r.status_code == 400
     assert "certificate" in r.json()["detail"]
     assert not hub.pushes
@@ -117,14 +128,16 @@ def test_secret_fallback_when_hub_has_no_cert(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     hub = _Hub(_state(None))
     r = _client(hub).post("/setup/netbox-sso", json={"config": {
-        "enabled": True, "client_secret": "s3cret"}})
+        "enabled": True, "target_agent": "agent-nb", "client_secret": "s3cret"}})
     assert r.status_code == 200 and r.json()["auth_mode"] == "secret"
     p = hub.pushes[-1][2]
     assert p["client_secret"] == "s3cret" and "client_key_pem" not in p
 
 
 def test_disable_pushes_no_key_material(cert):
-    hub = _Hub(_state(cert))
+    st = _state(cert)
+    st["global_config"]["netbox_sso"] = {"target_agent": "agent-nb", "enabled": True}
+    hub = _Hub(st)
     r = _client(hub).post("/setup/netbox-sso", json={"config": {"enabled": False}})
     assert r.status_code == 200
     p = hub.pushes[-1][2]
@@ -151,9 +164,51 @@ def test_hub_hooks_drive_same_apply_for_admin_ops(cert, monkeypatch):
     hub = _Hub(_state(cert))
     _client(hub)
     res = asyncio.run(hub.netbox_sso_apply(
-        {"enabled": True, "redirect_uri": "https://nb.example/oauth/complete/oidc/"}))
+        {"enabled": True, "target_agent": "agent-nb",
+         "redirect_uri": "https://nb.example/oauth/complete/oidc/"}))
     assert res["auth_mode"] == "certificate" and res["pushed"] == ["agent-nb"]
     payload = hub.pushes[-1][2]
     assert payload["client_key_pem"] and payload["superuser_groups"] == ["entra-admins"]
     status = asyncio.run(hub.netbox_sso_status())
     assert status["config"]["enabled"] is True and "client_key_pem" not in str(status)
+
+
+def test_enable_requires_explicit_target(cert):
+    hub = _Hub(_state(cert))
+    r = _client(hub).post("/setup/netbox-sso", json={"config": {"enabled": True}})
+    assert r.status_code == 400 and "target" in r.json()["detail"]
+    assert not hub.pushes
+
+
+def test_key_never_sent_to_agent_without_netbox(cert):
+    """The Entra key only goes to an agent that reports a NetBox install."""
+    hub = _Hub(_state(cert), agents=("agent-nb", "agent-other"))
+    r = _client(hub).post("/setup/netbox-sso", json={"config": {
+        "enabled": True, "target_agent": "agent-other"}})
+    assert r.status_code == 409
+    assert not hub.pushes
+    assert not (hub.state.system_state["global_config"].get("netbox_sso") or {}).get("enabled")
+
+
+def test_key_never_sent_to_disconnected_agent(cert):
+    hub = _Hub(_state(cert))
+    r = _client(hub).post("/setup/netbox-sso", json={"config": {
+        "enabled": True, "target_agent": "agent-gone"}})
+    assert r.status_code == 409 and not hub.pushes
+
+
+def test_moving_target_disables_previous_host(cert):
+    st = _state(cert)
+    st["global_config"]["netbox_sso"] = {"target_agent": "agent-old", "enabled": True}
+    hub = _Hub(st, agents=("agent-nb", "agent-old"), netbox_agents=("agent-nb", "agent-old"))
+    r = _client(hub).post("/setup/netbox-sso", json={"config": {
+        "enabled": True, "target_agent": "agent-nb"}})
+    assert r.status_code == 200
+    assert hub.pushes[0] == ("agent-old", "NETBOX_APPLY_SSO", {"enabled": False})
+    assert hub.pushes[1][0] == "agent-nb" and hub.pushes[1][2]["client_key_pem"]
+
+
+def test_get_lists_only_netbox_hosts_as_candidates(cert):
+    hub = _Hub(_state(cert), agents=("agent-nb", "agent-other"))
+    d = _client(hub).get("/setup/netbox-sso").json()
+    assert d["netbox_server_agents"] == ["agent-nb"]
