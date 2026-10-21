@@ -38,7 +38,7 @@ Consolidated reference for every environment variable read across the LM system.
 
 | Var | Purpose | Default | Read by |
 |---|---|---|---|
-| `LM_HUB_TLS_VERIFY` | `1`/`true`/`yes` → always verify hub cert; `off`/`never` → never; unset/`0`/`auto` → **auto ratchet** on the core control plane (verify when it can; required once it has verified — see lm-hub.md) | auto | `core/src/messaging/control_plane.py`, `agent/src/agent_spoke.py`, `pxmx/agent/src/agent.py`, cs/pxmx spokes |
+| `LM_HUB_TLS_VERIFY` | `1`/`true`/`yes` → always verify hub cert; `off`/`never` → never; unset/`0`/`auto` → **auto ratchet** on the core control plane (verify when it can; required once it has verified — see lm-hub.md). Overridden by the hub-pushed fleet policy (Setup → Hub TLS Verification) when set | auto | `core/src/messaging/control_plane.py`, `agent/src/agent_spoke.py`, `pxmx/agent/src/agent.py`, cs/pxmx spokes |
 | `LM_HUB_CA_CERT` | CA cert path for hub verification (set by `--tls-verify`) | — | same |
 
 > **Why verify (and mTLS) are off by default — chicken-and-egg.** mTLS needs the LE wildcard + CA on the hub *and* every spoke, but spokes receive those materials *through* their hub connection (`SPOKE_SET_MTLS_MATERIALS`). The fleet must first come up under plain TLS, the hub distributes the wildcard + CA, then mTLS (and `LM_HUB_TLS_VERIFY`) can be switched on. Enabling either before every connected spoke holds the cert **orphans** that spoke — it can't authenticate and can't be fixed through the hub (manual on-box recovery). Use Auto-provision or wait for `/setup/mtls-readiness` green first. See [lm-hub.md](lm-hub.md#mutual-tls-mtls) for the full ordering + risks.

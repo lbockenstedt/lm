@@ -436,13 +436,15 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         #     verification is REQUIRED for that hub host (no silent downgrade). A
         #     hub that has never verified (self-signed / IP URL) keeps working
         #     unverified, with a warning. See _resolve_auto_tls_verify.
-        _tv = os.environ.get("LM_HUB_TLS_VERIFY", "").strip().lower()
-        if _tv in ("1", "true", "yes", "on"):
-            self._tls_verify_mode = "on"
-        elif _tv in ("off", "never", "force-off", "disable", "disabled"):
-            self._tls_verify_mode = "off"
-        else:
-            self._tls_verify_mode = "auto"
+        # A hub-pushed fleet policy (Setup → Hub TLS Verification, persisted
+        # locally by SPOKE_SET_TLS_VERIFY) overrides the install-time env value.
+        self._tls_verify_mode = self._tls_mode_from_env()
+        try:
+            _pol = self._read_hub_tls_policy()
+            if _pol and not self._hub_url_is_loopback(self.hub_url or ""):
+                self._tls_verify_mode = _pol
+        except Exception:  # noqa: BLE001
+            pass
         self._tls_verify = self._tls_verify_mode == "on"
         self._tls_auto_neg_until = 0.0
         self._tls_ca_cert = (os.environ.get("LM_HUB_CA_CERT", "").strip()
@@ -914,6 +916,76 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         except Exception as e:
             logger.error("Could not build wss SSL context: %s — connecting without TLS", e)
             return None
+
+    @staticmethod
+    def _tls_mode_from_env() -> str:
+        _tv = os.environ.get("LM_HUB_TLS_VERIFY", "").strip().lower()
+        if _tv in ("1", "true", "yes", "on"):
+            return "on"
+        if _tv in ("off", "never", "force-off", "disable", "disabled"):
+            return "off"
+        return "auto"
+
+    def _hub_tls_policy_path(self) -> str:
+        return os.path.join(self._mtls_material_dir(), "hub-tls-policy")
+
+    def _read_hub_tls_policy(self) -> str:
+        try:
+            with open(self._hub_tls_policy_path(), "r") as f:
+                v = f.read().strip().lower()
+        except OSError:
+            return ""
+        return v if v in ("on", "auto", "off") else ""
+
+    async def _handle_set_tls_verify(self, data: dict) -> dict:
+        """Hub-pushed fleet TLS-verify policy (SPOKE_SET_TLS_VERIFY).
+
+        ``mode``: ``on`` (always verify the hub cert), ``auto`` (verify when it
+        can, required once it has), ``off``, or ``install`` (drop the hub policy
+        and use the install-time LM_HUB_TLS_VERIFY). Persisted to a local
+        policy file so it applies across restarts and outranks .env. Restarts
+        only when the effective mode changes (idempotent on every reconnect).
+        ``on`` is refused unless the hub cert verifies from this node right now
+        — applying it blind would lock the node out of the hub."""
+        mode = str((data or {}).get("mode") or "").strip().lower()
+        if mode not in ("on", "auto", "off", "install"):
+            return {"status": "ERROR", "message": f"invalid mode {mode!r}"}
+        if getattr(self, "parent_spoke_id", ""):
+            return {"status": "SUCCESS", "message": "skipped (role sub-spoke shares the parent's connection)"}
+        if self._hub_url_is_loopback(self.hub_url or "") or \
+                not (self.hub_url or "").lower().startswith("wss://"):
+            return {"status": "SUCCESS", "message": "skipped (loopback/non-TLS hub URL)",
+                    "effective": self._tls_verify_mode}
+        cur = self._tls_verify_mode
+        new = self._tls_mode_from_env() if mode == "install" else mode
+        if new == "on" and cur != "on":
+            ok = await self._probe_hub_tls_verify()
+            if ok is not True:
+                logger.warning("SPOKE_SET_TLS_VERIFY: refusing 'on' — the hub cert does "
+                               "not verify from this node (%s). Keeping %s.",
+                               "verification failed" if ok is False else "probe failed",
+                               cur)
+                return {"status": "ERROR", "effective": cur,
+                        "message": "hub cert does not verify from this node "
+                                   "(deploy a trusted hub cert or set LM_HUB_CA_CERT); "
+                                   f"keeping {cur}"}
+        path = self._hub_tls_policy_path()
+        if mode == "install":
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+        else:
+            self._mtls_write_if_changed(path, mode + "\n", 0o644)
+        if new == cur:
+            return {"status": "SUCCESS", "message": "already current", "effective": cur}
+        logger.warning("SPOKE_SET_TLS_VERIFY: hub TLS verification %s → %s; restarting "
+                       "to reconnect.", cur, new)
+        self._tls_verify_mode = new
+        self._draining = True
+        asyncio.create_task(self._deferred_restart_exit())
+        return {"status": "SUCCESS", "effective": new,
+                "message": f"hub TLS verify {cur} → {new}; restarting"}
 
     def _hub_tls_marker_path(self) -> str:
         return os.path.join(self._mtls_material_dir(), "hub-tls-verified")
@@ -2293,6 +2365,9 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                         "ENABLED" if cfg["enabled"] else "disabled",
                         cfg.get("service_s", "def"), cfg.get("reboot_s", "def"))
             return {"status": "SUCCESS", "enabled": cfg["enabled"]}
+
+        if cmd_type == "SPOKE_SET_TLS_VERIFY":
+            return await self._handle_set_tls_verify(data or {})
 
         if cmd_type == "SPOKE_SET_HUB_URL":
             # Hub-initiated repoint: the operator changed the hub's external

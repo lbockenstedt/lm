@@ -2585,6 +2585,26 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             except Exception as e:
                 logger.warning(f"Failed to push watchdog config to {spoke_id}: {e}")
 
+            # Fleet hub-TLS-verify policy (Setup → Hub TLS Verification). Only
+            # pushed once an admin has set it; the spoke handler is idempotent
+            # (restarts only when its effective mode changes). Role sub-spokes
+            # share the parent's connection and are skipped.
+            try:
+                tv = self.state.get_global_config().get("hub_tls_verify")
+                if tv and not self._is_role_subspoke(spoke_id):
+                    await self.send_to_spoke(Message(
+                        header=MessageHeader(
+                            message_id=str(uuid.uuid4()),
+                            timestamp=time.time(),
+                            sender_id="hub",
+                            destination_id=spoke_id,
+                        ),
+                        payload=MessagePayload(type="SPOKE_SET_TLS_VERIFY",
+                                               data={"mode": tv}),
+                    ))
+            except Exception as e:
+                logger.warning(f"Failed to push hub TLS verify policy to {spoke_id}: {e}")
+
             # Operator canary endpoints (optional; provider registered out-of-band
             # by a private site-extension). Push this node's assigned canary set on
             # every (re)connect so a reinstalled node re-arms with no operator
@@ -3726,6 +3746,37 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         failed = [sid for sid, kind in results if kind == "failed"]
         logger.info(f"Watchdog fan-out: {len(pushed)} pushed, {len(queued)} queued, {len(failed)} failed.")
         return {"status": "SUCCESS", "pushed": pushed, "queued": queued, "failed": failed}
+
+    async def push_tls_verify_to_all_spokes(self, mode: str) -> Dict[str, Any]:
+        """Fan out the hub-TLS-verify policy to every approved spoke/agent (the
+        save-time path; ``push_config_to_spoke`` reconciles on every connect).
+        Returns pushed/queued/failed plus ``refused`` — nodes that declined
+        ``on`` because the hub cert does not verify from them."""
+        targets = [sid for sid, ap in self.approved_modules.items()
+                   if ap and not self._is_role_subspoke(sid)]
+
+        async def _one(sid):
+            try:
+                r = await self.push_or_queue_to_spoke(sid, "SPOKE_SET_TLS_VERIFY", {"mode": mode})
+                if r.get("queued"):
+                    return sid, "queued", ""
+                res = r.get("result") or {}
+                res = (res.get("payload") or {}).get("data", res) if isinstance(res, dict) else {}
+                if isinstance(res, dict) and res.get("status") == "ERROR":
+                    return sid, "refused", str(res.get("message") or "")
+                return sid, "pushed", ""
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"push-tls-verify: failed for {sid}: {e}")
+                return sid, "failed", str(e)
+
+        results = await asyncio.gather(*(_one(sid) for sid in targets)) if targets else []
+        out = {"status": "SUCCESS", "pushed": [], "queued": [], "failed": [], "refused": []}
+        for sid, kind, msg in results:
+            out[kind].append({"spoke_id": sid, "message": msg} if kind == "refused" else sid)
+        logger.info("Hub-TLS-verify fan-out (%s): %d pushed, %d queued, %d refused, %d failed.",
+                    mode, len(out["pushed"]), len(out["queued"]), len(out["refused"]),
+                    len(out["failed"]))
+        return out
 
     async def revoke_spoke(self, spoke_id: str, reason: Optional[str] = None,
                            source: str = "admin") -> Dict[str, Any]:
