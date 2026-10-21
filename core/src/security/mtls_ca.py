@@ -149,32 +149,33 @@ def rollover_ca() -> str:
     return _write_new_ca()
 
 
-def issue_client_cert(common_name: str, sans=None, days: int = 397):
-    """Mint a ``clientAuth`` leaf cert for ``common_name`` (+ optional SANs), signed
-    by the hub mTLS CA. Returns ``(fullchain_pem, key_pem)`` where fullchain is the
-    leaf + the CA cert (so the presenter sends a complete chain). Raises on failure.
-
-    ``days`` default 397 (~13 months) — short enough to rotate, long enough to not
-    churn; re-issue any time (the hub re-delivers)."""
-    ensure_ca()
+def _load_ca():
     from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
-
+    from cryptography.hazmat.primitives import serialization
     with open(CA_KEY_PATH, "rb") as f:
         ca_key = serialization.load_pem_private_key(f.read(), password=None)
     with open(CA_CERT_PATH, "rb") as f:
         ca_cert = x509.load_pem_x509_certificate(f.read())
+    return ca_key, ca_cert
 
+
+def _sign_leaf(public_key, common_name: str, sans=None, days: int = 397) -> str:
+    """Sign a ``clientAuth`` leaf for ``public_key`` with the hub CA and return the
+    fullchain PEM (leaf + CA). Subject/SANs are chosen by the HUB, never taken from
+    the requester."""
+    ensure_ca()
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
+
+    ca_key, ca_cert = _load_ca()
     cn = (common_name or "").strip()
     san_names = [str(s).strip() for s in (sans or [cn]) if str(s).strip()]
-    key = ec.generate_private_key(ec.SECP256R1())
     builder = (
         x509.CertificateBuilder()
         .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
         .issuer_name(ca_cert.subject)
-        .public_key(key.public_key())
+        .public_key(public_key)
         .serial_number(x509.random_serial_number())
         .not_valid_before(_now() - datetime.timedelta(minutes=5))
         .not_valid_after(_now() + datetime.timedelta(days=int(days)))
@@ -186,13 +187,114 @@ def issue_client_cert(common_name: str, sans=None, days: int = 397):
         # THE point of this whole module: the clientAuth EKU LE won't issue.
         .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
         .add_extension(x509.SubjectAlternativeName([x509.DNSName(n) for n in san_names]), critical=False)
-        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(public_key), critical=False)
     )
     leaf = builder.sign(ca_key, hashes.SHA256())
     leaf_pem = leaf.public_bytes(serialization.Encoding.PEM).decode()
     ca_pem = ca_cert.public_bytes(serialization.Encoding.PEM).decode()
+    return leaf_pem + ca_pem
+
+
+def issue_client_cert(common_name: str, sans=None, days: int = 397):
+    """LEGACY path: mint a ``clientAuth`` leaf AND its private key on the hub.
+    Returns ``(fullchain_pem, key_pem)``. Used only for spokes that predate the
+    CSR flow (``sign_csr``) — the hub then has to ship the private key over the
+    wire, which is why CSR-capable spokes never take this path."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    fullchain = _sign_leaf(key.public_key(), common_name, sans=sans, days=days)
     key_pem = key.private_bytes(
         serialization.Encoding.PEM,
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption()).decode()
-    return leaf_pem + ca_pem, key_pem
+    return fullchain, key_pem
+
+
+def sign_csr(csr_pem: str, common_name: str, sans=None, days: int = 397) -> str:
+    """Sign a spoke-generated CSR (the private key never leaves the spoke).
+
+    The CSR's own subject/SANs are IGNORED — only its public key is used, and the
+    hub sets CN/SAN to the identity it authenticated. Rejects a CSR whose
+    self-signature does not verify (proof of key possession) or whose key is weak.
+    Returns the fullchain PEM. Raises ValueError on a bad CSR."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives.asymmetric import ec, rsa
+
+    try:
+        csr = x509.load_pem_x509_csr((csr_pem or "").strip().encode())
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"unparseable CSR: {e}")
+    if not csr.is_signature_valid:
+        raise ValueError("CSR signature invalid (no proof of key possession)")
+    pub = csr.public_key()
+    if isinstance(pub, rsa.RSAPublicKey):
+        if pub.key_size < 2048:
+            raise ValueError("CSR RSA key too small (<2048)")
+    elif isinstance(pub, ec.EllipticCurvePublicKey):
+        if pub.curve.key_size < 256:
+            raise ValueError("CSR EC key too small (<256)")
+    else:
+        raise ValueError("CSR key type not supported (EC P-256+ or RSA 2048+)")
+    return _sign_leaf(pub, common_name, sans=sans, days=days)
+
+
+def _ca_certs():
+    """Current + retired CA certs (parsed). Empty list if none."""
+    from cryptography import x509
+    out = []
+    for pem in (ca_cert_pem(), retired_ca_pems()):
+        if not pem or "BEGIN CERTIFICATE" not in pem:
+            continue
+        end = "-----END CERTIFICATE-----"
+        for chunk in pem.split(end):
+            if "BEGIN CERTIFICATE" not in chunk:
+                continue
+            try:
+                out.append(x509.load_pem_x509_certificate((chunk.strip() + "\n" + end + "\n").encode()))
+            except Exception:  # noqa: BLE001
+                continue
+    return out
+
+
+def inspect_client_cert(der: bytes):
+    """Inspect a presented client cert (DER, from ``getpeercert(binary_form=True)``).
+
+    Returns ``{"hub_ca": bool, "sans": tuple, "cn": str, "serial": str}`` or None
+    when ``der`` is empty/unparseable. ``hub_ca`` is True only when the leaf's
+    signature verifies against the hub CA (current or retired) — a cryptographic
+    check, not an issuer-name compare, so a publicly-trusted cert that merely
+    claims the same issuer name can't pass. ``serial`` is lower-case hex, matching
+    the registry's ``format(serial, "x")``."""
+    if not der:
+        return None
+    try:
+        from cryptography import x509
+        leaf = x509.load_der_x509_certificate(bytes(der))
+    except Exception:  # noqa: BLE001
+        return None
+    hub_ca = False
+    for ca in _ca_certs():
+        try:
+            leaf.verify_directly_issued_by(ca)
+            hub_ca = True
+            break
+        except Exception:  # noqa: BLE001
+            continue
+    sans = ()
+    try:
+        from cryptography.x509.oid import ExtensionOID
+        ext = leaf.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+        sans = tuple(ext.value.get_values_for_type(x509.DNSName))
+    except Exception:  # noqa: BLE001
+        sans = ()
+    cn = ""
+    try:
+        from cryptography.x509.oid import NameOID
+        attrs = leaf.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        cn = str(attrs[0].value) if attrs else ""
+    except Exception:  # noqa: BLE001
+        cn = ""
+    return {"hub_ca": hub_ca, "sans": sans, "cn": cn,
+            "serial": format(leaf.serial_number, "x")}

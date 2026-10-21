@@ -77,6 +77,7 @@ from cryptography.exceptions import InvalidTag
 from api import (build_server, _refresh_module_all_tenants,
                  _invalidate_tenant_module, _fetch_module)
 from hub_os_updates import HubOsUpdatesMixin
+from hub_mtls_enforcement import HubMtlsEnforcementMixin
 from update_pipeline import UpdatePipelineMixin
 from endpoint_sync import EndpointSyncMixin
 from vm_sync import VmSyncMixin
@@ -409,7 +410,7 @@ def _sentinel_fingerprint(errs):
     return hashlib.sha256("\n".join(sorted(norm)).encode("utf-8", "ignore")).hexdigest()
 
 
-class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, HenetSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, InstanceRelocateMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
+class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, HenetSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, InstanceRelocateMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubMtlsEnforcementMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -797,6 +798,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         #   plaintext, so a new hub never sends ciphertext a legacy spoke can't
         #   decrypt (fail-safe, no fleet break). }
         self.spoke_enc_capable: Dict[str, bool] = {}
+        # Spokes that advertised ``mtls_csr`` in their auth frame: they generate
+        # their own mTLS key and send a CSR, so the hub never handles the key.
+        self.spoke_mtls_csr_capable: Dict[str, bool] = {}
+        # pk → the websocket currently held in mTLS enrollment-only mode.
+        self._mtls_enrolling: Dict[str, Any] = {}
         # Spokes already diagnosed as connected-but-never-authenticated this
         # connection cycle (see _maybe_log_unauthenticated_agent). Cleared on
         # authenticate + disconnect so a re-trigger after a future regression
@@ -5240,6 +5246,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # encrypt to it). Recorded post-auth below (unconditional — covers
             # zero-touch / secret-less connects too, mirroring netbox_server_cap).
             spoke_enc_capable = bool(auth_data.get("enc") == ENC_MARKER) and encryption_enabled()
+            # The spoke can generate its own mTLS key + CSR (SPOKE_MTLS_CSR).
+            spoke_mtls_csr_capable = bool(auth_data.get("mtls_csr"))
+            # Set True below when an approved spoke without a hub-CA cert is held
+            # in mTLS enrollment-only mode (see hub_mtls_enforcement.py).
+            mtls_enroll_only = False
 
             # DEBUG-only + length-only: a 64-char session key's 4+4 prefix/suffix
             # is a 12.5% entropy reduction, and this fires on EVERY connect
@@ -5685,6 +5696,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # zero-touch / secret-less connect path too). A non-capable or
             # kill-switched spoke records False → outbound frames stay plaintext.
             self.spoke_enc_capable[pk] = spoke_enc_capable
+            self.spoke_mtls_csr_capable[pk] = spoke_mtls_csr_capable
             if parent_spoke_id:
                 self.spoke_parent_map[pk] = parent_spoke_id
                 # B4: persist the parent linkage + role name into the sub-spoke's
@@ -5777,59 +5789,84 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             type="SPOKE_UPDATE_SESSION_KEY",
                             data={"secret": session_secret}))
                     await self.send_to_spoke(key_msg, signing_secret=None)
-                self._cs_connect_defer[spoke_id] = [time.time(), False]
-                await self.push_config_to_spoke(spoke_id)
-
-                # Role self-heal (hub half): if this is a base agent, re-push
-                # LOAD_ROLE for any role the hub durably assigned to it whose
-                # sub-spoke isn't currently connected (the agent may have booted
-                # roles=none after losing its .env LOADED_ROLES). Fire-and-forget
-                # so it never blocks the connect path; it waits for the agent to
-                # authenticate before pushing.
-                if module_type == "agent":
-                    asyncio.create_task(self._readopt_agent_roles(spoke_id))
-
-                # Fleet mTLS: deliver a Hub-Local-CA clientAuth client cert so the
-                # spoke can present a VERIFIED mTLS identity (public CAs no longer
-                # issue clientAuth). Idempotent — skips when a current cert exists.
-                # Gated by the mtls_ca_auto_provision toggle (default ON); a revoked
-                # spoke (mtls_revoked set) is skipped until manually re-issued.
+                # mTLS enforcement (hub_mtls_enforcement.py): bind the presented
+                # hub-CA cert to this spoke, refuse revoked / foreign certs and
+                # bound spokes that show up cert-less, and hold a cert-less spoke
+                # in enrollment-only mode until it presents its issued cert.
                 try:
-                    _gc = self.state.system_state.get("global_config", {}) or {}
-                    _revoked = self.state.system_state.get("mtls_revoked", {}) or {}
-                    if (_gc.get("mtls_ca_auto_provision", True)
-                            and self._primary_key(spoke_id) not in _revoked):
-                        await self._provision_spoke_mtls_cert(spoke_id)
-                except Exception as e:  # noqa: BLE001 - never block connect on this
-                    logger.warning(f"[mtls] provision client cert for {spoke_id} failed: {e}")
+                    _mtls_gate, _mtls_why = self._mtls_connect_gate(
+                        spoke_id, pk, websocket, module_type or "")
+                except Exception as e:  # noqa: BLE001 - never block connect on a gate bug
+                    logger.warning(f"[mtls] connect gate for {spoke_id} errored: {e}")
+                    _mtls_gate, _mtls_why = "ok", "gate-error"
+                if _mtls_gate == "reject":
+                    await self._mtls_reject(spoke_id, pk, websocket, _mtls_why)
+                    return
+                if _mtls_why == "enroll-exhausted":
+                    logger.warning(f"[mtls] {spoke_id} never presented its hub-CA cert "
+                                   f"after repeated enrollment — allowing degraded "
+                                   f"cert-less operation (set mtls_require_cert to forbid)")
+                    self.record_spoke_event(spoke_id, "mtls_enroll_exhausted", "")
+                if _mtls_gate == "enroll":
+                    mtls_enroll_only = True
+                    await self._mtls_begin_enrollment(spoke_id, pk, websocket)
+                else:
+                    self._cs_connect_defer[spoke_id] = [time.time(), False]
+                    await self.push_config_to_spoke(spoke_id)
 
-                # Request version AFTER the session key is established so the spoke
-                # can sign its response and the hub can verify it.
-                try:
-                    version_msg = Message(
-                        header=MessageHeader(
-                            message_id=str(uuid.uuid4()),
-                            timestamp=time.time(),
-                            sender_id="hub",
-                            destination_id=spoke_id
-                        ),
-                        payload=MessagePayload(type="get_version", data={})
-                    )
-                    await self.send_to_spoke(version_msg)
-                except Exception as e:
-                    logger.error(f"Failed to request version from {spoke_id}: {e}")
+                    # Role self-heal (hub half): if this is a base agent, re-push
+                    # LOAD_ROLE for any role the hub durably assigned to it whose
+                    # sub-spoke isn't currently connected (the agent may have booted
+                    # roles=none after losing its .env LOADED_ROLES). Fire-and-forget
+                    # so it never blocks the connect path; it waits for the agent to
+                    # authenticate before pushing.
+                    if module_type == "agent":
+                        asyncio.create_task(self._readopt_agent_roles(spoke_id))
+
+                    # Fleet mTLS: deliver a Hub-Local-CA clientAuth client cert so the
+                    # spoke can present a VERIFIED mTLS identity (public CAs no longer
+                    # issue clientAuth). Idempotent — skips when a current cert exists.
+                    # Gated by the mtls_ca_auto_provision toggle (default ON); a revoked
+                    # spoke (mtls_revoked set) is skipped until manually re-issued.
+                    # Run as a task: a CSR-capable spoke answers SPOKE_MTLS_CSR over
+                    # request_response, which needs the message loop below running.
+                    try:
+                        _gc = self.state.system_state.get("global_config", {}) or {}
+                        _revoked = self.state.system_state.get("mtls_revoked", {}) or {}
+                        if (_gc.get("mtls_ca_auto_provision", True)
+                                and self._primary_key(spoke_id) not in _revoked):
+                            asyncio.create_task(self._provision_spoke_mtls_cert_safe(spoke_id))
+                    except Exception as e:  # noqa: BLE001 - never block connect on this
+                        logger.warning(f"[mtls] provision client cert for {spoke_id} failed: {e}")
+
+                    # Request version AFTER the session key is established so the spoke
+                    # can sign its response and the hub can verify it.
+                    try:
+                        version_msg = Message(
+                            header=MessageHeader(
+                                message_id=str(uuid.uuid4()),
+                                timestamp=time.time(),
+                                sender_id="hub",
+                                destination_id=spoke_id
+                            ),
+                            payload=MessagePayload(type="get_version", data={})
+                        )
+                        await self.send_to_spoke(version_msg)
+                    except Exception as e:
+                        logger.error(f"Failed to request version from {spoke_id}: {e}")
 
             # 2. Flush Mailbox — keyed by pk (guid once armed): _arm_guid_primary
             # in _reconcile_spoke_identity re-keyed the offline queue name→guid, so
             # flush must read the guid-keyed queue or a reconnecting spoke's
             # pending messages would be stranded under the stale name.
-            await self.mailbox.flush_mailbox(pk, self.send_to_spoke)
+            if not mtls_enroll_only:
+                await self.mailbox.flush_mailbox(pk, self.send_to_spoke)
 
             # cs reconnect config push, deferred from push_config_to_spoke so it
             # lands AFTER any queued (older) CS_CONFIG_UPDATE and runs as a task
             # while the message loop below receives its reply.
             _cs_defer = self._cs_connect_defer.pop(spoke_id, None) if spoke_id else None
-            if _cs_defer and _cs_defer[1]:
+            if _cs_defer and _cs_defer[1] and not mtls_enroll_only:
                 self._spawn_cs_push(self.push_cs_full_config(spoke_id, reason="reconnect"))
 
             # 3. Message Loop
@@ -5967,6 +6004,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 if not self.approved_modules.get(pk, False):
                     logger.debug(f"Dropping message from unapproved module {spoke_id}")
                     continue
+
+                # mTLS enrollment-only: nothing but replies to the hub's own
+                # in-flight requests (the CSR exchange) until the spoke reconnects
+                # presenting its cert.
+                if mtls_enroll_only:
+                    _cid = msg_data.get("correlation_id")
+                    if not (_cid and _cid in self._outstanding_requests):
+                        logger.debug(f"Dropping message from {spoke_id} (mTLS enrollment-only)")
+                        continue
 
                 # Process Acknowledgement
                 if "correlation_id" in msg_data:
@@ -6476,6 +6522,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # `is websocket` guard below (previously only on active_connections)
             # now covers the sibling state too. Capture ownership BEFORE deleting
             # the entry (the delete would otherwise make the later check False).
+            if spoke_id:
+                try:
+                    self._mtls_enrollment_done(self._primary_key(spoke_id), websocket)
+                except Exception:  # noqa: BLE001
+                    pass
             owns_slot = bool(spoke_id and self.active_connections.get(self._primary_key(spoke_id)) is websocket)
             if owns_slot:
                 pk = self._primary_key(spoke_id)
@@ -6688,8 +6739,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         clientAuth). Idempotent — skips when the registry holds a current (>30d to
         expiry) cert unless ``force``. AppBuilder's cert SANs include the pinned
         ``ab_cert_identities`` so the HUB_REQUEST gate matches; other spokes
-        get SAN=spoke_id. The hub keeps only cert METADATA (the spoke holds the
-        private key) — re-issue to re-provision."""
+        get SAN=spoke_id. The hub keeps only cert METADATA.
+
+        Key custody: a spoke that advertised ``mtls_csr`` generates its own key
+        and answers ``SPOKE_MTLS_CSR`` with a CSR — the private key never leaves
+        the spoke. Legacy spokes (and AppBuilder's separate agent) still get a
+        hub-generated key in ``SPOKE_SET_MTLS_CLIENT_CERT``; that frame is in
+        ``ENCRYPTED_TYPES`` so the key is AEAD-wrapped on the wire."""
         try:
             from security import mtls_ca
         except Exception:  # noqa: BLE001
@@ -6903,17 +6959,32 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     except Exception:  # noqa: BLE001
                         pass
         cn = sans[0]
+        key = None
+        csr_capable = bool((getattr(self, "spoke_mtls_csr_capable", None) or {}).get(pk))
         try:
-            fullchain, key = mtls_ca.issue_client_cert(cn, sans=sans, days=397)
+            if csr_capable:
+                rr = await self.request_response(spoke_id, "SPOKE_MTLS_CSR",
+                                                 {"cn": cn, "sans": sans}, timeout=30.0)
+                d = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+                csr = (d or {}).get("csr") if isinstance(d, dict) else None
+                if not csr:
+                    msg_ = (d or {}).get("message") if isinstance(d, dict) else None
+                    logger.warning(f"[mtls] {spoke_id} returned no CSR: {msg_ or rr}")
+                    return {"status": "error", "message": f"no CSR from spoke: {msg_ or 'timeout'}"}
+                fullchain = mtls_ca.sign_csr(csr, cn, sans=sans, days=397)
+            else:
+                fullchain, key = mtls_ca.issue_client_cert(cn, sans=sans, days=397)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[mtls] issue client cert for {spoke_id} failed: {e}")
             return {"status": "error", "message": str(e)}
         try:
+            _data = {"cert": fullchain, "sans": sans}
+            if key:
+                _data["key"] = key
             msg = Message(
                 header=MessageHeader(message_id=str(uuid.uuid4()), timestamp=time.time(),
                                      sender_id="hub", destination_id=spoke_id),
-                payload=MessagePayload(type="SPOKE_SET_MTLS_CLIENT_CERT",
-                                       data={"cert": fullchain, "key": key, "sans": sans}))
+                payload=MessagePayload(type="SPOKE_SET_MTLS_CLIENT_CERT", data=_data))
             await self.send_to_spoke(msg)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[mtls] deliver client cert to {spoke_id} failed: {e}")
@@ -6934,7 +7005,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         reg[pk] = {"spoke_id": spoke_id, "module_type": module_type, "san": sans, "cn": cn,
                    "issued_at": now, "not_after": na_iso, "not_after_ts": na_ts,
                    "serial": serial, "source": "hub-ca", "ab": bool(is_bf),
-                   "heal_attempts": heal_attempts}
+                   "heal_attempts": heal_attempts,
+                   # The superseded cert stays acceptable for binding until the
+                   # spoke restarts with the new one (delivery can fail).
+                   "prev_serial": (entry or {}).get("serial", ""),
+                   "key_custody": "spoke-csr" if csr_capable else "hub-generated"}
         self.state.system_state["mtls_client_certs"] = reg
         try:
             await self.state.save_state_now()
@@ -6948,6 +7023,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         logger.info(f"[mtls] provisioned Hub-CA client cert for {spoke_id} "
                     f"(san={sans}, exp={na_iso})")
         return {"status": "SUCCESS", "san": sans, "not_after": na_iso}
+
+    async def _provision_spoke_mtls_cert_safe(self, spoke_id: str) -> None:
+        """Fire-and-forget wrapper for the connect-time issuance task."""
+        try:
+            await self._provision_spoke_mtls_cert(spoke_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[mtls] provision client cert for {spoke_id} failed: {e}")
 
     async def _revoke_spoke_mtls_cert(self, spoke_id: str) -> Dict[str, Any]:
         """Revoke a spoke's Hub-CA mTLS client cert: tell it to delete + stop
@@ -6966,6 +7048,18 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self.state.system_state.setdefault("mtls_revoked", {})[pk] = {
             "spoke_id": spoke_id, "revoked_at": time.time(),
             "serial": (prev or {}).get("serial", "")}
+        # Enforcement: the revoked serials are refused at connect even if the
+        # spoke (or a thief) keeps presenting the cert; the identity loses its
+        # binding so only an explicit re-issue lets it enroll again.
+        try:
+            _na = float((prev or {}).get("not_after_ts") or 0)
+            for _s in ((prev or {}).get("serial", ""), (prev or {}).get("prev_serial", "")):
+                self._mtls_record_revoked_serial(pk, _s, _na)
+            _bound = (self.state.system_state.get("mtls_bound", {}) or {}).pop(pk, None)
+            if _bound and _bound.get("serial"):
+                self._mtls_record_revoked_serial(pk, _bound["serial"], _na)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             await self.state.save_state_now()
         except Exception:  # noqa: BLE001

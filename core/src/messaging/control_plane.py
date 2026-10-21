@@ -427,7 +427,24 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         #     LM_HUB_CA_CERT=<path> (or LM_HUB_CA_BUNDLE=<path>) to pin the CA.
         # See _client_ssl_ctx. Never silently downgrades: verify=ON with a missing
         # CA path fails fast instead of falling back to unverified.
-        self._tls_verify = os.environ.get("LM_HUB_TLS_VERIFY", "0").strip() in ("1", "true", "yes")
+        # Three modes (LM_HUB_TLS_VERIFY):
+        #   1/true/yes/on   → always verify.
+        #   off/never/force-off → never verify (explicit operator opt-out).
+        #   anything else (unset, "0", "auto") → AUTO RATCHET: each connect first
+        #     probes whether the hub cert verifies (pinned CA or system store). On
+        #     the first success a host-bound marker is written and from then on
+        #     verification is REQUIRED for that hub host (no silent downgrade). A
+        #     hub that has never verified (self-signed / IP URL) keeps working
+        #     unverified, with a warning. See _resolve_auto_tls_verify.
+        _tv = os.environ.get("LM_HUB_TLS_VERIFY", "").strip().lower()
+        if _tv in ("1", "true", "yes", "on"):
+            self._tls_verify_mode = "on"
+        elif _tv in ("off", "never", "force-off", "disable", "disabled"):
+            self._tls_verify_mode = "off"
+        else:
+            self._tls_verify_mode = "auto"
+        self._tls_verify = self._tls_verify_mode == "on"
+        self._tls_auto_neg_until = 0.0
         self._tls_ca_cert = (os.environ.get("LM_HUB_CA_CERT", "").strip()
                              or os.environ.get("LM_HUB_CA_BUNDLE", "").strip())
         # Surface the TLS trust config once at startup so the spoke log states
@@ -436,6 +453,9 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         if self._tls_verify:
             _cfg = f"verify=ON ca={'<system store>' if not self._tls_ca_cert else self._tls_ca_cert}"
             logger.info("Spoke TLS config: %s (hub cert will be authenticated)", _cfg)
+        elif self._tls_verify_mode == "auto":
+            logger.info("Spoke TLS config: verify=AUTO (hub cert verified when it "
+                        "can be; required once it has verified)")
         else:
             logger.info("Spoke TLS config: verify=OFF (hub cert NOT authenticated — "
                         "set LM_HUB_TLS_VERIFY=1 to verify once the hub cert is deployed)")
@@ -895,6 +915,81 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             logger.error("Could not build wss SSL context: %s — connecting without TLS", e)
             return None
 
+    def _hub_tls_marker_path(self) -> str:
+        return os.path.join(self._mtls_material_dir(), "hub-tls-verified")
+
+    def _hub_host_port(self):
+        from urllib.parse import urlsplit
+        u = urlsplit(self.hub_url)
+        return (u.hostname or ""), (u.port or 443)
+
+    async def _probe_hub_tls_verify(self):
+        """True = the hub cert verifies (CA pin or system store, hostname checked);
+        False = it was presented but does NOT verify; None = couldn't tell
+        (network error)."""
+        host, port = self._hub_host_port()
+        if not host:
+            return None
+        try:
+            if self._tls_ca_cert and os.path.isfile(self._tls_ca_cert):
+                ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
+            else:
+                ctx = ssl.create_default_context()
+        except Exception:  # noqa: BLE001
+            return None
+        try:
+            _r, w = await asyncio.wait_for(
+                asyncio.open_connection(host, port, ssl=ctx, server_hostname=host),
+                timeout=10.0)
+            w.close()
+            try:
+                await w.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        except ssl.SSLCertVerificationError:
+            return False
+        except ssl.SSLError as e:
+            return False if "CERTIFICATE_VERIFY_FAILED" in str(e) else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _resolve_auto_tls_verify(self) -> None:
+        """AUTO mode: decide verify on/off for this connect (see __init__)."""
+        host, _port = self._hub_host_port()
+        try:
+            marker = self._hub_tls_marker_path()
+            with open(marker, "r") as f:
+                ratcheted = f.read().strip() == host
+        except Exception:  # noqa: BLE001
+            marker, ratcheted = "", False
+        if ratcheted:
+            self._tls_verify = True
+            return
+        if time.time() < self._tls_auto_neg_until:
+            self._tls_verify = False
+            return
+        ok = await self._probe_hub_tls_verify()
+        if ok is True:
+            self._tls_verify = True
+            try:
+                self._mtls_write_if_changed(marker or self._hub_tls_marker_path(),
+                                            host + "\n", 0o644)
+                logger.info("Hub TLS cert for %s verified — hub verification is now "
+                            "REQUIRED for this hub (ratchet). Delete %s to undo.",
+                            host, marker or self._hub_tls_marker_path())
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Hub TLS verified but could not persist the ratchet "
+                               "marker: %s", e)
+            return
+        self._tls_verify = False
+        if ok is False:
+            self._tls_auto_neg_until = time.time() + 3600
+            logger.warning("Hub TLS cert for %s does NOT verify against %s — "
+                           "connecting unverified. Deploy a trusted hub cert or set "
+                           "LM_HUB_CA_CERT to pin the hub CA.", host,
+                           self._tls_ca_cert or "the system trust store")
+
     def _present_client_cert(self, ctx):
         """Load this spoke's hub-issued mTLS CLIENT cert into the wss context so
         the spoke actually PRESENTS a verified client identity on the handshake.
@@ -1202,6 +1297,9 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # the self-signed hub cert; LM_HUB_TLS_VERIFY=1 verifies — pinned CA via
         # LM_HUB_CA_CERT, else the system trust store). ws:// stays plaintext
         # (loopback / legacy). See _client_ssl_ctx.
+        if (self.hub_url.lower().startswith("wss://")
+                and getattr(self, "_tls_verify_mode", "") == "auto"):
+            await self._resolve_auto_tls_verify()
         ssl_ctx = self._client_ssl_ctx() if self.hub_url.lower().startswith("wss://") else None
         # Surface the connect attempt + TLS mode at INFO so it reaches the hub
         # via the log relay. This pairs with the "Connection lost (...)" warning
@@ -1281,6 +1379,11 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             # LM_APP_ENCRYPTION=0 → don't advertise (behave as legacy).
             if encryption_enabled():
                 auth_payload["enc"] = ENC_MARKER
+            # mTLS key custody: this spoke generates its own client key and
+            # answers SPOKE_MTLS_CSR, so the hub never handles the private key.
+            # Role sub-spokes ride their parent's cert and don't advertise.
+            if not getattr(self, "parent_spoke_id", ""):
+                auth_payload["mtls_csr"] = 1
 
             await websocket.send(json.dumps(auth_payload, separators=(',', ':')))
             logger.info(f"Connected to Lab Manager Hub as {self.spoke_id}. Performing mutual authentication...")
@@ -2354,6 +2457,9 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         if cmd_type == "SPOKE_CLEAR_MTLS_CLIENT_CERT":
             return await self._handle_clear_mtls_client_cert(data)
 
+        if cmd_type == "SPOKE_MTLS_CSR":
+            return await self._handle_mtls_csr(data)
+
         return None
 
     async def _handle_clear_mtls_client_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -2396,6 +2502,77 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             asyncio.create_task(self._deferred_restart_exit())
         return {"status": "SUCCESS", "message": "mTLS client cert cleared (revoked)"}
 
+    @staticmethod
+    def _pubkey_fingerprint(public_key) -> str:
+        import hashlib
+        from cryptography.hazmat.primitives import serialization
+        der = public_key.public_bytes(serialization.Encoding.DER,
+                                      serialization.PublicFormat.SubjectPublicKeyInfo)
+        return hashlib.sha256(der).hexdigest()
+
+    async def _handle_mtls_csr(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """``SPOKE_MTLS_CSR``: generate a fresh EC P-256 key ON THIS SPOKE and
+        return a CSR for it. The key stays here (in memory + a 0600 ``.pending``
+        file) until the matching cert arrives in ``SPOKE_SET_MTLS_CLIENT_CERT``.
+        The hub ignores the CSR subject and sets the identity itself."""
+        if getattr(self, "parent_spoke_id", ""):
+            return {"status": "ERROR", "message": "role sub-spoke — parent carries the mTLS cert"}
+        try:
+            from cryptography import x509
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.x509.oid import NameOID
+        except Exception as e:  # noqa: BLE001
+            return {"status": "ERROR", "message": f"cryptography unavailable: {e}"}
+        cn = str((data or {}).get("cn") or self.spoke_id or "spoke").strip()
+        key = ec.generate_private_key(ec.SECP256R1())
+        csr = (x509.CertificateSigningRequestBuilder()
+               .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
+               .sign(key, hashes.SHA256()))
+        key_pem = key.private_bytes(serialization.Encoding.PEM,
+                                    serialization.PrivateFormat.PKCS8,
+                                    serialization.NoEncryption()).decode()
+        pending = getattr(self, "_mtls_pending_keys", None)
+        if pending is None:
+            pending = self._mtls_pending_keys = {}
+        pending[self._pubkey_fingerprint(key.public_key())] = key_pem
+        while len(pending) > 4:
+            pending.pop(next(iter(pending)))
+        try:
+            self._mtls_write_if_changed(
+                os.path.join(self._mtls_material_dir(), "mtls-hub-client.key.pending"),
+                key_pem, 0o600)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("SPOKE_MTLS_CSR: could not persist pending key: %s", e)
+        logger.info("SPOKE_MTLS_CSR: generated a local mTLS client key + CSR for %s", cn)
+        return {"status": "SUCCESS",
+                "csr": csr.public_bytes(serialization.Encoding.PEM).decode()}
+
+    def _mtls_key_for_cert(self, cert_pem: str) -> str:
+        """The locally generated pending key whose public key matches the leaf in
+        ``cert_pem`` ('' if none — e.g. the hub signed a CSR from another run)."""
+        try:
+            from cryptography import x509
+            from cryptography.hazmat.primitives import serialization
+            end = "-----END CERTIFICATE-----"
+            leaf = x509.load_pem_x509_certificate((cert_pem.split(end)[0] + end).encode())
+            fp = self._pubkey_fingerprint(leaf.public_key())
+        except Exception:  # noqa: BLE001
+            return ""
+        key_pem = (getattr(self, "_mtls_pending_keys", None) or {}).get(fp, "")
+        if key_pem:
+            return key_pem
+        try:
+            p = os.path.join(self._mtls_material_dir(), "mtls-hub-client.key.pending")
+            with open(p, "r") as f:
+                cand = f.read()
+            k = serialization.load_pem_private_key(cand.encode(), password=None)
+            if self._pubkey_fingerprint(k.public_key()) == fp:
+                return cand
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
     async def _handle_set_mtls_client_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Apply ``SPOKE_SET_MTLS_CLIENT_CERT``: write the hub-issued clientAuth cert
         + key as this spoke's spoke→hub mTLS CLIENT identity and restart on change so
@@ -2415,6 +2592,14 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                     "message": "skipped — role sub-spoke; parent carries the mTLS client cert"}
         cert = (data.get("cert") or "").strip()
         key = (data.get("key") or "").strip()
+        from_csr = False
+        if cert and not key:
+            # CSR flow: the key was generated here by _handle_mtls_csr.
+            key = self._mtls_key_for_cert(cert).strip()
+            from_csr = bool(key)
+            if not key:
+                return {"status": "ERROR",
+                        "message": "cert does not match any locally generated key"}
         if not cert or not key:
             return {"status": "ERROR", "message": "missing cert/key"}
         cert_dir = self._mtls_material_dir()
@@ -2428,6 +2613,12 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 ck_path, key if key.endswith("\n") else key + "\n", 0o600)
             self._persist_secret_to_env("LM_MTLS_HUB_CLIENT_CERT", cc_path)
             self._persist_secret_to_env("LM_MTLS_HUB_CLIENT_KEY", ck_path)
+            if from_csr:
+                self._mtls_pending_keys = {}
+                try:
+                    os.remove(os.path.join(cert_dir, "mtls-hub-client.key.pending"))
+                except OSError:
+                    pass
         except Exception as e:  # noqa: BLE001
             logger.warning("SPOKE_SET_MTLS_CLIENT_CERT: write to %s failed: %s", cert_dir, e)
             return {"status": "ERROR", "message": f"write failed: {e}"}
