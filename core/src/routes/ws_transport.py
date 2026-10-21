@@ -37,9 +37,15 @@ def register(app, hub, ctx):
             # the mTLS-clients debug view — so an operator can see WHICH connections
             # actually presented a verified client cert vs. connected cert-less.
             adapter.peer_cert_raw = raw_peer_cert if isinstance(raw_peer_cert, dict) else None
+            # DER for the hub's cert↔spoke binding + revocation check
+            # (_mtls_connect_gate). Only meaningful when the cert verified.
+            _der = (websocket.scope.get("extensions") or {}).get("x_peer_cert_der")
+            adapter.peer_cert_der = (bytes(_der) if _der and adapter.peer_cert_raw
+                                     else None)
         except Exception:  # noqa: BLE001 - never drop a connection on a read hiccup
             adapter.peer_cert_identity = None
             adapter.peer_cert_raw = None
+            adapter.peer_cert_der = None
         await hub.handle_connection(adapter)
 
     @app.websocket("/ws/agent")

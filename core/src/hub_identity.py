@@ -648,6 +648,12 @@ class HubIdentityMixin:
         # _install_active_connection under the new id; just drop the stale pointer.
         self.active_connections.pop(old_id, None)
         self.active_connection_key_ids.pop(old_id, None)
+        # mTLS registry / binding / enrollment records follow the identity, so a
+        # renamed spoke's cert still matches by registered serial.
+        for _k in ("mtls_client_certs", "mtls_bound", "mtls_enroll"):
+            _d = self.state.system_state.get(_k)
+            if isinstance(_d, dict) and old_id in _d and new_id not in _d:
+                _d[new_id] = _d.pop(old_id)
         # KeyManager re-key (CRITICAL): without this the new id has no key and the
         # renamed spoke falls into pending-negotiation despite the approval carryover.
         self.key_manager.rename_spoke_keys(old_id, new_id)

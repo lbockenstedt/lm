@@ -2661,6 +2661,8 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
             if _ca and os.path.exists(_ca):
                 cfg_kwargs["ssl_ca_certs"] = _ca
                 cfg_kwargs["ssl_cert_reqs"] = _mtls.server_verify_mode()
+                if tls_cert and tls_key:
+                    _mtls.mark_listener_client_auth_armed()
     except Exception:  # noqa: BLE001 - never brick the hub boot on an mtls hiccup
         pass
     # WebSocket keepalive: uvicorn's defaults (ping every 20s, pong timeout 5s)
@@ -2781,6 +2783,7 @@ def run_api_server(hub, port=443):
                 if _ca and os.path.exists(_ca):
                     _mtls_kw = {"ssl_ca_certs": _ca,
                                 "ssl_cert_reqs": _mtls.server_verify_mode()}
+                    _mtls.mark_listener_client_auth_armed()
         except Exception:  # noqa: BLE001
             _mtls_kw = {}
         uvicorn.run(app, host="0.0.0.0", port=port, ssl_certfile=cert,

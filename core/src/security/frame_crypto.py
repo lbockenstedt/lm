@@ -84,6 +84,8 @@ ENCRYPTED_TYPES: FrozenSet[str] = frozenset({
     "SPOKE_UPDATE_SESSION_KEY",
     "INSTALL_CERT",
     "SPOKE_SET_MTLS_MATERIALS",
+    # Legacy (non-CSR) spokes still receive a hub-generated private key here.
+    "SPOKE_SET_MTLS_CLIENT_CERT",
     "SPOKE_SET_HUB_SECRET",
     "SPOKE_SET_RECOVERY_PSK",
     "NETBOX_APPLY_SSO",

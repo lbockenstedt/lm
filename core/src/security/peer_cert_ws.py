@@ -64,10 +64,18 @@ try:
                 transport = getattr(self, "transport", None)
                 ssl_obj = transport.get_extra_info("ssl_object") if transport else None
                 peer_cert = ssl_obj.getpeercert() if ssl_obj is not None else None
+                # DER of the same cert: lets the hub cryptographically check the
+                # leaf was issued by ITS mTLS CA (not merely some trusted CA) and
+                # read the serial for revocation (see mtls_ca.inspect_client_cert).
+                peer_der = (ssl_obj.getpeercert(binary_form=True)
+                            if ssl_obj is not None else None)
             except Exception:  # noqa: BLE001 - extraction is best-effort, fail-closed
                 peer_cert = None
+                peer_der = None
             try:
-                self.scope.setdefault("extensions", {})["x_peer_cert"] = peer_cert
+                _ext = self.scope.setdefault("extensions", {})
+                _ext["x_peer_cert"] = peer_cert
+                _ext["x_peer_cert_der"] = peer_der
             except Exception:  # noqa: BLE001 - scope may be absent in odd paths
                 pass
             await super().run_asgi()
