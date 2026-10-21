@@ -2862,8 +2862,10 @@ def register(app, hub, ctx):
 
     @app.post("/api/mtls/reprovision")
     async def mtls_reprovision(request: Request):
-        """Force-(re)issue Hub-Local-CA mTLS client certs. Body {spoke_id} for one,
-        else every connected spoke. Admin-only. Used to roll certs out immediately
+        """Force-(re)issue Hub-Local-CA mTLS client certs. Body {spoke_id} for one
+        (also re-arms enrollment for a bound spoke that lost its cert, and works
+        for an offline spoke — it enrolls on its next connect), else every
+        connected spoke. Admin-only. Used to roll certs out immediately
         instead of waiting for the next reconnect."""
         hub = app.state.hub
         sess = _session_user(request)
@@ -2874,6 +2876,14 @@ def register(app, hub, ctx):
         targets = [one] if one else list((hub.active_connections or {}).keys())
         results = []
         for sid in targets:
+            # An explicit single-spoke re-issue is also the admin's "re-enroll":
+            # a bound spoke that lost its cert is otherwise refused cert-less
+            # (hub_mtls_enforcement). Not done for the fleet-wide variant.
+            if one:
+                try:
+                    hub._mtls_allow_reenroll(hub._primary_key(sid))
+                except Exception:  # noqa: BLE001
+                    pass
             try:
                 r = await hub._provision_spoke_mtls_cert(sid, force=True)
                 results.append({"spoke_id": sid, **(r or {})})
@@ -2883,9 +2893,11 @@ def register(app, hub, ctx):
 
     @app.post("/api/mtls/revoke")
     async def mtls_revoke(request: Request):
-        """Revoke a spoke's Hub-CA mTLS client cert: it's cleared on the spoke
-        (reconnects cert-less), removed from the registry, and marked revoked so
-        auto-provision won't re-mint until an explicit (re)issue. Body {spoke_id}.
+        """Revoke a spoke's Hub-CA mTLS client cert: it's cleared on the spoke,
+        removed from the registry, its serial is refused at connect, and it is
+        marked revoked so auto-provision won't re-mint until an explicit
+        (re)issue. While mTLS enforcement is on, a revoked spoke is REFUSED until
+        re-issued. Body {spoke_id}.
         Admin-only."""
         hub = app.state.hub
         sess = _session_user(request)

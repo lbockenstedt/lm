@@ -207,6 +207,20 @@ def server_verify_mode():
     return ssl.CERT_OPTIONAL
 
 
+_listener_armed = False
+
+
+def mark_listener_client_auth_armed() -> None:
+    """Record that this process's hub listener requests client certs (set where
+    the server SSL config is built). App-layer enforcement keys off it."""
+    global _listener_armed
+    _listener_armed = True
+
+
+def listener_client_auth_armed() -> bool:
+    return _listener_armed
+
+
 def apply_server_client_auth(ctx: ssl.SSLContext):
     """Arm a server SSL context (hub WS, spoke /ws/agent) to verify a client
     cert — ONLY when mTLS is enabled and a CA is configured. PERMISSIVE by
