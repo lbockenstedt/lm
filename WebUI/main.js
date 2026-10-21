@@ -8534,6 +8534,22 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub TLS Verification ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Whether spokes &amp; agents verify the hub's TLS certificate when they connect — set fleet-wide here instead of re-running installers. Pushed to every node and stored locally (overrides the install-time <code>--tls-verify</code>); a node restarts only if its setting changes. <strong>Always verify</strong> is refused by any node that can't verify the hub cert right now (listed below), so it can't lock a node out. Co-located (loopback) spokes and role sub-spokes are not affected.</p>
+                <div class="space-y-1">
+                    <label class="${labelCls}">Spoke/agent hub-cert verification</label>
+                    <select id="htv-mode" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        <option value="install">Per-install (installer setting)</option>
+                        <option value="auto">Auto — verify when possible, required once verified</option>
+                        <option value="on">Always verify</option>
+                        <option value="off">Off (not recommended)</option>
+                    </select>
+                </div>
+                <p id="htv-msg" class="text-xs text-slate-400 mt-3"></p>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Source of Truth ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Per-module owner: a module's source of truth is never overwritten by a sync that disagrees. <strong>External</strong> = the feed owns the object (the sync overwrites NetBox to match — e.g. Proxmox owns VMs, the discovery feed owns device MAC/IP). <strong>NetBox</strong> = NetBox owns the object (only-add-missing — existing records are refreshed but never clobbered, protecting hand-managed inventory). Defaults: VMs = Proxmox (external), Devices = NetBox, Access Tracker = NetBox, Endpoint sync = NetBox.</p>
@@ -8593,6 +8609,7 @@ function _renderSetupSyncTile(content) {
     loadSpokeAlertConfig();
     loadSpokeAlerts();
     loadHubWatchdog();
+    loadHubTlsVerify();
     // Auto-save: one delegated `change` listener maps the edited field's id
     // prefix to its card's save handler and fires it — same no-Save-button
     // model as the Proxmox auto-provisioning card. Programmatic value sets
@@ -8615,6 +8632,7 @@ function _syncSaveFnFor(el) {
     if (id.startsWith('staleness-sweep-'))  return saveStalenessSweepConfig;
     if (id.startsWith('spoke-alert-'))      return saveSpokeAlertConfig;
     if (id.startsWith('hcw-'))              return saveHubWatchdog;
+    if (id.startsWith('htv-'))              return saveHubTlsVerify;
     if (id.startsWith('sot-'))              return saveSourceOfTruthConfig;
     return null;
 }
@@ -13922,6 +13940,41 @@ async function saveHubWatchdog() {
     finally { if (btn) btn.disabled = false; }
 }
 window.loadHubWatchdog = loadHubWatchdog; window.saveHubWatchdog = saveHubWatchdog;
+
+// ── Hub TLS Verification (fleet-wide, pushed to spokes/agents) ───────────
+async function loadHubTlsVerify() {
+    try {
+        const r = await setupFetch('/setup/hub-tls-verify');
+        const d = await r.json().catch(() => ({}));
+        const sel = document.getElementById('htv-mode');
+        if (sel && d.mode) sel.value = d.mode;
+    } catch (e) { console.error('loadHubTlsVerify failed', e); }
+}
+
+async function saveHubTlsVerify() {
+    const sel = document.getElementById('htv-mode');
+    const mode = sel ? sel.value : 'install';
+    if (mode === 'off' && !confirm('Turn OFF hub certificate verification on every spoke/agent? This exposes the hub connection to man-in-the-middle attacks.')) { loadHubTlsVerify(); return; }
+    if (sel) sel.disabled = true;
+    const msg = document.getElementById('htv-msg');
+    if (msg) msg.textContent = 'Pushing to nodes…';
+    try {
+        const d = await apiJson('/setup/hub-tls-verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) });
+        const f = d.fanout || {};
+        const refused = f.refused || [];
+        let t = `Saved. Pushed to ${(f.pushed || []).length} node(s)`;
+        if ((f.queued || []).length) t += `, queued for ${f.queued.length} offline`;
+        if ((f.failed || []).length) t += `, failed: ${f.failed.join(', ')}`;
+        t += '.';
+        if (refused.length) t += ' Refused (hub cert does not verify from these nodes — they keep their current setting): ' + refused.map(x => x.spoke_id).join(', ') + '.';
+        if (msg) { msg.textContent = t; msg.className = 'text-xs mt-3 ' + (refused.length ? 'text-amber-600' : 'text-slate-400'); }
+        showToast('Hub TLS verification saved.', refused.length ? 'warning' : 'success');
+    } catch (e) {
+        if (msg) msg.textContent = '';
+        showToast('Save failed: ' + (e.message || e), 'error');
+    } finally { if (sel) sel.disabled = false; }
+}
+window.loadHubTlsVerify = loadHubTlsVerify; window.saveHubTlsVerify = saveHubTlsVerify;
 
 async function loadSpokeAlerts() {
     const wrap = document.getElementById('spoke-alerts-status');
