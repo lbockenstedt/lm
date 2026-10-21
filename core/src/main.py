@@ -410,6 +410,26 @@ def _sentinel_fingerprint(errs):
     return hashlib.sha256("\n".join(sorted(norm)).encode("utf-8", "ignore")).hexdigest()
 
 
+def _log_cs_op_failure(source: str, cs_type: str, data: Dict[str, Any]) -> None:
+    """Write a failed agent op (per-VM CS_PROGRESS result or a failed
+    CS_COMMAND_RESULT terminal) to hub.log, so "VM 90012 · failed" in the UI
+    has its reason on the hub instead of only on the Proxmox host's
+    pxmx-agent.log. Only whitelisted, non-secret fields are logged (never the
+    raw ``data``), and only on failure — successes stay silent."""
+    if not isinstance(data, dict):
+        return
+    status = str(data.get("status") or "").lower()
+    result = str(data.get("result") or "").lower()
+    if "failed" not in (status, result) and "error" not in (status, result):
+        return
+    reason = str(data.get("error") or data.get("message") or "no reason given")
+    logger.warning(
+        "CS op failed: %s %s action=%s vmid=%s name=%s cs_cmd_id=%s reason=%s",
+        source, cs_type, data.get("action"), data.get("vmid"),
+        data.get("name") or data.get("hostname") or "-",
+        data.get("cs_cmd_id"), reason[:500])
+
+
 class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, HenetSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, InstanceRelocateMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubMtlsEnforcementMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
@@ -2177,7 +2197,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         binding. Hostname comes from the relayed payload (the agent injects it).
 
         Security: the payload may carry a Proxmox token secret (CS_TOKEN_RESULT,
-        Phase F). This method never logs ``data`` — only type/hostname/tenant —
+        Phase F). This method never logs ``data`` — only type/hostname/tenant, plus the
+        whitelisted failure fields in ``_log_cs_op_failure`` —
         so secrets do not reach the hub log. Never raises: a missing/offline cs
         spoke or a dispatch failure must not break the agent→hub relay loop —
         this is enforced by an outer try/except because the caller fires the
@@ -2189,6 +2210,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             await self._relay_cs_event_inner(spoke_id, agent_id, cs_type, data)
         except Exception as exc:  # noqa: BLE001 — never let a background relay task raise
             logger.debug("CS_* relay: %s from %s raised: %s", cs_type, agent_id, exc)
+
 
     async def _relay_cs_event_inner(self, spoke_id: str, agent_id: str,
                                     cs_type: str, data: Dict[str, Any]) -> None:
@@ -2220,6 +2242,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # or a UI-initiated delete never shows "Deleting…" and the VM table
         # doesn't refresh until the next telemetry poll. Terminals are owned by
         # the CS_COMMAND_RESULT block below (delete completed => prune).
+        if cs_type in ("CS_PROGRESS", "CS_COMMAND_RESULT"):
+            _log_cs_op_failure(f"agent={agent_id}", cs_type, data)
         if cs_type == "CS_PROGRESS":
             _pact = (data or {}).get("action")
             _pstat = str((data or {}).get("status") or "").lower()
@@ -6291,6 +6315,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # for a live feed. Fire-and-forget passthrough (no ingest/state).
                 if payload.get("type") == "CS_PROGRESS":
                     _pdata = payload.get("data", {}) or {}
+                    _log_cs_op_failure(f"spoke={spoke_id}", "CS_PROGRESS", _pdata)
                     try:
                         _ptenant = self.state.get_spoke_tenant(pk)
                     except Exception:  # noqa: BLE001
