@@ -1773,7 +1773,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # path, or a spoke that exited before its first draining frame).
                 # Mark it draining for a short window so subsequent pushes skip the
                 # 5s live wait and queue directly instead of timing out again.
-                self.mark_draining(spoke_id, window=90.0)
+                # Only on a REAL timeout: re-marking on the draining short-circuit
+                # itself would refresh the window forever (every 45s reconcile
+                # tick < 90s window) and the spoke could never be live-pushed again.
+                if not result.get("draining"):
+                    self.mark_draining(spoke_id, window=90.0)
                 raise TimeoutError("no reply — spoke may be reconnecting")
             return {"status": "ok", "queued": False, "result": result}
         except Exception as exc:
@@ -1826,12 +1830,24 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             return
         if window is None:
             window = self.DRAIN_WINDOW_S
-        self._draining_spokes[spoke_id] = time.time() + window
+        self._draining_spokes[self._drain_key(spoke_id)] = time.time() + window
+
+    def _drain_key(self, spoke_id: str) -> str:
+        """Drain state is keyed by the spoke's PRIMARY key. Callers mix the raw
+        connect-id (CS_TELEMETRY ingest: ``cs-svr-01``) and the guid primary key
+        (push fan-out / SPOKE_UPDATE: ``a1e70438-…``); without normalizing, the
+        telemetry ``draining: false`` clear never matched the guid mark and a
+        drained cs spoke stayed short-circuited forever."""
+        try:
+            return self._primary_key(spoke_id)
+        except Exception:  # noqa: BLE001
+            return spoke_id
 
     def is_draining(self, spoke_id: str) -> bool:
         """True if the spoke is within its drain window (mid self-update)."""
         if not spoke_id:
             return False
+        spoke_id = self._drain_key(spoke_id)
         until = self._draining_spokes.get(spoke_id)
         if until is None:
             return False
@@ -1846,8 +1862,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     def clear_draining(self, spoke_id: str) -> None:
         """Clear drain state (the spoke reported ``draining: false`` after its
         restart — it's back for good)."""
-        if spoke_id and spoke_id in self._draining_spokes:
-            self._draining_spokes.pop(spoke_id, None)
+        if spoke_id:
+            self._draining_spokes.pop(self._drain_key(spoke_id), None)
 
     async def _drain_aware_config_push(self, spoke_id: str, command_type: str,
                                        data: Dict[str, Any], timeout: Optional[float] = None) -> Dict[str, Any]:
