@@ -783,6 +783,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             # live request_response so a stale drain window doesn't keep
             # suppressing the delivery. Falls through to push_or_queue_to_spoke
             # (live + queue-on-unreachable) below.
+            if force_live:
+                # request_response itself short-circuits while is_draining, so a
+                # force-live attempt must drop the (stale) drain mark first.
+                _clear = getattr(hub, "clear_draining", None)
+                if callable(_clear):
+                    _clear(sid)
             if callable(drain_aware) and not force_live:
                 try:
                     outcome = await drain_aware(sid, "CS_CONFIG_UPDATE", payload, timeout=30.0)
