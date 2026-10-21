@@ -336,3 +336,46 @@ def test_background_feed_polls_only_scopes_older_than_6h():
     assert len([c for c in hub.calls if c["cmd"] == "PXMX_DRIVE_HEALTH"]) >= 1
     assert hub.warm_fetched_at(_NS, "default|node=") > 0
     assert hub.warm_state(_NS, "default|node=") == "fresh"
+
+
+def _error_only_payload():
+    return {
+        "nodes": [{"node": "default", "drives": [], "status": "ERROR",
+                   "error": "Timed out waiting for spoke response",
+                   "summary": {"total_drives": 0, "healthy": 0, "warning": 0,
+                               "critical": 0, "unknown": 0}}],
+        "summary": {"total_drives": 0, "healthy": 0, "warning": 0,
+                    "critical": 0, "unknown": 0},
+        "spoke_connected": True,
+    }
+
+
+def test_error_only_cache_entry_is_bypassed_for_a_live_poll():
+    """Live bug (CS-hosted nodes): a poll taken while the spokes were stuck
+    stored an all-ERROR aggregate, and cache-first then served "Timed out"
+    for 6h after the spokes had recovered."""
+    hub = _MockHub(bound_spoke="pxmx-1")
+    hub.seed_warm(_NS, "t1|node=", _error_only_payload(), age_s=60)
+    body = _build_client(hub, tenant="t1").get(
+        "/api/pxmx/drive-health?tenant=t1").json()
+    assert len([c for c in hub.calls if c["cmd"] == "PXMX_DRIVE_HEALTH"]) == 1
+    assert [n["status"] for n in body["nodes"]] == ["SUCCESS"]
+    assert hub.warm_get(_NS, "t1|node=")["nodes"][0]["status"] == "SUCCESS"
+
+
+def test_error_only_result_is_not_warm_cached():
+    hub = _MockHub(bound_spoke="pxmx-1")
+    hub.drive_response = {"status": "ERROR", "node": "pve1",
+                          "message": "Timed out waiting for spoke response"}
+    _build_client(hub, tenant="t1").get("/api/pxmx/drive-health?tenant=t1")
+    assert hub.warm_state(_NS, "t1|node=") == "missing"
+
+
+def test_background_feed_retries_a_fresh_error_only_entry():
+    import asyncio
+    hub = _MockHub(bound_spoke="pxmx-1")
+    _build_client(hub, tenant="default")
+    hub.seed_warm(_NS, "default|node=", _error_only_payload(), age_s=60)
+    asyncio.run(hub.pxmx_drive_health_feed_once())
+    assert len([c for c in hub.calls if c["cmd"] == "PXMX_DRIVE_HEALTH"]) >= 1
+    assert hub.warm_get(_NS, "default|node=")["nodes"][0]["status"] == "SUCCESS"
