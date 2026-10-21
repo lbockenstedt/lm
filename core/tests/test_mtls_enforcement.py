@@ -461,3 +461,103 @@ def test_ratchet_marker_is_bound_to_the_hub_host(tmp_path):
     d = _Dialer(tmp_path, False)
     _run(d._resolve_auto_tls_verify())
     assert d._tls_verify is False
+
+
+# ── fleet hub-TLS-verify policy (SPOKE_SET_TLS_VERIFY) ──────────────────────
+
+class _PolicySpoke:
+    _handle_set_tls_verify = BaseControlPlane._handle_set_tls_verify
+    _tls_mode_from_env = staticmethod(BaseControlPlane._tls_mode_from_env)
+    _hub_tls_policy_path = BaseControlPlane._hub_tls_policy_path
+    _read_hub_tls_policy = BaseControlPlane._read_hub_tls_policy
+    _hub_url_is_loopback = staticmethod(BaseControlPlane._hub_url_is_loopback)
+    _mtls_write_if_changed = staticmethod(BaseControlPlane._mtls_write_if_changed)
+
+    def __init__(self, d, mode="auto", probe=True, url="wss://hub.example.com:443"):
+        self.d = str(d)
+        self.hub_url = url
+        self.parent_spoke_id = ""
+        self._tls_verify_mode = mode
+        self._probe = probe
+        self.restarts = 0
+
+    def _mtls_material_dir(self):
+        return self.d
+
+    async def _probe_hub_tls_verify(self):
+        return self._probe
+
+    async def _deferred_restart_exit(self):
+        self.restarts += 1
+
+
+def _apply(sp, mode):
+    async def go():
+        r = await sp._handle_set_tls_verify({"mode": mode})
+        await asyncio.sleep(0)
+        return r
+    return _run(go())
+
+
+def test_policy_on_persists_and_restarts_once(tmp_path):
+    sp = _PolicySpoke(tmp_path)
+    assert _apply(sp, "on")["effective"] == "on"
+    assert (tmp_path / "hub-tls-policy").read_text().strip() == "on"
+    assert sp.restarts == 1
+    assert _apply(sp, "on")["message"] == "already current"
+    assert sp.restarts == 1
+
+
+def test_policy_on_refused_when_hub_cert_does_not_verify(tmp_path):
+    sp = _PolicySpoke(tmp_path, probe=False)
+    r = _apply(sp, "on")
+    assert r["status"] == "ERROR" and r["effective"] == "auto"
+    assert not (tmp_path / "hub-tls-policy").exists() and sp.restarts == 0
+
+
+def test_policy_install_clears_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("LM_HUB_TLS_VERIFY", "0")
+    sp = _PolicySpoke(tmp_path, mode="on")
+    (tmp_path / "hub-tls-policy").write_text("on\n")
+    r = _apply(sp, "install")
+    assert r["effective"] == "auto" and sp.restarts == 1
+    assert not (tmp_path / "hub-tls-policy").exists()
+
+
+def test_policy_skips_loopback_and_role_subspokes(tmp_path):
+    sp = _PolicySpoke(tmp_path, url="wss://127.0.0.1:443")
+    assert "skipped" in _apply(sp, "on")["message"]
+    sp2 = _PolicySpoke(tmp_path)
+    sp2.parent_spoke_id = "agent-x"
+    assert "skipped" in _apply(sp2, "off")["message"]
+    assert sp.restarts == sp2.restarts == 0
+
+
+def test_policy_file_overrides_env_at_startup(tmp_path, monkeypatch):
+    monkeypatch.setenv("LM_HUB_TLS_VERIFY", "0")
+    sp = _PolicySpoke(tmp_path)
+    (tmp_path / "hub-tls-policy").write_text("on\n")
+    assert sp._read_hub_tls_policy() == "on"
+    (tmp_path / "hub-tls-policy").write_text("bogus\n")
+    assert sp._read_hub_tls_policy() == ""
+
+
+def test_hub_fanout_reports_refusals_and_skips_role_subspokes():
+    h = main.LabManagerHub.__new__(main.LabManagerHub)
+    h.approved_modules = {"a": True, "b": True, "a-netbox": True, "c": False}
+    h._is_role_subspoke = lambda sid: sid == "a-netbox"
+    sent = []
+
+    async def _poq(sid, cmd, data):
+        sent.append((sid, cmd, data))
+        if sid == "b":
+            return {"status": "ok", "queued": False,
+                    "result": {"payload": {"data": {"status": "ERROR", "message": "no verify"}}}}
+        return {"status": "ok", "queued": False, "result": {"status": "SUCCESS"}}
+
+    h.push_or_queue_to_spoke = _poq
+    out = _run(h.push_tls_verify_to_all_spokes("on"))
+    assert out["pushed"] == ["a"]
+    assert out["refused"] == [{"spoke_id": "b", "message": "no verify"}]
+    assert {s for s, _, _ in sent} == {"a", "b"}
+    assert all(c == "SPOKE_SET_TLS_VERIFY" and d == {"mode": "on"} for _, c, d in sent)
