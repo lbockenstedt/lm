@@ -1781,9 +1781,17 @@ def register(app, hub, ctx):
             "spoke_connected": True,
             "cached_at": now_ts,
         }
-        if aggregated_nodes:
+        # Error-only results (every node timed out / failed) must not be warm-
+        # cached: they'd be served as fresh for 6h and the background feed
+        # would not retry, pinning the tab to "Timed out" long after the
+        # spokes recovered.
+        if _has_real_drive_data(res):
             await hub.warm_set("pxmx_drive_health", warm_key, res)
         return res
+
+    def _has_real_drive_data(res):
+        nodes = (res or {}).get("nodes") if isinstance(res, dict) else None
+        return any(isinstance(n, dict) and n.get("status") != "ERROR" for n in (nodes or []))
 
     # Drive health/SSD wear changes slowly: the hub polls it in the background
     # every 6h per tenant scope and the Diagnostics tab is served from that cache
@@ -1803,7 +1811,8 @@ def register(app, hub, ctx):
         for tid in sorted(tenants | {"default"}):
             warm_key = f"{tid}|node="
             fetched = hub.warm_fetched_at("pxmx_drive_health", warm_key)
-            if fetched and time.time() - fetched < _DRIVE_HEALTH_FEED_S:
+            if (fetched and time.time() - fetched < _DRIVE_HEALTH_FEED_S
+                    and _has_real_drive_data(hub.warm_get("pxmx_drive_health", warm_key))):
                 continue
             try:
                 spokes = list(hub.get_hypervisor_spokes_for_tenant(tid) or [])
@@ -1911,7 +1920,7 @@ def register(app, hub, ctx):
             state = hub.warm_state("pxmx_drive_health", warm_key)
             if state != "missing":
                 cached = hub.warm_get("pxmx_drive_health", warm_key)
-                if isinstance(cached, dict):
+                if isinstance(cached, dict) and _has_real_drive_data(cached):
                     out = dict(cached)
                     if state == "expired":
                         # >24h: the 6h background poll has been failing the
