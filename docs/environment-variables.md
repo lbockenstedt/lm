@@ -71,6 +71,7 @@ Consolidated reference for every environment variable read across the LM system.
 | `LM_BRANCH` | lm branch for install_menu bootstrap | main | `install_menu.sh` |
 | `CS_POLL_INTERVAL_S` / `CS_USB_CONFIG_INTERVAL_S` | CS bridge poll / USB-sync intervals | 5 / 60 | `gateway/cs_bridge.py` |
 | `APP_VERSION` / `APP_BRANCH` | Simulations routes version stamps | — | `simulations/routes.py` |
+| `LM_UPDATE_GATE_TZ` | IANA timezone for the auto-update maintenance window when `global_config.update_gate.timezone` is unset (hubs run in UTC, so 02:00 is otherwise 02:00 UTC) | hub system clock | `core/src/main.py` |
 
 ## generic-agent / agent-spoke
 
