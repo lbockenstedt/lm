@@ -73,8 +73,10 @@ correct between the daily checks.
 
 ## Alert rules
 
-The **Alert Rules** card at the bottom of the Cert Monitor view works like the
-Simulation module's realtime alert rules. Each rule has:
+The **Cert Monitor Alert Rules** card lives in the **Reports** view, below the
+Realtime Alert Rules. It is shown only to a Global Admin while the monitor is
+enabled, and works like the Simulation module's realtime alert rules. Each rule
+has:
 
 - a trigger (see the table below)
 - an optional list of services to watch (no services ticked = all)
