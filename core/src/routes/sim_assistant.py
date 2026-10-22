@@ -50,6 +50,7 @@ reports that, mirroring /api/help/available.
 import base64
 import json
 import re
+import time
 
 from api import HTTPException, Request, logger, os
 
@@ -471,10 +472,148 @@ def register(app, hub, ctx):
             logger.warning("sim_assistant _final_answer synthesis failed: %s", e)
         return ""
 
+    # ── Interactive sessions (AppBuilder-owned) ─────────────────────────────
+    # The interactive assistant runs ENTIRELY on AppBuilder (ab/sim_session.py):
+    # a read-only GitHub Copilot CLI session over the cs + lm repos, AB's
+    # skills, AGENTS.md rules and feature boundaries, and a structured spec
+    # that, on submit, AB files as one marker-gated enhancement issue per repo
+    # for its own feature_drive -> feature_build pipeline. The hub only gates
+    # access and relays SIM_SESSION_* commands over the existing WS. An older
+    # AB that doesn't know these commands never answers the PING, so
+    # /available reports sessions=false and the WebUI keeps the legacy
+    # /chat flow above.
+    _caps = {"ts": 0.0, "agent": None, "sessions": False, "reason": ""}
+
+    async def _sessions_capability(agent):
+        now = time.time()
+        if _caps["agent"] == agent and now - _caps["ts"] < (60 if _caps["sessions"] else 20):
+            return _caps["sessions"], _caps["reason"]
+        ok, reason = False, ""
+        try:
+            res = await hub.request_response(agent, "SIM_SESSION_PING", {}, timeout=8.0)
+            data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+            if isinstance(data, dict) and data.get("status") == "SUCCESS":
+                ok = bool(data.get("ready"))
+                reason = "; ".join(data.get("reasons") or [])
+            else:
+                reason = "AppBuilder does not support interactive sessions (update AppBuilder)"
+        except Exception as e:  # noqa: BLE001
+            reason = f"capability probe failed: {e}"
+        _caps.update(ts=now, agent=agent, sessions=ok, reason=reason)
+        return ok, reason
+
+    def _session_owner(request):
+        sess = ctx._session_user(request)
+        if not ctx._has_cs_access(sess):
+            raise HTTPException(status_code=403, detail="Simulations access required")
+        s = sess or {}
+        u = s.get("user") if isinstance(s.get("user"), dict) else {}
+        user = s.get("user_id") or s.get("username") or u.get("username") or u.get("id")
+        try:
+            tenant = ctx._resolve_tenant(request) or ""
+        except Exception:  # noqa: BLE001
+            tenant = ""
+        if tenant == "default":
+            tenant = ""
+        # auth_type/ip are audit-only (recorded on submitted specs so an in-place
+        # change to a simulation traces back to the LM login); AppBuilder matches
+        # session ownership on user + tenant.
+        return sess, {"user": str(user or "?"), "tenant": str(tenant), "admin": bool(ctx._is_admin(sess)),
+                      "auth_type": str(u.get("auth_type") or ""), "ip": str(s.get("client_ip") or "")}
+
+    async def _relay(cmd, data, timeout=20.0):
+        agent = _ab_agent()
+        if not agent:
+            raise HTTPException(status_code=409, detail="Simulation assistant unavailable — "
+                                                        "the AppBuilder agent is not connected.")
+        try:
+            res = await hub.request_response(agent, cmd, data, timeout=timeout)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("sim_assistant %s relay failed: %s", cmd, e)
+            raise HTTPException(status_code=502, detail=f"Simulation assistant error: {e}")
+        out = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+        if not isinstance(out, dict):
+            raise HTTPException(status_code=502, detail="Simulation assistant error")
+        if out.get("status") != "SUCCESS":
+            msg = str(out.get("message") or "Simulation assistant error")
+            if out.get("code") == "not_found":
+                raise HTTPException(status_code=404, detail="Session not found")
+            if "Timed out" in msg:
+                raise HTTPException(status_code=504, detail="AppBuilder did not answer in time — retry")
+            raise HTTPException(status_code=409, detail=msg)
+        out = dict(out)
+        out.pop("status", None)
+        return out
+
+    async def _json_message(request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        msg = str((body or {}).get("message") or "").strip() if isinstance(body, dict) else ""
+        if not msg:
+            raise HTTPException(status_code=400, detail="message is required")
+        return msg
+
     @app.get("/api/sim-assistant/available")
-    async def sim_assistant_available():
-        """Whether the simulation build assistant is usable (ab connected)."""
-        return {"available": _ab_agent() is not None}
+    async def sim_assistant_available(request: Request):
+        """Whether the assistant is usable (ab connected) and whether AB offers
+        interactive sessions; can_submit tells the UI whether this user may hand
+        a finished spec straight to AppBuilder (Global Admin) or must file it
+        for admin approval."""
+        agent = _ab_agent()
+        if agent is None:
+            return {"available": False, "sessions": False}
+        sessions, reason = await _sessions_capability(agent)
+        try:
+            can_submit = bool(ctx._is_admin(ctx._session_user(request)))
+        except Exception:  # noqa: BLE001
+            can_submit = False
+        return {"available": True, "sessions": sessions, "sessions_reason": reason,
+                "can_submit": can_submit}
+
+    @app.post("/api/sim-assistant/session")
+    async def sim_session_start(request: Request):
+        _sess, owner = _session_owner(request)
+        msg = await _json_message(request)
+        out = await _relay("SIM_SESSION_START", {"owner": owner, "message": msg})
+        logger.info("sim_assistant: session %s started by %s", out.get("session_id"), owner["user"])
+        return out
+
+    @app.get("/api/sim-assistant/session/{session_id}")
+    async def sim_session_poll(session_id: str, request: Request, since: int = 0):
+        _sess, owner = _session_owner(request)
+        return await _relay("SIM_SESSION_POLL",
+                            {"owner": owner, "session_id": session_id, "since": since})
+
+    @app.post("/api/sim-assistant/session/{session_id}/reply")
+    async def sim_session_reply(session_id: str, request: Request):
+        _sess, owner = _session_owner(request)
+        msg = await _json_message(request)
+        return await _relay("SIM_SESSION_REPLY",
+                            {"owner": owner, "session_id": session_id, "message": msg})
+
+    @app.post("/api/sim-assistant/session/{session_id}/cancel")
+    async def sim_session_cancel(session_id: str, request: Request):
+        _sess, owner = _session_owner(request)
+        return await _relay("SIM_SESSION_CANCEL", {"owner": owner, "session_id": session_id})
+
+    @app.post("/api/sim-assistant/session/{session_id}/submit")
+    async def sim_session_submit(session_id: str, request: Request):
+        """Hand the finished spec to AppBuilder to build. Global Admin only —
+        this replaces the admin-approval step that /api/bug-report feature
+        requests go through, so it is gated on the same role that approves
+        them. Everyone else files the spec via /api/bug-report (pending
+        approval)."""
+        sess, owner = _session_owner(request)
+        if not ctx._is_admin(sess):
+            raise HTTPException(status_code=403, detail="Only a Global Admin can send a spec "
+                                                        "straight to AppBuilder — file it for approval instead.")
+        out = await _relay("SIM_SESSION_SUBMIT", {"owner": owner, "session_id": session_id},
+                           timeout=60.0)
+        logger.info("sim_assistant: session %s submitted by %s -> %s", session_id, owner["user"],
+                    [s.get("url") for s in out.get("submitted") or []])
+        return out
 
     @app.post("/api/sim-assistant/chat")
     async def sim_assistant_chat(request: Request):

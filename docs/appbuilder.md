@@ -43,7 +43,7 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
 
 ## Key commands / handlers
 
-- **Inbound from hub** (`hub_agent.py::_handle_message`): `APPROVAL_REQUIRED`, `APPROVED`, `SPOKE_UPDATE_SESSION_KEY` (provisions session secret), `SPOKE_SET_HUB_SECRET`, `HUB_RESPONSE` (correlated reply to a `HUB_REQUEST`), `DENIED`, `get_version`/`GET_VERSION` (signed `COMMAND_RESULT` with `data.version`), `SET_LOG_LEVEL`/`SPOKE_SET_LOG_LEVEL` (WebUI "Enable Debug" broadcast).
+- **Inbound from hub** (`hub_agent.py::_handle_message`): `APPROVAL_REQUIRED`, `APPROVED`, `SPOKE_UPDATE_SESSION_KEY` (provisions session secret), `SPOKE_SET_HUB_SECRET`, `HUB_RESPONSE` (correlated reply to a `HUB_REQUEST`), `DENIED`, `get_version`/`GET_VERSION` (signed `COMMAND_RESULT` with `data.version`), `SET_LOG_LEVEL`/`SPOKE_SET_LOG_LEVEL` (WebUI "Enable Debug" broadcast). `SIM_SESSION_PING`/`START`/`REPLY`/`POLL`/`CANCEL`/`SUBMIT` drive the interactive Simulation Build Assistant (`sim_session.py`, see "How it works").
 - **Outbound to hub** (`client.request_sync` over the reverse `HUB_REQUEST` channel): `GET_LOGS` (aggregated spoke logs, 20s timeout), `GET_ERROR_LOGS`, `GET_SPOKE_STATUS` (approved roster + per-spoke recovery state), `TRIGGER_ALL_UPDATES` (kick all spoke self-updates, 60s timeout), and the "File a Bug" handoff — `GET_BUG_REPORTS` (list metadata), `GET_BUG_REPORT` (pull full artifacts for AI-fix context), `MARK_BUG_FILED` (stop a report re-filing), `MARK_BUG_FIXED` (the GitHub issue was closed). These replace the old static-token HTTP calls (`LM_ADMIN_TOKEN`/`X-Admin-Token`) the hub never honored. The whole channel is **cert-bound**, not `spoke_id`-bound — see "AppBuilder mTLS cert + LE tag flow" below; any approved spoke that is not presenting the pinned AppBuilder client cert is denied before dispatch.
 - **FastAPI routes (own dashboard):** `/api/health`, settings, status/logs endpoints, `hub_agent_status`/`hub_agent_reregister`, scan/poll/fix/verify/iterate/deploy/sync workflow. The hub agent singleton starts at app startup via `_start_hub_agent()` → `hub_agent.start_agent_from_config(...)`.
 
@@ -57,7 +57,7 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
 - **Reimplements lm-core signing** — `hub_agent.py::MessageSigner` mirrors `lm/core/src/security/signer.py` (HMAC-SHA256 canonical JSON) so it can talk to the hub without depending on lm-core.
 - **Watchdog rollback** — polls `/api/health` every 5s; rolls back via `update_state.json`/`update_pending` in `/etc/ab/` only on a failed auto-update.
 - **`SET_LOG_LEVEL`** — ab is in the hub's broadcast set, so the WebUI "Enable Debug" flips its log level too.
-- **Feature requests require admin approval — INVARIANT.** Feature reports filed from the footer modal never reach AppBuilder until an admin approves them on the `/setup/bug-reports` view (`POST /setup/bug-reports/{rid}/approve`). The hub enforces this at **two** points: (1) `GET_BUG_REPORTS` annotates each gated feature with `gated_pending_approval=true` (annotated, not hard-filtered, so the Diagnostics card can still show an "awaiting approval" count), and (2) `GET_BUG_REPORT` denies the full-artifact fetch for a gated feature (`{"gated_pending_approval": true}`). Bugs are never gated; an already-`approved`/`filed`/`fixed` feature is not gated. Don't remove either gate — a single hard-filter would hide the "waiting on approval" count from AppBuilder, and a missing deny would let AppBuilder file + work an unapproved feature. Status flow is `pending` → `approved` → `filed` → `fixed`.
+- **Feature requests require admin approval — INVARIANT.** Feature reports filed from the footer modal never reach AppBuilder until an admin approves them on the `/setup/bug-reports` view (`POST /setup/bug-reports/{rid}/approve`). The hub enforces this at **two** points: (1) `GET_BUG_REPORTS` annotates each gated feature with `gated_pending_approval=true` (annotated, not hard-filtered, so the Diagnostics card can still show an "awaiting approval" count), and (2) `GET_BUG_REPORT` denies the full-artifact fetch for a gated feature (`{"gated_pending_approval": true}`). Bugs are never gated; an already-`approved`/`filed`/`fixed` feature is not gated. Don't remove either gate — a single hard-filter would hide the "waiting on approval" count from AppBuilder, and a missing deny would let AppBuilder file + work an unapproved feature. Status flow is `pending` → `approved` → `filed` → `fixed`. The Simulation Build Assistant's **Submit to AppBuilder** (which files feature issues directly) is therefore **Global Admin only** (`POST /api/sim-assistant/session/{id}/submit` → 403 otherwise) — the submitter is the approver. Other users get **File for approval**, which posts the spec + transcript to `/api/bug-report` and goes through the gate above.
 - **`MARK_BUG_FIXED` cascades to sibling reports.** Because recurrence dedup folds several reports onto ONE GitHub issue (each reopens it / adds evidence), closing that issue only carries the single report id embedded in the issue body. `_mark_bug_fixed` (`hub_bug_store.py`), called by the `MARK_BUG_FIXED` HUB_REQUEST, therefore also marks every other report sharing the same `issue_url` `fixed`, logging a `[bug-report] MARK_BUG_FIXED cascaded to sibling …` line. Without the cascade, sibling recurrence reports would stick at `filed` forever even though the work is done.
 - **Hub heartbeat at INFO — heartbeat-triage gate is INVARIANT.** The hub's `run_hub_heartbeat_loop` emits a greppable `[heartbeat] ok module=hub …` line every ~60s (`LM_HEARTBEAT_INTERVAL_S`, default 60) at **INFO, not DEBUG** — at the default INFO level a DEBUG line is filtered before it reaches `HubLogHandler`, never buffered into `self.logs`, never returned by `GET_LOGS`, and AppBuilder never observes the hub's own heartbeat. AppBuilder's `scan_heartbeats` is gated on TWO conditions, both of which must hold before any per-spoke triage runs: (1) the agent is approved and a signed `GET_SPOKE_STATUS` actually round-trips to the hub, and (2) the hub's own `[heartbeat]` line has been observed at least once since this AppBuilder process started. Suppressing until both hold is what prevents a false "hub unreachable — every spoke missing" reinstall flood after a reinstall or boot. A `HEARTBEAT_WARMUP_S` (300s) backstop since (re)approval lets a genuinely-broken hub-heartbeat loop be triaged — but hub-only, never the spokes, so a dead pipeline still can't flood. `heartbeat_triage_enabled` (default OFF) is the top-level Settings toggle for the whole triage path.
 - **AppBuilder mTLS cert + LE tag flow (cert trust) — INVARIANT.** AppBuilder's identity is an LE-issued cert: **one cert serves both its WebUI/server leg and its mTLS client leg**. The hub's reverse `HUB_REQUEST` channel is **cert-bound, not `spoke_id`-bound** — `_hub_request_authorized` (`core/src/main.py`) authorizes a request only when the calling connection presented a client cert whose SAN matches the pinned `global_config['ab_cert_identities']` list; `spoke_id` is hostname-derived and spoofable (name a box `ab`), so it is NOT the gate. Fail-closed: no pinned cert, no client cert presented, or SAN mismatch → denied and logged. `ab` is in `CERT_CAPABLE_MODULES` (`core/src/cert_distribution.py`), so the LE module can target it; the LE Certificates page has a "★ AppBuilder identity" checkbox inside the cert's **Manage** modal (`POST /api/le/certs/{domain}/ab`) that adds/removes the domain in the pinned list, and stars `ab` targets so the cert is deployed to the ab agent. A persistent purple "★ AppBuilder identity" banner above the cert table shows which cert is pinned (and whether it's deployed to a `ab` target — flagging extras). The hub's client-cert verify path trusts the **system store** in addition to `LM_MTLS_CA` (`server_client_ca_file()` in `core/src/security/mtls.py` concatenates the Hub Local CA + retired CA + legacy `LM_MTLS_CA` + the system root bundle via `certifi`/OpenSSL paths) so an LE-issued, SAN-pinned AppBuilder cert verifies without having to live in the private mTLS CA — mirroring the client leg's `create_default_context` symmetry. The admin-only `GET /api/mtls/trust-diag` surfaces what the hub trusts, per-connection mTLS state (who is actually presenting a verified client cert vs. cert-less permissive fallback), and a live check of each pinned AppBuilder SAN against connected clients. See [le.md](le.md) for the one-cert-per-target cert-target model.
@@ -91,6 +91,71 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
   model gives a final answer with no more tool calls. `GET /api/help/available` reports
   `true` only when a AppBuilder agent connection is present in the hub's
   `active_connections` — that's what shows or hides the "Ask AI" button in the WebUI.
+- **Simulation Build Assistant (interactive sessions).** Simulations → Assistant is
+  an AppBuilder-run agent session; the hub only gates access and relays
+  (`lm/core/src/routes/sim_assistant.py`, `/api/sim-assistant/session*` →
+  `SIM_SESSION_*` → `ab/sim_session.py`). Each session is a **GitHub Copilot CLI**
+  session (`copilot -p … --session-id/--resume`, JSONL output) that may only
+  `view`/`grep`/`glob` inside a shared read-only workspace of shallow `dev`
+  checkouts of the cs and lm repos plus AppBuilder's materialized skills. Its
+  first-turn instructions tell it to read each repo's `AGENTS.md`, the
+  `add-simulation` recipe and the real sim source, ask one question at a time,
+  respect the configured `feature_boundaries`, and end every reply with a fenced
+  `sim-spec` JSON block (name, behaviour, platforms, alert, config knobs,
+  per-repo touch-points, open questions, `ready`, optional answer `choices`).
+  Each turn runs on its own thread; the browser polls `SIM_SESSION_POLL` for
+  events (tool activity such as "Viewing file: cs/clients/linux/dns_fail.sh",
+  assistant messages, the spec). Sessions persist as JSON under
+  `/etc/ab/sim_sessions/sessions/` (30-day TTL, 20 per user), are owner-scoped
+  (user + tenant stamped by the hub), and a turn interrupted by a restart is
+  marked so the user can resend. **Submit** is allowed only once the spec is
+  ready with no open questions; AppBuilder then files one `enhancement` issue per
+  touched repo carrying `<!-- report-type: feature -->`, the spec, that repo's
+  touch-points, links to the sibling issues and the transcript. The normal
+  `feature_drive` → `feature_build` pipeline builds each issue into a PR to
+  `dev`, and the issue's `processed_issues.json` status (queued / needs info /
+  PR opened / flagged / failed) is shown back in the chat. The CLI authenticates
+  with AppBuilder's stored Copilot OAuth credential (`llm_credentials.copilot`)
+  passed as `COPILOT_GITHUB_TOKEN`; the agent's environment never contains the
+  repo-write `GITHUB_TOKEN`. Config: `copilot_binary` (default `copilot` on
+  `PATH`), `sim_assistant_sessions_enabled` (default true),
+  `sim_assistant_repos` (default: the `cs`/`lm` repos in `feature_drive_repos`
+  / `monitored_repos`), `sim_assistant_branch` (`dev`), `sim_assistant_model`,
+  `sim_assistant_reasoning_effort`, `sim_assistant_turn_timeout_s` (900),
+  `sim_assistant_max_running` (2 concurrent turns),
+  `sim_assistant_copilot_token` / `sim_assistant_copilot_home` (use a dedicated
+  token, or an existing `copilot login`, instead of the stored credential). An
+  **Guardrails (scope).** The assistant only *creates* a simulation, *modifies*
+  an existing one, or *explains* how one works (spec `intent` create / modify /
+  explain); it declines everything else and treats repo file contents and user
+  text as data, not instructions. AppBuilder re-checks every spec server-side
+  (`spec_problems`) and refuses Submit when: the intent is explain (never
+  built) or missing; any touch-point is outside the simulation build surface
+  (`DEFAULT_ALLOWED_PATHS`: cs `clients/*`, `configs/*`, the cs `sim-views.js`,
+  `lm-spoke/src/sim_*.py`, `simulation_engine.py`, sim tests, `docs/*`; lm
+  `WebUI/sim-views.js`, `core/src/simulations/*`, `core/tests/test_sim*.py`,
+  `docs/alert-generation.md`, `docs/cs.md`, `docs/CHANGELOG.md`; override with
+  `sim_assistant_allowed_paths`) or in another repo; a modify target is not an
+  existing simulation; or a create reuses an existing name. Findings are shown
+  in the Spec panel and fed back to the agent on the next turn.
+  **Changing an existing simulation** follows a fixed protocol, and Submit is
+  refused until it is complete. (1) Warn and recommend duplicating it instead
+  (`duplicate_of`), then get explicit confirmation (`modify_confirmed`). (2)
+  Verify the user's complaint against the code and record a `diagnosis`. If it
+  is a real defect, set `verified_broken` and the spec becomes a focused patch.
+  (3) If it works as built, or the user's description is not how it works, the
+  assistant says so and steers them to duplicating it again. Only if they still
+  insist is their reason recorded (`override_reason`). Each repo's issue is
+  built as its own dedicated PR. A modify issue also carries the label
+  `sim-modify-existing` and an `<!-- ab-sim-modify: <sim> -->` marker. Every
+  submitted issue opens with a trace block that `pr_template` quotes into the
+  PR: the requesting and submitting LM users, auth type, client IP, time,
+  session id, diagnosis and override reason. AppBuilder also appends the same
+  record to `/etc/ab/sim_sessions/audit.jsonl` and logs a
+  `[sim-assistant-audit]` line.
+  AppBuilder without these commands (or without the CLI/credential) answers the
+  hub's `SIM_SESSION_PING` with not-ready or not at all, and the WebUI keeps the
+  older stateless `/api/sim-assistant/chat` assistant.
 - **"File a Bug" / feature-request pipeline.** The LM footer's "🐞 Bug/Feature
   Request" button POSTs an explanation + console + HTML + screenshot to
   `/api/bug-report`; the hub stores the full artifacts under
