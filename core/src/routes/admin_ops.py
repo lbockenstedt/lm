@@ -520,17 +520,30 @@ def register(app, hub, ctx):
         """Trigger the fleet self-update (the Setup → Sync 'Sync now' action):
         pull the hub's provisioning repos, run the version-gated hub pull, and
         fan ``SPOKE_UPDATE`` out to every approved spoke so they self-pull and
-        restart on a version change. ``force=True`` bypasses the maintenance
-        window (operator-initiated). Use this to push new agent/spoke code
-        (e.g. the agent-secret mint) out to cs-svr-06 before approving."""
+        restart on a version change. Use this to push new agent/spoke code
+        (e.g. the agent-secret mint) out to cs-svr-06 before approving.
+
+        The HUB restart is GATED by default (update_gate: deferred while a user
+        is logged in, applied in the maintenance window). This loopback route is
+        scripted/automation-driven, and forcing it booted logged-in operators
+        mid-day on every deploy. Pass ``{"force": true}`` (or ``?force=true``)
+        only when an immediate hub restart is genuinely required."""
         _guard(request)
+        force = request.query_params.get("force", "").lower() in ("1", "true", "yes")
         try:
-            result = await hub.run_repo_sync_all(force_spokes=True, force=True)
+            body = await request.json()
+            if isinstance(body, dict) and body.get("force") is True:
+                force = True
+        except Exception:  # noqa: BLE001 — empty / non-JSON body → defaults
+            pass
+        try:
+            result = await hub.run_repo_sync_all(force_spokes=True, force=force)
         except Exception as e:
             logger.exception("admin_ops: self-update failed")
             raise HTTPException(status_code=500, detail=str(e))
-        logger.warning("admin_ops: self-update driven via loopback")
-        return {"status": "ok", "result": result}
+        logger.warning("admin_ops: self-update driven via loopback (hub restart %s)",
+                       "FORCED" if force else "gated by update_gate")
+        return {"status": "ok", "force": force, "result": result}
 
     @app.post("/admin/ops/force-dhcp-dns-sync")
     async def admin_ops_force_dhcp_dns_sync(request: Request):
