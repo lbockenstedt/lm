@@ -2974,7 +2974,9 @@ async function updateStatus() {
         _updateMetrics(statusData);
         _applyHubHealth(diagData);
         _updateSpokeCount(approvedSpokes);
+        window.__lmNavArgs = [allSpokes, connections];
         _rebuildMainNav(allSpokes, connections);
+        _refreshCertMonFlag();
         await _renderDashboardLists(allSpokes, approvedSpokes, connections);
     } catch (err) {
         console.error('Status update error:', err);
@@ -3608,6 +3610,13 @@ function _rebuildMainNav(allSpokes, connections) {
             <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg></div>
             <span>Security</span>
         </div>`;
+    // Cert Expiry Monitor — Global Admin only, and only once switched on in
+    // System → General (window.__lmCertMonEnabled, from /api/certmon/status).
+    const _certMonNavHtml = () => `
+        <div onclick="setView('certmon')" id="nav-certmon" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">
+            <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12.75L11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 01-1.043 3.296 3.745 3.745 0 01-3.296 1.043A3.745 3.745 0 0112 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 01-3.296-1.043 3.745 3.745 0 01-1.043-3.296A3.745 3.745 0 013 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 011.043-3.296 3.746 3.746 0 013.296-1.043A3.746 3.746 0 0112 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 013.296 1.043 3.746 3.746 0 011.043 3.296A3.745 3.745 0 0121 12z"></path></svg></div>
+            <span>Cert Monitor</span>
+        </div>`;
     // Credential Vault — hub-side per-tenant secret locker (routes/cred_vault.py,
     // /tenant/cred-vault/*). Reachable by a tenant-admin (own-tenant buckets) OR
     // a Global Admin (any tenant + the __admin__ infrastructure slot); the
@@ -3627,6 +3636,7 @@ function _rebuildMainNav(allSpokes, connections) {
         ${isAdmin() ? adminSettings : ''}
         ${isAdmin() ? adminLogs : ''}
         ${isAdmin() ? _securityNavHtml() : ''}
+        ${(isAdmin() && window.__lmCertMonEnabled) ? _certMonNavHtml() : ''}
         ${(isAdmin() || isTenantAdmin()) ? _credVaultNavHtml() : ''}
         ${isAdmin() ? _templateRepoNavHtml() : ''}
         ${(isAdmin() || isTenantAdmin()) ? _bugReportNavHtml() : ''}
@@ -3883,6 +3893,10 @@ async function setView(viewId) {
     // Credential Vault — reachable by a tenant-admin (own-tenant buckets) or a
     // Global Admin; the server enforces per-bucket reach + pass-phrase on top.
     if (viewId === 'credvault' && !(isTenantAdmin() || isAdmin())) {
+        return;
+    }
+    // Cert Expiry Monitor — Global Admin only, and only while enabled.
+    if (viewId === 'certmon' && !(isAdmin() && window.__lmCertMonEnabled)) {
         return;
     }
     // Directory (LDAP) has no MODULE_CLASSES entry (standalone view), so gate its
@@ -4487,6 +4501,15 @@ function _viewTemplate(viewId) {
   <div id="security-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
 </div>`;
 
+        case 'certmon':
+            return `<div class="space-y-4">
+  <div>
+    <h2 class="text-xl font-bold text-slate-800">Cert Expiry Monitor</h2>
+    <p class="text-sm text-slate-500">TLS certificates of the public Aruba Central / HPE GreenLake and Juniper Mist cloud endpoints (plus your custom hosts), checked once a day. <span class="text-red-600 font-semibold">Red</span> = under 30 days, <span class="text-amber-600 font-semibold">yellow</span> = under 90 days, <span class="text-green-700 font-semibold">green</span> = 90+ days.</p>
+  </div>
+  <div id="certmon-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
+</div>`;
+
         case 'credvault':
             return `<div class="space-y-4">
   <div>
@@ -4708,6 +4731,165 @@ async function testReport(id) {
         if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
         showToast('Test sent to ' + ((d.to || []).join(', ') || 'recipients'), 'success');
     } catch (e) { showToast('Send failed: ' + e.message, 'error'); }
+}
+
+// ── Cert Expiry Monitor (Global Admin only, opt-in) ─────────────────────────
+// Backed by routes/cert_monitor.py (/api/certmon/*). The left-nav item only
+// renders while window.__lmCertMonEnabled is true (refreshed on each status
+// poll, throttled); the toggle lives in System → General.
+let _certMonFlagAt = 0;
+async function _refreshCertMonFlag(force = false) {
+    if (!isAdmin()) { window.__lmCertMonEnabled = false; return; }
+    const now = Date.now();
+    if (!force && now - _certMonFlagAt < 60000) return;
+    _certMonFlagAt = now;
+    try {
+        const r = await fetch('/api/certmon/status', { credentials: 'same-origin' });
+        if (!r.ok) return;
+        const d = await r.json();
+        const on = !!d.enabled;
+        if (on !== !!window.__lmCertMonEnabled) {
+            window.__lmCertMonEnabled = on;
+            if (window.__lmNavArgs) _rebuildMainNav(...window.__lmNavArgs);
+            if (!on && currentView === 'certmon') setView('dashboard');
+        }
+    } catch (e) { /* transient — next poll retries */ }
+}
+
+async function loadCertMonToggle() {
+    const cb = document.getElementById('certmon-enabled');
+    if (!cb) return;
+    try {
+        const r = await setupFetch('/api/certmon/status');
+        if (r.ok) cb.checked = !!(await r.json()).enabled;
+    } catch (e) { /* leave unchecked */ }
+}
+
+async function _certMonPutConfig(body) {
+    const r = await setupFetch('/api/certmon/config', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+    return d;
+}
+
+async function saveCertMonEnabled(cb) {
+    const want = !!cb.checked;
+    try {
+        const d = await _certMonPutConfig({ enabled: want });
+        showToast(want ? ('Cert Expiry Monitor enabled' + (d.check_started ? ' — first check running' : '')) : 'Cert Expiry Monitor disabled', 'success');
+        await _refreshCertMonFlag(true);
+    } catch (e) {
+        cb.checked = !want;
+        showToast('Save failed: ' + e.message, 'error');
+    }
+}
+
+function _certMonDate(iso) {
+    if (!iso) return '';
+    try { return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); } catch (e) { return iso; }
+}
+
+async function loadCertMonData() {
+    const el = document.getElementById('certmon-content');
+    if (!el) return;
+    let d;
+    try {
+        const r = await setupFetch('/api/certmon/overview');
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || ('HTTP ' + r.status));
+        d = await r.json();
+    } catch (e) {
+        el.innerHTML = `<div class="hpe-card rounded-lg p-5"><p class="text-sm text-red-500">Failed to load: ${escapeHtml(e.message)}</p></div>`;
+        return;
+    }
+    window._certMonData = d;
+    const card = 'hpe-card rounded-lg p-5 shadow-sm';
+    const c = d.counts || {};
+    const th = d.thresholds || { red_days: 30, yellow_days: 90 };
+    const tile = (label, n, cls) => `<div class="rounded-lg border px-4 py-3 ${cls}"><div class="text-2xl font-bold">${n || 0}</div><div class="text-[11px] uppercase tracking-wider font-semibold">${label}</div></div>`;
+    const lastRun = d.last_run ? new Date(d.last_run).toLocaleString() : 'never';
+    const nextRun = d.next_run ? new Date(d.next_run).toLocaleString() : (d.config && d.config.enabled ? 'shortly' : '—');
+
+    const rowCls = { red: 'bg-red-50', yellow: 'bg-amber-50', green: '', error: 'bg-slate-50', unknown: 'bg-slate-50' };
+    const pill = (r) => {
+        const s = r.status;
+        const dl = r.days_left;
+        if (s === 'red') return `<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-red-600 text-white">${dl < 0 ? 'EXPIRED' : dl + ' d'}</span>`;
+        if (s === 'yellow') return `<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-400 text-amber-950">${dl} d</span>`;
+        if (s === 'green') return `<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-green-600 text-white">${dl} d</span>`;
+        return `<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-slate-300 text-slate-700">n/a</span>`;
+    };
+    const filt = (window._certMonFilter || '').toLowerCase();
+    const results = (d.results || []).filter(r => !filt || [r.host, r.service, r.region, r.role, r.provider, r.issuer_cn, r.subject_cn].join(' ').toLowerCase().includes(filt));
+    const rows = results.map(r => {
+        const trust = r.trusted ? '' : (r.verify_error ? `<span class="ml-1 text-[10px] text-slate-500" title="${escapeHtml(r.verify_error)}">(private CA / untrusted)</span>` : '');
+        const err = r.error ? `<div class="text-[11px] text-red-600">${escapeHtml(r.error)}</div>` : '';
+        const san = r.san_count ? `<div class="text-[10px] text-slate-400" title="${escapeHtml((r.san || []).join(', '))}">CN ${escapeHtml(r.subject_cn || '')} · ${r.san_count} SAN</div>` : (r.subject_cn ? `<div class="text-[10px] text-slate-400">CN ${escapeHtml(r.subject_cn)}</div>` : '');
+        return `<tr class="${rowCls[r.status] || ''}">
+            <td class="px-3 py-2">${pill(r)}</td>
+            <td class="px-3 py-2 font-mono text-xs">${escapeHtml(r.host)}${r.port && r.port !== 443 ? ':' + r.port : ''}${san}${err}</td>
+            <td class="px-3 py-2 text-xs">${escapeHtml(r.service || '')}<div class="text-[10px] text-slate-400">${escapeHtml([r.region, r.role].filter(Boolean).join(' · '))}</div></td>
+            <td class="px-3 py-2 text-xs">${escapeHtml(r.provider || '')}${trust}<div class="text-[10px] text-slate-400">${escapeHtml(r.issuer_cn || '')}</div></td>
+            <td class="px-3 py-2 text-xs">${escapeHtml(r.cert_type || '')}<div class="text-[10px] text-slate-400">${escapeHtml(r.key_type || '')}${r.signature_algorithm ? ' · ' + escapeHtml(r.signature_algorithm) : ''}</div></td>
+            <td class="px-3 py-2 text-xs whitespace-nowrap">${escapeHtml(_certMonDate(r.not_after))}</td>
+        </tr>`;
+    }).join('');
+    const cfg = d.config || {};
+    el.innerHTML = `
+      <div class="${card}">
+        <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <div class="text-xs text-slate-500">Last check: <b>${escapeHtml(lastRun)}</b>${d.duration_s != null ? ` (${d.duration_s}s)` : ''} · Next: <b>${escapeHtml(nextRun)}</b> · ${(d.results || []).length} hosts${d.running ? ' · <span class="text-[#01A982] font-semibold animate-pulse">checking…</span>' : ''}</div>
+          <div class="flex items-center gap-2">
+            <input id="certmon-filter" type="text" placeholder="Filter…" value="${escapeHtml(window._certMonFilter || '')}" oninput="window._certMonFilter=this.value; clearTimeout(window._certMonFt); window._certMonFt=setTimeout(loadCertMonData, 250)" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-xs outline-none focus:ring-2 focus:ring-green-500">
+            <button onclick="certMonRunNow(this)" class="text-xs bg-[#01A982] hover:bg-[#008f6e] text-white px-3 py-1 rounded-md font-medium" ${d.running ? 'disabled' : ''}>Check now</button>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+          ${tile('< ' + th.red_days + ' days', c.red, 'bg-red-50 border-red-200 text-red-700')}
+          ${tile('< ' + th.yellow_days + ' days', c.yellow, 'bg-amber-50 border-amber-200 text-amber-700')}
+          ${tile(th.yellow_days + '+ days', c.green, 'bg-green-50 border-green-200 text-green-700')}
+          ${tile('Unreachable / error', (c.error || 0) + (c.unknown || 0), 'bg-slate-50 border-slate-200 text-slate-600')}
+        </div>
+        <div class="overflow-x-auto rounded-md border border-slate-200">
+          <table class="w-full text-left text-sm">
+            <thead class="bg-slate-100 text-slate-600 uppercase text-[11px]"><tr>
+              <th class="px-3 py-2">Expires in</th><th class="px-3 py-2">Host</th><th class="px-3 py-2">Service</th>
+              <th class="px-3 py-2">Provider (issuer)</th><th class="px-3 py-2">Type / key</th><th class="px-3 py-2">Expiry date</th>
+            </tr></thead>
+            <tbody class="divide-y divide-slate-200">${rows || `<tr><td colspan="6" class="px-4 py-8 text-center text-slate-400 italic">${d.last_run ? 'No matching hosts' : 'No check has run yet — click <b>Check now</b>.'}</td></tr>`}</tbody>
+          </table>
+        </div>
+        <p class="text-[10px] text-slate-400 mt-2">Results file: <span class="font-mono">${escapeHtml(d.results_file || '')}</span>. "Private CA / untrusted" = the endpoint presents a device-CA cert (Mist terminators, Aruba device endpoints) — its expiry is still tracked.</p>
+      </div>
+      <div class="${card}">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Custom hosts</h3>
+        <p class="text-xs text-slate-400 mb-2">Extra endpoints to monitor, one per line (<span class="font-mono">host</span> or <span class="font-mono">host:port</span>). The ${(d.builtin_hosts || []).length} built-in Aruba Central / GreenLake / Mist endpoints are always included${(cfg.disabled_builtin || []).length ? ` (${cfg.disabled_builtin.length} disabled)` : ''}.</p>
+        <textarea id="certmon-custom" rows="4" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500">${escapeHtml((cfg.custom_hosts || []).join('\n'))}</textarea>
+        <div class="flex justify-end mt-2"><button onclick="certMonSaveCustom(this)" class="text-xs px-3 py-1 rounded-md bg-green-600 text-white hover:bg-green-700">Save</button></div>
+      </div>`;
+    if (filt) { const f = document.getElementById('certmon-filter'); if (f) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); } }
+    if (d.running) { clearTimeout(window._certMonPoll); window._certMonPoll = setTimeout(() => { if (currentView === 'certmon') loadCertMonData(); }, 5000); }
+}
+
+async function certMonRunNow(btn) {
+    if (btn) btn.disabled = true;
+    try {
+        const r = await setupFetch('/api/certmon/run', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        showToast(d.status === 'started' ? 'Certificate check started' : 'A check is already running', 'success');
+    } catch (e) { showToast('Check failed: ' + e.message, 'error'); }
+    setTimeout(loadCertMonData, 800);
+}
+
+async function certMonSaveCustom(btn) {
+    const ta = document.getElementById('certmon-custom');
+    const hosts = (ta ? ta.value : '').split(/[\n,]+/).map(x => x.trim()).filter(Boolean);
+    try {
+        await _certMonPutConfig({ custom_hosts: hosts });
+        showToast('Custom hosts saved — included in the next check', 'success');
+        loadCertMonData();
+    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
 }
 
 // ── Security / Threat Monitor (admin-only nav) ───────────────────────────────
@@ -5422,6 +5604,9 @@ function initView(viewId, subView) {
             break;
         case 'credvault':
             loadCredVault();
+            break;
+        case 'certmon':
+            loadCertMonData();
             break;
     }
 }
@@ -7105,6 +7290,14 @@ function _renderSettingsSection(subMenu) {
                     </div>
                 </div>
                 <div class="${card} p-6">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Cert Expiry Monitor</h3>
+                    <p class="text-xs text-slate-400 mb-3">Daily check of the TLS certificates on the public Aruba Central / HPE GreenLake and Juniper Mist cloud endpoints. When enabled, a <b>Cert Monitor</b> item appears in the left menu (Global Admins only).</p>
+                    <label class="flex items-center gap-2 text-sm text-slate-600">
+                        <input type="checkbox" id="certmon-enabled" onchange="saveCertMonEnabled(this)" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                        Enable Cert Expiry Monitor
+                    </label>
+                </div>
+                <div class="${card} p-6">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Idle Session Timeout</h3>
                     <p class="text-xs text-slate-400 mb-3">Automatically log out a user who makes no requests for this long. Applies live to all sessions.</p>
                     <div class="flex items-center gap-3">
@@ -7148,6 +7341,7 @@ function _renderSettingsSection(subMenu) {
         loadSpokeRegistryDiag();
         loadBackpressureConfig();
         loadUpdateGateConfig();
+        loadCertMonToggle();
         loadActiveSessions();
         loadSessionTimeout();
         loadMtlsReadiness();

@@ -10,6 +10,23 @@ first. This is a pointer index, not the source of truth — each entry links to
 the module doc that describes the behaviour in full. Internal refactors and
 CI/tooling changes are omitted unless they change what an operator sees.
 
+## Week of 2026-10-19
+
+### Hub
+- **Cert Expiry Monitor (Global Admin, opt-in).** Enable it in System → General
+  and a **Cert Monitor** menu item appears. It checks the TLS certificates of
+  every public Aruba Central / GreenLake and Juniper Mist endpoint once a day
+  and lists them red (under 30 days), yellow (under 90 days) or green. Results
+  are saved as JSON on the hub. See [cert-monitor.md](cert-monitor.md).
+- **Auto-updates no longer restart the hub while you're logged in.**
+  - Scripted deploys through `/admin/ops/self-update` now follow the
+    maintenance window (pass `{"force": true}` to override).
+  - The window hour now uses a configurable timezone: System → General →
+    Update / Maintenance Window → *Window timezone*, or `LM_UPDATE_GATE_TZ`.
+    Without it, "02:00" meant 02:00 UTC.
+  - The panel offers *When no users online — else the daily window*, and it now
+    has its Save button.
+
 ## Week of 2026-10-05
 
 ### Console
