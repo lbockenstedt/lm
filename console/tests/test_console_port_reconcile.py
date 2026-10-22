@@ -247,3 +247,97 @@ def test_replug_under_same_port_id_forces_fresh_reverify(monkeypatch, spoke):
     monkeypatch.setattr(spoke, "_active_identify", _fake_active_identify)
     _run(spoke._autoprobe_scan())
     assert calls == ["pid-1"]
+
+
+# ── Last-known profile survives failed / blank probes (update restart wipe) ──
+
+def _named(spoke, pid="pid-1"):
+    _run(spoke._emit_probe_result(pid, {
+        "vendor": "ARUBA-AOS-CX",
+        "identity": {"hostname": "core-sw", "serial": "SN123", "model": "6300", "type": "switch"},
+        "logged_in": True,
+    }))
+
+
+def test_failed_probe_keeps_last_known_identity(spoke):
+    _named(spoke)
+    _run(spoke._emit_probe_result("pid-1", {
+        "identity": {}, "logged_in": False, "error": "no output after 6 Enter nudge(s) — silent"}))
+    p = spoke.store.get("pid-1")["probe"]
+    assert p["identity"]["hostname"] == "core-sw"
+    assert p["identity"]["serial"] == "SN123"
+    assert p["vendor"] == "ARUBA-AOS-CX"
+    assert p["stale"] is True
+    assert "silent" in p["error"]
+    assert spoke._probe_identified(p) is False  # keep retrying until re-confirmed
+
+
+def test_partial_probe_merges_field_by_field(spoke):
+    _named(spoke)
+    _run(spoke._emit_probe_result("pid-1", {"identity": {"hostname": "core-sw-renamed"},
+                                            "logged_in": True}))
+    p = spoke.store.get("pid-1")["probe"]
+    assert p["identity"] == {"hostname": "core-sw-renamed", "serial": "SN123",
+                             "model": "6300", "type": "switch"}
+    assert p["vendor"] == "ARUBA-AOS-CX"
+    assert not p.get("stale")
+    assert spoke._probe_identified(p) is True
+
+
+def test_swapped_device_replaces_identity_wholesale(spoke):
+    _named(spoke)
+    _run(spoke._emit_probe_result("pid-1", {"identity": {"hostname": "other", "serial": "SN999"},
+                                            "logged_in": True}))
+    p = spoke.store.get("pid-1")["probe"]
+    assert p["identity"] == {"hostname": "other", "serial": "SN999"}
+    assert p["vendor"] is None
+
+
+def test_blank_probe_on_known_port_does_not_repush_to_hub(spoke):
+    sent = []
+
+    class _CP:
+        async def send_to_hub(self, t, payload):
+            sent.append(payload)
+
+    spoke.control_plane = _CP()
+    _named(spoke)
+    _run(spoke._emit_probe_result("pid-1", {"identity": {}, "logged_in": False}))
+    assert len(sent) == 1
+
+
+def test_restore_last_known_from_port_cache_hostname_only(spoke):
+    spoke.devices.remember({"hostname": "MIA-GW-01"}, port_id="pid-1", vendor="FORTIOS")
+    spoke.store.update("pid-1", probe={"identity": {}, "vendor": None, "source": "active"})
+    spoke._restore_last_known()
+    p = spoke.store.get("pid-1")["probe"]
+    assert p["identity"] == {"hostname": "MIA-GW-01"}
+    assert p["vendor"] == "FORTIOS"
+    assert p["stale"] is True and p["restored_from"] == "device_cache"
+    assert spoke._probe_identified(p) is False
+
+
+def test_restore_last_known_from_hostname_history(spoke):
+    spoke.store.update("pid-2", probe={"identity": {}, "source": "active"})
+    spoke._health["pid-2"] = {"identify": {"hostname_history": [
+        {"host": "old", "ts": 1}, {"host": "Aruba7008_21_FE_CC", "ts": 2}]}}
+    spoke._restore_last_known()
+    p = spoke.store.get("pid-2")["probe"]
+    assert p["identity"] == {"hostname": "Aruba7008_21_FE_CC"}
+    assert p["restored_from"] == "hostname_history"
+
+
+def test_restore_never_overrides_existing_identity(spoke):
+    spoke.devices.remember({"hostname": "cached"}, port_id="pid-1")
+    spoke.store.update("pid-1", probe={"identity": {"hostname": "live"}, "source": "active"})
+    spoke._restore_last_known()
+    assert spoke.store.get("pid-1")["probe"]["identity"] == {"hostname": "live"}
+
+
+def test_device_cache_backfills_missing_fields_after_ports_json_wipe(spoke):
+    spoke.devices.remember({"serial": "SN123", "hostname": "core-sw", "model": "6300"},
+                           port_id="old-pid", vendor="ARUBA-AOS-CX")
+    _run(spoke._emit_probe_result("new-pid", {"identity": {"serial": "SN123"}, "logged_in": True}))
+    p = spoke.store.get("new-pid")["probe"]
+    assert p["identity"]["hostname"] == "core-sw" and p["identity"]["model"] == "6300"
+    assert p["vendor"] == "ARUBA-AOS-CX"

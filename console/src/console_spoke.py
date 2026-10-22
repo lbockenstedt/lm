@@ -811,15 +811,47 @@ class ConsoleSpoke(BaseSpoke):
         ``method`` records provenance ("login" for the fingerprint identify,
         "llm" for hub LLM-driven identify). ``source`` stays "active" for both —
         a logged-in identity is authoritative and outranks passive glean."""
+        prev = self.store.get(port_id).get("probe") or {}
+        prev_ident = {k: v for k, v in (prev.get("identity") or {}).items()
+                      if v not in (None, "", [], {})}
+        new_ident = {k: v for k, v in (res.get("identity") or {}).items()
+                     if v not in (None, "", [], {})}
+        # MERGE, never blank: a probe that learns nothing (silent device, idle
+        # timeout, creds not pushed yet — routine right after an update restart
+        # re-verifies every port) must not wipe the last-known name/serial/type.
+        # A probe that DOES learn identity refreshes it field-by-field, unless it
+        # is provably a different device on this cable (serial/MAC changed), in
+        # which case the old identity is dropped wholesale.
+        if new_ident:
+            if self._different_device(prev_ident, new_ident):
+                identity, vendor = new_ident, res.get("vendor")
+            else:
+                identity = {**prev_ident, **new_ident}
+                vendor = res.get("vendor") or prev.get("vendor")
+            source, stale = "active", False
+        else:
+            identity = prev_ident
+            vendor = res.get("vendor") or prev.get("vendor")
+            source = (prev.get("source") or "active") if prev_ident else "active"
+            stale = bool(prev_ident)
         probe = {
-            "banner": (res.get("banner") or "")[-2000:],
-            "vendor": res.get("vendor"),
-            "identity": res.get("identity") or {},
+            "banner": ((res.get("banner") or "") or (prev.get("banner") or ""))[-2000:],
+            "vendor": vendor,
+            "identity": identity,
             "logged_in": bool(res.get("logged_in")),
             "error": res.get("error", ""),
-            "source": "active",  # logged-in identify (authoritative; beats passive)
+            "source": source,  # "active" = logged-in identify (authoritative; beats passive)
             "method": method,
         }
+        if stale:
+            # Shown as "last known": this attempt didn't re-confirm the identity.
+            probe["stale"] = True
+            if prev.get("restored_from"):
+                probe["restored_from"] = prev["restored_from"]
+        if new_ident:
+            probe["identified_at"] = time.time()
+        elif prev.get("identified_at"):
+            probe["identified_at"] = prev["identified_at"]
         # VSF stack membership, when the device is stacked. Absent entirely for a
         # standalone switch so the UI has nothing to render for the common case.
         stack = res.get("stack") or {}
@@ -829,7 +861,6 @@ class ConsoleSpoke(BaseSpoke):
         # confident sweep sets a fresh one (res.detected_baud); otherwise carry
         # forward what a prior sweep already locked so we don't lose it and
         # needlessly re-sweep a known-good port.
-        prev = self.store.get(port_id).get("probe") or {}
         detected = res.get("detected_baud") or prev.get("detected_baud")
         if detected:
             probe["detected_baud"] = detected
@@ -843,7 +874,10 @@ class ConsoleSpoke(BaseSpoke):
         # to a different port. Carry the operator's alias/tenant assignment
         # forward onto this port_id and drop the orphan so it never lingers in
         # the list as a stale duplicate.
-        identity = probe.get("identity") or {}
+        # Only a probe that actually learned identity reconciles / refreshes the
+        # cache — re-running it on a kept last-known identity every failed retry
+        # could retire a different port's record on a stale match.
+        identity = (probe.get("identity") or {}) if new_ident else {}
         if identity:
             fields: Dict[str, Any] = {}
             old_pid = self.store.find_by_identity(identity, exclude_port_id=port_id)
@@ -872,6 +906,13 @@ class ConsoleSpoke(BaseSpoke):
                         fields["alias"] = cached["alias"]
                     if cached.get("tenant_id") and not self.store.get(port_id).get("tenant_id"):
                         fields["tenant_id"] = cached["tenant_id"]
+                    # Backfill the profile itself (name/type/model…) the probe
+                    # didn't re-learn this time — gap-fill only, never override.
+                    for k, v in (cached.get("identity") or {}).items():
+                        if v and not identity.get(k):
+                            identity[k] = v
+                    if cached.get("vendor") and not probe.get("vendor"):
+                        probe["vendor"] = cached["vendor"]
             if fields:
                 self.store.update(port_id, **fields)
         self.store.update(port_id, probe=probe)
@@ -887,7 +928,10 @@ class ConsoleSpoke(BaseSpoke):
                 alias=saved.get("alias", ""), tenant_id=saved.get("tenant_id", ""),
             )
         self._probe_attempts[port_id] = time.monotonic()
-        if self.control_plane is not None:
+        # Nothing new learned about an already-known device → no NetBox
+        # round-trip (a silent device is retried hourly; don't re-push its
+        # unchanged last-known identity each time).
+        if self.control_plane is not None and (new_ident or not prev_ident):
             await self.control_plane.send_to_hub("CONSOLE_PROBE_RESULT", {
                 "spoke_id": self.spoke_id, "port_id": port_id,
                 "tenant_id": self.store.get(port_id).get("tenant_id", ""),  # per-port override
@@ -964,17 +1008,65 @@ class ConsoleSpoke(BaseSpoke):
         }
 
     @staticmethod
+    def _different_device(prev: Dict[str, Any], new: Dict[str, Any]) -> bool:
+        """True when ``new`` is provably a DIFFERENT device than ``prev`` (a
+        cable swapped onto another box): its serial or MAC is known on both
+        sides and differs. Hostname alone never decides it (renames happen)."""
+        for k in ("serial", "mac"):
+            a = str(prev.get(k) or "").strip().lower()
+            b = str(new.get(k) or "").strip().lower()
+            if a and b and a != b:
+                return True
+        return False
+
+    @staticmethod
     def _probe_identified(probe: Dict[str, Any]) -> bool:
-        """True once an ACTIVE login/identify has succeeded for a port (it yielded
-        an identity, a vendor, or a confirmed login). Such a port is treated as
-        authoritatively identified, so the auto-identify loops STOP actively
-        re-probing it on a timer: passive monitoring keeps its name/type fresh as
-        console output arrives, and the operator can force a fresh profile on
-        demand (Profile Device). This avoids needlessly re-logging-into a known
-        device — including banner-identified switches (vendor known, no structured
-        identity) that the old identity-only guard kept re-probing every 30 min."""
-        return probe.get("source") == "active" and bool(
-            probe.get("identity") or probe.get("vendor") or probe.get("logged_in"))
+        """True once a port is PROFILED: an active login/identify has confirmed a
+        hostname for it, and the latest attempt didn't fail to re-confirm it
+        (``stale``). Only then do the auto-identify loops stop the 5 min → 1 h
+        retry backoff and fall back to the daily re-verify
+        (``console_identify_reverify_secs``). A vendor/banner, a bare login, a
+        passive glean or a last-known name restored after a restart is NOT
+        enough — such a port keeps being retried until it yields a name."""
+        if probe.get("source") != "active" or probe.get("stale"):
+            return False
+        return bool(str((probe.get("identity") or {}).get("hostname") or "").strip())
+
+    def _restore_last_known(self) -> None:
+        """One-time (per process) backfill of ports whose stored profile is
+        blank — e.g. wiped by an older build's failed re-verify after an update
+        — from the per-port last-known record in devices.json, else the newest
+        hostname in health.json's identify history. Shown as last-known
+        (``stale``) and NOT counted as profiled, so the port is still actively
+        retried until a live identify re-confirms it."""
+        if getattr(self, "_restored_last_known", False):
+            return
+        self._restored_last_known = True
+        for pid, saved in self.store.all_items().items():
+            probe = dict(saved.get("probe") or {})
+            if any(v for v in (probe.get("identity") or {}).values()):
+                continue
+            identity: Dict[str, Any] = {}
+            vendor = None
+            origin = ""
+            cached = self.devices.lookup_port(pid)
+            if cached and any(v for v in (cached.get("identity") or {}).values()):
+                identity = {k: v for k, v in cached["identity"].items() if v}
+                vendor = cached.get("vendor") or None
+                origin = "device_cache"
+            else:
+                hist = ((self._health.get(pid) or {}).get("identify") or {}).get("hostname_history") or []
+                host = str((hist[-1] or {}).get("host") or "").strip() if hist else ""
+                if host:
+                    identity = {"hostname": host}
+                    origin = "hostname_history"
+            if not identity:
+                continue
+            probe.update({"identity": identity, "vendor": probe.get("vendor") or vendor,
+                          "source": "restored", "stale": True, "restored_from": origin})
+            self.store.update(pid, probe=probe)
+            logger.info("console: restored last-known profile for %s from %s (%s)",
+                        pid, origin, identity.get("hostname") or identity.get("serial") or "?")
 
     async def _autoprobe_scan(self) -> None:
         """Probe each newly-seen port with the stored credentials. Guardrails:
@@ -985,6 +1077,7 @@ class ConsoleSpoke(BaseSpoke):
         that has vanished has its retry state cleared so re-plugging starts fresh."""
         if not self.config.get("auto_identify", True):
             return
+        self._restore_last_known()
         live = {p["port_id"]: p for p in await self._enumerate_ports()}
         # First-seen / re-plug: reset retry state so a freshly connected cable is
         # attempted right away instead of inheriting a stale backoff.
@@ -1069,10 +1162,12 @@ class ConsoleSpoke(BaseSpoke):
             self._clear_unopenable(pid)
         self._record_identify_telemetry(pid, res, method="login")
         await self._emit_probe_result(pid, res)
-        if res.get("identity") or res.get("logged_in"):
+        if str((res.get("identity") or {}).get("hostname") or "").strip():
             self._probe_fails[pid] = 0                 # success clears the give-up counter
-            self._probe_delay[pid] = cfg["reverify"]   # identified → auto-loops now skip it
+            self._probe_delay[pid] = cfg["reverify"]   # profiled → daily re-verify only
         else:
+            # No hostname (silent, banner/vendor only, or logged in but nothing
+            # parsed) → not profiled yet: keep retrying on the escalating backoff.
             _fail_backoff()
         return res
 
@@ -1998,7 +2093,8 @@ class ConsoleSpoke(BaseSpoke):
         probe = self.store.get(pid).get("probe") or {}
         active_id = self._probe_identified(probe)
         if active_id:
-            next_in = 0.0  # identified ports are not re-probed on a timer
+            last_v = self._identify_verify_ts.get(pid)
+            next_in = 0.0 if last_v is None else max(0.0, cfg["reverify"] - (now - last_v))
         if not self.config.get("auto_identify", True):
             reason = "auto-identify is disabled for this agent (config auto_identify=false)"
         elif not present:
@@ -2008,8 +2104,12 @@ class ConsoleSpoke(BaseSpoke):
         elif pid in self._probing:
             reason = "identify in progress"
         elif active_id:
-            reason = ("identified via active login — passive monitoring only; "
-                      "no active re-probe (use Profile Device to re-check)")
+            reason = ("profiled via active login (hostname confirmed) — re-verified "
+                      f"every {round(cfg['reverify'] / 3600, 1):g}h "
+                      "(use Profile Device to re-check now)")
+        elif probe.get("stale") and (probe.get("identity") or {}).get("hostname") and next_in > 0:
+            reason = ("last-known name kept, but the latest attempt didn't re-confirm it — "
+                      "retrying on backoff")
         elif given_up:
             reason = (f"gave up after {fails} consecutive failed attempts "
                       f"(console_identify_max_attempts={cap}) — replug or probe manually")

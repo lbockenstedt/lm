@@ -448,20 +448,38 @@ class DeviceCache:
         """Record/refresh the last-known state for whichever device ``identity``
         describes. A no-op when the identity is too thin to key on."""
         key = self.device_key(identity)
-        if not key:
-            return
-        self._data[key] = {
-            "identity": identity, "port_id": port_id, "vendor": vendor,
+        rec = {
+            "identity": dict(identity or {}), "port_id": port_id, "vendor": vendor,
             "product": product, "alias": alias, "tenant_id": tenant_id,
             "updated": time.time(),
         }
-        self._save()
+        changed = False
+        if key:
+            self._data[key] = rec
+            changed = True
+        # Per-PORT last-known profile too: unlike the device-keyed record this
+        # accepts a hostname-only identity (no cross-port merge is ever keyed on
+        # it — it only restores THIS port_id's own last name after a restart).
+        if port_id and identity:
+            self._data[self.port_key(port_id)] = rec
+            changed = True
+        if changed:
+            self._save()
+
+    @staticmethod
+    def port_key(port_id: str) -> str:
+        return f"port:{port_id}"
 
     def lookup(self, identity: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Last-known cache record for ``identity`` (by serial/MAC/hostname, in
-        that priority), or ``None`` if this device was never recorded."""
+        """Last-known cache record for ``identity`` (by serial, then MAC), or
+        ``None`` if this device was never recorded."""
         key = self.device_key(identity)
         return self._data.get(key) if key else None
+
+    def lookup_port(self, port_id: str) -> Optional[Dict[str, Any]]:
+        """Last-known profile recorded for ``port_id`` itself (any identity,
+        including hostname-only), or ``None``."""
+        return self._data.get(self.port_key(port_id)) if port_id else None
 
     def all_items(self) -> Dict[str, Dict[str, Any]]:
         return dict(self._data)

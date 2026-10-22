@@ -103,6 +103,19 @@ serial ports from the hub WebUI's **Console** view (an xterm.js terminal in the 
   `derive_port_id`'s own format (which would otherwise orphan every existing record on the next deploy), or
   the state dir simply being gone. `_emit_probe_result` refreshes it on every successful identify and falls
   back to it for alias/tenant carry-forward when `ports.json` has no match at all.
+- `DeviceCache` also keeps a **per-port** last-known record (`port:<port_id>` key) that accepts a
+  hostname-only identity. It is never used to merge across ports; it only lets a port get its OWN last name
+  back after a restart.
+- **A failed or partial probe never blanks a profile.** `_emit_probe_result` merges each result over the
+  stored probe field by field: a silent device, an idle timeout, or credentials that haven't arrived yet
+  (routine right after an update restart, which re-verifies every port) keeps the last-known
+  name/serial/model/type/vendor and marks the probe `stale` (UI: **last known** badge). Identity is only
+  replaced wholesale when a serial or MAC proves it's a different device on that cable. A blank re-probe of
+  an already-known port isn't re-pushed to the hub.
+- On the first scan after start, `_restore_last_known()` backfills any port whose stored identity is blank
+  from that per-port record, else the newest `health.json` `identify.hostname_history` entry
+  (`source: "restored"`, `stale: true`, `restored_from`). Restored names still count as un-profiled, so they
+  keep being retried.
 - A hostname-only passive glean on a true "lame" cable (no serial#, no login) still can't be reconciled
   across a port_id change — the same limitation ConsolePi documents for serial-less adapters moved to a
   different port. Burn a serial# into the adapter (FTDI + `FTPROG`, or similar) to eliminate it entirely.
@@ -387,10 +400,15 @@ front door, so many console servers are reachable through one address.
   failed probe backs off (escalating) before retrying — no credential lockout hammering.
   The retry policy is operator-tunable via role config: `console_identify_retry_secs`
   (floor backoff, default 300), `console_identify_retry_max_secs` (cap, default 3600),
-  `console_identify_reverify_secs` (re-verify interval after success, default 1800),
+  `console_identify_reverify_secs` (re-verify interval after success, default 86400),
   `console_identify_max_attempts` (give up after N consecutive failures, `0`=never, the
   default), and `console_autoprobe_interval` (poll/first-seen cadence, default 30s).
   Unplugging a cable clears that port's retry state so re-plugging starts fresh.
+  **A port counts as profiled only once an active login has confirmed a hostname**
+  (`_probe_identified`). A vendor/banner match, a bare login, a passive glean, or a stale
+  or restored last-known name isn't enough: such ports stay on the 5 min → 1 h retry
+  backoff in both the autoprobe and monitor-login loops until a hostname is learned.
+  Only then does the port drop to the daily re-verify.
 - **Two-level tenant binding.** The whole console agent can be bound to a tenant like any
   spoke; additionally, an individual port can carry its own tenant override
   (`CONSOLE_SET_TENANT`) so one console host can serve ports to different tenants. The
