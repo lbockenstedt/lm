@@ -22063,7 +22063,9 @@ function _consoleIdentityBlock(p) {
     const seen = p.last_activity
         ? `<span class="text-[10px] text-slate-400" title="Last console output seen">· 👂 ${_consoleRelTime(p.last_activity)}</span>` : '';
     if (probe.vendor || summary) {
-        const src = probe.source === 'active'
+        const src = probe.stale
+            ? '<span class="text-[9px] px-1 py-0.5 rounded bg-amber-100 text-amber-700 font-bold uppercase" title="Last-known profile — the latest identify attempt did not re-confirm it; still retrying">last known</span>'
+            : probe.source === 'active'
             ? '<span class="text-[9px] px-1 py-0.5 rounded bg-green-100 text-green-700 font-bold uppercase" title="Verified via read-only login">verified</span>'
             : (probe.source === 'passive'
                 ? '<span class="text-[9px] px-1 py-0.5 rounded bg-slate-100 text-slate-500 font-bold uppercase" title="Observed passively from console output (no login)">observed</span>' : '');
