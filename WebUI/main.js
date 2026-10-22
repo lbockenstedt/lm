@@ -4866,7 +4866,9 @@ async function loadCertMonData() {
         <p class="text-xs text-slate-400 mb-2">Extra endpoints to monitor, one per line (<span class="font-mono">host</span> or <span class="font-mono">host:port</span>). The ${(d.builtin_hosts || []).length} built-in Aruba Central / GreenLake / Mist endpoints are always included${(cfg.disabled_builtin || []).length ? ` (${cfg.disabled_builtin.length} disabled)` : ''}.</p>
         <textarea id="certmon-custom" rows="4" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500">${escapeHtml((cfg.custom_hosts || []).join('\n'))}</textarea>
         <div class="flex justify-end mt-2"><button onclick="certMonSaveCustom(this)" class="text-xs px-3 py-1 rounded-md bg-green-600 text-white hover:bg-green-700">Save</button></div>
-      </div>`;
+      </div>
+      <div id="certmon-alerts" class="${card}"><p class="text-sm text-slate-400 italic">Loading alert rules…</p></div>`;
+    loadCertMonAlertRules();
     if (filt) { const f = document.getElementById('certmon-filter'); if (f) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); } }
     if (d.running) { clearTimeout(window._certMonPoll); window._certMonPoll = setTimeout(() => { if (currentView === 'certmon') loadCertMonData(); }, 5000); }
 }
@@ -4890,6 +4892,103 @@ async function certMonSaveCustom(btn) {
         showToast('Custom hosts saved — included in the next check', 'success');
         loadCertMonData();
     } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
+}
+
+// Cert Monitor alert rules — breach + recovery digests (/api/certmon/alerts/*),
+// the Cert Monitor counterpart of the Simulation Realtime Alert Rules.
+function _certMonRuleWhat(r) {
+    const L = window._certMonAlertMeta?.trigger_labels || {};
+    const base = r.trigger === 'expiring' ? `Expiring in < ${r.threshold_days} days` : (L[r.trigger] || r.trigger);
+    return base + ((r.services || []).length ? ` · ${r.services.join(', ')}` : ' · all services');
+}
+async function loadCertMonAlertRules() {
+    const el = document.getElementById('certmon-alerts');
+    if (!el) return;
+    let d;
+    try {
+        const r = await setupFetch('/api/certmon/alerts/rules');
+        d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+    } catch (e) { el.innerHTML = `<p class="text-sm text-red-500">Could not load alert rules: ${escapeHtml(e.message)}</p>`; return; }
+    window._certMonAlertMeta = d;
+    const rules = d.rules || [];
+    const rows = rules.length ? rules.map(r => `<tr class="border-b border-slate-100">
+        <td class="px-3 py-2"><span class="font-semibold text-slate-700">${escapeHtml(r.name || '')}</span></td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${escapeHtml(_certMonRuleWhat(r))}</td>
+        <td class="px-3 py-2 text-xs">${r.format === 'raw' ? '<span class="text-purple-600 font-mono">raw/JSON</span>' : '<span class="text-slate-500">human</span>'}</td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${escapeHtml((r.recipients || []).join(', ')) || '—'}</td>
+        <td class="px-3 py-2">${r.enabled ? '<span class="text-green-600 text-xs font-bold">on</span>' : '<span class="text-slate-400 text-xs">off</span>'}</td>
+        <td class="px-3 py-2 text-right whitespace-nowrap"><button onclick="testCertMonAlertRule('${escapeHtml(r.id)}')" class="text-xs text-slate-500 hover:text-slate-700 mr-2">Test</button><button onclick="editCertMonAlertRule('${escapeHtml(r.id)}')" class="text-xs text-[#01A982] hover:underline mr-2">Edit</button><button onclick="deleteCertMonAlertRule('${escapeHtml(r.id)}')" class="text-xs text-red-500 hover:text-red-700">Delete</button></td></tr>`).join('') : '<tr><td colspan="6" class="px-3 py-4 text-slate-400 italic">No alert rules — click "Add alert".</td></tr>';
+    el.innerHTML = `
+      <div class="flex items-center justify-between mb-3">
+        <div><h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Alert Rules</h3><p class="text-xs text-slate-400 max-w-xl">One email when hosts newly breach a rule, one when they recover — a still-bad cert stays silent. Each email lists every host that changed. Evaluated after each check and every 15 minutes. Delivered via Setup → Notifications.</p></div>
+        <button onclick="editCertMonAlertRule('')" class="shrink-0 bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500 px-3 py-1.5 rounded-md text-sm font-bold">+ Add alert</button>
+      </div>
+      <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-[10px] uppercase text-slate-400"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Trigger</th><th class="px-3 py-1 text-left">Format</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+function editCertMonAlertRule(id) {
+    const meta = window._certMonAlertMeta || {};
+    const existing = (meta.rules || []).find(r => r.id === id) || null;
+    const L = meta.trigger_labels || {};
+    const trig = (meta.triggers && meta.triggers.length) ? meta.triggers : ['expiring', 'error', 'untrusted'];
+    const svcSel = new Set(existing ? (existing.services || []) : []);
+    document.getElementById('certmon-alert-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'certmon-alert-modal';
+    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
+    const trigOpts = trig.map(t => `<option value="${escapeHtml(t)}" ${existing && existing.trigger === t ? 'selected' : ''}>${escapeHtml(L[t] || t)}</option>`).join('');
+    const svcBoxes = (meta.services || []).map(s => `<label class="flex items-center gap-2"><input type="checkbox" class="cma-svc w-4 h-4 rounded" value="${escapeHtml(s)}" ${svcSel.has(s) ? 'checked' : ''}> ${escapeHtml(s)}</label>`).join('');
+    const inner = document.createElement('div');
+    inner.className = 'bg-white rounded-xl shadow-xl w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto';
+    inner.innerHTML = `
+      <div class="flex justify-between items-start"><p class="font-bold text-base text-[#263040]">${existing ? 'Edit cert alert rule' : 'New cert alert rule'}</p><button class="cma-close text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button></div>
+      <label class="block text-xs text-slate-500">Name<input id="cma-name" value="${escapeHtml(existing ? existing.name : '')}" placeholder="Central/Mist certs < 30d → NOC" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
+      <label class="block text-xs text-slate-500">Trigger (what to watch)<select id="cma-trigger" onchange="document.getElementById('cma-days-w').style.display = this.value === 'expiring' ? '' : 'none'" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm">${trigOpts}</select></label>
+      <label id="cma-days-w" class="block text-xs text-slate-500" style="${existing && existing.trigger !== 'expiring' ? 'display:none' : ''}">Alert when fewer than N days are left<input id="cma-days" type="number" min="1" max="825" value="${existing ? existing.threshold_days : (meta.default_threshold_days || 30)}" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"><span class="block text-[11px] text-slate-400 mt-1">Expired certs always match. Add several rules (e.g. 90, 30, 7) for escalating warnings.</span></label>
+      <div class="text-xs text-slate-500">Services <span class="text-slate-400">(none ticked = all)</span><div class="grid grid-cols-2 gap-1 mt-1 text-slate-600">${svcBoxes}</div></div>
+      <label class="block text-xs text-slate-500">Format<select id="cma-format" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm">
+        <option value="human" ${!existing || existing.format !== 'raw' ? 'selected' : ''}>Human — formatted email (host table)</option>
+        <option value="raw" ${existing && existing.format === 'raw' ? 'selected' : ''}>Raw — JSON body (for automation to ingest)</option>
+      </select></label>
+      <label class="block text-xs text-slate-500">Recipients <span class="text-slate-400">(comma-separated)</span><input id="cma-recips" value="${escapeHtml(existing ? (existing.recipients || []).join(', ') : '')}" placeholder="noc@acme.com" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
+      <label class="flex items-center gap-2 text-xs text-slate-600 pt-1"><input type="checkbox" id="cma-enabled" ${!existing || existing.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Enabled</label>
+      <div id="cma-result" class="text-xs"></div>
+      <div class="flex justify-end gap-2 pt-1"><button class="cma-cancel bg-slate-200 text-slate-700 px-4 py-2 rounded text-sm font-bold">Cancel</button><button id="cma-save" class="bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500 px-4 py-2 rounded text-sm font-bold">Save</button></div>`;
+    modal.appendChild(inner);
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+    inner.querySelector('.cma-close').addEventListener('click', () => modal.remove());
+    inner.querySelector('.cma-cancel').addEventListener('click', () => modal.remove());
+    document.body.appendChild(modal);
+    document.getElementById('cma-save').addEventListener('click', () => saveCertMonAlertRule(existing ? existing.id : ''));
+}
+async function saveCertMonAlertRule(id) {
+    const v = x => document.getElementById(x);
+    const resEl = v('cma-result');
+    const body = {
+        name: (v('cma-name').value || '').trim(), trigger: v('cma-trigger').value,
+        threshold_days: parseInt(v('cma-days').value, 10) || 30,
+        services: Array.from(document.querySelectorAll('#certmon-alert-modal .cma-svc:checked')).map(x => x.value),
+        format: v('cma-format').value, enabled: v('cma-enabled').checked,
+        recipients: (v('cma-recips').value || '').split(',').map(x => x.trim()).filter(Boolean),
+    };
+    try {
+        const r = await setupFetch(id ? ('/api/certmon/alerts/rules/' + encodeURIComponent(id)) : '/api/certmon/alerts/rules', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        document.getElementById('certmon-alert-modal')?.remove();
+        showToast('Alert rule saved.', 'success');
+        loadCertMonAlertRules();
+    } catch (e) { if (resEl) resEl.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`; }
+}
+async function deleteCertMonAlertRule(id) {
+    if (!confirm('Delete this alert rule?')) return;
+    try { const r = await setupFetch('/api/certmon/alerts/rules/' + encodeURIComponent(id), { method: 'DELETE' }); if (!r.ok) throw new Error('HTTP ' + r.status); showToast('Alert rule deleted.', 'success'); loadCertMonAlertRules(); }
+    catch (e) { showToast('Delete failed: ' + e.message, 'error'); }
+}
+async function testCertMonAlertRule(id) {
+    showToast('Sending test…', 'info');
+    try { const r = await setupFetch('/api/certmon/alerts/rules/' + encodeURIComponent(id) + '/test', { method: 'POST' }); const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); showToast('Test alert sent to ' + ((d.to || []).join(', ') || 'recipients'), 'success'); }
+    catch (e) { showToast('Send failed: ' + e.message, 'error'); }
 }
 
 // ── Security / Threat Monitor (admin-only nav) ───────────────────────────────
