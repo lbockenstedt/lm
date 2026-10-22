@@ -197,8 +197,11 @@ def test_device_cache_hostname_only_identity_is_not_remembered(tmp_path):
     # weak (collision-prone) to key a cross-restart merge on.
     cache = m.DeviceCache(path=tmp_path / "devices.json")
     cache.remember({"hostname": "core-sw"}, port_id="pid-1")
-    assert cache.all_items() == {}
+    assert not any(k.startswith(("serial:", "mac:")) for k in cache.all_items())
     assert cache.lookup({"hostname": "core-sw"}) is None
+    # ...but the port's OWN last-known profile is kept (restores THIS port only).
+    assert cache.lookup_port("pid-1")["identity"] == {"hostname": "core-sw"}
+    assert cache.lookup_port("other-pid") is None
 
 
 def test_device_cache_persists_across_instances(tmp_path):
