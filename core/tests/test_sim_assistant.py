@@ -72,13 +72,17 @@ def test_available_true_when_ab_connected():
     c = _build(_FakeHub(connected=True))
     r = c.get("/api/sim-assistant/available")
     assert r.status_code == 200
-    assert r.json() == {"available": True}
+    body = r.json()
+    assert body["available"] is True
+    # This fake AB only speaks HELP_ASK (like an AB that predates sessions),
+    # so the interactive-session probe must report unsupported, not crash.
+    assert body["sessions"] is False
 
 
 def test_available_false_when_ab_not_connected():
     c = _build(_FakeHub(connected=False))
     r = c.get("/api/sim-assistant/available")
-    assert r.json() == {"available": False}
+    assert r.json() == {"available": False, "sessions": False}
 
 
 def test_chat_returns_assistant_reply():
