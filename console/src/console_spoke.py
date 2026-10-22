@@ -55,6 +55,19 @@ except ImportError:  # loaded as a package (agent role loader) or from repo root
 
 logger = logging.getLogger("ConsoleSpoke")
 
+# Placeholder strings a parse glitch can capture as a "hostname" (a command echo,
+# a prompt word, an unset default). Never treated as a real device name.
+_JUNK_HOSTNAMES = frozenset({
+    "hostname", "localhost", "none", "(none)", "unknown", "more", "username",
+    "password", "login", "config",
+})
+
+
+def _real_hostname(value: Any) -> str:
+    """``value`` stripped, or '' if empty or a known placeholder."""
+    h = str(value or "").strip()
+    return "" if h.lower() in _JUNK_HOSTNAMES else h
+
 
 class ConsoleSpoke(BaseSpoke):
     """Serial console spoke.
@@ -843,11 +856,11 @@ class ConsoleSpoke(BaseSpoke):
             "source": source,  # "active" = logged-in identify (authoritative; beats passive)
             "method": method,
         }
-        if stale:
-            # Shown as "last known": this attempt didn't re-confirm the identity.
-            probe["stale"] = True
-            if prev.get("restored_from"):
-                probe["restored_from"] = prev["restored_from"]
+        # "stale" = shown as last-known: this attempt didn't re-confirm the
+        # identity. Always written (PortStore.update merges keys, so an omitted
+        # flag would leave an old True behind after a successful re-identify).
+        probe["stale"] = stale
+        probe["restored_from"] = (prev.get("restored_from") or "") if stale else ""
         if new_ident:
             probe["identified_at"] = time.time()
         elif prev.get("identified_at"):
@@ -1030,7 +1043,7 @@ class ConsoleSpoke(BaseSpoke):
         enough — such a port keeps being retried until it yields a name."""
         if probe.get("source") != "active" or probe.get("stale"):
             return False
-        return bool(str((probe.get("identity") or {}).get("hostname") or "").strip())
+        return bool(_real_hostname((probe.get("identity") or {}).get("hostname")))
 
     def _restore_last_known(self) -> None:
         """One-time (per process) backfill of ports whose stored profile is
@@ -1044,23 +1057,34 @@ class ConsoleSpoke(BaseSpoke):
         self._restored_last_known = True
         for pid, saved in self.store.all_items().items():
             probe = dict(saved.get("probe") or {})
-            if any(v for v in (probe.get("identity") or {}).values()):
+            ident = probe.get("identity") or {}
+            junk_restore = (probe.get("source") == "restored"
+                            and not _real_hostname(ident.get("hostname"))
+                            and not any(v for k, v in ident.items() if k != "hostname"))
+            if any(v for v in ident.values()) and not junk_restore:
                 continue
             identity: Dict[str, Any] = {}
             vendor = None
             origin = ""
             cached = self.devices.lookup_port(pid)
-            if cached and any(v for v in (cached.get("identity") or {}).values()):
+            if cached and (_real_hostname((cached.get("identity") or {}).get("hostname"))
+                           or any(v for k, v in (cached.get("identity") or {}).items()
+                                  if k != "hostname")):
                 identity = {k: v for k, v in cached["identity"].items() if v}
                 vendor = cached.get("vendor") or None
                 origin = "device_cache"
             else:
                 hist = ((self._health.get(pid) or {}).get("identify") or {}).get("hostname_history") or []
-                host = str((hist[-1] or {}).get("host") or "").strip() if hist else ""
+                host = next((h for h in (_real_hostname((e or {}).get("host"))
+                                         for e in reversed(hist)) if h), "")
                 if host:
                     identity = {"hostname": host}
                     origin = "hostname_history"
             if not identity:
+                if junk_restore:  # an earlier build restored a placeholder name
+                    probe.update({"identity": {}, "source": "active",
+                                  "stale": False, "restored_from": ""})
+                    self.store.update(pid, probe=probe)
                 continue
             probe.update({"identity": identity, "vendor": probe.get("vendor") or vendor,
                           "source": "restored", "stale": True, "restored_from": origin})
@@ -1162,7 +1186,7 @@ class ConsoleSpoke(BaseSpoke):
             self._clear_unopenable(pid)
         self._record_identify_telemetry(pid, res, method="login")
         await self._emit_probe_result(pid, res)
-        if str((res.get("identity") or {}).get("hostname") or "").strip():
+        if _real_hostname((res.get("identity") or {}).get("hostname")):
             self._probe_fails[pid] = 0                 # success clears the give-up counter
             self._probe_delay[pid] = cfg["reverify"]   # profiled → daily re-verify only
         else:
