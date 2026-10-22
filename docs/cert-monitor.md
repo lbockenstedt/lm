@@ -73,10 +73,11 @@ correct between the daily checks.
 
 ## Alert rules
 
-The **Cert Monitor Alert Rules** card lives in the **Reports** view, below the
-Realtime Alert Rules. It is shown only to a Global Admin while the monitor is
-enabled, and works like the Simulation module's realtime alert rules. Each rule
-has:
+Cert alert rules live in the single **Alert Rules** tile of the **Reports**
+view, alongside the realtime alert rules. Click **+ Add alert** and choose a
+source from the **Cert Expiry Monitor** group. These sources (and the cert rules
+in the list) appear only to a Global Admin while the monitor is enabled. Cert
+rules are hub-wide, not per-tenant. Each rule has:
 
 - a trigger (see the table below)
 - an optional list of services to watch (no services ticked = all)
