@@ -12,6 +12,19 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-10-19
 
+### Simulations
+- **Interactive Simulation Build Assistant.** Simulations → Assistant is now a
+  live AppBuilder agent session. It reads the real cs and lm code, rules and the
+  add-simulation recipe, streams what it's reading, asks one question at a time
+  (with suggested answers), and fills in a Spec panel. Once the spec is ready, a
+  Global Admin can **Submit to AppBuilder**, which files one issue per repo and
+  builds it as PRs to dev. Build status shows in the chat. Other users file it
+  for admin approval. It only creates, changes or explains simulations. Changing
+  a working simulation needs confirmation and a code check, and it steers you to
+  duplicating it first. Each in-place change is built as its own PR, recorded
+  with the requesting LM user. See [cs.md](cs.md#how-to-use-it) and
+  [appbuilder.md](appbuilder.md#how-it-works).
+
 ### Hub
 - **Cert Expiry Monitor (Global Admin, opt-in).** Enable it in System → General
   and a **Cert Monitor** menu item appears. It checks the TLS certificates of
