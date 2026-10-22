@@ -4537,6 +4537,8 @@ async function loadReportsData() {
         reports = ((await apiJson('/api/reports/list?tenant=' + encodeURIComponent(currentTenant))) || {}).reports || [];
     } catch (e) { el.innerHTML = `<div class="hpe-card rounded-lg p-5 text-red-600">Could not load reports: ${escapeHtml(e.message || String(e))}</div>`; return; }
     window._reportsCache = reports;
+    // Cert Monitor alert rules live here too — same gate as the Cert Monitor view.
+    const _showCertMonAlerts = isAdmin() && window.__lmCertMonEnabled;
     const freqLabel = s => { s = s || {}; const f = s.freq || 'weekly'; const when = f === 'weekly' ? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][s.dow || 0] : (f === 'monthly' ? ('day ' + (s.dom || 1)) : ''); return `${f}${when ? ' ' + when : ''} @ ${String(s.hour != null ? s.hour : 7).padStart(2, '0')}:00`; };
     const rows = reports.length ? reports.map(r => `<tr class="border-b border-slate-100">
         <td class="px-3 py-2"><span class="font-semibold text-slate-700">${escapeHtml(r.name || '')}</span></td>
@@ -4556,8 +4558,10 @@ async function loadReportsData() {
       </div>
       <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-[10px] uppercase text-slate-400"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Tenant</th><th class="px-3 py-1 text-left">Sections</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">Schedule</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
     </div>
-    <div id="alerts-content" class="hpe-card rounded-lg p-5 shadow-sm mt-4"><p class="text-sm text-slate-400 italic">Loading alert rules…</p></div>`;
+    <div id="alerts-content" class="hpe-card rounded-lg p-5 shadow-sm mt-4"><p class="text-sm text-slate-400 italic">Loading alert rules…</p></div>
+    ${_showCertMonAlerts ? '<div id="certmon-alerts" class="hpe-card rounded-lg p-5 shadow-sm mt-4"><p class="text-sm text-slate-400 italic">Loading cert alert rules…</p></div>' : ''}`;
     loadAlertRules();
+    if (_showCertMonAlerts) loadCertMonAlertRules();
 }
 
 // ── Realtime Alert Rules (per-tenant; edge-triggered breach + recovery) ──────
@@ -4826,7 +4830,7 @@ async function loadCertMonData() {
         const err = r.error ? `<div class="text-[11px] text-red-600">${escapeHtml(r.error)}</div>` : '';
         const san = r.san_count ? `<div class="text-[10px] text-slate-400" title="${escapeHtml((r.san || []).join(', '))}">CN ${escapeHtml(r.subject_cn || '')} · ${r.san_count} SAN</div>` : (r.subject_cn ? `<div class="text-[10px] text-slate-400">CN ${escapeHtml(r.subject_cn)}</div>` : '');
         return `<tr class="${rowCls[r.status] || ''}">
-            <td class="px-3 py-2">${pill(r)}</td>
+            <td class="px-3 py-2 whitespace-nowrap">${pill(r)}</td>
             <td class="px-3 py-2 font-mono text-xs">${escapeHtml(r.host)}${r.port && r.port !== 443 ? ':' + r.port : ''}${san}${err}</td>
             <td class="px-3 py-2 text-xs">${escapeHtml(r.service || '')}<div class="text-[10px] text-slate-400">${escapeHtml([r.region, r.role].filter(Boolean).join(' · '))}</div></td>
             <td class="px-3 py-2 text-xs">${escapeHtml(r.provider || '')}${trust}<div class="text-[10px] text-slate-400">${escapeHtml(r.issuer_cn || '')}</div></td>
@@ -4853,7 +4857,7 @@ async function loadCertMonData() {
         <div class="overflow-x-auto rounded-md border border-slate-200">
           <table class="w-full text-left text-sm">
             <thead class="bg-slate-100 text-slate-600 uppercase text-[11px]"><tr>
-              <th class="px-3 py-2">Expires in</th><th class="px-3 py-2">Host</th><th class="px-3 py-2">Service</th>
+              <th class="px-3 py-2 min-w-[7rem] whitespace-nowrap">Expires in</th><th class="px-3 py-2">Host</th><th class="px-3 py-2">Service</th>
               <th class="px-3 py-2">Provider (issuer)</th><th class="px-3 py-2">Type / key</th><th class="px-3 py-2">Expiry date</th>
             </tr></thead>
             <tbody class="divide-y divide-slate-200">${rows || `<tr><td colspan="6" class="px-4 py-8 text-center text-slate-400 italic">${d.last_run ? 'No matching hosts' : 'No check has run yet — click <b>Check now</b>.'}</td></tr>`}</tbody>
@@ -4867,8 +4871,7 @@ async function loadCertMonData() {
         <textarea id="certmon-custom" rows="4" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500">${escapeHtml((cfg.custom_hosts || []).join('\n'))}</textarea>
         <div class="flex justify-end mt-2"><button onclick="certMonSaveCustom(this)" class="text-xs px-3 py-1 rounded-md bg-green-600 text-white hover:bg-green-700">Save</button></div>
       </div>
-      <div id="certmon-alerts" class="${card}"><p class="text-sm text-slate-400 italic">Loading alert rules…</p></div>`;
-    loadCertMonAlertRules();
+      <p class="text-xs text-slate-400">Cert alert rules (expiry / error / untrusted emails) are managed under <a href="#" onclick="setView('reports'); return false;" class="text-[#01A982] hover:underline">Reports</a>.</p>`;
     if (filt) { const f = document.getElementById('certmon-filter'); if (f) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); } }
     if (d.running) { clearTimeout(window._certMonPoll); window._certMonPoll = setTimeout(() => { if (currentView === 'certmon') loadCertMonData(); }, 5000); }
 }
@@ -4921,7 +4924,7 @@ async function loadCertMonAlertRules() {
         <td class="px-3 py-2 text-right whitespace-nowrap"><button onclick="testCertMonAlertRule('${escapeHtml(r.id)}')" class="text-xs text-slate-500 hover:text-slate-700 mr-2">Test</button><button onclick="editCertMonAlertRule('${escapeHtml(r.id)}')" class="text-xs text-[#01A982] hover:underline mr-2">Edit</button><button onclick="deleteCertMonAlertRule('${escapeHtml(r.id)}')" class="text-xs text-red-500 hover:text-red-700">Delete</button></td></tr>`).join('') : '<tr><td colspan="6" class="px-3 py-4 text-slate-400 italic">No alert rules — click "Add alert".</td></tr>';
     el.innerHTML = `
       <div class="flex items-center justify-between mb-3">
-        <div><h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Alert Rules</h3><p class="text-xs text-slate-400 max-w-xl">One email when hosts newly breach a rule, one when they recover — a still-bad cert stays silent. Each email lists every host that changed. Evaluated after each check and every 15 minutes. Delivered via Setup → Notifications.</p></div>
+        <div><p class="text-sm font-bold text-slate-600">Cert Monitor Alert Rules</p><p class="text-xs text-slate-400 max-w-xl">One email when hosts newly breach a rule, one when they recover — a still-bad cert stays silent. Each email lists every host that changed. Evaluated after each check and every 15 minutes. Delivered via Setup → Notifications.</p></div>
         <button onclick="editCertMonAlertRule('')" class="shrink-0 bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500 px-3 py-1.5 rounded-md text-sm font-bold">+ Add alert</button>
       </div>
       <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-[10px] uppercase text-slate-400"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Trigger</th><th class="px-3 py-1 text-left">Format</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
