@@ -430,6 +430,18 @@ def _log_cs_op_failure(source: str, cs_type: str, data: Dict[str, Any]) -> None:
         data.get("cs_cmd_id"), reason[:500])
 
 
+def _update_gate_local_hour(tz_name: str) -> int:
+    """Current hour in ``tz_name`` (IANA) for the update_gate window; the hub's
+    system local time when empty or invalid."""
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+            return _dt.datetime.now(ZoneInfo(tz_name)).hour
+        except Exception as e:  # noqa: BLE001 — bad zone → system local
+            logger.debug("update_gate: invalid timezone %r (%s) — using system local", tz_name, e)
+    return _dt.datetime.now().hour
+
+
 class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, HenetSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, InstanceRelocateMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubMtlsEnforcementMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
@@ -7804,8 +7816,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # daytime idle); idle_window = idle OR window; idle = when idle only;
             # immediate = always. AUTO restarts only; the footer Update is force.
             "mode": str(cfg.get("mode", "window")).lower(),
-            "window_hour": int(cfg.get("window_hour", 2)),        # 0-23 local
+            "window_hour": int(cfg.get("window_hour", 2)),        # 0-23 in `timezone`
             "window_duration_h": int(cfg.get("window_duration_h", 2)),
+            # IANA zone the window hour is evaluated in. Hubs run in UTC, so
+            # without this "02:00" means 02:00 UTC (evening in the Americas).
+            # Empty → LM_UPDATE_GATE_TZ → the hub's system local time.
+            "timezone": str(cfg.get("timezone") or
+                            os.environ.get("LM_UPDATE_GATE_TZ", "") or "").strip(),
         }
 
     def _gate_allows_restart_now(self) -> bool:
@@ -7835,8 +7852,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # button (force sentinel) still applies on demand, any time. INVARIANT:
         # do NOT re-add an `if idle: return True` here for window mode — use
         # `idle_window` mode if promptly-on-idle behavior is wanted.
-        try:  # window: local hour within [start, start+duration) mod 24
-            h = _dt.datetime.now().hour
+        try:  # window: hour (in the gate's timezone) within [start, start+duration) mod 24
+            h = _update_gate_local_hour(g.get("timezone", ""))
         except Exception:  # noqa: BLE001
             return True   # clock unreadable → fail-open so an update never strands
         start = g["window_hour"] % 24
