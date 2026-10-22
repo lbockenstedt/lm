@@ -7,6 +7,7 @@ isolation.
 """
 import asyncio
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -156,10 +157,10 @@ def test_monitor_login_scan_attempts_login_with_stored_creds(spoke):
     assert calls == []
 
 
-def test_banner_identified_port_not_re_probed_on_timer(spoke):
-    # A device identified by BANNER (vendor + login, but no structured identity —
-    # e.g. an HP-ProCurve switch) must be treated as authoritatively identified:
-    # the auto-identify loops must NOT keep re-logging-into it every 30 min.
+def test_banner_only_port_is_not_profiled_and_keeps_retrying(spoke, monkeypatch):
+    # A device that yields only a vendor/banner + login (no hostname) is NOT
+    # profiled: it must stay on the 5 min -> 1 h retry backoff, not the daily
+    # re-verify (the "consoles un-named for 14 h" bug).
     spoke.config["auto_identify"] = True
     spoke._credentials = [{"username": "admin", "password": "x"}]
     spoke._monitor_scan()
@@ -167,19 +168,41 @@ def test_banner_identified_port_not_re_probed_on_timer(spoke):
     spoke._identify_blocking = lambda pid, dev: calls.append(pid) or {
         "vendor": "hp-procurve", "identity": {}, "logged_in": True, "banner": "ProCurve"}
     asyncio.run(spoke._monitor_login_scan())
-    assert calls == ["good"]  # first identify happens
+    assert calls == ["good"]
     probe = spoke.store.get("good")["probe"]
     assert probe["source"] == "active" and probe["vendor"] == "hp-procurve"
-    # Subsequent scans (login + autoprobe) must skip it — no periodic re-verify.
+    assert spoke._probe_identified(probe) is False
+    assert spoke._probe_delay["good"] == 300  # retry_min, not the daily reverify
+    status = spoke._identify_status("good", present=True)
+    assert status["active_identity"] is False
+    # Immediately after: still inside the backoff window -> not re-probed yet.
+    calls.clear()
+    asyncio.run(spoke._monitor_login_scan())
+    assert calls == []
+    # Once the backoff elapses it is tried again.
+    real = time.monotonic
+    monkeypatch.setattr(cs.time, "monotonic", lambda: real() + 301)
+    asyncio.run(spoke._monitor_login_scan())
+    assert calls == ["good"]
+
+
+def test_hostname_profiled_port_not_re_probed_until_reverify(spoke):
+    spoke.config["auto_identify"] = True
+    spoke._credentials = [{"username": "admin", "password": "x"}]
+    spoke._monitor_scan()
+    calls = []
+    spoke._identify_blocking = lambda pid, dev: calls.append(pid) or {
+        "vendor": "hp-procurve", "identity": {"hostname": "SW1"}, "logged_in": True}
+    asyncio.run(spoke._monitor_login_scan())
+    assert calls == ["good"]
     calls.clear()
     asyncio.run(spoke._monitor_login_scan())
     asyncio.run(spoke._autoprobe_scan())
-    assert "good" not in calls  # identified port never re-probed on a timer
-    # Diagnostics must advertise passive-only, not a re-verify countdown.
+    assert "good" not in calls
     status = spoke._identify_status("good", present=True)
     assert status["active_identity"] is True
-    assert status["next_attempt_in"] == 0
-    assert "no active re-probe" in status["skip_reason"]
+    assert status["next_attempt_in"] > 0
+    assert "re-verified every" in status["skip_reason"]
 
 
 def test_monitor_login_scan_skips_without_credentials(spoke):
