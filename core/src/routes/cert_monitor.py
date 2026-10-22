@@ -1,12 +1,14 @@
 """Cert Expiry Monitor routes — GLOBAL ADMIN ONLY (on top of the /api/* session
 gate). Config lives in global_config["cert_monitor"]; results are written to
 $LM_STATE_DIR/cert_monitor.json by cert_monitor.run_checks. A startup-launched
-scheduler runs a check at most once per 24h while the feature is enabled."""
+scheduler runs a check at most once per 24h while the feature is enabled, and
+evaluates the alert rules (cert_monitor_alerts) after every check and tick."""
 import asyncio
 import datetime as _dt
 import logging
 
 import cert_monitor as cm
+import cert_monitor_alerts as cma
 from api import HTTPException, Request
 
 logger = logging.getLogger("Hub")
@@ -18,6 +20,7 @@ def register(app, hub, ctx):
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
     run_lock = asyncio.Lock()
+    alert_lock = asyncio.Lock()
     runtime = {"running": False, "task": None, "scheduler": None}
 
     def _guard(request: Request):
@@ -56,6 +59,7 @@ def register(app, hub, ctx):
                 logger.info("[certmon] done in %ss: red=%d yellow=%d green=%d error=%d",
                             data["duration_s"], c.get("red", 0), c.get("yellow", 0),
                             c.get("green", 0), c.get("error", 0))
+                await _evaluate_alerts(data)
             except Exception as e:  # noqa: BLE001
                 logger.warning("[certmon] check failed: %s", e)
             finally:
@@ -86,6 +90,22 @@ def register(app, hub, ctx):
                     pass
             out.append(r)
         return cm.sort_results(out)
+
+    async def _evaluate_alerts(data=None):
+        if not _cfg()["enabled"]:
+            return {}
+        async with alert_lock:
+            try:
+                if data is None:
+                    data = await asyncio.to_thread(cm.load_results)
+                if not data.get("last_run"):
+                    return {}
+                results = _refresh_days(data.get("results"),
+                                        _dt.datetime.now(_dt.timezone.utc))
+                return await cma.run_alerts(hub, results)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[certmon] alert evaluation failed: %s", e)
+                return {}
 
     @app.get("/api/certmon/status")
     async def certmon_status(request: Request):
@@ -165,6 +185,78 @@ def register(app, hub, ctx):
         started = _kick("manual")
         return {"status": "started" if started else "already_running"}
 
+    # ── alert rules (breach + recovery digests; see cert_monitor_alerts) ──
+    @app.get("/api/certmon/alerts/rules")
+    async def certmon_alert_rules(request: Request):
+        _guard(request)
+        return {"rules": cma.get_rules(hub), "triggers": list(cma.TRIGGERS),
+                "trigger_labels": cma.TRIGGER_LABELS, "services": cma.service_names(),
+                "default_threshold_days": cma.DEFAULT_THRESHOLD_DAYS}
+
+    async def _body(request):
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = None
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="JSON object expected")
+        return body
+
+    @app.post("/api/certmon/alerts/rules")
+    async def certmon_alert_rule_create(request: Request):
+        _guard(request)
+        body = await _body(request)
+        rules = cma.get_rules(hub)
+        if len(rules) >= cma.MAX_RULES:
+            raise HTTPException(status_code=400, detail=f"At most {cma.MAX_RULES} rules")
+        rule = cma.clean_rule(body)
+        rules.append(rule)
+        await cma.save_rules(hub, rules)
+        if rule["enabled"]:
+            asyncio.create_task(_evaluate_alerts())
+        return {"saved": True, "rule": rule}
+
+    @app.put("/api/certmon/alerts/rules/{rid}")
+    async def certmon_alert_rule_update(rid: str, request: Request):
+        _guard(request)
+        body = await _body(request)
+        rules = cma.get_rules(hub)
+        for i, r in enumerate(rules):
+            if r.get("id") == rid:
+                rules[i] = cma.clean_rule(body, r)
+                await cma.save_rules(hub, rules)
+                if rules[i]["trigger"] != r.get("trigger"):
+                    async with alert_lock:
+                        await asyncio.to_thread(cma.reset_rule_state, rid)
+                if rules[i]["enabled"]:
+                    asyncio.create_task(_evaluate_alerts())
+                return {"saved": True, "rule": rules[i]}
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    @app.delete("/api/certmon/alerts/rules/{rid}")
+    async def certmon_alert_rule_delete(rid: str, request: Request):
+        _guard(request)
+        rules = cma.get_rules(hub)
+        keep = [r for r in rules if r.get("id") != rid]
+        removed = len(keep) != len(rules)
+        if removed:
+            await cma.save_rules(hub, keep)
+        return {"removed": removed}
+
+    @app.post("/api/certmon/alerts/rules/{rid}/test")
+    async def certmon_alert_rule_test(rid: str, request: Request):
+        _guard(request)
+        rule = next((r for r in cma.get_rules(hub) if r.get("id") == rid), None)
+        if not rule:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        if not rule.get("recipients"):
+            raise HTTPException(status_code=400, detail="This rule has no recipients")
+        data = await asyncio.to_thread(cm.load_results)
+        results = _refresh_days(data.get("results"), _dt.datetime.now(_dt.timezone.utc))
+        if not await cma.send_test(hub, rule, results):
+            raise HTTPException(status_code=400, detail="Send failed — check Setup → Notifications")
+        return {"sent": True, "to": rule["recipients"]}
+
     async def _scheduler():
         await asyncio.sleep(60)
         while True:
@@ -173,6 +265,8 @@ def register(app, hub, ctx):
                     data = await asyncio.to_thread(cm.load_results)
                     if cm.is_due(data):
                         await _run("daily")
+                    else:
+                        await _evaluate_alerts(data)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001

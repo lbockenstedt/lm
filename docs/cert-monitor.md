@@ -1,6 +1,6 @@
 ---
-summary: "Cert Expiry Monitor: Global-Admin-only, opt-in daily TLS certificate expiry check of public Aruba Central / HPE GreenLake and Juniper Mist cloud endpoints, stored as JSON on the hub."
-keywords: [cert-monitor, certmon, certificate, expiry, tls, aruba-central, greenlake, mist]
+summary: "Cert Expiry Monitor: Global-Admin-only, opt-in daily TLS certificate expiry check of public Aruba Central / HPE GreenLake and Juniper Mist cloud endpoints, stored as JSON on the hub, with edge-triggered email alert rules."
+keywords: [cert-monitor, certmon, certificate, expiry, tls, aruba-central, greenlake, mist, alerts, notifications]
 ---
 
 # Cert Expiry Monitor
@@ -71,6 +71,49 @@ correct between the daily checks.
 - Config is stored in `global_config.cert_monitor`:
   `{enabled, custom_hosts, disabled_builtin}`.
 
+## Alert rules
+
+The **Alert Rules** card at the bottom of the Cert Monitor view works like the
+Simulation module's realtime alert rules. Each rule has:
+
+- a trigger (see the table below)
+- an optional list of services to watch (no services ticked = all)
+- recipients
+- a format: **human** (a formatted email with a host table) or **raw** (a JSON
+  body for automation)
+- an on/off switch
+
+| Trigger | A host breaches when |
+| :-- | :-- |
+| `expiring` | days left < the rule's `threshold_days` (default 30; expired certs always match) |
+| `error` | the check failed (DNS failure, timeout or handshake error) |
+| `untrusted` | the cert did not validate against the system trust store (expected for private device-CA endpoints) |
+
+Alerts are **edge-triggered**:
+- One email goes out when hosts newly breach a rule, and one when they recover.
+  A host that stays bad does not trigger more emails.
+- Each email is a digest: it lists every host that changed in that evaluation,
+  so a shared wildcard cert on many endpoints sends one email, not dozens.
+- If a host can't be reached, an `expiring` rule keeps its last verdict instead
+  of reporting it as recovered.
+
+Rules are evaluated after every check and on every 15-minute scheduler tick,
+using days left recalculated from `not_after`. That way a threshold crossed
+between daily checks still fires. Evaluation only runs while the feature is
+enabled.
+
+The breach state is saved in
+`$LM_STATE_DIR/cert_monitor_alert_state.json`, so a hub restart does not repeat
+alerts that were already sent. A rule's state only moves forward after its
+email is delivered, so a failed send is retried on the next tick. Changing a
+rule's trigger resets that rule's state. Deleting a rule drops its state.
+
+Emails go through the hub provider in **Setup → Notifications**. **Test** sends
+the rule's current matches in the rule's format without changing any state.
+
+Rules are stored in `global_config.cert_monitor_alerts.rules`. The code is in
+`core/src/cert_monitor_alerts.py`.
+
 ## API (Global Admin only — 403 otherwise)
 
 | Method | Path | Purpose |
@@ -79,6 +122,12 @@ correct between the daily checks.
 | GET | `/api/certmon/overview` | config, built-in host list, counts, sorted results |
 | PUT | `/api/certmon/config` | `{enabled?, custom_hosts?, disabled_builtin?}` |
 | POST | `/api/certmon/run` | start a check now (409 when disabled) |
+| GET | `/api/certmon/alerts/rules` | rules plus the trigger and service lists |
+| POST | `/api/certmon/alerts/rules` | create `{name, trigger, threshold_days, services, recipients, format, enabled}` |
+| PUT | `/api/certmon/alerts/rules/{id}` | update a rule |
+| DELETE | `/api/certmon/alerts/rules/{id}` | delete a rule |
+| POST | `/api/certmon/alerts/rules/{id}/test` | send a test email with the current matches |
 
-Code: `core/src/cert_monitor.py` (probe, classify, store) and
+Code: `core/src/cert_monitor.py` (probe, classify, store),
+`core/src/cert_monitor_alerts.py` (alert rules) and
 `core/src/routes/cert_monitor.py` (routes and scheduler).
