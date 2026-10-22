@@ -3221,6 +3221,7 @@ async function loadUpdateGateConfig() {
         setv('ug-mode', g.mode || _UG_DEFAULTS.mode);
         setv('ug-window-hour', g.window_hour !== undefined ? g.window_hour : _UG_DEFAULTS.window_hour);
         setv('ug-window-duration', g.window_duration_h !== undefined ? g.window_duration_h : _UG_DEFAULTS.window_duration_h);
+        setv('ug-timezone', g.timezone || '');
     } catch (e) { /* leave inputs as-is on failure */ }
     // Live watchdog status from /status → metrics.watchdog (bridge loop).
     try {
@@ -3244,7 +3245,10 @@ function resetUpdateGateConfig() {
     setv('ug-mode', _UG_DEFAULTS.mode);
     setv('ug-window-hour', _UG_DEFAULTS.window_hour);
     setv('ug-window-duration', _UG_DEFAULTS.window_duration_h);
-    if (typeof showToast === 'function') showToast('Defaults filled (02:00 window) — click Save to apply.', 'info');
+    let browserTz = '';
+    try { browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { /* ignore */ }
+    setv('ug-timezone', browserTz);
+    if (typeof showToast === 'function') showToast(`Defaults filled (02:00 ${browserTz || 'hub clock'} window) — click Save to apply.`, 'info');
 }
 
 async function saveUpdateGateConfig() {
@@ -3253,6 +3257,7 @@ async function saveUpdateGateConfig() {
         mode: document.getElementById('ug-mode').value,
         window_hour: Number(document.getElementById('ug-window-hour').value),
         window_duration_h: Number(document.getElementById('ug-window-duration').value),
+        timezone: (document.getElementById('ug-timezone').value || '').trim(),
     });
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
     try {
@@ -7054,13 +7059,16 @@ function _renderSettingsSection(subMenu) {
                     <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs text-slate-500">
                         <label>Apply auto-updates<br>
                             <select id="ug-mode" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                                <option value="window">When idle — else the daily window</option>
+                                <option value="window">Only in the daily window (default)</option>
+                                <option value="idle_window">When no users online — else the daily window</option>
                                 <option value="idle">Only when no users online</option>
                                 <option value="immediate">Immediately</option>
                             </select></label>
-                        <label>Window start hour (0–23, local)<br><input type="number" id="ug-window-hour" min="0" max="23" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label>Window start hour (0–23)<br><input type="number" id="ug-window-hour" min="0" max="23" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                         <label>Window length (hours)<br><input type="number" id="ug-window-duration" min="1" max="24" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label title="IANA zone the window hour is in (e.g. America/Chicago). Blank = the hub's system clock, which is usually UTC.">Window timezone<br><input type="text" id="ug-timezone" placeholder="hub clock (UTC)" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                     </div>
+                    <div class="flex justify-end mt-3"><button id="ug-save-btn" onclick="saveUpdateGateConfig()" class="text-xs px-3 py-1 rounded-md bg-green-600 text-white hover:bg-green-700 transition-all">Save</button></div>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="${card} p-6">
