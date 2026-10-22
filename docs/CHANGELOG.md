@@ -18,8 +18,9 @@ CI/tooling changes are omitted unless they change what an operator sees.
   every public Aruba Central / GreenLake and Juniper Mist endpoint once a day
   and lists them red (under 30 days), yellow (under 90 days) or green. Results
   are saved as JSON on the hub. See [cert-monitor.md](cert-monitor.md).
-- **Cert Monitor alert rules.** The **Reports** view now has **Cert Monitor
-  Alert Rules** (Global Admin, while the monitor is enabled),
+- **Cert Monitor alert rules.** Reports → **Alert Rules** now offers Cert
+  Expiry Monitor sources in **+ Add alert** (Global Admin, while the monitor is
+  enabled). Reports has one Alert Rules tile for every alert kind,
   like the Simulation realtime alerts. Each rule watches one trigger (cert
   expiring in under N days, endpoint unreachable, or cert untrusted), optionally
   limited to some services. It emails once when hosts breach and once when they
