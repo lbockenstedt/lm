@@ -2534,7 +2534,9 @@ function _csCentralWarn(data) {
 function _csCentralOk(data) {
     return !!(data && data.status !== 'ERROR');
 }
-function csAgeShort(epochSeconds) {
+// Distinct name: a later global csAgeShort(secs) (duration → '1d') would
+// otherwise shadow this one and render an epoch as ~20000 days.
+function csEpochAgeShort(epochSeconds) {
     if (epochSeconds == null || epochSeconds === '') return null;
     let ms = Number(epochSeconds);
     if (isNaN(ms)) return null;
@@ -2551,7 +2553,7 @@ function csAgeShort(epochSeconds) {
 // ABOVE any empty-state early-return, not after it.
 function csCentralFreshnessBadge(data) {
     const ok = _csCentralOk(data);
-    const age = csAgeShort(data && data.fetched_at);
+    const age = csEpochAgeShort(data && data.fetched_at);
     const label = ok
         ? `✓ Last query to Central succeeded${age ? ' · ' + age : ''}`
         : `✗ Last query to Central failed${age ? ' · ' + age : ''}`;
