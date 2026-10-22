@@ -7290,14 +7290,6 @@ function _renderSettingsSection(subMenu) {
                     </div>
                 </div>
                 <div class="${card} p-6">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Cert Expiry Monitor</h3>
-                    <p class="text-xs text-slate-400 mb-3">Daily check of the TLS certificates on the public Aruba Central / HPE GreenLake and Juniper Mist cloud endpoints. When enabled, a <b>Cert Monitor</b> item appears in the left menu (Global Admins only).</p>
-                    <label class="flex items-center gap-2 text-sm text-slate-600">
-                        <input type="checkbox" id="certmon-enabled" onchange="saveCertMonEnabled(this)" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
-                        Enable Cert Expiry Monitor
-                    </label>
-                </div>
-                <div class="${card} p-6">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Idle Session Timeout</h3>
                     <p class="text-xs text-slate-400 mb-3">Automatically log out a user who makes no requests for this long. Applies live to all sessions.</p>
                     <div class="flex items-center gap-3">
@@ -7341,7 +7333,6 @@ function _renderSettingsSection(subMenu) {
         loadSpokeRegistryDiag();
         loadBackpressureConfig();
         loadUpdateGateConfig();
-        loadCertMonToggle();
         loadActiveSessions();
         loadSessionTimeout();
         loadMtlsReadiness();
@@ -10730,8 +10721,18 @@ function _renderSetupGeneralTile(content) {
             <p class="text-xs text-slate-500 mb-3">Filter each module's data by the tenant's NetBox prefixes, enforced server-side (a tenant cannot see another tenant's subnet data even via the API). Disable for modules that are scoped by tenant ID instead of subnet (e.g. Simulations).</p>
             <div id="subnet-filter-toggles" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
         </div>` : '';
+    const certMonCard = (currentView === 'settings' && isAdmin()) ? `
+        <div class="${card}">
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Cert Expiry Monitor</h3>
+            <p class="text-xs text-slate-400">Daily check of the TLS certificates on the public Aruba Central / HPE GreenLake and Juniper Mist cloud endpoints. When enabled, a <b>Cert Monitor</b> item appears in the left menu (Global Admins only).</p>
+            <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
+                <input type="checkbox" id="certmon-enabled" onchange="saveCertMonEnabled(this)" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                Enable Cert Expiry Monitor
+            </label>
+        </div>` : '';
     content.innerHTML = `
         ${subnetFilterCard}
+        ${certMonCard}
         <div class="${card}">
             <div class="flex justify-between items-center">
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Optimization — Data Cache ${helpIcon('lm-hub', null, 'Hub help')}</h3>
@@ -10822,6 +10823,7 @@ function _renderSetupGeneralTile(content) {
     loadRelayTimeoutsForm();
     loadRepoSyncConfig();
     if (currentView === 'settings') loadSubnetFilterToggles();
+    if (certMonCard) loadCertMonToggle();
     // Auto-save on change (no per-card Save buttons). Cache rows are loaded
     // dynamically by loadCacheConfig with data-cache-key (no id), so the mapper
     // keys off both el.id and el.dataset.cacheKey.
