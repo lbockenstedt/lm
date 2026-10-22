@@ -159,6 +159,37 @@ Each product tab (Central, Central On-Prem, Mist) has a **Diagnostic** subtab th
 
 **Trip a MAC-auth-failure alert (`mac_auth_fail`).** A Wi-Fi client sim that flaps a predictable deny-listed MAC so Aruba Central / ClearPass fires a MAC-auth-failure alert. Enable **Mac Auth Fail** on a client (its help field `mac_auth_fail_mac` sets the exact MAC to spoof, `WebUI/sim-views.js`); the client script (`lm-spoke/src/sim_primitives.py sim_mac_auth_fail`, Windows `simulation.ps1`) does the association attempt. Gotcha: the alert only fires when the spoofed MAC matches the value actually deny-listed/monitored in Central.
 
+**Scope a new simulation with the Assistant.** Simulations → **Assistant** is an
+AppBuilder agent that reads the real cs and lm code (including each repo's rules
+and the `add-simulation` recipe) and asks what it needs, one question at a time.
+Its tool activity streams into the chat ("Viewing file: cs/clients/linux/dns_fail.sh"),
+suggested answers appear as buttons, and the **Spec** panel on the right fills in
+as it learns: name, behaviour, platforms, alert, config knobs, the files each repo
+needs, and open questions. When it marks the spec **Ready to build**, a Global
+Admin presses **Submit to AppBuilder**. AppBuilder files one issue per repo and
+builds each as a PR to `dev`, and the panel shows the build status and PR links.
+Other users press **File for approval**, which sends the spec to an admin through
+the normal feature-request approval. The conversation survives a page reload;
+**New conversation** starts over and **Stop** interrupts a running turn.
+The assistant only creates a simulation, changes an existing one, or explains how
+one works, and it declines anything else. AppBuilder refuses to build a spec that
+touches files outside the simulation code. **Explain** conversations are never
+built. **Changing an existing simulation** follows a fixed sequence:
+1. The assistant warns that every client running the simulation will change,
+   and recommends duplicating it and editing the copy.
+2. It asks you to confirm.
+3. It checks the code against what you say is wrong. A real defect becomes a
+   focused patch.
+4. If the simulation works as built, it tells you what it actually does and
+   suggests duplicating it again.
+5. Only if you still insist does it record your reason.
+
+Each repo's change is built as its own PR. Each issue records your LM login,
+the diagnosis and the reason, so the change can be traced back. It needs
+an AppBuilder that has the GitHub Copilot CLI and a Copilot credential (see
+[appbuilder.md](appbuilder.md)); otherwise the older single-turn assistant is
+shown.
+
 ## Troubleshooting / common questions
 
 **"Auto-provisioning is enabled but nothing provisions."** This is almost always the **two-flag trap**: the tenant-level **"Auto-Provision VMs"** toggle (`usb_auto_provision`) is a *different* switch from each host's **"Enable Client Simulation mode on this host"** (`client_simulation.enabled`). The pxmx agent's loop only spawns when **both** are on. Check the host's `provision` diagnostic on **VM Server** — it reports `cs_enabled`, `loop_running`, `auto_provision_on`, a `reason` string for the current gate, and `halt`. Common gate reasons beyond the two flags: no VM template configured, an empty dongle VID:PID list, CPU/mem over the 1h-average thresholds, or `provision_halt` set. Remember the brain runs in the agent; cs only relays and displays the diagnostic.

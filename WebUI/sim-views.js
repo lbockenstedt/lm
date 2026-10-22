@@ -13244,15 +13244,413 @@ function csAssistantNewConversation() {
     _csAssistantRenderLog();
 }
 
+// ── Interactive sessions (AppBuilder-owned) ─────────────────────────────────
+// When AppBuilder supports it (/available → sessions:true), the assistant is a
+// live agent session on AB: a read-only Copilot CLI agent over the real cs + lm
+// repos, AB's skills and AGENTS.md rules. This UI starts a session, sends each
+// reply, and polls for events (tool activity, assistant messages, the
+// structured spec). Submit hands the finished spec to AppBuilder, which files
+// one issue per repo and builds it; build status streams back into the chat.
+// Older AppBuilders fall back to the legacy /chat flow above.
+const _CS_ASST_SID_KEY = 'lm.simAssistant.session';
+window._csAsst = window._csAsst || null;
+
+function _csAsstNew() {
+    return { sid: null, seq: 0, events: [], spec: null, ready: false, choices: [],
+             state: 'idle', submitted: [], builds: [], premium: 0, pollTimer: null,
+             canSubmit: !!(window._csAsstCaps && window._csAsstCaps.can_submit) };
+}
+
+function _csAsstBusy(st) {
+    return st === 'preparing' || st === 'running' || st === 'submitting';
+}
+
+async function _csAsstApi(method, url, body) {
+    const res = await fetch(url, {
+        method, headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+    });
+    let data = {};
+    try { data = await res.json(); } catch (e) { data = {}; }
+    if (!res.ok) {
+        const err = new Error(data.detail || ('HTTP ' + res.status));
+        err.status = res.status;
+        throw err;
+    }
+    return data;
+}
+
+function _csAsstApply(data) {
+    const a = window._csAsst;
+    if (!a || !data) return;
+    if (data.session_id && data.session_id !== a.sid) return;
+    (data.events || []).forEach(e => {
+        if (e.seq > a.seq) { a.events.push(e); a.seq = e.seq; }
+    });
+    ['state', 'spec', 'ready', 'problems', 'intent', 'choices', 'submitted', 'builds'].forEach(k => {
+        if (data[k] !== undefined) a[k] = data[k];
+    });
+    if (data.premium_requests !== undefined) a.premium = data.premium_requests;
+}
+
+function _csAsstEventHtml(e) {
+    const t = e.text || '';
+    if (e.kind === 'user') return _csAssistantBubble('user', t);
+    if (e.kind === 'assistant') return _csAssistantBubble('assistant', t);
+    if (e.kind === 'tool') return '<div class="text-[11px] font-mono text-slate-500 ml-2 mb-1 truncate" title="' +
+        csEscape(t) + '">› ' + csEscape(t) + '</div>';
+    if (e.kind === 'status') return '<div class="text-xs italic text-slate-400 ml-2 mb-2">' + csEscape(t) + '</div>';
+    if (e.kind === 'error') return '<div class="text-xs text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2 mb-3">⚠️ ' + csEscape(t) + '</div>';
+    if (e.kind === 'submit') return '<div class="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2 mb-3">✅ ' + csEscape(t) + '</div>';
+    return '';
+}
+
+function _csAsstRenderLog() {
+    const log = csEl('cs-assistant-log');
+    const a = window._csAsst;
+    if (!log || !a) return;
+    if (!a.events.length) {
+        window._csAssistantMessages = [];
+        _csAssistantRenderLog();
+        return;
+    }
+    let html = a.events.map(_csAsstEventHtml).join('');
+    if (_csAsstBusy(a.state)) {
+        html += '<div class="flex items-center gap-2 text-xs text-slate-500 ml-2 mb-2">' +
+            '<span class="inline-block w-3 h-3 border-2 border-slate-300 border-t-[#01A982] rounded-full animate-spin"></span>' +
+            (a.state === 'submitting' ? 'Handing off to AppBuilder…' : 'Working…') + '</div>';
+    } else if (a.choices && a.choices.length && !(a.submitted || []).length) {
+        html += '<div class="flex flex-wrap gap-2 mb-3 ml-2">' + a.choices.map((c, i) =>
+            '<button onclick="csAssistantChoose(' + i + ')" class="px-3 py-1.5 text-xs rounded-full border border-[#01A982] text-[#01A982] bg-white hover:bg-emerald-50">' +
+            csEscape(c) + '</button>').join('') + '</div>';
+    }
+    log.innerHTML = html;
+    _csAssistantScrollToBottom();
+}
+
+function _csAsstSpecRow(label, ok, valueHtml) {
+    return '<div class="mb-2"><div class="flex items-center gap-1.5 text-xs font-semibold text-slate-700">' +
+        '<span class="' + (ok ? 'text-emerald-600' : 'text-slate-300') + '">' + (ok ? '●' : '○') + '</span>' +
+        csEscape(label) + '</div>' + (valueHtml ? '<div class="text-xs text-slate-600 ml-4 mt-0.5 break-words">' + valueHtml + '</div>' : '') + '</div>';
+}
+
+function _csAsstRenderSpec() {
+    const el = csEl('cs-assistant-spec');
+    const a = window._csAsst;
+    if (!el || !a) return;
+    const s = a.spec || {};
+    const short = v => csEscape(String(v || '').length > 220 ? String(v).slice(0, 220) + '…' : String(v || ''));
+    const intent = a.intent || s.intent || '';
+    const explain = intent === 'explain';
+    const intentLabel = { create: 'New simulation', modify: 'Change existing', explain: 'Explain only' }[intent] || '';
+    const badge = explain ? '<span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-sky-100 text-sky-800">Explain only</span>'
+        : a.ready ? '<span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">Ready to build</span>'
+        : '<span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">Gathering</span>';
+    let html = '<div class="flex items-center justify-between mb-3"><h3 class="text-sm font-bold text-slate-800">Spec</h3>' + badge + '</div>';
+    html += _csAsstSpecRow('Request', !!intent, csEscape(intentLabel) +
+        (s.target ? ' · <code>' + csEscape(s.target) + '</code>' : ''));
+    if (explain) {
+        html += '<div class="mt-2 text-xs text-slate-500">Read-only walkthrough of how this simulation works — nothing is filed or built. Ask to change it to get a buildable spec.</div>';
+        if (a.premium) html += '<div class="mt-4 text-[10px] text-slate-400">Copilot premium requests used: ' + csEscape(a.premium) + '</div>';
+        el.innerHTML = html;
+        return;
+    }
+    if (intent === 'modify') {
+        html += '<div class="mt-2 mb-2 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-900">' +
+            '<b>Changing a working simulation</b> affects every client running it. Duplicating it and changing the copy is recommended. ' +
+            'In-place changes ship as their own PR, recorded with your LM login.</div>';
+        html += _csAsstSpecRow('Edit confirmed', !!s.modify_confirmed, s.modify_confirmed ? 'Yes' : '');
+        html += _csAsstSpecRow('Diagnosis', !!s.diagnosis, short(s.diagnosis));
+        const why = s.verified_broken ? 'Verified defect — patch'
+            : (s.override_reason ? 'Works as built — user override: ' + short(s.override_reason) : '');
+        html += _csAsstSpecRow('Why change in place', !!why, s.verified_broken ? csEscape(why) : why);
+    } else if (s.duplicate_of) {
+        html += _csAsstSpecRow('Duplicated from', true, '<code>' + csEscape(s.duplicate_of) + '</code>');
+    }
+    html += _csAsstSpecRow('Name', !!s.name, s.name ? '<code>' + csEscape(s.name) + '</code>' : '');
+    html += _csAsstSpecRow('Summary', !!s.summary, short(s.summary));
+    html += _csAsstSpecRow('Behavior', !!s.behavior, short(s.behavior));
+    html += _csAsstSpecRow('Platforms', !!(s.platforms && s.platforms.length), csEscape((s.platforms || []).join(', ')));
+    html += _csAsstSpecRow('Alert', !!s.alert, csEscape(s.alert || ''));
+    html += _csAsstSpecRow('Config knobs', !!(s.config_knobs && s.config_knobs.length),
+        (s.config_knobs || []).map(k => '<code>' + csEscape(k.key) + '</code>' + (k.default ? '=' + csEscape(k.default) : '')).join(', '));
+    const tps = s.touchpoints || [];
+    html += _csAsstSpecRow('Touch-points (' + tps.length + ')', tps.length > 0,
+        tps.map(t => '<div class="truncate" title="' + csEscape(t.change || '') + '"><span class="text-slate-400">' + csEscape(t.repo) + ':</span> ' + csEscape(t.path) + '</div>').join(''));
+    const probs = a.problems || [];
+    if (probs.length) {
+        html += '<div class="mt-3 text-xs font-semibold text-rose-700">Blocked by guardrails</div><ul class="list-disc ml-5 text-xs text-rose-800">' +
+            probs.map(q => '<li>' + csEscape(q) + '</li>').join('') + '</ul>';
+    }
+    const oq = s.open_questions || [];
+    if (oq.length) {
+        html += '<div class="mt-3 text-xs font-semibold text-amber-700">Open questions</div><ul class="list-disc ml-5 text-xs text-amber-800">' +
+            oq.map(q => '<li>' + csEscape(q) + '</li>').join('') + '</ul>';
+    }
+    const builds = a.builds || [];
+    if (builds.length) {
+        const label = { queued: 'Queued for AppBuilder', feature_needs_info: 'AppBuilder needs info',
+            feature_built: 'PR opened', feature_flagged: 'Needs a human (boundary)', feature_failed: 'Build failed' };
+        html += '<div class="mt-4 pt-3 border-t border-slate-200 text-xs font-semibold text-slate-700 mb-1">Build</div>' +
+            builds.map(b => '<div class="text-xs mb-1"><a class="text-[#01A982] hover:underline" target="_blank" rel="noopener" href="' +
+                csEscape(b.url || '#') + '">' + csEscape(b.repo + '#' + b.number) + '</a> — ' + csEscape(label[b.status] || b.status) +
+                (b.pr_url ? ' · <a class="text-[#01A982] hover:underline" target="_blank" rel="noopener" href="' + csEscape(b.pr_url) + '">PR</a>' : '') +
+                (b.reason ? '<div class="text-slate-500">' + short(b.reason) + '</div>' : '') + '</div>').join('');
+    }
+    if (a.premium) html += '<div class="mt-4 text-[10px] text-slate-400">Copilot premium requests used: ' + csEscape(a.premium) + '</div>';
+    el.innerHTML = html;
+}
+
+function _csAsstRenderControls() {
+    const a = window._csAsst;
+    if (!a) return;
+    const busy = _csAsstBusy(a.state);
+    const done = (a.submitted || []).length > 0;
+    const input = csEl('cs-assistant-input');
+    const send = csEl('cs-assistant-send');
+    const stop = csEl('cs-assistant-stop');
+    const submit = csEl('cs-assistant-submit');
+    if (input) {
+        input.disabled = busy || done;
+        input.placeholder = done ? 'Submitted — start a new conversation to scope something else.'
+            : 'Reply, paste a script, or describe what you want… (Enter to send, Shift+Enter for a new line)';
+    }
+    if (send) send.disabled = busy || done;
+    if (stop) stop.classList.toggle('hidden', !(a.state === 'running' || a.state === 'preparing'));
+    if (submit) {
+        submit.disabled = !a.ready || busy || done;
+        const explain = (a.intent || (a.spec || {}).intent) === 'explain';
+        submit.title = a.ready ? '' : explain ? 'Explain-only conversations are not built.'
+            : (a.problems || []).length ? 'Blocked: ' + a.problems.join('; ')
+            : 'Available once the assistant marks the spec ready (no open questions).';
+        submit.textContent = done ? 'Submitted' : (a.canSubmit ? 'Submit to AppBuilder' : 'File for approval');
+        submit.classList.toggle('opacity-50', submit.disabled);
+    }
+}
+
+function _csAsstRender() {
+    _csAsstRenderLog();
+    _csAsstRenderSpec();
+    _csAsstRenderControls();
+}
+
+function _csAsstSchedulePoll() {
+    const a = window._csAsst;
+    if (!a || !a.sid) return;
+    if (a.pollTimer) clearTimeout(a.pollTimer);
+    const buildsPending = (a.builds || []).some(b => !b.done) || ((a.submitted || []).length && !(a.builds || []).length);
+    let delay = null;
+    if (_csAsstBusy(a.state)) delay = 1500;
+    else if (buildsPending) delay = 15000;
+    if (delay === null) return;
+    a.pollTimer = setTimeout(_csAsstPoll, delay);
+}
+
+async function _csAsstPoll() {
+    const a = window._csAsst;
+    if (!a || !a.sid) return;
+    a.pollTimer = null;
+    if (!csEl('cs-assistant-log')) return; // navigated away; resumes on re-render
+    const sid = a.sid;
+    try {
+        const data = await _csAsstApi('GET', '/api/sim-assistant/session/' + encodeURIComponent(sid) + '?since=' + a.seq);
+        _csAsstApply(data);
+    } catch (e) {
+        if (e.status === 404) {
+            console.warn('sim assistant: session expired', e);
+            localStorage.removeItem(_CS_ASST_SID_KEY);
+            window._csAsst = _csAsstNew();
+            _csAsstRender();
+            return;
+        }
+        console.error('sim assistant: poll failed', e);
+    }
+    _csAsstRender();
+    _csAsstSchedulePoll();
+}
+
+async function _csAsstSend(text) {
+    const a = window._csAsst;
+    if (!a || !text || _csAsstBusy(a.state)) return;
+    a.choices = [];
+    a.state = 'preparing';
+    _csAsstRenderControls();
+    try {
+        let data;
+        if (!a.sid) {
+            data = await _csAsstApi('POST', '/api/sim-assistant/session', { message: text });
+            a.sid = data.session_id;
+            localStorage.setItem(_CS_ASST_SID_KEY, a.sid);
+        } else {
+            data = await _csAsstApi('POST', '/api/sim-assistant/session/' + encodeURIComponent(a.sid) + '/reply', { message: text });
+        }
+        _csAsstApply(data);
+        a.state = data.state || 'preparing';
+    } catch (e) {
+        console.error('sim assistant: send failed', e);
+        a.state = 'awaiting_user';
+        a.events.push({ seq: a.seq, kind: 'error', text: (e && e.message) ? e.message : String(e) });
+    }
+    _csAsstRender();
+    _csAsstSchedulePoll();
+}
+
+function csAssistantChoose(i) {
+    const a = window._csAsst;
+    const c = a && a.choices && a.choices[i];
+    if (c) _csAsstSend(c);
+}
+
+async function csAssistantStop() {
+    const a = window._csAsst;
+    if (!a || !a.sid) return;
+    try {
+        await _csAsstApi('POST', '/api/sim-assistant/session/' + encodeURIComponent(a.sid) + '/cancel');
+    } catch (e) {
+        console.error('sim assistant: cancel failed', e);
+        showToast('Could not stop: ' + e.message, 'error');
+    }
+}
+
+async function _csAsstFileForApproval() {
+    const a = window._csAsst;
+    const transcript = a.events.filter(e => e.kind === 'user' || e.kind === 'assistant')
+        .map(e => (e.kind === 'user' ? 'User: ' : 'Assistant: ') + e.text).join('\n\n---\n\n');
+    const explanation = 'New simulation requested via the Simulation Build Assistant (session ' + a.sid + ').\n\n' +
+        '=== SPEC ===\n\n' + JSON.stringify(a.spec, null, 2) + '\n\n=== CONVERSATION TRANSCRIPT ===\n\n' + transcript;
+    const data = await _csAsstApi('POST', '/api/bug-report', {
+        explanation, severity: 'medium', type: 'feature',
+        context: { currentView: 'Simulations', source: 'sim-assistant', module: 'simulation', sim_session_id: a.sid },
+    });
+    a.events.push({ seq: a.seq, kind: 'submit', text: 'Filed as a feature request (id ' + (data.id || '?') +
+        ') — pending admin approval in Setup.' });
+    showToast('Filed — pending admin approval.', 'success');
+}
+
+async function csAssistantSubmitSession() {
+    const a = window._csAsst;
+    if (!a || !a.sid || !a.ready) return;
+    if (!a.canSubmit) {
+        try { await _csAsstFileForApproval(); } catch (e) {
+            console.error('sim assistant: file for approval failed', e);
+            showToast('Could not file the request: ' + e.message, 'error');
+        }
+        _csAsstRender();
+        return;
+    }
+    if (!confirm('Hand this spec to AppBuilder? It will file one issue per repo and build it as PRs to dev.')) return;
+    a.state = 'submitting';
+    _csAsstRender();
+    try {
+        const data = await _csAsstApi('POST', '/api/sim-assistant/session/' + encodeURIComponent(a.sid) + '/submit');
+        _csAsstApply(data);
+        showToast('Submitted to AppBuilder.', 'success');
+        await _csAsstPoll();
+        return;
+    } catch (e) {
+        console.error('sim assistant: submit failed', e);
+        a.state = 'awaiting_user';
+        showToast('Submit failed: ' + e.message, 'error');
+    }
+    _csAsstRender();
+}
+
+function csAssistantNewSession() {
+    const a = window._csAsst;
+    if (a && a.pollTimer) clearTimeout(a.pollTimer);
+    localStorage.removeItem(_CS_ASST_SID_KEY);
+    window._csAsst = _csAsstNew();
+    _csAsstRender();
+    const input = csEl('cs-assistant-input');
+    if (input) input.focus();
+}
+
+function _csAsstInputKey(ev) {
+    if (ev.key === 'Enter' && !ev.shiftKey) {
+        ev.preventDefault();
+        csAssistantSessionSend();
+    }
+}
+
+function csAssistantSessionSend() {
+    const input = csEl('cs-assistant-input');
+    if (!input) return;
+    const text = (input.value || '').trim();
+    if (!text) return;
+    input.value = '';
+    _csAsstSend(text);
+}
+
+async function _csRenderAssistantSessions(caps) {
+    window._csAsstCaps = caps;
+    if (!window._csAsst) {
+        window._csAsst = _csAsstNew();
+        const saved = localStorage.getItem(_CS_ASST_SID_KEY);
+        if (saved) window._csAsst.sid = saved;
+    }
+    window._csAsst.canSubmit = !!caps.can_submit;
+    // Starter prompts (shared with the legacy empty state) fill the input.
+    window.csAssistantSetInput = csAssistantSetInput;
+    csSet(`
+        <div class="flex flex-col h-[calc(100vh-14rem)] max-w-6xl mx-auto">
+            <div class="flex items-center justify-between mb-3">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-800">Simulation Build Assistant</h2>
+                    <p class="text-xs text-slate-500">Create a new simulation, change an existing one, or ask how one works. An AppBuilder agent reads the real cs + lm code, asks what it needs, and builds a complete spec; AppBuilder then builds it (PRs to dev → qa → main). Other requests are declined.</p>
+                </div>
+                <div class="flex gap-2">
+                    <button onclick="csAssistantNewSession()"
+                        class="text-xs px-3 py-1.5 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">New conversation</button>
+                    <button id="cs-assistant-submit" onclick="csAssistantSubmitSession()" disabled
+                        class="text-xs px-3 py-1.5 rounded-md bg-[#01A982] text-white font-semibold hover:bg-[#019172] opacity-50">Submit to AppBuilder</button>
+                </div>
+            </div>
+            <div class="flex-1 flex gap-3 min-h-0">
+                <div class="flex-1 flex flex-col min-w-0">
+                    <div id="cs-assistant-log" class="flex-1 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-4"></div>
+                    <form class="flex gap-2 mt-3 items-end" onsubmit="event.preventDefault(); csAssistantSessionSend();">
+                        <textarea id="cs-assistant-input" rows="2" onkeydown="_csAsstInputKey(event)"
+                            class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#01A982] resize-y"></textarea>
+                        <button id="cs-assistant-stop" type="button" onclick="csAssistantStop()"
+                            class="hidden border border-slate-300 text-slate-600 rounded-lg px-3 py-2 text-sm hover:bg-slate-50">Stop</button>
+                        <button id="cs-assistant-send" type="submit"
+                            class="bg-[#01A982] text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-[#019172]">Send</button>
+                    </form>
+                </div>
+                <div id="cs-assistant-spec" class="w-72 shrink-0 overflow-y-auto rounded-lg border border-slate-200 bg-white p-4"></div>
+            </div>
+        </div>
+    `);
+    _csAsstRender();
+    if (window._csAsst.sid) await _csAsstPoll();
+    const input = csEl('cs-assistant-input');
+    if (input && !input.disabled) input.focus();
+}
+
+window.csAssistantChoose = csAssistantChoose;
+window.csAssistantStop = csAssistantStop;
+window.csAssistantSubmitSession = csAssistantSubmitSession;
+window.csAssistantNewSession = csAssistantNewSession;
+window.csAssistantSessionSend = csAssistantSessionSend;
+window._csAsstInputKey = _csAsstInputKey;
+
 async function csRenderAssistant() {
     csSetToolbar('');
     let available = false;
+    let caps = {};
     try {
         const res = await fetch('/api/sim-assistant/available');
-        const data = await res.json();
-        available = !!(res.ok && data.available);
+        caps = await res.json();
+        available = !!(res.ok && caps.available);
     } catch (e) {
         console.error('csRenderAssistant: availability check failed', e);
+    }
+    if (available && caps.sessions) {
+        await _csRenderAssistantSessions(caps);
+        return;
+    }
+    if (available && caps.sessions_reason) {
+        console.info('Simulation assistant: interactive sessions unavailable —', caps.sessions_reason);
     }
     if (!available) {
         csSet(csEmpty(
