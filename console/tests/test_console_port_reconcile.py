@@ -341,3 +341,35 @@ def test_device_cache_backfills_missing_fields_after_ports_json_wipe(spoke):
     p = spoke.store.get("new-pid")["probe"]
     assert p["identity"]["hostname"] == "core-sw" and p["identity"]["model"] == "6300"
     assert p["vendor"] == "ARUBA-AOS-CX"
+
+
+def test_restore_skips_placeholder_hostnames_in_history(spoke):
+    spoke.store.update("pid-3", probe={"identity": {}, "source": "active"})
+    spoke._health["pid-3"] = {"identify": {"hostname_history": [
+        {"host": "BO-SYD-ACSW02", "ts": 1}, {"host": "hostname", "ts": 2}]}}
+    spoke._restore_last_known()
+    assert spoke.store.get("pid-3")["probe"]["identity"] == {"hostname": "BO-SYD-ACSW02"}
+
+
+def test_restore_clears_a_previously_restored_placeholder(spoke):
+    spoke.store.update("pid-4", probe={"identity": {"hostname": "hostname"}, "source": "restored",
+                                       "stale": True, "restored_from": "hostname_history"})
+    spoke._health["pid-4"] = {"identify": {"hostname_history": [{"host": "hostname", "ts": 2}]}}
+    spoke._restore_last_known()
+    p = spoke.store.get("pid-4")["probe"]
+    assert p["identity"] == {} and not p.get("stale")
+
+
+def test_placeholder_hostname_is_not_profiled(spoke):
+    assert spoke._probe_identified({"source": "active", "identity": {"hostname": "hostname"}}) is False
+    assert spoke._probe_identified({"source": "active", "identity": {"hostname": "SW1"}}) is True
+
+
+def test_successful_reidentify_clears_stale_flag(spoke):
+    _named(spoke)
+    _run(spoke._emit_probe_result("pid-1", {"identity": {}, "logged_in": False}))
+    assert spoke.store.get("pid-1")["probe"]["stale"] is True
+    _run(spoke._emit_probe_result("pid-1", {"identity": {"hostname": "core-sw"}, "logged_in": True}))
+    p = spoke.store.get("pid-1")["probe"]
+    assert p["stale"] is False and p["restored_from"] == ""
+    assert spoke._probe_identified(p) is True
