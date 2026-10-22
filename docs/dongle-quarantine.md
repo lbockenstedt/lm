@@ -62,7 +62,14 @@ auto-recovery, never re-picked). Operator can manually un-QT when fixed.
 ## Locked (resolved this session)
 
 - **Grace window = 1 hour** after the agent reports the VM provisioned (clone +
-  boot) before "never connected" is declared.
+  boot) before "never connected" is declared. The clock starts at the LATEST of
+  `first_seen`, the moment the client's target `(wsite, ssid)` was assigned or
+  last changed, and the cs engine's start — a client can only connect once it
+  has an SSID, so a client that was starved of one (e.g. an empty SSID matrix
+  placement) gets a fresh hour once it's placed instead of being shed minutes
+  later. A client with NO target SSID (blank, or the `-` a blank site+ssid
+  renders to) is never a candidate: that's a config gap, not a dongle fault.
+  A shed is marked at dispatch (not after the agent ack), so it's sent once.
 - **Exclusion set is admin-configurable** (`qt_exclude_sims`), default =
   `{dhcp_fail, assoc_fail, ssidpw_fail, auth_fail, port_flap}` (the
   connectivity-breaking exclusive sims). **QT fires when a client fails (no
