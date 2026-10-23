@@ -49,12 +49,24 @@ class HubBugStoreMixin:
         # picker) and injects it — the browser payload is NOT trusted for it.
         # Untagged (legacy / no active tenant) reports stay Global-Admin-only.
         tenant_id = str(payload.get("tenant_id") or "").strip()
+        # Optional Request-Assistant fields (absent on one-shot reports): a short
+        # title (ab prefers it for the issue title), the structured spec and the
+        # assistant session id. Older ab ignores them.
+        title = " ".join(str(payload.get("title") or "").split())[:200]
+        request_spec = payload.get("request_spec")
+        assistant_session = str(payload.get("assistant_session") or "")[:64]
         # Persist the structured metadata + the captured text artifacts.
         report_json = {
             "id": rid, "explanation": explanation, "severity": severity,
             "type": rtype, "context": context, "filed": False, "issue_url": "",
             "tenant_id": tenant_id, "ts": time.time(),
         }
+        if title:
+            report_json["title"] = title
+        if isinstance(request_spec, dict) and request_spec:
+            report_json["request_spec"] = request_spec
+        if assistant_session:
+            report_json["assistant_session"] = assistant_session
         try:
             with open(os.path.join(d, "report.json"), "w") as f:
                 json.dump(report_json, f, indent=2)
@@ -78,7 +90,7 @@ class HubBugStoreMixin:
         # In-memory index (capped). Holds the metadata ab lists; full
         # artifacts are read from disk on demand by _get_bug_report.
         self.bug_reports[rid] = {
-            "id": rid, "summary": explanation[:120], "severity": severity,
+            "id": rid, "summary": (title or explanation)[:120], "severity": severity,
             "type": rtype, "ts": report_json["ts"], "filed": False, "issue_url": "",
             "tenant_id": tenant_id,
             "context": context, "has_screenshot": "screenshot_file" in report_json,
@@ -156,7 +168,7 @@ class HubBugStoreMixin:
             entries.sort(key=lambda e: e[0], reverse=True)
             for _ts, r in entries[: self.bug_report_limit]:
                 self.bug_reports[r["id"]] = {
-                    "id": r["id"], "summary": str(r.get("explanation", ""))[:120],
+                    "id": r["id"], "summary": str(r.get("title") or r.get("explanation", ""))[:120],
                     "severity": r.get("severity", "medium"), "type": r.get("type", "bug"),
                     "ts": r.get("ts", 0),
                     "filed": bool(r.get("filed")), "issue_url": r.get("issue_url", ""),
