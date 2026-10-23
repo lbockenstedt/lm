@@ -5206,26 +5206,32 @@ async function loadCertMonData() {
         if (s === 'green') return `<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-green-600 text-white">${dl} d</span>`;
         return `<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-slate-300 text-slate-700">n/a</span>`;
     };
+    // Ignored certs keep their real status pill, muted and tagged "(ignored)".
+    const statusCell = (r) => r.ignored
+        ? `<span class="opacity-50">${pill(r)}</span><div class="text-[10px] font-semibold text-slate-500 mt-0.5" title="${escapeHtml(['Ignored', r.ignored_by && 'by ' + r.ignored_by, r.ignored_at && new Date(r.ignored_at).toLocaleString()].filter(Boolean).join(' '))}">(ignored)</div>`
+        : pill(r);
     const filt = (window._certMonFilter || '').toLowerCase();
     const results = (d.results || []).filter(r => !filt || [r.host, r.service, r.region, r.role, r.provider, r.issuer_cn, r.subject_cn].join(' ').toLowerCase().includes(filt));
     const rows = results.map(r => {
         const trust = r.trusted ? '' : (r.verify_error ? `<span class="ml-1 text-[10px] text-slate-500" title="${escapeHtml(r.verify_error)}">(private CA / untrusted)</span>` : '');
         const err = r.error ? `<div class="text-[11px] text-red-600">${escapeHtml(r.error)}</div>` : '';
         const san = r.san_count ? `<div class="text-[10px] text-slate-400" title="${escapeHtml((r.san || []).join(', '))}">CN ${escapeHtml(r.subject_cn || '')} · ${r.san_count} SAN</div>` : (r.subject_cn ? `<div class="text-[10px] text-slate-400">CN ${escapeHtml(r.subject_cn)}</div>` : '');
-        return `<tr class="${rowCls[r.status] || ''}">
-            <td class="px-3 py-2 whitespace-nowrap">${pill(r)}</td>
+        const ignBtn = `<button onclick="certMonSetIgnored(this, ${escapeHtml(JSON.stringify(r.host || ''))}, ${Number(r.port) || 443}, ${r.ignored ? 'false' : 'true'})" class="text-[11px] px-2 py-0.5 rounded-md border ${r.ignored ? 'border-[#01A982] text-[#01A982] hover:bg-green-50' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}" title="${r.ignored ? 'Count this cert in the status totals and alerts again' : 'Keep listing this cert but leave it out of the status totals and alerts'}">${r.ignored ? 'Un-ignore' : 'Ignore'}</button>`;
+        return `<tr class="${r.ignored ? 'bg-slate-50 text-slate-400' : (rowCls[r.status] || '')}">
+            <td class="px-3 py-2 whitespace-nowrap">${statusCell(r)}</td>
             <td class="px-3 py-2 font-mono text-xs">${escapeHtml(r.host)}${r.port && r.port !== 443 ? ':' + r.port : ''}${san}${err}</td>
             <td class="px-3 py-2 text-xs">${escapeHtml(r.service || '')}<div class="text-[10px] text-slate-400">${escapeHtml([r.region, r.role].filter(Boolean).join(' · '))}</div></td>
             <td class="px-3 py-2 text-xs">${escapeHtml(r.provider || '')}${trust}<div class="text-[10px] text-slate-400">${escapeHtml(r.issuer_cn || '')}</div></td>
             <td class="px-3 py-2 text-xs">${escapeHtml(r.cert_type || '')}<div class="text-[10px] text-slate-400">${escapeHtml(r.key_type || '')}${r.signature_algorithm ? ' · ' + escapeHtml(r.signature_algorithm) : ''}</div></td>
             <td class="px-3 py-2 text-xs whitespace-nowrap">${escapeHtml(_certMonDate(r.not_after))}</td>
+            <td class="px-3 py-2 text-right whitespace-nowrap">${ignBtn}</td>
         </tr>`;
     }).join('');
     const cfg = d.config || {};
     el.innerHTML = `
       <div class="${card}">
         <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
-          <div class="text-xs text-slate-500">Last check: <b>${escapeHtml(lastRun)}</b>${d.duration_s != null ? ` (${d.duration_s}s)` : ''} · Next: <b>${escapeHtml(nextRun)}</b> · ${(d.results || []).length} hosts${d.running ? ' · <span class="text-[#01A982] font-semibold animate-pulse">checking…</span>' : ''}</div>
+          <div class="text-xs text-slate-500">Last check: <b>${escapeHtml(lastRun)}</b>${d.duration_s != null ? ` (${d.duration_s}s)` : ''} · Next: <b>${escapeHtml(nextRun)}</b> · ${(d.results || []).length} hosts${c.ignored ? ` (${c.ignored} ignored — not counted)` : ''}${d.running ? ' · <span class="text-[#01A982] font-semibold animate-pulse">checking…</span>' : ''}</div>
           <div class="flex items-center gap-2">
             <input id="certmon-filter" type="text" placeholder="Filter…" value="${escapeHtml(window._certMonFilter || '')}" oninput="window._certMonFilter=this.value; clearTimeout(window._certMonFt); window._certMonFt=setTimeout(loadCertMonData, 250)" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-xs outline-none focus:ring-2 focus:ring-green-500">
             <button onclick="certMonRunNow(this)" class="text-xs bg-[#01A982] hover:bg-[#008f6e] text-white px-3 py-1 rounded-md font-medium" ${d.running ? 'disabled' : ''}>Check now</button>
@@ -5241,12 +5247,12 @@ async function loadCertMonData() {
           <table class="w-full text-left text-sm">
             <thead class="bg-slate-100 text-slate-600 uppercase text-[11px]"><tr>
               <th class="px-3 py-2 min-w-[7rem] whitespace-nowrap">Expires in</th><th class="px-3 py-2">Host</th><th class="px-3 py-2">Service</th>
-              <th class="px-3 py-2">Provider (issuer)</th><th class="px-3 py-2">Type / key</th><th class="px-3 py-2">Expiry date</th>
+              <th class="px-3 py-2">Provider (issuer)</th><th class="px-3 py-2">Type / key</th><th class="px-3 py-2">Expiry date</th><th class="px-3 py-2"></th>
             </tr></thead>
-            <tbody class="divide-y divide-slate-200">${rows || `<tr><td colspan="6" class="px-4 py-8 text-center text-slate-400 italic">${d.last_run ? 'No matching hosts' : 'No check has run yet — click <b>Check now</b>.'}</td></tr>`}</tbody>
+            <tbody class="divide-y divide-slate-200">${rows || `<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400 italic">${d.last_run ? 'No matching hosts' : 'No check has run yet — click <b>Check now</b>.'}</td></tr>`}</tbody>
           </table>
         </div>
-        <p class="text-[10px] text-slate-400 mt-2">Results file: <span class="font-mono">${escapeHtml(d.results_file || '')}</span>. "Private CA / untrusted" = the endpoint presents a device-CA cert (Mist terminators, Aruba device endpoints) — its expiry is still tracked.</p>
+        <p class="text-[10px] text-slate-400 mt-2">Results file: <span class="font-mono">${escapeHtml(d.results_file || '')}</span>. "Private CA / untrusted" = the endpoint presents a device-CA cert (Mist terminators, Aruba device endpoints) — its expiry is still tracked. <b>Ignore</b> keeps a cert listed (with its real status) but leaves it out of the totals above and every cert alert rule.</p>
       </div>
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Custom hosts</h3>
@@ -5268,6 +5274,23 @@ async function certMonRunNow(btn) {
         showToast(d.status === 'started' ? 'Certificate check started' : 'A check is already running', 'success');
     } catch (e) { showToast('Check failed: ' + e.message, 'error'); }
     setTimeout(loadCertMonData, 800);
+}
+
+async function certMonSetIgnored(btn, host, port, ignored) {
+    if (btn) btn.disabled = true;
+    try {
+        const r = await setupFetch('/api/certmon/ignore', {
+            method: 'POST', body: JSON.stringify({ host, port, ignored }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        showToast(ignored ? `Ignoring ${host} — excluded from totals and alerts` : `${host} is monitored again`, 'success');
+    } catch (e) {
+        showToast('Update failed: ' + e.message, 'error');
+        if (btn) btn.disabled = false;
+        return;
+    }
+    loadCertMonData();
 }
 
 async function certMonSaveCustom(btn) {

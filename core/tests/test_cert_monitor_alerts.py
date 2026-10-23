@@ -197,3 +197,32 @@ def test_alert_rule_crud_and_test(tmp_path, monkeypatch):
 
     assert client.delete(f"/api/certmon/alerts/rules/{rid}").json()["removed"] is True
     assert client.get("/api/certmon/alerts/rules").json()["rules"] == []
+
+
+def test_ignored_host_never_breaches_and_drops_silently():
+    rule = cma.clean_rule({"trigger": "expiring", "threshold_days": 30})
+    a = dict(_r("a", 5), ignored=True)
+    b, rec, bad = cma.evaluate_rule(rule, [a, _r("b", 5)], [])
+    assert [x["host"] for x in b] == ["b"] and bad == ["b:443"]
+    # Already breached, then ignored → leaves the state with no recovery email.
+    b, rec, bad = cma.evaluate_rule(rule, [dict(_r("b", 5), ignored=True)], ["b:443"])
+    assert b == [] and rec == [] and bad == []
+
+
+def test_rule_test_send_skips_ignored_hosts(tmp_path, monkeypatch):
+    client, hub = _client(True, tmp_path, monkeypatch)
+    rid = client.post("/api/certmon/alerts/rules", json={
+        "trigger": "error", "recipients": ["noc@x.com"], "enabled": False}).json()["rule"]["id"]
+    cm.save_results({"last_run": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                     "results": [_r("a.example.com", None, error="DNS"),
+                                 _r("b.example.com", None, error="DNS")]})
+    assert client.post("/api/certmon/ignore", json={"host": "a.example.com"}).status_code == 200
+    got = []
+
+    async def fake_send(h, subj, text, to_emails=None, html=""):
+        got.append(text)
+        return True
+    import notifications
+    monkeypatch.setattr(notifications, "send_email", fake_send)
+    assert client.post(f"/api/certmon/alerts/rules/{rid}/test").status_code == 200
+    assert "b.example.com" in got[-1] and "a.example.com" not in got[-1]

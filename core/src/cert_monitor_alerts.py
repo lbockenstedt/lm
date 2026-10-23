@@ -20,6 +20,9 @@ Triggers:
   * ``error``    — the host could not be checked (DNS / timeout / handshake).
   * ``untrusted`` — the cert did not validate against the system trust store
                    (private device-CA endpoints are expected to match this).
+
+Hosts the operator marked ignored (``cert_monitor.IGNORE_KEY``) never breach
+any rule.
 """
 from __future__ import annotations
 
@@ -106,7 +109,7 @@ async def save_rules(hub, rules: List[Dict[str, Any]]) -> None:
 # ── evaluation (pure) ───────────────────────────────────────────────────────
 
 def item_key(r: Dict[str, Any]) -> str:
-    return f"{r.get('host', '')}:{int(r.get('port') or 443)}"
+    return cm.cert_key(r)
 
 
 def _in_scope(rule: Dict[str, Any], r: Dict[str, Any]) -> bool:
@@ -134,11 +137,12 @@ def is_bad(rule: Dict[str, Any], r: Dict[str, Any]) -> Optional[bool]:
 def evaluate_rule(rule: Dict[str, Any], results: List[Dict[str, Any]],
                   prev_bad: List[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
     """→ (newly breached results, recovered results, new bad-key list).
-    Hosts no longer monitored (or out of the rule's scope) drop out silently."""
+    Hosts no longer monitored, out of the rule's scope or ignored by the
+    operator drop out silently (no recovery email)."""
     prev = set(prev_bad or [])
     breached, recovered, bad_now = [], [], set()
     for r in results or []:
-        if not _in_scope(rule, r):
+        if r.get("ignored") or not _in_scope(rule, r):
             continue
         k = item_key(r)
         verdict = is_bad(rule, r)
@@ -308,7 +312,8 @@ async def _send(hub, rule, subj, text, html) -> bool:
 
 async def send_test(hub, rule: Dict[str, Any], results: List[Dict[str, Any]]) -> bool:
     """Test send: the rule's current matches, in the rule's format. No state change."""
-    matches = [r for r in results or [] if _in_scope(rule, r) and is_bad(rule, r)]
+    matches = [r for r in results or []
+               if not r.get("ignored") and _in_scope(rule, r) and is_bad(rule, r)]
     subj, text, html = build_email(rule, matches, [], test=True)
     return await _send(hub, rule, subj, text, html)
 

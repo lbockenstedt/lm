@@ -336,6 +336,76 @@ def sort_results(results):
     return sorted(results, key=key)
 
 
+# ── per-cert ignore ─────────────────────────────────────────────────────────
+# Operators can mark a monitored endpoint "ignored": it stays in the list (with
+# its real status) but is left out of the status counts and alert rules. The
+# list lives in global_config["cert_monitor_ignored"] = {"host:port": {by, at}}
+# and is keyed by host:port — the identity the monitor (and its alert edge
+# state) already uses for a result.
+
+IGNORE_KEY = "cert_monitor_ignored"
+MAX_IGNORED = 1000
+STATUSES = ("red", "yellow", "green", "error", "unknown")
+
+
+def cert_key(r):
+    return f"{r.get('host', '')}:{int(r.get('port') or 443)}"
+
+
+def normalize_ignored(raw):
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
+        host, _, port = str(k).rpartition(":")
+        p = parse_host_entry(f"{host}:{port}") if host and port.isdigit() else None
+        if not p:
+            continue
+        v = v if isinstance(v, dict) else {}
+        out[f"{p[0]}:{p[1]}"] = {"by": str(v.get("by") or "")[:120],
+                                 "at": str(v.get("at") or "")[:40]}
+        if len(out) >= MAX_IGNORED:
+            break
+    return out
+
+
+def apply_ignored(results, ignored):
+    """Copy of ``results`` with ``ignored`` (and who/when) set on each row;
+    ignored rows sort after the active ones, keeping their own order."""
+    ignored = ignored or {}
+    active, muted = [], []
+    for r in results or []:
+        r = dict(r)
+        meta = ignored.get(cert_key(r))
+        r["ignored"] = meta is not None
+        if meta is not None:
+            r["ignored_by"] = meta.get("by", "")
+            r["ignored_at"] = meta.get("at", "")
+            muted.append(r)
+        else:
+            r.pop("ignored_by", None)
+            r.pop("ignored_at", None)
+            active.append(r)
+    return active + muted
+
+
+def active_results(results):
+    return [r for r in results or [] if not r.get("ignored")]
+
+
+def count_statuses(results):
+    """Status counts over non-ignored results, plus an ``ignored`` total."""
+    counts = {s: 0 for s in STATUSES}
+    counts["ignored"] = 0
+    for r in results or []:
+        if r.get("ignored"):
+            counts["ignored"] += 1
+            continue
+        s = r.get("status", "unknown")
+        counts[s] = counts.get(s, 0) + 1
+    return counts
+
+
 def run_checks(hosts, timeout=PROBE_TIMEOUT_S, workers=MAX_WORKERS):
     started = _dt.datetime.now(_dt.timezone.utc)
     results = []
