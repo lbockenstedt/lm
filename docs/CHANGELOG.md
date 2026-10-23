@@ -13,6 +13,10 @@ CI/tooling changes are omitted unless they change what an operator sees.
 ## Week of 2026-10-19
 
 ### Simulations
+- **Clearer 802.1X configuration.** Simulation Engine editor exposes 802.1X
+  EAP method, TLS cert paths and PSK/1X SSID select. PEAP password fallback
+  and Linux-only TLS support are explicit; saved custom values are preserved.
+  No client behavior or config defaults change. See [cs.md](cs.md).
 - **Client offline windows (`client_offline`).** Linux and Windows clients can
   now pause their simulation interface at the end of each cycle for a random,
   configurable duration (default 60–240 minutes). Off by default, enabled per
