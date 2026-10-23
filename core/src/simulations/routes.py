@@ -3755,16 +3755,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             touched = True
                 if touched:
                     cleared_sids.append(sid)
-        # Best-effort: tell the connected cs spoke(s) to drop it from proxmox_states
-        # so it doesn't re-appear on the next relay. Spoke offline → skip silently.
+        # Best-effort: tell EVERY cs spoke of this tenant to drop it from
+        # proxmox_states (+ its pxmx_site_map entry) so it doesn't re-appear on the
+        # next relay or in Config → Sites. A host can linger on any of the
+        # tenant's spokes (e.g. after its pxmx server moved to another tenant), so
+        # notifying only the primary spoke left the stale row behind.
         forwarded = False
         try:
-            sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
-            if sid:
-                await hub.request_response(sid, "CS_PURGE_HOST", {"hostname": hn}, timeout=8.0)
-                forwarded = True
+            results = await _cs_forward_all(tenant_id, "CS_PURGE_HOST", {"hostname": hn}, timeout=8.0)
+            forwarded = any(isinstance(d, dict) for _sid, d in results)
         except Exception:
             pass
+        _invalidate_pxmx_site_map(tenant_id)
         return {"status": "ok", "removed": removed, "spoke_notified": forwarded,
                 "message": (f"Removed host {hn}"
                             + ("" if forwarded else " (spoke offline — cache cleared; "
@@ -5467,6 +5469,30 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return {"status": "SUCCESS", "spokes": spokes,
                 "warning": "" if results else "No Client-Sim spoke connected."}
 
+    def _pxmx_hosts_owned_elsewhere(tenant_id: str, fresh_s: float = 3600.0) -> set:
+        """Lower-cased pxmx hostnames that a cs spoke bound to a DIFFERENT tenant
+        is relaying live (last_seen within ``fresh_s``). An unbound/orphaned
+        spoke's frozen copy is not ownership evidence."""
+        import time as _t
+        now = _t.time()
+        owned: set = set()
+        for sid, data in list((getattr(hub, "simulations_cache", None) or {}).items()):
+            try:
+                other = hub.state.get_spoke_tenant(sid)
+            except Exception:  # noqa: BLE001
+                continue
+            if not other or other == tenant_id or not isinstance(data, dict):
+                continue
+            for h in (data.get("proxmox_hosts") or []):
+                hn = str((h or {}).get("hostname") or "").strip().lower()
+                try:
+                    seen = float(((h or {}).get("proxmox") or {}).get("last_seen") or 0)
+                except (TypeError, ValueError):
+                    seen = 0.0
+                if hn and now - seen <= fresh_s:
+                    owned.add(hn)
+        return owned
+
     @app.get("/sim/api/{tenant}/pxmx-site-map")
     async def get_pxmx_site_map(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         # Cached per tenant for _PXMX_SITE_MAP_TTL_S (60s), invalidated on save.
@@ -5497,6 +5523,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if not results:
             return {"status": "SUCCESS", "pxmx_site_map": {}, "agents": [],
                     "warning": "Client-Sim spoke not connected."}
+        # Tenant scoping: a pxmx server that moved to ANOTHER tenant keeps a stale
+        # map entry / offline row on this tenant's spokes. Hide any host whose
+        # live telemetry is currently relayed by a spoke bound to a different
+        # tenant — it is not this tenant's to assign.
+        foreign = _pxmx_hosts_owned_elsewhere(tenant_id)
+        if foreign:
+            merged_map = {h: s for h, s in merged_map.items()
+                          if str(h).strip().lower() not in foreign}
+            agents = [a for a in agents
+                      if str(a.get("agent_id") or a.get("hostname") or "").strip().lower()
+                      not in foreign]
         out = {"status": "SUCCESS", "pxmx_site_map": merged_map, "agents": agents}
         _pxmx_site_map_cache[tenant_id] = (now + _PXMX_SITE_MAP_TTL_S, out)
         return out
