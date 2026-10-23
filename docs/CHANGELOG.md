@@ -37,6 +37,18 @@ CI/tooling changes are omitted unless they change what an operator sees.
   [appbuilder.md](appbuilder.md#how-it-works).
 
 ### Hub
+- **Guided Bug/Feature Requests.** The footer **🐞 Bug/Feature Request**
+  button now opens a chat with an AppBuilder assistant, the same kind as the
+  Simulation Build Assistant. It asks one question at a time (with suggested
+  answers) and reads the code to point at the likely area. **File report**
+  stays disabled until everything needed is captured. For a bug that means
+  steps, expected vs actual, how often, environment, severity and evidence.
+  For a feature it means the problem, who uses it, desired behaviour,
+  acceptance criteria, scope and priority. The report goes through the usual
+  pipeline: bugs are fixed by AppBuilder, and features wait for admin approval.
+  The assistant never changes code. **Use quick form** keeps the old one-step
+  form, which is also used when AppBuilder can't run the assistant. See
+  [appbuilder.md](appbuilder.md#how-it-works).
 - **Cert Expiry Monitor (Global Admin, opt-in).** Enable it in System → General
   and a **Cert Monitor** menu item appears. It checks the TLS certificates of
   every public Aruba Central / GreenLake and Juniper Mist endpoint once a day

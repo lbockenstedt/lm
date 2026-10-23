@@ -43,7 +43,7 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
 
 ## Key commands / handlers
 
-- **Inbound from hub** (`hub_agent.py::_handle_message`): `APPROVAL_REQUIRED`, `APPROVED`, `SPOKE_UPDATE_SESSION_KEY` (provisions session secret), `SPOKE_SET_HUB_SECRET`, `HUB_RESPONSE` (correlated reply to a `HUB_REQUEST`), `DENIED`, `get_version`/`GET_VERSION` (signed `COMMAND_RESULT` with `data.version`), `SET_LOG_LEVEL`/`SPOKE_SET_LOG_LEVEL` (WebUI "Enable Debug" broadcast). `SIM_SESSION_PING`/`START`/`REPLY`/`POLL`/`CANCEL`/`SUBMIT` drive the interactive Simulation Build Assistant (`sim_session.py`, see "How it works").
+- **Inbound from hub** (`hub_agent.py::_handle_message`): `APPROVAL_REQUIRED`, `APPROVED`, `SPOKE_UPDATE_SESSION_KEY` (provisions session secret), `SPOKE_SET_HUB_SECRET`, `HUB_RESPONSE` (correlated reply to a `HUB_REQUEST`), `DENIED`, `get_version`/`GET_VERSION` (signed `COMMAND_RESULT` with `data.version`), `SET_LOG_LEVEL`/`SPOKE_SET_LOG_LEVEL` (WebUI "Enable Debug" broadcast). `SIM_SESSION_PING`/`START`/`REPLY`/`POLL`/`CANCEL`/`SUBMIT` drive the interactive Simulation Build Assistant (`sim_session.py`, see "How it works"). `REQ_SESSION_PING`/`START`/`REPLY`/`POLL`/`CANCEL`/`SUBMIT`/`FILED` drive the guided Bug/Feature Request Assistant (`request_session.py`).
 - **Outbound to hub** (`client.request_sync` over the reverse `HUB_REQUEST` channel): `GET_LOGS` (aggregated spoke logs, 20s timeout), `GET_ERROR_LOGS`, `GET_SPOKE_STATUS` (approved roster + per-spoke recovery state), `TRIGGER_ALL_UPDATES` (kick all spoke self-updates, 60s timeout), and the "File a Bug" handoff — `GET_BUG_REPORTS` (list metadata), `GET_BUG_REPORT` (pull full artifacts for AI-fix context), `MARK_BUG_FILED` (stop a report re-filing), `MARK_BUG_FIXED` (the GitHub issue was closed). These replace the old static-token HTTP calls (`LM_ADMIN_TOKEN`/`X-Admin-Token`) the hub never honored. The whole channel is **cert-bound**, not `spoke_id`-bound — see "AppBuilder mTLS cert + LE tag flow" below; any approved spoke that is not presenting the pinned AppBuilder client cert is denied before dispatch.
 - **FastAPI routes (own dashboard):** `/api/health`, settings, status/logs endpoints, `hub_agent_status`/`hub_agent_reregister`, scan/poll/fix/verify/iterate/deploy/sync workflow. The hub agent singleton starts at app startup via `_start_hub_agent()` → `hub_agent.start_agent_from_config(...)`.
 
@@ -191,6 +191,38 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
   stored report can be deleted from the same view via `DELETE /setup/bug-reports/{rid}`
   (admin-only) — removes the hub's local copy only; the public GitHub issue
   AppBuilder may already have filed is NOT touched.
+- **Bug/Feature Request Assistant (guided capture).** The footer "🐞 Bug/Feature
+  Request" modal opens in a guided chat when AppBuilder offers it
+  (`GET /api/request-assistant/available` → `REQ_SESSION_PING`); otherwise, or
+  via **Use quick form**, the one-shot form above is used unchanged. It is the
+  same session machinery as the Simulation Build Assistant
+  (`ab/request_session.py`, a `RequestSessionManager` subclass of
+  `SimSessionManager` with its own workspace, sessions and audit log under
+  `/etc/ab/request_sessions/`; the hub relays `/api/request-assistant/session*`
+  → `REQ_SESSION_*` in `lm/core/src/routes/request_assistant.py`). The read-only
+  Copilot CLI agent (`view`/`grep`/`glob` only) reads the repos' docs and code,
+  asks one question at a time with suggested answers, and keeps a fenced
+  `request-spec` JSON block. **Scope:** it only captures and explains — it never
+  writes code, patches or commands, and declines other topics. **Server-side
+  gate:** File report is refused until the required fields are present —
+  *bug:* module/page, steps to reproduce, expected vs actual, frequency, since
+  when, environment, severity, evidence and the suspected area (repo-relative
+  files, which must be in a configured repo with no `..`); *feature:* problem,
+  who uses it, desired behaviour, acceptance criteria, affected
+  screens/modules, out of scope and priority. On **File report** AppBuilder
+  renders the explanation (title on the first line, then a **Request trace**
+  block — requester and filer LM user, auth type, IP, time, session id — then
+  the structured sections, the spec JSON and the transcript), and the hub
+  stores it through the SAME store as `/api/bug-report` with the browser's
+  console/HTML/screenshot, plus optional `title`, `request_spec` and
+  `assistant_session` fields in `report.json` (older AppBuilders ignore them;
+  newer ones use `title` for the GitHub issue title). The hub then sends
+  `REQ_SESSION_FILED` with the report id. Everything downstream is unchanged:
+  bugs are auto-fixed and features wait for Global Admin approval. Config:
+  `request_assistant_sessions_enabled` (default true), `request_assistant_repos`
+  (default: every repo in `feature_drive_repos`, `monitored_repos` and
+  `bug_report_repo`), `request_assistant_dir`; the Copilot binary, credential,
+  model, branch and timeout settings are shared with `sim_assistant_*`.
 - **"What's New" popover surfaces committed features to everyone.** The WebUI
   top banner carries an info-icon (ⓘ) next to **Help** that opens a small
   "What's New" popover listing recently shipped features. It reads

@@ -1412,19 +1412,54 @@ async function fileBug(prefill = '') {
 
     const modal = document.createElement('div');
     modal.id = 'file-bug-modal';
+    // Keep the report window itself out of the html2canvas screenshot so the
+    // evidence shows the page being reported, not this dialog.
+    modal.setAttribute('data-html2canvas-ignore', 'true');
     // z-[70] -- above BOTH a z-50 openModal() dialog and the z-[60] footer, so
     // the report window opens on top of whatever dialog the user is reporting
     // about rather than behind it (lm#487).
     modal.className = 'fixed inset-0 z-[70] flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
     modal.innerHTML = `
-        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[92vh] flex flex-col">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-[#263040]">🐞 Bug / Feature Request</h3>
-                <button onclick="this.closest('#file-bug-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-                </button>
+                <div class="flex items-center gap-3">
+                    <button id="bug-mode-guided" onclick="bugUseGuided()" class="hidden text-xs font-semibold text-[#01A982] hover:underline">Guided assistant</button>
+                    <button id="bug-mode-quick" onclick="bugUseQuickForm()" class="hidden text-xs font-semibold text-slate-500 hover:underline">Use quick form</button>
+                    <button onclick="this.closest('#file-bug-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
             </div>
-            <div class="p-6 space-y-4">
+            <div id="bug-guided" class="hidden p-5 space-y-3 overflow-y-auto">
+                <div class="flex items-center gap-2 text-xs text-slate-600">
+                    <span class="font-bold uppercase text-slate-500">Type</span>
+                    <button data-reqtype="bug" onclick="reqAsstSetType('bug')" class="req-asst-type px-3 py-1 rounded-full border">🐞 Bug</button>
+                    <button data-reqtype="feature" onclick="reqAsstSetType('feature')" class="req-asst-type px-3 py-1 rounded-full border">💡 Feature</button>
+                    <button data-reqtype="" onclick="reqAsstSetType('')" class="req-asst-type px-3 py-1 rounded-full border">Not sure</button>
+                    <button onclick="reqAsstReset()" class="ml-auto text-slate-400 hover:text-slate-600">↺ Start over</button>
+                </div>
+                <div id="req-asst-log" class="h-72 overflow-y-auto bg-slate-50 border border-slate-200 rounded-lg p-3"></div>
+                <div id="req-asst-choices" class="flex flex-wrap gap-2"></div>
+                <div id="req-asst-checklist" class="text-[11px] leading-relaxed"></div>
+                <div class="flex gap-2 items-end">
+                    <textarea id="req-asst-input" rows="2" placeholder="Describe what went wrong, or what you'd like added…" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></textarea>
+                    <button id="req-asst-send" onclick="reqAsstSend()" class="bg-[#01A982] hover:bg-[#019672] text-white px-4 py-2 rounded-md text-sm font-bold">Send</button>
+                    <button id="req-asst-stop" onclick="reqAsstStop()" class="hidden bg-slate-200 hover:bg-slate-300 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Stop</button>
+                </div>
+                <p class="text-[11px] text-slate-400 leading-relaxed">
+                    The assistant asks one question at a time and reads the code read-only to point at the likely area — it never changes anything.
+                    When the report is complete, <b>File report</b> sends it (with your console log, page HTML and a screenshot) through the normal
+                    pipeline: a <b>bug</b> is filed for AppBuilder to fix; a <b>feature request</b> waits for Global Admin approval.
+                </p>
+                <div id="req-asst-status" class="text-xs text-slate-500 hidden"></div>
+                <div class="flex justify-end gap-3">
+                    <button onclick="this.closest('#file-bug-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Close</button>
+                    <button id="req-asst-file" onclick="reqAsstFile()" disabled class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed">File report</button>
+                </div>
+            </div>
+            <div id="bug-quick" class="p-6 space-y-4 overflow-y-auto">
+                <div id="bug-guided-note" class="hidden text-[11px] text-slate-400"></div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Describe the bug or request <span class="text-red-500">*</span></label>
                     <textarea id="bug-description" rows="4" placeholder="Describe what went wrong, or what you'd like added — e.g. 'Clicked Save on the firewall rule form and the page went blank.' or 'Add a CSV export button to the device list.'" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></textarea>
@@ -1461,6 +1496,11 @@ async function fileBug(prefill = '') {
     // — newlines and all — lands verbatim and stays user-editable).
     const _ta = document.getElementById('bug-description');
     if (_ta && prefill) _ta.value = prefill;
+    const _gi = document.getElementById('req-asst-input');
+    if (_gi && prefill) _gi.value = prefill;
+    _gi?.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); reqAsstSend(); }
+    });
     setTimeout(() => {
         const t = document.getElementById('bug-description');
         t?.focus();
@@ -1468,6 +1508,284 @@ async function fileBug(prefill = '') {
         // pre-filled log context rather than in front of it.
         if (t && prefill) t.setSelectionRange(t.value.length, t.value.length);
     }, 50);
+    // Switch to the guided assistant when AppBuilder offers it; the quick form
+    // above stays as the fallback (AB offline / older AB / Copilot not ready).
+    _reqAsstProbe(!!prefill);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Guided Bug/Feature Request — the same AppBuilder-run interview as the
+// Simulation Build Assistant (ab/request_session.py, relayed by the hub at
+// /api/request-assistant/*). AB asks one question at a time until the
+// required fields are captured and gates filing server-side; File report
+// stores it through the normal /api/bug-report store. All text is escaped.
+const _REQ_ASST_KEY = 'lm.requestAssistant.session';
+
+function _reqAsstNew() {
+    window._reqAsst = { sid: '', seq: 0, events: [], state: '', spec: null, ready: false,
+        missing: [], blocked: [], choices: [], report_id: '', type: (window._reqAsst || {}).type || '',
+        timer: null, sending: false };
+    return window._reqAsst;
+}
+
+function _reqAsstStore(sid) {
+    try { if (sid) localStorage.setItem(_REQ_ASST_KEY, sid); else localStorage.removeItem(_REQ_ASST_KEY); } catch (_) { /* private mode */ }
+}
+
+async function _reqAsstProbe(fresh) {
+    let avail = null;
+    try { avail = await apiJson('/api/request-assistant/available'); } catch (_) { avail = null; }
+    if (!document.getElementById('file-bug-modal')) return;
+    const note = document.getElementById('bug-guided-note');
+    if (!avail || !avail.sessions) {
+        if (note && avail && avail.available && avail.sessions_reason) {
+            note.textContent = 'Guided assistant unavailable: ' + avail.sessions_reason;
+            note.classList.remove('hidden');
+        }
+        return;
+    }
+    window._reqAsstAvailable = true;
+    _reqAsstNew();
+    let sid = '';
+    try { sid = fresh ? '' : (localStorage.getItem(_REQ_ASST_KEY) || ''); } catch (_) { sid = ''; }
+    bugUseGuided();
+    if (sid) {
+        window._reqAsst.sid = sid;
+        try {
+            const data = await apiJson(`/api/request-assistant/session/${encodeURIComponent(sid)}?since=0`);
+            _reqAsstApply(data);
+            if (data.report_id) { _reqAsstStore(''); _reqAsstNew(); }
+        } catch (_) { _reqAsstStore(''); _reqAsstNew(); }
+        _reqAsstRender();
+        _reqAsstSchedule();
+    }
+}
+
+function bugUseGuided() {
+    const g = document.getElementById('bug-guided'), q = document.getElementById('bug-quick');
+    if (!g || !q || !window._reqAsstAvailable) return;
+    const gi = document.getElementById('req-asst-input'), qt = document.getElementById('bug-description');
+    if (gi && qt && !gi.value && qt.value) gi.value = qt.value;
+    g.classList.remove('hidden'); q.classList.add('hidden');
+    document.getElementById('bug-mode-guided')?.classList.add('hidden');
+    document.getElementById('bug-mode-quick')?.classList.remove('hidden');
+    if (!window._reqAsst) _reqAsstNew();
+    _reqAsstRender();
+    setTimeout(() => gi?.focus(), 30);
+}
+
+function bugUseQuickForm() {
+    const g = document.getElementById('bug-guided'), q = document.getElementById('bug-quick');
+    if (!g || !q) return;
+    const a = window._reqAsst || {};
+    const qt = document.getElementById('bug-description');
+    const first = (a.events || []).find(e => e.kind === 'user');
+    const typed = document.getElementById('req-asst-input')?.value || '';
+    if (qt && !qt.value) qt.value = (first && first.text) || typed;
+    const fb = document.getElementById('bug-is-feature');
+    if (fb) fb.checked = ((a.spec && a.spec.intent) || a.type) === 'feature';
+    g.classList.add('hidden'); q.classList.remove('hidden');
+    document.getElementById('bug-mode-quick')?.classList.add('hidden');
+    if (window._reqAsstAvailable) document.getElementById('bug-mode-guided')?.classList.remove('hidden');
+}
+
+function _reqAsstApply(data) {
+    const a = window._reqAsst;
+    if (!a || !data) return;
+    if (data.session_id && a.sid && data.session_id !== a.sid) return;
+    if (data.session_id && !a.sid) { a.sid = data.session_id; _reqAsstStore(a.sid); }
+    (data.events || []).forEach(e => { if (e.seq > a.seq) { a.events.push(e); a.seq = e.seq; } });
+    ['state', 'spec', 'ready', 'missing', 'blocked', 'choices', 'report_id'].forEach(k => {
+        if (data[k] !== undefined) a[k] = data[k];
+    });
+}
+
+function _reqAsstBubble(role, text) {
+    const isUser = role === 'user';
+    const bg = isUser ? 'bg-[#01A982] text-white' : 'bg-white border border-slate-200 text-slate-800';
+    let body = (!isUser && window.renderHelpMarkdown) ? window.renderHelpMarkdown(text)
+        : '<p class="whitespace-pre-wrap">' + escapeHtml(text) + '</p>';
+    body = body.replace(/<pre><code/g, '<pre class="bg-slate-800 text-slate-100 p-3 rounded-lg overflow-x-auto text-xs my-2"><code');
+    return `<div class="flex ${isUser ? 'justify-end' : 'justify-start'} mb-3">
+        <div class="max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${bg} shadow-sm"><div class="cs-assistant-msg">${body}</div></div>
+    </div>`;
+}
+
+function _reqAsstEventHtml(e) {
+    const t = String(e.text || '');
+    if (e.kind === 'user') return _reqAsstBubble('user', t);
+    if (e.kind === 'assistant') return _reqAsstBubble('assistant', t);
+    if (e.kind === 'tool') return '<div class="text-[11px] font-mono text-slate-500 ml-2 mb-1 truncate" title="' + escapeHtml(t) + '">› ' + escapeHtml(t) + '</div>';
+    if (e.kind === 'status') return '<div class="text-xs italic text-slate-400 ml-2 mb-2">' + escapeHtml(t) + '</div>';
+    if (e.kind === 'error') return '<div class="text-xs text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2 mb-3">⚠️ ' + escapeHtml(t) + '</div>';
+    if (e.kind === 'submit') return '<div class="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2 mb-3">✅ ' + escapeHtml(t) + '</div>';
+    return '';
+}
+
+function _reqAsstBusy() {
+    const a = window._reqAsst || {};
+    return a.sending || a.state === 'preparing' || a.state === 'running';
+}
+
+function _reqAsstRender() {
+    const a = window._reqAsst;
+    const log = document.getElementById('req-asst-log');
+    if (!a || !log) return;
+    const intro = _reqAsstBubble('assistant', "Tell me what went wrong, or what you'd like added. " +
+        "I'll ask a few questions (one at a time) so AppBuilder gets everything it needs.");
+    log.innerHTML = intro + a.events.map(_reqAsstEventHtml).join('') +
+        (_reqAsstBusy() ? '<div class="text-xs italic text-slate-400 ml-2">Assistant is working…</div>' : '');
+    log.scrollTop = log.scrollHeight;
+
+    const intent = (a.spec && a.spec.intent) || a.type || '';
+    document.querySelectorAll('#file-bug-modal .req-asst-type').forEach(b => {
+        const on = (b.getAttribute('data-reqtype') || '') === intent;
+        b.className = 'req-asst-type px-3 py-1 rounded-full border ' + (on
+            ? 'bg-[#01A982] text-white border-[#01A982]' : 'bg-white text-slate-600 border-slate-300 hover:border-[#01A982]');
+        b.disabled = !!a.sid;
+    });
+
+    const busy = _reqAsstBusy();
+    const done = a.state === 'submitted';
+    const ch = document.getElementById('req-asst-choices');
+    if (ch) {
+        ch.innerHTML = (!busy && !done ? (a.choices || []) : []).map((c, i) =>
+            `<button onclick="reqAsstChoose(${i})" class="px-3 py-1 rounded-full border border-[#01A982] text-[#01A982] text-xs hover:bg-[#01A982]/10">${escapeHtml(String(c))}</button>`).join('');
+    }
+    const cl = document.getElementById('req-asst-checklist');
+    if (cl) {
+        let h = '';
+        if (a.sid && (a.missing || []).length) {
+            h += '<div class="text-amber-700">Still needed: ' + a.missing.map(m => escapeHtml(String(m))).join(', ') + '</div>';
+        } else if (a.sid && a.spec && a.ready) {
+            h += '<div class="text-emerald-700">✅ All required details captured — review the summary, then File report.</div>';
+        }
+        (a.blocked || []).forEach(p => { h += '<div class="text-red-700">⛔ ' + escapeHtml(String(p)) + '</div>'; });
+        cl.innerHTML = h;
+    }
+    const send = document.getElementById('req-asst-send'), stop = document.getElementById('req-asst-stop');
+    const input = document.getElementById('req-asst-input');
+    if (send) { send.disabled = busy || done; send.classList.toggle('opacity-50', busy || done); send.classList.toggle('hidden', a.state === 'running'); }
+    if (stop) stop.classList.toggle('hidden', a.state !== 'running');
+    if (input) input.disabled = done;
+    const file = document.getElementById('req-asst-file');
+    if (file) file.disabled = !(a.sid && a.ready && !busy && !a.report_id);
+}
+
+function _reqAsstSchedule() {
+    const a = window._reqAsst;
+    if (!a || a.timer || !a.sid || !_reqAsstBusy()) return;
+    a.timer = setTimeout(async () => {
+        a.timer = null;
+        if (!document.getElementById('file-bug-modal') || window._reqAsst !== a) return;
+        try {
+            _reqAsstApply(await apiJson(`/api/request-assistant/session/${encodeURIComponent(a.sid)}?since=${a.seq}`));
+        } catch (err) {
+            if (/^404/.test(String(err && err.message))) { _reqAsstStore(''); _reqAsstNew(); }
+        }
+        _reqAsstRender();
+        _reqAsstSchedule();
+    }, 1500);
+}
+
+function _reqAsstConsoleErrors() {
+    return (window.__lmBugBuffer || [])
+        .filter(e => /error|warn/i.test(String(e.level || '')))
+        .slice(-40)
+        .map(e => `[${e.ts}] ${String(e.level).toUpperCase()}: ${e.msg}`)
+        .join('\n');
+}
+
+function reqAsstSetType(t) {
+    const a = window._reqAsst || _reqAsstNew();
+    if (a.sid) return;
+    a.type = t;
+    _reqAsstRender();
+}
+
+function reqAsstChoose(i) {
+    const c = ((window._reqAsst || {}).choices || [])[i];
+    if (c !== undefined) reqAsstSend(String(c));
+}
+
+async function reqAsstSend(text) {
+    const a = window._reqAsst || _reqAsstNew();
+    const input = document.getElementById('req-asst-input');
+    const msg = String(text !== undefined ? text : (input?.value || '')).trim();
+    if (!msg || _reqAsstBusy() || a.state === 'submitted') return;
+    const status = document.getElementById('req-asst-status');
+    a.sending = true;
+    a.choices = [];
+    _reqAsstRender();
+    try {
+        let data;
+        if (!a.sid) {
+            data = await apiJson('/api/request-assistant/session', { method: 'POST', body: JSON.stringify({
+                message: msg, type: a.type || '', context: _bugContextMeta(), console_errors: _reqAsstConsoleErrors() }) });
+        } else {
+            data = await apiJson(`/api/request-assistant/session/${encodeURIComponent(a.sid)}/reply`,
+                { method: 'POST', body: JSON.stringify({ message: msg }) });
+        }
+        if (input && text === undefined) input.value = '';
+        if (status) status.classList.add('hidden');
+        _reqAsstApply(data);
+        if (!a.state || a.state === 'awaiting_user') a.state = 'running';
+    } catch (err) {
+        if (status) { status.textContent = 'Assistant error: ' + err.message; status.classList.remove('hidden'); }
+        if (/^404/.test(String(err && err.message))) { _reqAsstStore(''); _reqAsstNew(); }
+    } finally {
+        a.sending = false;
+    }
+    _reqAsstRender();
+    _reqAsstSchedule();
+}
+
+async function reqAsstStop() {
+    const a = window._reqAsst;
+    if (!a || !a.sid) return;
+    try { _reqAsstApply(await apiJson(`/api/request-assistant/session/${encodeURIComponent(a.sid)}/cancel`, { method: 'POST' })); } catch (_) { /* best effort */ }
+    _reqAsstRender();
+    _reqAsstSchedule();
+}
+
+async function reqAsstReset() {
+    const a = window._reqAsst;
+    if (a && a.sid && a.state === 'running') {
+        try { await apiJson(`/api/request-assistant/session/${encodeURIComponent(a.sid)}/cancel`, { method: 'POST' }); } catch (_) { /* best effort */ }
+    }
+    if (a && a.timer) clearTimeout(a.timer);
+    _reqAsstStore('');
+    _reqAsstNew();
+    const status = document.getElementById('req-asst-status');
+    if (status) status.classList.add('hidden');
+    _reqAsstRender();
+}
+
+async function reqAsstFile() {
+    const a = window._reqAsst;
+    if (!a || !a.sid || !a.ready) return;
+    const btn = document.getElementById('req-asst-file');
+    const status = document.getElementById('req-asst-status');
+    const say = (m) => { if (status) { status.textContent = m; status.classList.remove('hidden'); } };
+    if (btn) { btn.disabled = true; btn.textContent = 'Filing…'; }
+    try {
+        say('Capturing console, HTML, and screenshot…');
+        const { consoleLogs, html, screenshot } = await _captureBugContext();
+        say('Filing report…');
+        const data = await apiJson(`/api/request-assistant/session/${encodeURIComponent(a.sid)}/submit`, {
+            method: 'POST', body: JSON.stringify({ console_logs: consoleLogs, html, screenshot, context: _bugContextMeta() }) });
+        const label = data.type === 'feature' ? 'Feature request' : 'Bug report';
+        const next = data.type === 'feature' ? 'pending Global Admin approval' : 'ab will file an issue';
+        showToast(`${label} submitted (id ${data.report_id || ''}) — ${next}`, 'success');
+        _reqAsstStore('');
+        _reqAsstNew();
+        document.getElementById('file-bug-modal')?.remove();
+    } catch (err) {
+        console.error('Request assistant: file failed', err);
+        say('Failed to file: ' + err.message);
+        showToast('Failed to file: ' + err.message, 'error');
+        if (btn) { btn.disabled = false; btn.textContent = 'Retry'; }
+    }
 }
 
 // Shared capture for manual + auto bug filing: console buffer + truncated DOM
