@@ -2,7 +2,9 @@
 gate). Config lives in global_config["cert_monitor"]; results are written to
 $LM_STATE_DIR/cert_monitor.json by cert_monitor.run_checks. A startup-launched
 scheduler runs a check at most once per 24h while the feature is enabled, and
-evaluates the alert rules (cert_monitor_alerts) after every check and tick."""
+evaluates the alert rules (cert_monitor_alerts) after every check and tick.
+Per-cert ignores (global_config["cert_monitor_ignored"], keyed host:port) keep
+a cert listed but drop it from the counts and the alert evaluation."""
 import asyncio
 import datetime as _dt
 import logging
@@ -44,6 +46,25 @@ def register(app, hub, ctx):
             except Exception as e:  # noqa: BLE001
                 logger.warning("[certmon] state save failed: %s", e)
 
+    def _ignored():
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        return cm.normalize_ignored(gc.get(cm.IGNORE_KEY))
+
+    async def _save_ignored(ignored):
+        gc = hub.state.system_state.setdefault("global_config", {})
+        gc[cm.IGNORE_KEY] = ignored
+        hub.state._mark_dirty()
+        saver = getattr(hub.state, "save_state_now", None)
+        if saver:
+            try:
+                await saver()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[certmon] ignore-list save failed: %s", e)
+
+    def _view(results, now):
+        """Stored results → refreshed days/status, ignore flags applied."""
+        return cm.apply_ignored(_refresh_days(results, now), _ignored())
+
     async def _run(reason):
         if run_lock.locked():
             return False
@@ -55,10 +76,10 @@ def register(app, hub, ctx):
                 data = await asyncio.to_thread(cm.run_checks, hosts)
                 data["trigger"] = reason
                 await asyncio.to_thread(cm.save_results, data)
-                c = data["counts"]
-                logger.info("[certmon] done in %ss: red=%d yellow=%d green=%d error=%d",
+                c = cm.count_statuses(cm.apply_ignored(data["results"], _ignored()))
+                logger.info("[certmon] done in %ss: red=%d yellow=%d green=%d error=%d ignored=%d",
                             data["duration_s"], c.get("red", 0), c.get("yellow", 0),
-                            c.get("green", 0), c.get("error", 0))
+                            c.get("green", 0), c.get("error", 0), c.get("ignored", 0))
                 await _evaluate_alerts(data)
             except Exception as e:  # noqa: BLE001
                 logger.warning("[certmon] check failed: %s", e)
@@ -100,9 +121,8 @@ def register(app, hub, ctx):
                     data = await asyncio.to_thread(cm.load_results)
                 if not data.get("last_run"):
                     return {}
-                results = _refresh_days(data.get("results"),
-                                        _dt.datetime.now(_dt.timezone.utc))
-                return await cma.run_alerts(hub, results)
+                results = _view(data.get("results"), _dt.datetime.now(_dt.timezone.utc))
+                return await cma.run_alerts(hub, cm.active_results(results))
             except Exception as e:  # noqa: BLE001
                 logger.warning("[certmon] alert evaluation failed: %s", e)
                 return {}
@@ -119,10 +139,8 @@ def register(app, hub, ctx):
         cfg = _cfg()
         data = await asyncio.to_thread(cm.load_results)
         now = _dt.datetime.now(_dt.timezone.utc)
-        results = _refresh_days(data.get("results"), now)
-        counts = {s: 0 for s in ("red", "yellow", "green", "error", "unknown")}
-        for r in results:
-            counts[r.get("status", "unknown")] = counts.get(r.get("status", "unknown"), 0) + 1
+        results = _view(data.get("results"), now)
+        counts = cm.count_statuses(results)
         next_run = None
         if cfg["enabled"] and data.get("last_run"):
             try:
@@ -141,6 +159,7 @@ def register(app, hub, ctx):
             "counts": counts,
             "results": results,
             "results_file": cm.results_path(),
+            "ignored": _ignored(),
         }
 
     @app.put("/api/certmon/config")
@@ -184,6 +203,41 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=409, detail="Cert Expiry Monitor is disabled")
         started = _kick("manual")
         return {"status": "started" if started else "already_running"}
+
+    @app.post("/api/certmon/ignore")
+    async def certmon_ignore(request: Request):
+        """Set / clear the per-cert ignore flag: ``{host, port?, ignored}``
+        (``host`` may also be ``host:port``). Ignored certs stay listed but are
+        excluded from the status counts and every alert rule."""
+        sess = _guard(request)
+        body = await _body(request)
+        raw = str(body.get("host") or "").strip()
+        if body.get("port") not in (None, "") and ":" not in raw:
+            raw = f"{raw}:{body.get('port')}"
+        parsed = cm.parse_host_entry(raw)
+        if not parsed:
+            raise HTTPException(status_code=400, detail="Valid host (and port) required")
+        key = cm.cert_key({"host": parsed[0], "port": parsed[1]})
+        want = body.get("ignored", True)
+        want = want is True or str(want).lower() in ("true", "1", "on", "yes")
+        ignored = _ignored()
+        if want:
+            monitored = {cm.cert_key(h) for h in cm.effective_hosts(_cfg())}
+            data = await asyncio.to_thread(cm.load_results)
+            monitored |= {cm.cert_key(r) for r in data.get("results") or []}
+            if key not in monitored and key not in ignored:
+                raise HTTPException(status_code=404, detail="Host is not monitored")
+            if key not in ignored and len(ignored) >= cm.MAX_IGNORED:
+                raise HTTPException(status_code=400, detail=f"At most {cm.MAX_IGNORED} ignored certs")
+            actor = ((sess or {}).get("user", {}) or {}).get("username") or ""
+            ignored[key] = {"by": str(actor)[:120],
+                            "at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")}
+        else:
+            ignored.pop(key, None)
+        await _save_ignored(ignored)
+        logger.info("[certmon] %s %s", "ignore" if want else "un-ignore", key)
+        asyncio.create_task(_evaluate_alerts())
+        return {"status": "ok", "key": key, "ignored": want, "ignored_hosts": ignored}
 
     # ── alert rules (breach + recovery digests; see cert_monitor_alerts) ──
     @app.get("/api/certmon/alerts/rules")
@@ -252,8 +306,8 @@ def register(app, hub, ctx):
         if not rule.get("recipients"):
             raise HTTPException(status_code=400, detail="This rule has no recipients")
         data = await asyncio.to_thread(cm.load_results)
-        results = _refresh_days(data.get("results"), _dt.datetime.now(_dt.timezone.utc))
-        if not await cma.send_test(hub, rule, results):
+        results = _view(data.get("results"), _dt.datetime.now(_dt.timezone.utc))
+        if not await cma.send_test(hub, rule, cm.active_results(results)):
             raise HTTPException(status_code=400, detail="Send failed — check Setup → Notifications")
         return {"sent": True, "to": rule["recipients"]}
 
