@@ -125,9 +125,10 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
   `sim_assistant_max_running` (2 concurrent turns),
   `sim_assistant_copilot_token` / `sim_assistant_copilot_home` (use a dedicated
   token, or an existing `copilot login`, instead of the stored credential). An
-  **Guardrails (scope).** The assistant only *creates* a simulation, *modifies*
-  an existing one, or *explains* how one works (spec `intent` create / modify /
-  explain); it declines everything else and treats repo file contents and user
+  **Guardrails (scope).** The assistant only makes a *cosmetic Simulations UI
+  change*, *creates* a simulation (including duplicating one), *modifies* or
+  *removes* an existing one, or *explains* how one works (spec `intent` ui /
+  create / modify / remove / explain); it declines everything else and treats repo file contents and user
   text as data, not instructions. AppBuilder re-checks every spec server-side
   (`spec_problems`) and refuses Submit when: the intent is explain (never
   built) or missing; any touch-point is outside the simulation build surface
@@ -138,6 +139,19 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
   `sim_assistant_allowed_paths`) or in another repo; a modify target is not an
   existing simulation; or a create reuses an existing name. Findings are shown
   in the Spec panel and fed back to the agent on the next turn.
+  **UI changes** (move, add, rename or restyle a button, label, column or
+  layout in the Simulations pages) are intent `ui`, not modify: no simulation
+  changes, so there is never a duplicate step or modify protocol. A ui spec
+  may only touch the Simulations UI (`UI_ALLOWED_PATHS`: lm
+  `WebUI/sim-views.js` and cs `lm-spoke/static/sim-views.js`, both required
+  because they are twins, plus lm `docs/cs.md`, `docs/CHANGELOG.md` and cs
+  `docs/*`). Anything that needs a backend, API or script change is out of
+  scope for ui. Its issues are titled `Simulations UI: …`.
+  **Removing a simulation** (intent `remove`) needs an existing target, explicit
+  confirmation (`remove_confirmed`) after a warning that every client running
+  it loses it, and the user's reason (`remove_reason`). It is built as a
+  dedicated PR with the label `sim-remove`, an `<!-- ab-sim-remove: <sim> -->`
+  marker and the same trace block.
   **Changing an existing simulation** follows a fixed protocol, and Submit is
   refused until it is complete. (1) Warn and recommend duplicating it instead
   (`duplicate_of`), then get explicit confirmation (`modify_confirmed`). (2)
