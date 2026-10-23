@@ -19,7 +19,10 @@ CI/tooling changes are omitted unless they change what an operator sees.
   (with suggested answers), and fills in a Spec panel. Once the spec is ready, a
   Global Admin can **Submit to AppBuilder**, which files one issue per repo and
   builds it as PRs to dev. Build status shows in the chat. Other users file it
-  for admin approval. It only creates, changes or explains simulations. Changing
+  for admin approval. It only makes cosmetic Simulations UI changes, or
+  creates, changes, removes or explains simulations. UI changes (move or add a
+  button) only touch the two `sim-views.js` copies and are never duplicated.
+  Removing a simulation needs confirmation and a reason. Changing
   a working simulation needs confirmation and a code check, and it steers you to
   duplicating it first. Each in-place change is built as its own PR, recorded
   with the requesting LM user. See [cs.md](cs.md#how-to-use-it) and
