@@ -8833,14 +8833,14 @@ function csPctCell(v) {
 // Auto-provisioning status badge for a host, from px.provision (the pxmx agent's
 // diagnostic). Shows the throttle + WHAT throttled it (provision_halt.reason +
 // the cpu/mem pct vs threshold, or CPU pacing) — copied from the original
-// webui's provision_halt badge — else Active / Idle / Off.
+// webui's provision_halt badge — else Active / Off.
 function csProvThrottleBadge(px) {
     const prov = (px && px.provision) || {};
     const halt = prov.halt || {};
     const pill = (cls, txt, title) =>
         `<span title="${csEscape(title || '')}" class="px-2 py-0.5 rounded text-[10px] font-bold uppercase ${cls}">${csEscape(txt)}</span>`;
     // No provision telemetry (a row with no proxmox/agent data) → neutral "—",
-    // not a misleading "Active". Active/Idle/Off/throttled are only meaningful
+    // not a misleading "Active". Active/Off/throttled are only meaningful
     // once the pxmx agent has actually reported a provision block.
     if (!prov || Object.keys(prov).length === 0)
         return '<span class="text-slate-400">—</span>';
@@ -8858,8 +8858,6 @@ function csProvThrottleBadge(px) {
         return pill('bg-slate-200 text-slate-500', 'Off', 'Auto-provisioning disabled');
     if (prov.cs_enabled === false)
         return pill('bg-slate-200 text-slate-500', 'No sim', 'Client-simulation mode not enabled on this agent');
-    if (prov.loop_running === false)
-        return pill('bg-amber-100 text-amber-700', 'Idle', prov.reason || 'Provision loop not running');
     return pill('bg-green-100 text-green-700', 'Active', prov.reason || 'Provisioning active');
 }
 
