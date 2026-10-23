@@ -60,6 +60,27 @@ Rows are sorted red → yellow → error → green, then by days left. Days left
 recalculated from `not_after` every time the view loads, so the colours stay
 correct between the daily checks.
 
+## Ignoring a cert
+
+Each row has an **Ignore** button (**Un-ignore** once ignored). Use it for an
+endpoint whose status you have accepted, for example a known-expired or
+private-CA host you can't fix.
+
+An ignored cert:
+- stays in the list, muted, with its real status still shown and tagged
+  "(ignored)" (hover it for who ignored it and when);
+- is sorted after the active rows;
+- is left out of the red / yellow / green / error totals (the header shows the
+  ignored count separately);
+- never breaches an alert rule. If it was already breached, it drops out of the
+  rule's state silently (no "recovered" email). Un-ignoring a cert that is still
+  bad makes it breach again on the next evaluation.
+
+Ignores are keyed by **`host:port`**, the same identity the monitor and the
+alert state use, so an ignore survives cert renewals and hub restarts. They are
+stored in `global_config.cert_monitor_ignored` as
+`{"host:port": {"by": <username>, "at": <ISO timestamp>}}`.
+
 ## Schedule & storage
 
 - A scheduler started with the hub checks every 15 minutes whether a run is due.
@@ -122,9 +143,10 @@ Rules are stored in `global_config.cert_monitor_alerts.rules`. The code is in
 | Method | Path | Purpose |
 | :-- | :-- | :-- |
 | GET | `/api/certmon/status` | `{enabled, running}` (drives the left-nav item) |
-| GET | `/api/certmon/overview` | config, built-in host list, counts, sorted results |
+| GET | `/api/certmon/overview` | config, built-in host list, counts (ignored certs excluded, plus an `ignored` total), sorted results (each with `ignored`, `ignored_by`, `ignored_at`), the `ignored` map |
 | PUT | `/api/certmon/config` | `{enabled?, custom_hosts?, disabled_builtin?}` |
 | POST | `/api/certmon/run` | start a check now (409 when disabled) |
+| POST | `/api/certmon/ignore` | `{host, port?, ignored}` — ignore (`true`, default) or un-ignore (`false`) one cert; `host` may be `host:port`. 400 for a bad host, 404 when ignoring a host that isn't monitored |
 | GET | `/api/certmon/alerts/rules` | rules plus the trigger and service lists |
 | POST | `/api/certmon/alerts/rules` | create `{name, trigger, threshold_days, services, recipients, format, enabled}` |
 | PUT | `/api/certmon/alerts/rules/{id}` | update a rule |

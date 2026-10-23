@@ -209,3 +209,60 @@ def test_enable_triggers_first_check_when_due(tmp_path, monkeypatch):
     assert r.status_code == 200 and r.json()["config"]["enabled"] is True
     assert r.json()["check_started"] is True
     assert client.get("/api/certmon/status").json()["enabled"] is True
+
+
+def test_ignored_helpers_flag_sort_and_count():
+    res = [{"host": "a", "port": 443, "status": "red"},
+           {"host": "b", "port": 8443, "status": "red"},
+           {"host": "c", "port": 443, "status": "green"}]
+    ign = cm.normalize_ignored({"a:443": {"by": "ops", "at": "2026-01-01"},
+                                "bad host!:443": {}, "nope": {}})
+    assert list(ign) == ["a:443"]
+    out = cm.apply_ignored(res, ign)
+    assert [r["host"] for r in out] == ["b", "c", "a"]
+    assert out[-1]["ignored"] is True and out[-1]["ignored_by"] == "ops"
+    assert out[-1]["status"] == "red"  # real status kept
+    assert [r["host"] for r in cm.active_results(out)] == ["b", "c"]
+    c = cm.count_statuses(out)
+    assert c["red"] == 1 and c["green"] == 1 and c["ignored"] == 1
+    # host:port identity — same host on another port is a different cert.
+    assert cm.apply_ignored(res, {"b:443": {}})[0]["ignored"] is False
+
+
+def test_ignore_route_roundtrip(tmp_path, monkeypatch):
+    client, hub = _client(True, tmp_path, monkeypatch)
+    na = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=5)).isoformat()
+    cm.save_results({"last_run": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                     "results": [{"host": "old.example.com", "port": 443, "not_after": na},
+                                 {"host": "api.mist.com", "port": 443, "status": "error"}]})
+    assert client.post("/api/certmon/ignore", json={"host": "bad host!"}).status_code == 400
+    assert client.post("/api/certmon/ignore", json={"host": "nowhere.example"}).status_code == 404
+
+    r = client.post("/api/certmon/ignore", json={"host": "old.example.com", "port": 443})
+    assert r.status_code == 200 and r.json()["key"] == "old.example.com:443"
+    stored = hub.state.system_state["global_config"][cm.IGNORE_KEY]
+    assert set(stored) == {"old.example.com:443"} and stored["old.example.com:443"]["at"]
+    # A built-in host is monitored even before it shows up in results.
+    assert client.post("/api/certmon/ignore", json={"host": "manage.mist.com"}).status_code == 200
+
+    ov = client.get("/api/certmon/overview").json()
+    row = next(r for r in ov["results"] if r["host"] == "old.example.com")
+    assert row["ignored"] is True and row["status"] == "red" and row["days_left"] < 0
+    assert ov["results"][-1]["host"] == "old.example.com"
+    assert ov["counts"]["red"] == 0 and ov["counts"]["error"] == 1 and ov["counts"]["ignored"] == 1
+    assert "old.example.com:443" in ov["ignored"]
+
+    # Config saves don't touch the ignore list.
+    assert client.put("/api/certmon/config", json={"custom_hosts": []}).status_code == 200
+    assert "old.example.com:443" in hub.state.system_state["global_config"][cm.IGNORE_KEY]
+
+    r = client.post("/api/certmon/ignore", json={"host": "old.example.com:443", "ignored": False})
+    assert r.status_code == 200 and r.json()["ignored"] is False
+    ov = client.get("/api/certmon/overview").json()
+    assert ov["counts"]["red"] == 1 and ov["counts"]["ignored"] == 0
+    assert list(ov["ignored"]) == ["manage.mist.com:443"]  # no result row yet
+
+
+def test_ignore_route_admin_only(tmp_path, monkeypatch):
+    client, _ = _client(False, tmp_path, monkeypatch)
+    assert client.post("/api/certmon/ignore", json={"host": "a.example.com"}).status_code == 403
