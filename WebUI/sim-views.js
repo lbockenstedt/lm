@@ -6507,7 +6507,10 @@ function csRenderPxmxSiteMapEditor() {
         return `<div class="grid grid-cols-1 md:grid-cols-3 gap-2 items-center bg-white border border-slate-200 rounded-md p-2" data-cs-pxrow="${i}">
           <label class="text-xs text-slate-600 font-mono">${csEscape(r.host)} ${badge}</label>
           <select data-cs-px="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">${siteOpts(sel)}</select>
-          <button onclick="csPxmxSiteClear('${csEscape(r.host)}')" class="text-red-600 hover:text-red-800 text-xs font-bold py-1 justify-self-end">Clear</button>
+          <div class="flex gap-3 justify-self-end">
+            <button onclick="csPxmxSiteClear('${csEscape(r.host)}')" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Clear</button>
+            ${r.connected ? '' : `<button onclick="csPxmxSiteDelete('${csEscape(r.host)}')" title="Remove this stale server record (e.g. a server moved to another tenant)" class="text-red-700 hover:text-red-900 text-xs font-bold py-1">Delete</button>`}
+          </div>
         </div>`;
     }).join('');
     csSet(`<div class="space-y-4">
@@ -6600,6 +6603,25 @@ window.csPxmxSiteClear = function (host) {
             if (sel) sel.value = '';
         }
     });
+};
+
+// Delete a stale (offline) server row: the hub drops it from its cache and every
+// tenant cs spoke forgets it (proxmox_states + its site assignment). A server
+// that is still alive in this tenant re-appears on its next telemetry frame.
+window.csPxmxSiteDelete = async function (host) {
+    if (!host) return;
+    if (!confirm(`Delete stale server '${host}'?\n\nThis removes its site assignment and cached record from this tenant (use it for a server that was decommissioned or moved to another tenant). If it is still connected to this tenant it will re-appear.`))
+        return;
+    try {
+        await csFetch(`/proxmox/host/${encodeURIComponent(host)}?tenant_id=${csTenant()}`, { method: 'DELETE' });
+        delete csPxmxSiteMap[host];
+        csPxmxAgents = csPxmxAgents.filter(a => (a.agent_id || a.hostname) !== host);
+        csRenderPxmxSiteMapEditor();
+        showToast(`Removed ${host}.`, 'success');
+    } catch (e) {
+        console.error('csPxmxSiteDelete: delete failed', e);
+        showToast('Delete failed: ' + ((e && e.message) || e), 'error');
+    }
 };
 
 window.csPxmxSiteSave = async function () {

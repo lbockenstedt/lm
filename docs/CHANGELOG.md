@@ -13,6 +13,14 @@ CI/tooling changes are omitted unless they change what an operator sees.
 ## Week of 2026-10-19
 
 ### Simulations
+- **Site Pool clients join the plain SSID.** Clients on a pxmx server
+  assigned to a Site Pool (RF chamber) now connect to the SSID exactly as
+  configured (e.g. `CC-BRIDGE`), not `<site>-<ssid>`. The site prefix applies
+  only to Tenant-Wide Pool servers. See [cs.md](cs.md).
+- **Server to Site Assignments are tenant-scoped, with Delete.** A pxmx
+  server that moved to another tenant no longer shows up here. Offline rows
+  have a **Delete** button that removes the stale record and its site
+  assignment from every Client-Sim spoke in the tenant. See [cs.md](cs.md).
 - **Interactive Simulation Build Assistant.** Simulations → Assistant is now a
   live AppBuilder agent session. It reads the real cs and lm code, rules and the
   add-simulation recipe, streams what it's reading, asks one question at a time
