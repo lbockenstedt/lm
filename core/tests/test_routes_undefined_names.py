@@ -128,15 +128,12 @@ def _undefined_names(path):
 #:       distribute_* paths; both sit inside a try/except, so the lookup
 #:       silently degrades instead of crashing. Probably meant `unwrap_spoke`.
 #:   oidc `cfg`                   — one site.
-#:   setup_admin `ctx`            — a closure referencing an enclosing-scope
-#:       name before assignment; needs care, not a quick import.
 #:
 #: The list is self-cleaning: fix one and this test FAILS until it is removed
 #: from here, so the baseline cannot quietly rot into a permanent exemption.
 _BASELINE = {
     ("cert_distribution.py", "_unwrap"),
     ("oidc.py", "cfg"),
-    ("setup_admin.py", "ctx"),
 }
 
 

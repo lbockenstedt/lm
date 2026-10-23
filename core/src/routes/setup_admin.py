@@ -391,6 +391,66 @@ async def _aggregate_diagnostics(hub):
 
 
 
+async def store_bug_report(hub, ctx, request, data: dict) -> str:
+    """Store one WebUI bug/feature report (shared by /api/bug-report and the
+    Request Assistant submit route) and log the greppable ``[bug-report]``
+    marker ab's scan_bugs keys on. Returns the report id; raises HTTPException.
+    The tenant is resolved server-side and overrides whatever the browser sent."""
+    try:
+        explanation = str(data.get("explanation") or "")
+        # Capture-integrity receipt line (before store): shows whether the
+        # WebUI actually captured console/html/screenshot, so a "no issue in
+        # GitHub" trace can rule out a missing payload upstream of storage.
+        shot = data.get("screenshot")
+        if isinstance(shot, str) and shot.startswith("data:"):
+            shot_kind = "png" if "image/png" in shot.split(",", 1)[0] else "jpg"
+        else:
+            shot_kind = "none"
+        logger.info(
+            f"[bug-report] received explanation={len(explanation)} chars "
+            f"console={len(str(data.get('console_logs') or ''))} "
+            f"html={len(str(data.get('html') or ''))} screenshot={shot_kind}"
+        )
+        # Attribute the report to the filer's tenant (authoritative, server-
+        # side) so the read-only tenant-admin view can scope to it. Prefer the
+        # session tenant; for a Global Admin with no active tenant, fall back
+        # to the header tenant picker carried in context.currentTenant.
+        try:
+            _tid = ctx._resolve_tenant(request) or ""
+        except Exception:  # noqa: BLE001
+            _tid = ""
+        if not _tid:
+            _c = data.get("context") or {}
+            if isinstance(_c, dict):
+                _tid = str(_c.get("currentTenant") or "").strip()
+        # 'default' is the WebUI's no-tenant sentinel, not a real tenant —
+        # store it as untagged (Global-Admin-only) rather than a bogus tenant.
+        if _tid == "default":
+            _tid = ""
+        data["tenant_id"] = _tid
+        rid = await asyncio.to_thread(hub._store_bug_report, data)
+        if not rid:
+            logger.error("bug-report: _store_bug_report returned no id (data keys=%s)", list(data.keys()))
+            raise HTTPException(status_code=500, detail="Failed to store bug report")
+        sev = str(data.get("severity") or "medium")
+        rtype = str(data.get("type") or "bug").strip().lower() or "bug"
+        bctx = data.get("context") or {}
+        view = bctx.get("currentView") if isinstance(bctx, dict) else ""
+        summary = str(data.get("title") or "") or explanation
+        # Short marker — flows through HubLogHandler -> self.logs ->
+        # /var/log/lm/hub.log -> GET_LOGS -> ab scan_bugs. No base64.
+        logger.info(
+            f"[bug-report] id={rid} type={rtype} severity={sev} view={view} "
+            f"summary={summary[:80]!r}"
+        )
+        return rid
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[bug-report] store failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def register(app, hub, ctx):
     """Register setup_admin routes on the Hub app."""
 
@@ -1065,59 +1125,7 @@ def register(app, hub, ctx):
         if not isinstance(data, dict) or not str(data.get("explanation") or "").strip():
             raise HTTPException(status_code=400, detail="Missing explanation")
 
-        try:
-            explanation = str(data.get("explanation") or "")
-            # Capture-integrity receipt line (before store): shows whether the
-            # WebUI actually captured console/html/screenshot, so a "no issue in
-            # GitHub" trace can rule out a missing payload upstream of storage.
-            shot = data.get("screenshot")
-            if isinstance(shot, str) and shot.startswith("data:"):
-                shot_kind = "png" if "image/png" in shot.split(",", 1)[0] else "jpg"
-            else:
-                shot_kind = "none"
-            logger.info(
-                f"[bug-report] received explanation={len(explanation)} chars "
-                f"console={len(str(data.get('console_logs') or ''))} "
-                f"html={len(str(data.get('html') or ''))} screenshot={shot_kind}"
-            )
-            # Attribute the report to the filer's tenant (authoritative, server-
-            # side) so the read-only tenant-admin view can scope to it. Prefer the
-            # session tenant; for a Global Admin with no active tenant, fall back
-            # to the header tenant picker carried in context.currentTenant. The
-            # browser can't spoof this — we overwrite whatever it sent.
-            try:
-                _tid = ctx._resolve_tenant(request) or ""
-            except Exception:  # noqa: BLE001
-                _tid = ""
-            if not _tid:
-                _c = data.get("context") or {}
-                if isinstance(_c, dict):
-                    _tid = str(_c.get("currentTenant") or "").strip()
-            # 'default' is the WebUI's no-tenant sentinel, not a real tenant —
-            # store it as untagged (Global-Admin-only) rather than a bogus tenant.
-            if _tid == "default":
-                _tid = ""
-            data["tenant_id"] = _tid
-            rid = await asyncio.to_thread(hub._store_bug_report, data)
-            if not rid:
-                logger.error("bug-report: _store_bug_report returned no id (data keys=%s)", list(data.keys()))
-                raise HTTPException(status_code=500, detail="Failed to store bug report")
-            sev = str(data.get("severity") or "medium")
-            rtype = str(data.get("type") or "bug").strip().lower() or "bug"
-            ctx = data.get("context") or {}
-            view = ctx.get("currentView") if isinstance(ctx, dict) else ""
-            # Short marker — flows through HubLogHandler -> self.logs ->
-            # /var/log/lm/hub.log -> GET_LOGS -> ab scan_bugs. No base64.
-            logger.info(
-                f"[bug-report] id={rid} type={rtype} severity={sev} view={view} "
-                f"summary={explanation[:80]!r}"
-            )
-            return {"status": "ok", "id": rid}
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"[bug-report] /api/bug-report failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "ok", "id": await store_bug_report(hub, ctx, request, data)}
 
     @app.get("/api/whats-new")
     async def whats_new():
