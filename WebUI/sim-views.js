@@ -2402,7 +2402,7 @@ window.csDemoClear = async function (btn) {
 // is an expandable row beneath each client; opening it fetches the host's
 // current overrides and seeds the toggles.
 // Alphabetical so the sim knobs + the Simulation facet dropdown list in order.
-const CS_CONTROL_FLAGS = ['assoc_fail', 'auth_fail', 'dhcp_fail', 'dns_fail',
+const CS_CONTROL_FLAGS = ['assoc_fail', 'auth_fail', 'client_offline', 'dhcp_fail', 'dns_fail',
     'dns_latency', 'download', 'iperf', 'kill_switch', 'mac_auth_fail', 'ping_test', 'port_flap',
     'ssidpw_fail', 'www_traffic'];
 
@@ -4229,7 +4229,7 @@ window.csSaveConfigPush = async function () {
 // (allow_offline and l1 use yes/no in the canon; they stay text inputs so the
 // exact value is preserved losslessly.)
 const CS_ONOFF_KEYS = new Set([
-    'kill_switch', 'rapid_update', 'github_repo', 'smb_repo', 'site_based_ssid',
+    'client_offline', 'kill_switch', 'rapid_update', 'github_repo', 'smb_repo', 'site_based_ssid',
     'ssidpw_fail', 'auth_fail', 'mac_auth_fail', 'syslog', 'web_server',
     'dhcp_fail', 'dns_fail', 'dns_latency', 'assoc_fail', 'port_flap', 'ping_test',
     'download', 'www_traffic', 'iperf',
@@ -4249,6 +4249,8 @@ const CS_SIM_SECTION_FIELDS = {
         ['rapid_update', 'Rapid Update'], ['github_repo', 'Github Repo'],
         ['smb_repo', 'Smb Repo'], ['site_based_ssid', 'Site Based Ssid'],
         ['allow_offline', 'Allow Offline'], ['ssidpw_fail', 'Ssidpw Fail'],
+        ['client_offline_min_minutes', 'Client Offline Min (minutes)'],
+        ['client_offline_max_minutes', 'Client Offline Max (minutes)'],
         ['auth_fail', 'Auth Fail'], ['mac_auth_fail', 'Mac Auth Fail'], ['syslog', 'Syslog'],
         ['web_server', 'Web Server'],
         ['dns_fail_rate', 'DNS Fail Rate (/min)'],
@@ -4275,6 +4277,7 @@ const CS_SIM_SECTION_FIELDS = {
 // Per-bucket [s0]–[s9] field schema (identical for each bucket).
 const CS_SIM_BUCKET_FIELDS = [
     ['wsite', 'Wsite'], ['ssid', 'Ssid'], ['ssidpw', 'Ssidpw'],
+    ['client_offline', 'Client Offline'],
     ['dhcp_fail', 'Dhcp Fail'], ['dns_fail', 'Dns Fail'], ['dns_latency', 'Dns Latency'],
     ['assoc_fail', 'Assoc Fail'], ['port_flap', 'Port Flap'],
     ['ping_test', 'Ping Test'], ['download', 'Download'],
@@ -5104,7 +5107,9 @@ function csPoolConfigCardHtml() {
     const matrix = pc.ssid_matrix || [];
     const placement = pc.ssid_placement || {};
     const randPool = pc.random_pool || {};
-    const flags = (typeof CS_CONTROL_FLAGS !== 'undefined' ? CS_CONTROL_FLAGS : []);
+    // Client Offline is an end-of-cycle lifecycle sim, not an ambient traffic roll.
+    const flags = (typeof CS_CONTROL_FLAGS !== 'undefined' ? CS_CONTROL_FLAGS : [])
+        .filter(f => f !== 'client_offline');
     const esc = csEscape;  // shared escaper (escapes &<>"')
     const simChecks = flags.map(f =>
         `<label class="flex items-center gap-1 text-xs"><input type="checkbox" data-cs-rand="${esc(f)}" ${rsims.indexOf(f) >= 0 ? 'checked' : ''}> ${esc(f)}</label>`).join('');
