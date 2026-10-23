@@ -1,6 +1,6 @@
 ---
 summary: "Client Simulation spoke. Repo: cs. moduletype = 'simulation', label 'Agent'/'Client Simulator'."
-keywords: [client, collab, cs, dashboard, dhcp_fail, dns_fail, dns_latency, download, iperf, lm, sims, simulation, traffic, www_traffic]
+keywords: [client, client_offline, collab, cs, dashboard, dhcp_fail, dns_fail, dns_latency, download, iperf, lm, sims, simulation, traffic, www_traffic]
 ---
 
 # cs — Client Simulation
@@ -100,6 +100,53 @@ The cs spoke itself owns the simulation "profile" logic, the per-client override
 **The cs-owned sim DHCP.** cs owns its **own** Kea DHCP4 instance for the isolated sim-client network — this is **separate** from the `dhcp` module's Kea. `install_cs.sh` provisions it on an auto-detected **second NIC** at `169.253.1.1`, static subnet **`169.253.1.0/24`**, pool **`169.253.1.11`–`169.253.1.254`**, **no** router/gateway option (the network is deliberately isolated). Configs: `/etc/kea/kea-dhcp4-sim.conf` + `/etc/kea/kea-ctrl-agent-sim.conf`; the sim control agent listens on **127.0.0.1:8002** (the `dhcp` module's Kea control agent is on a different port); leases in `/var/lib/kea/kea-leases4-sim.csv`; units `kea-dhcp4-sim.service` + `kea-ctrl-agent-sim.service`. `dhcp_status.py` cheaply reads the lease CSV (not the ctrl-agent) and rides the 10s telemetry frame to the hub's DHCP-server card.
 
 **How a sim client gets an address and phones home.** A sim VM boots on the isolated sim network → the cs-owned Kea leases it an address from `169.253.1.11`–`.254` → the client reaches the **client API at `169.253.1.1:8080`** (`client_api.py`, FastAPI). It fetches its profile from `GET /api/config?hostname=…` (bucket + overrides + any live demo flags baked in), POSTs status beacons to `/api/status` (upserting the registry), and opens `ws /ws/client` for live command push. When a client-api key is set, the linux agent fetches it from `/api/client/key` first; the t3 agent sends none (empty key = open).
+
+## Client offline window (`client_offline`)
+
+On Linux and Windows, `client_offline` periodically takes only the client's
+**simulation interface** offline so Aruba Central sees realistic client-count
+and traffic variation. It generates no dedicated alert. Enable it in
+**Simulations → Config → Simulation** for the desired buckets, or override the
+flag per user. It is off by default, so installing it does not change fleet
+behaviour until enabled.
+
+| Key | Scope | Default | Meaning |
+| --- | --- | --- | --- |
+| `client_offline` | `[s0]`–`[s9]`, also overridable per user | `off` | `on` enables an offline window at the end of each cycle. |
+| `client_offline_min_minutes` | `[simulation]` | `60` | Minimum offline duration in minutes. |
+| `client_offline_max_minutes` | `[simulation]` | `240` | Maximum offline duration in minutes. |
+
+For a 1–2 hour window use `60` and `120`; the defaults give 1–4 hours.
+Invalid or non-numeric bounds fall back to their respective defaults; a minimum
+below 1 becomes 60, and a minimum above the maximum swaps the bounds. Each
+window chooses a random duration in seconds, inclusive of both bounds after
+conversion to seconds.
+
+The orchestrator passes the resolved `sim_phy` to the dedicated
+`client_offline.sh` / `client_offline.ps1` script and waits in the **foreground**
+at the end of the cycle. `sim_phy=wireless` (default) selects only the wireless
+adapter; `sim_phy=ethernet` selects only the wired adapter. The other adapter is
+never touched. **Any chosen adapter carrying a `169.253.*` management address
+is protected**: if the simulation adapter is missing or carries that address,
+the script logs the reason and skips the window without sleeping. The
+management interface, `agent.sh`, and the agent/spoke API connection stay up;
+the orchestrator does not stop the agent.
+
+Linux uses `ip link set down` and an EXIT trap; Windows uses
+`Disable-NetAdapter` and `try/finally`. After sleeping the full duration, cleanup
+restores **only the adapter the script brought down**, then the outer loop
+reconnects and resumes. On Linux, the orchestrator's USR1 handler interrupts the
+child for `restart_sim` / `kill_switch`, restoring the adapter so config pushes
+can take effect immediately. Linux also skips the window while an engine-driven
+`dhcp_fail`, `dns_fail`, `assoc_fail`, `port_flap`, `ssidpw_fail`, `auth_fail`, or
+`mac_auth_fail` is on for that client.
+
+This is a lifecycle simulation, not a background traffic job or a
+`randomizable_sims` entry. The dead commented-out Linux `allow_offline` block is
+replaced by this dispatch. Legacy `allow_offline` remains separate on Windows
+and in the engine; keep **`allow_offline=no`** so both mechanisms do not fire.
+The client scripts and orchestrator changes ship from the cs repo; this LM UI
+requires that companion update to execute the windows.
 
 ## Sim Quotas (alert-driven auto-fill, multi-source)
 
