@@ -13,6 +13,14 @@ CI/tooling changes are omitted unless they change what an operator sees.
 ## Week of 2026-10-19
 
 ### Simulations
+- **Client offline windows (`client_offline`).** Linux and Windows clients can
+  now pause their simulation interface at the end of each cycle for a random,
+  configurable duration (default 60–240 minutes). Off by default, enabled per
+  bucket or user, with minute-range fields in the Simulation config editor.
+  Management adapters carrying `169.253.*` addresses are never disabled, and
+  the agent/spoke API stays online. Requires the companion cs client update;
+  keep legacy `allow_offline=no`. See
+  [cs.md](cs.md#client-offline-window-client_offline).
 - **Site Pool clients join the plain SSID.** Clients on a pxmx server
   assigned to a Site Pool (RF chamber) now connect to the SSID exactly as
   configured (e.g. `CC-BRIDGE`), not `<site>-<ssid>`. The site prefix applies
