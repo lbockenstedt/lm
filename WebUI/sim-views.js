@@ -13342,7 +13342,7 @@ function _csAsstRenderSpec() {
     const short = v => csEscape(String(v || '').length > 220 ? String(v).slice(0, 220) + '…' : String(v || ''));
     const intent = a.intent || s.intent || '';
     const explain = intent === 'explain';
-    const intentLabel = { create: 'New simulation', modify: 'Change existing', explain: 'Explain only' }[intent] || '';
+    const intentLabel = { ui: 'UI change', create: 'New simulation', modify: 'Change existing', remove: 'Remove simulation', explain: 'Explain only' }[intent] || '';
     const badge = explain ? '<span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-sky-100 text-sky-800">Explain only</span>'
         : a.ready ? '<span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">Ready to build</span>'
         : '<span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">Gathering</span>';
@@ -13364,16 +13364,26 @@ function _csAsstRenderSpec() {
         const why = s.verified_broken ? 'Verified defect — patch'
             : (s.override_reason ? 'Works as built — user override: ' + short(s.override_reason) : '');
         html += _csAsstSpecRow('Why change in place', !!why, s.verified_broken ? csEscape(why) : why);
+    } else if (intent === 'remove') {
+        html += '<div class="mt-2 mb-2 rounded-md border border-rose-300 bg-rose-50 px-2 py-1.5 text-[11px] text-rose-900">' +
+            '<b>Removing a simulation</b> takes it away from every client running it. ' +
+            'Removals ship as their own PR, recorded with your LM login and reason.</div>';
+        html += _csAsstSpecRow('Removal confirmed', !!s.remove_confirmed, s.remove_confirmed ? 'Yes' : '');
+        html += _csAsstSpecRow('Reason', !!s.remove_reason, short(s.remove_reason));
+    } else if (intent === 'ui') {
+        html += '<div class="mt-2 mb-2 text-[11px] text-slate-500">Cosmetic change to the Simulations pages only — no simulation is changed or duplicated.</div>';
     } else if (s.duplicate_of) {
         html += _csAsstSpecRow('Duplicated from', true, '<code>' + csEscape(s.duplicate_of) + '</code>');
     }
     html += _csAsstSpecRow('Name', !!s.name, s.name ? '<code>' + csEscape(s.name) + '</code>' : '');
     html += _csAsstSpecRow('Summary', !!s.summary, short(s.summary));
     html += _csAsstSpecRow('Behavior', !!s.behavior, short(s.behavior));
-    html += _csAsstSpecRow('Platforms', !!(s.platforms && s.platforms.length), csEscape((s.platforms || []).join(', ')));
-    html += _csAsstSpecRow('Alert', !!s.alert, csEscape(s.alert || ''));
-    html += _csAsstSpecRow('Config knobs', !!(s.config_knobs && s.config_knobs.length),
-        (s.config_knobs || []).map(k => '<code>' + csEscape(k.key) + '</code>' + (k.default ? '=' + csEscape(k.default) : '')).join(', '));
+    if (intent !== 'ui') {
+        html += _csAsstSpecRow('Platforms', !!(s.platforms && s.platforms.length), csEscape((s.platforms || []).join(', ')));
+        html += _csAsstSpecRow('Alert', !!s.alert, csEscape(s.alert || ''));
+        html += _csAsstSpecRow('Config knobs', !!(s.config_knobs && s.config_knobs.length),
+            (s.config_knobs || []).map(k => '<code>' + csEscape(k.key) + '</code>' + (k.default ? '=' + csEscape(k.default) : '')).join(', '));
+    }
     const tps = s.touchpoints || [];
     html += _csAsstSpecRow('Touch-points (' + tps.length + ')', tps.length > 0,
         tps.map(t => '<div class="truncate" title="' + csEscape(t.change || '') + '"><span class="text-slate-400">' + csEscape(t.repo) + ':</span> ' + csEscape(t.path) + '</div>').join(''));
@@ -13596,7 +13606,7 @@ async function _csRenderAssistantSessions(caps) {
             <div class="flex items-center justify-between mb-3">
                 <div>
                     <h2 class="text-lg font-bold text-slate-800">Simulation Build Assistant</h2>
-                    <p class="text-xs text-slate-500">Create a new simulation, change an existing one, or ask how one works. An AppBuilder agent reads the real cs + lm code, asks what it needs, and builds a complete spec; AppBuilder then builds it (PRs to dev → qa → main). Other requests are declined.</p>
+                    <p class="text-xs text-slate-500">Make a cosmetic change to the Simulations pages, create (or duplicate) a simulation, change or remove an existing one, or ask how one works. An AppBuilder agent reads the real cs + lm code, asks what it needs, and builds a complete spec; AppBuilder then builds it (PRs to dev → qa → main). Other requests are declined.</p>
                 </div>
                 <div class="flex gap-2">
                     <button onclick="csAssistantNewSession()"

@@ -171,9 +171,15 @@ builds each as a PR to `dev`, and the panel shows the build status and PR links.
 Other users press **File for approval**, which sends the spec to an admin through
 the normal feature-request approval. The conversation survives a page reload;
 **New conversation** starts over and **Stop** interrupts a running turn.
-The assistant only creates a simulation, changes an existing one, or explains how
-one works, and it declines anything else. AppBuilder refuses to build a spec that
-touches files outside the simulation code. **Explain** conversations are never
+The assistant only makes cosmetic changes to the Simulations pages (move, add or
+rename a button, label or column), creates a simulation (including duplicating
+one), changes or removes an existing one, or explains how one works. It declines
+anything else. AppBuilder refuses to build a spec that touches files outside the
+simulation code. A **UI change** may only touch the two `sim-views.js` copies and
+docs. It changes no simulation, so you are never asked to duplicate anything; a
+request that needs a backend change is out of scope. **Removing a simulation**
+warns that every client running it loses it, needs your confirmation and reason,
+and is built as its own PR. **Explain** conversations are never
 built. **Changing an existing simulation** follows a fixed sequence:
 1. The assistant warns that every client running the simulation will change,
    and recommends duplicating it and editing the copy.
