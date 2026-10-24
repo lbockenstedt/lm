@@ -2657,6 +2657,9 @@ async function loadTenantConfig() {
         const data = await apiJson('/setup/tenants');
         window._sharedTenantId = data.shared_tenant_id || null;  // for the shared badge / gate
         const tenants = data.tenants || [];
+        // Keep the shared tenant cache (group/user tenant-scope pickers) in
+        // step with the list after a tenant add/sync/delete.
+        _cacheAllTenants(tenants);
 
         listEl.innerHTML = tenants.map(t => {
             const accessible = canAccessTenant(t.id);
@@ -17145,7 +17148,7 @@ async function loadGroups() {
         window._permGroupNames = Object.fromEntries(
             Object.entries(groups).map(([gid, g]) => [gid, g.name || gid]));
         // Tenant names for the group-table scope badges + the modal checklist.
-        await ensureTenants();
+        await ensureTenants(true);
         if (!bodyEl) return;
         if (Object.keys(groups).length === 0) {
             bodyEl.innerHTML = `<tr><td colspan="5" class="px-4 py-6 text-center text-slate-400 italic">No groups yet — create one to bundle module access.</td></tr>`;
@@ -17194,21 +17197,27 @@ async function loadGroups() {
 // Fetch + cache the tenant list (id + name) for the group-modal tenant
 // checklist and the group-table scope badges. /setup/tenants is admin-only;
 // the group editor is itself admin-only, so this is safe to call here.
-async function ensureTenants() {
+function _cacheAllTenants(tenants) {
+    window._allTenants = tenants;
+    window._allTenantsName = Object.fromEntries(
+        tenants.map(t => [t.id, t.name || t.id]));
+}
+
+async function ensureTenants(force = false) {
     // Cache HIT only on a populated list. An empty array is truthy, so caching
     // [] (a transient fetch failure, or a fresh install with no tenants yet)
     // would short-circuit every later call to return [] — the "No tenants
     // defined yet" bug in the Add-User modal even after tenants appear. Re-fetch
-    // whenever the cache is empty/missing so the list self-heals.
-    if (window._allTenants && window._allTenants.length) return window._allTenants;
+    // whenever the cache is empty/missing so the list self-heals. Pass
+    // force=true where a stale list blocks an action (tenant-scope pickers) so
+    // a tenant added after page load is selectable.
+    if (!force && window._allTenants && window._allTenants.length) return window._allTenants;
     try {
         const res = await setupFetch('/setup/tenants');
         if (!res.ok) return window._allTenants || [];
         const data = await res.json();
         const tenants = data.tenants || [];
-        window._allTenants = tenants;
-        window._allTenantsName = Object.fromEntries(
-            tenants.map(t => [t.id, t.name || t.id]));
+        _cacheAllTenants(tenants);
         return tenants;
     } catch (_e) {
         // Don't poison the cache on a transient failure — leave whatever's
@@ -17237,7 +17246,7 @@ async function showGroupModal(groupId) {
     // Entra/LDAP group grants BOTH RBAC permissions AND tenant scope. The backend
     // validates each id is a real tenant (drops unknowns), so we list only known
     // tenants here; an id no longer in tenant_state is silently dropped on save.
-    await ensureTenants();
+    await ensureTenants(true);
     const tenants = window._allTenants || [];
     const granted = new Set(g.tenants || []);
     const tenantRows = tenants.length
