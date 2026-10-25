@@ -1,4 +1,5 @@
 """Dashboard summary/all-tenants + cross-system search routes."""
+import json
 import time
 
 from api import (
@@ -132,12 +133,22 @@ def register(app, hub, ctx):
     _resolve_prefixes_for_tenant = ctx._resolve_prefixes_for_tenant
     _filter_enabled = ctx._filter_enabled
 
-    async def _compute_tenant_counts(hub, scoping: dict, failed_spokes: set = None) -> dict:
+    async def _compute_tenant_counts(hub, scoping: dict, failed_spokes: set = None,
+                                     shared_calls: dict = None) -> dict:
         """Per-tenant aggregate counts across all connected spokes, scoped by
         the tenant's netbox_tenant_slug / proxmox_tag. Returns
         {devices, vms, sessions, prefixes, ips_used}. Shared by the single-tenant
         dashboard summary and the admin all-tenants overview so both show
-        identical numbers for a given tenant."""
+        identical numbers for a given tenant.
+
+        ``failed_spokes`` and ``shared_calls`` are passed only by the
+        all-tenants fan-out and are shared across every tenant in it:
+          - ``failed_spokes``: spokes that timed out; skipped for the rest
+            of the fan-out (see ``_req``).
+          - ``shared_calls``: (spoke, command, payload) -> in-flight request
+            task. Tenants that need the exact same answer (e.g. the
+            untagged ``PXMX_LIST_VMS {}`` to a shared hypervisor spoke) await
+            ONE request instead of sending one each."""
         import asyncio as _asyncio
         nb_slug  = scoping["netbox_tenant_slug"] or None
         pxmx_tag = scoping["proxmox_tag"]        or None
@@ -207,6 +218,32 @@ def register(app, hub, ctx):
                 if _sp and _sp in _hv_set:
                     owned_agent_reqs.append((_apk, _sp))
 
+        def _mark_failed(spoke):
+            if failed_spokes is not None:
+                failed_spokes.add(spoke)
+
+        def _send(spoke, cmd, payload, timeout):
+            """Start the request, or join an identical one already in flight
+            in this fan-out (``shared_calls``). The shared task is awaited
+            through ``asyncio.shield`` because each tenant runs under its own
+            12s ``wait_for``: one tenant hitting that ceiling must cancel
+            only ITS wait, not the request other tenants are also awaiting.
+            Spoke replies are only read here (counted, merged into new
+            dicts), never mutated, so sharing one reply object is safe."""
+            if shared_calls is None:
+                return hub.request_response(spoke, cmd, payload, timeout=timeout)
+            key = (spoke, cmd, json.dumps(payload, sort_keys=True, default=str))
+            task = shared_calls.get(key)
+            if task is None:
+                task = _asyncio.ensure_future(
+                    hub.request_response(spoke, cmd, payload, timeout=timeout))
+                # If every waiter was cancelled, nobody reads the result;
+                # retrieve it here so asyncio does not log "Task exception
+                # was never retrieved".
+                task.add_done_callback(lambda t: t.cancelled() or t.exception())
+                shared_calls[key] = task
+            return _asyncio.shield(task)
+
         async def _req(spoke, cmd, payload=None):
             if not spoke:
                 return {}
@@ -217,17 +254,34 @@ def register(app, hub, ctx):
             # (the all-tenants "several minutes, page never completes" hang).
             if failed_spokes is not None and spoke in failed_spokes:
                 return {}
+            payload = payload or {}
+            # Overview counts don't warrant the 30s heavy-op budget — an 8s cap
+            # keeps the dashboard responsive; a slow NetBox shows a stale/0 count
+            # (memoized 60s) instead of hanging the whole page.
+            timeout = 8.0 if isinstance(cmd, str) and cmd.startswith("NETBOX_") else 5.0
             try:
-                # Overview counts don't warrant the 30s heavy-op budget — an 8s cap
-                # keeps the dashboard responsive; a slow NetBox shows a stale/0 count
-                # (memoized 60s) instead of hanging the whole page.
-                timeout = 8.0 if isinstance(cmd, str) and cmd.startswith("NETBOX_") else 5.0
-                r = await hub.request_response(spoke, cmd, payload or {}, timeout=timeout)
-                return _unwrap_spoke(r) if isinstance(r, dict) else {}
+                r = await _send(spoke, cmd, payload, timeout)
             except Exception:
-                if failed_spokes is not None:
-                    failed_spokes.add(spoke)
+                _mark_failed(spoke)
                 return {}
+            # request_response does NOT raise on a timeout: it returns this
+            # ERROR dict. Commit 0e83c65b only marked the spoke failed on an
+            # exception, so the skip above never fired for a real timeout and
+            # every tenant re-asked (and re-waited on) the same slow spoke.
+            # On LM-HUB that was about 20 PXMX_LIST_VMS timeouts per
+            # all-tenants refresh.
+            #
+            # An agent-scoped call (payload has agent_id) does not mark the
+            # spoke: its slowness is that one Proxmox host's live query (or
+            # an older spoke ignoring prefer_cache), not the spoke being
+            # wedged. Skipping the whole spoke would zero out the counts of
+            # other tenants it serves.
+            if (isinstance(r, dict) and r.get("status") == "ERROR"
+                    and r.get("message") == "Timed out waiting for spoke response"):
+                if "agent_id" not in payload:
+                    _mark_failed(spoke)
+                return {}
+            return _unwrap_spoke(r) if isinstance(r, dict) else {}
 
         _core = await _asyncio.gather(
             _req(spoke_ipam, "NETBOX_GET_DEVICES", {"tenant": nb_slug}),
@@ -242,7 +296,12 @@ def register(app, hub, ctx):
             # Whole-host owned VMs: one PXMX_LIST_VMS per pinned agent, scoped to
             # that agent's host (see owned_agent_reqs above). Appended AFTER the
             # per-spoke fan-out so slicing stays deterministic.
-            *[_req(sp, "PXMX_LIST_VMS", {"agent_id": hub._agent_relay_name(apk)})
+            # prefer_cache: the spoke answers from that agent's last telemetry
+            # (seconds old) instead of a 10-15s live PVE query that cannot fit
+            # the 5s budget above. Counts only need vmid/node/status. See
+            # pxmx_node_vm_aggregation._cached_agent_vms.
+            *[_req(sp, "PXMX_LIST_VMS", {"agent_id": hub._agent_relay_name(apk),
+                                         "prefer_cache": True})
               for apk, sp in owned_agent_reqs],
         )
         devices_r, prefixes_r, ips_r, sessions_r = _core[:4]
@@ -407,6 +466,8 @@ def register(app, hub, ctx):
         # skipped for the rest (it's the same ipam/hypervisor spoke for all), so a
         # wedged spoke costs ~one timeout total instead of one per tenant.
         failed_spokes: set = set()
+        # Identical requests across tenants share one in-flight call.
+        shared_calls: dict = {}
 
         async def _one(tid):
             cfg = tenants.get(tid) or {}
@@ -415,7 +476,8 @@ def register(app, hub, ctx):
                 # Hard per-tenant ceiling so nothing can hang the endpoint even if
                 # a spoke call ignores its own timeout — degrades to the zeros row.
                 counts = await _asyncio.wait_for(
-                    _compute_tenant_counts(hub, scoping, failed_spokes), timeout=12)
+                    _compute_tenant_counts(hub, scoping, failed_spokes, shared_calls),
+                    timeout=12)
             return {
                 "id":          tid,
                 "name":        cfg.get("name") or tid,
