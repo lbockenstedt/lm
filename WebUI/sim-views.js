@@ -5141,7 +5141,16 @@ function csCellAuth(c) {
     return String((c && c.ssid) || '').trim().toUpperCase() === '1X' ? '1x' : 'psk';
 }
 
-// Switching auth swaps the 4th column (password ↔ 1X auto-gen) — re-render.
+// 1X cell "Account location": where the cs engine JIT-provisions each client's
+// 802.1X account via the hub broker (lm core dot1x_jit.py). '' = manual.
+const CS_DOT1X_ACCOUNT_LOCATIONS = [
+    ['', 'Manual (Simulation config)'],
+    ['entra', 'Entra ID (Cloud NAC)'],
+    ['ldap', 'LDAP (tenant OU)'],
+    ['clearpass', 'ClearPass (local user)'],
+];
+
+// Switching auth swaps the 4th column (password ↔ 1X account location) — re-render.
 window.csPoolCellAuthChange = function () {
     csSimQuotaSyncFromDom(); csPoolSyncFromDom();
     csRenderSimQuotaEditor();
@@ -5161,16 +5170,14 @@ function csPoolConfigCardHtml() {
     const simChecks = flags.map(f =>
         `<label class="flex items-center gap-1 text-xs"><input type="checkbox" data-cs-rand="${esc(f)}" ${rsims.indexOf(f) >= 0 ? 'checked' : ''}> ${esc(f)}</label>`).join('');
     // SSID matrix = cell DEFINITIONS only: Site, SSID, Auth, then Password
-    // (PSK/MPSK) or the 1X account auto-generate toggle.
+    // (PSK/MPSK) or the 1X account location (JIT 802.1X).
     const matrixRows = matrix.map((c, i) => {
         const auth = csCellAuth(c);
         const authOpts = CS_SSID_AUTH_TYPES.map(([v, lbl]) =>
             `<option value="${v}" ${auth === v ? 'selected' : ''}>${esc(lbl)}</option>`).join('');
         const fourth = auth === '1x'
-            ? `<label class="text-xs text-slate-500 flex items-center gap-2 pb-2" title="Auto-generating 1X accounts is not implemented yet — the setting is saved for later.">
-                 <input data-cs-cell-k="dot1x_autogen" type="checkbox" ${c.dot1x_autogen ? 'checked' : ''}>
-                 Auto-generate account <span class="text-slate-400">(coming soon)</span>
-               </label>`
+            ? `<label class="text-xs text-slate-500" title="Where the engine just-in-time creates each client's 802.1X account (username = client username, random password kept in the vault, rotated every 30 days). Manual = use dot1x_password from the Simulation config.">Account location<select data-cs-cell-k="dot1x_account" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${CS_DOT1X_ACCOUNT_LOCATIONS.map(([v, lbl]) =>
+                 `<option value="${v}" ${(c.dot1x_account || '') === v ? 'selected' : ''}>${esc(lbl)}</option>`).join('')}</select></label>`
             : `<label class="text-xs text-slate-500">${auth === 'mpsk' ? 'MPSK password' : 'PSK password'}<input data-cs-cell-k="ssidpw" value="${esc(c.ssidpw)}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>`;
         return `<div class="grid grid-cols-2 sm:grid-cols-5 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-cell="${i}">
           <label class="text-xs text-slate-500">Site<select data-cs-cell-k="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${csLinkSiteOptions(c.site, '— site —')}</select></label>
@@ -5203,7 +5210,7 @@ function csPoolConfigCardHtml() {
             <button onclick="csSavePoolConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Pool</button>
           </div>
         </div>
-        <p class="text-xs text-slate-500 mb-2"><code>1X</code> auth uses <code>dot1x_eap</code> and <code>dot1x_password</code> from the Simulation config; PEAP falls back to the SSID Ssidpw when the Dot1x Password is empty.</p>
+        <p class="text-xs text-slate-500 mb-2"><code>1X</code> auth uses <code>dot1x_eap</code> and <code>dot1x_password</code> from the Simulation config; PEAP falls back to the SSID Ssidpw when the Dot1x Password is empty. Set a 1X cell's <span class="font-semibold">Account location</span> to have the engine create each assigned client's account in Entra ID, the tenant LDAP OU or ClearPass with a random vaulted password (see NAC → My Users).</p>
         <p class="text-xs text-slate-500 mb-3">The SSID matrix just <span class="font-semibold">defines</span> your SSIDs (site, SSID, auth, password). <span class="font-semibold">Sim Quotas</span> attach an exact (accounted) count of clients to a cell for an alert. The <span class="font-semibold">weighted rules</span> below spread the rest of the pool (random, unaccounted) across a site's SSIDs by weight. Whether a PXMX server is site-bound (RF chamber) or assignable is set in <span class="font-semibold">Config → Sites</span>.</p>
         <div class="mb-3">
           <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Randomizable (ambient) sims</div>
@@ -5241,10 +5248,10 @@ function csPoolSyncFromDom() {
         if (!site && !ssid) return;
         const auth = get('auth') || csCellAuth(prev);
         // The hidden column keeps its last value so flipping auth back and
-        // forth doesn't lose the PSK password or the 1X auto-gen choice.
+        // forth doesn't lose the PSK password or the 1X account location.
         const ssidpw = q('ssidpw') ? get('ssidpw') : (prev.ssidpw || '');
-        const autogen = q('dot1x_autogen') ? !!q('dot1x_autogen').checked : !!prev.dot1x_autogen;
-        matrix.push({ name: `${site}-${ssid}`, site, ssid, auth, ssidpw, dot1x_autogen: autogen, enabled: true });
+        const dot1xAccount = q('dot1x_account') ? get('dot1x_account') : (prev.dot1x_account || '');
+        matrix.push({ name: `${site}-${ssid}`, site, ssid, auth, ssidpw, dot1x_account: dot1xAccount, enabled: true });
     });
     pc.ssid_matrix = matrix;
     // Weighted random rules → {site, ssid(cell), weight, all}. The cell name
@@ -5329,7 +5336,7 @@ window.csPoolWeightDel = function (i) {
 window.csPoolCellAdd = function () {
     csSimQuotaSyncFromDom(); csPoolSyncFromDom();
     (window._csPoolCfg.ssid_matrix = window._csPoolCfg.ssid_matrix || [])
-        .push({ name: '', site: '', ssid: '', auth: 'psk', ssidpw: '', dot1x_autogen: false, weight: 1, enabled: true });
+        .push({ name: '', site: '', ssid: '', auth: 'psk', ssidpw: '', dot1x_account: '', weight: 1, enabled: true });
     csRenderSimQuotaEditor();
 };
 window.csPoolCellDel = function (i) {
