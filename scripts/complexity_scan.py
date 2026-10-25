@@ -4,7 +4,7 @@ Usage: python3 scripts/complexity_scan.py [ROOT] [--json OUT]
 Reports per function: cyclomatic complexity (McCabe), length, max nesting depth,
 and parameter count; prints the worst offenders and per-repo totals.
 """
-import ast, json, os, sys, collections
+import argparse, ast, json, os, collections
 
 SKIP = {"venv", ".venv", "node_modules", "__pycache__", ".git", "build", "dist"}
 BRANCHES = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.ExceptHandler, ast.With,
@@ -76,17 +76,14 @@ def scan(root):
 
 
 def main():
-    argv = sys.argv[1:]
-    out = None
-    if "--json" in argv:
-        i = argv.index("--json")
-        out = argv[i + 1]
-        del argv[i:i + 2]
-    args = argv
-    root = args[0] if args else os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    rows = scan(root)
-    if out:
-        json.dump(rows, open(out, "w"))
+    default_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("root", nargs="?", default=default_root, help="directory holding the sibling repos")
+    ap.add_argument("--json", metavar="OUT", help="also write every function's metrics to OUT")
+    args = ap.parse_args()
+    rows = scan(args.root)
+    if args.json:
+        json.dump(rows, open(args.json, "w"))
     per = collections.defaultdict(lambda: collections.Counter())
     for r in rows:
         c = per[r["repo"]]
