@@ -366,7 +366,7 @@ listed above are not repeated. Effort: S = small, M = half-day, L = multi-day.
 
 | # | file:line | issue | fix | effort |
 |---|---|---|---|---|
-| R1 | `core/src/main.py:1716-1736` `request_response` | Polls `response_cache` every 100 ms for every in-flight request. | Resolve an `asyncio.Future` per `request_id` when the response arrives. | M |
+| R1 | `core/src/main.py:1716-1736` `request_response` | Polls `response_cache` every 100 ms for every in-flight request. | Resolve an `asyncio.Future` per `request_id` when the response arrives. | M — ✅ done: `_route_spoke_reply` sets a per-request `asyncio.Event` after storing the reply. `response_cache` stays the source of truth, with a 1 s fallback poll and a cache check before every deadline check. Also fixes a race: the request is now registered BEFORE `send_to_spoke`, so a reply processed during the send is no longer dropped as an unknown ack. Live (LM-HUB, 2026-10-25): about 200 timeouts and 3–4.5k unknown acks a day. The unknown acks are mostly replies to a previous hub process after restarts, which this cannot fix. The win is latency (about 50 ms per call), not load. Tests: `core/tests/test_request_response_event_wake.py` |
 | R2 | `core/src/main.py:1703,1736` | The debug f-string with `_redact(...)` is built even when debug logging is off. | Guard it with `if logger.isEnabledFor(logging.DEBUG)`, or use lazy `%s` arguments. | S |
 | R3 | `core/src/state/manager.py:633` | Every heartbeat's `last_seen` marks state dirty, so `system.json` and `tenants.json` are re-encrypted and rewritten every 60 s. | Keep `last_seen` in memory only, or flush it on a slow timer. | M |
 | R4 | `core/src/api.py:1374` | GZip `compresslevel=9` on every response, including the 2.4 MB `main.js`. | Use level 5–6, or serve precompressed `.gz` static files. | S |
@@ -384,6 +384,32 @@ listed above are not repeated. Effort: S = small, M = half-day, L = multi-day.
 | R16 | `core/src/security/encryption.py:70` | Legacy PBKDF2 key is derived at import. | Derive it lazily, only when a legacy token is seen. | S |
 
 **Order:** R1, R2, R3, R4, R5, R6, R7, R8, R12.
+
+**Found while sizing R1 — the Overview `PXMX_LIST_VMS` timeouts (✅ fixed).**
+These were the largest source of hub timeouts on LM-HUB (204 of 264 on
+2026-10-25), all 5.0 s and all from the admin all-tenants Overview
+(`routes/dashboard.py` `_compute_tenant_counts`). There were three causes:
+
+1. The wedged-spoke skip (0e83c65b) only fired on an exception, but
+   `request_response` *returns* the timeout dict. So every tenant re-asked
+   the same slow spoke. A timeout now marks the spoke failed, except for an
+   agent-scoped call, whose slowness is one host and not the spoke.
+2. Every tenant sent its own identical request. Requests are now
+   single-flighted within one fan-out, keyed on (spoke, command, payload).
+3. Pinned-agent counts ran a 10–15 s live PVE query against a 5 s budget.
+   The spoke log showed the reply landing about 10 s after the hub gave up.
+   These calls now send `prefer_cache`, and the spoke answers from that
+   agent's telemetry when it is under 300 s old
+   (`pxmx_node_vm_aggregation._cached_agent_vms`), falling back to live.
+   Callers that need live truth (delete verification, VM sync, VMID
+   allocation) do not send it. The lm agent's hosted proxmox role
+   (`agent/src/control_plane.py` `_on_agent_telemetry`) never stamped
+   `telemetry_ts`, unlike pxmx and cs. It does now, so hosts on
+   LM-AGENT-PROXMOX-style spokes (96 of the 204 timeouts) can use the cache
+   and also rank correctly in the freshest-report dedupe.
+
+Tests: `core/tests/test_dashboard_overview_fanout.py`,
+`core/tests/test_pxmx_list_vms_prefer_cache.py`.
 
 ## Spokes, agents and simulation clients
 
