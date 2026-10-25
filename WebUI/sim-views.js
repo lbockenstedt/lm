@@ -5131,6 +5131,22 @@ window.csAmbientControlToggle = function () {
     csRenderSimQuotaEditor();
 };
 
+const CS_SSID_AUTH_TYPES = [['1x', '1X'], ['psk', 'PSK'], ['mpsk', 'MPSK']];
+
+// A cell's auth type. Cells saved before `auth` existed encoded it in the SSID
+// itself (ssid "1X" = 802.1X, anything else PSK).
+function csCellAuth(c) {
+    const a = String((c && c.auth) || '').toLowerCase();
+    if (CS_SSID_AUTH_TYPES.some(([v]) => v === a)) return a;
+    return String((c && c.ssid) || '').trim().toUpperCase() === '1X' ? '1x' : 'psk';
+}
+
+// Switching auth swaps the 4th column (password ↔ 1X auto-gen) — re-render.
+window.csPoolCellAuthChange = function () {
+    csSimQuotaSyncFromDom(); csPoolSyncFromDom();
+    csRenderSimQuotaEditor();
+};
+
 function csPoolConfigCardHtml() {
     const pc = window._csPoolCfg || {};
     const src = pc.site_source || 'pxmx';
@@ -5144,12 +5160,23 @@ function csPoolConfigCardHtml() {
     const esc = csEscape;  // shared escaper (escapes &<>"')
     const simChecks = flags.map(f =>
         `<label class="flex items-center gap-1 text-xs"><input type="checkbox" data-cs-rand="${esc(f)}" ${rsims.indexOf(f) >= 0 ? 'checked' : ''}> ${esc(f)}</label>`).join('');
-    // SSID matrix = cell DEFINITIONS only: Site, SSID/Auth, Password.
+    // SSID matrix = cell DEFINITIONS only: Site, SSID, Auth, then Password
+    // (PSK/MPSK) or the 1X account auto-generate toggle.
     const matrixRows = matrix.map((c, i) => {
-        return `<div class="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-cell="${i}">
+        const auth = csCellAuth(c);
+        const authOpts = CS_SSID_AUTH_TYPES.map(([v, lbl]) =>
+            `<option value="${v}" ${auth === v ? 'selected' : ''}>${esc(lbl)}</option>`).join('');
+        const fourth = auth === '1x'
+            ? `<label class="text-xs text-slate-500 flex items-center gap-2 pb-2" title="Auto-generating 1X accounts is not implemented yet — the setting is saved for later.">
+                 <input data-cs-cell-k="dot1x_autogen" type="checkbox" ${c.dot1x_autogen ? 'checked' : ''}>
+                 Auto-generate account <span class="text-slate-400">(coming soon)</span>
+               </label>`
+            : `<label class="text-xs text-slate-500">${auth === 'mpsk' ? 'MPSK password' : 'PSK password'}<input data-cs-cell-k="ssidpw" value="${esc(c.ssidpw)}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>`;
+        return `<div class="grid grid-cols-2 sm:grid-cols-5 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-cell="${i}">
           <label class="text-xs text-slate-500">Site<select data-cs-cell-k="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${csLinkSiteOptions(c.site, '— site —')}</select></label>
-          <label class="text-xs text-slate-500">SSID / Auth<select data-cs-cell-k="ssid" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${csSimSelectOptions('ssid', c.ssid)}</select></label>
-          <label class="text-xs text-slate-500">Password<input data-cs-cell-k="ssidpw" value="${esc(c.ssidpw)}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
+          <label class="text-xs text-slate-500">SSID<input data-cs-cell-k="ssid" value="${esc(c.ssid)}" placeholder="e.g. PSK" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
+          <label class="text-xs text-slate-500">Auth<select data-cs-cell-k="auth" onchange="csPoolCellAuthChange()" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${authOpts}</select></label>
+          ${fourth}
           <button onclick="csPoolCellDel(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Remove</button>
         </div>`;
     }).join('');
@@ -5176,8 +5203,8 @@ function csPoolConfigCardHtml() {
             <button onclick="csSavePoolConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Pool</button>
           </div>
         </div>
-        <p class="text-xs text-slate-500 mb-2"><code>1X</code> uses <code>dot1x_eap</code> and <code>dot1x_password</code> from the Simulation config; PEAP falls back to the SSID Ssidpw when the Dot1x Password is empty.</p>
-        <p class="text-xs text-slate-500 mb-3">The SSID matrix just <span class="font-semibold">defines</span> your SSIDs (site, auth, password). <span class="font-semibold">Sim Quotas</span> attach an exact (accounted) count of clients to a cell for an alert. The <span class="font-semibold">weighted rules</span> below spread the rest of the pool (random, unaccounted) across a site's SSIDs by weight. Whether a PXMX server is site-bound (RF chamber) or assignable is set in <span class="font-semibold">Config → Sites</span>.</p>
+        <p class="text-xs text-slate-500 mb-2"><code>1X</code> auth uses <code>dot1x_eap</code> and <code>dot1x_password</code> from the Simulation config; PEAP falls back to the SSID Ssidpw when the Dot1x Password is empty.</p>
+        <p class="text-xs text-slate-500 mb-3">The SSID matrix just <span class="font-semibold">defines</span> your SSIDs (site, SSID, auth, password). <span class="font-semibold">Sim Quotas</span> attach an exact (accounted) count of clients to a cell for an alert. The <span class="font-semibold">weighted rules</span> below spread the rest of the pool (random, unaccounted) across a site's SSIDs by weight. Whether a PXMX server is site-bound (RF chamber) or assignable is set in <span class="font-semibold">Config → Sites</span>.</p>
         <div class="mb-3">
           <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Randomizable (ambient) sims</div>
           <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-x-4 gap-y-1">${simChecks}</div>
@@ -5204,12 +5231,20 @@ function csPoolSyncFromDom() {
     if (src) pc.site_source = src.value;
     pc.randomizable_sims = Array.from(document.querySelectorAll('[data-cs-rand]'))
         .filter(el => el.checked).map(el => el.getAttribute('data-cs-rand'));
+    const prevCells = pc.ssid_matrix || [];
     const matrix = [];
     document.querySelectorAll('[data-cs-cell]').forEach(el => {
-        const get = k => { const i = el.querySelector(`[data-cs-cell-k="${k}"]`); return i ? String(i.value).trim() : ''; };
+        const q = k => el.querySelector(`[data-cs-cell-k="${k}"]`);
+        const get = k => { const i = q(k); return i ? String(i.value).trim() : ''; };
+        const prev = prevCells[parseInt(el.getAttribute('data-cs-cell'), 10)] || {};
         const site = get('site'), ssid = get('ssid');
         if (!site && !ssid) return;
-        matrix.push({ name: `${site}-${ssid}`, site, ssid, ssidpw: get('ssidpw'), enabled: true });
+        const auth = get('auth') || csCellAuth(prev);
+        // The hidden column keeps its last value so flipping auth back and
+        // forth doesn't lose the PSK password or the 1X auto-gen choice.
+        const ssidpw = q('ssidpw') ? get('ssidpw') : (prev.ssidpw || '');
+        const autogen = q('dot1x_autogen') ? !!q('dot1x_autogen').checked : !!prev.dot1x_autogen;
+        matrix.push({ name: `${site}-${ssid}`, site, ssid, auth, ssidpw, dot1x_autogen: autogen, enabled: true });
     });
     pc.ssid_matrix = matrix;
     // Weighted random rules → {site, ssid(cell), weight, all}. The cell name
@@ -5294,7 +5329,7 @@ window.csPoolWeightDel = function (i) {
 window.csPoolCellAdd = function () {
     csSimQuotaSyncFromDom(); csPoolSyncFromDom();
     (window._csPoolCfg.ssid_matrix = window._csPoolCfg.ssid_matrix || [])
-        .push({ name: '', site: '', ssid: '', ssidpw: '', weight: 1, enabled: true });
+        .push({ name: '', site: '', ssid: '', auth: 'psk', ssidpw: '', dot1x_autogen: false, weight: 1, enabled: true });
     csRenderSimQuotaEditor();
 };
 window.csPoolCellDel = function (i) {
