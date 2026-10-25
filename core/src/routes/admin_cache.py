@@ -1,9 +1,40 @@
-"""Auth/admin cache-status + session admin + cache config routes."""
+"""Hub data cache status/refresh/purge routes + session admin routes.
+
+Every module page is served from ONE hub data cache (``warm_cache.py``). These
+routes only LOOK at it or nudge it — there is nothing to configure:
+
+* ``GET  /admin/cache/status``   — admin: every cached namespace/entry, its age,
+  error, whether it is kept warm (feed) and on the fast (active) cycle.
+* ``POST /admin/cache/refresh``  — admin: refresh one namespace (or all) now.
+* ``POST /admin/cache/purge``    — admin: drop cached data (all, or one
+  tenant's) and refetch it.
+* ``GET  /auth/cache-status``    — any user: footer "Caching: …" indicator.
+* ``POST /auth/cache/refresh``   — any user: refresh one module for the
+  caller's own tenants (the per-page refresh buttons).
+"""
 from api import (
-    HTTPException, Request, _DEFAULT_CACHE_CONFIG, _FW_MODULES, _cache_status, _cache_tasks,
-    _fetch_module, _get_cache_config, _get_max_concurrent, _preload_all_parallel,
-    _save_sessions, _sessions, _start_cache_for_tenant, _tenant_cache, asyncio, time,
+    HTTPException, Request, _legacy_cache_namespaces, _save_sessions,
+    _session_cache_scopes, _sessions, time,
 )
+
+# Friendly names for the footer indicator.
+_NS_LABELS = {
+    "nb_racks": "Racks", "nb_devices": "Devices", "nb_ips": "IP Addresses",
+    "nb_prefixes": "Prefixes",
+    "list_endpoints": "Device Database", "cppm_get_access_tracker": "Access Tracker",
+    "pxmx_vms": "Virtual Machines", "pxmx_nodes": "Hypervisor Nodes",
+    "fw_rules": "Firewall Rules", "fw_nat": "NAT Policies", "fw_dhcp": "DHCP Leases",
+    "fw_dns": "DNS Records", "fw_interfaces": "Interfaces",
+    "ldap_list_users": "Directory Users", "ldap_list_groups": "Directory Groups",
+}
+
+
+def _visible(entry_tenants, scopes: set) -> bool:
+    """Can a session with ``scopes`` see a cache entry owned by
+    ``entry_tenants``? None = shared data (anyone)."""
+    if not entry_tenants:
+        return True
+    return bool(set(entry_tenants) & scopes)
 
 
 def register(app, hub, ctx):
@@ -11,28 +42,74 @@ def register(app, hub, ctx):
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
 
+    def _require_admin(request):
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Admin only")
+        return sess
+
     @app.get("/auth/cache-status")
     async def get_my_cache_status(request: Request):
-        """Returns cache loading status for the current session's tenant (used by footer indicator)."""
+        """Footer indicator: which of the caller's modules are being fetched
+        for the FIRST time (no cached data yet). Everything else is served
+        from cache instantly, so ``loading`` is normally empty."""
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Not authenticated")
-        tenant_id = sess.get("user", {}).get("tenant_id")
-        if not tenant_id:
-            return {"status": {}, "all_ready": True, "tenant_id": None}
-        config = _get_cache_config(hub)
-        status = _cache_status.get(tenant_id, {})
-        enabled_modules = {k for k, v in config.items() if v.get("enabled", True)}
-        loading = [k for k, v in status.items() if v == "loading"]
-        all_ready = not loading and bool(status)
+        scopes = _session_cache_scopes(sess)
+        loading = set()
+        for (ns, key), task in list(getattr(hub, "_cache_inflight", {}).items()):
+            if task.done() or key in hub.warm_cache.get(ns, {}):
+                continue
+            job = hub._cache_read_jobs.get((ns, key))
+            if job is None or _visible(job.tenants, scopes):
+                loading.add(_NS_LABELS.get(ns, ns))
         return {
-            "status": status,
-            "loading": loading,
-            "all_ready": all_ready,
-            "tenant_id": tenant_id,
-            "labels": {k: _DEFAULT_CACHE_CONFIG[k.split(":")[0]]["label"]
-                       for k in status if k.split(":")[0] in _DEFAULT_CACHE_CONFIG},
+            "loading": sorted(loading),
+            "all_ready": not loading,
+            "tenant_id": (sess.get("user", {}) or {}).get("tenant_id"),
         }
+
+    @app.post("/auth/cache/refresh")
+    async def refresh_my_cache(request: Request, module: str = None):
+        """Refresh one module (legacy key, e.g. ``cppm_devices``) — only the
+        entries the caller can see — and wait briefly so the page reload
+        right after shows the new data."""
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        if not module:
+            return {"status": "ok", "refreshed": 0}
+        scopes = _session_cache_scopes(sess)
+        n = 0
+        for ns in _legacy_cache_namespaces(module):
+            keys = tuple(k for k, e in (hub.warm_cache.get(ns) or {}).items()
+                         if isinstance(e, dict) and _visible(e.get("tenants"), scopes))
+            if keys:
+                n += hub.cache_refresh(ns, keys, exact=True)
+        await hub.cache_wait_idle(timeout=15.0)
+        return {"status": "ok", "refreshed": n}
+
+    @app.get("/admin/cache/status")
+    async def admin_cache_status(request: Request):
+        _require_admin(request)
+        return hub.cache_status()
+
+    @app.post("/admin/cache/refresh")
+    async def admin_cache_refresh(request: Request, namespace: str = None):
+        """Refresh one namespace (or every namespace) now."""
+        _require_admin(request)
+        namespaces = [namespace] if namespace else list(hub.warm_cache)
+        n = sum(hub.cache_refresh(ns) for ns in namespaces)
+        return {"status": "ok", "refreshed": n}
+
+    @app.post("/admin/cache/purge")
+    async def admin_purge_cache(request: Request, tenant: str = None):
+        """Drop cached data (all, or what one tenant can see) and refetch it.
+        Pages keep working: the next read fetches live."""
+        _require_admin(request)
+        n = hub.cache_purge(tenant or None)
+        return {"status": "ok", "tenant": tenant or "all", "dropped": n}
 
     @app.get("/admin/sessions")
     async def admin_get_sessions(request: Request):
@@ -80,55 +157,6 @@ def register(app, hub, ctx):
                 return {"status": "ok", "message": "Session revoked"}
         raise HTTPException(status_code=404, detail="Session not found")
 
-    @app.get("/admin/cache/config")
-    async def admin_get_cache_config(request: Request):
-        sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="Admin only")
-        cfg = _get_cache_config(hub)
-        return {
-            "config": cfg,
-            "max_concurrent_tenants": _get_max_concurrent(hub),
-            "labels": {k: v["label"] for k, v in _DEFAULT_CACHE_CONFIG.items()},
-        }
-
-    @app.put("/admin/cache/config")
-    async def admin_update_cache_config(request: Request):
-        sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="Admin only")
-        data = await request.json()
-        stored = hub.state.system_state.get("cache_config", {})
-        for key, vals in data.get("config", {}).items():
-            stored.setdefault(key, {}).update({k: v for k, v in vals.items() if k in ("enabled", "interval")})
-        if "max_concurrent_tenants" in data:
-            stored["max_concurrent_tenants"] = int(data["max_concurrent_tenants"])
-        hub.state.system_state["cache_config"] = stored
-        hub.state._mark_dirty()
-        return {"status": "ok"}
-
-    @app.post("/admin/cache/purge")
-    async def admin_purge_cache(request: Request, tenant: str = None):
-        sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="Admin only")
-        if tenant:
-            _tenant_cache.pop(tenant, None)
-            _cache_status.pop(tenant, None)
-            task = _cache_tasks.pop(tenant, None)
-            if task: task.cancel()
-            _start_cache_for_tenant(hub, tenant)
-        else:
-            tenants_to_rewarm = list(_tenant_cache.keys())
-            _tenant_cache.clear()
-            _cache_status.clear()
-            for tid, task in list(_cache_tasks.items()):
-                task.cancel()
-            _cache_tasks.clear()
-            for tid in tenants_to_rewarm:
-                _start_cache_for_tenant(hub, tid)
-        return {"status": "ok", "tenant": tenant or "all"}
-
     @app.post("/admin/state/reset")
     async def admin_reset_derived_state(request: Request, tenant: str = None):
         """Corruption recovery: wipe DERIVED/cache/history JSON (sharded files +
@@ -136,9 +164,7 @@ def register(app, hub, ctx):
         config/identity (tenant registration, spoke PSKs, users, sessions) — a
         reset never orphans a spoke or logs anyone out; the derived data
         regenerates from the next poll/telemetry. Global-Admin only + audited."""
-        sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="Admin only")
+        sess = _require_admin(request)
         who = (sess.get("user", {}) or {}).get("user_id") or sess.get("user_id") or "?"
         try:
             result = hub.reset_derived_cache(tenant or None)
@@ -153,39 +179,3 @@ def register(app, hub, ctx):
         except Exception:  # noqa: BLE001 — audit is best-effort
             pass
         return result
-
-    @app.get("/admin/cache/status")
-    async def admin_cache_status(request: Request):
-        sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="Admin only")
-        summary = {}
-        for tid, modules in _cache_status.items():
-            summary[tid] = {
-                "modules": modules,
-                "fetched_at": {k: _tenant_cache.get(tid, {}).get(k, {}).get("fetched_at")
-                               for k in modules},
-                "task_alive": tid in _cache_tasks and not _cache_tasks[tid].done(),
-            }
-        return {"tenants": summary, "max_concurrent": _get_max_concurrent(hub)}
-
-    @app.post("/auth/cache/refresh")
-    async def refresh_my_cache(request: Request, module: str = None):
-        """Any authenticated user can trigger a refresh of their tenant's cache modules."""
-        sess = _session_user(request)
-        if not sess:
-            raise HTTPException(status_code=401, detail="Not authenticated")
-        tenant_id = sess.get("user", {}).get("tenant_id")
-        if not tenant_id:
-            return {"status": "ok", "message": "No tenant assigned"}
-        firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
-        if module:
-            base = module.split(":")[0]
-            if base in _FW_MODULES:
-                tasks = [_fetch_module(hub, tenant_id, base, fw_id=fw["id"]) for fw in firewalls]
-            else:
-                tasks = [_fetch_module(hub, tenant_id, base)]
-            await asyncio.gather(*tasks, return_exceptions=True)
-        else:
-            await _preload_all_parallel(hub, tenant_id)
-        return {"status": "ok", "tenant_id": tenant_id}

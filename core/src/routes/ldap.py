@@ -6,7 +6,8 @@ tenant's users + groups; a **Global Admin** may pick any tenant. Every relayed
 ``LDAP_*`` command carries a ``tenant_slug`` that is derived SERVER-SIDE from the
 session (:func:`access.resolve_directory_tenant`) — a tenant-admin can NEVER pass
 another tenant's slug (the cross-tenant guard, enforced here and matched
-case-insensitively so case can't bypass it). Reads are warm-cached per tenant.
+case-insensitively so case can't bypass it). User/group LISTS are served from
+the hub data cache per tenant OU (warm_cache.cache_read; writes refresh them).
 
 The middleware (api.py) already gates ``/api/ldap/*``: GET requires the ``ldap``
 right (or admin); writes require the tenant-admin tier (``_can_edit_shared``).
@@ -16,6 +17,10 @@ from api import (
     HTTPException, Request, _invalidate_user_sessions, access,
     logger,
 )
+from access import all_tenant_ids
+from warm_cache import CacheJob
+
+LDAP_LIST_CMDS = ("LDAP_LIST_USERS", "LDAP_LIST_GROUPS")
 
 _DEFAULT_LDAP_SERVER_URL = "ldap://localhost:389"
 
@@ -184,6 +189,16 @@ def register(app, hub, ctx):
         if isinstance(result, dict) and str(result.get("status", "")).upper() == "ERROR":
             raise HTTPException(status_code=502,
                                 detail=result.get("message") or f"{cmd} failed on the LDAP server")
+        # Every _relay command is a write: refresh this OU's cached lists now
+        # so the page shows the change (readers briefly wait for it).
+        slug = (payload or {}).get("tenant_slug")
+        if slug and hasattr(hub, "cache_refresh"):
+            for list_cmd in LDAP_LIST_CMDS:
+                ns = list_cmd.lower()
+                keys = tuple(k for k in (hub.warm_cache.get(ns) or {})
+                             if k.endswith(f"|{slug}"))
+                if keys:
+                    hub.cache_refresh(ns, keys, exact=True)
         return _ldap_unwrap(result)
 
     def _ldap_unwrap(result):
@@ -198,34 +213,48 @@ def register(app, hub, ctx):
             return data if data is not None else result
         return result
 
-    async def _relay_list(cmd: str, slug: str, spoke_id: str):
-        """Warm-cached LIST read (per tenant slug): serve last-known (stale) on
-        spoke-down / error so the Directory page renders instead of 503-ing.
-        ``spoke_id`` is resolved tenant-aware by the caller."""
-        key = cmd.lower()
-        if not spoke_id:
-            cached = hub.warm_get(key, slug)
-            if cached is not None:
-                return cached
-            raise HTTPException(status_code=503, detail="No spoke connected")
-        try:
+    def ldap_cache_job(cmd: str, tid: str, slug: str) -> CacheJob:
+        """Hub-cache job for a directory LIST (users or groups) of one tenant
+        OU. Namespace ``ldap_list_users`` / ``ldap_list_groups``, key =
+        ``<tenant id>|<OU slug>``. The directory spoke is resolved
+        tenant-aware at FETCH time."""
+        async def fetch():
+            spoke_id = hub.get_directory_spoke_for_tenant(tid)
+            if not spoke_id:
+                raise HTTPException(status_code=503, detail="No spoke connected")
             result = await hub.request_response(spoke_id, cmd, {"tenant_slug": slug},
                                                 timeout=20.0)
-            # Don't cache/return an ERROR envelope as if it were data (a
-            # SERVER_DOWN would otherwise poison the warm cache with junk and
-            # hide the outage) — fall through to stale cache / raise.
+            # Never cache an ERROR envelope as data (a SERVER_DOWN would hide
+            # the outage behind junk) — raise so last-known data is kept.
             if isinstance(result, dict) and str(result.get("status", "")).upper() == "ERROR":
-                raise RuntimeError(result.get("message") or f"{cmd} failed on the LDAP server")
-            data = _ldap_unwrap(result)
-            await hub.warm_set(key, slug, data)
-            return data
-        except HTTPException:
-            raise
-        except Exception:  # noqa: BLE001
-            cached = hub.warm_get(key, slug)
-            if cached is not None:
-                return cached
-            raise
+                raise HTTPException(status_code=502,
+                                    detail=result.get("message") or f"{cmd} failed on the LDAP server")
+            return _ldap_unwrap(result)
+        # Key = "<tenant id>|<OU slug>": the fetch goes to THIS tenant's
+        # directory spoke, so two tenants that happen to map to the same OU
+        # slug must never share an entry.
+        return CacheJob(cmd.lower(), f"{tid or ''}|{slug}", fetch,
+                        (tid,) if tid else None, lane="ldap")
+
+    def ldap_cache_feed(_hub):
+        """Feed: users + groups for every tenant that has a directory spoke."""
+        for tid in all_tenant_ids(hub):
+            if hub.get_directory_spoke_for_tenant(tid):
+                slug = access.ldap_tenant_slug(hub, tid)
+                if slug:
+                    for cmd in LDAP_LIST_CMDS:
+                        yield ldap_cache_job(cmd, tid, slug)
+
+    if hasattr(hub, "cache_register_feed"):
+        hub.cache_register_feed("ldap", ldap_cache_feed)
+
+    async def _relay_list(cmd: str, tid: str, slug: str):
+        """Directory LIST served from the hub data cache (last-known data on
+        spoke-down / error, so the Directory page renders instead of 503-ing)."""
+        job = ldap_cache_job(cmd, tid, slug)
+        data = await hub.cache_read(job.ns, job.key, job.fetch, tenants=job.tenants,
+                                    lane=job.lane)
+        return hub.cache_annotate(data, job.ns, job.key)
 
     def _directory_spoke(tid: str) -> str:
         """Resolve the tenant-aware directory spoke or 503. Mirrors the
@@ -316,7 +345,7 @@ def register(app, hub, ctx):
     async def get_ldap_users(request: Request):
         tid, slug, _ = _directory_resolve(request)
         logger.debug("relay LDAP_LIST_USERS tenant=%s", slug)
-        return await _relay_list("LDAP_LIST_USERS", slug, _directory_spoke(tid))
+        return await _relay_list("LDAP_LIST_USERS", tid, slug)
 
     @app.post("/api/ldap/users")
     async def create_ldap_user(request: Request):
@@ -411,7 +440,7 @@ def register(app, hub, ctx):
     async def get_ldap_groups(request: Request):
         tid, slug, _ = _directory_resolve(request)
         logger.debug("relay LDAP_LIST_GROUPS tenant=%s", slug)
-        return await _relay_list("LDAP_LIST_GROUPS", slug, _directory_spoke(tid))
+        return await _relay_list("LDAP_LIST_GROUPS", tid, slug)
 
     @app.post("/api/ldap/groups")
     async def create_ldap_group(request: Request):

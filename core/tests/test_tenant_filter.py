@@ -103,13 +103,15 @@ def test_own_source_marker_bypasses_single_record_gate():
     assert filter_record_by_prefixes({"ip": "8.8.8.8"}, TENANT_PREFIXES, ["ip"]) is None
 
 
-def test_envelope_dict_filtered_in_place():
-    """A spoke envelope {data: [...]} is filtered in place (the list is mutated)."""
+def test_envelope_dict_filtered_into_a_copy():
+    """A spoke envelope {data: [...]} is filtered into a COPY; the input (often
+    the hub data cache's stored object) is never modified."""
     env = {"data": [{"ip": "10.20.0.1"}, {"ip": "8.8.8.8"}], "other": "keep"}
     out = filter_items_by_prefixes(env, TENANT_PREFIXES, ["ip"])
-    assert out is env
-    assert [r["ip"] for r in env["data"]] == ["10.20.0.1"]
-    assert env["other"] == "keep"  # non-list fields untouched
+    assert out is not env
+    assert [r["ip"] for r in out["data"]] == ["10.20.0.1"]
+    assert out["other"] == "keep"  # non-list fields carried over
+    assert [r["ip"] for r in env["data"]] == ["10.20.0.1", "8.8.8.8"]
 
 
 # ── alias resolution ────────────────────────────────────────────────────────

@@ -29,20 +29,14 @@ These lock in:
   an agent id.
 """
 
+import tempfile
 from types import SimpleNamespace
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routes import pxmx
-
-
-@pytest.fixture(autouse=True)
-def _reset_vms_ttl_cache():
-    pxmx._VMS_CACHE.clear()
-    yield
-    pxmx._VMS_CACHE.clear()
+from warm_cache import WarmCacheMixin
 
 
 class _State:
@@ -55,7 +49,7 @@ class _Store:
         return set()
 
 
-class _Hub:
+class _Hub(WarmCacheMixin):
     """Two spokes: one bound to tenant 'lrb', one bound to tenant 'ra'.
     Records which spokes were actually queried."""
 
@@ -81,14 +75,9 @@ class _Hub:
                       [{"name": "ra-vm", "node": ra_spoke, "vmid": 200,
                         "unique_id": f"{ra_spoke}/{ra_spoke}/200"}]}
         self._bindings = {lrb_spoke: lrb_tenant, ra_spoke: ra_tenant}
-        self.warm = {}
         self.queried = []
-
-    def warm_get(self, ns, key):
-        return self.warm.get((ns, key))
-
-    async def warm_set(self, ns, key, data):
-        self.warm[(ns, key)] = data
+        self.cache_dir = tempfile.mkdtemp(prefix="pxmx-iso-")
+        self.warm_cache_init()
 
     def get_hypervisor_spoke(self):
         return self._lrb_spoke  # arbitrary "global" pick, matches nodes' single-fallback shape
@@ -218,3 +207,17 @@ def test_agent_id_for_own_tenants_spoke_still_works():
     assert r.status_code == 200
     assert [v["name"] for v in r.json()["vms"]] == ["lrb-vm"]
     assert hub.queried == ["pxmx-lrb"]
+
+
+def test_cached_list_is_keyed_per_tenant_never_shared():
+    """Hub-cache entries are keyed by tenant id: lrb's cached VM list must
+    never be served to ra (and vice versa), even when both are warm."""
+    hub = _Hub()
+    c_lrb = _build(hub, admin=True, tenant="lrb")
+    assert [v["name"] for v in c_lrb.get("/api/pxmx/vms?tenant=lrb").json()["vms"]] == ["lrb-vm"]
+    assert "lrb|agent=" in hub.warm_cache["pxmx_vms"]
+    c_ra = _build(hub, admin=True, tenant="ra")
+    assert [v["name"] for v in c_ra.get("/api/pxmx/vms?tenant=ra").json()["vms"]] == ["ra-vm"]
+    assert "ra|agent=" in hub.warm_cache["pxmx_vms"]
+    assert hub.warm_cache["pxmx_vms"]["lrb|agent="]["tenants"] == ["lrb"]
+    assert hub.warm_cache["pxmx_vms"]["ra|agent="]["tenants"] == ["ra"]
