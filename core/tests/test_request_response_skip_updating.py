@@ -21,6 +21,15 @@ class _FakeHub:
         self._draining = draining
         self._default_request_timeout = 60.0
         self.sent = []
+        # request_response registers its waiter state BEFORE sending (so a
+        # reply that arrives during the send is not lost), so the fake needs
+        # the same bookkeeping a real hub has.
+        self.response_cache = {}
+        self._outstanding_requests = set()
+        self._progress_deadlines = {}
+        self._response_waiters = {}
+        self._recent_request_timeouts = {}
+        self._request_progress_hard_mult = 6.0
 
     def is_draining(self, spoke_id):
         return self._draining
@@ -66,3 +75,9 @@ def test_signing_secret_bypasses_guard_even_while_draining():
         raise AssertionError("guard should not short-circuit the signed path")
 
     assert len(hub.sent) == 1
+    # The failed send unregistered everything and was not remembered as a
+    # timeout (nothing went out, so no late reply can come back).
+    assert hub._outstanding_requests == set()
+    assert hub._progress_deadlines == {}
+    assert hub._response_waiters == {}
+    assert hub._recent_request_timeouts == {}
