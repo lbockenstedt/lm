@@ -480,7 +480,8 @@ class DNSSpoke(BaseSpoke):
             "recommendations": recommendations,
         }
 
-    async def _cluster_stats(self, search: str = None, source_prefixes: list = None) -> Dict[str, Any]:
+    async def _cluster_stats(self, search: str = None, source_prefixes: list = None,
+                             range_days: int = None) -> Dict[str, Any]:
         """Cluster stats: per-member counters plus the summed headline totals."""
         payload = {}
         if search:
@@ -489,6 +490,8 @@ class DNSSpoke(BaseSpoke):
         # reach each member so it fails CLOSED, not be dropped (= unfiltered).
         if source_prefixes is not None:
             payload["source_prefixes"] = source_prefixes
+        if range_days:
+            payload["range_days"] = range_days
         fan = await self._transport.fanout("DNSW_STATS", payload, timeout=20.0)
         per_member: Dict[str, Any] = {}
         member_errors: Dict[str, str] = {}
@@ -562,12 +565,14 @@ class DNSSpoke(BaseSpoke):
         fan = await self._transport.fanout("DNSW_CLIENT_QUERIES", data, timeout=20.0)
         queries: List[dict] = []
         errors: Dict[str, str] = {}
+        successes = 0
         for member_id, reply in (fan.get("results") or {}).items():
             if not isinstance(reply, dict) or reply.get("status") != "SUCCESS":
                 errors[member_id] = (
                     (reply.get("message") if isinstance(reply, dict) else None)
                     or "no response")
                 continue
+            successes += 1
             for q in reply.get("queries") or []:
                 queries.append({**q, "resolver": member_id})
         queries.sort(key=lambda q: q.get("time", 0), reverse=True)
@@ -582,8 +587,12 @@ class DNSSpoke(BaseSpoke):
         # (e.g. the whole cluster unreachable) -- the headline "0 queries" and
         # a genuine outage were indistinguishable to the caller. Mirrors the
         # PARTIAL convention used elsewhere in this module (status-conflation
-        # is exactly what the skeptical review panel flagged).
-        return {"status": "PARTIAL" if errors else "SUCCESS",
+        # is exactly what the skeptical review panel flagged). Every member
+        # failing is ERROR, not PARTIAL: there is no data at all.
+        status = "SUCCESS"
+        if errors:
+            status = "PARTIAL" if successes else "ERROR"
+        return {"status": status,
                 "client": data.get("client", ""),
                 "minutes": data.get("minutes", 10), "total": len(queries),
                 "queries": queries[:1000], "top_names": top_names,
@@ -803,7 +812,8 @@ class DNSSpoke(BaseSpoke):
                 return await self._cluster_diagnostics()
             if cmd == "DNS_STATS":
                 return await self._cluster_stats(search=data.get("search"),
-                                                 source_prefixes=data.get("source_prefixes"))
+                                                 source_prefixes=data.get("source_prefixes"),
+                                                 range_days=data.get("range_days"))
             if cmd == "DNS_CLIENT_QUERIES":
                 return await self._cluster_client_queries(data)
             if cmd == "DNS_FORWARDERS":

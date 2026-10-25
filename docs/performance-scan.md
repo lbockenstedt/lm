@@ -354,3 +354,62 @@ on `routes/firewall.py`, `routes/pxmx_vm.py`, `routes/console.py`,
 `simulations/routes.py`, and almost all background-sync-loop `request_response`
 (staleness 180s, fw_discovery 30/120s, nw_discovery 30-120s, endpoint 30/180s,
 realtime_nac 30/120s, vm_sync 30/180s, dns_dhcp fetch 30s).
+---
+
+# Re-scan — 2026-10 (code loading, caching, hot loops)
+
+A second read-only pass over the hub, the WebUI and the spokes. It covers how
+code is loaded, what is cached, and what runs in hot loops. Items already
+listed above are not repeated. Effort: S = small, M = half-day, L = multi-day.
+
+## Hub (`lm/core`) and WebUI
+
+| # | file:line | issue | fix | effort |
+|---|---|---|---|---|
+| R1 | `core/src/main.py:1716-1736` `request_response` | Polls `response_cache` every 100 ms for every in-flight request. | Resolve an `asyncio.Future` per `request_id` when the response arrives. | M |
+| R2 | `core/src/main.py:1703,1736` | The debug f-string with `_redact(...)` is built even when debug logging is off. | Guard it with `if logger.isEnabledFor(logging.DEBUG)`, or use lazy `%s` arguments. | S |
+| R3 | `core/src/state/manager.py:633` | Every heartbeat's `last_seen` marks state dirty, so `system.json` and `tenants.json` are re-encrypted and rewritten every 60 s. | Keep `last_seen` in memory only, or flush it on a slow timer. | M |
+| R4 | `core/src/api.py:1374` | GZip `compresslevel=9` on every response, including the 2.4 MB `main.js`. | Use level 5–6, or serve precompressed `.gz` static files. | S |
+| R5 | `core/src/security/oidc.py:601` | No Entra app-token cache; every Graph call fetches a new token. | Cache the token until about 60 s before `expires_in`. | S |
+| R6 | `core/src/routes/ldap.py:242` + `WebUI/main.js:9367` | `/api/ldap/health` is polled every 10 s and hits LDAP each time. | Add a short TTL cache (about 10 s) on the server. | S |
+| R7 | `core/src/main.py:7548` `_save_simulations_cache` | Saves without `dirty=`, so unchanged shards are rewritten. | Pass the changed-shard set. | S |
+| R8 | `core/src/routes/net_services.py:470-523` | The stale-while-revalidate (SWR) cache returns `deepcopy` on every hit. | Return immutable data, or copy only at the mutating callers. | S |
+| R9 | `core/src/http_client.py:31` | Creates a new `httpx` client per call, so there is no connection reuse. | Share one `AsyncClient` per process, closed on shutdown. | S |
+| R10 | `core/src/routes/setup_admin.py:772,904` `/setup/logs` | Reads whole log files on the event loop. | Tail with seek, inside `asyncio.to_thread`. | S |
+| R11 | `WebUI/index.html:20` | `html2canvas` is loaded eagerly but used only for screenshots. | Load it with dynamic `import()` on first use. | S |
+| R12 | `WebUI/main.js` (2.42 MB), `sim-views.js` (922 KB) | Served unminified. | Minify at release time. | M |
+| R13 | `WebUI/sim-views.js` | Loaded on every page. | Load it lazily when the Simulations view opens. | M |
+| R14 | `core/src/api.py` | Four `BaseHTTPMiddleware` layers, each adding a task hop per request. | Merge them into one pure-ASGI middleware. | M |
+| R15 | `WebUI/main.js:4026` | Re-renders the full spoke list every 10 s. | Diff the data and re-render only the changed rows. | S |
+| R16 | `core/src/security/encryption.py:70` | Legacy PBKDF2 key is derived at import. | Derive it lazily, only when a legacy token is seen. | S |
+
+**Order:** R1, R2, R3, R4, R5, R6, R7, R8, R12.
+
+## Spokes, agents and simulation clients
+
+| # | location | issue | fix | effort |
+|---|---|---|---|---|
+| S1 | `pxmx/agent/src/drive_health.py` | Blocking `subprocess` calls (smartctl, lsblk) inside async code stall the agent. | Use `asyncio.to_thread` or `create_subprocess_exec`. | S |
+| S2 | `pxmx/agent` `usb_state_store` | Re-parses the state file on every call. | Cache it in memory, keyed on mtime. | S |
+| S3 | `cs` `sim_config.load_configs` | `deepcopy` on every cache hit. | Return read-only data, or copy at the writers. | S |
+| S4 | `pxmx/agent/src/watchdogs.py` | Synchronous `journalctl` calls (more sites than A6 above). | Use the existing async `_journalctl()`. | S |
+| S5 | `pxmx` `pve_cmds.vm_status` | Spawns 2 Perl CLIs per VM. | Make one `pvesh get /cluster/resources` call per tick. | M |
+| S6 | `cs` `CheckHealthHistory` | Saves on the event loop. | Use `to_thread`. | S |
+| S7 | `cs` `_save_ledger` | Rewrites 4 files every 60 s. | Write only the files that changed. | S |
+| S8 | `cppm` endpoint search | Always scans 5k endpoints. | Use a server-side filter, or an index. | M |
+| S9 | `nw` SNMP poll | Walks the ifTable fully 3 times. | Walk once and reuse the result. | S |
+| S10 | `netbox` `git pull` | Runs synchronously on the loop. | Use `to_thread`. | S |
+| S11 | `lm/dhcp` Kea client | New HTTP client per Kea call. | Use a persistent session. | S |
+| S12 | `cs` `simulation.sh` | Re-parses its config on every loop. | Parse once, and reload on mtime change. | S |
+| S13 | `cs` `report_status` | Spawns one process per field. | Collect all fields in one pass. | S |
+| S14 | sim clients and `ab` | Logs are not rotated; `ab` uses a plain `FileHandler` and `readlines()`. | Use `RotatingFileHandler`, and tail with seek. | S |
+| S15 | `cs` `sys_mon` timer | Overly frequent timer. | Lengthen the interval, or make it event-driven. | S |
+| S16 | `cs/lm-spoke/src/sim_quota_engine.py` `_engine_sims_for` | O(n²) scan. | Build a dict index once per reconcile. | S |
+| S17 | `netbox` `netbox_sync` | One GET per device. | Fetch in bulk with a filtered list. | M |
+| S18 | `cppm` `sync_endpoints` | Scans 3 times and PUTs unchanged endpoints. | Scan once and skip unchanged rows. | M |
+| S19 | `cs` aruba poller | Polls sites one after another, with fallback retries. | Poll sites with a bounded `gather`. | M |
+| S20–22 | `cs` `dns_fail.sh`, `connect_wired_1x.sh`, `network_common.sh` | Hot shell loops fork tools on every iteration. | Hoist the invariant calls out of the loops. | S |
+| S23 | `cs` `CS_TELEMETRY_CONDITIONAL` | Off by default, so full telemetry is sent every tick. | Turn it on by default after testing. | S |
+| S24 | `ab` | `time.sleep` inside async code. | Use `await asyncio.sleep`. | S |
+
+**Order:** S1, S17, S18, S3, S16, then S12 and S13.

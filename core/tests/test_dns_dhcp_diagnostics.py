@@ -205,13 +205,16 @@ def test_ensure_query_logging_restarts_when_logfile_never_opened(monkeypatch, tm
     even when unbound had never actually opened QUERY_LOG (so the caller's
     ``if not self._ensure_query_logging(): self._reload()`` never ran). It
     must now force a restart whenever the logfile doesn't exist yet, even
-    with an already-correct config."""
+    with an already-correct config. (The result is now a structured dict
+    rather than a bool.)"""
     mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
     log_path = tmp_path / "unbound-logs" / "lm-queries.log"
     logging_conf = tmp_path / "lm-logging.conf"
     monkeypatch.setattr(dns_manager, "QUERY_LOG", str(log_path))
     monkeypatch.setattr(dns_manager, "LOGGING_CONF", str(logging_conf))
-    monkeypatch.setattr(mgr, "_ensure_apparmor_log_access", lambda: False)
+    monkeypatch.setattr(mgr, "_ensure_apparmor_log_access",
+                        lambda: {"status": "noop", "changed": False, "restarted": False,
+                                 "ok": True, "reason": "apparmor-unavailable"})
 
     # Pre-seed the conf.d snippet with EXACTLY what _ensure_query_logging
     # would write, simulating "config already correct" -- but QUERY_LOG
@@ -228,7 +231,8 @@ def test_ensure_query_logging_restarts_when_logfile_never_opened(monkeypatch, tm
 
     result = mgr._ensure_query_logging()
     assert restarts and restarts[0][:2] == ["systemctl", "restart"]
-    assert result is False  # caller must reload/restart, not assume it's fine
+    # caller must know unbound was restarted, not assume it's fine
+    assert result["restarted"] is True and result["ok"] is True
 
 
 def test_ensure_query_logging_short_circuits_once_logfile_exists(monkeypatch, tmp_path):
@@ -239,7 +243,9 @@ def test_ensure_query_logging_short_circuits_once_logfile_exists(monkeypatch, tm
     logging_conf = tmp_path / "lm-logging.conf"
     monkeypatch.setattr(dns_manager, "QUERY_LOG", str(log_path))
     monkeypatch.setattr(dns_manager, "LOGGING_CONF", str(logging_conf))
-    monkeypatch.setattr(mgr, "_ensure_apparmor_log_access", lambda: False)
+    monkeypatch.setattr(mgr, "_ensure_apparmor_log_access",
+                        lambda: {"status": "noop", "changed": False, "restarted": False,
+                                 "ok": True, "reason": "apparmor-unavailable"})
 
     want = (f'server:\n    log-queries: yes\n'
             f'    use-syslog: no\n    logfile: "{log_path}"\n')
@@ -254,7 +260,7 @@ def test_ensure_query_logging_short_circuits_once_logfile_exists(monkeypatch, tm
 
     result = mgr._ensure_query_logging()
     assert restarts == []
-    assert result is True
+    assert result["status"] == "unchanged" and result["ok"] is True
 
 
 def test_dns_add_forwarder_persists_config_and_reloads(monkeypatch, tmp_path):
