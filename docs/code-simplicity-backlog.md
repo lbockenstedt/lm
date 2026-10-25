@@ -79,7 +79,7 @@ instead of nesting to bring the depth down.
 
 | cc | len | depth | location |
 |---:|---:|---:|---|
-| 225 | 727 | 9 | `netbox/src/netbox_sync.py:543` `sync_devices` |
+| 225 | 727 | 9 | `netbox/src/netbox_sync.py:543` `sync_devices` — ✅ done (netbox cdb5fe3): cc 226 → 14, every new helper ≤ 10. Split into named steps around a `_DeviceSyncRun` dataclass. Verified with a request-for-request differential fuzz over 20,000 seeds (identical request logs, incl. fault injection) |
 | 188 | 791 | 7 | `pxmx/agent/src/agent.py:2068` `_connect_once` |
 | 160 | 414 | 10 | `cs/webui-local/app/tasks.py:543` `aruba_poller` |
 | 159 | 1048 | 5 | `pxmx/agent/src/usb_provision.py:2597` `run_provision_loop` |
