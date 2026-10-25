@@ -97,6 +97,10 @@ ENCRYPTED_TYPES: FrozenSet[str] = frozenset({
     "UPDATE_CONFIG",
     "CS_STORE_PROXMOX_TOKEN",
     "CS_TOKEN_RESULT",
+    # JIT 802.1X (dot1x_jit.py): random account passwords hub → cs / nac spoke.
+    "CS_DOT1X_CREDENTIAL",
+    "CPPM_CREATE_LOCAL_USER",
+    "CPPM_SET_LOCAL_USER_PASSWORD",
 })
 
 #: The marker value placed in ``payload["enc"]`` to signal an encrypted

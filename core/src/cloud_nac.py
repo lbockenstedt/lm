@@ -1,10 +1,11 @@
 """Cloud NAC — JIT Entra account provisioning (hub broker).
 
-When the cs SimQuotaEngine moves a client onto a 1X SSID, the spoke asks the HUB
-(which holds the Entra app cert) to JIT-create that user's Entra account and hand
-back a random password; the spoke delivers it to the client as its
-``dot1x_password`` override. Accounts idle for ``idle_days`` (no Entra sign-in)
-are swept + deleted.
+Graph primitives for the Entra backend of the JIT 802.1X broker
+(``dot1x_jit``): when the cs SimQuotaEngine moves a client onto a 1X SSID cell
+whose account location is ``entra``, the hub creates the user's Entra account
+with a random password and delivers it to the client as its ``dot1x_password``
+override. The ``/setup/cloud-nac`` routes keep the manual admin tools (and
+``idle_days`` sweep) for accounts provisioned by hand.
 
 Auth reuses the SSO app cert (``security.oidc.fetch_app_token``, Graph scope). The
 app registration needs these Graph **application** permissions (admin-consented):
@@ -109,11 +110,13 @@ async def get_user(token: str, ident: str, http: Optional[httpx.AsyncClient] = N
 
 
 async def provision_user(cfg: OidcConfig, domain: str, username: str,
-                         http: Optional[httpx.AsyncClient] = None) -> Dict[str, Any]:
+                         http: Optional[httpx.AsyncClient] = None,
+                         password: Optional[str] = None) -> Dict[str, Any]:
     """Create the Entra account for ``username`` (or reset its password if it
     exists), non-interactive (``forceChangePasswordNextSignIn=false`` so a
     headless MSCHAPv2 client can auth). Returns
-    ``{username, upn, oid, password, created}``. The caller records the password."""
+    ``{username, upn, oid, password, created}``. The caller records the password.
+    ``password`` lets the caller (dot1x_jit) choose it; default is random."""
     username = str(username or "").strip().lower()
     if not username:
         raise CloudNacError("empty username")
@@ -122,7 +125,7 @@ async def provision_user(cfg: OidcConfig, domain: str, username: str,
         raise CloudNacError("UPN domain not configured")
     upn = f"{username}@{domain}"
     token = await fetch_app_token(cfg, _GRAPH_SCOPE, http=http)
-    password = gen_password()
+    password = password or gen_password()
     existing = await get_user(token, upn, http=http)
     if existing:
         oid = existing["id"]

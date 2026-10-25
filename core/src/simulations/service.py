@@ -277,7 +277,9 @@ class SimulationsService:
                     # Per-client sim overrides + config so the Clients tab's per-sim
                     # override buttons reflect what's SET and stay across refreshes.
                     "config": c.get("config") or {},
-                    "overrides": c.get("overrides") or {},
+                    # dot1x_password (JIT 802.1X, dot1x_jit.py) is never shown.
+                    "overrides": {k: ("********" if k == "dot1x_password" and v else v)
+                                  for k, v in (c.get("overrides") or {}).items()},
                 })
         # Dedup by hostname across spokes: the same client can be cached by
         # more than one cs spoke. The common cause is a per-client override

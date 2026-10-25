@@ -71,6 +71,29 @@ Talks to ClearPass REST (`CPPMClient`, `src/client.py`, `requests.Session`, TLS 
 - **Trigger the realtime NAC→IPAM reverse sync on demand** ("Sync now" on the realtime NAC→IPAM card in the same System → Sync area) to pull the last `lookback_minutes` of sessions and push newly-seen devices into NetBox right away.
 - **Look up a specific device or session**: use My Devices / Unknown Devices / Access Tracker tabs, which map to `GET_DEVICE`/`GET_ENDPOINT_DETAIL` (by MAC), `GET_DEVICE_SESSIONS`/`GET_USER_SESSIONS`, and `SEARCH_SESSIONS`/global search respectively.
 
+## JIT 802.1X accounts & "My Users"
+
+The hub's `core/src/dot1x_jit.py` broker creates just-in-time 802.1X accounts for simulation clients. Each **1X** cell in the Config/Engine SSID matrix has an **Account location** setting: Entra, LDAP (tenant OU), or ClearPass (Policy Manager local user). The cs engine sends `CS_DOT1X_PROVISION`, `CS_DOT1X_RELEASE`, and `CS_DOT1X_SYNC` messages to the hub as clients join or leave a 1X cell. For each account, the hub:
+
+- creates the account in the cell's account location. For ClearPass this uses `CPPM_CREATE_LOCAL_USER` / `CPPM_SET_LOCAL_USER_PASSWORD` / `CPPM_DELETE_LOCAL_USER` / `CPPM_GET_LOCAL_USER`, with role `global_config.dot1x_jit.cppm_role` (default `[Employee]`).
+- generates a random password and stores it in the enabled Credential Vault. With no vault enabled, it stores the password in the hub's encrypted state (`dot1x_jit_secrets`).
+- sends the password to the sim client through an encrypted `CS_DOT1X_CREDENTIAL` frame. The password is redacted from logs and masked in every overrides view.
+
+An hourly sweep handles rotation and cleanup:
+
+- It rotates passwords every `rotate_days` (default 30).
+- Every `cleanup_interval_days` (default 30), it deletes accounts that have no client assigned and have not been seen for `unused_days`.
+
+When the engine stops assigning a client to the 1X cell, or the client is torn down, the cs engine releases the account right away. The sweep catches anything that release missed.
+
+**NAC → My Users** lists the tenant's sim-created accounts, showing username, location, assigned hosts, and last rotated time. It offers **Reset password** and **Delete**:
+
+- **Reset password** generates a new password, updates the vault, and sends it to the sim client.
+- There is no reveal action.
+- If you delete an account while a client is still assigned to its 1X cell, the engine re-creates it.
+
+The API is `GET /api/cppm/my-users`, plus `POST /api/cppm/my-users/reset` and `POST /api/cppm/my-users/delete` (`routes/nac_users.py`).
+
 ## Troubleshooting / common questions
 
 - **"Auth to ClearPass keeps failing — how do I tell why?"** Run TEST_AUTH. It reports every OAuth attempt tried (password grant with each candidate `client_id`, then `client_credentials`) with that attempt's actual HTTP result — an `HTTP 400`/`401` on the password-grant attempts usually means the ClearPass Guest/API Login username or password is wrong or the operator profile lacks API access; a failure only on the `client_credentials` attempt usually means the API client's client_id/secret is wrong or the client's operator profile is too restricted. Compare against what's actually configured on the ClearPass side (API Services → API Clients, and the Operator Login the username belongs to).
