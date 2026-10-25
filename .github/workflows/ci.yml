@@ -53,7 +53,7 @@ jobs:
         run: |
           set -u
           failed=""
-          for c in agent console core dns henet proxy; do
+          for c in agent console core dhcp dns henet proxy; do
             echo "::group::$c"
             pytest --timeout=300 --timeout-method=thread -q "$c/tests" || failed="$failed $c"
             echo "::endgroup::"
