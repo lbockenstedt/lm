@@ -169,6 +169,13 @@ _INTERNAL_NETS = tuple(ipaddress.ip_network(c) for c in (
 # enough that a routine pull + watchdog restart never trips it.
 _UPDATE_STUCK_S = float(os.environ.get("LM_UPDATE_STUCK_S", "3600") or 3600)
 
+# request_response wakes the moment its reply arrives (an asyncio.Event set by
+# _route_spoke_reply). This is only the safety-net interval at which a waiter
+# also re-checks response_cache and its deadline on its own, for writers that
+# fill the cache without setting the event (test harnesses) and so a
+# SPOKE_PROGRESS deadline extension is noticed. It does not delay replies.
+_RESPONSE_FALLBACK_POLL_S = 1.0
+
 # Dedicated channel for generic-agent lifecycle diagnostics — the
 # connected-but-never-authenticated signature of a protocol-incompatible
 # legacy GenericLeafAgent or a crashed-on-startup agent-spoke (see
@@ -961,6 +968,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # instead of leaking an entry that is never popped (unbounded growth at
         # scale with periodic commands + occasional spoke slowness).
         self._outstanding_requests: set = set()
+        # { msg_id: asyncio.Event } — the wake-up signal for a request_response
+        # waiter. When a reply arrives, _route_spoke_reply stores it in
+        # response_cache AND sets this event, so the waiter returns at once
+        # instead of on its next poll tick. See request_response for the full
+        # contract (the 1s fallback poll and why the cache is still the source
+        # of truth).
+        self._response_waiters: Dict[str, asyncio.Event] = {}
         # { msg_id: {"soft","hard","grace"} } — keepalive-extendable deadlines
         # for in-flight request_response waiters. A spoke servicing a slow
         # command emits SPOKE_PROGRESS frames (correlation_id == the request's
@@ -1783,27 +1797,62 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             payload=MessagePayload(type=command_type, data=data)
         )
 
-        await self.send_to_spoke(msg, signing_secret=signing_secret)
-
-        # Wait for the response in the mailbox
-        self._outstanding_requests.add(msg_id)
+        # ── Waiting for the reply ─────────────────────────────────────────
+        #
+        # How a reply reaches us: the spoke answers with a frame whose
+        # correlation_id == msg_id. _route_spoke_reply stores it in
+        # response_cache[msg_id] (only while msg_id is in
+        # _outstanding_requests, so a late reply cannot leak) and then sets
+        # our wake event. We pop the cache entry and return it.
+        #
+        # R1 (docs/performance-scan.md, 2026-10 re-scan): this used to poll
+        # response_cache every 100ms, which added about 50ms on average to
+        # every one of the ~290 request_response call sites and woke the
+        # event loop 10x a second per in-flight request. Now the reply wakes
+        # us directly. Three rules keep that change safe:
+        #
+        # 1. response_cache stays the single source of truth. The event only
+        #    means "go look". Every wake-up, including the first, checks the
+        #    cache BEFORE the deadline, so a reply that lands exactly at the
+        #    deadline still wins (the old loop could lose that race).
+        # 2. A fallback poll (every _RESPONSE_FALLBACK_POLL_S at most) still
+        #    re-checks the cache. That covers any writer that fills
+        #    response_cache without setting the event (test harnesses, or a
+        #    hub object built without __init__), and re-reads the deadline,
+        #    which a SPOKE_PROGRESS keepalive may have pushed forward.
+        # 3. Everything is registered BEFORE send_to_spoke. send_to_spoke
+        #    awaits the socket write, and the old code only added msg_id to
+        #    _outstanding_requests AFTER it. A fast spoke whose reply was
+        #    processed during that await was treated as an "unknown ack",
+        #    dropped, and the caller waited out the full timeout. The
+        #    liveness ping (_send_liveness_ping) already registers first for
+        #    the same reason.
+        #
+        # Deadlines (unchanged): "soft" starts at timeout and each
+        # SPOKE_PROGRESS frame pushes it to now + timeout, never past "hard"
+        # (timeout x _request_progress_hard_mult). See the
+        # _progress_deadlines init.
+        waiters = getattr(self, "_response_waiters", None)
+        if waiters is None:  # hub object built without __init__ (tests)
+            waiters = self._response_waiters = {}
+        wake = asyncio.Event()
         start_time = time.time()
-        # Keepalive-extendable deadline (see _progress_deadlines init): the base
-        # window is `timeout`; a SPOKE_PROGRESS frame for this msg_id pushes the
-        # soft deadline forward, capped at the hard ceiling. With no progress the
-        # behavior is identical to the old fixed `timeout` wait.
         prog = {"soft": start_time + timeout,
                 "hard": start_time + timeout * self._request_progress_hard_mult,
                 "grace": timeout}
+        self._outstanding_requests.add(msg_id)
         self._progress_deadlines[msg_id] = prog
+        waiters[msg_id] = wake
         settled = False
+        sent = False
         try:
+            # A send failure (spoke not connected, socket closed mid-send)
+            # raises ConnectionError to the caller exactly as before; the
+            # finally below unregisters everything.
+            await self.send_to_spoke(msg, signing_secret=signing_secret)
+            sent = True
             while True:
-                now = time.time()
-                if now >= prog["soft"] or now >= prog["hard"]:
-                    break
-                await asyncio.sleep(0.1)
-                if msg_id in getattr(self, "response_cache", {}):
+                if msg_id in self.response_cache:
                     result = self.response_cache.pop(msg_id)
                     logger.debug(f"Response: {msg_id} received from {spoke_id}: {_redact(command_type, result)}")
                     settled = True
@@ -1815,6 +1864,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     # sub-spoke is re-pushed on the agent's next reconnect.
                     self._track_role_rpc(spoke_id, command_type, data, result)
                     return result
+                now = time.time()
+                deadline = min(prog["soft"], prog["hard"])
+                if now >= deadline:
+                    break
+                # clear() before waiting so a stale set() can never turn this
+                # into a busy loop. Nothing is lost: the cache was just
+                # checked, and a reply arriving from here on sets it again.
+                wake.clear()
+                try:
+                    await asyncio.wait_for(
+                        wake.wait(),
+                        timeout=min(deadline - now, _RESPONSE_FALLBACK_POLL_S))
+                except asyncio.TimeoutError:
+                    pass  # fallback poll tick or deadline: loop re-checks both
 
             # Subject (the hostname/appliance/device the request operates on)
             # instead of the opaque msg_id UUID — the recurring "UUID instead
@@ -1833,10 +1896,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # Drop the waiter so a late ack can't leak a response_cache entry.
             self._outstanding_requests.discard(msg_id)
             self._progress_deadlines.pop(msg_id, None)
-            if not settled:
+            waiters.pop(msg_id, None)
+            if sent and not settled:
                 # Waiter returned without a reply (timeout or cancel). A late ack
                 # may still arrive from the spoke; remember the id briefly so the
                 # receive path can log it as "late" (DEBUG) instead of "unknown".
+                # Skipped when the send itself failed: nothing went out, so no
+                # reply can come back.
                 self._recent_request_timeouts[msg_id] = time.time() + self._RECENT_TIMEOUT_TTL
                 self._prune_recent_timeouts()
 
@@ -6588,6 +6654,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # dropped instead of leaked.
         if hasattr(self, "response_cache") and corr_id in self._outstanding_requests:
             self.response_cache[corr_id] = msg_data
+            # Wake the waiting request_response now rather than on its next
+            # poll tick (R1). Always store first, then set: the waiter treats
+            # the event only as "go look in response_cache". getattr because
+            # test hubs built without __init__ (hc_harness) have no waiter
+            # dict; their waiters fall back to the 1s poll.
+            _wake = getattr(self, "_response_waiters", {}).get(corr_id)
+            if _wake is not None:
+                _wake.set()
 
         self.message_count += 1
 
