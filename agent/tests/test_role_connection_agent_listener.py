@@ -219,6 +219,10 @@ def test_on_agent_telemetry_mirrors_under_role_name(monkeypatch, tmp_path):
     assert rec["nodes"] == [{"name": "n1"}]
     assert rec["vms"] == [{"vmid": 100}]
     assert rec["agent_metrics"] == {"cpu": 0.1}
+    # Stamped like pxmx/cs so the shared aggregator can rank and serve it
+    # (prefer_cache needs a fresh telemetry_ts).
+    import time as _time
+    assert abs(rec["telemetry_ts"] - _time.time()) < 5
 
 
 def test_on_agent_registered_repushes_stored_config(monkeypatch, tmp_path):

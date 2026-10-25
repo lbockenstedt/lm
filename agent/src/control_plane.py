@@ -642,6 +642,13 @@ class RoleConnection(AgentHostingControlPlane):
             rec["nodes"]        = data.get("nodes", {}).get("nodes", [])
             rec["vms"]          = data.get("vms", {}).get("vms", [])
             rec["agent_metrics"] = data.get("metrics", {})
+            # When THIS nodes/vms snapshot was taken (pxmx and cs stamp it
+            # too). The shared aggregator needs it to (a) prefer the
+            # freshest cluster-mate's report and (b) answer a
+            # PXMX_LIST_VMS {agent_id, prefer_cache} from this snapshot
+            # instead of a 10-15s live PVE query. Without it every agent
+            # hosted here read as ts=0: never freshest, and never cacheable.
+            rec["telemetry_ts"] = time.time()
             if self._agent_listener_enabled():  # proxmox role → persist
                 self._save_disk_cache()
         mod = self.modules.get(self.role_name)
