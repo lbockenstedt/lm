@@ -223,7 +223,6 @@ HUB_STUBS = {
     "_relay_session_owner_ok": [True, True, False],
     "_vm_live_set": [None, RAISE],
     "_mtls_enrollment_done": [None, None, RAISE],
-    "_recompute_proxied_tenants": [None],
     "_mark_spoke_disconnected": [None],
     # async
     "_install_active_connection": [True, True, False],

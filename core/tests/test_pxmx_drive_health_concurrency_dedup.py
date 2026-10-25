@@ -18,12 +18,10 @@ from test_pxmx_drive_health_route import _MockHub, _build_client
 
 
 def setup_function(_):
-    pxmx._NODES_CACHE.clear()
     pxmx._DRIVE_HEALTH_CACHE.clear()
 
 
 def teardown_function(_):
-    pxmx._NODES_CACHE.clear()
     pxmx._DRIVE_HEALTH_CACHE.clear()
 
 

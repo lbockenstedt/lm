@@ -439,6 +439,15 @@ def netbox_tenant_scope(hub, tenant_id: str = None) -> dict:
             "tenant_id": tid, "key": tenant or "_all_"}
 
 
+def all_tenant_ids(hub) -> list:
+    """Every configured hub tenant id (plain tenants and tenant groups).
+    Used by the hub data cache feeds to enumerate the scopes to keep warm."""
+    try:
+        return [str(k) for k in (hub.state.tenant_state.get("tenants") or {})]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def tenant_netbox_slugs(hub, tenant_id: str = None) -> list:
     """Every concrete NetBox tenant slug a hub tenant id covers.
 

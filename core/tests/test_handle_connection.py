@@ -549,7 +549,6 @@ def test_owner_cleanup_releases_all_per_connection_state():
     assert "spk" not in hub.active_connections and "spk" not in hub.spoke_module_types
     assert hub.netbox_server_agents == set() and "spk" not in hub.spoke_enc_capable
     assert hub.agent_info == {"a2": {"spoke_id": "other"}}
-    assert "_recompute_proxied_tenants" in names(run)
     assert "connection_closed" in events(run) and called(run, "_mark_spoke_disconnected")
 
 

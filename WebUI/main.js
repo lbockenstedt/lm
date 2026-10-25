@@ -161,8 +161,8 @@ const ROUTES = {
     showAddNwDeviceModal:   { m: 'POST', p: '/setup/nw-devices',          api: 'add_nw_device', via: 'saveNwDevice' },
 
     // ── Cache / subnet-filter / diagnostics / logs ──
-    loadCacheConfig:        { m: 'GET',  p: '/admin/cache/config',        api: 'admin_get_cache_config' },
-    saveCacheConfig:        { m: 'PUT',  p: '/admin/cache/config',        api: 'admin_update_cache_config' },
+    loadCacheStatus:        { m: 'GET',  p: '/admin/cache/status',        api: 'admin_cache_status' },
+    refreshCacheNamespace:  { m: 'POST', p: '/admin/cache/refresh',       api: 'admin_cache_refresh' },
     purgeAllCaches:         { m: 'POST', p: '/admin/cache/purge',         api: 'admin_purge_cache' },
     loadSubnetFilterToggles:{ m: 'GET',  p: '/admin/subnet-filter-config',api: 'get_subnet_filter_config' },
     loadSpokesAndAgents:    { m: 'GET',  p: '/setup/pending_spokes + /api/pxmx/agents + /setup/diagnostics', api: 'get_pending_spokes / get_pxmx_agents / get_diagnostics' },
@@ -11133,9 +11133,9 @@ function _useInSimQuota(btn) {
     if (typeof showToast === 'function') showToast(`Staged '${name}' into a new Sim-Quota Default row — pick a simulation and Save.`, 'success');
 }
 
-// Setup → General (default) tile. Cache config + update sources + appearance.
-// GET /setup/config + /api/cache/config + /api/appearance (core/src/api.py
-// get_setup_config / get_cache_config / get_appearance). When invoked from the
+// Setup → General (default) tile. Data cache status + update sources + appearance.
+// GET /setup/config + /admin/cache/status + /api/appearance (core/src/api.py
+// get_setup_config, routes/admin_cache.py admin_cache_status, get_appearance). When invoked from the
 // System view (currentView === 'settings'), also renders the Tenant Subnet
 // Filtering toggle card — a system-wide enforcement posture setting that lives
 // here rather than under Setup → Simulations. The same renderer serves Setup →
@@ -11162,16 +11162,14 @@ function _renderSetupGeneralTile(content) {
         ${certMonCard}
         <div class="${card}">
             <div class="flex justify-between items-center">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Optimization — Data Cache ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Data Cache ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 <div class="flex items-center gap-3">
-                    <label class="${labelCls}">Max Concurrent Tenants</label>
-                    <input type="number" id="cache-max-concurrent" min="1" max="20" value="3"
-                        class="w-16 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                    <button onclick="purgeAllCaches()" class="${btnSecCls}" title="Clear all cached tenant data; the next load re-fetches everything from the spokes">Purge All</button>
+                    <button onclick="refreshCacheNamespace()" class="${btnSecCls}" title="Refresh every cached module from the spokes now">Refresh now</button>
+                    <button onclick="purgeAllCaches()" class="${btnSecCls}" title="Drop all cached data; it is fetched again right away">Purge All</button>
                 </div>
             </div>
-            <div id="cache-config-rows" class="mt-3 grid grid-cols-3 gap-x-8 text-sm">
-                <p class="col-span-2 py-4 text-center text-slate-400 italic text-xs">Loading…</p>
+            <div id="cache-status-rows" class="mt-3 text-sm">
+                <p class="py-4 text-center text-slate-400 italic text-xs">Loading…</p>
             </div>
         </div>
         <div class="${card}">
@@ -11244,16 +11242,15 @@ function _renderSetupGeneralTile(content) {
             </div>
         </div>`;
     loadSetupConfig();
-    loadCacheConfig();
+    loadCacheStatus();
     loadAppearanceForm();
     loadToastConfigForm();
     loadRelayTimeoutsForm();
     loadRepoSyncConfig();
     if (currentView === 'settings') loadSubnetFilterToggles();
     if (certMonCard) loadCertMonToggle();
-    // Auto-save on change (no per-card Save buttons). Cache rows are loaded
-    // dynamically by loadCacheConfig with data-cache-key (no id), so the mapper
-    // keys off both el.id and el.dataset.cacheKey.
+    // Auto-save on change (no per-card Save buttons). The Data Cache card is
+    // read-only status (no inputs), so it has no save handler.
     _attachAutoSave(content, _generalSaveFnFor, 'generalAutoSave');
 }
 
@@ -11261,7 +11258,6 @@ function _renderSetupGeneralTile(content) {
 function _generalSaveFnFor(el) {
     if (!el) return null;
     const id = el.id || '';
-    if (id.startsWith('cache-') || el.dataset.cacheKey) return saveCacheConfig;
     if (id.startsWith('update-source-') || id === 'global-branch') return saveUpdateSources;
     if (id.startsWith('repo-sync-'))      return saveRepoSyncConfig;
     if (id.startsWith('toast-'))          return saveToastConfig;
@@ -15508,58 +15504,74 @@ async function _tenantUsbPost(tid, vid, pid, action, inp, type) {
     } catch (e) { if (typeof showToast === 'function') showToast('Failed: ' + e.message, 'error'); }
 }
 
-async function loadCacheConfig() {
-    const container = document.getElementById('cache-config-rows');
+// Data Cache card (Settings → General): read-only status of the hub data
+// cache (core/src/warm_cache.py) — one row per cached module with its number
+// of entries, oldest data age, errors, and whether users are active on it
+// (refreshed every 60s while active, 5min otherwise). Refresh/Purge only.
+function _cacheAge(s) {
+    if (s == null) return '—';
+    if (s < 90) return `${Math.round(s)}s`;
+    if (s < 5400) return `${Math.round(s / 60)}m`;
+    return `${Math.round(s / 3600)}h`;
+}
+
+async function loadCacheStatus() {
+    const container = document.getElementById('cache-status-rows');
     if (!container) return;
     try {
-        const r = await fetch('/admin/cache/config', { credentials: 'same-origin' });
-        if (!r.ok) { container.innerHTML = '<p class="col-span-2 py-3 text-center text-xs text-red-400">Not available</p>'; return; }
+        const r = await fetch('/admin/cache/status', { credentials: 'same-origin' });
+        if (!r.ok) { container.innerHTML = '<p class="py-3 text-center text-xs text-red-400">Not available</p>'; return; }
         const d = await r.json();
-        const cfg = d.config || {};
-        const labels = d.labels || {};
-        const inputCls = 'w-20 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500 text-center';
-        container.innerHTML = Object.entries(cfg).map(([key, val]) => `
-            <div class="flex items-center gap-3 py-2 border-b border-slate-100">
-                <span class="flex-1 text-slate-700">${labels[key] || key}</span>
-                <input type="checkbox" data-cache-key="${key}" data-cache-field="enabled" class="w-4 h-4 text-green-600 rounded" ${val.enabled !== false ? 'checked' : ''}>
-                <input type="number" data-cache-key="${key}" data-cache-field="interval" min="30" max="3600"
-                    value="${Math.round((val.interval || 300) / 60)}" class="${inputCls}">
-                <span class="text-xs text-slate-400">min</span>
-            </div>`).join('');
-        const maxEl = document.getElementById('cache-max-concurrent');
-        if (maxEl) maxEl.value = d.max_concurrent_tenants || 3;
+        const rows = (d.namespaces || []).map(n => {
+            const entries = n.entries || [];
+            const ages = entries.map(e => e.age).filter(a => a != null);
+            const oldest = ages.length ? Math.max(...ages) : null;
+            const errors = entries.filter(e => e.error).length;
+            const active = entries.some(e => e.active);
+            const kb = n.file_bytes != null ? `${Math.max(1, Math.round(n.file_bytes / 1024))} KB` : '—';
+            return `
+            <tr class="border-b border-slate-100">
+                <td class="py-1.5 pr-3 text-slate-700">${escapeHtml(n.namespace)}</td>
+                <td class="py-1.5 pr-3 text-center">${entries.length}</td>
+                <td class="py-1.5 pr-3 text-center">${_cacheAge(oldest)}</td>
+                <td class="py-1.5 pr-3 text-center">${active ? '<span class="text-green-600">active</span>' : '<span class="text-slate-400">idle</span>'}</td>
+                <td class="py-1.5 pr-3 text-center ${errors ? 'text-red-500' : 'text-slate-400'}">${errors}</td>
+                <td class="py-1.5 pr-3 text-right text-slate-400">${kb}</td>
+                <td class="py-1.5 text-right"><button class="text-xs text-[#01A982] hover:underline" onclick="refreshCacheNamespace('${escapeHtml(n.namespace)}')">Refresh</button></td>
+            </tr>`;
+        }).join('');
+        const iv = d.intervals || {};
+        container.innerHTML = `
+            <p class="text-xs text-slate-500 mb-2">Every page is served from this cache. Refreshed every ${iv.active_s || 60}s while users are active, ${Math.round((iv.idle_s || 300) / 60)}m otherwise.
+               Stored on disk ${d.encrypted ? 'encrypted' : '<span class="text-red-500">unencrypted</span>'} so it survives a restart.</p>
+            <table class="w-full text-xs">
+                <thead><tr class="text-slate-400 uppercase tracking-wider">
+                    <th class="text-left py-1">Module</th><th>Entries</th><th>Oldest</th><th>Users</th><th>Errors</th><th class="text-right">Disk</th><th></th>
+                </tr></thead>
+                <tbody>${rows || '<tr><td colspan="7" class="py-3 text-center text-slate-400 italic">Nothing cached yet</td></tr>'}</tbody>
+            </table>`;
     } catch (e) {
-        if (container) container.innerHTML = `<p class="col-span-2 py-3 text-center text-xs text-red-400">${e.message}</p>`;
+        if (container) container.innerHTML = `<p class="py-3 text-center text-xs text-red-400">${escapeHtml(e.message)}</p>`;
     }
 }
 
-async function saveCacheConfig() {
-    const configPayload = {};
-    document.querySelectorAll('[data-cache-key]').forEach(el => {
-        const key = el.dataset.cacheKey;
-        const field = el.dataset.cacheField;
-        if (!configPayload[key]) configPayload[key] = {};
-        if (field === 'enabled') configPayload[key].enabled = el.checked;
-        if (field === 'interval') configPayload[key].interval = parseInt(el.value, 10) * 60;
-    });
-    const maxConcurrent = parseInt(document.getElementById('cache-max-concurrent')?.value || '3', 10);
+async function refreshCacheNamespace(ns) {
     try {
-        await apiJson('/admin/cache/config', {
-            method: 'PUT', credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ config: configPayload, max_concurrent_tenants: maxConcurrent }),
-        });
-        showToast('Cache configuration saved', 'success');
+        const q = ns ? `?namespace=${encodeURIComponent(ns)}` : '';
+        const d = await apiJson(`/admin/cache/refresh${q}`, { method: 'POST', credentials: 'same-origin' });
+        showToast(`Refreshing ${d.refreshed || 0} cached item(s)`, 'success');
+        setTimeout(loadCacheStatus, 3000);
     } catch (e) {
-        showToast('Save failed: ' + e.message, 'error');
+        showToast('Refresh failed: ' + e.message, 'error');
     }
 }
 
 async function purgeAllCaches() {
-    if (!await showConfirmToast('Purge all tenant caches and re-warm from live data?')) return;
+    if (!await showConfirmToast('Purge all cached data and fetch it again from the spokes?')) return;
     try {
         await apiJson('/admin/cache/purge', { method: 'POST', credentials: 'same-origin' });
-        showToast('Cache purged — re-warming in background', 'success');
+        showToast('Cache purged — refetching in background', 'success');
+        setTimeout(loadCacheStatus, 3000);
     } catch (e) {
         showToast('Purge failed: ' + e.message, 'error');
     }

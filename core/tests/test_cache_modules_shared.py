@@ -122,13 +122,21 @@ async def test_file_is_owner_only_and_valid_json(tmp_path, name):
     await write(hub)
     await flush(hub)
 
-    written = [f for f in os.listdir(str(tmp_path)) if f.endswith(".json")]
+    # warm writes one compressed (optionally encrypted) file per namespace
+    # under warm/ (cache_core.ShardedCacheFile); the others write one .json.
+    written = []
+    for root, _dirs, fnames in os.walk(str(tmp_path)):
+        written += [os.path.join(root, f) for f in fnames
+                    if f.endswith(".json") or f.endswith(".bin")]
     assert written, "flush_now produced no file"
-    for fname in written:
-        p = os.path.join(str(tmp_path), fname)
+    for p in written:
         assert oct(os.stat(p).st_mode)[-3:] == "600"
-        with open(p) as f:
-            json.load(f)  # raises if the atomic replace exposed a partial write
+        if p.endswith(".bin"):
+            # raises if the atomic replace exposed a partial write
+            hub._warm_cache_file.decode(open(p, "rb").read())
+        else:
+            with open(p) as f:
+                json.load(f)
         assert not os.path.exists(p + ".tmp")
 
 

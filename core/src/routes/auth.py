@@ -3,7 +3,7 @@ from api import (
     HTTPException, JSONResponse, Request, _SESSION_TTL, _client_ip,
     _cookie_secure, _hash_password, _lockout_key, _login_check, _login_fail,
     _login_success, _record_session, _save_sessions, _sessions,
-    _start_cache_for_tenant, _stop_cache_for_tenant, _verify_password,
+    _verify_password, cache_kick_login,
     get_netbox_spoke, get_tenant_scoping, logger, os, secrets, time,
 )
 from access import resolve_effective_permissions
@@ -115,9 +115,8 @@ def register(app, hub, ctx):
                 max_age=_SESSION_TTL,
                 secure=_cookie_secure(),
             )
-            # Kick off background cache preload for every tenant this user belongs to
-            for tid in tenants:
-                _start_cache_for_tenant(hub, tid)
+            # Refresh this user's cached data now; pages then serve from cache.
+            cache_kick_login(hub, user_data)
             return resp
         except HTTPException:
             raise
@@ -285,13 +284,10 @@ def register(app, hub, ctx):
         for it remain. Persists the session store so the revocation survives
         a restart."""
         token = request.cookies.get("lm_session")
-        sess = _sessions.pop(token, None)
-        tenant_id = (sess or {}).get("user", {}).get("tenant_id")
+        _sessions.pop(token, None)
         _save_sessions(app.state.hub)
         resp = JSONResponse({"status": "ok"})
         resp.delete_cookie("lm_session")
-        if tenant_id:
-            _stop_cache_for_tenant(tenant_id)
         return resp
 
     @app.post("/auth/setup")

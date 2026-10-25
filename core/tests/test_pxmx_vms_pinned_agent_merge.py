@@ -6,26 +6,21 @@ closing three defects the skeptical review panel found in lm#1131/#1132:
   ``"Default"`` never matched a scope of ``"default"`` -- exactly the
   case-mismatch class of bug the surrounding feature claims to fix.
 * REACHABILITY — the merge call was wired into only 3 of ``get_pxmx_vms``'s 5
-  return paths. The fast non-admin session-cache hit and the no-visible-spoke
-  cached-entry fallback both skipped it, so a pinned host's off-subnet/
-  untagged VMs depended on which branch served the response.
+  return paths. ``get_pxmx_vms`` now has a single hub-cache read path; the
+  merge must apply to a cache HIT too (not only a live fetch), so a pinned
+  host's off-subnet/untagged VMs never depend on whether the list was cached.
 * Single-agent scope — ``?agent_id=`` must restrict the merge to that ONE
   pinned agent, not union every agent pinned to the same tenant.
 """
+import tempfile
+import time
 from types import SimpleNamespace
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routes import pxmx
-
-
-@pytest.fixture(autouse=True)
-def _reset_vms_ttl_cache():
-    pxmx._VMS_CACHE.clear()
-    yield
-    pxmx._VMS_CACHE.clear()
+from warm_cache import WarmCacheMixin
 
 
 class _State:
@@ -38,7 +33,7 @@ class _Store:
         return set()
 
 
-class _Hub:
+class _Hub(WarmCacheMixin):
     """One SHARED spoke (bound to no tenant) hosting two agents: one pinned
     to tenant 'lrb' (as 'Lrb' -- deliberately mismatched case), one unpinned.
     """
@@ -63,14 +58,10 @@ class _Hub:
         self._live_vms = []
         self._pinned_vms = [{"name": "pinned-vm", "node": "pinned-host", "vmid": 1,
                               "unique_id": "pinned-host/1"}]
-        self.warm = {}
         self.queried_merge = []  # agent ids queried via the merge's request_response
-
-    def warm_get(self, ns, key):
-        return self.warm.get((ns, key))
-
-    async def warm_set(self, ns, key, data):
-        self.warm[(ns, key)] = data
+        self.live_fanouts = 0    # un-scoped PXMX_LIST_VMS (the cacheable list fetch)
+        self.cache_dir = tempfile.mkdtemp(prefix="pxmx-pinned-")
+        self.warm_cache_init()
 
     def get_hypervisor_spoke(self):
         return self._shared_spoke
@@ -96,6 +87,7 @@ class _Hub:
             if payload["agent_id"] == self._pinned_agent:
                 return {"payload": {"data": {"vms": self._pinned_vms}}}
             return {"payload": {"data": {"vms": []}}}
+        self.live_fanouts += 1
         return {"payload": {"data": {"vms": self._live_vms, "spoke_connected": True}}}
 
 
@@ -141,22 +133,16 @@ def test_pinned_agent_merge_scoped_to_requested_agent_id():
 
 
 def test_pinned_agent_merge_reachable_on_non_admin_session_cache_path():
-    """The fast non-admin session-cache-hit path (no ?agent_id, no ?tenant,
-    session already scoped) must also apply the pinned-host merge. Pre-fix
-    this early return skipped ``_merge_pinned_agent_vms`` entirely."""
-    import time
-    import api as api_mod
-
+    """A non-admin read served from the hub cache (entry present, no live
+    fan-out) must also apply the pinned-host merge. Pre-fix the cache-hit
+    early return skipped ``_merge_pinned_agent_vms`` entirely."""
     hub = _Hub(pin="lrb")
     tid = "lrb"
-    try:
-        api_mod._tenant_cache[tid] = {
-            "pxmx_vms": {"data": {"vms": []}, "fetched_at": time.time()},
-        }
-        c = _build(hub, admin=False, tenant=None, sess={"user": {"tenant_id": tid}})
-        r = c.get("/api/pxmx/vms")  # fast session-cache path: no agent_id/tenant
-        assert r.status_code == 200
-        names = sorted(v["name"] for v in r.json()["vms"])
-        assert "pinned-vm" in names
-    finally:
-        api_mod._tenant_cache.pop(tid, None)
+    hub.warm_cache.setdefault("pxmx_vms", {})[f"{tid}|agent="] = {
+        "data": {"vms": []}, "fetched_at": time.time(), "tenants": [tid]}
+    c = _build(hub, admin=False, tenant=tid, sess={"user": {"tenant_id": tid}})
+    r = c.get("/api/pxmx/vms")  # session-scoped: no agent_id/tenant query
+    assert r.status_code == 200
+    names = sorted(v["name"] for v in r.json()["vms"])
+    assert "pinned-vm" in names
+    assert hub.live_fanouts == 0  # served from the cache, not a live fetch

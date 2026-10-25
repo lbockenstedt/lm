@@ -116,9 +116,10 @@ def _find_list_slot(data: Any):
     Mirrors the client ``extractItems`` (main.js:3899): bare list, then
     ``data['data']``, ``data['payload']['data']``, ``data['rows']``, then the
     first list-of-dicts value. Returns ``(container, key)`` where
-    ``container[key]`` is the list to mutate, or ``(None, None)``. For a bare
-    list the container is the list itself and ``key`` is ``None`` (filter
-    in place).
+    ``container[key]`` is the record list, or ``(None, None)``. For a bare
+    list the container is the list itself and ``key`` is ``None``. Callers
+    put the filtered list back with :func:`_replace_slot`, which COPIES —
+    the input is never modified.
     """
     if isinstance(data, list):
         return (data, None)
@@ -135,6 +136,25 @@ def _find_list_slot(data: Any):
             if isinstance(v, list) and v and isinstance(v[0], dict):
                 return (data, k)
     return (None, None)
+
+
+def _replace_slot(data: Any, container: Any, key: str, filtered: list) -> Any:
+    """Return ``data`` with the list at ``container[key]`` replaced by
+    ``filtered`` — as a shallow COPY; ``data`` itself is never modified.
+
+    The input is often the hub data cache's own stored object (shared by every
+    reader and persisted to disk): filtering it in place would turn the cached
+    RAW list into one tenant's narrowed view."""
+    if container is data:
+        out = dict(data)
+        out[key] = filtered
+        return out
+    # The list sits one level down, in data["payload"]["data"].
+    out = dict(data)
+    payload = dict(container)
+    payload[key] = filtered
+    out["payload"] = payload
+    return out
 
 
 def _filter_list(lst: list, keep) -> list:
@@ -157,8 +177,8 @@ def filter_items_by_prefixes(
 
     Mirrors ``itemInTenantPrefixes`` (main.js:389). ``items`` may be a bare list
     or a spoke envelope dict; the record list is located via
-    ``_find_list_slot`` and filtered in place. Anything without a record list
-    is returned unchanged.
+    ``_find_list_slot`` and a filtered COPY is returned (the input is never
+    modified). Anything without a record list is returned unchanged.
 
     An item that yields no concrete IP from any field is **dropped** by default
     (``drop_no_ip=True``): it can't be attributed to a tenant, so erring on
@@ -205,8 +225,7 @@ def filter_items_by_prefixes(
     if key is None:
         # bare list — return the filtered copy
         return filtered
-    container[key] = filtered
-    return items
+    return _replace_slot(items, container, key, filtered)
 
 
 def filter_firewall_rules(data: Any, prefixes: Sequence[str], alias_map: Any = None,
@@ -241,8 +260,7 @@ def filter_firewall_rules(data: Any, prefixes: Sequence[str], alias_map: Any = N
     )
     if key is None:
         return filtered
-    container[key] = filtered
-    return data
+    return _replace_slot(data, container, key, filtered)
 
 
 def filter_record_by_prefixes(record: Any, prefixes: Sequence[str], ip_fields: Sequence[str],
@@ -345,8 +363,7 @@ def filter_hypervisor_vms(data: Any, prefixes: Sequence[str], *,
     filtered = _filter_list(container if key is None else container[key], keep)
     if key is None:
         return filtered
-    container[key] = filtered
-    return data
+    return _replace_slot(data, container, key, filtered)
 
 
 def _is_wildcard(val: Any) -> bool:
