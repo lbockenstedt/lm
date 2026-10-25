@@ -126,9 +126,10 @@ def test_dispatch_branch_order_broadcast_before_mailbox():
     # _outstanding_requests/_recent_request_timeouts but BEFORE the
     # mailbox.acknowledge (unknown-ack WARNING) branch. Pin that the broadcast
     # branch exists in the source and is ordered before mailbox.acknowledge so
-    # a broadcast ack can never reach the WARNING.
+    # a broadcast ack can never reach the WARNING. (Reply routing lives in
+    # _route_spoke_reply, extracted from handle_connection.)
     import inspect
-    src = inspect.getsource(main_mod.LabManagerHub.handle_connection)
+    src = inspect.getsource(main_mod.LabManagerHub._route_spoke_reply)
     broadcast_check = src.find("_pending_broadcast_ids")
     mailbox_ack = src.find("self.mailbox.acknowledge(ack)")
     assert broadcast_check != -1, "broadcast-ack branch missing from dispatch"

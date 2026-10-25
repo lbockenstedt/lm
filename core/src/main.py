@@ -52,7 +52,7 @@ import secrets
 import shutil
 from collections import deque
 from typing import Dict, Any, Optional, List, Tuple, Set
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import websockets
 from starlette.websockets import WebSocketDisconnect
 
@@ -441,6 +441,78 @@ def _update_gate_local_hour(tz_name: str) -> int:
         except Exception as e:  # noqa: BLE001 — bad zone → system local
             logger.debug("update_gate: invalid timezone %r (%s) — using system local", tz_name, e)
     return _dt.datetime.now().hour
+
+
+@dataclass
+class _SpokeHello:
+    """The fields a spoke presents in its first (auth) frame.
+
+    Parsed in exactly the original order so a malformed field (e.g. a
+    non-string ``install_uuid``) raises at the same point it always has,
+    ending the connection through handle_connection's error handler.
+    """
+    spoke_id: object
+    secret: object
+    module_type: object
+    # PSK self-provisioning fields (optional; absent on non-PSK spokes).
+    onboarding_psk: str
+    tenant_id_hint: str
+    # Install-UUID identity tracking: a stable per-install UUID + the current
+    # OS hostname, adjudicated BEFORE the secret is verified so a renamed
+    # spoke's re-keyed material is in place for get_valid_key.
+    install_uuid: str
+    hostname: str
+    # Multi-role generic agent: a role sub-spoke (spoke_id {base}-{role})
+    # claims its base agent as parent so the hub can auto-approve it via the
+    # parent's signed vouch. Empty on every other spoke.
+    parent_spoke_id: str
+    # Cert-target capabilities: a generic agent that deployed netbox-server /
+    # ldap-server advertises it so the hub can route that cert to it.
+    netbox_server: bool
+    ldap_server: bool
+    # H4 app-layer encryption: the spoke advertised ``enc="v1"`` AND the hub
+    # has encryption enabled (LM_APP_ENCRYPTION=0 makes a new spoke behave
+    # as legacy — the hub doesn't encrypt to it).
+    enc_capable: bool
+    # The spoke can generate its own mTLS key + CSR (SPOKE_MTLS_CSR).
+    mtls_csr_capable: bool
+
+    @classmethod
+    def from_auth_frame(cls, auth_data):
+        spoke_id = auth_data.get("spoke_id")
+        secret = auth_data.get("secret")
+        module_type = auth_data.get("module_type")
+        onboarding_psk = (auth_data.get("onboarding_psk") or "").strip()
+        tenant_id_hint = (auth_data.get("tenant_id_hint") or "").strip()
+        install_uuid = (auth_data.get("install_uuid") or "").strip()
+        hostname = (auth_data.get("hostname") or "").strip()
+        parent_spoke_id = (auth_data.get("parent_spoke_id") or "").strip()
+        netbox_server = bool(auth_data.get("netbox_server"))
+        ldap_server = bool(auth_data.get("ldap_server"))
+        enc_capable = bool(auth_data.get("enc") == ENC_MARKER) and encryption_enabled()
+        mtls_csr_capable = bool(auth_data.get("mtls_csr"))
+        return cls(spoke_id, secret, module_type, onboarding_psk, tenant_id_hint,
+                   install_uuid, hostname, parent_spoke_id, netbox_server,
+                   ldap_server, enc_capable, mtls_csr_capable)
+
+
+@dataclass
+class _SpokeConn:
+    """Per-connection state shared by the handle_connection phase methods.
+
+    ``pk`` is the spoke's primary key as resolved AFTER identity
+    reconciliation (it may be the install guid rather than ``spoke_id``) —
+    every per-spoke state op keys through it.
+    """
+    websocket: object
+    spoke_id: str
+    pk: str
+    peer_ip: object
+    secret: object
+    # True while an approved spoke without its hub-CA cert is held in mTLS
+    # enrollment-only mode (hub_mtls_enforcement.py): only replies to the
+    # hub's in-flight requests are accepted, nothing is pushed to it.
+    mtls_enroll_only: bool = False
 
 
 class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, HenetSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, InstanceRelocateMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubMtlsEnforcementMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
@@ -5296,6 +5368,64 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self._arm_liveness_probe(spoke_id, websocket)
         return True
 
+    # ══════════════════════════════════════════════════════════════════════
+    # Spoke connection lifecycle  (SECURITY-CRITICAL — read before editing)
+    # ══════════════════════════════════════════════════════════════════════
+    #
+    # ``handle_connection`` is the hub's front door: every spoke, role
+    # sub-spoke and generic agent connects through it. It used to be one
+    # 1,375-line method; it is now split into the phase methods below, which
+    # run in exactly the order the original code did (the split was verified
+    # with an old-vs-new differential fuzz — every call, log line, state
+    # change and close code identical).
+    #
+    #   handle_connection                     the skeleton + error handling
+    #   ├─ _recv_auth_frame                   1. read the spoke's first frame
+    #   ├─ _authenticate_spoke                2. decide whether to trust it
+    #   │   ├─ _settle_spoke_identity            rename / install binding
+    #   │   ├─ _verify_spoke_secret              session-secret check
+    #   │   ├─ _hold_unauthenticated_spoke       no / wrong secret
+    #   │   ├─ _take_spoke_slot                  right secret
+    #   │   └─ _prove_hub_identity               hub proves itself to spoke
+    #   ├─ _admit_spoke                       3. register + approve + greet
+    #   ├─ _flush_spoke_backlog               4. deliver queued mail
+    #   ├─ _handle_spoke_frame (per frame)    5. filter, then route
+    #   │   └─ _dispatch_spoke_message           _SPOKE_MESSAGE_HANDLERS table
+    #   └─ _on_spoke_connection_closed / _on_spoke_connection_error /
+    #      _release_spoke_slot                6. cleanup
+    #
+    # ORDERING RULES. Each was a real incident or pen-test finding; the git
+    # commit is named so the full story is one ``git show`` away. Do not
+    # reorder these steps without re-reading the commit:
+    #
+    #  * Install-binding check runs BEFORE _reconcile_spoke_identity
+    #    (1d2f5aae). Reconcile persists the claim; checking afterwards would
+    #    let one refused attacker lock the real spoke out.
+    #  * A rename (same install_uuid, new spoke_id) migrates approval + keys
+    #    ONLY when the caller proves the OLD id's secret (CC2, 67ca8701).
+    #  * pk is re-resolved after reconcile: it may arm guid-primary (B1,
+    #    e72c46f1), and all later state must land under the guid.
+    #  * Wrong secret closes the socket; NO secret stays open to negotiate
+    #    (zero-touch). An approved install presenting a stale secret is not
+    #    counted as an attack, within a budget (6b35ad9e, 25d7590d).
+    #  * A stale-key reconnect may not evict a live current-key connection
+    #    (_install_active_connection, 9ae39980).
+    #  * The hub proof is always sent; its additive fields (signatures,
+    #    recovery_signature, enc, psk_signature) never block a connect
+    #    (4a135d01).
+    #  * PSK self-provisioning runs after register_module(approved=False) and
+    #    before the approval check, so the approval wins.
+    #  * Parent auto-approve needs a SIGNED parent vouch (H3, dbc4e8e4).
+    #  * Per frame: signature verify → replay/freshness → H4 decrypt, in that
+    #    order (f50d1822, 4e50918f). Unsigned frames: HEARTBEAT only.
+    #  * Replies (correlation_id) are handled BEFORE the rate limiter, so an
+    #    ack is never dropped (4fe0916e).
+    #  * Cleanup only touches shared state if THIS socket still owns the
+    #    spoke's slot — an evicted zombie must not wipe its live replacement
+    #    (9ae39980).
+    #  * No synchronous save_state() on the connect path (727ae321 —
+    #    reconnect storms stalled the event loop).
+
     async def handle_connection(self, websocket):
         """Handle the full lifecycle of a single Spoke/Agent connection.
 
@@ -5303,1374 +5433,1621 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         peer (spoke or pxmx agent), rate-limits it, then dispatches inbound
         signed messages to the right router until the socket closes. Cleans up
         the registry + per-spoke event buffer on exit (clean or crash).
+
+        See the "Spoke connection lifecycle" banner above for the phase map
+        and the ordering rules. Every phase that refuses the spoke closes the
+        socket itself and returns a falsy value; this method then just
+        returns (the ``finally`` cleanup still runs).
         """
+        # Bound before anything can fail so the except/finally handlers know
+        # which spoke this socket belonged to (None until the auth frame is
+        # parsed — then cleanup is skipped, nothing was registered yet).
         spoke_id = None
         try:
-            # 1. Authentication Handshake
             # Peer IP for the threat monitor. The hub serves /ws/spoke directly
             # (no reverse proxy), so the WebSocket peer IS the real client IP —
             # safe to feed to threat_monitor without X-Forwarded-For trust.
-            peer_ip = None
-            try:
-                peer_ip = websocket.remote_address[0] if websocket.remote_address else None
-            except Exception:  # noqa: BLE001 — never block a connect on IP capture
-                peer_ip = None
-            auth_json = await websocket.recv()
-            try:
-                auth_data = json.loads(auth_json)
-            except (ValueError, TypeError):
-                # Malformed first frame = a probe, not a real spoke. Feed the
-                # threat monitor so repeated garbage from one IP trips the block.
-                self._record_spoke_auth_failure(peer_ip, None, "malformed_auth_frame")
-                await websocket.close(1008, "Malformed auth frame")
+            peer_ip = self._ws_peer_ip(websocket)
+
+            # 1. Authentication handshake
+            ok, auth_data = await self._recv_auth_frame(websocket, peer_ip)
+            if not ok:
                 return
+            # Read spoke_id FIRST and on its own: if a later field is malformed
+            # and parsing raises, the error handlers must still know the id.
             spoke_id = auth_data.get("spoke_id")
-            secret = auth_data.get("secret")
-            module_type = auth_data.get("module_type")
-            # PSK self-provisioning fields (optional; absent on non-PSK spokes).
-            onboarding_psk = (auth_data.get("onboarding_psk") or "").strip()
-            tenant_id_hint = (auth_data.get("tenant_id_hint") or "").strip()
-            # Install-UUID identity tracking: a stable per-install UUID + the
-            # current OS hostname. Reconcile BEFORE the auth verify so a renamed
-            # spoke's re-keyed material is in place for get_valid_key below.
-            install_uuid = (auth_data.get("install_uuid") or "").strip()
-            spoke_hostname = (auth_data.get("hostname") or "").strip()
-            # Multi-role generic agent: a role sub-spoke (spoke_id {base}-{role})
-            # claims its base agent as parent so the hub can auto-approve it via
-            # the parent. Absent on every other spoke (no behavior change).
-            parent_spoke_id = (auth_data.get("parent_spoke_id") or "").strip()
-            # Cert-target capability: a generic agent that deployed netbox-server
-            # (has the local nginx cert helper) advertises this so the hub can
-            # route the NetBox cert to it. Recorded post-auth below.
-            netbox_server_cap = bool(auth_data.get("netbox_server"))
-            # LDAP web/ldaps server cert-target capability (mirrors netbox_server):
-            # a generic agent that ran the ldap-server deploy role advertises this
-            # so the hub can route an LE cert to it. Recorded post-auth below.
-            ldap_server_cap = bool(auth_data.get("ldap_server"))
-            # H4 app-layer-encryption capability: the spoke advertises ``enc="v1"``
-            # in its auth frame. Combined with encryption_enabled() so
-            # LM_APP_ENCRYPTION=0 makes a new spoke behave as legacy (don't
-            # encrypt to it). Recorded post-auth below (unconditional — covers
-            # zero-touch / secret-less connects too, mirroring netbox_server_cap).
-            spoke_enc_capable = bool(auth_data.get("enc") == ENC_MARKER) and encryption_enabled()
-            # The spoke can generate its own mTLS key + CSR (SPOKE_MTLS_CSR).
-            spoke_mtls_csr_capable = bool(auth_data.get("mtls_csr"))
-            # Set True below when an approved spoke without a hub-CA cert is held
-            # in mTLS enrollment-only mode (see hub_mtls_enforcement.py).
-            mtls_enroll_only = False
-
-            # DEBUG-only + length-only: a 64-char session key's 4+4 prefix/suffix
-            # is a 12.5% entropy reduction, and this fires on EVERY connect
-            # attempt, so the log would accumulate prefix/suffix for every spoke
-            # over time. Length is enough to distinguish a real key from a
-            # missing/short one for debugging without leaking key material.
-            logger.debug(f"Auth attempt: spoke_id={spoke_id}, "
-                         f"secret={'<%d chars>' % len(secret) if secret else '***'}")
-            self.record_spoke_event(spoke_id, "auth_attempt", f"secret={'yes' if secret else 'no'} module_type={module_type}")
-
-            if not spoke_id:
-                self._record_spoke_auth_failure(peer_ip, None, "missing_spoke_id")
-                await websocket.close(1008, "Missing spoke_id")
+            hello = _SpokeHello.from_auth_frame(auth_data)
+            conn = await self._authenticate_spoke(websocket, hello, peer_ip)
+            if conn is None:
                 return
 
-            pk = self._primary_key(spoke_id)
-
-            # DDoS quarantine: a spoke disconnected for ignoring the slow-down
-            # signal and flooding is refused reconnect until its cooldown expires
-            # — so it can't just reconnect and immediately resume the flood. 1013
-            # = Try Again Later (the spoke's reconnect backoff honors it).
-            if self._is_quarantined(spoke_id):
-                self.record_spoke_event(spoke_id, "quarantine_reject",
-                                        "reconnect refused — still in DDoS quarantine")
-                await websocket.close(1013, "Quarantined (flooding) — retry later")
+            # Register, auto-approve if entitled, greet (config/key push).
+            if not await self._admit_spoke(conn, hello):
                 return
 
-            # Detect a clone-and-rename (same install UUID, new id) and migrate
-            # approval/tenant binding + key material to the new id — but ONLY if
-            # the caller proves it owns the OLD id's secret (CC2: a bare
-            # install_uuid + a new spoke_id with NO secret used to migrate the
-            # victim's approval + key material BEFORE any auth verify, then the
-            # zero-touch re-key path minted the attacker a fresh session key —
-            # full spoke/tenant takeover with no secret knowledge). Verify the
-            # presented secret against the OLD id (the UUID's current owner)
-            # first; only a proven rename is allowed to migrate. An unproven
-            # rename is left as a fresh spoke (pending approval / PSK), never an
-            # inheritance. get_valid_key is a pure constant-time compare — safe
-            # to call on old_id as a proof check without consuming/rotating it.
-            rename_proven = False
-            if install_uuid and secret:
-                _old_id = self.install_uuid_index.get(install_uuid)
-                if _old_id and _old_id != spoke_id \
-                        and self.key_manager.get_valid_key(self._primary_key(_old_id), secret):
-                    rename_proven = True
-            # Key↔install binding. A valid secret proves possession of key
-            # material, not that the box presenting it is the install the hub
-            # issued it to. Run this BEFORE _reconcile_spoke_identity: reconcile
-            # repoints install_uuid_index, overwrites the recorded uuid and can
-            # re-arm the guid, so adjudicating afterwards would persist the
-            # claim we are about to refuse — and the REAL spoke would then
-            # mismatch on its next reconnect and be locked out by its own
-            # attacker. Nothing here mutates state.
-            #
-            # Ordered cheapest-first so the normal reconnect pays only a string
-            # compare: no baseline / identical uuid short-circuits, and the key
-            # is verified only once a mismatch actually needs adjudicating.
-            # get_valid_key is a pure constant-time compare — safe to call as a
-            # proof check without consuming or rotating the key.
-            prev_install_uuid = self._recorded_install_uuid(pk)
-            if secret and not rename_proven and prev_install_uuid \
-                    and install_uuid != prev_install_uuid \
-                    and self.key_manager.get_valid_key(pk, secret) \
-                    and not self._verify_install_uuid_binding(
-                        spoke_id, pk, install_uuid, prev_install_uuid, peer_ip):
-                self.record_spoke_event(
-                    spoke_id, "auth_rejected",
-                    "valid secret presented from an install_uuid that does not "
-                    "match the install on record — connection refused")
-                await websocket.close(
-                    1008, "Identity mismatch — re-approval required")
-                return
-            self._reconcile_spoke_identity(spoke_id, install_uuid, spoke_hostname,
-                                           migrate_if=rename_proven)
-            # Re-resolve the primary key: _reconcile_spoke_identity may have
-            # armed guid-primary (spoke_id_alias[spoke_id]=install_uuid), so pk
-            # now resolves name→guid. Every state op below keys through pk so
-            # the spoke's routing/approval/crypto/mailbox state lands under the
-            # guid (the stable primary key) instead of the connect-id name.
-            pk = self._primary_key(spoke_id)
-            # Recompute pk: the arm inside reconcile may have flipped the alias
-            # name→guid, so the pre-reconcile pk computed above is now stale.
-            pk = self._primary_key(spoke_id)
+            # 2. Flush mailbox (+ deferred cs config push)
+            await self._flush_spoke_backlog(conn)
 
-            # If secret is provided, verify it. If not, the spoke is in 'pending secret' state.
-            is_authenticated = False
-            if secret:
-                key_id = self.key_manager.get_valid_key(pk, secret)
-                if key_id:
-                    is_authenticated = True
-                    self.spoke_authenticated[pk] = True
-                    # It adopted its key — clear any prior "never authenticated"
-                    # diagnosis so a future regression re-triggers a fresh ERROR.
-                    self._unauth_warned_spokes.discard(pk)
-                    # Established-good IP: shield it from a false-positive
-                    # threat block if it later glitches during a key rotation.
-                    if peer_ip:
-                        tm = getattr(self, "threat_monitor", None)
-                        if tm:
-                            try:
-                                tm.record_success(peer_ip)
-                            except Exception:  # noqa: BLE001
-                                pass
-                    logger.info(f"Spoke {spoke_id} authenticated successfully with secret.")
-                    self.record_spoke_event(spoke_id, "auth_ok", "secret verified")
-                else:
-                    logger.warning(f"Authentication failed for spoke {spoke_id}: Invalid secret.")
-                    self.record_spoke_event(spoke_id, "auth_failed", "invalid secret — spoke will retry / fall back to zero-touch")
-            else:
-                logger.info(f"Spoke {spoke_id} connected without secret. Entering pending-negotiation state.")
-                self.record_spoke_event(spoke_id, "pending_negotiation", "no secret — zero-touch")
-
-            if not is_authenticated:
-                # Register as known if not already
-                if pk not in self.known_modules:
-                    self.state.register_module(pk, approved=False)
-                    self.known_modules = self.state.system_state["known_modules"]
-
-                # Update telemetry
-                self.spoke_telemetry[pk] = {
-                    "last_attempt": time.time(),
-                    "status": "PENDING_SECRET" if not secret else "AUTH_FAILED",
-                    "error": None if not secret else "Invalid secret"
-                }
-
-                # If they provided a secret and it was wrong, we close.
-                # If they provided no secret, we KEEP the connection open to negotiate one.
-                if secret:
-                    # Invalid session secret = a credential-guessing attempt —
-                    # UNLESS the peer proves it is an already-approved install
-                    # (matching 128-bit install_uuid). A generic agent fans out
-                    # several role sub-spokes from ONE IP; after a reboot or a key
-                    # rotation that outlived the 3600s success-grace, their
-                    # stale-but-legit secrets would otherwise rack up spoke_auth
-                    # failures from that single IP and NSG-block the whole agent.
-                    # An attacker cannot forge a valid install_uuid that maps to an
-                    # approved identity, so this exempts the reboot/rotation glitch
-                    # without weakening detection of a real guessing source (which
-                    # has no such identity proof and still trips the block).
-                    if (self._is_approved_install_reconnect(spoke_id, install_uuid)
-                            and self._within_reconnect_exemption_budget(peer_ip)):
-                        self.record_spoke_event(
-                            spoke_id, "auth_glitch_known_install",
-                            "invalid secret from an approved install (reboot/rotation) "
-                            "— not counted as an attack; will re-negotiate")
-                        logger.info(
-                            "Spoke %s presented a stale secret but proved an approved "
-                            "install (uuid match) — treating as a rotation/reboot glitch, "
-                            "not a threat signal.", spoke_id)
-                    else:
-                        # Established-good IPs are also success-grace exempt (above),
-                        # so a probing source with neither identity proof nor grace
-                        # — or a proven identity that BLEW the reconnect budget (a
-                        # sustained stale-secret stream, i.e. not a bounded reboot) —
-                        # trips the block at threshold.
-                        self._record_spoke_auth_failure(peer_ip, spoke_id, "invalid_secret")
-                    await websocket.close(1008, "Authentication failed")
-                    return
-            else:
-                logger.info(f"Spoke {spoke_id} authenticated successfully.")
-                # Evict any prior connection for this spoke_id (e.g. a zombie
-                # left over from a prior outage / port-move crash-loop). A stale
-                # (history-key) reconnect that would evict a live current-key
-                # connection is rejected instead — see _install_active_connection.
-                if not await self._install_active_connection(spoke_id, websocket, key_id):
-                    return
-                self.record_spoke_event(spoke_id, "connected", "authenticated with secret")
-                # Persist this source IP as the spoke's HISTORICAL (known-good)
-                # location — but ONLY when it authenticated on its CURRENT key
-                # while approved. A harvested BACKUP key can never move it, so
-                # the key-clone response can trust known_ip to spare the real
-                # spoke's IP (and follow it across a legit DHCP move) while
-                # NSG-blocking the intruder's IP. See _handle_key_clone_compromise.
-                try:
-                    _cur = self.key_manager.keys.get(pk)
-                    if (peer_ip and _cur and key_id == _cur.key_id
-                            and self.approved_modules.get(pk, False)):
-                        self._note_known_ip(pk, peer_ip)
-                except Exception:  # noqa: BLE001
-                    pass
-                # A history-key reconnect (missed a rotation push while offline)
-                # is re-synced by _maybe_redeliver_session_key on the first
-                # history-signed frame in the message loop (main.py ~3924) — no
-                # connect-time push needed here.
-
-            # --- Mutual Authentication (Hub Identity Proof) ---
-            try:
-                challenge = secrets.token_urlsafe(32)
-                signature = self.key_manager.sign_hub_challenge(challenge.encode())
-
-                proof = {
-                    "status": "HUB_VERIFIED",
-                    "challenge": challenge,
-                    "signature": signature
-                }
-                # Rotation-window proof: the KeyManager retains the last 3 hub
-                # root secrets specifically "so spokes can verify the Hub's
-                # identity even if they have not yet received the latest
-                # rotation update or if they were restored from a backup"
-                # (key_manager.rotate_hub_secret docstring) — but that window
-                # was dead unless the spoke happened to hold hub_secrets[0].
-                # Ship a signature for every retained secret so a spoke
-                # holding an older-but-still-retained secret can verify via
-                # ``signatures`` instead of only the single newest-secret
-                # ``signature`` above. Additive field — the spoke verifies
-                # over ``challenge`` only (see the ``enc`` comment below), so
-                # a legacy spoke that only reads ``signature`` is unaffected.
-                try:
-                    proof["signatures"] = self.key_manager.sign_hub_challenge_all(
-                        challenge.encode())
-                except Exception:  # noqa: BLE001 — never block the legacy proof on this
-                    logger.debug("sign_hub_challenge_all failed; proceeding with single signature only", exc_info=True)
-                # Rotation-INDEPENDENT proof. ``signatures`` above only rescues a
-                # spoke still inside the 3-deep root window; one that missed more
-                # rotations than that has nothing left to check and hard-refuses
-                # us forever when LM_HUB_TLS_VERIFY=0 (the cs-svr-0* lockout —
-                # 77k log lines, only a reinstall cleared it). The per-spoke
-                # recovery PSK is derived from a root that never rotates, so a
-                # spoke that persisted it on ANY prior good connect can still
-                # verify us regardless of how far behind it has drifted. Signed
-                # per spoke_id and one-way, so a stranger claiming some other
-                # spoke's id learns nothing it can replay. Additive — verified
-                # over ``challenge`` only, so legacy spokes ignore it.
-                try:
-                    if spoke_id:
-                        proof["recovery_signature"] = self.key_manager.sign_hub_challenge_recovery(
-                            challenge.encode(), spoke_id)
-                except Exception:  # noqa: BLE001 — never block connect on the escape hatch
-                    logger.debug("sign_hub_challenge_recovery failed; proceeding without it", exc_info=True)
-                # H4: advertise app-layer-encryption capability to the spoke. The
-                # spoke verifies the signature over ``challenge`` ONLY (it never
-                # re-serializes or re-signs this proof dict), so adding an
-                # additive ``enc`` field is signature-safe. A new spoke reads it
-                # and encrypts its outbound secret frames to the hub; a legacy
-                # spoke ignores the unknown field (fail-safe → plaintext).
-                if encryption_enabled():
-                    proof["enc"] = ENC_MARKER
-                # PSK-bound hub proof (stale-hub-secret recovery): when the spoke
-                # presented a VALID onboarding PSK, ALSO sign the challenge with
-                # that PSK. The PSK is a deploy-time shared secret a MITM hub does
-                # NOT hold, so it is an INDEPENDENT hub authenticator. This lets a
-                # spoke whose stored hub_secret has gone stale (hub root-key
-                # rotation / restore-from-different-install / a rotation it was
-                # offline for) re-verify the hub and recover to zero-touch even
-                # with LM_HUB_TLS_VERIFY=0 — instead of hard-refusing forever
-                # ("Hub identity unverified (TLS verify off)") and never getting
-                # the fresh hub_secret + mTLS cert that push_config_to_spoke /
-                # _provision_spoke_mtls_cert deliver on the approved connect.
-                # Validated against the tenant's stored PSKs first so the hub
-                # never signs with attacker-supplied material. Additive field —
-                # the spoke verifies over ``challenge`` only, so this is
-                # signature-safe and legacy spokes ignore it.
-                if onboarding_psk and tenant_id_hint:
-                    try:
-                        if await self._psk_is_valid(tenant_id_hint, onboarding_psk):
-                            proof["psk_signature"] = hmac.new(
-                                onboarding_psk.encode(), challenge.encode(),
-                                hashlib.sha256).hexdigest()
-                    except Exception:  # noqa: BLE001 — never block connect on this
-                        logger.debug("PSK-bound hub proof skipped (psk check failed)",
-                                     exc_info=True)
-                await websocket.send(json.dumps(proof))
-
-                # If the spoke has a secret, it will respond. If not, it might just ignore or respond HUB_OK.
-                try:
-                    hub_response_json = await asyncio.wait_for(websocket.recv(), timeout=2.0)
-                    hub_response = json.loads(hub_response_json)
-
-                    if hub_response.get("status") != "HUB_OK":
-                        logger.warning(f"Mutual auth failed: Spoke {spoke_id} rejected Hub identity.")
-                        self.record_spoke_event(spoke_id, "mutual_auth_failed", "spoke rejected hub identity — likely stale HUB_SECRET after hub restart")
-                        await websocket.close(1008, "Hub identity rejected")
-                        return
-                    logger.info(f"Mutual authentication complete for {spoke_id}.")
-                    self.record_spoke_event(spoke_id, "mutual_auth_complete", "")
-                    # The spoke told us (additive/optional ``hub_secret_index``)
-                    # which entry of our ``signatures`` rotation-window list it
-                    # matched. Index 0 = our current root secret — nothing to
-                    # do. Index > 0 = it's still holding an OLDER retained
-                    # secret (missed one or more root rotations); proactively
-                    # push it the current one now instead of leaving it to
-                    # keep drifting — a spoke that never reconnects during a
-                    # rotation's brief propagation window would otherwise
-                    # accumulate rotations behind until it eventually falls
-                    # OUT of the 3-entry window and hits the unverified-hub
-                    # refusal this whole feature exists to prevent. A legacy
-                    # spoke omits the field entirely and this is a no-op.
-                    try:
-                        matched_index = hub_response.get("hub_secret_index")
-                        if isinstance(matched_index, int) and matched_index > 0:
-                            await self._maybe_reprovision_hub_secret(spoke_id)
-                    except Exception:  # noqa: BLE001 — best-effort, never break the handshake
-                        logger.debug("hub_secret reprovision check failed for %s", spoke_id, exc_info=True)
-                except asyncio.TimeoutError:
-                    if not secret:
-                        logger.info(f"No response for Hub proof from {spoke_id} (expected for secret-less connection).")
-                        self.record_spoke_event(spoke_id, "mutual_auth_skipped", "no secret — HUB_OK not required (zero-touch)")
-                    else:
-                        logger.error(f"Mutual authentication timed out for {spoke_id}")
-                        self.record_spoke_event(spoke_id, "mutual_auth_timeout", "spoke did not respond to hub proof within 2s")
-                        await websocket.close(1008, "Mutual authentication timed out")
-                        return
-                except websockets.ConnectionClosed as e:
-                    # The spoke closes the socket (instead of replying HUB_OK)
-                    # when it refuses this Hub's identity proof — see
-                    # control_plane.py's "Hub identity unverified (TLS verify
-                    # off)" refuse branch: every known hub_secret (plus the
-                    # signatures/psk_signature fallbacks) failed to verify,
-                    # and TLS isn't authenticating the hub either, so the
-                    # spoke keeps its stale secret(s) and drops the connection
-                    # rather than risk trusting a possible MITM hub. Before
-                    # this, the Hub recorded NOTHING for this case — the
-                    # operator only ever saw the spoke as "offline" with no
-                    # cause, even though the Hub is the side watching the
-                    # close frame go by. Surface it through record_spoke_event
-                    # + spoke_telemetry so it flows into /setup/diagnostics
-                    # (last_status/last_error/flapping) instead of vanishing.
-                    # The decision + recording is factored into
-                    # _record_hub_identity_rejection (rather than kept inline)
-                    # so it's unit-testable without driving a full fake-
-                    # websocket handshake through this method.
-                    close_code = e.rcvd.code if getattr(e, "rcvd", None) else None
-                    close_reason = ((e.rcvd.reason if getattr(e, "rcvd", None) else "") or "")
-                    identity_rejected = self._record_hub_identity_rejection(
-                        spoke_id, pk, close_code, close_reason)
-                    if not identity_rejected:
-                        # Not an identity-rejection close — preserve the prior
-                        # fallback behavior (this used to fall through to the
-                        # generic "Mutual authentication error" handler below).
-                        logger.error(f"Mutual authentication error for {spoke_id}: {e}")
-                        try:
-                            await websocket.close(1008, "Mutual authentication failed")
-                        except Exception:
-                            pass
-                    return
-            except Exception as e:
-                logger.error(f"Mutual authentication error for {spoke_id}: {e}")
-                await websocket.close(1008, "Mutual authentication failed")
-                return
-
-            # Ensure connection is tracked even if not fully auth'd (for negotiation).
-            # See _install_pending_connection: a prior PENDING connection is
-            # evicted (so a newer connection wins the slot), but a prior
-            # AUTHENTICATED connection is NOT clobbered (stale-process guard).
-            await self._install_pending_connection(spoke_id, websocket)
-
-            # Update telemetry — capture remote IP so the UI can auto-fill service URLs
-            remote_ip = None
-            try:
-                remote_ip = websocket.remote_address[0] if websocket.remote_address else None
-            except Exception:
-                pass
-            self.spoke_telemetry[pk] = {
-                "last_attempt": time.time(),
-                "status": "CONNECTED",
-                "error": None,
-                "remote_ip": remote_ip,
-            }
-
-            # Track this module as known for approval lists
-            if pk not in self.known_modules:
-                self.state.register_module(pk, approved=False)
-                self.known_modules = self.state.system_state["known_modules"]
-
-            # Initialize the per-spoke rate limiter from config (applied on each
-            # (re)connect, so a knob change propagates as spokes reconnect). The
-            # default (burst=400 / 200 msg/s, from _rate_limit_params) is a FLOOD
-            # guard sized well ABOVE a RELAY spoke's legit peak — it fans many
-            # hosted agents and re-flushes its queue on reconnect — so normal
-            # traffic is never dropped. Raise global_config["rate_limit"] as the
-            # fleet/scale grows. Aggregate overload is the fleet layer's job, not
-            # this bucket. See docs/backpressure-throttling.md §4.
-            _rl_cap, _rl_rate = self._rate_limit_params()
-            self.rate_limiters[pk] = TokenBucket(capacity=_rl_cap, fill_rate=_rl_rate)
-            if module_type:
-                self.spoke_module_types[pk] = module_type
-                # Persist the type into module_metadata so the Spoke Management
-                # list can show a cs/simulation spoke's type even while it is
-                # offline (the in-memory spoke_module_types dict is popped on
-                # disconnect). Free-form merge — no migration needed.
-                #
-                # DEFER the disk write: update_module_metadata already marks the
-                # state dirty, and the (offloaded) 60s persistence flush writes
-                # it. A synchronous save_state() HERE did a full-state
-                # encrypt+write on the event loop on EVERY connect — under a
-                # 600-spoke reconnect storm that repeatedly stalled the loop for
-                # seconds (py-spy: save_state → _write_encrypted inside
-                # handle_connection), delaying heartbeats enough to flip modules
-                # offline. Durability to the next flush is fine: a reconnecting
-                # spoke re-registers its type anyway. Only log/event on a genuinely
-                # NEW type so a reconnect storm doesn't spam either.
-                _prev_type = self.state.system_state.get("module_metadata", {}).get(
-                    pk, {}).get("module_type")
-                self.state.update_module_metadata(pk, {"module_type": module_type})
-                if _prev_type != module_type:
-                    logger.info(f"Spoke {spoke_id} registered as module type: {module_type}")
-                    self.record_spoke_event(spoke_id, "registered", f"module_type={module_type}")
-
-            # PSK self-provisioning: a spoke that presented the tenant's
-            # predefined onboarding PSK (+ a tenant_id_hint) auto-approves and
-            # auto-binds to that tenant without admin action (mirrors the legacy
-            # cs/webui-local /api/spokes/register PSK flow). This runs AFTER the
-            # register_module(approved=False) calls above so the approval wins,
-            # and BEFORE the approval check so the approved branch handles
-            # session-key/config push. A wrong/missing PSK is not fatal — the
-            # spoke simply falls through to pending admin approval as today.
-            if onboarding_psk and tenant_id_hint:
-                if await self._try_psk_self_provision(spoke_id, tenant_id_hint, onboarding_psk):
-                    self.known_modules = self.state.system_state["known_modules"]
-                else:
-                    logger.warning(
-                        f"PSK self-provision failed for {spoke_id} "
-                        f"(tenant_hint={tenant_id_hint}): invalid/missing PSK — pending admin approval.")
-                    self.record_spoke_event(spoke_id, "psk_self_provision_failed",
-                                            f"tenant_hint={tenant_id_hint}")
-                    # A wrong onboarding PSK is an unambiguous attack signal (a
-                    # legit PSK spoke has the right PSK; a legit zero-touch spoke
-                    # sends none). Feed the threat monitor so PSK-guessing from
-                    # one IP trips the NSG block.
-                    self._record_spoke_auth_failure(peer_ip, spoke_id, "invalid_onboarding_psk")
-
-            # Multi-role generic agent — parent-auto-approve: a role sub-spoke
-            # (spoke_id {base}-{role}) that claimed a parent agent in its auth
-            # frame is auto-approved + tenant-bound when the parent is already
-            # approved + connected + module_type "agent", reusing the same
-            # approve_and_bind_spoke state machine as admin/PSK approval. This
-            # runs alongside the PSK block (both are claim-based auto-approve)
-            # and before the approval check so the approved branch pushes the
-            # session key + config. Non-fatal: parent not approved/connected or
-            # the id isn't prefix-tied to the claimed parent → fall through to
-            # pending admin approval as today. Record the parent claim either way
-            # so a later base-agent approval can sweep up waiting sub-spokes
-            # (_auto_approve_pending_subspokes covers the sub-before-parent order).
-            if netbox_server_cap:
-                self.netbox_server_agents.add(pk)
-            else:
-                self.netbox_server_agents.discard(pk)
-            if ldap_server_cap:
-                self.ldap_server_agents.add(pk)
-            else:
-                self.ldap_server_agents.discard(pk)
-            # H4: record encryption capability unconditionally (covers the
-            # zero-touch / secret-less connect path too). A non-capable or
-            # kill-switched spoke records False → outbound frames stay plaintext.
-            self.spoke_enc_capable[pk] = spoke_enc_capable
-            self.spoke_mtls_csr_capable[pk] = spoke_mtls_csr_capable
-            if parent_spoke_id:
-                self.spoke_parent_map[pk] = parent_spoke_id
-                # B4: persist the parent linkage + role name into the sub-spoke's
-                # metadata so the WebUI can match a role sub-spoke to its parent
-                # agent AFTER B1 re-keyed known_modules raw→guid (the pre-B1
-                # ``{base}-{role}`` string-prefix match broke once both the base
-                # and the sub-spoke became independent guid keys). Stamped raw
-                # (the parent name the sub-spoke claimed) + resolved to the
-                # parent's current primary key at emit time (``_primary_key``),
-                # which matches whatever the parent's own pending_spokes row emits
-                # as ``spoke_id`` (guid once armed, raw until then). Persisted →
-                # the linkage survives the sub-spoke going offline (the in-memory
-                # ``spoke_parent_map`` does not).
-                if spoke_id.startswith(parent_spoke_id + "-"):
-                    self.state.update_module_metadata(pk, {
-                        "parent_name": parent_spoke_id,
-                        "role_name": spoke_id[len(parent_spoke_id) + 1:],
-                    })
-                if not self.approved_modules.get(pk, False):
-                    # Parent attestation (H3): ask the claimed parent to sign a
-                    # vouch that this sub-spoke is one it spawned, instead of
-                    # trusting the child's unsigned parent_spoke_id claim. On a
-                    # verified vouch → auto-approve + tenant-bind (zero-touch
-                    # preserved). On any failure (parent not connected /
-                    # unauthenticated / timeout / denied / echo mismatch / not
-                    # an agent / prefix mismatch) → fall through to pending admin
-                    # approval below; do NOT close the connection. Record the
-                    # parent claim either way so a later base-agent approval can
-                    # sweep up waiting sub-spokes (the sweep covers the
-                    # sub-before-parent connect order).
-                    vouched, reason = await self._parent_vouches(spoke_id, parent_spoke_id)
-                    if vouched:
-                        tenant = self.state.get_spoke_tenant(self._primary_key(parent_spoke_id)) or ""
-                        logger.info(f"Parent auto-approve: {spoke_id} via parent "
-                                    f"{parent_spoke_id} (tenant={tenant or 'unassigned'}).")
-                        await self.approve_and_bind_spoke(spoke_id, tenant)
-                        self.known_modules = self.state.system_state["known_modules"]
-                        self.record_spoke_event(spoke_id, "parent_auto_approve",
-                                                f"parent={parent_spoke_id}")
-                    else:
-                        self.record_spoke_event(spoke_id, "parent_vouch_failed",
-                                                f"parent={parent_spoke_id} reason={reason}")
-
-            # Check if the module is already approved
-            if not self.approved_modules.get(pk, False):
-                logger.info(f"Module {spoke_id} is pending approval.")
-                self.record_spoke_event(spoke_id, "pending_approval", "awaiting admin approval")
-                # Send Approval Required message
-                approval_msg = {
-                    "header": {"message_id": str(uuid.uuid4()), "timestamp": time.time(),
-                               "sender_id": "hub", "destination_id": spoke_id},
-                    "payload": {"type": "APPROVAL_REQUIRED", "data": {}}
-                }
-                # Only sign if we have a key
-                try:
-                    approval_msg["signature"] = self.key_manager.sign_message(pk, {
-                        "header": approval_msg["header"],
-                        "payload": approval_msg["payload"]
-                    })
-                except Exception:
-                    approval_msg["signature"] = None
-
-                await websocket.send(json.dumps(approval_msg))
-                # We don't return; we enter the loop but the loop will filter messages
-            else:
-                # MODULE IS APPROVED
-                # If the spoke connected without a secret (zero-touch, already approved),
-                # generate and push its session key before sending config.
-                if not secret:
-                    # Zero-touch reconnect (spoke connected with no secret).
-                    # Provision PLAINTEXT: signing_secret=None → no AEAD wrap →
-                    # accepted in the spoke's bootstrap decode (which ignores
-                    # signatures when self.secret is unset). Never sign with a
-                    # retained prev_secret here — the hub persists keys[pk] so
-                    # current_session_secret(pk) can be a secret a prior-session
-                    # sub-spoke armed but never persisted (RoleConnection no-op),
-                    # and encrypting the push with it traps the sub-spoke in
-                    # _decode_frame's defer-buffer forever (the never-adopted
-                    # outage). Fire-and-forget (NOT request_response): the ack
-                    # is unreachable in the connect path (the message loop
-                    # hasn't started) → a 5s timeout every connect that stalls
-                    # push_config and flaps the WS. The spoke-side deferral
-                    # closes the back-to-back encrypted UPDATE_CONFIG race.
-                    session_secret = self.key_manager.generate_first_secret(pk)
-                    key_msg = Message(
-                        header=MessageHeader(
-                            message_id=str(uuid.uuid4()), timestamp=time.time(),
-                            sender_id="hub", destination_id=spoke_id),
-                        payload=MessagePayload(
-                            type="SPOKE_UPDATE_SESSION_KEY",
-                            data={"secret": session_secret}))
-                    await self.send_to_spoke(key_msg, signing_secret=None)
-                # mTLS enforcement (hub_mtls_enforcement.py): bind the presented
-                # hub-CA cert to this spoke, refuse revoked / foreign certs and
-                # bound spokes that show up cert-less, and hold a cert-less spoke
-                # in enrollment-only mode until it presents its issued cert.
-                try:
-                    _mtls_gate, _mtls_why = self._mtls_connect_gate(
-                        spoke_id, pk, websocket, module_type or "")
-                except Exception as e:  # noqa: BLE001 - never block connect on a gate bug
-                    logger.warning(f"[mtls] connect gate for {spoke_id} errored: {e}")
-                    _mtls_gate, _mtls_why = "ok", "gate-error"
-                if _mtls_gate == "reject":
-                    await self._mtls_reject(spoke_id, pk, websocket, _mtls_why)
-                    return
-                if _mtls_why == "enroll-exhausted":
-                    logger.warning(f"[mtls] {spoke_id} never presented its hub-CA cert "
-                                   f"after repeated enrollment — allowing degraded "
-                                   f"cert-less operation (set mtls_require_cert to forbid)")
-                    self.record_spoke_event(spoke_id, "mtls_enroll_exhausted", "")
-                if _mtls_gate == "enroll":
-                    mtls_enroll_only = True
-                    await self._mtls_begin_enrollment(spoke_id, pk, websocket)
-                else:
-                    self._cs_connect_defer[spoke_id] = [time.time(), False]
-                    await self.push_config_to_spoke(spoke_id)
-
-                    # Role self-heal (hub half): if this is a base agent, re-push
-                    # LOAD_ROLE for any role the hub durably assigned to it whose
-                    # sub-spoke isn't currently connected (the agent may have booted
-                    # roles=none after losing its .env LOADED_ROLES). Fire-and-forget
-                    # so it never blocks the connect path; it waits for the agent to
-                    # authenticate before pushing.
-                    if module_type == "agent":
-                        asyncio.create_task(self._readopt_agent_roles(spoke_id))
-
-                    # Fleet mTLS: deliver a Hub-Local-CA clientAuth client cert so the
-                    # spoke can present a VERIFIED mTLS identity (public CAs no longer
-                    # issue clientAuth). Idempotent — skips when a current cert exists.
-                    # Gated by the mtls_ca_auto_provision toggle (default ON); a revoked
-                    # spoke (mtls_revoked set) is skipped until manually re-issued.
-                    # Run as a task: a CSR-capable spoke answers SPOKE_MTLS_CSR over
-                    # request_response, which needs the message loop below running.
-                    try:
-                        _gc = self.state.system_state.get("global_config", {}) or {}
-                        _revoked = self.state.system_state.get("mtls_revoked", {}) or {}
-                        if (_gc.get("mtls_ca_auto_provision", True)
-                                and self._primary_key(spoke_id) not in _revoked):
-                            asyncio.create_task(self._provision_spoke_mtls_cert_safe(spoke_id))
-                    except Exception as e:  # noqa: BLE001 - never block connect on this
-                        logger.warning(f"[mtls] provision client cert for {spoke_id} failed: {e}")
-
-                    # Request version AFTER the session key is established so the spoke
-                    # can sign its response and the hub can verify it.
-                    try:
-                        version_msg = Message(
-                            header=MessageHeader(
-                                message_id=str(uuid.uuid4()),
-                                timestamp=time.time(),
-                                sender_id="hub",
-                                destination_id=spoke_id
-                            ),
-                            payload=MessagePayload(type="get_version", data={})
-                        )
-                        await self.send_to_spoke(version_msg)
-                    except Exception as e:
-                        logger.error(f"Failed to request version from {spoke_id}: {e}")
-
-            # 2. Flush Mailbox — keyed by pk (guid once armed): _arm_guid_primary
-            # in _reconcile_spoke_identity re-keyed the offline queue name→guid, so
-            # flush must read the guid-keyed queue or a reconnecting spoke's
-            # pending messages would be stranded under the stale name.
-            if not mtls_enroll_only:
-                await self.mailbox.flush_mailbox(pk, self.send_to_spoke)
-
-            # cs reconnect config push, deferred from push_config_to_spoke so it
-            # lands AFTER any queued (older) CS_CONFIG_UPDATE and runs as a task
-            # while the message loop below receives its reply.
-            _cs_defer = self._cs_connect_defer.pop(spoke_id, None) if spoke_id else None
-            if _cs_defer and _cs_defer[1] and not mtls_enroll_only:
-                self._spawn_cs_push(self.push_cs_full_config(spoke_id, reason="reconnect"))
-
-            # 3. Message Loop
+            # 3. Message loop
             async for message_json in websocket:
-                # TRUE offered-rate tally (before ANY shed) so the protect
-                # source-shed can find the loudest talkers to disconnect. One
-                # dict op per frame — cheap. Counts frames we then drop, unlike
-                # spoke_msg_count (which is post-shed).
-                if spoke_id:
-                    self._spoke_recv[pk] = self._spoke_recv.get(pk, 0) + 1
-                # PROTECT MODE — early shed by SIZE, BEFORE the expensive JSON
-                # parse. At a CPU-pegged loop the parse of large telemetry frames
-                # IS the bottleneck, so dropping them here (not after parsing) is
-                # what actually frees the loop. Small frames (heartbeats/acks,
-                # < shed_bytes) still parse + flow, so liveness/acks are kept.
-                # BUT dropping-after-read still costs the READ; a sustained flood
-                # is only relieved by DISCONNECTING the source — see the protect
-                # source-shed in run_mps_loop / _protect_source_shed.
-                if self._protect_mode:
-                    # SURGICAL shed: drop a large frame ONLY if this spoke is a
-                    # high-offered-rate OFFENDER. Legit low-rate spokes' telemetry
-                    # flows even during protect — the point is to shed the FLOOD,
-                    # not everyone (that's why real modules were dropping traffic).
-                    # _spoke_offered is the TRUE pre-shed per-tick count, so it
-                    # isn't corrupted by the shedding itself.
-                    try:
-                        if (len(message_json) > self._protect_shed_bytes
-                                and self._spoke_offered.get(pk, 0) >= self._protect_shed_min_mps):
-                            self.rate_limit_drops[pk] = self.rate_limit_drops.get(pk, 0) + 1
-                            continue
-                    except Exception:
-                        pass
-                # Wire form is <sig>.<body>: split, verify the RECEIVED body bytes
-                # DIRECTLY (no re-serialization — the per-frame json.dumps that
-                # dominated ingest CPU is gone), and parse the body ONCE. sig == ""
-                # means unsigned (a bootstrap heartbeat before the spoke has a key).
-                sig, body_str = split_frame(message_json)
-                try:
-                    msg_data = json.loads(body_str)
-                except Exception:
-                    logger.debug("Unparseable frame from %s — dropping", spoke_id)
-                    continue
-
-                signature = sig or None
-                # H4: the AEAD-decrypt secret for an inbound secret-bearing
-                # frame. Resolved (and the payload decrypted) only on signed
-                # frames after HMAC verify + freshness pass; None for unsigned
-                # heartbeats (never encrypted). Threaded into _handle_agent_relay_up
-                # for the nested CS_TOKEN_RESULT decrypt (refinement #2).
-                _dec_secret = None
-                if signature:
-                    src = self.key_manager.verify_signature_source(pk, body_str.encode(), sig)
-                    if src is None:
-                        logger.warning(f"Invalid signature from spoke {spoke_id}")
-                        continue
-                    # A verified signature proves the spoke installed its session
-                    # key. Mark it authenticated (idempotent — also set at connect
-                    # when a secret was presented). A spoke that never reaches here
-                    # (legacy/incompatible agent that can't adopt a key) stays
-                    # unauthenticated, so command routes can fail fast.
-                    self.spoke_authenticated[pk] = True
-                    # The spoke is signing with a PREVIOUS (rotated-out) key — it
-                    # authenticated via the history window but never adopted the
-                    # current key (missed the SPOKE_UPDATE_SESSION_KEY push). That
-                    # is exactly the skew that produces "Bytes signature mismatch"
-                    # on hub→spoke replies + GET_AGENTS/telemetry timeouts: the
-                    # spoke→hub direction verifies (history), hub→spoke does not
-                    # (spoke lacks the current key). Re-deliver the current key
-                    # signed with the previous secret so the spoke can adopt it
-                    # without a full re-onboard. Rate-limited per spoke.
-                    if src == "history":
-                        await self._maybe_redeliver_session_key(pk)
-                    # First signed frame clears any prior "never authenticated"
-                    # diagnosis (idempotent with the connect-time discard).
-                    self._unauth_warned_spokes.discard(pk)
-                    # Replay/freshness gate (item 8B): drop a captured/delayed
-                    # signed frame that replays verbatim (same bytes → same HMAC)
-                    # or whose timestamp is outside the freshness window. Runs
-                    # only on signed frames, after verification, so unsigned
-                    # heartbeats cost nothing and it's not an unauth flood vector.
-                    if not self._check_freshness_and_replay(pk, msg_data):
-                        continue
-                    # H4: AEAD-decrypt payload.data of secret-bearing inbound
-                    # frames (after HMAC verify + freshness pass) BEFORE dispatch
-                    # reads data. _decrypt_inbound_payload resolves the AEAD key
-                    # from src (history → previous_session_secret, else current),
-                    # is a no-op on plaintext/legacy frames, and returns _H4_DROP
-                    # on tamper / wrong key / marked-encrypted-with-no-decrypt-key
-                    # (the frame is dropped — ciphertext is never dispatched).
-                    _dec_secret = await self._decrypt_inbound_payload(pk, src, msg_data)
-                    if _dec_secret is _H4_DROP:
-                        continue
-                else:
-                    # No signature provided. Allow ONLY heartbeats for unauthenticated spokes.
-                    payload = msg_data.get("payload", {})
-                    if payload.get("type") != "HEARTBEAT":
-                        # A non-heartbeat frame from a spoke that never adopted
-                        # its session key. If this persists past the grace
-                        # window it's the signature of a legacy/incompatible or
-                        # crashed-on-startup agent — emit ONE actionable ERROR
-                        # via the GenericAgent logger (throttled per-connection)
-                        # instead of flooding WARNING per frame.
-                        self._maybe_log_unauthenticated_agent(pk)
-                        logger.debug(
-                            f"Unauthenticated non-heartbeat from {spoke_id} "
-                            f"(only HEARTBEAT allowed). Dropping.")
-                        continue
-
-                # Process Heartbeat (Always allowed for pending spokes to maintain connection)
-                payload = msg_data.get("payload", {})
-                self.bytes_count += len(message_json) # Track received bytes
-                # Per-spoke inbound rate (relayed agent frames count toward the
-                # hosting spoke) — reset + averaged each 1s tick in run_mps_loop.
-                if spoke_id:
-                    self.spoke_msg_count[pk] = self.spoke_msg_count.get(pk, 0) + 1
-                # Inbound trace: one line per frame so the full dispatch flow is
-                # greppable when DEBUG is on. Heartbeats are the bulk of traffic,
-                # so this stays at DEBUG (not INFO) to avoid flooding the log.
-                logger.debug("inbound type=%s from spoke=%s", payload.get("type"), spoke_id)
-                if payload.get("type") == "HEARTBEAT":
-                    self.message_count += 1
-                    self.heartbeat.update_heartbeat(pk)
-                    # Persist last-contacted so a hub reboot doesn't reset this
-                    # spoke to "Never connected / RED". _mark_dirty (no disk
-                    # write here) — the 60s persistence_loop flushes. Cheap
-                    # enough to run every heartbeat tick.
-                    self.state.set_spoke_last_seen(pk, self.heartbeat.last_seen[pk])
-                    # A heartbeat means the spoke is in contact — clear any
-                    # never-seen absent clock so the alert loop doesn't keep a
-                    # stale _spoke_absent_since entry around after first contact.
-                    self._spoke_absent_since.pop(pk, None)
-                    continue
-
-                # If the module is not approved, ignore all other messages
-                if not self.approved_modules.get(pk, False):
-                    logger.debug(f"Dropping message from unapproved module {spoke_id}")
-                    continue
-
-                # mTLS enrollment-only: nothing but replies to the hub's own
-                # in-flight requests (the CSR exchange) until the spoke reconnects
-                # presenting its cert.
-                if mtls_enroll_only:
-                    _cid = msg_data.get("correlation_id")
-                    if not (_cid and _cid in self._outstanding_requests):
-                        logger.debug(f"Dropping message from {spoke_id} (mTLS enrollment-only)")
-                        continue
-
-                # Process Acknowledgement
-                if "correlation_id" in msg_data:
-                    corr_id = msg_data["correlation_id"]
-                    # Keepalive: a spoke servicing a slow request emits
-                    # SPOKE_PROGRESS frames (correlation_id == the request's
-                    # msg_id) so this hub extends the request_response deadline
-                    # instead of killing a genuinely-working spoke at the base
-                    # timeout. Bump the soft deadline (capped at the hard
-                    # ceiling) and drop the frame — it carries no result.
-                    if payload.get("type") == "SPOKE_PROGRESS":
-                        _pd = self._progress_deadlines.get(corr_id)
-                        if _pd is not None:
-                            _pd["soft"] = min(time.time() + _pd["grace"], _pd["hard"])
-                            logger.debug(
-                                "SPOKE_PROGRESS keepalive for %s from %s — deadline extended",
-                                corr_id, spoke_id)
-                        self.message_count += 1
-                        continue
-                    # App-layer liveness probe reply (HUB_PING → COMMAND_RESULT
-                    # whose correlation_id is the ping's message_id). Resolve the
-                    # sending adapter's ping waiter BEFORE the mailbox/unknown-ack
-                    # routing so a probe reply isn't mislogged as a stray ack.
-                    # The spoke that REPLIED is the one whose socket holds the
-                    # waiter (it echoed the nonce we sent it on that socket).
-                    if corr_id in self._pending_liveness_nonces:
-                        self._pending_liveness_nonces.discard(corr_id)
-                        adapter = self.active_connections.get(pk)
-                        if adapter is not None and hasattr(adapter, "resolve_pong"):
-                            adapter.resolve_pong(corr_id)
-                        self.message_count += 1
-                        continue
-                    # A reply's correlation_id is the hub's original message_id.
-                    # Two send paths share the id space: ``mailbox.push`` (tracked
-                    # in ``mailbox.pending_ack``) and ``request_response`` (tracked
-                    # in ``_outstanding_requests``, or ``_recent_request_timeouts``
-                    # if the waiter already timed out / was cancelled). Route
-                    # accordingly so a late request/response reply is logged as
-                    # "late" (DEBUG) instead of mislabeled "unknown message ID"
-                    # (WARNING) — request_response ids are never in pending_ack,
-                    # so mailbox.acknowledge can't tell a late reply from a stray.
-                    in_flight = corr_id in self._outstanding_requests
-                    late_reply = (not in_flight) and (corr_id in self._recent_request_timeouts)
-                    if in_flight or late_reply:
-                        if late_reply:
-                            self._recent_request_timeouts.pop(corr_id, None)
-                            logger.debug(
-                                "Late reply for %s from %s (request_response already "
-                                "timed out) — dropped (message_type=%s, source_ip=%s)",
-                                corr_id, spoke_id, payload.get("type"), remote_ip)
-                    elif corr_id in self._pending_broadcast_ids:
-                        # Fire-and-forget broadcast command ack (SET_LOG_LEVEL,
-                        # CLEAR_LOGS, …): sent via low-level send_to_spoke, not
-                        # mailbox.push, so it's not in pending_ack. Expected —
-                        # log DEBUG + drop instead of WARNING "unknown message ID"
-                        # (which fired on every Clear-Logs click / debug toggle).
-                        self._pending_broadcast_ids.pop(corr_id, None)
-                        logger.debug(
-                            "Broadcast command ack for %s from %s — dropped "
-                            "(message_type=%s, source_ip=%s)",
-                            corr_id, spoke_id, payload.get("type"), remote_ip)
-                    else:
-                        # mailbox.push reply, or a genuinely unknown ack. Status:
-                        # spoke reply frames carry the real outcome in
-                        # payload.data.status (not a top-level "status" key, which
-                        # the control plane never sets) — read it from there so the
-                        # "unknown ack" warning reflects reality instead of always
-                        # printing the stale "FAILED" default.
-                        _pdata = payload.get("data") if isinstance(payload, dict) else None
-                        _rstatus = str(_pdata.get("status") or "").strip().upper() \
-                            if isinstance(_pdata, dict) else ""
-                        ack = Acknowledgement(
-                            correlation_id=corr_id,
-                            status="SUCCESS" if _rstatus == "SUCCESS" else "FAILED",
-                            error=msg_data.get("error"),
-                            # Thread the sender's identity + frame type + peer IP
-                            # into the ack so the mailbox "unknown ack" warning can
-                            # name the source of a stray/late ack (the envelope's
-                            # own spoke_id is often None for these).
-                            spoke_id=spoke_id,
-                            message_type=payload.get("type"),
-                            source_ip=remote_ip,
-                        )
-                        await self.mailbox.acknowledge(ack)
-
-                    # Debug: Log this response is actually expected
-                    if corr_id not in self.response_cache:
-                        logger.debug(f"Received response for correlation_id: {corr_id}")
-
-                    # Special case: if this was a version request, store the version
-                    # (payload was already extracted at the top of the dispatch and
-                    # msg_data is not mutated between there and here.)
-                    if payload.get("type") == "COMMAND_RESULT":
-                        data = payload.get("data", {})
-                        if isinstance(data, dict) and "version" in data:
-                            self.spoke_versions[pk] = data["version"]
-                        if isinstance(data, dict) and data.get("commit_sha"):
-                            self.spoke_commits[pk] = data["commit_sha"]
-
-                    # Store in response cache for API request bridging — but
-                    # only if a waiter is still outstanding for this msg_id, so
-                    # a late ack (after request_response already timed out and
-                    # discarded the waiter) is dropped instead of leaked.
-                    if hasattr(self, "response_cache") and corr_id in self._outstanding_requests:
-                        self.response_cache[corr_id] = msg_data
-
-                    self.message_count += 1
-                    continue
-
-                # MUST-PROCESS probe (load-test verification hook). Classified
-                # 'must' but carries NO correlation_id, so handle it HERE — above
-                # the rate limiter + protect shed — to PROVE must-process frames
-                # survive every rung of the ladder while telemetry is coalesced.
-                # Cheap: a per-spoke seq/gap counter, no ingest. A gap here would
-                # be a real must-process LOSS (a bug); telemetry gaps are expected.
-                if payload.get("type") == "LOADTEST_PROBE":
-                    self.message_count += 1
-                    st = self._probe_state.setdefault(
-                        pk, {"count": 0, "last_seq": -1, "gaps": 0})
-                    try:
-                        seq = int((payload.get("data") or {}).get("seq", -1))
-                    except (TypeError, ValueError):
-                        seq = -1
-                    if st["last_seq"] >= 0 and seq > st["last_seq"] + 1:
-                        st["gaps"] += seq - st["last_seq"] - 1
-                    st["count"] += 1
-                    if seq > st["last_seq"]:
-                        st["last_seq"] = seq
-                    continue
-
-                # Rate Limiting for non-heartbeat messages.
-                # ACKs / replies (correlation_id present) are handled + `continue`
-                # ABOVE this block, so they are NEVER rate-limited/dropped. Belt-
-                # and-suspenders: even if reordered later, skip the limiter for a
-                # correlation-bearing frame so a reply can never be dropped.
-                if "correlation_id" not in msg_data:
-                    # PROTECT MODE: SHED inbound telemetry/logs — but SURGICALLY,
-                    # only from high-offered-rate OFFENDERS. A legit low-rate
-                    # spoke's telemetry is processed even during protect, so real
-                    # modules keep flowing while the flood is shed. Heartbeats
-                    # (handled above) always flow. Survive > fresh, but spare the
-                    # innocent.
-                    if (self._protect_mode
-                            and self._spoke_offered.get(pk, 0) >= self._protect_shed_min_mps):
-                        self.rate_limit_drops[pk] = self.rate_limit_drops.get(pk, 0) + 1
-                        continue
-                    limiter = self.rate_limiters.get(pk)
-                    if limiter:
-                        ok = limiter.consume()
-                        # SOFT WATERMARK (default 80% of burst consumed): flag the
-                        # spoke so the ladder (next 1s tick) TELLS it to slow +
-                        # coalesce locally — proactively, BEFORE the hard drop.
-                        # Cheap set add (deduped); the ladder does the signalling
-                        # with its dedup/dwell/cap. A correct client backs off here
-                        # and never reaches the hard limit below.
-                        if limiter.capacity and limiter.tokens <= (1.0 - self._rl_soft_frac) * limiter.capacity:
-                            self._rl_breached.add(pk)
-                        if not ok:
-                            # HARD LIMIT (100%) → DROP the frame (enforcement). A
-                            # client still hard-dropping here IGNORED the 80%
-                            # slow-down — track the hard drops so the ladder can
-                            # escalate a persistent flooder to disconnect+quarantine
-                            # (DDoS defense: stop parsing its frames entirely).
-                            self.rate_limit_drops[pk] = self.rate_limit_drops.get(pk, 0) + 1
-                            self._rl_harddrops[pk] = self._rl_harddrops.get(pk, 0) + 1
-                            logger.debug(
-                                "Rate limit HARD-DROP for spoke %s (type=%s, total drops=%d).",
-                                spoke_id, payload.get('type'), self.rate_limit_drops[pk])
-                            continue
-
-                # Handle other messages
-                self.message_count += 1
-
-                # --- Client-Sim telemetry (combined spoke relays its full state) ---
-                # Ingest + fan-out + USB diagnostic live in _handle_cs_telemetry.
-                # CS_TELEMETRY is the "coalesce" class — this branch IS the live
-                # enforcement of _classify_message's policy; keep them in lockstep.
-                if payload.get("type") == "CS_TELEMETRY":
-                    self._telemetry_received += 1
-                    # Rung-3: if this spoke is under backpressure, COALESCE its
-                    # telemetry (latest-wins) into the drain buffer instead of
-                    # running the full ingest inline. A prior un-drained snapshot
-                    # for this spoke is merged away (counted). Keeps the main loop
-                    # free for must-process frames while the spoke catches up to
-                    # the slow-down signal. Not under pressure → ingest inline.
-                    if pk in self._spoke_backoff:
-                        if pk in self._coalesce_pending:
-                            self._telemetry_coalesced += 1
-                        self._coalesce_pending[pk] = (payload.get("data", {}), time.time())
-                        continue
-                    await self._handle_cs_telemetry(spoke_id, payload.get("data", {}))
-                    self._telemetry_processed += 1
-                    continue
-
-                # --- Client-Sim config pull (sent once per spoke connect) ---
-                # Re-push the full config when the spoke's hash differs from what
-                # the hub would send now. Runs as a task: the push's reply arrives
-                # through this same loop.
-                if payload.get("type") == "CS_CONFIG_REQUEST":
-                    _rd = payload.get("data", {}) or {}
-                    self._spawn_cs_push(self._handle_cs_config_request(
-                        spoke_id, str(_rd.get("config_hash") or "")))
-                    continue
-
-                # --- JIT 802.1X accounts (cs engine → hub broker) ---
-                # Spawned: provisioning round-trips to the backend spoke and then
-                # replies to THIS spoke (CS_DOT1X_CREDENTIAL), whose answer arrives
-                # through this same loop. See dot1x_jit.py.
-                if payload.get("type") in dot1x_jit.MESSAGE_TYPES:
-                    self._spawn_cs_push(dot1x_jit.handle_spoke_message(
-                        self, spoke_id, payload.get("type"), payload.get("data", {}) or {}))
-                    continue
-
-                # --- Client-Sim per-op progress (realtime operations feed) ---
-                # The agent emits CS_PROGRESS per phase (destroying/cloning/starting/
-                # …) for reclone/provision/delete — far faster than the ~30s
-                # CS_TELEMETRY frame. Fan these out to the tenant's /sim/ws browsers
-                # for a live feed. Fire-and-forget passthrough (no ingest/state).
-                if payload.get("type") == "CS_PROGRESS":
-                    _pdata = payload.get("data", {}) or {}
-                    _log_cs_op_failure(f"spoke={spoke_id}", "CS_PROGRESS", _pdata)
-                    try:
-                        _ptenant = self.state.get_spoke_tenant(pk)
-                    except Exception:  # noqa: BLE001
-                        _ptenant = None
-                    # Drive the VM Server table's per-VM live state from the op
-                    # feed (instant, one vmid per event). Non-terminal progress
-                    # sets the in-progress state; terminals are owned by the
-                    # CS_COMMAND_RESULT handler above.
-                    try:
-                        _pstate = self._VM_ACTION_STATE.get(_pdata.get("action"))
-                        _pstat = str(_pdata.get("status") or "").lower()
-                        if _ptenant and _pstate and _pstat not in ("completed", "failed", "error"):
-                            self._vm_live_set(_ptenant, _pdata.get("vmid"), _pstate)
-                    except Exception:  # noqa: BLE001 — overlay is best-effort
-                        pass
-                    try:
-                        await self.simulations_broadcaster.broadcast(
-                            spoke_id, {"type": "cs_progress", "data": _pdata}, _ptenant)
-                    except Exception:  # noqa: BLE001 — feed is best-effort
-                        pass
-                    continue
-
-                # --- Spoke log forwarding (SPOKE_LOG) ---
-                # See _handle_spoke_log for the ingest + agent_logs buffering.
-                if payload.get("type") == "SPOKE_LOG":
-                    await self._handle_spoke_log(spoke_id, payload)
-                    continue
-
-                # --- Remote client debug-log streaming (CS_DEBUG_LOG) ---
-                # A cs client flipped into "debug mode" from the WebUI has its
-                # agent.sh tailer stream sim.log + debug-* logs (advanced adds
-                # journal/dmesg) up through the cs spoke, which relays them here.
-                # Ingest into a per-(tenant,hostname) ring buffer (same ephemeral
-                # deque contract as SPOKE_LOG/agent_logs) and serve via
-                # GET /api/cs/clients/{host}/debug-logs (routes/client_debug.py).
-                if payload.get("type") == "CS_DEBUG_LOG":
-                    await self._handle_cs_debug_log(spoke_id, payload)
-                    continue
-
-                # --- Console serial relay (CONSOLE_DATA_UP / READY / ERROR / CLOSED) ---
-                # The console role sub-spoke pushes live serial output + control
-                # signals straight up its own connection (send_to_hub). Route each
-                # to the browser session's queue; the /ws/console-serial relay reads
-                # bytes off it. Control signals are tuples so the WS loop can tell
-                # them from data bytes (mirrors the VNC ready/error/disconnect
-                # discipline — a bare-return there once killed the queue consumer).
-                _ctype = payload.get("type")
-                if _ctype in ("CONSOLE_DATA_UP", "CONSOLE_READY", "CONSOLE_ERROR", "CONSOLE_CLOSED", "CONSOLE_DOWNGRADED"):
-                    _cdata = payload.get("data", {}) or {}
-                    _csess = self.get_console_session(_cdata.get("session_id")) if _cdata.get("session_id") else None
-                    if _csess and not self._relay_session_owner_ok(
-                            _csess, spoke_id, kind="console", remote_ip=remote_ip):
-                        _csess = None  # sender does not own this session — refuse (surface K)
-                    if _csess:
-                        if _ctype == "CONSOLE_DATA_UP":
-                            try:
-                                await _csess["queue"].put(base64.b64decode(_cdata.get("data") or ""))
-                            except Exception:
-                                pass
-                        elif _ctype == "CONSOLE_READY":
-                            await _csess["queue"].put(("ready",))
-                        elif _ctype == "CONSOLE_ERROR":
-                            await _csess["queue"].put(("error", str(_cdata.get("error", "console error"))[:300]))
-                        elif _ctype == "CONSOLE_CLOSED":
-                            await _csess["queue"].put(("disconnect",))
-                        elif _ctype == "CONSOLE_DOWNGRADED":
-                            # Another session forced a write-lock takeover on
-                            # this port — tell the dispossessed browser to drop
-                            # to read-only without closing the connection.
-                            await _csess["queue"].put(("downgraded",))
-                    continue
-
-                # --- Console auto-identify result → NetBox (event-driven) ---
-                # A console spoke fingerprinted a device; match/create a NetBox
-                # device from the harvested identity. Fire-and-forget so the
-                # dispatch loop doesn't block on a NetBox round-trip.
-                if payload.get("type") == "CONSOLE_PROBE_RESULT":
-                    asyncio.create_task(self._handle_console_probe(pk, payload.get("data", {}) or {}))
-                    continue
-
-                # --- NW autonomous per-device poll result (spoke-driven) ---
-                # An nw spoke polled a device on its configured poll_interval and
-                # pushed the fused result. Fold it into the per-device nw cache so
-                # every sub-view (info/arp/macs/interfaces/endpoints/vlans) serves
-                # instantly without a live SSH round-trip. The payload's ``data``
-                # is the flattened poll (device_info/arp/mac_table/interfaces/
-                # endpoints/vlans at top level) — exactly what nw_cache_set_poll
-                # reads. Fire-and-forget (must not block the dispatch loop).
-                if payload.get("type") == "NW_POLL_RESULT":
-                    _nwd = payload.get("data", {}) or {}
-                    _nw_did = _nwd.get("device_id")
-                    _nw_pdata = _nwd.get("data") if isinstance(_nwd.get("data"), dict) else _nwd
-                    if _nw_did and isinstance(_nw_pdata, dict):
-                        # Warm cache + per-device NetBox inventory sync.
-                        asyncio.create_task(self.apply_nw_auto_poll(_nw_did, _nw_pdata))
-                    continue
-
-                # --- NW lightweight reachability sweep result (spoke-driven) ---
-                # The nw spoke ICMP-pings each device on a ~5-min cadence and
-                # pushes just the up/down/unknown verdict (no datums). Fold it
-                # into the cached fleet row so the badge stays fresh between the
-                # hours-apart data polls. ``reachable`` may be None (UNKNOWN).
-                # Fire-and-forget (must not block the dispatch loop).
-                if payload.get("type") == "NW_REACHABILITY":
-                    _nwr = payload.get("data", {}) or {}
-                    _nwr_did = _nwr.get("device_id")
-                    if _nwr_did:
-                        asyncio.create_task(self.nw_cache_set_reachability(
-                            _nwr_did, _nwr.get("reachable"),
-                            _nwr.get("latency_ms")))
-                    continue
-
-                # --- TrueNAS autonomous per-appliance poll result (spoke-driven)
-                # A truenas spoke polled an appliance on its configured
-                # poll_interval and pushed the fused result. Fold it into the
-                # per-appliance truenas cache so every Storage sub-view
-                # (info/pools/datasets/disks/shares/alerts/services/capacity)
-                # serves instantly without a live WS JSON-RPC round-trip. The
-                # payload's ``data`` is the flattened poll. Fire-and-forget.
-                if payload.get("type") == "TRUENAS_POLL_RESULT":
-                    _td = payload.get("data", {}) or {}
-                    _tn_aid = _td.get("appliance_id")
-                    _tn_pdata = _td.get("data") if isinstance(_td.get("data"), dict) else _td
-                    if _tn_aid and isinstance(_tn_pdata, dict):
-                        asyncio.create_task(self.truenas_cache_set_poll(_tn_aid, _tn_pdata))
-                    continue
-
-                # --- LE cert renewed (event-driven distribution) ---
-                # A le spoke renewed a cert and emitted LE_CERT_RENEWED so we
-                # re-push the material to its targets now instead of waiting up
-                # to 1h for run_cert_distribution_loop. Fire-and-forget (the
-                # inbound dispatch loop must not block on a LE_GET_CERT +
-                # INSTALL_CERT round-trip); the hourly loop is the fallback.
-                if payload.get("type") == "LE_CERT_RENEWED":
-                    ev = payload.get("data", {}) or {}
-                    _ev_domain = ev.get("domain")
-                    _ev_targets = ev.get("targets") or []
-                    if _ev_domain and _ev_targets:
-                        asyncio.create_task(self._on_le_cert_renewed(
-                            spoke_id, _ev_domain, _ev_targets))
-                    else:
-                        logger.debug("LE_CERT_RENEWED from %s missing "
-                                     "domain/targets; hourly loop will cover it",
-                                     spoke_id)
-                    # A successful renew clears any prior cert-renew-failed alert
-                    # edge (recovery email) — tenant from the spoke's binding,
-                    # never the payload.
-                    if _ev_domain:
-                        _rn_tenant = self.state.get_spoke_tenant(spoke_id) or "default"
-                        asyncio.create_task(self.alert_engine.evaluate(
-                            _rn_tenant, "cert_renew_failed", _ev_domain, False,
-                            "", severity="ok"))
-                    continue
-
-                # --- LE cert renewal FAILED (event-driven alert) ---
-                # A le spoke's background (or on-demand) renewal failed and
-                # emitted LE_CERT_RENEW_FAILED so we fire a realtime
-                # cert-renewal-failed alert now (vs. the 60s pull loop scanning
-                # le_cache). The ledger's last_error is the persisted record;
-                # this event is the prompt transport. Tenant from the spoke's
-                # binding (security: never trust the payload tenant).
-                if payload.get("type") == "LE_CERT_RENEW_FAILED":
-                    ev = payload.get("data", {}) or {}
-                    _fr_domain = ev.get("domain")
-                    if _fr_domain:
-                        _fr_tenant = self.state.get_spoke_tenant(spoke_id) or "default"
-                        asyncio.create_task(self.alert_engine.evaluate(
-                            _fr_tenant, "cert_renew_failed", _fr_domain, True,
-                            ev.get("message") or "renew failed", severity="error"))
-                    else:
-                        logger.debug("LE_CERT_RENEW_FAILED from %s missing domain",
-                                     spoke_id)
-                    continue
-
-                # --- Status-page public demo trigger (event-driven relay) ---
-                # A `statuspage` role sub-spoke relayed a PUBLIC demo click up
-                # (send_to_hub). SECURITY: the sub-spoke holds NO tenant authority
-                # — we resolve the tenant from ITS binding (get_spoke_tenant), NEVER
-                # the payload, and validate the client belongs to that tenant before
-                # driving the cs demo machinery (ephemeral, auto-reverts in 120 min).
-                # Fire-and-forget so the dispatch loop never blocks on the cs round-trip.
-                if payload.get("type") == "STATUS_RUN_DEMO":
-                    asyncio.create_task(self._handle_status_run_demo(
-                        spoke_id, payload.get("data", {}) or {}))
-                    continue
-
-                # --- Edge-reported HTTPS-port scanner (HTTP_PROBE_REPORT) ---
-                # A reverse proxy / AppBuilder / role-hosted spoke UI detected a
-                # scanner on ITS OWN :443 listener and relayed it up (send_to_hub)
-                # so the hub blocks the source centrally — one NSG deny protects
-                # every edge, exactly like the hub's own _looks_like_probe. The
-                # frame's signature already verified above (authenticated spoke);
-                # _handle_edge_probe_report re-classifies the path server-side and
-                # rate-caps the reporter so a compromised edge can't poison the
-                # blocklist. Fire-and-forget: never block the dispatch loop.
-                if payload.get("type") == "HTTP_PROBE_REPORT":
-                    self._handle_edge_probe_report(
-                        spoke_id, remote_ip, payload.get("data", {}) or {})
-                    continue
-
-                # --- App-edge login failure (APP_LOGIN_FAILURE) ---
-                # An app spoke (today just AppBuilder) rejected a WebUI login
-                # credential and relayed it up (send_to_hub) so repeat attempts
-                # against ITS edge count toward the same brute-force threshold
-                # as a failed login against the hub's own /login. The frame's
-                # signature already verified above (authenticated spoke);
-                # _handle_app_login_failure rate-caps the reporter. Fire-and-
-                # forget: never block the dispatch loop.
-                if payload.get("type") == "APP_LOGIN_FAILURE":
-                    self._handle_app_login_failure(
-                        spoke_id, remote_ip, payload.get("data", {}) or {})
-                    continue
-
-                # --- Node canary-endpoint interaction (NODE_CANARY_HIT) ---
-                # A node reported that one of its hub-assigned canary endpoints
-                # was touched — a definitive intrusion attempt (nothing legitimate
-                # requests one). The frame's signature already verified above;
-                # _handle_node_canary_hit rate-caps the reporter and routes the
-                # response by the reporter's location (perimeter → bounded source
-                # block; tenant → self-scoped hard-revoke). Fire-and-forget.
-                if payload.get("type") == "NODE_CANARY_HIT":
-                    self._handle_node_canary_hit(
-                        spoke_id, remote_ip, payload.get("data", {}) or {})
-                    continue
-
-                # --- Relayed node-agent zero-touch onboarding PSK ---
-                # A pxmx/cs agent-hosting spoke relays this the instant a
-                # zero-touch node agent presents an onboarding PSK + tenant
-                # hint on connect (agent_hosting.py's _agent_handler pending
-                # branch). Fire-and-forget: on a valid PSK the agent is
-                # auto-approved + bound to that tenant immediately (no admin
-                # click); on any mismatch/failure it just stays pending for
-                # manual approval, unchanged.
-                if payload.get("type") == "AGENT_ONBOARDING_PSK":
-                    await self._handle_agent_onboarding_psk(
-                        spoke_id, payload.get("data", {}) or {})
-                    continue
-
-                # --- Scale-Out Relay Logic ---
-                # _handle_agent_relay_up returns True when it matched + handled a
-                # sub-type (AGENT_LOG/HEARTBEAT/AGENT_TELEMETRY/CS_*), in which case
-                # we `continue`. It returns False when the sub-type was unmatched —
-                # CRITICAL: unmatched AGENT_RELAY_UP frames must NOT continue; they
-                # fall through to the HUB_REQUEST check below and the catch-all INFO
-                # log, matching the pre-extraction behavior. Do not add a `continue`
-                # on the False path.
-                if payload.get("type") == "AGENT_RELAY_UP":
-                    if await self._handle_agent_relay_up(spoke_id, msg_data, payload,
-                                                        _dec_secret=_dec_secret):
-                        continue
-                # --- End Relay Logic ---
-
-                # Agent-initiated request (e.g. AppBuilder asking for logs or to
-                # trigger updates). See _handle_hub_request for the dispatch +
-                # signed HUB_RESPONSE reply.
-                if payload.get("type") == "HUB_REQUEST":
-                    await self._handle_hub_request(
-                        spoke_id, msg_data, payload,
-                        getattr(websocket, "peer_cert_identity", None))
-                    continue
-
-                # Fallback for verified-but-unhandled message types: every known
-                # type (HEARTBEAT, ack, CS_TELEMETRY, SPOKE_LOG, AGENT_RELAY_UP,
-                # HUB_REQUEST) has already `continue`d by here, so this line is
-                # reached ONLY for types the hub doesn't recognize. Logged at INFO
-                # (not DEBUG) so a new/unknown spoke frame is visible by default.
-                logger.info(f"Received verified message from {spoke_id}: {payload.get('type')}")
+                await self._handle_spoke_frame(conn, message_json)
 
         except (websockets.ConnectionClosed, WebSocketDisconnect):
-            logger.info(f"Connection closed for spoke {spoke_id}")
-            # Only this connection's own belated exception may update telemetry —
-            # an evicted/zombie connection (see _install_active_connection) can
-            # still be blocked in recv() when it's replaced, and its eventual
-            # ConnectionClosed/accept-first exception must not clobber the live
-            # replacement connection's just-written CONNECTED telemetry. Same
-            # guard as the `finally` cleanup below.
-            if spoke_id and self.active_connections.get(self._primary_key(spoke_id)) is websocket:
-                self._mark_spoke_disconnected(spoke_id)
-                self.record_spoke_event(spoke_id, "connection_closed", "clean websocket close")
+            self._on_spoke_connection_closed(spoke_id, websocket)
         except Exception as e:
-            logger.error(f"Error handling connection for {spoke_id}: {e}")
-            if spoke_id and self.active_connections.get(self._primary_key(spoke_id)) is websocket:
-                pk = self._primary_key(spoke_id)
-                self.spoke_telemetry[pk] = {
-                    "last_attempt": time.time(),
-                    "status": "ERROR",
-                    "error": str(e)
-                }
-                self.record_spoke_event(spoke_id, "connection_error", str(e))
+            self._on_spoke_connection_error(spoke_id, websocket, e)
         finally:
-            # Only clean up shared registry state if THIS websocket still owns the
-            # spoke's slot. An evicted/zombie connection (replaced by a live
-            # reconnect via _install_active_connection) whose recv() later unblocks
-            # must NOT wipe the live replacement's module_type / auth / parent map /
-            # hosted-agent index — that is the cs-spoke-1 zombie class, and the
-            # `is websocket` guard below (previously only on active_connections)
-            # now covers the sibling state too. Capture ownership BEFORE deleting
-            # the entry (the delete would otherwise make the later check False).
-            if spoke_id:
+            self._release_spoke_slot(spoke_id, websocket)
+
+    # ── Phase 1: the auth frame ─────────────────────────────────────────
+
+    @staticmethod
+    def _ws_peer_ip(websocket):
+        """The socket's remote IP, or None. Never raises — a connect is never
+        blocked on IP capture."""
+        try:
+            return websocket.remote_address[0] if websocket.remote_address else None
+        except Exception:  # noqa: BLE001 — never block a connect on IP capture
+            return None
+
+    async def _recv_auth_frame(self, websocket, peer_ip):
+        """Read the spoke's first frame and JSON-decode it.
+
+        Returns ``(True, decoded)`` — ``decoded`` may be any JSON value; a
+        non-object fails later on ``.get`` exactly as it always has — or
+        ``(False, None)`` after closing the socket on undecodable input.
+        """
+        auth_json = await websocket.recv()
+        try:
+            return True, json.loads(auth_json)
+        except (ValueError, TypeError):
+            # Malformed first frame = a probe, not a real spoke. Feed the
+            # threat monitor so repeated garbage from one IP trips the block.
+            self._record_spoke_auth_failure(peer_ip, None, "malformed_auth_frame")
+            await websocket.close(1008, "Malformed auth frame")
+            return False, None
+
+    # ── Phase 2: authentication ─────────────────────────────────────────
+
+    async def _authenticate_spoke(self, websocket, hello, peer_ip):
+        """Decide whether to trust the connecting spoke.
+
+        Returns a ``_SpokeConn`` when the connection may proceed — either
+        authenticated with its session secret, or secret-less (zero-touch,
+        "pending negotiation"). Returns None after closing the socket when it
+        must not: missing id, quarantined, identity mismatch, wrong secret, or
+        the spoke rejected the hub's identity proof.
+        """
+        spoke_id, secret = hello.spoke_id, hello.secret
+
+        # DEBUG-only + length-only: a 64-char session key's 4+4 prefix/suffix
+        # is a 12.5% entropy reduction, and this fires on EVERY connect
+        # attempt, so the log would accumulate prefix/suffix for every spoke
+        # over time. Length is enough to distinguish a real key from a
+        # missing/short one for debugging without leaking key material.
+        logger.debug(f"Auth attempt: spoke_id={spoke_id}, "
+                     f"secret={'<%d chars>' % len(secret) if secret else '***'}")
+        self.record_spoke_event(spoke_id, "auth_attempt", f"secret={'yes' if secret else 'no'} module_type={hello.module_type}")
+
+        if not spoke_id:
+            self._record_spoke_auth_failure(peer_ip, None, "missing_spoke_id")
+            await websocket.close(1008, "Missing spoke_id")
+            return None
+
+        pk = self._primary_key(spoke_id)
+
+        # DDoS quarantine: a spoke disconnected for ignoring the slow-down
+        # signal and flooding is refused reconnect until its cooldown expires
+        # — so it can't just reconnect and immediately resume the flood. 1013
+        # = Try Again Later (the spoke's reconnect backoff honors it).
+        if self._is_quarantined(spoke_id):
+            self.record_spoke_event(spoke_id, "quarantine_reject",
+                                    "reconnect refused — still in DDoS quarantine")
+            await websocket.close(1013, "Quarantined (flooding) — retry later")
+            return None
+
+        if not await self._settle_spoke_identity(websocket, hello, pk, peer_ip):
+            return None
+        # Re-resolve the primary key: _reconcile_spoke_identity may have
+        # armed guid-primary (spoke_id_alias[spoke_id]=install_uuid), so pk
+        # now resolves name→guid. Every state op below keys through pk so
+        # the spoke's routing/approval/crypto/mailbox state lands under the
+        # guid (the stable primary key) instead of the connect-id name.
+        pk = self._primary_key(spoke_id)
+
+        key_id = self._verify_spoke_secret(hello, pk, peer_ip)
+        if key_id:
+            if not await self._take_spoke_slot(websocket, hello, pk, key_id, peer_ip):
+                return None
+        elif not await self._hold_unauthenticated_spoke(websocket, hello, pk, peer_ip):
+            return None
+
+        if not await self._prove_hub_identity(websocket, hello, pk):
+            return None
+        return _SpokeConn(websocket=websocket, spoke_id=spoke_id, pk=pk,
+                          peer_ip=peer_ip, secret=secret)
+
+    async def _settle_spoke_identity(self, websocket, hello, pk, peer_ip):
+        """Adjudicate install identity (rename / clone), then record it.
+
+        Returns False (socket closed) when a VALID secret is presented from an
+        install that is not the one the key was issued to. Otherwise runs
+        ``_reconcile_spoke_identity`` and returns True.
+
+        Everything before the reconcile call is read-only on purpose — see
+        the ordering rules in the lifecycle banner (1d2f5aae, CC2).
+        """
+        spoke_id, secret, install_uuid = hello.spoke_id, hello.secret, hello.install_uuid
+
+        # Detect a clone-and-rename (same install UUID, new id) and migrate
+        # approval/tenant binding + key material to the new id — but ONLY if
+        # the caller proves it owns the OLD id's secret (CC2: a bare
+        # install_uuid + a new spoke_id with NO secret used to migrate the
+        # victim's approval + key material BEFORE any auth verify, then the
+        # zero-touch re-key path minted the attacker a fresh session key —
+        # full spoke/tenant takeover with no secret knowledge). Verify the
+        # presented secret against the OLD id (the UUID's current owner)
+        # first; only a proven rename is allowed to migrate. An unproven
+        # rename is left as a fresh spoke (pending approval / PSK), never an
+        # inheritance. get_valid_key is a pure constant-time compare — safe
+        # to call on old_id as a proof check without consuming/rotating it.
+        rename_proven = False
+        if install_uuid and secret:
+            _old_id = self.install_uuid_index.get(install_uuid)
+            if _old_id and _old_id != spoke_id \
+                    and self.key_manager.get_valid_key(self._primary_key(_old_id), secret):
+                rename_proven = True
+        # Key↔install binding. A valid secret proves possession of key
+        # material, not that the box presenting it is the install the hub
+        # issued it to. Run this BEFORE _reconcile_spoke_identity: reconcile
+        # repoints install_uuid_index, overwrites the recorded uuid and can
+        # re-arm the guid, so adjudicating afterwards would persist the
+        # claim we are about to refuse — and the REAL spoke would then
+        # mismatch on its next reconnect and be locked out by its own
+        # attacker. Nothing here mutates state.
+        #
+        # Ordered cheapest-first so the normal reconnect pays only a string
+        # compare: no baseline / identical uuid short-circuits, and the key
+        # is verified only once a mismatch actually needs adjudicating.
+        # get_valid_key is a pure constant-time compare — safe to call as a
+        # proof check without consuming or rotating the key.
+        prev_install_uuid = self._recorded_install_uuid(pk)
+        if secret and not rename_proven and prev_install_uuid \
+                and install_uuid != prev_install_uuid \
+                and self.key_manager.get_valid_key(pk, secret) \
+                and not self._verify_install_uuid_binding(
+                    spoke_id, pk, install_uuid, prev_install_uuid, peer_ip):
+            self.record_spoke_event(
+                spoke_id, "auth_rejected",
+                "valid secret presented from an install_uuid that does not "
+                "match the install on record — connection refused")
+            await websocket.close(
+                1008, "Identity mismatch — re-approval required")
+            return False
+        self._reconcile_spoke_identity(spoke_id, install_uuid, hello.hostname,
+                                       migrate_if=rename_proven)
+        return True
+
+    def _verify_spoke_secret(self, hello, pk, peer_ip):
+        """Check the presented session secret.
+
+        Returns the matching key id when it verifies (the spoke is
+        authenticated), else None — for both a wrong secret and no secret at
+        all; the caller tells those apart via ``hello.secret``.
+        """
+        spoke_id, secret = hello.spoke_id, hello.secret
+        if not secret:
+            logger.info(f"Spoke {spoke_id} connected without secret. Entering pending-negotiation state.")
+            self.record_spoke_event(spoke_id, "pending_negotiation", "no secret — zero-touch")
+            return None
+
+        key_id = self.key_manager.get_valid_key(pk, secret)
+        if not key_id:
+            logger.warning(f"Authentication failed for spoke {spoke_id}: Invalid secret.")
+            self.record_spoke_event(spoke_id, "auth_failed", "invalid secret — spoke will retry / fall back to zero-touch")
+            return None
+
+        self.spoke_authenticated[pk] = True
+        # It adopted its key — clear any prior "never authenticated"
+        # diagnosis so a future regression re-triggers a fresh ERROR.
+        self._unauth_warned_spokes.discard(pk)
+        # Established-good IP: shield it from a false-positive
+        # threat block if it later glitches during a key rotation.
+        if peer_ip:
+            tm = getattr(self, "threat_monitor", None)
+            if tm:
                 try:
-                    self._mtls_enrollment_done(self._primary_key(spoke_id), websocket)
+                    tm.record_success(peer_ip)
                 except Exception:  # noqa: BLE001
                     pass
-            owns_slot = bool(spoke_id and self.active_connections.get(self._primary_key(spoke_id)) is websocket)
-            if owns_slot:
-                pk = self._primary_key(spoke_id)
-                del self.active_connections[pk]
-                self.active_connection_key_ids.pop(pk, None)
-                disc_mtype = self.spoke_module_types.pop(pk, None)
-                self.spoke_parent_map.pop(pk, None)
-                self.netbox_server_agents.discard(pk)
-                self.ldap_server_agents.discard(pk)
-                self.spoke_authenticated.pop(pk, None)
-                self.spoke_enc_capable.pop(pk, None)
-                # Drop the per-connection "never authenticated" diagnosis state
-                # so a reconnect that's still broken re-emits the ERROR once
-                # past the grace window (instead of staying suppressed).
-                self._unauth_warned_spokes.discard(pk)
-                # Evict every agent hosted by this spoke from the agent→spoke
-                # index. They'll re-index on reconnect (next AGENT_RELAY_UP).
-                # Iterate over a snapshot — mutating the dict during iteration
-                # would otherwise raise RuntimeError.
-                for aid in list(self.agent_info):
-                    if self._primary_key(self.agent_info.get(aid, {}).get("spoke_id")) == pk:
-                        self.agent_info.pop(aid, None)
-                # A disconnected proxy no longer serves its tenant disk-backed;
-                # recompute so that tenant reverts to resident RAM caching (or
-                # stays disk-backed if another proxy still serves it).
-                if disc_mtype == "proxy":
-                    self._recompute_proxied_tenants()
+        logger.info(f"Spoke {spoke_id} authenticated successfully with secret.")
+        self.record_spoke_event(spoke_id, "auth_ok", "secret verified")
+        return key_id
+
+    async def _hold_unauthenticated_spoke(self, websocket, hello, pk, peer_ip):
+        """Handle a spoke whose secret did not verify (or that sent none).
+
+        No secret → keep the socket open (returns True) so the hub can
+        negotiate one (zero-touch / pending approval). Wrong secret → close
+        it (returns False), counting it as an attack signal unless the peer
+        proves it is an already-approved install.
+        """
+        spoke_id, secret = hello.spoke_id, hello.secret
+        # Register as known if not already
+        if pk not in self.known_modules:
+            self.state.register_module(pk, approved=False)
+            self.known_modules = self.state.system_state["known_modules"]
+
+        # Update telemetry
+        self.spoke_telemetry[pk] = {
+            "last_attempt": time.time(),
+            "status": "PENDING_SECRET" if not secret else "AUTH_FAILED",
+            "error": None if not secret else "Invalid secret"
+        }
+
+        # If they provided a secret and it was wrong, we close.
+        # If they provided no secret, we KEEP the connection open to negotiate one.
+        if not secret:
+            return True
+
+        # Invalid session secret = a credential-guessing attempt —
+        # UNLESS the peer proves it is an already-approved install
+        # (matching 128-bit install_uuid). A generic agent fans out
+        # several role sub-spokes from ONE IP; after a reboot or a key
+        # rotation that outlived the 3600s success-grace, their
+        # stale-but-legit secrets would otherwise rack up spoke_auth
+        # failures from that single IP and NSG-block the whole agent.
+        # An attacker cannot forge a valid install_uuid that maps to an
+        # approved identity, so this exempts the reboot/rotation glitch
+        # without weakening detection of a real guessing source (which
+        # has no such identity proof and still trips the block).
+        if (self._is_approved_install_reconnect(spoke_id, hello.install_uuid)
+                and self._within_reconnect_exemption_budget(peer_ip)):
+            self.record_spoke_event(
+                spoke_id, "auth_glitch_known_install",
+                "invalid secret from an approved install (reboot/rotation) "
+                "— not counted as an attack; will re-negotiate")
+            logger.info(
+                "Spoke %s presented a stale secret but proved an approved "
+                "install (uuid match) — treating as a rotation/reboot glitch, "
+                "not a threat signal.", spoke_id)
+        else:
+            # Established-good IPs are also success-grace exempt (above),
+            # so a probing source with neither identity proof nor grace
+            # — or a proven identity that BLEW the reconnect budget (a
+            # sustained stale-secret stream, i.e. not a bounded reboot) —
+            # trips the block at threshold.
+            self._record_spoke_auth_failure(peer_ip, spoke_id, "invalid_secret")
+        await websocket.close(1008, "Authentication failed")
+        return False
+
+    async def _take_spoke_slot(self, websocket, hello, pk, key_id, peer_ip):
+        """Make this authenticated socket the spoke's active connection.
+
+        Returns False when ``_install_active_connection`` refuses (a stale
+        history-key reconnect must not evict a live current-key connection —
+        it has already closed this socket).
+        """
+        spoke_id = hello.spoke_id
+        logger.info(f"Spoke {spoke_id} authenticated successfully.")
+        # Evict any prior connection for this spoke_id (e.g. a zombie
+        # left over from a prior outage / port-move crash-loop). A stale
+        # (history-key) reconnect that would evict a live current-key
+        # connection is rejected instead — see _install_active_connection.
+        if not await self._install_active_connection(spoke_id, websocket, key_id):
+            return False
+        self.record_spoke_event(spoke_id, "connected", "authenticated with secret")
+        # Persist this source IP as the spoke's HISTORICAL (known-good)
+        # location — but ONLY when it authenticated on its CURRENT key
+        # while approved. A harvested BACKUP key can never move it, so
+        # the key-clone response can trust known_ip to spare the real
+        # spoke's IP (and follow it across a legit DHCP move) while
+        # NSG-blocking the intruder's IP. See _handle_key_clone_compromise.
+        try:
+            _cur = self.key_manager.keys.get(pk)
+            if (peer_ip and _cur and key_id == _cur.key_id
+                    and self.approved_modules.get(pk, False)):
+                self._note_known_ip(pk, peer_ip)
+        except Exception:  # noqa: BLE001
+            pass
+        # A history-key reconnect (missed a rotation push while offline)
+        # is re-synced by _maybe_redeliver_session_key on the first
+        # history-signed frame in the message loop (_verify_signed_frame) —
+        # no connect-time push needed here.
+        return True
+
+    async def _prove_hub_identity(self, websocket, hello, pk):
+        """Send the hub's signed identity proof and read the spoke's verdict.
+
+        Mutual authentication: the spoke verifies the hub before trusting it.
+        Returns True to continue — the spoke replied HUB_OK, or it is
+        secret-less and simply didn't answer within 2 s. Returns False after
+        the socket is closed: the spoke rejected the hub, timed out while
+        holding a secret, closed on us, or anything here raised.
+        """
+        spoke_id, secret = hello.spoke_id, hello.secret
+        try:
+            challenge = secrets.token_urlsafe(32)
+            proof = await self._build_hub_proof(hello, challenge)
+            await websocket.send(json.dumps(proof))
+
+            # If the spoke has a secret, it will respond. If not, it might just ignore or respond HUB_OK.
+            try:
+                hub_response_json = await asyncio.wait_for(websocket.recv(), timeout=2.0)
+                hub_response = json.loads(hub_response_json)
+
+                if hub_response.get("status") != "HUB_OK":
+                    logger.warning(f"Mutual auth failed: Spoke {spoke_id} rejected Hub identity.")
+                    self.record_spoke_event(spoke_id, "mutual_auth_failed", "spoke rejected hub identity — likely stale HUB_SECRET after hub restart")
+                    await websocket.close(1008, "Hub identity rejected")
+                    return False
+                logger.info(f"Mutual authentication complete for {spoke_id}.")
+                self.record_spoke_event(spoke_id, "mutual_auth_complete", "")
+                await self._reprovision_if_behind_on_hub_secret(spoke_id, hub_response)
+            except asyncio.TimeoutError:
+                if not secret:
+                    logger.info(f"No response for Hub proof from {spoke_id} (expected for secret-less connection).")
+                    self.record_spoke_event(spoke_id, "mutual_auth_skipped", "no secret — HUB_OK not required (zero-touch)")
+                else:
+                    logger.error(f"Mutual authentication timed out for {spoke_id}")
+                    self.record_spoke_event(spoke_id, "mutual_auth_timeout", "spoke did not respond to hub proof within 2s")
+                    await websocket.close(1008, "Mutual authentication timed out")
+                    return False
+            except websockets.ConnectionClosed as e:
+                # The spoke closes the socket (instead of replying HUB_OK)
+                # when it refuses this Hub's identity proof — see
+                # control_plane.py's "Hub identity unverified (TLS verify
+                # off)" refuse branch: every known hub_secret (plus the
+                # signatures/psk_signature fallbacks) failed to verify,
+                # and TLS isn't authenticating the hub either, so the
+                # spoke keeps its stale secret(s) and drops the connection
+                # rather than risk trusting a possible MITM hub. Before
+                # this, the Hub recorded NOTHING for this case — the
+                # operator only ever saw the spoke as "offline" with no
+                # cause, even though the Hub is the side watching the
+                # close frame go by. Surface it through record_spoke_event
+                # + spoke_telemetry so it flows into /setup/diagnostics
+                # (last_status/last_error/flapping) instead of vanishing.
+                # The decision + recording is factored into
+                # _record_hub_identity_rejection (rather than kept inline)
+                # so it's unit-testable without driving a full fake-
+                # websocket handshake through this method.
+                close_code = e.rcvd.code if getattr(e, "rcvd", None) else None
+                close_reason = ((e.rcvd.reason if getattr(e, "rcvd", None) else "") or "")
+                identity_rejected = self._record_hub_identity_rejection(
+                    spoke_id, pk, close_code, close_reason)
+                if not identity_rejected:
+                    # Not an identity-rejection close — preserve the prior
+                    # fallback behavior (this used to fall through to the
+                    # generic "Mutual authentication error" handler below).
+                    logger.error(f"Mutual authentication error for {spoke_id}: {e}")
+                    try:
+                        await websocket.close(1008, "Mutual authentication failed")
+                    except Exception:
+                        pass
+                return False
+        except Exception as e:
+            logger.error(f"Mutual authentication error for {spoke_id}: {e}")
+            await websocket.close(1008, "Mutual authentication failed")
+            return False
+        return True
+
+    async def _build_hub_proof(self, hello, challenge):
+        """The HUB_VERIFIED frame: ``challenge`` signed with the hub secret.
+
+        Only ``signature`` is required. Every other field is an ADDITIVE
+        fallback for a spoke whose stored hub secret has drifted, and none of
+        them may ever block a connect (each failure just omits its field).
+        The spoke verifies over ``challenge`` only — it never re-serializes
+        this dict — so adding fields is signature-safe and legacy spokes
+        ignore the ones they don't know.
+        """
+        spoke_id = hello.spoke_id
+        signature = self.key_manager.sign_hub_challenge(challenge.encode())
+
+        proof = {
+            "status": "HUB_VERIFIED",
+            "challenge": challenge,
+            "signature": signature
+        }
+        # Rotation-window proof: the KeyManager retains the last 3 hub
+        # root secrets specifically "so spokes can verify the Hub's
+        # identity even if they have not yet received the latest
+        # rotation update or if they were restored from a backup"
+        # (key_manager.rotate_hub_secret docstring) — but that window
+        # was dead unless the spoke happened to hold hub_secrets[0].
+        # Ship a signature for every retained secret so a spoke
+        # holding an older-but-still-retained secret can verify via
+        # ``signatures`` instead of only the single newest-secret
+        # ``signature`` above. Additive field — the spoke verifies
+        # over ``challenge`` only (see the ``enc`` comment below), so
+        # a legacy spoke that only reads ``signature`` is unaffected.
+        try:
+            proof["signatures"] = self.key_manager.sign_hub_challenge_all(
+                challenge.encode())
+        except Exception:  # noqa: BLE001 — never block the legacy proof on this
+            logger.debug("sign_hub_challenge_all failed; proceeding with single signature only", exc_info=True)
+        # Rotation-INDEPENDENT proof. ``signatures`` above only rescues a
+        # spoke still inside the 3-deep root window; one that missed more
+        # rotations than that has nothing left to check and hard-refuses
+        # us forever when LM_HUB_TLS_VERIFY=0 (the cs-svr-0* lockout —
+        # 77k log lines, only a reinstall cleared it). The per-spoke
+        # recovery PSK is derived from a root that never rotates, so a
+        # spoke that persisted it on ANY prior good connect can still
+        # verify us regardless of how far behind it has drifted. Signed
+        # per spoke_id and one-way, so a stranger claiming some other
+        # spoke's id learns nothing it can replay. Additive — verified
+        # over ``challenge`` only, so legacy spokes ignore it.
+        try:
+            if spoke_id:
+                proof["recovery_signature"] = self.key_manager.sign_hub_challenge_recovery(
+                    challenge.encode(), spoke_id)
+        except Exception:  # noqa: BLE001 — never block connect on the escape hatch
+            logger.debug("sign_hub_challenge_recovery failed; proceeding without it", exc_info=True)
+        # H4: advertise app-layer-encryption capability to the spoke. The
+        # spoke verifies the signature over ``challenge`` ONLY (it never
+        # re-serializes or re-signs this proof dict), so adding an
+        # additive ``enc`` field is signature-safe. A new spoke reads it
+        # and encrypts its outbound secret frames to the hub; a legacy
+        # spoke ignores the unknown field (fail-safe → plaintext).
+        if encryption_enabled():
+            proof["enc"] = ENC_MARKER
+        # PSK-bound hub proof (stale-hub-secret recovery): when the spoke
+        # presented a VALID onboarding PSK, ALSO sign the challenge with
+        # that PSK. The PSK is a deploy-time shared secret a MITM hub does
+        # NOT hold, so it is an INDEPENDENT hub authenticator. This lets a
+        # spoke whose stored hub_secret has gone stale (hub root-key
+        # rotation / restore-from-different-install / a rotation it was
+        # offline for) re-verify the hub and recover to zero-touch even
+        # with LM_HUB_TLS_VERIFY=0 — instead of hard-refusing forever
+        # ("Hub identity unverified (TLS verify off)") and never getting
+        # the fresh hub_secret + mTLS cert that push_config_to_spoke /
+        # _provision_spoke_mtls_cert deliver on the approved connect.
+        # Validated against the tenant's stored PSKs first so the hub
+        # never signs with attacker-supplied material.
+        if hello.onboarding_psk and hello.tenant_id_hint:
+            try:
+                if await self._psk_is_valid(hello.tenant_id_hint, hello.onboarding_psk):
+                    proof["psk_signature"] = hmac.new(
+                        hello.onboarding_psk.encode(), challenge.encode(),
+                        hashlib.sha256).hexdigest()
+            except Exception:  # noqa: BLE001 — never block connect on this
+                logger.debug("PSK-bound hub proof skipped (psk check failed)",
+                             exc_info=True)
+        return proof
+
+    async def _reprovision_if_behind_on_hub_secret(self, spoke_id, hub_response):
+        """Push the current hub secret to a spoke that verified us with an
+        older one. Best-effort; never breaks the handshake.
+
+        The spoke told us (additive/optional ``hub_secret_index``) which
+        entry of our ``signatures`` rotation-window list it matched. Index 0
+        = our current root secret — nothing to do. Index > 0 = it's still
+        holding an OLDER retained secret (missed one or more root rotations);
+        proactively push it the current one now instead of leaving it to keep
+        drifting — a spoke that never reconnects during a rotation's brief
+        propagation window would otherwise accumulate rotations behind until
+        it eventually falls OUT of the 3-entry window and hits the
+        unverified-hub refusal this whole feature exists to prevent. A legacy
+        spoke omits the field entirely and this is a no-op.
+        """
+        try:
+            matched_index = hub_response.get("hub_secret_index")
+            if isinstance(matched_index, int) and matched_index > 0:
+                await self._maybe_reprovision_hub_secret(spoke_id)
+        except Exception:  # noqa: BLE001 — best-effort, never break the handshake
+            logger.debug("hub_secret reprovision check failed for %s", spoke_id, exc_info=True)
+
+    # ── Phase 3: admission ──────────────────────────────────────────────
+
+    async def _admit_spoke(self, conn, hello):
+        """Register the connection, auto-approve it if entitled, greet it.
+
+        Runs for both authenticated and secret-less (pending) spokes. Returns
+        False only when the approved-spoke mTLS gate refuses the connection
+        (the socket is already closed).
+        """
+        spoke_id, pk, websocket = conn.spoke_id, conn.pk, conn.websocket
+
+        # Ensure connection is tracked even if not fully auth'd (for negotiation).
+        # See _install_pending_connection: a prior PENDING connection is
+        # evicted (so a newer connection wins the slot), but a prior
+        # AUTHENTICATED connection is NOT clobbered (stale-process guard).
+        await self._install_pending_connection(spoke_id, websocket)
+
+        # Update telemetry — capture remote IP so the UI can auto-fill service URLs
+        self.spoke_telemetry[pk] = {
+            "last_attempt": time.time(),
+            "status": "CONNECTED",
+            "error": None,
+            "remote_ip": conn.peer_ip,
+        }
+
+        # Track this module as known for approval lists
+        if pk not in self.known_modules:
+            self.state.register_module(pk, approved=False)
+            self.known_modules = self.state.system_state["known_modules"]
+
+        # Initialize the per-spoke rate limiter from config (applied on each
+        # (re)connect, so a knob change propagates as spokes reconnect). The
+        # default (burst=400 / 200 msg/s, from _rate_limit_params) is a FLOOD
+        # guard sized well ABOVE a RELAY spoke's legit peak — it fans many
+        # hosted agents and re-flushes its queue on reconnect — so normal
+        # traffic is never dropped. Raise global_config["rate_limit"] as the
+        # fleet/scale grows. Aggregate overload is the fleet layer's job, not
+        # this bucket. See docs/backpressure-throttling.md §4.
+        _rl_cap, _rl_rate = self._rate_limit_params()
+        self.rate_limiters[pk] = TokenBucket(capacity=_rl_cap, fill_rate=_rl_rate)
+        if hello.module_type:
+            self._record_spoke_module_type(spoke_id, pk, hello.module_type)
+
+        # PSK self-provisioning: a spoke that presented the tenant's
+        # predefined onboarding PSK (+ a tenant_id_hint) auto-approves and
+        # auto-binds to that tenant without admin action (mirrors the legacy
+        # cs/webui-local /api/spokes/register PSK flow). This runs AFTER the
+        # register_module(approved=False) calls above so the approval wins,
+        # and BEFORE the approval check so the approved branch handles
+        # session-key/config push. A wrong/missing PSK is not fatal — the
+        # spoke simply falls through to pending admin approval as today.
+        if hello.onboarding_psk and hello.tenant_id_hint:
+            await self._psk_auto_approve(conn, hello)
+
+        self._record_spoke_capabilities(pk, hello)
+        if hello.parent_spoke_id:
+            await self._link_role_subspoke(conn, hello.parent_spoke_id)
+
+        # Check if the module is already approved
+        if not self.approved_modules.get(pk, False):
+            # We don't return; the message loop runs but drops everything
+            # except heartbeats until an admin approves the spoke.
+            await self._send_approval_required(conn)
+            return True
+        return await self._greet_approved_spoke(conn, hello)
+
+    def _record_spoke_module_type(self, spoke_id, pk, module_type):
+        """Remember the spoke's module type, in memory and in metadata.
+
+        Persist the type into module_metadata so the Spoke Management list can
+        show a cs/simulation spoke's type even while it is offline (the
+        in-memory spoke_module_types dict is popped on disconnect). Free-form
+        merge — no migration needed.
+
+        DEFER the disk write: update_module_metadata already marks the state
+        dirty, and the (offloaded) 60s persistence flush writes it. A
+        synchronous save_state() HERE did a full-state encrypt+write on the
+        event loop on EVERY connect — under a 600-spoke reconnect storm that
+        repeatedly stalled the loop for seconds (py-spy: save_state →
+        _write_encrypted inside handle_connection), delaying heartbeats enough
+        to flip modules offline. Durability to the next flush is fine: a
+        reconnecting spoke re-registers its type anyway. Only log/event on a
+        genuinely NEW type so a reconnect storm doesn't spam either.
+        """
+        self.spoke_module_types[pk] = module_type
+        _prev_type = self.state.system_state.get("module_metadata", {}).get(
+            pk, {}).get("module_type")
+        self.state.update_module_metadata(pk, {"module_type": module_type})
+        if _prev_type != module_type:
+            logger.info(f"Spoke {spoke_id} registered as module type: {module_type}")
+            self.record_spoke_event(spoke_id, "registered", f"module_type={module_type}")
+
+    async def _psk_auto_approve(self, conn, hello):
+        """Approve + tenant-bind a spoke that presented a valid onboarding PSK.
+
+        A wrong PSK is not fatal (the spoke stays pending admin approval) but
+        IS fed to the threat monitor: a legit PSK spoke has the right PSK and
+        a legit zero-touch spoke sends none, so a wrong one is an unambiguous
+        guessing signal and repeats from one IP trip the NSG block.
+        """
+        spoke_id, tenant_id_hint = conn.spoke_id, hello.tenant_id_hint
+        if await self._try_psk_self_provision(spoke_id, tenant_id_hint, hello.onboarding_psk):
+            self.known_modules = self.state.system_state["known_modules"]
+            return
+        logger.warning(
+            f"PSK self-provision failed for {spoke_id} "
+            f"(tenant_hint={tenant_id_hint}): invalid/missing PSK — pending admin approval.")
+        self.record_spoke_event(spoke_id, "psk_self_provision_failed",
+                                f"tenant_hint={tenant_id_hint}")
+        self._record_spoke_auth_failure(conn.peer_ip, spoke_id, "invalid_onboarding_psk")
+
+    def _record_spoke_capabilities(self, pk, hello):
+        """Record what the spoke advertised in its auth frame.
+
+        Recorded on every connect, authenticated or not (zero-touch too), and
+        cleared when a capability is no longer advertised:
+
+        * netbox_server / ldap_server — the agent runs that deploy role, so
+          the hub can route that service's cert to it.
+        * H4 encryption — a non-capable or kill-switched spoke records False
+          and its outbound frames stay plaintext.
+        * mTLS CSR — the spoke can generate its own key + CSR.
+        """
+        if hello.netbox_server:
+            self.netbox_server_agents.add(pk)
+        else:
+            self.netbox_server_agents.discard(pk)
+        if hello.ldap_server:
+            self.ldap_server_agents.add(pk)
+        else:
+            self.ldap_server_agents.discard(pk)
+        self.spoke_enc_capable[pk] = hello.enc_capable
+        self.spoke_mtls_csr_capable[pk] = hello.mtls_csr_capable
+
+    async def _link_role_subspoke(self, conn, parent_spoke_id):
+        """Record a role sub-spoke's parent agent; auto-approve on a vouch.
+
+        Multi-role generic agent: a role sub-spoke (spoke_id
+        ``{base}-{role}``) claims its base agent as parent. The claim is
+        recorded either way, so a later base-agent approval can sweep up
+        waiting sub-spokes (_auto_approve_pending_subspokes covers the
+        sub-before-parent connect order).
+
+        If the sub-spoke is not yet approved, the parent must SIGN a vouch
+        that it spawned this sub-spoke (H3) — the child's unsigned claim is
+        never trusted on its own. A verified vouch auto-approves + binds it to
+        the parent's tenant via the same approve_and_bind_spoke state machine
+        as admin/PSK approval. Any failure (parent not connected /
+        unauthenticated / timeout / denied / echo mismatch / not an agent /
+        prefix mismatch) falls through to pending admin approval; the
+        connection is NOT closed.
+        """
+        spoke_id, pk = conn.spoke_id, conn.pk
+        self.spoke_parent_map[pk] = parent_spoke_id
+        # B4: persist the parent linkage + role name into the sub-spoke's
+        # metadata so the WebUI can match a role sub-spoke to its parent
+        # agent AFTER B1 re-keyed known_modules raw→guid (the pre-B1
+        # ``{base}-{role}`` string-prefix match broke once both the base
+        # and the sub-spoke became independent guid keys). Stamped raw
+        # (the parent name the sub-spoke claimed) + resolved to the
+        # parent's current primary key at emit time (``_primary_key``),
+        # which matches whatever the parent's own pending_spokes row emits
+        # as ``spoke_id`` (guid once armed, raw until then). Persisted →
+        # the linkage survives the sub-spoke going offline (the in-memory
+        # ``spoke_parent_map`` does not).
+        if spoke_id.startswith(parent_spoke_id + "-"):
+            self.state.update_module_metadata(pk, {
+                "parent_name": parent_spoke_id,
+                "role_name": spoke_id[len(parent_spoke_id) + 1:],
+            })
+        if self.approved_modules.get(pk, False):
+            return
+        vouched, reason = await self._parent_vouches(spoke_id, parent_spoke_id)
+        if vouched:
+            tenant = self.state.get_spoke_tenant(self._primary_key(parent_spoke_id)) or ""
+            logger.info(f"Parent auto-approve: {spoke_id} via parent "
+                        f"{parent_spoke_id} (tenant={tenant or 'unassigned'}).")
+            await self.approve_and_bind_spoke(spoke_id, tenant)
+            self.known_modules = self.state.system_state["known_modules"]
+            self.record_spoke_event(spoke_id, "parent_auto_approve",
+                                    f"parent={parent_spoke_id}")
+        else:
+            self.record_spoke_event(spoke_id, "parent_vouch_failed",
+                                    f"parent={parent_spoke_id} reason={reason}")
+
+    async def _send_approval_required(self, conn):
+        """Tell a not-yet-approved spoke to wait for admin approval."""
+        spoke_id, pk = conn.spoke_id, conn.pk
+        logger.info(f"Module {spoke_id} is pending approval.")
+        self.record_spoke_event(spoke_id, "pending_approval", "awaiting admin approval")
+        approval_msg = {
+            "header": {"message_id": str(uuid.uuid4()), "timestamp": time.time(),
+                       "sender_id": "hub", "destination_id": spoke_id},
+            "payload": {"type": "APPROVAL_REQUIRED", "data": {}}
+        }
+        # Only sign if we have a key
+        try:
+            approval_msg["signature"] = self.key_manager.sign_message(pk, {
+                "header": approval_msg["header"],
+                "payload": approval_msg["payload"]
+            })
+        except Exception:
+            approval_msg["signature"] = None
+
+        await conn.websocket.send(json.dumps(approval_msg))
+
+    async def _greet_approved_spoke(self, conn, hello):
+        """Bring an approved spoke up: session key, mTLS gate, config push.
+
+        Returns False only when the mTLS gate rejects it (socket closed).
+        A cert-less spoke may instead be held in mTLS enrollment-only mode
+        (``conn.mtls_enroll_only``): no config push and no mailbox flush,
+        only the CSR exchange, until it reconnects presenting its cert.
+        """
+        spoke_id, pk = conn.spoke_id, conn.pk
+        if not conn.secret:
+            await self._push_zero_touch_session_key(spoke_id, pk)
+        # mTLS enforcement (hub_mtls_enforcement.py): bind the presented
+        # hub-CA cert to this spoke, refuse revoked / foreign certs and
+        # bound spokes that show up cert-less, and hold a cert-less spoke
+        # in enrollment-only mode until it presents its issued cert.
+        try:
+            _mtls_gate, _mtls_why = self._mtls_connect_gate(
+                spoke_id, pk, conn.websocket, hello.module_type or "")
+        except Exception as e:  # noqa: BLE001 - never block connect on a gate bug
+            logger.warning(f"[mtls] connect gate for {spoke_id} errored: {e}")
+            _mtls_gate, _mtls_why = "ok", "gate-error"
+        if _mtls_gate == "reject":
+            await self._mtls_reject(spoke_id, pk, conn.websocket, _mtls_why)
+            return False
+        if _mtls_why == "enroll-exhausted":
+            logger.warning(f"[mtls] {spoke_id} never presented its hub-CA cert "
+                           f"after repeated enrollment — allowing degraded "
+                           f"cert-less operation (set mtls_require_cert to forbid)")
+            self.record_spoke_event(spoke_id, "mtls_enroll_exhausted", "")
+        if _mtls_gate == "enroll":
+            conn.mtls_enroll_only = True
+            await self._mtls_begin_enrollment(spoke_id, pk, conn.websocket)
+            return True
+        await self._push_connect_config(spoke_id, hello.module_type)
+        return True
+
+    async def _push_zero_touch_session_key(self, spoke_id, pk):
+        """Mint and push a session key to an approved spoke that connected
+        without one (zero-touch reconnect).
+
+        Provision PLAINTEXT: signing_secret=None → no AEAD wrap → accepted in
+        the spoke's bootstrap decode (which ignores signatures when
+        self.secret is unset). Never sign with a retained prev_secret here —
+        the hub persists keys[pk] so current_session_secret(pk) can be a
+        secret a prior-session sub-spoke armed but never persisted
+        (RoleConnection no-op), and encrypting the push with it traps the
+        sub-spoke in _decode_frame's defer-buffer forever (the never-adopted
+        outage). Fire-and-forget (NOT request_response): the ack is
+        unreachable in the connect path (the message loop hasn't started) →
+        a 5s timeout every connect that stalls push_config and flaps the WS.
+        The spoke-side deferral closes the back-to-back encrypted
+        UPDATE_CONFIG race.
+        """
+        session_secret = self.key_manager.generate_first_secret(pk)
+        key_msg = Message(
+            header=MessageHeader(
+                message_id=str(uuid.uuid4()), timestamp=time.time(),
+                sender_id="hub", destination_id=spoke_id),
+            payload=MessagePayload(
+                type="SPOKE_UPDATE_SESSION_KEY",
+                data={"secret": session_secret}))
+        await self.send_to_spoke(key_msg, signing_secret=None)
+
+    async def _push_connect_config(self, spoke_id, module_type):
+        """Everything an approved, admitted spoke gets on connect."""
+        # Arm the cs reconnect push; _flush_spoke_backlog fires it after the
+        # mailbox so it lands AFTER any queued (older) CS_CONFIG_UPDATE.
+        self._cs_connect_defer[spoke_id] = [time.time(), False]
+        await self.push_config_to_spoke(spoke_id)
+
+        # Role self-heal (hub half): if this is a base agent, re-push
+        # LOAD_ROLE for any role the hub durably assigned to it whose
+        # sub-spoke isn't currently connected (the agent may have booted
+        # roles=none after losing its .env LOADED_ROLES). Fire-and-forget
+        # so it never blocks the connect path; it waits for the agent to
+        # authenticate before pushing.
+        if module_type == "agent":
+            asyncio.create_task(self._readopt_agent_roles(spoke_id))
+
+        # Fleet mTLS: deliver a Hub-Local-CA clientAuth client cert so the
+        # spoke can present a VERIFIED mTLS identity (public CAs no longer
+        # issue clientAuth). Idempotent — skips when a current cert exists.
+        # Gated by the mtls_ca_auto_provision toggle (default ON); a revoked
+        # spoke (mtls_revoked set) is skipped until manually re-issued.
+        # Run as a task: a CSR-capable spoke answers SPOKE_MTLS_CSR over
+        # request_response, which needs the message loop running.
+        try:
+            _gc = self.state.system_state.get("global_config", {}) or {}
+            _revoked = self.state.system_state.get("mtls_revoked", {}) or {}
+            if (_gc.get("mtls_ca_auto_provision", True)
+                    and self._primary_key(spoke_id) not in _revoked):
+                asyncio.create_task(self._provision_spoke_mtls_cert_safe(spoke_id))
+        except Exception as e:  # noqa: BLE001 - never block connect on this
+            logger.warning(f"[mtls] provision client cert for {spoke_id} failed: {e}")
+
+        # Request version AFTER the session key is established so the spoke
+        # can sign its response and the hub can verify it.
+        try:
+            version_msg = Message(
+                header=MessageHeader(
+                    message_id=str(uuid.uuid4()),
+                    timestamp=time.time(),
+                    sender_id="hub",
+                    destination_id=spoke_id
+                ),
+                payload=MessagePayload(type="get_version", data={})
+            )
+            await self.send_to_spoke(version_msg)
+        except Exception as e:
+            logger.error(f"Failed to request version from {spoke_id}: {e}")
+
+    # ── Phase 4: backlog ────────────────────────────────────────────────
+
+    async def _flush_spoke_backlog(self, conn):
+        """Deliver mail queued while the spoke was offline, then the deferred
+        cs reconnect config push. Both are skipped in mTLS enrollment-only
+        mode.
+
+        The mailbox is keyed by pk (guid once armed): _arm_guid_primary in
+        _reconcile_spoke_identity re-keyed the offline queue name→guid, so
+        flush must read the guid-keyed queue or a reconnecting spoke's
+        pending messages would be stranded under the stale name.
+        """
+        spoke_id = conn.spoke_id
+        if not conn.mtls_enroll_only:
+            await self.mailbox.flush_mailbox(conn.pk, self.send_to_spoke)
+
+        # cs reconnect config push, deferred from push_config_to_spoke so it
+        # lands AFTER any queued (older) CS_CONFIG_UPDATE and runs as a task
+        # while the message loop receives its reply. Always popped, so a
+        # stale defer entry never outlives this connect.
+        _cs_defer = self._cs_connect_defer.pop(spoke_id, None) if spoke_id else None
+        if _cs_defer and _cs_defer[1] and not conn.mtls_enroll_only:
+            self._spawn_cs_push(self.push_cs_full_config(spoke_id, reason="reconnect"))
+
+    # ── Phase 5: the message loop (one call per inbound frame) ─────────
+
+    async def _handle_spoke_frame(self, conn, message_json):
+        """Filter one inbound frame, then route it.
+
+        The filters run in a fixed order and each may drop the frame
+        (return early). Before the type is known: protect-mode size shed →
+        parse → signature verify / replay / H4 decrypt (signed) or
+        HEARTBEAT-only (unsigned). Once the type is known: heartbeat →
+        unapproved drop → mTLS enroll-only drop → replies → load-test probe
+        → rate limit → dispatch.
+
+        A non-object frame/payload raises AttributeError out of here, which
+        ends the connection via handle_connection's ``except Exception`` —
+        the long-standing behavior, preserved deliberately.
+        """
+        spoke_id, pk = conn.spoke_id, conn.pk
+        # TRUE offered-rate tally (before ANY shed) so the protect
+        # source-shed can find the loudest talkers to disconnect. One
+        # dict op per frame — cheap. Counts frames we then drop, unlike
+        # spoke_msg_count (which is post-shed). (spoke_id is always set here:
+        # _authenticate_spoke refuses a connection without one.)
+        self._spoke_recv[pk] = self._spoke_recv.get(pk, 0) + 1
+        if self._protect_shed_oversized(pk, message_json):
+            return
+
+        # Wire form is <sig>.<body>: split, verify the RECEIVED body bytes
+        # DIRECTLY (no re-serialization — the per-frame json.dumps that
+        # dominated ingest CPU is gone), and parse the body ONCE. sig == ""
+        # means unsigned (a bootstrap heartbeat before the spoke has a key).
+        sig, body_str = split_frame(message_json)
+        try:
+            msg_data = json.loads(body_str)
+        except Exception:
+            logger.debug("Unparseable frame from %s — dropping", spoke_id)
+            return
+
+        # H4: the AEAD-decrypt secret for an inbound secret-bearing frame.
+        # Resolved (and the payload decrypted) only on signed frames after
+        # HMAC verify + freshness pass; None for unsigned heartbeats (never
+        # encrypted). Threaded into _handle_agent_relay_up for the nested
+        # CS_TOKEN_RESULT decrypt (refinement #2).
+        dec_secret = None
+        if sig:
+            accepted, dec_secret = await self._verify_signed_frame(conn, body_str, sig, msg_data)
+            if not accepted:
+                return
+        elif msg_data.get("payload", {}).get("type") != "HEARTBEAT":
+            # No signature: allow ONLY heartbeats. A non-heartbeat frame from
+            # a spoke that never adopted its session key, if it persists past
+            # the grace window, is the signature of a legacy/incompatible or
+            # crashed-on-startup agent — emit ONE actionable ERROR via the
+            # GenericAgent logger (throttled per-connection) instead of
+            # flooding WARNING per frame.
+            self._maybe_log_unauthenticated_agent(pk)
+            logger.debug(
+                f"Unauthenticated non-heartbeat from {spoke_id} "
+                f"(only HEARTBEAT allowed). Dropping.")
+            return
+
+        payload = msg_data.get("payload", {})
+        self.bytes_count += len(message_json)  # Track received bytes
+        # Per-spoke inbound rate (relayed agent frames count toward the
+        # hosting spoke) — reset + averaged each 1s tick in run_mps_loop.
+        self.spoke_msg_count[pk] = self.spoke_msg_count.get(pk, 0) + 1
+        # Inbound trace: one line per frame so the full dispatch flow is
+        # greppable when DEBUG is on. Heartbeats are the bulk of traffic,
+        # so this stays at DEBUG (not INFO) to avoid flooding the log.
+        logger.debug("inbound type=%s from spoke=%s", payload.get("type"), spoke_id)
+
+        # Heartbeats are always allowed — even for pending spokes — so the
+        # connection stays alive while it waits for approval.
+        if payload.get("type") == "HEARTBEAT":
+            self._on_spoke_heartbeat(pk)
+            return
+
+        # If the module is not approved, ignore all other messages
+        if not self.approved_modules.get(pk, False):
+            logger.debug(f"Dropping message from unapproved module {spoke_id}")
+            return
+
+        # mTLS enrollment-only: nothing but replies to the hub's own
+        # in-flight requests (the CSR exchange) until the spoke reconnects
+        # presenting its cert.
+        if conn.mtls_enroll_only:
+            _cid = msg_data.get("correlation_id")
+            if not (_cid and _cid in self._outstanding_requests):
+                logger.debug(f"Dropping message from {spoke_id} (mTLS enrollment-only)")
+                return
+
+        # Replies are routed BEFORE the rate limiter so an ack/reply is
+        # never dropped.
+        if "correlation_id" in msg_data:
+            await self._route_spoke_reply(conn, msg_data, payload)
+            return
+
+        # MUST-PROCESS probe: carries no correlation_id, so it is handled
+        # here — above the rate limiter + protect shed — to prove
+        # must-process frames survive every rung of the ladder.
+        if payload.get("type") == "LOADTEST_PROBE":
+            self._count_loadtest_probe(pk, payload)
+            return
+
+        if not self._passes_inbound_rate_limit(conn, payload):
+            return
+
+        self.message_count += 1
+        await self._dispatch_spoke_message(conn, msg_data, payload, dec_secret)
+
+    def _protect_shed_oversized(self, pk, message_json):
+        """PROTECT MODE early shed — True means drop the frame unparsed.
+
+        Shed by SIZE, BEFORE the expensive JSON parse. At a CPU-pegged loop
+        the parse of large telemetry frames IS the bottleneck, so dropping
+        them here (not after parsing) is what actually frees the loop. Small
+        frames (heartbeats/acks, < shed_bytes) still parse + flow, so
+        liveness/acks are kept. BUT dropping-after-read still costs the READ;
+        a sustained flood is only relieved by DISCONNECTING the source — see
+        the protect source-shed in run_mps_loop / _protect_source_shed.
+
+        SURGICAL: drop a large frame ONLY if this spoke is a high-offered-rate
+        OFFENDER. Legit low-rate spokes' telemetry flows even during protect
+        — the point is to shed the FLOOD, not everyone. _spoke_offered is the
+        TRUE pre-shed per-tick count, so it isn't corrupted by the shedding.
+        """
+        if not self._protect_mode:
+            return False
+        try:
+            if (len(message_json) > self._protect_shed_bytes
+                    and self._spoke_offered.get(pk, 0) >= self._protect_shed_min_mps):
+                self.rate_limit_drops[pk] = self.rate_limit_drops.get(pk, 0) + 1
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def _verify_signed_frame(self, conn, body_str, sig, msg_data):
+        """Authenticate a signed frame. Returns ``(accepted, dec_secret)``.
+
+        Order is security-relevant (f50d1822, 4e50918f): HMAC verify →
+        replay/freshness → H4 decrypt. Rejected at any step → the frame is
+        dropped (``accepted`` False). On success ``msg_data`` has had its
+        payload decrypted in place and ``dec_secret`` is the AEAD key used.
+        """
+        spoke_id, pk = conn.spoke_id, conn.pk
+        src = self.key_manager.verify_signature_source(pk, body_str.encode(), sig)
+        if src is None:
+            logger.warning(f"Invalid signature from spoke {spoke_id}")
+            return False, None
+        # A verified signature proves the spoke installed its session key.
+        # Mark it authenticated (idempotent — also set at connect when a
+        # secret was presented). A spoke that never reaches here
+        # (legacy/incompatible agent that can't adopt a key) stays
+        # unauthenticated, so command routes can fail fast.
+        self.spoke_authenticated[pk] = True
+        # The spoke is signing with a PREVIOUS (rotated-out) key — it
+        # authenticated via the history window but never adopted the current
+        # key (missed the SPOKE_UPDATE_SESSION_KEY push). That is exactly the
+        # skew that produces "Bytes signature mismatch" on hub→spoke replies
+        # + GET_AGENTS/telemetry timeouts: the spoke→hub direction verifies
+        # (history), hub→spoke does not (spoke lacks the current key).
+        # Re-deliver the current key signed with the previous secret so the
+        # spoke can adopt it without a full re-onboard. Rate-limited per spoke.
+        if src == "history":
+            await self._maybe_redeliver_session_key(pk)
+        # First signed frame clears any prior "never authenticated"
+        # diagnosis (idempotent with the connect-time discard).
+        self._unauth_warned_spokes.discard(pk)
+        # Replay/freshness gate (item 8B): drop a captured/delayed signed
+        # frame that replays verbatim (same bytes → same HMAC) or whose
+        # timestamp is outside the freshness window. Runs only on signed
+        # frames, after verification, so unsigned heartbeats cost nothing and
+        # it's not an unauth flood vector.
+        if not self._check_freshness_and_replay(pk, msg_data):
+            return False, None
+        # H4: AEAD-decrypt payload.data of secret-bearing inbound frames
+        # (after HMAC verify + freshness pass) BEFORE dispatch reads data.
+        # _decrypt_inbound_payload resolves the AEAD key from src (history →
+        # previous_session_secret, else current), is a no-op on
+        # plaintext/legacy frames, and returns _H4_DROP on tamper / wrong key
+        # / marked-encrypted-with-no-decrypt-key (the frame is dropped —
+        # ciphertext is never dispatched).
+        dec_secret = await self._decrypt_inbound_payload(pk, src, msg_data)
+        if dec_secret is _H4_DROP:
+            return False, None
+        return True, dec_secret
+
+    def _on_spoke_heartbeat(self, pk):
+        """Record a heartbeat: liveness, persisted last-seen, absent clock."""
+        self.message_count += 1
+        self.heartbeat.update_heartbeat(pk)
+        # Persist last-contacted so a hub reboot doesn't reset this spoke to
+        # "Never connected / RED". _mark_dirty (no disk write here) — the
+        # 60s persistence_loop flushes. Cheap enough to run every heartbeat.
+        self.state.set_spoke_last_seen(pk, self.heartbeat.last_seen[pk])
+        # A heartbeat means the spoke is in contact — clear any never-seen
+        # absent clock so the alert loop doesn't keep a stale
+        # _spoke_absent_since entry around after first contact.
+        self._spoke_absent_since.pop(pk, None)
+
+    async def _route_spoke_reply(self, conn, msg_data, payload):
+        """Handle a frame carrying ``correlation_id`` — a reply to something
+        the hub sent. Replies are never rate-limited.
+
+        A reply's correlation_id is the hub's original message_id. Several
+        senders share that id space, checked in this order:
+
+        1. SPOKE_PROGRESS keepalive for a slow request_response → extend its
+           deadline; the frame carries no result.
+        2. HUB_PING liveness reply → resolve the adapter's pong waiter.
+        3. request_response (``_outstanding_requests``, or
+           ``_recent_request_timeouts`` once the waiter gave up → "late").
+        4. Fire-and-forget broadcast (``_pending_broadcast_ids``).
+        5. Otherwise mailbox.push (``mailbox.pending_ack``) or a genuinely
+           unknown ack → ``mailbox.acknowledge``. Routing 3/4 first keeps a
+           late or broadcast reply from being mislogged as an "unknown
+           message ID" WARNING.
+        """
+        spoke_id, pk, remote_ip = conn.spoke_id, conn.pk, conn.peer_ip
+        corr_id = msg_data["correlation_id"]
+        # Keepalive: a spoke servicing a slow request emits SPOKE_PROGRESS
+        # frames (correlation_id == the request's msg_id) so this hub extends
+        # the request_response deadline instead of killing a genuinely-working
+        # spoke at the base timeout. Bump the soft deadline (capped at the
+        # hard ceiling) and drop the frame — it carries no result.
+        if payload.get("type") == "SPOKE_PROGRESS":
+            _pd = self._progress_deadlines.get(corr_id)
+            if _pd is not None:
+                _pd["soft"] = min(time.time() + _pd["grace"], _pd["hard"])
+                logger.debug(
+                    "SPOKE_PROGRESS keepalive for %s from %s — deadline extended",
+                    corr_id, spoke_id)
+            self.message_count += 1
+            return
+        # App-layer liveness probe reply (HUB_PING → COMMAND_RESULT whose
+        # correlation_id is the ping's message_id). Resolve the sending
+        # adapter's ping waiter BEFORE the mailbox/unknown-ack routing so a
+        # probe reply isn't mislogged as a stray ack. The spoke that REPLIED
+        # is the one whose socket holds the waiter (it echoed the nonce we
+        # sent it on that socket).
+        if corr_id in self._pending_liveness_nonces:
+            self._pending_liveness_nonces.discard(corr_id)
+            adapter = self.active_connections.get(pk)
+            if adapter is not None and hasattr(adapter, "resolve_pong"):
+                adapter.resolve_pong(corr_id)
+            self.message_count += 1
+            return
+
+        in_flight = corr_id in self._outstanding_requests
+        late_reply = (not in_flight) and (corr_id in self._recent_request_timeouts)
+        if in_flight or late_reply:
+            if late_reply:
+                self._recent_request_timeouts.pop(corr_id, None)
+                logger.debug(
+                    "Late reply for %s from %s (request_response already "
+                    "timed out) — dropped (message_type=%s, source_ip=%s)",
+                    corr_id, spoke_id, payload.get("type"), remote_ip)
+        elif corr_id in self._pending_broadcast_ids:
+            # Fire-and-forget broadcast command ack (SET_LOG_LEVEL,
+            # CLEAR_LOGS, …): sent via low-level send_to_spoke, not
+            # mailbox.push, so it's not in pending_ack. Expected — log DEBUG +
+            # drop instead of WARNING "unknown message ID" (which fired on
+            # every Clear-Logs click / debug toggle).
+            self._pending_broadcast_ids.pop(corr_id, None)
+            logger.debug(
+                "Broadcast command ack for %s from %s — dropped "
+                "(message_type=%s, source_ip=%s)",
+                corr_id, spoke_id, payload.get("type"), remote_ip)
+        else:
+            # mailbox.push reply, or a genuinely unknown ack. Status: spoke
+            # reply frames carry the real outcome in payload.data.status (not
+            # a top-level "status" key, which the control plane never sets) —
+            # read it from there so the "unknown ack" warning reflects reality
+            # instead of always printing the stale "FAILED" default.
+            _pdata = payload.get("data") if isinstance(payload, dict) else None
+            _rstatus = str(_pdata.get("status") or "").strip().upper() \
+                if isinstance(_pdata, dict) else ""
+            ack = Acknowledgement(
+                correlation_id=corr_id,
+                status="SUCCESS" if _rstatus == "SUCCESS" else "FAILED",
+                error=msg_data.get("error"),
+                # Thread the sender's identity + frame type + peer IP into
+                # the ack so the mailbox "unknown ack" warning can name the
+                # source of a stray/late ack (the envelope's own spoke_id is
+                # often None for these).
+                spoke_id=spoke_id,
+                message_type=payload.get("type"),
+                source_ip=remote_ip,
+            )
+            await self.mailbox.acknowledge(ack)
+
+        # Debug: Log this response is actually expected
+        if corr_id not in self.response_cache:
+            logger.debug(f"Received response for correlation_id: {corr_id}")
+
+        # A get_version reply: remember the spoke's version + commit.
+        if payload.get("type") == "COMMAND_RESULT":
+            data = payload.get("data", {})
+            if isinstance(data, dict) and "version" in data:
+                self.spoke_versions[pk] = data["version"]
+            if isinstance(data, dict) and data.get("commit_sha"):
+                self.spoke_commits[pk] = data["commit_sha"]
+
+        # Store in response cache for API request bridging — but only if a
+        # waiter is still outstanding for this msg_id, so a late ack (after
+        # request_response already timed out and discarded the waiter) is
+        # dropped instead of leaked.
+        if hasattr(self, "response_cache") and corr_id in self._outstanding_requests:
+            self.response_cache[corr_id] = msg_data
+
+        self.message_count += 1
+
+    def _count_loadtest_probe(self, pk, payload):
+        """Load-test verification hook: per-spoke seq/gap counter, no ingest.
+
+        A gap here would be a real must-process LOSS (a bug); telemetry gaps
+        are expected.
+        """
+        self.message_count += 1
+        st = self._probe_state.setdefault(
+            pk, {"count": 0, "last_seq": -1, "gaps": 0})
+        try:
+            seq = int((payload.get("data") or {}).get("seq", -1))
+        except (TypeError, ValueError):
+            seq = -1
+        if st["last_seq"] >= 0 and seq > st["last_seq"] + 1:
+            st["gaps"] += seq - st["last_seq"] - 1
+        st["count"] += 1
+        if seq > st["last_seq"]:
+            st["last_seq"] = seq
+
+    def _passes_inbound_rate_limit(self, conn, payload):
+        """Per-spoke flood guard for non-reply frames. False = drop it.
+
+        Only reached by frames WITHOUT a correlation_id (replies return
+        earlier), so a reply can never be dropped here.
+        """
+        spoke_id, pk = conn.spoke_id, conn.pk
+        # PROTECT MODE: SHED inbound telemetry/logs — but SURGICALLY, only
+        # from high-offered-rate OFFENDERS. A legit low-rate spoke's
+        # telemetry is processed even during protect, so real modules keep
+        # flowing while the flood is shed. Heartbeats (handled earlier)
+        # always flow. Survive > fresh, but spare the innocent.
+        if (self._protect_mode
+                and self._spoke_offered.get(pk, 0) >= self._protect_shed_min_mps):
+            self.rate_limit_drops[pk] = self.rate_limit_drops.get(pk, 0) + 1
+            return False
+        limiter = self.rate_limiters.get(pk)
+        if not limiter:
+            return True
+        ok = limiter.consume()
+        # SOFT WATERMARK (default 80% of burst consumed): flag the spoke so
+        # the ladder (next 1s tick) TELLS it to slow + coalesce locally —
+        # proactively, BEFORE the hard drop. Cheap set add (deduped); the
+        # ladder does the signalling with its dedup/dwell/cap. A correct
+        # client backs off here and never reaches the hard limit below.
+        if limiter.capacity and limiter.tokens <= (1.0 - self._rl_soft_frac) * limiter.capacity:
+            self._rl_breached.add(pk)
+        if ok:
+            return True
+        # HARD LIMIT (100%) → DROP the frame (enforcement). A client still
+        # hard-dropping here IGNORED the 80% slow-down — track the hard drops
+        # so the ladder can escalate a persistent flooder to
+        # disconnect+quarantine (DDoS defense: stop parsing its frames).
+        self.rate_limit_drops[pk] = self.rate_limit_drops.get(pk, 0) + 1
+        self._rl_harddrops[pk] = self._rl_harddrops.get(pk, 0) + 1
+        logger.debug(
+            "Rate limit HARD-DROP for spoke %s (type=%s, total drops=%d).",
+            spoke_id, payload.get('type'), self.rate_limit_drops[pk])
+        return False
+
+    # ── Phase 5b: dispatch of verified, approved, rate-limited frames ──
+
+    # Message type → handler method. Every handler has the signature
+    # ``(conn, msg_data, payload, dec_secret)``. A handler may return False
+    # to mean "not handled" (only AGENT_RELAY_UP does, for an unmatched
+    # sub-type); the frame then gets the unhandled-type INFO log, exactly as
+    # the old if-chain fell through. Types not listed here get that log too.
+    _SPOKE_MESSAGE_HANDLERS = {
+        "CS_TELEMETRY": "_spoke_msg_cs_telemetry",
+        "CS_CONFIG_REQUEST": "_spoke_msg_cs_config_request",
+        **{_t: "_spoke_msg_dot1x" for _t in dot1x_jit.MESSAGE_TYPES},
+        "CS_PROGRESS": "_spoke_msg_cs_progress",
+        "SPOKE_LOG": "_spoke_msg_spoke_log",
+        "CS_DEBUG_LOG": "_spoke_msg_cs_debug_log",
+        **{_t: "_spoke_msg_console" for _t in (
+            "CONSOLE_DATA_UP", "CONSOLE_READY", "CONSOLE_ERROR",
+            "CONSOLE_CLOSED", "CONSOLE_DOWNGRADED")},
+        "CONSOLE_PROBE_RESULT": "_spoke_msg_console_probe_result",
+        "NW_POLL_RESULT": "_spoke_msg_nw_poll_result",
+        "NW_REACHABILITY": "_spoke_msg_nw_reachability",
+        "TRUENAS_POLL_RESULT": "_spoke_msg_truenas_poll_result",
+        "LE_CERT_RENEWED": "_spoke_msg_le_cert_renewed",
+        "LE_CERT_RENEW_FAILED": "_spoke_msg_le_cert_renew_failed",
+        "STATUS_RUN_DEMO": "_spoke_msg_status_run_demo",
+        "HTTP_PROBE_REPORT": "_spoke_msg_http_probe_report",
+        "APP_LOGIN_FAILURE": "_spoke_msg_app_login_failure",
+        "NODE_CANARY_HIT": "_spoke_msg_node_canary_hit",
+        "AGENT_ONBOARDING_PSK": "_spoke_msg_agent_onboarding_psk",
+        "AGENT_RELAY_UP": "_spoke_msg_agent_relay_up",
+        "HUB_REQUEST": "_spoke_msg_hub_request",
+    }
+
+    async def _dispatch_spoke_message(self, conn, msg_data, payload, dec_secret):
+        """Route a fully-vetted frame to its handler (see the table above)."""
+        mtype = payload.get("type")
+        # A non-string type (e.g. a list) is never a valid key — and an
+        # unhashable one would raise on dict lookup — so it goes straight to
+        # the unhandled-type log, as it did under the old if-chain.
+        handler_name = self._SPOKE_MESSAGE_HANDLERS.get(mtype) if isinstance(mtype, str) else None
+        if handler_name:
+            handled = await getattr(self, handler_name)(conn, msg_data, payload, dec_secret)
+            if handled is not False:
+                return
+        # Fallback for verified-but-unhandled message types. Logged at INFO
+        # (not DEBUG) so a new/unknown spoke frame is visible by default.
+        logger.info(f"Received verified message from {conn.spoke_id}: {payload.get('type')}")
+
+    async def _spoke_msg_cs_telemetry(self, conn, msg_data, payload, dec_secret):
+        """Client-Sim telemetry (combined spoke relays its full state).
+
+        Ingest + fan-out + USB diagnostic live in _handle_cs_telemetry.
+        CS_TELEMETRY is the "coalesce" class — this IS the live enforcement of
+        _classify_message's policy; keep them in lockstep. Rung-3: if this
+        spoke is under backpressure, COALESCE its telemetry (latest-wins) into
+        the drain buffer instead of running the full ingest inline. A prior
+        un-drained snapshot for this spoke is merged away (counted).
+        """
+        pk = conn.pk
+        self._telemetry_received += 1
+        if pk in self._spoke_backoff:
+            if pk in self._coalesce_pending:
+                self._telemetry_coalesced += 1
+            self._coalesce_pending[pk] = (payload.get("data", {}), time.time())
+            return
+        await self._handle_cs_telemetry(conn.spoke_id, payload.get("data", {}))
+        self._telemetry_processed += 1
+
+    async def _spoke_msg_cs_config_request(self, conn, msg_data, payload, dec_secret):
+        """Client-Sim config pull (sent once per spoke connect).
+
+        Re-push the full config when the spoke's hash differs from what the
+        hub would send now. Runs as a task: the push's reply arrives through
+        this same loop.
+        """
+        _rd = payload.get("data", {}) or {}
+        self._spawn_cs_push(self._handle_cs_config_request(
+            conn.spoke_id, str(_rd.get("config_hash") or "")))
+
+    async def _spoke_msg_dot1x(self, conn, msg_data, payload, dec_secret):
+        """JIT 802.1X accounts (cs engine → hub broker). See dot1x_jit.py.
+
+        Spawned: provisioning round-trips to the backend spoke and then
+        replies to THIS spoke (CS_DOT1X_CREDENTIAL), whose answer arrives
+        through this same loop.
+        """
+        self._spawn_cs_push(dot1x_jit.handle_spoke_message(
+            self, conn.spoke_id, payload.get("type"), payload.get("data", {}) or {}))
+
+    async def _spoke_msg_cs_progress(self, conn, msg_data, payload, dec_secret):
+        """Client-Sim per-op progress (realtime operations feed).
+
+        The agent emits CS_PROGRESS per phase (destroying/cloning/starting/…)
+        for reclone/provision/delete — far faster than the ~30s CS_TELEMETRY
+        frame. Fan these out to the tenant's /sim/ws browsers for a live
+        feed. Fire-and-forget passthrough (no ingest/state); every step is
+        best-effort.
+        """
+        spoke_id = conn.spoke_id
+        _pdata = payload.get("data", {}) or {}
+        _log_cs_op_failure(f"spoke={spoke_id}", "CS_PROGRESS", _pdata)
+        try:
+            _ptenant = self.state.get_spoke_tenant(conn.pk)
+        except Exception:  # noqa: BLE001
+            _ptenant = None
+        # Drive the VM Server table's per-VM live state from the op feed
+        # (instant, one vmid per event). Non-terminal progress sets the
+        # in-progress state; terminals are owned by the CS_COMMAND_RESULT
+        # handler.
+        try:
+            _pstate = self._VM_ACTION_STATE.get(_pdata.get("action"))
+            _pstat = str(_pdata.get("status") or "").lower()
+            if _ptenant and _pstate and _pstat not in ("completed", "failed", "error"):
+                self._vm_live_set(_ptenant, _pdata.get("vmid"), _pstate)
+        except Exception:  # noqa: BLE001 — overlay is best-effort
+            pass
+        try:
+            await self.simulations_broadcaster.broadcast(
+                spoke_id, {"type": "cs_progress", "data": _pdata}, _ptenant)
+        except Exception:  # noqa: BLE001 — feed is best-effort
+            pass
+
+    async def _spoke_msg_spoke_log(self, conn, msg_data, payload, dec_secret):
+        """Spoke log forwarding — see _handle_spoke_log."""
+        await self._handle_spoke_log(conn.spoke_id, payload)
+
+    async def _spoke_msg_cs_debug_log(self, conn, msg_data, payload, dec_secret):
+        """Remote client debug-log streaming.
+
+        A cs client flipped into "debug mode" from the WebUI has its agent.sh
+        tailer stream sim.log + debug-* logs (advanced adds journal/dmesg) up
+        through the cs spoke, which relays them here. Ingested into a
+        per-(tenant,hostname) ring buffer and served via
+        GET /api/cs/clients/{host}/debug-logs (routes/client_debug.py).
+        """
+        await self._handle_cs_debug_log(conn.spoke_id, payload)
+
+    async def _spoke_msg_console(self, conn, msg_data, payload, dec_secret):
+        """Console serial relay (CONSOLE_DATA_UP / READY / ERROR / CLOSED /
+        DOWNGRADED).
+
+        The console role sub-spoke pushes live serial output + control
+        signals straight up its own connection. Route each to the browser
+        session's queue; the /ws/console-serial relay reads bytes off it.
+        Control signals are tuples so the WS loop can tell them from data
+        bytes (mirrors the VNC ready/error/disconnect discipline — a
+        bare-return there once killed the queue consumer). A sender that does
+        not own the session is refused (surface K).
+        """
+        _ctype = payload.get("type")
+        _cdata = payload.get("data", {}) or {}
+        _csess = self.get_console_session(_cdata.get("session_id")) if _cdata.get("session_id") else None
+        if _csess and not self._relay_session_owner_ok(
+                _csess, conn.spoke_id, kind="console", remote_ip=conn.peer_ip):
+            _csess = None  # sender does not own this session — refuse (surface K)
+        if not _csess:
+            return
+        if _ctype == "CONSOLE_DATA_UP":
+            try:
+                await _csess["queue"].put(base64.b64decode(_cdata.get("data") or ""))
+            except Exception:
+                pass
+        elif _ctype == "CONSOLE_READY":
+            await _csess["queue"].put(("ready",))
+        elif _ctype == "CONSOLE_ERROR":
+            await _csess["queue"].put(("error", str(_cdata.get("error", "console error"))[:300]))
+        elif _ctype == "CONSOLE_CLOSED":
+            await _csess["queue"].put(("disconnect",))
+        elif _ctype == "CONSOLE_DOWNGRADED":
+            # Another session forced a write-lock takeover on this port —
+            # tell the dispossessed browser to drop to read-only without
+            # closing the connection.
+            await _csess["queue"].put(("downgraded",))
+
+    async def _spoke_msg_console_probe_result(self, conn, msg_data, payload, dec_secret):
+        """Console auto-identify result → NetBox (event-driven).
+
+        A console spoke fingerprinted a device; match/create a NetBox device
+        from the harvested identity. Fire-and-forget so the dispatch loop
+        doesn't block on a NetBox round-trip.
+        """
+        asyncio.create_task(self._handle_console_probe(conn.pk, payload.get("data", {}) or {}))
+
+    async def _spoke_msg_nw_poll_result(self, conn, msg_data, payload, dec_secret):
+        """NW autonomous per-device poll result (spoke-driven).
+
+        Fold it into the per-device nw cache so every sub-view
+        (info/arp/macs/interfaces/endpoints/vlans) serves instantly without a
+        live SSH round-trip. ``data`` is the flattened poll — exactly what
+        nw_cache_set_poll reads. Fire-and-forget.
+        """
+        _nwd = payload.get("data", {}) or {}
+        _nw_did = _nwd.get("device_id")
+        _nw_pdata = _nwd.get("data") if isinstance(_nwd.get("data"), dict) else _nwd
+        if _nw_did and isinstance(_nw_pdata, dict):
+            # Warm cache + per-device NetBox inventory sync.
+            asyncio.create_task(self.apply_nw_auto_poll(_nw_did, _nw_pdata))
+
+    async def _spoke_msg_nw_reachability(self, conn, msg_data, payload, dec_secret):
+        """NW lightweight reachability sweep result (spoke-driven).
+
+        The nw spoke ICMP-pings each device on a ~5-min cadence and pushes
+        just the up/down/unknown verdict. Fold it into the cached fleet row so
+        the badge stays fresh between the hours-apart data polls.
+        ``reachable`` may be None (UNKNOWN). Fire-and-forget.
+        """
+        _nwr = payload.get("data", {}) or {}
+        _nwr_did = _nwr.get("device_id")
+        if _nwr_did:
+            asyncio.create_task(self.nw_cache_set_reachability(
+                _nwr_did, _nwr.get("reachable"),
+                _nwr.get("latency_ms")))
+
+    async def _spoke_msg_truenas_poll_result(self, conn, msg_data, payload, dec_secret):
+        """TrueNAS autonomous per-appliance poll result (spoke-driven).
+
+        Fold it into the per-appliance truenas cache so every Storage sub-view
+        serves instantly without a live WS JSON-RPC round-trip. ``data`` is
+        the flattened poll. Fire-and-forget.
+        """
+        _td = payload.get("data", {}) or {}
+        _tn_aid = _td.get("appliance_id")
+        _tn_pdata = _td.get("data") if isinstance(_td.get("data"), dict) else _td
+        if _tn_aid and isinstance(_tn_pdata, dict):
+            asyncio.create_task(self.truenas_cache_set_poll(_tn_aid, _tn_pdata))
+
+    async def _spoke_msg_le_cert_renewed(self, conn, msg_data, payload, dec_secret):
+        """LE cert renewed → re-push the material to its targets now.
+
+        Saves waiting up to 1h for run_cert_distribution_loop (the hourly
+        loop remains the fallback). Fire-and-forget. A successful renew also
+        clears any prior cert-renew-failed alert edge (recovery email) —
+        tenant from the spoke's binding, never the payload.
+        """
+        spoke_id = conn.spoke_id
+        ev = payload.get("data", {}) or {}
+        _ev_domain = ev.get("domain")
+        _ev_targets = ev.get("targets") or []
+        if _ev_domain and _ev_targets:
+            asyncio.create_task(self._on_le_cert_renewed(
+                spoke_id, _ev_domain, _ev_targets))
+        else:
+            logger.debug("LE_CERT_RENEWED from %s missing "
+                         "domain/targets; hourly loop will cover it",
+                         spoke_id)
+        if _ev_domain:
+            _rn_tenant = self.state.get_spoke_tenant(spoke_id) or "default"
+            asyncio.create_task(self.alert_engine.evaluate(
+                _rn_tenant, "cert_renew_failed", _ev_domain, False,
+                "", severity="ok"))
+
+    async def _spoke_msg_le_cert_renew_failed(self, conn, msg_data, payload, dec_secret):
+        """LE cert renewal FAILED → realtime cert-renewal-failed alert.
+
+        The ledger's last_error is the persisted record; this event is the
+        prompt transport. Tenant from the spoke's binding (security: never
+        trust the payload tenant).
+        """
+        spoke_id = conn.spoke_id
+        ev = payload.get("data", {}) or {}
+        _fr_domain = ev.get("domain")
+        if _fr_domain:
+            _fr_tenant = self.state.get_spoke_tenant(spoke_id) or "default"
+            asyncio.create_task(self.alert_engine.evaluate(
+                _fr_tenant, "cert_renew_failed", _fr_domain, True,
+                ev.get("message") or "renew failed", severity="error"))
+        else:
+            logger.debug("LE_CERT_RENEW_FAILED from %s missing domain",
+                         spoke_id)
+
+    async def _spoke_msg_status_run_demo(self, conn, msg_data, payload, dec_secret):
+        """Status-page public demo trigger (relayed by a statuspage sub-spoke).
+
+        SECURITY: the sub-spoke holds NO tenant authority —
+        _handle_status_run_demo resolves the tenant from ITS binding, never
+        the payload. Fire-and-forget.
+        """
+        asyncio.create_task(self._handle_status_run_demo(
+            conn.spoke_id, payload.get("data", {}) or {}))
+
+    async def _spoke_msg_http_probe_report(self, conn, msg_data, payload, dec_secret):
+        """Edge-reported HTTPS-port scanner → block the source centrally.
+
+        _handle_edge_probe_report re-classifies the path server-side and
+        rate-caps the reporter so a compromised edge can't poison the
+        blocklist.
+        """
+        self._handle_edge_probe_report(
+            conn.spoke_id, conn.peer_ip, payload.get("data", {}) or {})
+
+    async def _spoke_msg_app_login_failure(self, conn, msg_data, payload, dec_secret):
+        """App-edge (AppBuilder) login failure → shared brute-force counter.
+        _handle_app_login_failure rate-caps the reporter."""
+        self._handle_app_login_failure(
+            conn.spoke_id, conn.peer_ip, payload.get("data", {}) or {})
+
+    async def _spoke_msg_node_canary_hit(self, conn, msg_data, payload, dec_secret):
+        """A node's hub-assigned canary endpoint was touched — a definitive
+        intrusion attempt. _handle_node_canary_hit rate-caps the reporter and
+        routes the response by the reporter's location."""
+        self._handle_node_canary_hit(
+            conn.spoke_id, conn.peer_ip, payload.get("data", {}) or {})
+
+    async def _spoke_msg_agent_onboarding_psk(self, conn, msg_data, payload, dec_secret):
+        """Relayed node-agent zero-touch onboarding PSK.
+
+        On a valid PSK the agent is auto-approved + bound to that tenant
+        immediately; on any mismatch it just stays pending manual approval.
+        """
+        await self._handle_agent_onboarding_psk(
+            conn.spoke_id, payload.get("data", {}) or {})
+
+    async def _spoke_msg_agent_relay_up(self, conn, msg_data, payload, dec_secret):
+        """Scale-out relay of a hosted agent's frame.
+
+        Returns False when _handle_agent_relay_up did not match the sub-type —
+        CRITICAL: an unmatched AGENT_RELAY_UP must get the unhandled-type INFO
+        log (the dispatcher does that on False), matching the pre-extraction
+        behavior.
+        """
+        return bool(await self._handle_agent_relay_up(
+            conn.spoke_id, msg_data, payload, _dec_secret=dec_secret))
+
+    async def _spoke_msg_hub_request(self, conn, msg_data, payload, dec_secret):
+        """Agent-initiated request (e.g. AppBuilder asking for logs or to
+        trigger updates). See _handle_hub_request for the dispatch + signed
+        HUB_RESPONSE reply."""
+        await self._handle_hub_request(
+            conn.spoke_id, msg_data, payload,
+            getattr(conn.websocket, "peer_cert_identity", None))
+
+    # ── Phase 6: connection end ─────────────────────────────────────────
+    #
+    # A replaced ("zombie") connection — evicted by _install_active_connection
+    # — can still be blocked in recv() when its replacement arrives, and its
+    # belated exit must not clobber the live replacement's state. So all
+    # three handlers below act only if THIS websocket still owns the slot
+    # (9ae39980 — the cs-spoke-1 zombie class).
+
+    def _owns_spoke_slot(self, spoke_id, websocket):
+        return bool(spoke_id and self.active_connections.get(self._primary_key(spoke_id)) is websocket)
+
+    def _on_spoke_connection_closed(self, spoke_id, websocket):
+        """Clean WebSocket close."""
+        logger.info(f"Connection closed for spoke {spoke_id}")
+        if self._owns_spoke_slot(spoke_id, websocket):
+            self._mark_spoke_disconnected(spoke_id)
+            self.record_spoke_event(spoke_id, "connection_closed", "clean websocket close")
+
+    def _on_spoke_connection_error(self, spoke_id, websocket, e):
+        """Any other exception ended the connection."""
+        logger.error(f"Error handling connection for {spoke_id}: {e}")
+        if self._owns_spoke_slot(spoke_id, websocket):
+            self.spoke_telemetry[self._primary_key(spoke_id)] = {
+                "last_attempt": time.time(),
+                "status": "ERROR",
+                "error": str(e)
+            }
+            self.record_spoke_event(spoke_id, "connection_error", str(e))
+
+    def _release_spoke_slot(self, spoke_id, websocket):
+        """Always-run cleanup (handle_connection's ``finally``).
+
+        Ends any mTLS enrollment hold, then — only if this socket still owns
+        the slot — drops every piece of per-connection registry state. Ownership
+        is checked BEFORE deleting active_connections (the delete would
+        otherwise make it False).
+        """
+        if spoke_id:
+            try:
+                self._mtls_enrollment_done(self._primary_key(spoke_id), websocket)
+            except Exception:  # noqa: BLE001
+                pass
+        if not self._owns_spoke_slot(spoke_id, websocket):
+            return
+        pk = self._primary_key(spoke_id)
+        del self.active_connections[pk]
+        self.active_connection_key_ids.pop(pk, None)
+        disc_mtype = self.spoke_module_types.pop(pk, None)
+        self.spoke_parent_map.pop(pk, None)
+        self.netbox_server_agents.discard(pk)
+        self.ldap_server_agents.discard(pk)
+        self.spoke_authenticated.pop(pk, None)
+        self.spoke_enc_capable.pop(pk, None)
+        # Drop the per-connection "never authenticated" diagnosis state so a
+        # reconnect that's still broken re-emits the ERROR once past the
+        # grace window (instead of staying suppressed).
+        self._unauth_warned_spokes.discard(pk)
+        # Evict every agent hosted by this spoke from the agent→spoke index.
+        # They'll re-index on reconnect (next AGENT_RELAY_UP). Iterate over a
+        # snapshot — mutating the dict during iteration would raise.
+        for aid in list(self.agent_info):
+            if self._primary_key(self.agent_info.get(aid, {}).get("spoke_id")) == pk:
+                self.agent_info.pop(aid, None)
+        # A disconnected proxy no longer serves its tenant disk-backed;
+        # recompute so that tenant reverts to resident RAM caching (or stays
+        # disk-backed if another proxy still serves it).
+        if disc_mtype == "proxy":
+            self._recompute_proxied_tenants()
 
     # ── Update pipeline (extracted) ───────────────────────────────────────
     # get_local_version / get_remote_version / _is_git_repo / _download_update /
