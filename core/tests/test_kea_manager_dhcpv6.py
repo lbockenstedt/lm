@@ -158,10 +158,11 @@ def test_list_leases6_passes_subnet_ids_and_targets_dhcp6_service():
 
 def test_delete_lease6_uses_lease6_del_on_dhcp6_service():
     mgr = kea_manager.KeaManager("http://localhost:8001")
-    mgr._rpc = MagicMock(return_value={})
+    mgr._rpc_full = MagicMock(return_value={"result": 0, "text": "IPv6 lease deleted."})
     result = mgr.delete_lease6("2001:470:4948:1::10")
     assert result["status"] == "SUCCESS"
-    mgr._rpc.assert_called_once_with("dhcp6", "lease6-del", {"ip-address": "2001:470:4948:1::10"})
+    assert result["not_found"] is False
+    mgr._rpc_full.assert_called_once_with("dhcp6", "lease6-del", {"ip-address": "2001:470:4948:1::10"})
 
 
 def test_add_reservation6_and_list_reservations6_round_trip():
@@ -180,6 +181,7 @@ def test_add_reservation6_and_list_reservations6_round_trip():
         raise AssertionError(f"unexpected RPC {command}")
 
     mgr = _manager_with_rpc(rpc)
+    mgr._rpc_full = MagicMock(return_value={"result": 3, "text": "IPv6 lease not found."})
     add_result = mgr.add_reservation6(3, "2001:470:4948:1::20", "AA:BB:CC:DD:EE:01", "host2")
     assert add_result["status"] == "SUCCESS"
 
