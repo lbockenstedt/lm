@@ -61,7 +61,7 @@ dict `{"A": _handle_a, …}`. Each handler can then be read and tested on its ow
 
 | cc | len | location |
 |---:|---:|---|
-| 304 | 919 | `cs/lm-spoke/src/command_handlers/handlers_config.py:63` `_dispatch_config` |
+| 304 | 919 | `cs/lm-spoke/src/command_handlers/handlers_config.py:63` `_dispatch_config` — ✅ done (cs 5f16e14: dispatch tables for all 5 mixins) |
 | 241 | 1375 | `lm/core/src/main.py:5299` `handle_connection` (WS message-type chain) |
 | 137 | 463 | `pxmx/src/proxmox_spoke.py:103` `handle_command` |
 | 119 | 292 | `cs/lm-spoke/src/command_handlers/handlers_agents.py:47` `_dispatch_agents` |
@@ -106,7 +106,7 @@ a list and apply them all in one loop.
 | 221 | 637 | `cs/webui-spoke/services/proxmox_agent.py:2564` `_apply_proxmox_telemetry_state` |
 | 160 | 593 | `ab/routes.py:2704` `save_settings` |
 | 130 | 377 | `cs/webui-spoke/routers/settings.py:67` `api_settings_update` |
-| 107 | 406 | `cs/lm-spoke/src/command_handlers/handlers_config.py:1110` `_apply_hub_config` |
+| 107 | 406 | `cs/lm-spoke/src/command_handlers/handlers_config.py:1110` `_apply_hub_config` — ✅ done (cs 5f16e14: cc 107 → 13) |
 | 97 | 242 | `cs/webui-spoke/server.py:3971` `_apply_hub_config` |
 | 90 | 302 | `cs/webui-spoke/server.py:3667` `_apply_relay_command_batch` |
 
