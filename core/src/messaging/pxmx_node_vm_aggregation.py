@@ -21,7 +21,8 @@ last-known-data fallback; degrades to empty when absent, e.g. on a cs spoke).
 """
 import asyncio
 import logging
-from typing import Any, Dict, Iterable, List, Tuple
+import time
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     from .. import pve_cmd_builder
@@ -313,7 +314,55 @@ async def _vms_from_agent(cp, agent_id: str) -> Dict[str, Any]:
         return {"vms": [], "cluster": cluster, "error": str(e)}
 
 
+# How old an agent's AGENT_TELEMETRY snapshot may be and still answer a
+# ``prefer_cache`` pinned request. Agents report about every 60s, so 300s
+# tolerates a few slow or missed cycles without serving a host that has gone
+# quiet. Older than this falls back to the live query.
+PREFER_CACHE_MAX_AGE_S = 300.0
+
+
+def _cached_agent_vms(cp, agent_id: str) -> Optional[Dict[str, Any]]:
+    """One agent's VM list from its last AGENT_TELEMETRY, in the same
+    ``{vms, cluster}`` shape ``_vms_from_agent`` returns, or ``None`` when
+    there is no fresh snapshot (unknown agent, no telemetry yet, or older
+    than ``PREFER_CACHE_MAX_AGE_S``).
+
+    Why this exists: a pinned ``agent_id`` request otherwise ALWAYS runs the
+    live multi-round-trip PVE query (pools, cluster resources, per-VM
+    interface annotation), about 10-15s on the live fleet. The Dashboard's
+    Overview counts give each call a 5s budget and only need
+    vmid/node/status, so every pinned count timed out (about 200
+    "Request Timeout: [PXMX_LIST_VMS]" errors a day on LM-HUB, 2026-10-25)
+    while the spoke kept doing the slow work for a reply nobody read.
+
+    Telemetry VMs carry no per-VM interface annotation (``interfaces``/
+    ``ips`` may be missing or coarser), which is why this is opt-in: callers
+    that need live truth (delete verification, VM sync, VMID allocation)
+    never send ``prefer_cache`` and keep the live path. A fresh snapshot
+    with an EMPTY vms list is a real "0 VMs" and is returned as such."""
+    info = (getattr(cp, "connected_agents", None) or {}).get(agent_id)
+    if not isinstance(info, dict):
+        return None
+    ts = info.get("telemetry_ts") or 0
+    if not ts or (time.time() - ts) > PREFER_CACHE_MAX_AGE_S:
+        return None
+    return {"vms": list(info.get("vms") or []),
+            "cluster": info.get("cluster_name", agent_id)}
+
+
 async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Answer PXMX_LIST_VMS / GET_VM_LIST.
+
+    Payload keys:
+      ``agent_id``     scope to one Proxmox agent (a pinned host).
+      ``tag_filter``   keep only VMs carrying this Proxmox tag.
+      ``prefer_cache`` with ``agent_id``: serve that agent's fresh telemetry
+                       snapshot when there is one (see ``_cached_agent_vms``)
+                       and fall back to the live query otherwise. Ignored
+                       without ``agent_id``, because the aggregate path
+                       already serves from telemetry first. An older spoke
+                       ignores the key and answers live, as before.
+    """
     if not cp:
         return {"status": "ERROR", "error": "Control plane not initialised"}
 
@@ -327,7 +376,10 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
     # surface it honestly so the hub records an 'error' sync status instead
     # of silently reading an empty vms list as "0 records synced, success".
     if agent_id:
-        result = await _vms_from_agent(cp, agent_id)
+        result = _cached_agent_vms(cp, agent_id) if data.get("prefer_cache") else None
+        source = "telemetry_cache" if result is not None else "pinned_agent"
+        if result is None:
+            result = await _vms_from_agent(cp, agent_id)
         if not isinstance(result, dict) or result.get("status") == "ERROR":
             logger.warning("PXMX_LIST_VMS pinned agent %r unreachable: %s",
                            agent_id, result if isinstance(result, dict) else "non-dict")
@@ -344,9 +396,9 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
         if tag_filter:
             vms = [v for v in vms
                    if tag_filter in [t.lower() for t in (v.get("tags") or [])]]
-        logger.info("PXMX_LIST_VMS pinned agent=%s tag_filter=%r -> %d VMs",
-                    agent_id, tag_filter, len(vms))
-        return {"status": "SUCCESS", "vms": vms, "source": "pinned_agent",
+        logger.info("PXMX_LIST_VMS pinned agent=%s tag_filter=%r -> %d VMs (%s)",
+                    agent_id, tag_filter, len(vms), source)
+        return {"status": "SUCCESS", "vms": vms, "source": source,
                 "agent_count": 1}
 
     # Aggregate from telemetry cache first (fast, no PVE API call).
