@@ -62,7 +62,7 @@ dict `{"A": _handle_a, …}`. Each handler can then be read and tested on its ow
 | cc | len | location |
 |---:|---:|---|
 | 304 | 919 | `cs/lm-spoke/src/command_handlers/handlers_config.py:63` `_dispatch_config` — ✅ done (cs 5f16e14: dispatch tables for all 5 mixins) |
-| 241 | 1375 | `lm/core/src/main.py:5299` `handle_connection` (WS message-type chain) |
+| 241 | 1375 | `lm/core/src/main.py` `handle_connection` (WS message-type chain) — ✅ done: cc 241 → 7. The 1,375-line function is now 6 documented phases (auth frame → authenticate → admit → backlog → per-frame filters + `_SPOKE_MESSAGE_HANDLERS` dispatch table → slot-owner cleanup). The largest piece left is `_route_spoke_reply`, at cc 23. Every security-ordering rule is listed, with its originating commit, in the "Spoke connection lifecycle" banner in main.py. How behavior was verified: a differential fuzz of the old vs new function over 30,000 random connection scripts, comparing calls, logs, sends, closes and final state (0 mismatches); 99.5% line coverage of the new code; and 14/14 security mutants caught by the permanent tests (`core/tests/test_handle_connection.py` + `hc_harness.py`). Those tests also pass against the pre-refactor code (the one exception is the dispatch-table test, which needs the new table). |
 | 137 | 463 | `pxmx/src/proxmox_spoke.py:103` `handle_command` |
 | 119 | 292 | `cs/lm-spoke/src/command_handlers/handlers_agents.py:47` `_dispatch_agents` |
 | 99 | 314 | `lm/console/src/console_spoke.py:293` `handle_command` |
