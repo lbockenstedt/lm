@@ -3,7 +3,7 @@ import asyncio
 import re
 
 from api import (
-    HTTPException, Request, _cache_entry, _refresh_module_all_tenants,
+    HTTPException, Request, _refresh_module_all_tenants,
     access, get_tenant_scoping, logger, spoke_or_503, vmid_alloc,
 )
 
@@ -662,8 +662,8 @@ def register(app, hub, ctx):
         template_pools = {p.lower() for p in access._template_pools(hub)}
         template_pool_ok = False
         try:
-            cached = _cache_entry(tid, "pxmx_vms")
-            vms = (cached["data"] or {}).get("vms", []) if cached else []
+            cached = hub.warm_get("pxmx_vms", f"{tid or '_all_'}|agent=")
+            vms = (cached or {}).get("vms", []) if isinstance(cached, dict) else []
             if not vms:
                 # No cache yet — ask the spoke for the live list (unfiltered is
                 # fine: we only read the template's pool field).
@@ -741,8 +741,8 @@ def register(app, hub, ctx):
         cache is cold. Best-effort ([] on any failure) — the caller only reads VM
         names to pick the next free spoke number."""
         try:
-            cached = _cache_entry(tid, "pxmx_vms")
-            vms = (cached["data"] or {}).get("vms", []) if cached else []
+            cached = hub.warm_get("pxmx_vms", f"{tid or '_all_'}|agent=")
+            vms = (cached or {}).get("vms", []) if isinstance(cached, dict) else []
             if vms:
                 return vms
             r = await hub.request_response(pxmx_spoke, "PXMX_LIST_VMS", {})

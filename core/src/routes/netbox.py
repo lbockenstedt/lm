@@ -3,13 +3,74 @@ import asyncio
 import os
 import secrets
 
-from access import ADMIN_TENANT_ID
+from access import ADMIN_TENANT_ID, all_tenant_ids
 from api import (
-    HTTPException, Request, _cache_entry, _fetch_module, _hub_msg,
+    HTTPException, Request, _hub_msg,
     _refresh_module_all_tenants, _unwrap_netbox,
     get_netbox_spoke, get_spoke_or_503, get_tenant_scoping, logger,
     netbox_tenant_scope, tenant_netbox_slugs,
 )
+from warm_cache import ALL_SCOPE, CacheJob
+
+# NetBox list datasets held in the hub data cache. Namespace = "nb_<module>",
+# key = the resolved NetBox scope key (tenant slug, "group:<slug>", or "_all_")
+# plus "|<slice>" for a site/rack/prefix/device-filtered read.
+NB_LIST_CMDS = {
+    "netbox_racks":    "NETBOX_GET_RACKS",
+    "netbox_devices":  "NETBOX_GET_DEVICES",
+    "netbox_ips":      "NETBOX_GET_IPS",
+    "netbox_prefixes": "NETBOX_GET_PREFIXES",
+}
+
+
+def nb_cache_job(hub, module_key: str, scope: dict, slice_query: dict = None) -> CacheJob:
+    """The one definition of "how to fetch a NetBox list for a scope", shared
+    by the page read, the ownership guard and the background feed so all three
+    cache under the same (namespace, key) and send the same spoke payload."""
+    slice_query = dict(slice_query or {})
+    slice_sig = ",".join(f"{k}={v}" for k, v in sorted(slice_query.items()) if v)
+    base = scope["key"]
+    owner = scope.get("tenant_id")
+    if base == "_all_" and owner:
+        # A tenant with no NetBox slug gets an unscoped list. Key it by the
+        # hub tenant anyway: two slug-less tenants must NEVER share an entry
+        # (the write ownership guard trusts this list).
+        base = f"_all_:{owner}"
+    key = f"{base}|{slice_sig}" if slice_sig else base
+    payload = dict(slice_query)
+    # Exactly one of these is set: a plain tenant sends ``tenant``, a NetBox
+    # tenant group sends ``tenant_group`` (NetBox's tree-aware union filter).
+    payload["tenant"] = scope["tenant"]
+    payload["tenant_group"] = scope["tenant_group"]
+    cmd = NB_LIST_CMDS[module_key]
+
+    async def fetch():
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="No spoke connected")
+        # 20s: a large NetBox can be slow; the cache covers an overrun.
+        return _unwrap_netbox(await hub.request_response(spoke_id, cmd, payload, timeout=20.0))
+
+    # Who may see this entry: its hub tenant, or every admin for "_all_".
+    tenants = (owner,) if owner else (ALL_SCOPE,)
+    # Namespace "nb_devices" etc. (module key without its "netbox_" prefix).
+    ns = "nb_" + module_key[len("netbox_"):] if module_key.startswith("netbox_") else f"nb_{module_key}"
+    return CacheJob(ns, key, fetch, tenants, lane="netbox", detail=bool(slice_sig))
+
+
+def nb_cache_feed(hub):
+    """Feed: every tenant's (and the admin view's) four NetBox lists."""
+    seen = set()
+    for tid in [None] + all_tenant_ids(hub):
+        try:
+            scope = netbox_tenant_scope(hub, tid)
+        except Exception:  # noqa: BLE001
+            continue
+        for module_key in NB_LIST_CMDS:
+            job = nb_cache_job(hub, module_key, scope)
+            if (job.ns, job.key) not in seen:   # tenants sharing a slug share one entry
+                seen.add((job.ns, job.key))
+                yield job
 
 
 def register(app, hub, ctx):
@@ -67,10 +128,10 @@ def register(app, hub, ctx):
         sequential integer IDs (device_id/prefix_id/ip_id) is fail-closed
         rather than a cross-tenant destroy/modify. Admin bypasses (returns
         None). Returns the caller's tenant_id on success; raises 401/403 on
-        failure. The cache is the fast path; a stale/empty cache (e.g. after
-        the 300s TTL) is refreshed via the canonical ``_fetch_module`` GET +
-        re-checked, so a legit delete isn't false-denied. Spoke-down → 503
-        (can't verify ownership without the live list)."""
+        failure. The hub data cache is the fast path; on a miss the tenant's
+        list is fetched live once (``cache_fetch_now``) and re-checked, so a
+        legit delete of a just-created object isn't false-denied. Spoke down
+        on a miss → 403 (fail closed: ownership can't be verified)."""
         sess = _session_user(request)
         if sess and _is_admin(sess):
             return None
@@ -81,22 +142,24 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403, detail="No tenant context for this user")
         sid = str(obj_id)
 
-        def _in(cached):
-            rows = _nb_rows(cached, module_key)
+        def _in(data):
+            rows = _nb_rows({"data": data}, module_key)
             return any(isinstance(it, dict) and str(it.get(id_field)) == sid
                        for it in (rows or []))
 
-        cached = _cache_entry(tid, module_key)
-        if _in(cached):
+        job = nb_cache_job(hub, module_key, netbox_tenant_scope(hub, tid))
+        if _in(hub.warm_get(job.ns, job.key)):
             return tid
-        # Stale/empty cache → live-refresh the tenant's list and re-check.
+        # Not in the cached list (new object, or cache older than the
+        # object) → fetch the tenant's list live once and re-check.
         try:
-            await _fetch_module(hub, tid, module_key)
+            fresh = await hub.cache_fetch_now(job.ns, job.key, job.fetch,
+                                              tenants=job.tenants, lane=job.lane)
         except Exception as e:  # noqa: BLE001
             logger.warning("netbox ownership refresh [%s][%s] %s failed: %s",
                            tid, module_key, sid, e)
-        cached = _cache_entry(tid, module_key)
-        if _in(cached):
+            fresh = None
+        if _in(fresh):
             return tid
         raise HTTPException(status_code=403,
                             detail="Object not found in your tenant (cross-tenant mutation denied)")
@@ -241,84 +304,32 @@ def register(app, hub, ctx):
     # ─── NetBox data API ────────────────────────────────────────────────────────
 
     async def _netbox_list_get(request, tenant, cache_key, cmd, slice_query, subnet_fields, route_name):
-        """Cache→spoke→offline GET for the NetBox list handlers (racks/devices/
-        prefixes/ips). Non-admin cache hit (when no slice param or tenant is
-        selected) → cached data; spoke down → offline cache fallback; otherwise a
-        live spoke round-trip with the resolved tenant slug. ``slice_query`` is the
-        dict of non-tenant slice params (site/rack/prefix/device); ``subnet_fields``
-        is None for raw data or a list like ``["prefix"]`` to apply the subnet
-        filter to both cached and live data. Handlers that can't share this
-        helper (get_firewall_data, get_cppm_devices/sessions, get_pxmx_vms)
-        inline the same cache→spoke→offline shape with a
-        ``# see _netbox_list_get (variant: …)`` cross-ref."""
+        """Serve a NetBox list (racks/devices/prefixes/ips) from the hub data
+        cache — for every user, admin included; the page never waits on the
+        spoke except the very first read of a scope.
+
+        The entry is keyed by the resolved NetBox scope (tenant slug,
+        ``group:<slug>`` or ``_all_``) plus any slice params, and holds the RAW
+        spoke list; ``subnet_fields`` (e.g. ``["prefix"]``) re-applies the
+        caller's subnet filter on every read. ``cmd`` must match
+        ``NB_LIST_CMDS[cache_key]`` (kept in the signature for readability)."""
         hub = app.state.hub
-        logger.debug("relay %s %s tenant=%s %s", request.method, request.url.path, tenant, slice_query)
-        sess = _session_user(request)
-        cache_bypass = bool(tenant) or any(v for v in slice_query.values())
-        if not cache_bypass and sess and not _is_admin(sess):
-            tid = sess.get("user", {}).get("tenant_id")
-            if tid:
-                cached = _cache_entry(tid, cache_key)
-                if cached:
-                    data = cached["data"]
-                    if subnet_fields:
-                        return await _filter_session(request, data, "netbox", subnet_fields)
-                    return data
-        # Warm-cache scope key: the resolved NetBox scope (admins acting all-
-        # tenants → "_all_", a tenant group → "group:<slug>"), so cached data is
-        # only ever served back to the same scope (tenant isolation preserved).
-        # Slice params vary the key so a site/rack-filtered read doesn't serve
-        # an unfiltered snapshot.
         scope = netbox_tenant_scope(hub, _resolve_tenant(request, tenant))
-        slice_sig = ",".join(f"{k}={v}" for k, v in sorted(slice_query.items()) if v)
-        warm_key = f"{scope['key']}|{slice_sig}" if slice_sig else scope["key"]
-
-        async def _warm_or_raise(exc):
-            cached = hub.warm_get(f"nb_{cache_key}", warm_key)
-            if cached is not None:
-                out = cached
-                if subnet_fields:
-                    out = await _filter_session(request, cached, "netbox", subnet_fields)
-                if isinstance(out, dict):
-                    out = dict(out); out["stale"] = True
-                return out
-            raise exc
-
-        spoke_id = get_netbox_spoke(hub)
-        if not spoke_id:
-            if sess:
-                tid = sess.get("user", {}).get("tenant_id")
-                cached = _cache_entry(tid, cache_key) if tid else None
-                if cached:
-                    data = cached["data"]
-                    if subnet_fields:
-                        return await _filter_session(request, data, "netbox", subnet_fields)
-                    return data
-            return await _warm_or_raise(
-                HTTPException(status_code=503, detail="No spoke connected"))
+        job = nb_cache_job(hub, cache_key, scope, slice_query)
         try:
-            payload = dict(slice_query)
-            # Exactly one of these is set: a plain tenant sends ``tenant``, a
-            # NetBox tenant group sends ``tenant_group`` (which the spoke turns
-            # into NetBox's tree-aware union filter). An older spoke that
-            # doesn't know ``tenant_group`` just ignores it and returns the
-            # unscoped list — which is why the group path still passes
-            # tenant=None rather than a partial slug.
-            payload["tenant"] = scope["tenant"]
-            payload["tenant_group"] = scope["tenant_group"]
-            # 20s (was the 5s relay default) — a large NetBox can be slow; the
-            # warm cache covers an overrun so the page still renders.
-            result = await hub.request_response(spoke_id, cmd, payload, timeout=20.0)
-            data = _unwrap_netbox(result)
-            await hub.warm_set(f"nb_{cache_key}", warm_key, data)  # cache raw
-            if subnet_fields:
-                return await _filter_session(request, data, "netbox", subnet_fields)
-            return data
-        except HTTPException as e:
-            return await _warm_or_raise(e)
+            data = await hub.cache_read(job.ns, job.key, job.fetch, tenants=job.tenants,
+                                        lane=job.lane, detail=job.detail)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception(route_name + " failed")
-            return await _warm_or_raise(HTTPException(status_code=500, detail=str(e)))
+            raise HTTPException(status_code=500, detail=str(e))
+        if subnet_fields:
+            data = await _filter_session(request, data, "netbox", subnet_fields)
+        return hub.cache_annotate(data, job.ns, job.key)
+
+    if hasattr(hub, "cache_register_feed"):
+        hub.cache_register_feed("netbox", nb_cache_feed)
 
     @app.get("/api/netbox/health")
     async def netbox_health():

@@ -23,10 +23,8 @@ _NS = "pxmx_drive_health"
 
 @pytest.fixture(autouse=True)
 def _reset_caches():
-    pxmx._NODES_CACHE.clear()
     pxmx._DRIVE_HEALTH_CACHE.clear()
     yield
-    pxmx._NODES_CACHE.clear()
     pxmx._DRIVE_HEALTH_CACHE.clear()
 
 
