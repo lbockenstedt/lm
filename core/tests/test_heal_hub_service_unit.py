@@ -50,3 +50,48 @@ def test_heal_derives_base_from_workingdirectory(tmp_path):
     p.write_text(LEGACY.replace("/opt/lm", "/srv/lm"))
     assert u.heal_hub_service_unit(str(p)) is True
     assert "ExecStart=/srv/lm/core/venv/bin/python3 /srv/lm/core/src/main.py" in p.read_text()
+
+
+# ── regression: comment-only "Type=oneshot" re-heal loop (LM-HUB) ───────────
+
+CURRENT = (
+    "[Unit]\nDescription=Lab Manager Orchestrator\n\n[Service]\n"
+    "# The old\n# Type=oneshot + `ExecStart=start_all.sh` left MainPID=0.\n"
+    "Type=exec\nUser=svc_lm\nWorkingDirectory=/opt/lm\n"
+    "ExecStart=/opt/lm/core/venv/bin/python3 /opt/lm/core/src/main.py\n"
+    "StandardOutput=append:/var/log/lm/hub.log\n"
+    "StandardError=append:/var/log/lm/hub.log\n"
+    "Restart=on-failure\n\n[Install]\nWantedBy=multi-user.target\n"
+)
+
+
+def test_comment_mentioning_oneshot_is_not_healed(tmp_path):
+    """The install_all.sh unit COMMENTS on Type=oneshot; that must not
+    trigger a rewrite (it re-fired on every update and grew the unit)."""
+    p = tmp_path / "lm.service"
+    p.write_text(CURRENT)
+    assert u.heal_hub_service_unit(str(p)) is False
+    assert p.read_text() == CURRENT
+
+
+def test_duplicate_std_lines_are_collapsed(tmp_path):
+    """Repairs units already damaged by the old loop: keep one of each."""
+    dup = ("StandardOutput=append:/var/log/lm/hub.log\n"
+           "StandardError=append:/var/log/lm/hub.log\n") * 40
+    damaged = CURRENT.replace("Restart=on-failure\n", dup + "Restart=on-failure\n")
+    p = tmp_path / "lm.service"
+    p.write_text(damaged)
+    assert u.heal_hub_service_unit(str(p)) is True
+    out = p.read_text()
+    assert out.count("StandardOutput=") == 1 and out.count("StandardError=") == 1
+    assert "Restart=on-failure" in out and "Type=exec" in out
+    assert u.heal_hub_service_unit(str(p)) is False   # now stable
+
+
+def test_legacy_heal_does_not_duplicate_existing_std_lines(tmp_path):
+    p = tmp_path / "lm.service"
+    p.write_text(LEGACY.replace(
+        "Restart=on-failure", "StandardOutput=journal\nRestart=on-failure"))
+    assert u.heal_hub_service_unit(str(p)) is True
+    out = p.read_text()
+    assert out.count("StandardOutput=") == 1 and out.count("StandardError=") == 1
