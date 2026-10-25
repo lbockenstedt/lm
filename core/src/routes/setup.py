@@ -196,6 +196,41 @@ def _is_relayed_agent(sid, relay_ids, direct_ids):
     return sid in relay_ids and sid not in direct_ids
 
 
+def _agent_last_seen_for(relayed_last, *keys):
+    """Freshest relay timestamp for a registry row, trying every key the
+    agent's state may live under (spoke alias, agent alias/guid, raw id).
+    ``None`` when none has ever relayed. Pure for unit tests."""
+    vals = [relayed_last.get(k) for k in keys if k]
+    vals = [v for v in vals if isinstance(v, (int, float)) and v > 0]
+    return max(vals) if vals else None
+
+
+def _agent_name_to_guid(agent_config, agent_info):
+    """``{raw agent name: guid}`` built from persisted ``agent_config``
+    (hostname / display_name) and in-memory ``agent_info`` (agent_id).
+    Only keys whose own id differs from the name (i.e. guid-migrated) count,
+    and a name claimed by two different guids is dropped as ambiguous rather
+    than guessed. Pure for unit tests."""
+    found = {}
+    ambiguous = set()
+
+    def _add(name, guid):
+        if not name or not guid or name == guid:
+            return
+        if found.get(name, guid) != guid:
+            ambiguous.add(name)
+        found[name] = guid
+
+    for guid, cfg in (agent_config or {}).items():
+        if isinstance(cfg, dict):
+            for field in ("agent_id", "hostname", "display_name"):
+                _add(cfg.get(field), guid)
+    for guid, info in (agent_info or {}).items():
+        if isinstance(info, dict):
+            _add(info.get("agent_id"), guid)
+    return {n: g for n, g in found.items() if n not in ambiguous}
+
+
 def _leaked_approved_agent_ids(approved, relay_ids, direct_ids):
     """Approved ids that the leak self-heal would pop.
 
@@ -1778,6 +1813,25 @@ def register(app, hub, ctx):
             _relayed_last = hub._relayed_agent_last_seen()
         except Exception:            # noqa: BLE001 — never break the page
             _relayed_last = {}
+        # Every id the hub knows as a relayed node agent (agent_config /
+        # agent_info / composite heartbeats), minus device-mode agents that
+        # hold their own socket — the SAME predicate the alert self-heal uses.
+        try:
+            _relay_ids = hub._relayed_agent_ids()
+        except Exception:            # noqa: BLE001
+            _relay_ids = set()
+        try:
+            _direct_ids = _direct_module_ids(hub.state.system_state)
+        except Exception:            # noqa: BLE001
+            _direct_ids = set()
+        # Durable name → guid map for relayed agents. The in-memory
+        # agent_id_alias is only re-armed when an agent next relays in, so
+        # after a hub restart it is empty and a raw-name row (left behind in
+        # module_metadata by the old approved_modules leak) cannot reach its
+        # guid-keyed agent_config / heartbeat state without this.
+        _agent_name_guid = _agent_name_to_guid(
+            hub.state.system_state.get("agent_config") or {},
+            getattr(hub, "agent_info", {}) or {})
 
         for sid in sorted(ids):
             meta = md.get(sid) or {}
@@ -1796,14 +1850,26 @@ def register(app, hub, ctx):
             # directly contradicting Spokes & Agents on the same screen.
             # Same blind spot already fixed on the agent card, the out-of-contact
             # alerts and the dashboard tile; this is the fourth surface.
-            _agent_last = _relayed_last.get(pk) or _relayed_last.get(sid)
-            is_relayed_agent = bool(_agent_last)
+            # Agent state is keyed by the AGENT alias (name → install guid),
+            # not the spoke alias: once an agent is guid-migrated a row still
+            # registered under its raw name ("mipbe-ssplm-pxmx01") found no
+            # relay traffic via pk/sid and read "offline · no key · never"
+            # (the dashboard tile had the same bug, fixed with this lookup).
+            try:
+                apk = hub._agent_primary_key(sid)
+            except Exception:                           # noqa: BLE001
+                apk = sid
+            if apk == sid:
+                apk = _agent_name_guid.get(sid, sid)
+            _agent_last = _agent_last_seen_for(_relayed_last, pk, apk, sid)
+            is_relayed_agent = bool(_agent_last) or any(
+                _is_relayed_agent(k, _relay_ids, _direct_ids) for k in {sid, pk, apk})
             if is_relayed_agent:
-                if not seen or _agent_last > seen:
+                if _agent_last and (not seen or _agent_last > seen):
                     seen = _agent_last
                 # Fresh relay traffic IS the agent's liveness — it has no socket
                 # of its own to be "connected" on.
-                connected = connected or (_now - _agent_last) < _RELAY_LIVE_S
+                connected = connected or bool(_agent_last and (_now - _agent_last) < _RELAY_LIVE_S)
             has_key = sid in keys or pk in keys
             # "Approve → never reports in": an APPROVED registration that has
             # NEVER been seen, holds NO session key, is NOT connected and is NOT
@@ -1828,7 +1894,9 @@ def register(app, hub, ctx):
                 reasons.append("relayed agent (no own socket — liveness via parent spoke)")
             if not has_key and not is_relayed_agent:
                 reasons.append("no session key")
-            if not approved.get(sid, False):
+            # Relayed agents are never approved as modules (approval lives on
+            # the parent spoke), so "not approved" is not a fault for them.
+            if not approved.get(sid, False) and not is_relayed_agent:
                 reasons.append("not approved")
             if stuck_never_keyed:
                 reasons.append("approved but never seen / never keyed — "
