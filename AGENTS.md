@@ -47,7 +47,7 @@ OPNsense, NetBox, ClearPass, LDAP, Kea, Unbound, switches, TrueNAS, certbot) and
 
 ## Hub-specific gotchas
 
-- **`hub_discovery.py` is vendored three times** — `core/src/messaging/hub_discovery.py` (canonical), `pxmx/src/discovery.py`, `pxmx/agent/src/discovery.py`. **They must change together.**
+- **`hub_discovery.py` is vendored twice** — `core/src/messaging/hub_discovery.py` (canonical) and `pxmx/agent/src/discovery.py`. **They must change together.**
 - **The hub is a relay, not a brain.** Resist adding module logic here. The canonical example: Client-Sim auto-provisioning lives in the *pxmx agent*, not the hub, not the cs spoke.
 - **Changing a message type is a fleet-wide contract change.** Spokes deploy independently — stay backward-compatible.
 - `docs/` pages are copied verbatim into each module repo's own `docs/`. Update here first.

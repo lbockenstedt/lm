@@ -45,6 +45,20 @@ DHCP_WORKER_OPS = (
     "KEAW_LIST_LEASES",    # lease4-get-all
     "KEAW_LIST_RES",       # static reservations across subnets
     "KEAW_DEL_LEASE",      # delete active lease by IP
+    # ── DHCPv6 (dual-stack) mirrors of the ops above, against the separate
+    # kea-dhcp6 daemon. Required here: this tuple is the coordinator→worker
+    # op allowlist handed to ClusterCoordinator, so an op missing from it can
+    # never be issued and the whole v6 HA path would be dead.
+    "KEAW_GET_CONFIG6",    # read this node's FULL running Dhcp6 config
+    "KEAW_VALIDATE6",      # config-test a candidate Dhcp6 node config
+    "KEAW_APPLY6",         # snapshot + config-set + config-write (Dhcp6)
+    "KEAW_ROLLBACK6",      # restore the pre-apply6 snapshot
+    "KEAW_STANDDOWN6",     # leave the pair: strip the HA hooks (Dhcp6)
+    "KEAW_HA_STATUS6",     # status-get (dhcp6) → HA state + lease sync
+    "KEAW_LIST_SUBNETS6",  # subnet6-list
+    "KEAW_LIST_LEASES6",   # lease6-get-all
+    "KEAW_LIST_RES6",      # static DHCPv6 reservations across subnets
+    "KEAW_DEL_LEASE6",     # delete active DHCPv6 lease by address/MAC
     "KEAW_DIAGNOSTICS",    # full local diagnostics evidence
     "KEAW_STATS",          # statistic-get-all
     "KEAW_PACKET_TRACE",   # per-client DHCPv4 request/error trace
@@ -413,6 +427,18 @@ def build_node_config6(node_dhcp6: Dict[str, Any], this_name: str,
     for key in COORDINATOR_OWNED_KEYS6:
         if owned is not None and key in owned:
             cfg[key] = copy.deepcopy(owned[key])
+    # Kea's dhcp6 matches host reservations by DUID unless ``hw-address`` is
+    # explicitly listed in ``host-reservation-identifiers``. Every reservation
+    # this coordinator renders is keyed by hw-address (see ``build_subnet6``),
+    # so without this the pair would accept the config, report SUCCESS and
+    # then silently never match a client. Mirrors ``KeaManager.sync6``.
+    identifiers = cfg.get("host-reservation-identifiers") or []
+    if not isinstance(identifiers, list):
+        identifiers = []
+    if "hw-address" not in identifiers:
+        cfg["host-reservation-identifiers"] = list(identifiers) + ["hw-address"]
+    else:
+        cfg["host-reservation-identifiers"] = list(identifiers)
     keep = [h for h in (cfg.get("hooks-libraries") or [])
             if isinstance(h, dict)
             and not str(h.get("library", "")).endswith(

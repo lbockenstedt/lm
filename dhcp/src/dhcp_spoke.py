@@ -16,7 +16,8 @@ from kea_manager import KeaManager
 from kea_packet_trace import VERDICT_RANK, clamp_int, MAX_CAPTURE_SECONDS, MAX_LOOKBACK_MINUTES
 
 from kea_ha import (
-    DEFAULT_CLUSTER_CONFIG, DEFAULT_DESIRED_STATE, DHCP_WORKER_OPS,
+    DEFAULT_CLUSTER_CONFIG, DEFAULT_DESIRED_STATE, DEFAULT_DESIRED_STATE6,
+    DHCP_WORKER_OPS,
     KeaHAConfigError, UnsupportedHAMode, build_peers, load_cluster_config,
     normalize_mode, save_cluster_config,
 )
@@ -145,6 +146,7 @@ class DHCPSpoke(BaseSpoke):
       DHCP_SYNC6         — replace all subnet6 scopes + reservations
       DHCP_LIST_SUBNETS6 — list all managed subnet6 scopes
       DHCP_LIST_LEASES6  — list active DHCPv6 leases (optional subnet filter)
+      DHCP_DEL_LEASE6    — delete an active DHCPv6 lease by address
       DHCP_ADD_RES6      — add a static DHCPv6 reservation (matched by hw-address)
       DHCP_LIST_RES6     — list static DHCPv6 reservations
       DHCP_DEL_RES6      — remove a static DHCPv6 reservation by address
@@ -179,7 +181,10 @@ class DHCPSpoke(BaseSpoke):
             self._transport, mode=mode, hook_dir=self._hook_dir,
             state_path=config.get(
                 "desired_state",
-                os.getenv("LM_DHCP_DESIRED_STATE", DEFAULT_DESIRED_STATE)))
+                os.getenv("LM_DHCP_DESIRED_STATE", DEFAULT_DESIRED_STATE)),
+            state_path6=config.get(
+                "desired_state6",
+                os.getenv("LM_DHCP_DESIRED_STATE6", DEFAULT_DESIRED_STATE6)))
 
     # ── Cluster plumbing ────────────────────────────────────────────────────
 
@@ -924,7 +929,27 @@ class DHCPSpoke(BaseSpoke):
                 if not ip:
                     return {"status": "ERROR", "message": "ip is required"}
                 fan = await self.cluster.transport.fanout("KEAW_DEL_LEASE6", {"ip": ip})
-                return {"status": "SUCCESS", "results": fan.get("results", {})}
+                results = fan.get("results") or {}
+                if not results:
+                    # No node answered (also what _DisabledTransport returns):
+                    # that is NOT a successful purge.
+                    return {"status": "ERROR", "results": {},
+                            "message": fan.get("message")
+                            or "no node answered the DHCPv6 lease purge"}
+                member_errors = {}
+                for member_id, r in results.items():
+                    if not isinstance(r, dict):
+                        member_errors[member_id] = "malformed reply"
+                    elif r.get("status") != "SUCCESS":
+                        member_errors[member_id] = (r.get("message")
+                                                    or "lease purge failed")
+                if member_errors:
+                    return {"status": ("ERROR" if len(member_errors) == len(results)
+                                       else "PARTIAL"),
+                            "results": results, "member_errors": member_errors,
+                            "message": ("DHCPv6 lease purge failed on "
+                                        + ", ".join(sorted(member_errors)))}
+                return {"status": "SUCCESS", "results": results}
             if cmd == "DHCP_LIST_RES6":
                 return await self._ha_list("KEAW_LIST_RES6", {}, "reservations")
 

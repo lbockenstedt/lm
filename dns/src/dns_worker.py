@@ -174,7 +174,8 @@ class DnsWorkerOps:
 
     def stats(self, data: Dict[str, Any]) -> Dict[str, Any]:
         d = data or {}
-        return self.mgr.get_stats(search=d.get("search"), source_prefixes=d.get("source_prefixes"))
+        return self.mgr.get_stats(search=d.get("search"), source_prefixes=d.get("source_prefixes"),
+                                  range_days=d.get("range_days"))
 
     def client_queries(self, data: Dict[str, Any]) -> Dict[str, Any]:
         d = data or {}
