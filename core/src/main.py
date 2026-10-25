@@ -80,6 +80,7 @@ from hub_os_updates import HubOsUpdatesMixin
 from hub_mtls_enforcement import HubMtlsEnforcementMixin
 from update_pipeline import UpdatePipelineMixin
 from endpoint_sync import EndpointSyncMixin
+import dot1x_jit
 from vm_sync import VmSyncMixin
 from fw_discovery_sync import FwDiscoverySyncMixin
 from nw_discovery_sync import NwDiscoverySyncMixin
@@ -1397,6 +1398,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         "HEARTBEAT": "skippable",
         "CS_TELEMETRY": "coalesce",
         "CS_CONFIG_REQUEST": "must",
+        "CS_DOT1X_PROVISION": "must",
+        "CS_DOT1X_RELEASE": "must",
+        "CS_DOT1X_SYNC": "must",
         "SPOKE_LOG": "coalesce",
         "COMMAND_RESULT": "must",
         "LOADTEST_PROBE": "must",
@@ -6320,6 +6324,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         spoke_id, str(_rd.get("config_hash") or "")))
                     continue
 
+                # --- JIT 802.1X accounts (cs engine → hub broker) ---
+                # Spawned: provisioning round-trips to the backend spoke and then
+                # replies to THIS spoke (CS_DOT1X_CREDENTIAL), whose answer arrives
+                # through this same loop. See dot1x_jit.py.
+                if payload.get("type") in dot1x_jit.MESSAGE_TYPES:
+                    self._spawn_cs_push(dot1x_jit.handle_spoke_message(
+                        self, spoke_id, payload.get("type"), payload.get("data", {}) or {}))
+                    continue
+
                 # --- Client-Sim per-op progress (realtime operations feed) ---
                 # The agent emits CS_PROGRESS per phase (destroying/cloning/starting/
                 # …) for reclone/provision/delete — far faster than the ~30s
@@ -10714,6 +10727,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Setup → Azure → Key Vault. See run_key_vault_loop.
         key_vault_task = asyncio.create_task(self.run_key_vault_loop())
         pxmx_diag_task = asyncio.create_task(self.run_pxmx_diag_loop())
+        # JIT 802.1X accounts: hourly rotation (rotate_days) + cleanup of
+        # accounts unused for unused_days, every cleanup_interval_days.
+        dot1x_jit_task = asyncio.create_task(dot1x_jit.run_sweep_loop(self))
         # Console-ports warm-cache refresh (HubVncConsoleMixin): keeps the
         # last-known CONSOLE_LIST_PORTS list fresh for every connected console
         # spoke with a generous timeout, so /api/console/ports serves instantly

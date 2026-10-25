@@ -225,7 +225,7 @@ const ROUTES = {
 
     // ── CPPM / NAC ──
     loadCPPMNACStatus:      { m: 'GET',  p: '/api/cppm/nac-status',       api: 'get_cppm_nac_status' },
-    loadCPPMData:           { m: 'GET',  p: '/api/cppm/{sessions|devices|unknown-devices}', api: 'get_cppm_sessions/get_cppm_devices/get_cppm_unknown_devices' },
+    loadCPPMData:           { m: 'GET',  p: '/api/cppm/{sessions|devices|unknown-devices|my-users}', api: 'get_cppm_sessions/get_cppm_devices/get_cppm_unknown_devices/list_my_users' },
     showCPPMDeviceDetail:   { m: 'GET',  p: '/api/cppm/{device-enrich|device-sessions}', api: 'get_cppm_device_enrich/get_cppm_device_sessions' },
     showClaimDeviceModal:   { m: 'GET',  p: '/api/netbox/claim-device/options', api: 'netbox_claim_device_options' },
     submitClaimDevice:      { m: 'POST', p: '/api/netbox/claim-device',   api: 'netbox_claim_device' },
@@ -2152,7 +2152,7 @@ const VIEW_SUBMENUS = {
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Diagnostics', 'Settings'],
     ldap: ['Users', 'Groups'],
-    cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
+    cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices', 'My Users'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
     dns: ['Overview', 'Records', 'Forwarders', 'Overrides', 'External DNS', 'Diagnostics'],
@@ -33199,6 +33199,83 @@ async function _renderCppmDevices(container, subMenu, th, tableWrap) {
     });
 }
 
+// _renderCppmMyUsers() — NAC → My Users: the tenant's JIT 802.1X accounts the
+// simulation engine created (Entra ID / LDAP tenant OU / ClearPass local user,
+// per the 1X cell's Account location in Config → Engine). Passwords are never
+// shown: Reset generates a new random one, stores it in the vault and pushes it
+// to the sim client(s); Delete removes the account (the engine re-creates it
+// if the client is still on a JIT 1X cell).
+async function _renderCppmMyUsers(container, th, tableWrap) {
+    const tparam = currentTenant && currentTenant !== 'default' ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
+    const r = await fetch(`/api/cppm/my-users${tparam}`);
+    if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        container.innerHTML = _cppmErrorPanel(r, e);
+        return;
+    }
+    const d = await r.json();
+    const users = d.users || [];
+    const esc = escapeHtml;
+    const showTenantCol = !d.tenant && users.length > 0;
+    const fmt = ts => ts ? new Date(ts * 1000).toLocaleString() : '—';
+    const statusBadge = u => {
+        const cls = u.status === 'active' ? 'bg-green-100 text-green-700'
+            : u.status === 'pending_delete' ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700';
+        const lbl = u.status === 'pending_delete' ? 'deleting' : u.status;
+        return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}" title="${esc(u.last_error || '')}">${esc(lbl || '—')}</span>`;
+    };
+    const cols = (showTenantCol ? ['Tenant'] : []).concat(
+        ['Username', 'Location', 'Identity', 'Clients', 'SSID cells', 'Created', 'Password set', 'Next rotation', 'Last active', 'Stored in', 'Status', '']);
+    window._cppmMyUsers = users;
+    const rows = users.map((u, i) => `<tr class="border-b border-slate-100 hover:bg-slate-50">
+        ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${esc(u.tenant_id || '—')}</td>` : ''}
+        <td class="px-4 py-2 font-medium">${esc(u.username)}</td>
+        <td class="px-4 py-2 text-xs">${esc(u.backend_label || u.backend)}</td>
+        <td class="px-4 py-2 font-mono text-xs">${esc(u.identity || '—')}</td>
+        <td class="px-4 py-2 text-xs" title="${esc((u.hostnames || []).join(', '))}">${(u.hostnames || []).length ? esc((u.hostnames || []).slice(0, 3).join(', ')) + ((u.hostnames || []).length > 3 ? ` +${u.hostnames.length - 3}` : '') : '<span class="text-slate-300">none</span>'}</td>
+        <td class="px-4 py-2 text-xs">${esc((u.cells || []).join(', ') || '—')}</td>
+        <td class="px-4 py-2 text-xs">${fmt(u.created_at)}</td>
+        <td class="px-4 py-2 text-xs">${fmt(u.rotated_at)}</td>
+        <td class="px-4 py-2 text-xs">${fmt(u.next_rotation_at)}</td>
+        <td class="px-4 py-2 text-xs">${fmt(u.last_active_at)}</td>
+        <td class="px-4 py-2 text-xs">${u.password_store === 'vault' ? 'Vault' : 'Local (encrypted)'}</td>
+        <td class="px-4 py-2">${statusBadge(u)}</td>
+        <td class="px-4 py-2 text-right whitespace-nowrap">
+            <button onclick="cppmMyUserAction(${i}, 'reset')" class="text-xs text-[#01A982] hover:underline font-semibold mr-3">Reset password</button>
+            <button onclick="cppmMyUserAction(${i}, 'delete')" class="text-xs text-red-600 hover:underline font-semibold">Delete</button>
+        </td>
+    </tr>`).join('');
+    const rot = d.rotate_days || 30;
+    container.innerHTML = `<div class="flex justify-between items-center mb-1 px-1">
+        <h3 class="text-base font-semibold text-[#263040]">My Users <span class="text-xs text-slate-400 font-normal">(${users.length} simulation 802.1X accounts)</span> ${helpIcon('cppm', null, 'NAC help')}</h3>
+        <button onclick="loadCPPMData('My Users')" class="text-xs text-slate-400 hover:text-slate-600">Refresh</button>
+    </div>
+    <p class="text-xs text-slate-500 mb-2 px-1">Accounts the simulation engine created for clients on a 1X SSID cell with an Account location (Config → Engine → SSID matrix). Passwords are random, kept in the vault (or the hub's encrypted store when no vault is enabled), rotate every ${esc(rot)} days and are never displayed. An account is removed when its client leaves the 1X cell or is torn down; unused accounts are swept after 30 days.</p>`
+        + tableWrap(th(cols) + `<tbody>${rows || `<tr><td colspan="${cols.length}" class="px-4 py-6 text-center text-slate-400">No simulation-created 802.1X accounts</td></tr>`}</tbody>`);
+}
+
+window.cppmMyUserAction = async function (idx, action) {
+    const u = (window._cppmMyUsers || [])[idx];
+    if (!u) return;
+    const what = `${u.username} (${u.backend_label || u.backend})`;
+    const msg = action === 'reset'
+        ? `Reset the password for ${what}? A new random password is stored in the vault and pushed to its simulation client(s).`
+        : `Delete ${what}? If a client is still assigned to its 1X SSID the engine will re-create it on the next sweep.`;
+    if (!await showConfirmToast(msg)) return;
+    try {
+        const r = await fetch(`/api/cppm/my-users/${action}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenant_id: u.tenant_id, backend: u.backend, username: u.username }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || r.statusText);
+        showToast(action === 'reset' ? `Password reset for ${u.username}` : `Deleted ${u.username}`, 'success');
+    } catch (e) {
+        showToast(`${action === 'reset' ? 'Reset' : 'Delete'} failed: ${e.message}`, 'error');
+    }
+    loadCPPMData('My Users');
+};
+
 async function loadCPPMData(subMenu) {
     const container = document.getElementById('cppm-content');
     if (!container) return;
@@ -33211,6 +33288,8 @@ async function loadCPPMData(subMenu) {
             await _renderCppmSessions(container, subMenu, th, tableWrap);
         } else if (subMenu === 'My Devices' || subMenu === 'Unknown Devices') {
             await _renderCppmDevices(container, subMenu, th, tableWrap);
+        } else if (subMenu === 'My Users') {
+            await _renderCppmMyUsers(container, th, tableWrap);
         }
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error loading ${subMenu}: ${err.message}</p>`;

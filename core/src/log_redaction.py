@@ -77,7 +77,8 @@ _REDACT_COMMANDS = frozenset({"CS_STORE_PROXMOX_TOKEN", "CS_CREATE_PROXMOX_TOKEN
                               "CS_TOKEN_RESULT", "SPOKE_UPDATE_SESSION_KEY",
                               "SPOKE_SET_HUB_SECRET", "SET_PASSWORD",
                               "SET_USER_PASSWORD", "RESET_PASSWORD",
-                              "CONSOLE_PUSH_CONFIG"})
+                              "CONSOLE_PUSH_CONFIG", "CS_DOT1X_CREDENTIAL",
+                              "CPPM_CREATE_LOCAL_USER", "CPPM_SET_LOCAL_USER_PASSWORD"})
 
 # Field keys dropped outright from a redacted payload (the value is still
 # forwarded to the spoke — only the log line is redacted). Covers every secret
