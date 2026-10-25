@@ -75,6 +75,14 @@ TOP_NAMES_LIMIT = 200
 MAX_QUERY_EVENTS = 200000
 CLIENT_QUERY_LIMIT = 1000
 
+# WebUI day/week/month selector for the "Queries by Destination" breakdown.
+# Counts are kept in per-day buckets (see _query_counts) so a window can be
+# summed on read; MAX_RETENTION_DAYS caps how much history is kept at all —
+# once a bucket is older than that it is pruned regardless of which window
+# is currently selected.
+RANGE_DAYS = {"day": 1, "week": 7, "month": 30}
+MAX_RETENTION_DAYS = 30
+
 _QUERY_LOG_RE = re.compile(
     r"info:\s+(?P<ip>[0-9a-fA-F.:]+)\s+(?P<name>\S+?)\.?\s+(?P<type>\w+)\s+IN\s*$"
 )
@@ -103,14 +111,21 @@ class UnboundManager:
         # per-tenant filtering upstream, keyed on the source IP's subnet).
         # self._query_log_offset is the byte offset we last read up to, so
         # repeated get_stats() polls only parse newly appended lines instead
-        # of re-reading the whole log each time.
-        self._query_counts = {}       # "name|TYPE|source_ip" -> int
+        # of re-reading the whole log each time. Counts are bucketed by
+        # calendar day ({day_epoch: count}) so the day/week/month window and
+        # the MAX_RETENTION_DAYS drop are possible; _day_buckets() also
+        # accepts a legacy bare-int count (pre-bucketing format).
+        self._query_counts = {}       # "name|TYPE|source_ip" -> {day: int}
         self._query_log_offset = 0
         self._query_log_inode = None
         # (epoch, client_ip, name, type), oldest first — feeds the per-client
         # ("Pi-hole style") query log, which needs individual timestamped
         # events rather than the aggregate counters above.
         self._query_events = deque(maxlen=MAX_QUERY_EVENTS)
+        # Set after a successful restart/AppArmor apply in this process so a
+        # host whose logfile never appears is not restarted on every sync.
+        self._logging_restarted = False
+        self._apparmor_applied = False
 
     def _ensure_conf_included(self) -> dict:
         """Guarantee Unbound actually PARSES the directory we write into.
@@ -224,6 +239,16 @@ class UnboundManager:
             f.writelines(lines)
 
         count = len(records)
+        # Query logging is on by default: every sync (NetBox auto-sync runs
+        # regularly) idempotently guarantees it, not just a WebUI stats view.
+        # A restart performed here already loaded the new records, so an
+        # immediate reload would only race the restarting daemon.
+        logging_result = self._ensure_query_logging()
+        if logging_result.get("restarted"):
+            self._records_cache = None
+            self._records_cache_mtime = None
+            logger.info("Synced %d DNS records to Unbound via restart", count)
+            return {"status": "SUCCESS", "records_written": count, "reloaded": True}
         # A write that Unbound never reloaded has NOT taken effect: the file on
         # disk says one thing and the running resolver answers another. Report
         # the reload failure instead of a SUCCESS the caller cannot act on —
@@ -469,11 +494,147 @@ class UnboundManager:
             "probes": probes,
             "recommendations": recommendations,
             "conf_path": self.conf_path,
+            "query_logging": self._safe_query_log_diagnostics(),
         }
+
+    def _safe_query_log_diagnostics(self) -> dict:
+        try:
+            return self.query_log_diagnostics()
+        except Exception as e:
+            logger.warning("query log diagnostics failed: %s", e)
+            return {"error": str(e), "findings": [f"query-log diagnostics failed: {e}"]}
+
+    def query_log_diagnostics(self) -> dict:
+        """Read-only evidence for why the query log / "Queries by Destination"
+        / per-client log might be empty. Never changes any state."""
+        info = {"query_log": QUERY_LOG, "logging_conf": LOGGING_CONF}
+        findings = []
+
+        def tail(path, n=8, size=65536):
+            try:
+                with open(path, "rb") as fh:
+                    fh.seek(0, os.SEEK_END)
+                    end = fh.tell()
+                    fh.seek(max(0, end - size))
+                    return fh.read().decode("utf-8", "replace").splitlines()[-n:]
+            except OSError:
+                return []
+
+        def stat_of(path):
+            try:
+                st = os.stat(path)
+            except OSError as e:
+                return {"exists": False, "error": str(e)}
+            owner = group = None
+            try:
+                import pwd, grp
+                owner = pwd.getpwuid(st.st_uid).pw_name
+                group = grp.getgrgid(st.st_gid).gr_name
+            except Exception:
+                pass
+            return {"exists": True, "size": st.st_size, "mode": oct(st.st_mode & 0o7777),
+                    "owner": owner, "group": group,
+                    "age_seconds": round(time.time() - st.st_mtime, 1)}
+
+        info["log_dir"] = stat_of(os.path.dirname(QUERY_LOG))
+        info["log_file"] = stat_of(QUERY_LOG)
+        log_tail = tail(QUERY_LOG)
+        info["log_tail"] = log_tail
+        info["log_tail_parsed"] = sum(1 for ln in log_tail if _QUERY_LOG_RE.search(ln))
+        try:
+            info["logging_conf_content"] = open(LOGGING_CONF).read()
+        except OSError as e:
+            info["logging_conf_content"] = None
+            findings.append(f"{LOGGING_CONF} is missing ({e}); logging was never enabled.")
+
+        conf_dir = os.path.dirname(self.conf_path)
+        try:
+            main_text = open(MAIN_CONF, encoding="utf-8").read()
+        except OSError:
+            main_text = ""
+        info["conf_dir_included"] = bool(
+            re.search(r"^\s*include(?:-toplevel)?:\s*\"?%s" % re.escape(conf_dir),
+                      main_text, re.M))
+        if not info["conf_dir_included"]:
+            findings.append(f"{MAIN_CONF} does not include {conf_dir}/*; lm-logging.conf is never read.")
+
+        # What the RUNNING daemon uses (not just what the file says).
+        for opt in ("log-queries", "logfile", "use-syslog"):
+            r = self._run_diag(["unbound-control", "get_option", opt])
+            info[f"running_{opt.replace('-', '_')}"] = (
+                r["output"].strip() if r["ok"] else (r["error"].strip() or "unavailable"))
+        cf = self._run_diag(["unbound-checkconf", "-o", "log-queries"])
+        info["configured_log_queries"] = cf["output"].strip() if cf["ok"] else (cf["error"].strip() or "unavailable")
+        cf = self._run_diag(["unbound-checkconf", "-o", "logfile"])
+        info["configured_logfile"] = cf["output"].strip() if cf["ok"] else (cf["error"].strip() or "unavailable")
+        ver = self._run_diag(["unbound", "-V"])
+        info["unbound_version"] = (ver["output"] or ver["error"]).splitlines()[0] if (ver["output"] or ver["error"]) else ""
+        pid = self._run_diag(["systemctl", "show", "-p", "ActiveEnterTimestamp", "--value", "unbound"])
+        info["unbound_active_since"] = pid["output"].strip()
+
+        # AppArmor: override present, profile mode, recent denials.
+        override = "/etc/apparmor.d/local/usr.sbin.unbound"
+        try:
+            ov = open(override).read()
+        except OSError:
+            ov = None
+        info["apparmor_profile_present"] = os.path.exists("/etc/apparmor.d/usr.sbin.unbound")
+        info["apparmor_override_present"] = ov is not None
+        info["apparmor_override_has_rule"] = bool(ov and f"{os.path.dirname(QUERY_LOG)}/**" in ov)
+        aa = self._run_diag(["aa-status"])
+        info["apparmor_unbound_status"] = ("loaded" if re.search(r"unbound", aa["output"])
+                                           else ("aa-status unavailable" if not aa["ok"] else "not loaded"))
+        den = self._run_diag(["journalctl", "-k", "--no-pager", "-n", "400", "-o", "cat"])
+        info["apparmor_denials"] = [ln.strip() for ln in den["output"].splitlines()
+                                    if "DENIED" in ln and "unbound" in ln][-5:]
+
+        # Journal fallback: is unbound logging queries there instead?
+        jr = self._run_diag(["journalctl", "-u", "unbound", "--no-pager", "-n", "300", "-o", "cat"])
+        jlines = jr["output"].splitlines()
+        info["journal_query_lines"] = sum(1 for ln in jlines if _QUERY_LOG_RE.search(ln))
+        info["journal_tail"] = [ln for ln in jlines if "info:" in ln or "error" in ln.lower()][-6:]
+
+        # In-memory state of this process.
+        info["memory"] = {
+            "events": len(self._query_events), "tracked_names": len(self._query_counts),
+            "log_offset": self._query_log_offset, "log_inode": self._query_log_inode,
+        }
+
+        if info["log_file"].get("exists") and info["log_file"].get("size", 0) == 0:
+            findings.append("Query log exists but is empty: unbound is not writing to it "
+                            "(check running logfile/log-queries below, and AppArmor).")
+        if not info["log_file"].get("exists"):
+            findings.append("Query log file does not exist: unbound never created it.")
+        if info["apparmor_denials"]:
+            findings.append("AppArmor is denying unbound; see denials below.")
+        if info["apparmor_profile_present"] and not info["apparmor_override_has_rule"]:
+            findings.append("AppArmor profile present but the lm override rule is missing.")
+        if str(info.get("running_log_queries", "")).lower() not in ("yes", "unavailable", ""):
+            findings.append("Running unbound has log-queries off; it needs a restart (not reload).")
+        if info["running_logfile"] and QUERY_LOG not in info["running_logfile"] \
+                and info["running_logfile"] != "unavailable":
+            findings.append(f"Running unbound logfile is {info['running_logfile']!r}, not {QUERY_LOG}.")
+        if info["journal_query_lines"] and not info["log_tail_parsed"]:
+            findings.append("Queries are appearing in the journal, not the logfile.")
+        if info["log_tail"] and not info["log_tail_parsed"]:
+            findings.append("Log has lines but none match the parser regex; see log_tail for the real format.")
+        info["findings"] = findings
+        return info
 
     # ── Statistics & forwarders ───────────────────────────────────────
 
-    def _ensure_apparmor_log_access(self) -> bool:
+    def _restart_unbound(self, reason: str) -> dict:
+        """Restart Unbound and report a structured ``{"ok", "error"}`` outcome."""
+        try:
+            subprocess.run(["systemctl", "restart", "unbound"], check=True,
+                           capture_output=True, timeout=30)
+            logger.info("Unbound restarted (%s)", reason)
+            return {"ok": True, "error": ""}
+        except Exception as e:
+            logger.warning("unbound restart failed (%s): %s", reason, e)
+            return {"ok": False, "error": str(e)}
+
+    def _ensure_apparmor_log_access(self) -> dict:
         """Let the confined ``unbound`` daemon create/write the query log.
 
         Debian/Ubuntu ship an AppArmor profile for unbound that does NOT allow
@@ -481,46 +642,68 @@ class UnboundManager:
         DENIED, so the logfile directive silently produces nothing (the lines go
         to the journal instead) and the per-destination breakdown stays empty
         forever even though the conf and directory ownership are correct. The
-        supported hook is the ``local/`` override. Returns True only when the
-        override was changed (profile reloaded + unbound restarted so it
-        reopens its logfile); a host without AppArmor is a no-op."""
+        supported hook is the ``local/`` override.
+
+        Returns ``{"status": noop|applied|failed, "changed", "restarted", "ok",
+        "reason"}`` so callers do not confuse "nothing to do" with "still
+        broken". A rule that is present but not yet proven active (no logfile)
+        is re-applied — once per process after a successful apply, so a
+        transient first failure self-heals without restarting unbound on every
+        sync."""
         local_dir = "/etc/apparmor.d/local"
         profile = "/etc/apparmor.d/usr.sbin.unbound"
         rule = f"{os.path.dirname(QUERY_LOG)}/** rw,\n"
         if not os.path.isdir(local_dir) or not os.path.exists(profile):
-            return False
+            return {"status": "noop", "changed": False, "restarted": False,
+                    "ok": True, "reason": "apparmor-unavailable"}
         override = os.path.join(local_dir, "usr.sbin.unbound")
         try:
             current = open(override).read() if os.path.exists(override) else ""
-            if rule in current:
-                return False
-            with open(override, "a") as f:
-                if current and not current.endswith("\n"):
-                    f.write("\n")
-                f.write("# Managed by Lab Manager — unbound query log (DNS stats)\n" + rule)
+            changed = False
+            if rule not in current:
+                with open(override, "a") as f:
+                    if current and not current.endswith("\n"):
+                        f.write("\n")
+                    f.write("# Managed by Lab Manager — unbound query log (DNS stats)\n" + rule)
+                changed = True
         except Exception as e:
             logger.warning("could not update AppArmor override %s: %s", override, e)
-            return False
+            return {"status": "failed", "changed": False, "restarted": False,
+                    "ok": False, "reason": f"override-write-failed: {e}"}
+
+        if rule in current and (os.path.exists(QUERY_LOG) or getattr(self, "_apparmor_applied", False)):
+            return {"status": "noop", "changed": False, "restarted": False,
+                    "ok": True, "reason": "rule-already-active"}
         try:
             subprocess.run(["apparmor_parser", "-r", profile], check=True,
                            capture_output=True, timeout=30)
-            subprocess.run(["systemctl", "restart", "unbound"], check=True,
-                           capture_output=True, timeout=30)
-            logger.info("AppArmor: allowed unbound to write %s; profile reloaded, unbound restarted",
-                        QUERY_LOG)
         except Exception as e:
-            logger.warning("AppArmor override written but reload/restart failed: %s", e)
-        return True
+            logger.warning("AppArmor override written but profile reload failed: %s", e)
+            return {"status": "failed", "changed": changed, "restarted": False,
+                    "ok": False, "reason": f"apply-failed: {e}"}
+        restart = self._restart_unbound("AppArmor query-log access")
+        if not restart["ok"]:
+            return {"status": "failed", "changed": changed, "restarted": False,
+                    "ok": False, "reason": f"apply-failed: {restart['error']}"}
+        self._apparmor_applied = True
+        logger.info("AppArmor: allowed unbound to write %s; profile reloaded, unbound restarted",
+                    QUERY_LOG)
+        return {"status": "applied", "changed": changed, "restarted": True,
+                "ok": True, "reason": "override-applied"}
 
-    def _ensure_query_logging(self) -> bool:
-        """Self-enable Unbound query logging on first use.
+    def _ensure_query_logging(self) -> dict:
+        """Self-enable Unbound query logging (idempotent; called on every sync
+        and every stats/client-query read).
 
         ``unbound-control stats`` has no per-name counters, so per-destination
         breakdowns require Unbound's own query log. Rather than hand-edit the
         main unbound.conf, drop a managed conf.d snippet (same pattern as
-        LM_CONF) enabling ``log-queries``. Returns True if logging is already
-        (or now) enabled, False if we had to change the conf (caller should
-        reload before the new lines start appearing).
+        LM_CONF) enabling ``log-queries``.
+
+        Returns ``{"status": unchanged|restarted|failed, "changed",
+        "restarted", "ok", "reason"}``. ``restarted`` tells callers that
+        unbound was already restarted in this call (so an immediate reload
+        would only race it); ``ok=False`` means logging is still not in effect.
         """
         # Unbound defaults to use-syslog: yes, which makes it IGNORE the
         # logfile directive entirely (see log_init() — syslog wins over a
@@ -552,39 +735,55 @@ class UnboundManager:
             pass  # no "unbound" system user on this host (e.g. test env)
         except Exception as e:
             logger.warning("could not chown unbound log dir to unbound user: %s", e)
-        apparmor_changed = self._ensure_apparmor_log_access()
         try:
             current = open(LOGGING_CONF).read() if os.path.exists(LOGGING_CONF) else ""
         except Exception:
             current = ""
-        # The exact "config already correct but the log is still empty" case
-        # this method exists to fix used to be UNREACHABLE: if the conf.d
-        # snippet already matched (e.g. it predates this process, or a prior
-        # call already wrote it) and AppArmor needed no change, this returned
-        # True unconditionally -- even when unbound has never actually opened
-        # QUERY_LOG (a restart never happened, so the config is correct but
-        # inert). The caller's `if not self._ensure_query_logging(): self._reload()`
-        # then never ran. Only short-circuit once the logfile demonstrably
-        # exists; otherwise fall through and force the restart below.
-        if current == want and not apparmor_changed and os.path.exists(QUERY_LOG):
-            return True
-        try:
-            with open(LOGGING_CONF, "w") as f:
-                f.write(want)
-            logger.info("Enabled unbound query logging via %s", LOGGING_CONF)
-        except Exception as e:
-            logger.warning("failed to write %s: %s", LOGGING_CONF, e)
-            return False
+        conf_changed = current != want
+        if conf_changed:
+            try:
+                with open(LOGGING_CONF, "w") as f:
+                    f.write(want)
+                logger.info("Enabled unbound query logging via %s", LOGGING_CONF)
+            except Exception as e:
+                logger.warning("failed to write %s: %s", LOGGING_CONF, e)
+                return {"status": "failed", "changed": False, "restarted": False,
+                        "ok": False, "reason": f"logging-conf-write-failed: {e}"}
+
+        apparmor_result = self._ensure_apparmor_log_access()
+        if not apparmor_result["ok"]:
+            return {"status": "failed",
+                    "changed": bool(conf_changed or apparmor_result["changed"]),
+                    "restarted": False, "ok": False,
+                    "reason": apparmor_result["reason"]}
+        if apparmor_result["restarted"]:
+            self._logging_restarted = True
+            return {"status": "restarted",
+                    "changed": bool(conf_changed or apparmor_result["changed"]),
+                    "restarted": True, "ok": True,
+                    "reason": apparmor_result["reason"]}
+
         # ``logfile`` is only opened at process startup — a plain reload
         # leaves Unbound still logging to its old destination (syslog, or
         # nowhere), so the query log would stay empty until the next
-        # incidental restart. Force it now.
-        try:
-            subprocess.run(["systemctl", "restart", "unbound"], check=True,
-                           capture_output=True, timeout=30)
-        except Exception as e:
-            logger.warning("unbound restart after enabling query logging failed: %s", e)
-        return False
+        # incidental restart. Restart when the conf changed, and also when the
+        # conf already matched but unbound has never opened QUERY_LOG (the
+        # snippet predates a restart, so it is correct but inert). The latter
+        # is done once per process after a successful restart so a host where
+        # the logfile never materialises is not restarted on every sync.
+        log_missing = not os.path.exists(QUERY_LOG) and not getattr(self, "_logging_restarted", False)
+        if conf_changed or log_missing:
+            restart = self._restart_unbound("query logging enabled")
+            if not restart["ok"]:
+                return {"status": "failed", "changed": conf_changed, "restarted": False,
+                        "ok": False, "reason": f"restart-failed: {restart['error']}"}
+            self._logging_restarted = True
+            return {"status": "restarted", "changed": conf_changed, "restarted": True,
+                    "ok": True,
+                    "reason": "logging-conf-written" if conf_changed else "logfile-missing"}
+
+        return {"status": "unchanged", "changed": False, "restarted": False,
+                "ok": True, "reason": "already-enabled"}
 
     def _tail_query_log(self) -> None:
         """Incrementally parse newly-appended lines of the unbound query log
@@ -622,10 +821,41 @@ class UnboundManager:
                     self._query_events.append((self._line_epoch(line), ip, name, rtype))
                     if key not in self._query_counts and len(self._query_counts) >= MAX_TRACKED_NAMES:
                         continue  # cap reached; keep counting names already tracked
-                    self._query_counts[key] = self._query_counts.get(key, 0) + 1
+                    day = int(time.time() // 86400)
+                    bucket = self._day_buckets(key)
+                    bucket[day] = bucket.get(day, 0) + 1
                 self._query_log_offset = f.tell()
         except Exception as e:
             logger.warning("failed tailing unbound query log: %s", e)
+        self._prune_query_counts()
+
+    def _day_buckets(self, key: str) -> dict:
+        """The ``{day_epoch: count}`` buckets for ``key``, creating them if
+        needed. A legacy bare-int lifetime count (the pre-bucketing format) is
+        migrated in place into today's bucket so it keeps counting and ages
+        out under MAX_RETENTION_DAYS like everything else."""
+        bucket = self._query_counts.get(key)
+        if isinstance(bucket, dict):
+            return bucket
+        today = int(time.time() // 86400)
+        bucket = {today: int(bucket)} if isinstance(bucket, (int, float)) and bucket else {}
+        self._query_counts[key] = bucket
+        return bucket
+
+    def _prune_query_counts(self) -> None:
+        """Age out day-buckets older than MAX_RETENTION_DAYS so tracked query
+        history never grows unbounded and drops on its own, independent of
+        whichever day/week/month window the WebUI happens to be viewing."""
+        cutoff = int(time.time() // 86400) - MAX_RETENTION_DAYS + 1
+        empty_keys = []
+        for key in list(self._query_counts):
+            buckets = self._day_buckets(key)
+            for day in [d for d in buckets if d < cutoff]:
+                del buckets[day]
+            if not buckets:
+                empty_keys.append(key)
+        for key in empty_keys:
+            del self._query_counts[key]
 
     @staticmethod
     def _line_epoch(line: str) -> float:
@@ -664,7 +894,8 @@ class UnboundManager:
         returned window. ``search``/``source_prefixes`` mirror
         ``get_query_names`` (substring match on name / tenant subnet scoping).
         """
-        if not self._ensure_query_logging():
+        logging_result = self._ensure_query_logging()
+        if not logging_result.get("ok") and not logging_result.get("restarted"):
             self._reload()
         self._tail_query_log()
         try:
@@ -727,7 +958,7 @@ class UnboundManager:
                 "top_names": top_names}
 
     def get_query_names(self, search: str = None, limit: int = TOP_NAMES_LIMIT,
-                         source_prefixes: list = None) -> list:
+                         source_prefixes: list = None, range_days: int = None) -> list:
         """Per-(name,type) query counters, sorted by count desc, each carrying
         its breakdown of source client IPs.
 
@@ -740,7 +971,10 @@ class UnboundManager:
         used elsewhere, e.g. ``access.filter_items_by_prefixes``). ``limit``
         truncates the *returned* list only — the full counter table (up to
         MAX_TRACKED_NAMES distinct name/type/source entries) is retained in
-        memory so repeated/narrower searches don't lose data.
+        memory so repeated/narrower searches don't lose data. ``range_days``
+        (1/7/30 for the WebUI's day/week/month selector) sums only the
+        trailing N days of buckets; omitted/None sums everything still
+        retained (at most MAX_RETENTION_DAYS, enforced by _prune_query_counts).
         """
         self._tail_query_log()
         needle = (search or "").strip().lower()
@@ -752,8 +986,15 @@ class UnboundManager:
                     nets.append(ipaddress.ip_network(p, strict=False))
                 except ValueError:
                     continue
+        cutoff_day = None
+        if range_days:
+            try:
+                cutoff_day = int(time.time() // 86400) - int(range_days) + 1
+            except (TypeError, ValueError):
+                cutoff_day = None
         grouped = {}  # "name|TYPE" -> {"name":, "type":, "count":, "sources": {ip: count}}
-        for key, count in self._query_counts.items():
+        for key in list(self._query_counts):
+            buckets = self._day_buckets(key)
             name, rtype, ip = key.split("|", 2)
             if needle and needle not in name:
                 continue
@@ -764,6 +1005,9 @@ class UnboundManager:
                     continue
                 if not any(addr in n for n in nets):
                     continue  # source outside this tenant's subnets
+            count = sum(c for d, c in buckets.items() if cutoff_day is None or d >= cutoff_day)
+            if not count:
+                continue
             gkey = f"{name}|{rtype}"
             g = grouped.setdefault(gkey, {"name": name, "type": rtype, "count": 0, "sources": {}})
             g["count"] += count
@@ -780,7 +1024,8 @@ class UnboundManager:
             rows = rows[:limit]
         return rows
 
-    def get_stats(self, search: str = None, source_prefixes: list = None) -> dict:
+    def get_stats(self, search: str = None, source_prefixes: list = None,
+                  range_days: int = None) -> dict:
         """Unbound query statistics via ``unbound-control stats_noreset``.
 
         Parses the flat ``key=value`` output into headline metrics (total
@@ -795,20 +1040,46 @@ class UnboundManager:
         breakdown by substring match on the queried name; ``source_prefixes``
         scopes it to only queries whose source IP falls in those CIDRs (used
         for per-tenant filtering — see ``get_query_names``).
+
+        ``range_days`` only narrows the ``query_names`` (per-destination)
+        breakdown — the ``global``/``query_types`` counters come straight
+        from unbound-control's own lifetime totals, which Unbound itself does
+        not bucket by day.
         """
-        if not self._ensure_query_logging():
-            self._reload()  # newly-written logging conf needs a reload to take effect
-        query_names = self.get_query_names(search=search, source_prefixes=source_prefixes)
-        try:
-            result = subprocess.run(
-                ["unbound-control", "stats_noreset"],
-                capture_output=True, text=True, timeout=8,
-            )
-            if result.returncode != 0:
-                return {"status": "ERROR", "message": result.stderr.strip() or "unbound-control failed"}
-        except Exception as e:
-            logger.error("get_stats failed: %s", e)
-            return {"status": "ERROR", "message": str(e)}
+        reload_error = None
+        logging_result = self._ensure_query_logging()
+        restarted = bool(logging_result.get("restarted"))
+        if not logging_result.get("ok"):
+            if not restarted:
+                reload_result = self._reload()
+                if not reload_result.get("ok"):
+                    reload_error = reload_result.get("error", "Unbound is not running")
+            if not reload_error:
+                reload_error = logging_result.get("reason", "query logging setup failed")
+
+        query_names = self.get_query_names(search=search, source_prefixes=source_prefixes,
+                                            range_days=range_days)
+        # A restart in this same call may still be settling, so give
+        # unbound-control one retry before reporting it as down.
+        attempts = 2 if restarted else 1
+        for attempt in range(attempts):
+            try:
+                result = subprocess.run(
+                    ["unbound-control", "stats_noreset"],
+                    capture_output=True, text=True, timeout=8,
+                )
+            except Exception as e:
+                if attempt + 1 < attempts:
+                    time.sleep(0.5)
+                    continue
+                logger.error("get_stats failed: %s", e)
+                return {"status": "ERROR", "message": str(e)}
+            if result.returncode == 0:
+                break
+            if attempt + 1 < attempts:
+                time.sleep(0.5)
+                continue
+            return {"status": "ERROR", "message": result.stderr.strip() or "unbound-control failed"}
 
         raw = {}
         for line in result.stdout.splitlines():
@@ -842,7 +1113,7 @@ class UnboundManager:
                     threaded_types.get(m.group(1), 0) + int(v))
         query_types = aggregate_types or threaded_types
 
-        return {
+        response = {
             "status": "SUCCESS",
             "global": {
                 "total_queries":     int(total),
@@ -858,6 +1129,9 @@ class UnboundManager:
             "query_names": query_names,
             "query_names_tracked": len(self._query_counts),
         }
+        if reload_error:
+            response["warning"] = reload_error
+        return response
 
     def list_forwarders(self) -> dict:
         """Configured upstream forwarders via ``unbound-control list_forwards``.
