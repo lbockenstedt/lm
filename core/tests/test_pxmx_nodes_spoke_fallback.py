@@ -15,29 +15,20 @@ spoke exists, matching the VM list. These lock in:
 * a tenant whose host is connected but UNBOUND falls back to the global spoke
   and returns its nodes instead of an empty list (the fix);
 * an admin with no tenant selected uses the global spoke (unchanged).
+
+The node list is served from the hub data cache (ns ``pxmx_nodes``, key =
+tenant id or ``_all_``); the fakes below use the real ``WarmCacheMixin``.
 """
 
+import tempfile
 import time
 from types import SimpleNamespace
 
-from cache_core import StalenessPolicy
-
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routes import pxmx
-
-
-@pytest.fixture(autouse=True)
-def _reset_nodes_ttl_cache():
-    """The route's fresh-TTL memo (``_NODES_CACHE``) is module-level and keyed
-    by tenant scope — several tests here reuse the same scope (e.g. "acme")
-    with different hub fakes, so a stale entry from an earlier test would be
-    served instead of hitting the fake spoke this test set up."""
-    pxmx._NODES_CACHE.clear()
-    yield
-    pxmx._NODES_CACHE.clear()
+from warm_cache import STALE_AFTER_S, WarmCacheMixin
 
 
 class _State:
@@ -51,7 +42,7 @@ class _State:
         return False
 
 
-class _Hub:
+class _Hub(WarmCacheMixin):
     """Minimal hub: records which spoke GET_NODE_STATS was relayed to."""
 
     def __init__(self, bound_spoke=None, global_spoke="pxmx-global",
@@ -64,8 +55,8 @@ class _Hub:
             {"node": "pve1", "status": "online", "cluster": "lab"}]
         self.relayed_to = None
         self.raise_on_relay = raise_on_relay
-        self.warm_cache = {}
-        self.warm_ts = {}   # {(namespace, key): epoch} — mirrors fetched_at
+        self.cache_dir = tempfile.mkdtemp(prefix="pxmx-nodes-")
+        self.warm_cache_init()
         # Persisted offline relay-agent roster (reconstructed by
         # _offline_relay_agents): a host whose parent spoke is DOWN. Seed the
         # exact side-data that helper reads (agent_config + composite heartbeat
@@ -107,27 +98,12 @@ class _Hub:
         # _offline_relay_agents surfaces them.
         return False
 
-    def warm_get(self, ns, key):
-        return (self.warm_cache.get(ns) or {}).get(key)
-
-    def warm_fetched_at(self, ns, key="_"):
-        return self.warm_ts.get((ns, key))
-
-    def warm_state(self, ns, key="_", policy=None):
-        return (policy or StalenessPolicy()).classify(self.warm_fetched_at(ns, key))
-
-    def seed_warm(self, ns, key, data, age=0.0):
-        """Seed a warm entry AND its timestamp, the way warm_set would have.
-
-        Tests previously assigned hub.warm_cache directly, which left no
-        fetched_at — so warm_state() saw 'missing' and the route skipped the
-        fallback it was meant to be exercising."""
-        self.warm_cache.setdefault(ns, {})[key] = data
-        self.warm_ts[(ns, key)] = time.time() - age
-
-    async def warm_set(self, ns, key, data):
-        self.warm_cache.setdefault(ns, {})[key] = data
-        self.warm_ts[(ns, key)] = time.time()
+    def seed_warm(self, ns, key, data, age=0.0, tenants=None):
+        """Seed a cached entry the way a past successful fetch would have."""
+        entry = {"data": data, "fetched_at": time.time() - age}
+        if tenants is not None:
+            entry["tenants"] = list(tenants)
+        self.warm_cache.setdefault(ns, {})[key] = entry
 
     async def request_response(self, sid, cmd, payload, timeout=30.0,
                                signing_secret=None):
@@ -254,7 +230,7 @@ def test_foreign_bound_global_spoke_ignores_poisoned_warm_cache():
     lrb's nodes, the isolation path returns a CLEAN empty envelope rather than
     re-serving the stale cross-tenant data."""
     hub = _Hub(bound_spoke=None, global_spoke="pxmx-lrb", global_spoke_tenant="lrb")
-    hub.warm_cache["pxmx_nodes"] = {"ra": {"nodes": [{"node": "lrb-pve", "status": "online"}]}}
+    hub.seed_warm("pxmx_nodes", "ra", {"nodes": [{"node": "lrb-pve", "status": "online"}]})
     c = _build(hub, admin=True, tenant="ra")
     r = c.get("/api/pxmx/nodes?tenant=ra")
     assert r.status_code == 200
@@ -286,12 +262,32 @@ def test_no_spoke_at_all_returns_empty_not_error():
 
 
 def test_live_nodes_populate_warm_cache():
-    """A successful live fetch seeds the warm cache keyed by tenant scope."""
+    """A successful live fetch seeds the hub cache keyed by tenant scope."""
     hub = _Hub(bound_spoke="pxmx-acme", global_spoke="pxmx-global")
     c = _build(hub, admin=True, tenant="acme")
     r = c.get("/api/pxmx/nodes?tenant=acme")
     assert r.status_code == 200 and len(r.json()["nodes"]) == 1
-    assert hub.warm_cache.get("pxmx_nodes", {}).get("acme")  # cached raw
+    assert r.json()["cached_at"] is not None
+    entry = hub.warm_cache.get("pxmx_nodes", {}).get("acme")
+    assert entry and entry["data"]["nodes"]  # cached raw
+    assert entry["tenants"] == ["acme"]
+
+
+def test_admin_unscoped_nodes_cached_under_all_key():
+    hub = _Hub(bound_spoke=None, global_spoke="pxmx-global")
+    c = _build(hub, admin=True, tenant=None)
+    assert c.get("/api/pxmx/nodes").status_code == 200
+    assert set(hub.warm_cache["pxmx_nodes"]) == {"_all_"}
+
+
+def test_fresh_cached_nodes_served_without_relay():
+    hub = _Hub(bound_spoke="pxmx-acme", global_spoke="pxmx-global")
+    hub.seed_warm("pxmx_nodes", "acme", {"nodes": [{"node": "cached-pve", "status": "online"}]})
+    c = _build(hub, admin=True, tenant="acme")
+    body = c.get("/api/pxmx/nodes?tenant=acme").json()
+    assert [n["node"] for n in body["nodes"]] == ["cached-pve"]
+    assert hub.relayed_to is None
+    assert "stale" not in body
 
 
 def test_spoke_down_serves_stale_warm_cache():
@@ -299,14 +295,15 @@ def test_spoke_down_serves_stale_warm_cache():
     last-known nodes are served (stale) instead of an empty list — mirroring the
     VM tab so the Overview doesn't blank while VMs render from their cache."""
     hub = _Hub(bound_spoke=None, global_spoke=None)
-    hub.seed_warm("pxmx_nodes", "acme", {"nodes": [{"node": "pve1", "status": "online"}]}, age=300)
+    hub.seed_warm("pxmx_nodes", "acme", {"nodes": [{"node": "pve1", "status": "online"}]},
+                  age=STALE_AFTER_S + 60)
     c = _build(hub, admin=True, tenant="acme")
     r = c.get("/api/pxmx/nodes?tenant=acme")
     assert r.status_code == 200
     body = r.json()
     assert len(body["nodes"]) == 1
     assert body["stale"] is True
-    assert body["spoke_connected"] is False
+    assert body["cached_at"] is not None
 
 
 def test_live_fetch_failure_falls_back_to_warm_cache():
@@ -316,8 +313,24 @@ def test_live_fetch_failure_falls_back_to_warm_cache():
     c = _build(hub, admin=True, tenant="acme")
     r = c.get("/api/pxmx/nodes?tenant=acme")
     assert r.status_code == 200
-    body = r.json()
+    assert len(r.json()["nodes"]) == 1
+    # The background refresh the read kicked off failed → the entry is now
+    # flagged as failing and the next read is badged stale (still served).
+    deadline = time.time() + 2
+    while time.time() < deadline and not hub.warm_cache["pxmx_nodes"]["acme"].get("error_at"):
+        time.sleep(0.01)
+    body = c.get("/api/pxmx/nodes?tenant=acme").json()
     assert len(body["nodes"]) == 1 and body["stale"] is True
+
+
+def test_live_fetch_failure_no_cache_returns_empty_envelope():
+    hub = _Hub(bound_spoke="pxmx-acme", raise_on_relay=True)
+    c = _build(hub, admin=True, tenant="acme")
+    r = c.get("/api/pxmx/nodes?tenant=acme")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["nodes"] == [] and body["spoke_connected"] is False
+    assert not hub.warm_cache.get("pxmx_nodes")  # a failure is never cached
 
 
 # ── Offline-host merge (reported gap: '05 is offline; shows in CS module but ──

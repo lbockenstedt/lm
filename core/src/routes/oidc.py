@@ -99,7 +99,7 @@ a.btn:hover{background:#018f6f}
 
 from api import (
     HTTPException, Request, _SESSION_TTL, _client_ip, _cookie_secure, _record_session,
-    _start_cache_for_tenant, logger,
+    cache_kick_login, logger,
 )
 from security.oidc import (
     OidcError, discover, exchange_code, extract_member_groups,
@@ -240,8 +240,7 @@ def register(app, hub, ctx):
             )
             resp.delete_cookie(_STATE_COOKIE)
             resp.delete_cookie("lm_oidc_retry")
-            for tid in user_data["tenants"]:
-                _start_cache_for_tenant(hub, tid)
+            cache_kick_login(hub, user_data)
             logger.info("OIDC login ok for %s (groups=%s tenants=%s)",
                         oid, member_of, user_data["tenants"])
             return resp

@@ -1,6 +1,7 @@
 """Tests for the Proxmox drive diagnostics backend API (/api/pxmx/drive-health)
 and WebUI main.js subMenus / renderPxmxDiagnostics integration.
 """
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,17 +10,17 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from cache_core import StalenessPolicy
 from routes import pxmx
+from warm_cache import WarmCacheMixin
 
 MAIN_JS_PATH = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
 
 
 @pytest.fixture(autouse=True)
-def _reset_nodes_cache():
-    pxmx._NODES_CACHE.clear()
+def _reset_drive_health_cache():
+    pxmx._DRIVE_HEALTH_CACHE.clear()
     yield
-    pxmx._NODES_CACHE.clear()
+    pxmx._DRIVE_HEALTH_CACHE.clear()
 
 
 class _MockState:
@@ -33,8 +34,8 @@ class _MockState:
         return False
 
 
-class _MockHub:
-    """Mock hub for testing /api/pxmx/drive-health route."""
+class _MockHub(WarmCacheMixin):
+    """Mock hub for testing /api/pxmx/drive-health route (real hub cache)."""
 
     def __init__(self, bound_spoke=None, global_spoke="pxmx-spoke-1",
                  drive_response=None, node_stats=None):
@@ -46,8 +47,8 @@ class _MockHub:
             {"node": "pve1", "status": "online", "cluster": "lab-cluster"}
         ]
         self.calls = []
-        self.warm_cache = {}
-        self.warm_ts = {}
+        self.cache_dir = tempfile.mkdtemp(prefix="pxmx-drive-health-")
+        self.warm_cache_init()
 
     def get_hypervisor_spoke_for_tenant(self, tid=None):
         return self._bound
@@ -63,25 +64,12 @@ class _MockHub:
             return [self._global] if self._global else []
         return []
 
-    def warm_get(self, ns, key):
-        return (self.warm_cache.get(ns) or {}).get(key)
-
-    async def warm_set(self, ns, key, data):
-        self.warm_cache.setdefault(ns, {})[key] = data
-        self.warm_ts[(ns, key)] = time.time()
-
     def seed_warm(self, ns, key, data, age_s=0.0):
         """Pre-populate the cache as if it had been written ``age_s`` ago —
         the real mixin records a timestamp alongside every entry, and the
         staleness ladder is meaningless without one."""
-        self.warm_cache.setdefault(ns, {})[key] = data
-        self.warm_ts[(ns, key)] = time.time() - age_s
-
-    def warm_fetched_at(self, ns, key="_"):
-        return self.warm_ts.get((ns, key))
-
-    def warm_state(self, ns, key="_", policy=None):
-        return (policy or StalenessPolicy()).classify(self.warm_fetched_at(ns, key))
+        self.warm_cache.setdefault(ns, {})[key] = {
+            "data": data, "fetched_at": time.time() - age_s}
 
     async def request_response(self, sid, cmd, payload, timeout=30.0, signing_secret=None):
         self.calls.append({"sid": sid, "cmd": cmd, "payload": payload, "timeout": timeout})

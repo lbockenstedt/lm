@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 import api as api_mod
 import access as access_mod
 from access import session_user  # noqa: E402
+from warm_cache import WarmCacheMixin  # noqa: E402
 
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
@@ -53,9 +54,12 @@ class _FakeState:
         return None
 
 
-class _FakeHub:
+class _FakeHub(WarmCacheMixin):
     def __init__(self, data_dir, system_state=None):
         self.state = _FakeState(data_dir, system_state)
+        # The real hub data cache (routes read through hub.cache_read).
+        self.cache_dir = data_dir
+        self.warm_cache_init()
         self.simulations_store = type("_Store", (), {})()
         self.simulations_cache = {}
         self.active_connections = set()
@@ -85,7 +89,7 @@ class _FakeHub:
         return [sid] if sid else []
 
     async def request_response(self, spoke_id, cmd, data, timeout=30.0):
-        # A NETBOX_GET_* round-trip (used by _fetch_module on cache miss) returns
+        # A NETBOX_GET_* round-trip (the ownership guard's live re-check on a miss) returns
         # an empty list so a not-owned object is fail-closed; any other command
         # (delete/update) returns a SUCCESS body so the handler proceeds past
         # the ownership gate.
@@ -108,7 +112,6 @@ def _isolate(monkeypatch, tmp_path):
     api_mod._sessions.clear()
     api_mod._login_attempts.clear()
     api_mod._login_ip_attempts.clear()
-    api_mod._tenant_cache.clear()
     for v in ("LM_TLS_CERT", "LM_TLS_KEY", "LM_CORS_ORIGINS", "LM_SETUP_TOKEN",
               "LM_COOKIE_SECURE", "LM_MAX_SESSIONS_PER_USER",
               "LM_SESSION_IDLE_TIMEOUT_S", "LM_LOGIN_MAX_FAILS",
@@ -921,12 +924,21 @@ def test_help_ask_still_requires_a_session(tmp_path):
 
 # ── 10. NetBox cross-tenant mutation ownership check ──────────────────────────
 
+def _seed_nb_devices(hub, tid, rows):
+    """Put ``rows`` in the hub data cache as tenant ``tid``'s NetBox device
+    list (same namespace/key the route's ownership guard reads)."""
+    import time as _t
+    from routes.netbox import nb_cache_job
+    job = nb_cache_job(hub, "netbox_devices", api_mod.netbox_tenant_scope(hub, tid))
+    hub.warm_cache.setdefault(job.ns, {})[job.key] = {
+        "data": rows, "fetched_at": _t.time(), "tenants": list(job.tenants)}
+
 def test_netbox_delete_not_owned_by_tenant_denied(tmp_path):
     # Seed tenant tA's device cache with device 5 only. A non-admin ipam user
     # scoped to tA may NOT delete device 999 (another tenant's, by ID enum) —
     # fail-closed 403.
     c, hub = _build({}, tmp_path)
-    api_mod._tenant_cache["tA"] = {"netbox_devices": {"data": [{"id": 5}]}}
+    _seed_nb_devices(hub, "tA", [{"id": 5}])
     tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam", "edit"))
     r = c.delete("/api/netbox/devices/999", cookies={"lm_session": tok})
     assert r.status_code == 403
@@ -936,7 +948,7 @@ def test_netbox_delete_owned_by_tenant_passes_gate(tmp_path):
     # Device 5 IS in alice's tenant cache → ownership passes; the handler then
     # proceeds (fake request_response returns SUCCESS) → 200, not the 403 gate.
     c, hub = _build({}, tmp_path)
-    api_mod._tenant_cache["tA"] = {"netbox_devices": {"data": [{"id": 5}]}}
+    _seed_nb_devices(hub, "tA", [{"id": 5}])
     tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam", "edit"))
     r = c.delete("/api/netbox/devices/5", cookies={"lm_session": tok})
     assert r.status_code == 200

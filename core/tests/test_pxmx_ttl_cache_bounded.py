@@ -1,7 +1,7 @@
 """Regression coverage for the bounded pxmx TTL caches.
 
-``_NODES_CACHE`` / ``_VMS_CACHE`` / ``_DRIVE_HEALTH_CACHE`` are keyed per
-warm_key (tenant/agent scope) and ``_ttl_locks`` is keyed per
+``_DRIVE_HEALTH_CACHE`` (the one remaining module-level TTL memo; nodes/VMs
+moved to the hub data cache) is keyed per warm_key (tenant/node scope) and ``_ttl_locks`` is keyed per
 ``(id(loop), cache_name, key)``. Before ``_prune`` none of them were ever
 evicted, so a long-lived hub serving many tenants grew one entry per scope
 forever. ``_ttl_locks`` was the worse case: CPython recycles ``id()`` once a
@@ -19,12 +19,12 @@ from routes import pxmx
 
 
 def setup_function(_):
-    pxmx._NODES_CACHE.clear()
+    pxmx._DRIVE_HEALTH_CACHE.clear()
     pxmx._ttl_locks.clear()
 
 
 def teardown_function(_):
-    pxmx._NODES_CACHE.clear()
+    pxmx._DRIVE_HEALTH_CACHE.clear()
     pxmx._ttl_locks.clear()
 
 
@@ -67,8 +67,8 @@ def test_ttl_cached_bounds_cache():
             return "data"
 
         for i in range(pxmx._TTL_CACHE_MAX + 10):
-            await pxmx._ttl_cached(pxmx._NODES_CACHE, "nodes", f"k{i}", _fetch)
-        assert len(pxmx._NODES_CACHE) <= pxmx._TTL_CACHE_MAX
+            await pxmx._ttl_cached(pxmx._DRIVE_HEALTH_CACHE, "drive_health", f"k{i}", _fetch)
+        assert len(pxmx._DRIVE_HEALTH_CACHE) <= pxmx._TTL_CACHE_MAX
 
     asyncio.run(_run())
 
@@ -76,7 +76,7 @@ def test_ttl_cached_bounds_cache():
 def test_ttl_locks_bounded():
     async def _run():
         for i in range(pxmx._TTL_CACHE_MAX + 10):
-            pxmx._ttl_lock("nodes", str(i))
+            pxmx._ttl_lock("drive_health", str(i))
         assert len(pxmx._ttl_locks) <= pxmx._TTL_CACHE_MAX
 
     asyncio.run(_run())
@@ -84,8 +84,8 @@ def test_ttl_locks_bounded():
 
 def test_ttl_lock_returns_same_lock_for_same_key():
     async def _run():
-        first = pxmx._ttl_lock("nodes", "k1")
-        second = pxmx._ttl_lock("nodes", "k1")
+        first = pxmx._ttl_lock("drive_health", "k1")
+        second = pxmx._ttl_lock("drive_health", "k1")
         assert first is second
         assert isinstance(first, asyncio.Lock)
 
@@ -94,12 +94,12 @@ def test_ttl_lock_returns_same_lock_for_same_key():
 
 def test_ttl_lock_never_evicts_a_held_lock():
     async def _run():
-        held = pxmx._ttl_lock("nodes", "held")
+        held = pxmx._ttl_lock("drive_health", "held")
         await held.acquire()
         try:
             for i in range(pxmx._TTL_CACHE_MAX + 20):
-                pxmx._ttl_lock("nodes", f"other{i}")
-            assert pxmx._ttl_lock("nodes", "held") is held
+                pxmx._ttl_lock("drive_health", f"other{i}")
+            assert pxmx._ttl_lock("drive_health", "held") is held
             assert held.locked()
         finally:
             held.release()

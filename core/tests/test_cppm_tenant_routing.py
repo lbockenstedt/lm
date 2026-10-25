@@ -4,11 +4,14 @@ a request from tenant A must never be answered by tenant B's spoke, and an
 admin with no tenant selected should see every tenant's data combined
 (_nac_merge_fanout), not just whichever spoke happened to connect first.
 """
+import tempfile
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
 
 from routes.cppm import register
+from warm_cache import WarmCacheMixin
 
 
 class FakeState:
@@ -23,9 +26,12 @@ class FakeState:
         return (self._tenants.get(sid) or {}).get("tenant_id", "")
 
 
-class FakeHub:
+class FakeHub(WarmCacheMixin):
     def __init__(self, spokes, replies=None, nac_instances=None,
                 module_metadata=None, global_nac=None, approved=None):
+        # Real hub data cache (the NAC routes read through hub.cache_read).
+        self.cache_dir = tempfile.mkdtemp(prefix="lm-cppm-test-")
+        self.warm_cache_init()
         # spokes: set of connected+approved nac spoke ids
         self.active_connections = set(spokes)
         self.approved_modules = approved or {sid: True for sid in spokes}
@@ -34,7 +40,6 @@ class FakeHub:
         self.forwarded = []
         self._nac_spokes = set(spokes)
         self._global_nac = global_nac
-        self.warm_cache = {}
 
     def _primary_key(self, sid):
         return sid
@@ -67,12 +72,6 @@ class FakeHub:
         self.forwarded.append((sid, cmd, payload))
         data = (self.replies.get(sid) or {}).get(cmd, {"status": "SUCCESS"})
         return {"payload": {"data": data}}
-
-    def warm_get(self, cmd, key):
-        return self.warm_cache.get((cmd, key))
-
-    async def warm_set(self, cmd, key, data):
-        self.warm_cache[(cmd, key)] = data
 
 
 def _passthrough_filter(request, data, module, ip_fields, explicit_tenant=None):
@@ -341,3 +340,81 @@ def test_shared_tenant_itself_does_not_double_query_its_own_spoke():
     assert r.status_code == 200
     assert [d["mac"] for d in r.json()["devices"]] == ["shared-1"]
     assert len(hub.forwarded) == 1
+
+
+# ── hub data cache ───────────────────────────────────────────────────────────
+
+def _own_and_shared_hub():
+    hub = FakeHub(
+        {"cppm-a", "cppm-shared"},
+        replies={
+            "cppm-a": {"LIST_ENDPOINTS": {"status": "SUCCESS",
+                                          "devices": [{"mac": "own-1"}]}},
+            "cppm-shared": {"LIST_ENDPOINTS": {"status": "SUCCESS",
+                                               "devices": [{"mac": "shared-1"}]}},
+        },
+        module_metadata={"cppm-a": {"tenant_id": "tenantA"},
+                         "cppm-shared": {"tenant_id": "shared-tenant"}},
+    )
+    hub.get_cppm_spoke_for_shared = lambda: "cppm-shared"
+    return hub
+
+
+def test_tenant_merge_skips_a_spoke_with_no_clearpass_configured():
+    # The hub knows cppm-shared has no ClearPass configured: it is not queried
+    # and the tenant still gets its own CPPM's data.
+    hub = _own_and_shared_hub()
+    hub._nac_unconfigured_spokes = {"cppm-shared"}
+    r = _build(_tenant_user("tenantA"), hub).get("/api/cppm/devices")
+    assert r.status_code == 200
+    assert {d["mac"] for d in r.json()["devices"]} == {"own-1"}
+    assert {sid for sid, _, _ in hub.forwarded} == {"cppm-a"}
+
+
+def test_tenant_merge_with_every_spoke_unconfigured_is_503():
+    hub = _own_and_shared_hub()
+    hub._nac_unconfigured_spokes = {"cppm-a", "cppm-shared"}
+    r = _build(_tenant_user("tenantA"), hub).get("/api/cppm/devices")
+    assert r.status_code == 503
+    assert hub.forwarded == []
+
+
+def test_second_read_is_served_from_cache_without_a_spoke_call():
+    hub = _own_and_shared_hub()
+    c = _build(_tenant_user("tenantA"), hub)
+    first = c.get("/api/cppm/devices").json()
+    calls = len(hub.forwarded)
+    second = c.get("/api/cppm/devices").json()
+    assert len(hub.forwarded) == calls          # no new spoke round-trip
+    assert second["devices"] == first["devices"]
+    assert second.get("cached_at")              # cache badge info
+
+
+def test_spoke_down_after_first_read_still_serves_last_known_data():
+    hub = _own_and_shared_hub()
+    c = _build(_tenant_user("tenantA"), hub)
+    assert c.get("/api/cppm/devices").status_code == 200
+    hub.active_connections.clear()
+    hub._nac_spokes.clear()
+    r = c.get("/api/cppm/devices")
+    assert r.status_code == 200
+    assert {d["mac"] for d in r.json()["devices"]} == {"own-1", "shared-1"}
+
+
+def test_tenants_never_share_a_cache_entry():
+    hub = FakeHub(
+        {"cppm-a", "cppm-b"},
+        replies={
+            "cppm-a": {"LIST_ENDPOINTS": {"status": "SUCCESS", "devices": [{"mac": "a-1"}]}},
+            "cppm-b": {"LIST_ENDPOINTS": {"status": "SUCCESS", "devices": [{"mac": "b-1"}]}},
+        },
+        module_metadata={"cppm-a": {"tenant_id": "tenantA"},
+                         "cppm-b": {"tenant_id": "tenantB"}},
+    )
+    ra = _build(_tenant_user("tenantA"), hub).get("/api/cppm/devices").json()
+    rb = _build(_tenant_user("tenantB"), hub).get("/api/cppm/devices").json()
+    assert {d["mac"] for d in ra["devices"]} == {"a-1"}
+    assert {d["mac"] for d in rb["devices"]} == {"b-1"}
+    entries = hub.warm_cache["list_endpoints"]
+    assert entries["_all_:tenantA"]["tenants"] == ["tenantA"]
+    assert entries["_all_:tenantB"]["tenants"] == ["tenantB"]

@@ -154,7 +154,6 @@ def _isolate(monkeypatch):
     api_mod._sessions.clear()
     api_mod._login_attempts.clear()
     api_mod._login_ip_attempts.clear()
-    api_mod._tenant_cache.clear()
     # No shared tenant unless a test opts in.
     monkeypatch.setattr(access_mod, "_SHARED_TENANT_ID", None)
     monkeypatch.setattr(access_mod, "shared_tenant_id", lambda: access_mod._SHARED_TENANT_ID)
