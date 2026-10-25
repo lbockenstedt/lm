@@ -74,8 +74,7 @@ from role_listeners import LISTENER_PORT_ROLES, listener_conflict, is_deploy_rol
 from security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
                                    encryption_enabled, is_encrypted, wrap)
 from cryptography.exceptions import InvalidTag
-from api import (build_server, _refresh_module_all_tenants,
-                 _invalidate_tenant_module, _fetch_module)
+from api import build_server, _refresh_module_all_tenants
 from hub_os_updates import HubOsUpdatesMixin
 from hub_mtls_enforcement import HubMtlsEnforcementMixin
 from update_pipeline import UpdatePipelineMixin
@@ -1258,22 +1257,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # a live LE_LIST_CERTS round-trip or 503-ing until the le spoke reconnects.
         self.le_cache_init()
         self.le_cache_load()
-        # Generic warm cache shared by the other read-heavy pages (IPAM/NetBox,
-        # NAC/CPPM, Directory/LDAP) — same warm-start contract as nw/le.
-        self.warm_cache_init()
+        # The hub data cache (warm_cache.WarmCacheMixin): every page reads from
+        # here and a background refresher keeps it current (60s while a viewer
+        # is logged in, 5 min otherwise). Persisted per namespace to
+        # cache/warm/<ns>.bin as Fernet(zlib(json)) with the hub key — it holds
+        # tenant data, so it is encrypted at rest like system.json.
+        try:
+            from security.encryption import hub_encryption as _he
+            _cache_enc, _cache_dec = _he.encrypt_bytes, _he.decrypt_bytes
+        except Exception as e:  # noqa: BLE001 - hub_encryption is fail-closed in prod
+            logger.warning("hub cache: encryption unavailable (%s) — files not encrypted", e)
+            _cache_enc = _cache_dec = None
+        self.warm_cache_init(encrypt=_cache_enc, decrypt=_cache_dec)
         self.warm_cache_load()
         # In-memory global-search index (SearchIndexMixin): keeps the full
         # spoke-scoped result set per observed scope so /api/search serves from
         # memory instead of a live 5-spoke fan-out (+ the 30s prefix pre-fetch).
         self.search_index_init()
-        # Warm-start the per-tenant module cache (pxmx_vms/netbox/cppm/firewall) so
-        # the Hypervisors/NetBox/CPPM/Firewall dashboards seed on boot instead of
-        # blanking until a login-triggered preload lands. Stale-while-revalidate.
-        try:
-            from api import warm_load_tenant_cache
-            warm_load_tenant_cache(self)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("tenant_cache warm load skipped: %s", e)
         # Warm-start the per-device cert reports so the cert drill-down survives a
         # restart instead of blanking until the hourly distribution loop repopulates.
         try:
@@ -2531,7 +2531,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                          cs_type, mapped, hostname, exc)
 
     def refresh_module_cache(self, key: str) -> None:
-        """Drop + background re-fetch a tenant-cache module for ALL tenants.
+        """Refresh a hub-cache module (legacy key, e.g. ``netbox_devices``) for
+        ALL tenants now.
 
         Thin hub-method wrapper around api._refresh_module_all_tenants so the
         background-sync mixins (endpoint_sync / vm_sync / realtime_ipam_nac /
@@ -2539,8 +2540,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         dodge an import cycle — can refresh the cache at sync completion without
         a local import. Called after a sync cycle that actually changed spoke
         data so a non-admin viewer (whose list reads the tenant cache, not a
-        live relay) sees the new state immediately instead of waiting up to 300s
-        for the next cache tick.
+        live relay) sees the new state immediately instead of waiting for the
+        next refresh cycle.
         """
         try:
             _refresh_module_all_tenants(self, key)
@@ -2549,10 +2550,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     # --- Agent-result → debounced per-tenant VM-cache refresh ──────────────
     # An agent mass-delete (CS_COMMAND action=delete_vm) reports completion via
-    # CS_COMMAND_RESULT up AGENT_RELAY_UP, but that path never invalidated the
-    # hub's _tenant_cache[*]["pxmx_vms"] (only hub-originated routes did, via
-    # _refresh_module_all_tenants). So the Hypervisors VM list stayed stale up
-    # to the 300s TTL tick. This debounced refresh closes that gap, scoped to
+    # CS_COMMAND_RESULT up AGENT_RELAY_UP, but that path never refreshed the
+    # hub's cached VM lists (only hub-originated routes did, via
+    # _refresh_module_all_tenants). So the Hypervisors VM list stayed stale
+    # until the next refresh cycle. This debounced refresh closes that gap, scoped to
     # the acting tenant (pxmx_vms + netbox_vms) and coalesced to ≤1 / 5s with a
     # trailing refresh after a burst. See _VM_MUTATING_ACTIONS.
     def _schedule_vm_cache_refresh(self, tenant_id: str) -> None:
@@ -2580,12 +2581,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 wait = self._VM_REFRESH_MIN_INTERVAL - (now - self._vm_refresh_last.get(tenant_id, 0.0))
                 if wait > 0:
                     await asyncio.sleep(wait)
-                for key in ("pxmx_vms", "netbox_vms"):
-                    try:
-                        _invalidate_tenant_module(tenant_id, key)
-                        await _fetch_module(self, tenant_id, key)
-                    except Exception as e:  # noqa: BLE001 — best-effort, never break the loop
-                        logger.debug("vm cache refresh %s/%s failed: %s", tenant_id, key, e)
+                try:
+                    # This tenant's VM lists + the admin (all-tenant) view.
+                    self.cache_refresh("pxmx_vms", (f"{tenant_id}|", "_all_|"))
+                except Exception as e:  # noqa: BLE001 — best-effort, never break the loop
+                    logger.debug("vm cache refresh %s failed: %s", tenant_id, e)
                 self._vm_refresh_last[tenant_id] = time.time()
                 # Trailing edge: if another mutating result arrived during this
                 # refresh, loop once more (rate-limited by the interval above) so
@@ -2877,9 +2877,6 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     logger.debug(f"Pushed tenant ({ptenant or 'unassigned'}) to proxy {spoke_id}")
                 except Exception as e:
                     logger.warning(f"Failed to push tenant to proxy {spoke_id}: {e}")
-                # Refresh the hub's proxied-tenant set: this proxy's assigned
-                # tenant (if non-shared) is now served disk-backed, RAM-free.
-                self._recompute_proxied_tenants()
 
             module_key = _PUSH_CONFIG_MODULE_KEY.get(mtype)
             if not module_key:
@@ -7101,7 +7098,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         pk = self._primary_key(spoke_id)
         del self.active_connections[pk]
         self.active_connection_key_ids.pop(pk, None)
-        disc_mtype = self.spoke_module_types.pop(pk, None)
+        self.spoke_module_types.pop(pk, None)
         self.spoke_parent_map.pop(pk, None)
         self.netbox_server_agents.discard(pk)
         self.ldap_server_agents.discard(pk)
@@ -7117,11 +7114,6 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         for aid in list(self.agent_info):
             if self._primary_key(self.agent_info.get(aid, {}).get("spoke_id")) == pk:
                 self.agent_info.pop(aid, None)
-        # A disconnected proxy no longer serves its tenant disk-backed;
-        # recompute so that tenant reverts to resident RAM caching (or stays
-        # disk-backed if another proxy still serves it).
-        if disc_mtype == "proxy":
-            self._recompute_proxied_tenants()
 
     # ── Update pipeline (extracted) ───────────────────────────────────────
     # get_local_version / get_remote_version / _is_git_repo / _download_update /
@@ -9866,38 +9858,6 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 logger.warning(f"[recovery] loop error: {e}")
             await asyncio.sleep(30)
 
-    def _recompute_proxied_tenants(self) -> None:
-        """Rebuild the api module's proxied-tenant set from the live spoke
-        registry and push it to the hub cache layer. A tenant with its own
-        dedicated (non-shared) connected edge proxy is served disk-backed
-        (RAM-free at rest) instead of resident in _tenant_cache. A connected
-        SHARED proxy fronts the whole fleet (it caches every tenant locally), so
-        it disk-backs EVERY tenant (all_tenants=True). Recomputed on every proxy
-        (re)connect/disconnect so the set can never drift or leak a stale entry.
-        """
-        try:
-            import access as _access
-            from api import set_proxied_tenants
-            tenants = set()
-            shared_present = False
-            for pk, mtype in list(self.spoke_module_types.items()):
-                if mtype != "proxy":
-                    continue
-                t = self.state.get_spoke_tenant(pk) or ""
-                if not t:
-                    continue
-                if _access.tenant_is_shared(t):
-                    shared_present = True
-                else:
-                    tenants.add(t)
-            set_proxied_tenants(tenants, all_tenants=shared_present)
-            if shared_present or tenants:
-                logger.info(
-                    "[cache] proxied disk-backed tenants: %s",
-                    "ALL (shared proxy)" if shared_present else sorted(tenants))
-        except Exception as e:  # noqa: BLE001 — best-effort optimisation
-            logger.debug(f"recompute proxied tenants failed: {e}")
-
     def record_spoke_event(self, spoke_id: str, event: str, detail: str = "") -> None:
         """
         Append a structured connection-lifecycle event for a spoke.
@@ -11132,6 +11092,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         dns_dhcp_sync_task = asyncio.create_task(self.run_dns_dhcp_sync_loop())
         # Keeps the DNS/DHCP page caches fresh in the background (not only on tab open).
         dns_dhcp_feed_task = asyncio.create_task(self.run_dns_dhcp_feed_loop())
+        # Hub data cache refresher: keeps every registered page dataset warm
+        # (see warm_cache.run_cache_refresher_loop). Pages never fetch live.
+        cache_refresher_task = asyncio.create_task(self.run_cache_refresher_loop())
         # Proxmox drive health/SSD wear: polled every 6h, served from cache.
         pxmx_drive_health_task = asyncio.create_task(self.run_pxmx_drive_health_loop())
         # HE.NET (External DNS) scheduled re-sync: on a schedule (interval or a

@@ -372,6 +372,25 @@ class HubEncryption:
                     first_err = e
         raise first_err
 
+    def encrypt_bytes(self, data: bytes) -> bytes:
+        """Encrypt raw bytes (no str round-trip). Used by the hub data cache,
+        which encrypts already-compressed bytes so the str-based ``encrypt``
+        would force a pointless base64/decode step."""
+        return self.fernet.encrypt(data)
+
+    def decrypt_bytes(self, ciphertext: bytes) -> bytes:
+        """Bytes counterpart of ``decrypt``: same key chain (current →
+        previous → legacy), so a cache file written before a key rotation still
+        loads. Raises the primary key's error when no key works."""
+        first_err = None
+        for f in self._decrypt_chain:
+            try:
+                return f.decrypt(ciphertext)
+            except Exception as e:  # noqa: BLE001
+                if first_err is None:
+                    first_err = e
+        raise first_err
+
 # Singleton instance for the process
 hub_encryption = HubEncryption()
 

@@ -59,6 +59,11 @@ class _Hub:
     def get_hypervisor_spoke(self):
         return "pxmx-1"
 
+    def warm_get(self, ns, key="_"):
+        # Cold hub cache: the clone guard / next-name picker fall back to a
+        # live PXMX_LIST_VMS.
+        return None
+
     async def request_response(self, sid, cmd, payload, timeout=35.0, signing_secret=None):
         self.relayed.append((cmd, payload))
         if cmd == "PXMX_LIST_VMS":
@@ -95,7 +100,6 @@ def patched(monkeypatch):
     monkeypatch.setattr(pxmx_vm, "get_tenant_scoping", lambda hub, tid: {"proxmox_tag": "acme"})
     monkeypatch.setattr(pxmx_vm, "vmid_alloc",
                         SimpleNamespace(vmid_alloc_cfg=lambda hub: {"enabled": False}))
-    monkeypatch.setattr(pxmx_vm, "_cache_entry", lambda tid, mod: None)
     monkeypatch.setattr(pxmx_vm, "_refresh_module_all_tenants", lambda hub, mod: None)
 
 

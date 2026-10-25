@@ -3,9 +3,69 @@ import access
 import instance_vault
 from api import (
     HTTPException, Request, _FW_FETCH_TIMEOUTS, _FW_FETCH_TIMEOUT_DEFAULT, _FW_MODULES,
-    _FW_WRITE_TIMEOUT, _cache_entry, _fetch_module, _hub_msg, _invalidate_module_all_tenants,
-    _invalidate_tenant_module, _tenant_cache, asyncio, logger, uuid,
+    _FW_WRITE_TIMEOUT, _hub_msg, logger, uuid,
 )
+from warm_cache import CacheJob
+
+# Firewall read endpoints → OPNsense spoke command. Only OPNsense has a spoke;
+# the UI model dropdown also offers pfsense/juniper/fortigate, which fall back
+# to this command set (the former JUNIPER_GET_* map had no handler — removed).
+FW_READ_CMDS = {
+    "rules": "OPNSENSE_GET_ALL_RULES",
+    "interfaces": "GET_INTERFACE_STATUS",
+    "health": "GET_SYSTEM_HEALTH",
+    "dhcp": "OPNSENSE_GET_DHCP_LEASES",
+    "nat": "OPNSENSE_GET_NAT_POLICIES",
+    "dns": "OPNSENSE_GET_DNS_RECORDS",
+    "aliases": "OPNSENSE_GET_ALIASES",
+}
+
+
+def _fw_record(hub, firewall_id):
+    firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
+    return next((f for f in firewalls if f.get("id") == firewall_id), None)
+
+
+def fw_cache_job(hub, firewall_id: str, endpoint: str) -> CacheJob:
+    """Hub-cache job for one firewall endpoint. Namespace ``fw_<endpoint>``,
+    key = firewall id: a firewall's data is stored ONCE no matter how many
+    tenants share it; ``_filter_fw`` narrows it per reader. The five list
+    modules (``_FW_MODULES``) are kept warm by the feed; health/aliases are
+    cached on first open. Lane per firewall so one slow box can't starve the
+    others."""
+    async def fetch():
+        fw = _fw_record(hub, firewall_id)
+        if not fw:
+            raise HTTPException(status_code=404, detail="Firewall not found")
+        spoke_id = fw.get("spoke_id")
+        if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
+            raise HTTPException(status_code=503, detail=f"Firewall spoke {spoke_id} not connected")
+        result = await hub.request_response(
+            spoke_id, FW_READ_CMDS[endpoint], {},
+            timeout=_FW_FETCH_TIMEOUTS.get(endpoint, _FW_FETCH_TIMEOUT_DEFAULT))
+        # A spoke ERROR (e.g. OPNsense < 26.1 with no NAT MVC API, or an API
+        # key lacking the module scope) must surface rather than be cached as
+        # an empty list.
+        if isinstance(result, dict) and result.get("status") == "ERROR":
+            raise HTTPException(status_code=502,
+                                detail=result.get("message", "Firewall spoke error"))
+        if isinstance(result, dict):
+            if "data" in result:
+                return result["data"]
+            if isinstance(result.get("payload"), dict):
+                return result["payload"].get("data", {})
+        return result
+
+    return CacheJob(f"fw_{endpoint}", firewall_id, fetch, None,
+                    lane=f"fw:{firewall_id}", detail=endpoint not in _FW_MODULES)
+
+
+def fw_cache_feed(hub):
+    """Feed: the five list modules for every configured firewall."""
+    for fw in hub.state.system_state.get("global_config", {}).get("firewalls", []) or []:
+        if fw.get("id"):
+            for endpoint in sorted(_FW_MODULES):
+                yield fw_cache_job(hub, fw["id"], endpoint)
 
 
 def register(app, hub, ctx):
@@ -147,20 +207,19 @@ def register(app, hub, ctx):
 
     @app.get("/api/firewall/{firewall_id}/{endpoint}")
     # ── Firewall: data + CRUD (/api/firewall/*) ──────────────────────────────
-    # get_firewall_data serves from tenant cache (non-admin) / offline cache /
-    # a live spoke round-trip; the CRUD handlers below mutate and refresh.
+    # get_firewall_data serves from the hub data cache (fw_cache_job); the CRUD
+    # handlers below mutate and then cache_refresh the affected module.
     async def get_firewall_data(request: Request, firewall_id: str, endpoint: str, tenant: str = None):
-        """Live + cached firewall data (rules/interfaces/services/virtual-ip).
+        """Cached firewall data (rules/interfaces/nat/dhcp/dns/health/aliases).
 
-        Three return paths: tenant cache hit for non-admins, offline cache when
-        the spoke is down, and a live ``request_response`` round-trip. The
-        ``endpoint`` arg selects the firewall sub-resource. Results are
-        tenant-prefix-filtered via ``_filter_fw`` before return. ``?tenant=``
-        scopes the filter to the selected tenant so an admin acting as a tenant
-        (via the switcher) sees only that tenant's subnet data across every tab —
-        without it, admins bypass the filter (see access.filter_fw)."""
-        # see _netbox_list_get (variant: per-model command map + fw_id-scoped cache
-        # keys + _filter_fw filter — enough variation to stay inline).
+        The RAW per-firewall payload comes from the hub data cache (one entry
+        per firewall, shared by every tenant; first open of an uncached
+        endpoint fetches live). Authorization (``_authz_firewall``) and the
+        tenant-prefix filter (``_filter_fw``) run on EVERY read. ``?tenant=``
+        scopes the filter to the selected tenant so an admin acting as a
+        tenant (via the switcher) sees only that tenant's subnet data — without
+        it, admins bypass the filter (see access.filter_fw). Responses carry
+        ``cached_at`` (+ ``stale``)."""
         hub = app.state.hub
         logger.debug("relay %s %s firewall=%s endpoint=%s tenant=%s", request.method, request.url.path, firewall_id, endpoint, tenant)
 
@@ -180,82 +239,23 @@ def register(app, hub, ctx):
                 return payload
             return await _filter_fw(request, payload, endpoint, firewall_id, tenant)
 
-        # Serve from tenant cache for non-admin users (if module is cached)
-        sess = _session_user(request)
-        if sess and not _is_admin(sess):
-            tenant_id = sess.get("user", {}).get("tenant_id")
-            if tenant_id and endpoint in _FW_MODULES:
-                cached = _cache_entry(tenant_id, f"{endpoint}:{firewall_id}")
-                if cached:
-                    return await _scoped(cached["data"])
-
-        firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
-        fw = next((f for f in firewalls if f["id"] == firewall_id), None)
-        if not fw:
+        if not _fw_record(hub, firewall_id):
             raise HTTPException(status_code=404, detail="Firewall not found")
-
-        model = fw.get("model", "opnsense").lower()
-        # Only OPNsense has a spoke that handles these commands. The UI model
-        # dropdown also offers pfsense/juniper/fortigate, but no spokes exist
-        # for those yet, so an unknown model falls back to the OPNsense command
-        # set (parity with the previous behavior for pfsense/fortigate). The
-        # former "juniper" entry mapped to JUNIPER_GET_* commands no spoke
-        # handles — dead, removed.
-        command_map = {
-            "opnsense": {
-                "rules": "OPNSENSE_GET_ALL_RULES",
-                "interfaces": "GET_INTERFACE_STATUS",
-                "health": "GET_SYSTEM_HEALTH",
-                "dhcp": "OPNSENSE_GET_DHCP_LEASES",
-                "nat": "OPNSENSE_GET_NAT_POLICIES",
-                "dns": "OPNSENSE_GET_DNS_RECORDS",
-                "aliases": "OPNSENSE_GET_ALIASES",
-            },
-        }
-
-        model_commands = command_map.get(model, command_map.get("opnsense", {}))
-        spoke_cmd = model_commands.get(endpoint)
-        if not spoke_cmd:
-            raise HTTPException(status_code=400, detail=f"Endpoint {endpoint} not supported for model {model}")
-
-        spoke_id = fw.get("spoke_id")
-        if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
-            # Spoke offline — serve last known cache for any authenticated user
-            if sess:
-                tenant_id = sess.get("user", {}).get("tenant_id")
-                if tenant_id:
-                    cached = _cache_entry(tenant_id, f"{endpoint}:{firewall_id}")
-                    if cached:
-                        return await _scoped(cached["data"])
-            raise HTTPException(status_code=503, detail=f"Firewall spoke {spoke_id} not connected")
-
+        if endpoint not in FW_READ_CMDS:
+            raise HTTPException(status_code=400, detail=f"Endpoint {endpoint} not supported")
+        job = fw_cache_job(hub, firewall_id, endpoint)
         try:
-            result = await hub.request_response(
-                spoke_id, spoke_cmd, {},
-                timeout=_FW_FETCH_TIMEOUTS.get(endpoint, _FW_FETCH_TIMEOUT_DEFAULT))
-            # A spoke ERROR (e.g. OPNsense < 26.1 with no NAT MVC API, or an API
-            # key lacking the module scope) must surface to the UI rather than
-            # degrade to an empty list — otherwise the tab silently shows
-            # "No <things> found" with no clue as to why.
-            if isinstance(result, dict) and result.get("status") == "ERROR":
-                raise HTTPException(status_code=502,
-                                    detail=result.get("message", "Firewall spoke error"))
-            data = {}
-            if isinstance(result, dict):
-                if "data" in result:
-                    data = result["data"]
-                elif "payload" in result and isinstance(result["payload"], dict):
-                    data = result["payload"].get("data", {})
-                else:
-                    data = result
-            else:
-                data = result
-            return await _scoped(data)
+            data = await hub.cache_read(job.ns, job.key, job.fetch, tenants=job.tenants,
+                                        lane=job.lane, detail=job.detail)
         except HTTPException:
             raise
         except Exception as e:
             logger.error(f"Error fetching {endpoint} for firewall {firewall_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
+        return hub.cache_annotate(await _scoped(data), job.ns, job.key)
+
+    if hasattr(hub, "cache_register_feed"):
+        hub.cache_register_feed("firewall", fw_cache_feed)
 
     async def _fw_spoke_cmd(hub, firewall_id: str, command: str, data: dict):
         """Helper: resolve firewall spoke and send a command, return result."""
@@ -279,11 +279,11 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     async def _fw_write(hub, firewall_id: str, command: str, data: dict, module_key: str):
-        """Send a firewall write command and refresh the affected module in all tenant caches."""
+        """Send a firewall write command, then refresh that firewall's cached
+        ``module_key`` data now (readers briefly wait for it — see
+        ``warm_cache.cache_refresh``)."""
         result = await _fw_spoke_cmd(hub, firewall_id, command, data)
-        for tid in list(_tenant_cache):
-            _invalidate_tenant_module(tid, f"{module_key}:{firewall_id}")
-            asyncio.create_task(_fetch_module(hub, tid, module_key, fw_id=firewall_id))
+        hub.cache_refresh(f"fw_{module_key}", (firewall_id,), exact=True)
         return result
 
     @app.post("/api/firewall/{firewall_id}/rules")
@@ -496,12 +496,12 @@ def register(app, hub, ctx):
 
         hub.state.system_state["global_config"] = global_config
         hub.state._mark_dirty()
-        # Drop orphaned per-firewall cache entries ({rules,nat,dhcp,dns,
-        # interfaces}:{firewall_id}) from every tenant's cache so a deleted
-        # firewall doesn't leave stale data that would render until the 300s
-        # tick (and would never be re-fetched — the firewall no longer exists).
-        for _fw_mod in _FW_MODULES:
-            _invalidate_module_all_tenants(f"{_fw_mod}:{firewall_id}")
+        # Drop the deleted firewall's cached data (every fw_<endpoint>
+        # namespace, exact key) so it isn't served or persisted any more.
+        for _ep in FW_READ_CMDS:
+            entries = hub.warm_cache.get(f"fw_{_ep}") or {}
+            if firewall_id in entries:
+                hub.warm_drop(f"fw_{_ep}", (firewall_id,))
         return {"status": "ok", "message": f"Firewall {firewall_id} deleted."}
 
     # ── Network Devices: data + CRUD (/api/nw/*, /setup/nw-devices) ───────────

@@ -7,9 +7,11 @@ endpoints, and runs the uvicorn server that hosts it. It owns:
   token→session map (persisted to ``sessions.json`` so a logged-in user survives
   a triggered update/restart; see ``_save_sessions``/``_load_sessions``), the
   per-request ``_session_user`` validator, and admin session listing/revocation.
-- Tenant cache — per-tenant, per-module prefetched data with a background
-  refresh loop and a "drop the cache when no session for a tenant is active"
-  rule (``_start_cache_for_tenant``/``_stop_cache_for_tenant``).
+- Hub data cache hooks — every module page is served from the hub data cache
+  (``warm_cache.py``); this module tells it which tenants have active users
+  (``_cache_active_scopes``), refreshes a user's data at login
+  (``cache_kick_login``) and maps legacy module keys onto it
+  (``_refresh_module_all_tenants``).
 - Simulations (cs) relay — mounts the ported Client-Sim operator UI routes
   (``register_simulations_routes``) and relays cs telemetry/events through to
   the LM cs spoke; the spoke is relay-only, so no auto-provisioning logic runs
@@ -264,7 +266,7 @@ class StarletteWSAdapter:
 
 from messaging.protocol import Message, MessageHeader, MessagePayload
 from simulations.routes import register_simulations_routes
-from simulations.tenant_filter import filter_items_by_prefixes, OWN_SOURCE_MARKER
+from simulations.tenant_filter import filter_items_by_prefixes
 
 import access
 import api_tokens
@@ -650,134 +652,92 @@ def _load_sessions(hub) -> None:
                        getattr(hub.state, "data_dir", "?"), exc)
 
 # ---------------------------------------------------------------------------
-# Tenant data cache
+# Hub data cache hooks
 # ---------------------------------------------------------------------------
-_tenant_cache: dict = {}   # {tenant_id: {module_key: {data, fetched_at}}}
-_cache_tasks: dict = {}    # {tenant_id: asyncio.Task}
-_cache_status: dict = {}   # {tenant_id: {module_key: "loading"|"ready"|"error"}}
-_cache_semaphore = None    # asyncio.Semaphore — gates concurrent tenant preloads
+# Every module page is served from ONE hub data cache (warm_cache.py: memory +
+# encrypted per-namespace files, refreshed in the background — 60s while a
+# scope's users are active, 5min otherwise). The helpers below connect it to
+# login sessions; the routes call hub.cache_read / hub.cache_refresh directly.
 
-# ── Proxied-tenant disk-backed cache ─────────────────────────────────────────
-# A tenant that has an edge proxy assigned does NOT keep its module cache
-# resident in the hub's RAM (_tenant_cache). Instead the hub keeps that tenant's
-# encrypted api_cache shard fresh on disk (the refresh loop still runs) and reads
-# it on demand on a cache miss, evicting the tenant's RAM entries after every
-# persist. RBAC filtering stays hub-side (the shard stores RAW module data), so
-# on-disk reads are RBAC-correct. Non-proxied tenants are UNCHANGED (RAM-first,
-# no disk fallback). Set LM_PROXIED_TENANT_DISK_CACHE=0 to force legacy RAM
-# behaviour for every tenant regardless of proxy assignment.
-_proxied_tenants: set = set()   # tenant_ids served by a specific (non-shared) edge proxy
-_proxied_all: bool = False      # True when a SHARED proxy fronts every tenant → all disk-backed
-_shard_micro: dict = {}         # tenant_id -> (loaded_at, {module_key: entry}) — short-TTL read cache
-_SHARD_MICRO_TTL = 3.0          # seconds; a dashboard read-burst decrypts once, RAM-free at rest
-_MODULE_HUB = None              # hub ref for module-level shard reads (set by create_app)
+_MODULE_HUB = None   # hub ref for module-level helpers (set by create_app)
+_CACHE_ACTIVE_WINDOW_S = 600   # a session seen within 10min counts as "active"
 
 
-def set_module_hub(hub) -> None:
-    """Record the hub instance for module-level shard reads (data_dir/encryption)."""
-    global _MODULE_HUB
-    _MODULE_HUB = hub
+def _session_cache_scopes(sess: dict) -> set:
+    """Cache scopes a session can see: its tenant ids; a Global Admin or a
+    tenant-less (protected) account also sees admin-wide data ("*") and the
+    default tenant."""
+    user = (sess or {}).get("user", {}) or {}
+    scopes = {t for t in (user.get("tenants") or []) if t}
+    if user.get("tenant_id"):
+        scopes.add(user["tenant_id"])
+    if not scopes or access.is_admin(sess):
+        scopes |= {"*", "default"}
+    return scopes
 
 
-def _proxied_disk_cache_enabled() -> bool:
-    return os.environ.get("LM_PROXIED_TENANT_DISK_CACHE", "1").strip().lower() not in (
-        "0", "false", "no", "off")
-
-
-def _is_proxied_tenant(tenant_id: str) -> bool:
-    # A SHARED proxy fronts EVERY tenant (it caches them all locally — see
-    # set_proxied_tenants), so _proxied_all disk-backs all of them; otherwise a
-    # tenant is disk-backed only if it has its own dedicated (non-shared) proxy.
-    return bool(tenant_id) and _proxied_disk_cache_enabled() and (
-        _proxied_all or tenant_id in _proxied_tenants)
-
-
-def set_proxied_tenants(tenants, all_tenants: bool = False) -> None:
-    """Update which tenants are fronted by an edge proxy (called by the hub when
-    proxy spokes connect/disconnect). A tenant with a dedicated (non-shared)
-    proxy goes in ``tenants``; ``all_tenants=True`` marks that a SHARED proxy is
-    connected, which fronts the whole fleet — so EVERY tenant becomes disk-backed
-    (the shared proxy has the memory to cache them all locally, so nothing stays
-    resident in hub RAM). Newly-proxied tenants have their resident RAM evicted
-    immediately so they go disk-backed at once (covers the boot warm-load that
-    ran before any proxy connected)."""
-    global _proxied_tenants, _proxied_all
-    was_all = _proxied_all
-    new = set(t for t in (tenants or []) if t)
-    newly = new - _proxied_tenants
-    _proxied_tenants = new
-    _proxied_all = bool(all_tenants)
-    if not _proxied_disk_cache_enabled():
-        return
-    if _proxied_all and not was_all:
-        # A shared proxy just fronted the fleet → drop every resident tenant.
-        for t in list(_tenant_cache):
-            _evict_tenant_ram(t)
-    else:
-        for t in newly:
-            _evict_tenant_ram(t)
-
-
-def _evict_tenant_ram(tenant_id: str) -> None:
-    """Drop a tenant's resident module data (RAM) and its shard micro-cache. The
-    on-disk encrypted shard remains the source of truth for a proxied tenant."""
-    _tenant_cache.pop(tenant_id, None)
-    _shard_micro.pop(tenant_id, None)
-
-
-
-
-def _load_tenant_shard(tenant_id: str) -> dict:
-    """Read ONE proxied tenant's encrypted api_cache shard directly from disk,
-    memoised for _SHARD_MICRO_TTL so a dashboard's burst of per-module reads
-    decrypts once and the tenant holds nothing in RAM at rest. Returns
-    ``{module_key: {data, fetched_at}}`` (``{}`` on any miss/error)."""
+def _cache_active_scopes() -> set:
+    """Scopes with a live session seen in the last 10 minutes — the refresher
+    keeps their data on the fast (60s) cycle. Injected as
+    ``hub.cache_active_scopes_fn``."""
     now = time.time()
-    hit = _shard_micro.get(tenant_id)
-    if hit and now - hit[0] < _SHARD_MICRO_TTL:
-        return hit[1]
-    modules: dict = {}
-    hub = _MODULE_HUB
-    if hub is not None:
+    out: set = set()
+    for s in list(_sessions.values()):
         try:
-            from security.encryption import hub_encryption
-            path = os.path.join(hub.state.data_dir, "tenants", str(tenant_id),
-                                _TENANT_CACHE_MODULE, _TENANT_CACHE_NAME)
-            if os.path.exists(path):
-                with open(path, "rb") as f:
-                    blob = f.read()
-                content = json.loads(hub_encryption.decrypt(blob))
-                got = content.get(str(tenant_id)) if isinstance(content, dict) else None
-                if isinstance(got, dict):
-                    modules = got
-        except Exception as e:  # noqa: BLE001 — disk-backed read is best-effort
-            logger.debug("tenant_cache shard read failed for %s: %s", tenant_id, e)
-    _shard_micro[tenant_id] = (now, modules)
-    return modules
+            if float(s.get("expires", 0)) > now and \
+                    (now - float(s.get("last_seen", 0))) <= _CACHE_ACTIVE_WINDOW_S:
+                out |= _session_cache_scopes(s)
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
-_DEFAULT_CACHE_CONFIG = {
-    "rules":           {"enabled": True, "interval": 300, "label": "Firewall Rules"},
-    "nat":             {"enabled": True, "interval": 300, "label": "NAT Policies"},
-    "dhcp":            {"enabled": True, "interval": 300, "label": "DHCP Leases"},
-    "dns":             {"enabled": True, "interval": 300, "label": "DNS Records"},
-    "interfaces":      {"enabled": True, "interval": 300, "label": "Interfaces"},
-    "cppm_sessions":   {"enabled": True, "interval": 300, "label": "Access Tracker"},
-    "cppm_devices":    {"enabled": True, "interval": 300, "label": "Device Database"},
-    "netbox_racks":    {"enabled": True, "interval": 300, "label": "Racks"},
-    "netbox_devices":  {"enabled": True, "interval": 300, "label": "Devices"},
-    "netbox_ips":      {"enabled": True, "interval": 300, "label": "IP Addresses"},
-    "netbox_prefixes": {"enabled": True, "interval": 300, "label": "Prefixes"},
-    "pxmx_vms":        {"enabled": True, "interval": 300, "label": "Virtual Machines"},
+def cache_kick_login(hub, user_data: dict) -> None:
+    """Login hook: refresh everything the new session can see RIGHT NOW so the
+    first pages show current data; afterwards pages serve from cache. An admin
+    login refreshes admin-wide data + the default tenant (not every tenant)."""
+    if not hasattr(hub, "cache_kick_tenant"):
+        return
+    try:
+        for scope in _session_cache_scopes({"user": user_data}):
+            hub.cache_kick_tenant(None if scope == "*" else scope)
+    except Exception as e:  # noqa: BLE001 — never fail a login over the cache
+        logger.debug("cache login kick failed: %s", e)
+
+
+# Legacy module keys (WebUI "refresh" buttons, older write handlers) → the
+# hub-cache namespace(s) they map to.
+_LEGACY_CACHE_NS = {
+    "cppm_devices": ("list_endpoints",),
+    "cppm_sessions": ("cppm_get_access_tracker",),
+    "pxmx_vms": ("pxmx_vms",),
 }
+
+
+def _legacy_cache_namespaces(key: str) -> tuple:
+    """Legacy module key → hub-cache namespace(s)."""
+    key = (key or "").split(":")[0]
+    if key.startswith("netbox_"):
+        return (f"nb_{key[len('netbox_'):]}",)
+    if key in _FW_MODULES:
+        return (f"fw_{key}",)
+    return _LEGACY_CACHE_NS.get(key, (key,))
+
+
+def _refresh_module_all_tenants(hub, key: str) -> int:
+    """After a write: refresh module ``key`` (legacy key name, e.g.
+    ``netbox_devices``, ``cppm_devices``, ``pxmx_vms``, ``rules``) for EVERY
+    tenant now. Maps onto ``hub.cache_refresh``; returns refreshes started."""
+    if not hasattr(hub, "cache_refresh"):
+        return 0
+    namespaces = _legacy_cache_namespaces(key)
+    n = 0
+    for ns in namespaces:
+        n += hub.cache_refresh(ns)
+    return n
+
+
 _FW_MODULES = {"rules", "nat", "dhcp", "dns", "interfaces"}
-_FW_CMD_MAP = {
-    "rules":      "OPNSENSE_GET_ALL_RULES",
-    "nat":        "OPNSENSE_GET_NAT_POLICIES",
-    "dhcp":       "OPNSENSE_GET_DHCP_LEASES",
-    "dns":        "OPNSENSE_GET_DNS_RECORDS",
-    "interfaces": "GET_INTERFACE_STATUS",
-}
 # Per-endpoint hub→spoke timeout (seconds) for live firewall fetches. Generous
 # because spokes are distributed and may be reached over WAN (~300ms latency):
 # the opnsense spoke answers each API call via a curl subprocess with
@@ -800,56 +760,6 @@ _FW_WRITE_TIMEOUT = 45.0
 # _filter_config live in access.py now; re-exported above for the routes
 # that read/toggle them (Setup → Simulations). See access.py for the logic.
 
-
-def _get_cache_config(hub) -> dict:
-    stored = hub.state.system_state.get("cache_config", {})
-    result = {}
-    for key, defaults in _DEFAULT_CACHE_CONFIG.items():
-        result[key] = {**defaults, **{k: v for k, v in stored.get(key, {}).items() if k in ("enabled", "interval")}}
-    return result
-
-def _get_max_concurrent(hub) -> int:
-    return int(hub.state.system_state.get("cache_config", {}).get("max_concurrent_tenants", 3))
-
-def _cache_entry(tenant_id: str, key: str):
-    ram = _tenant_cache.get(tenant_id, {}).get(key)
-    if ram is not None:
-        return ram
-    # Proxied tenants keep no resident RAM cache — fall back to the on-disk
-    # encrypted shard (the refresh loop keeps it fresh; RBAC stays hub-side).
-    if _is_proxied_tenant(tenant_id):
-        return _load_tenant_shard(tenant_id).get(key)
-    return None
-
-def _set_cache_entry(tenant_id: str, key: str, data):
-    _tenant_cache.setdefault(tenant_id, {})[key] = {"data": data, "fetched_at": time.time()}
-    _set_cache_status(tenant_id, key, "ready")
-
-def _set_cache_status(tenant_id: str, key: str, status: str):
-    _cache_status.setdefault(tenant_id, {})[key] = status
-
-def _invalidate_tenant_module(tenant_id: str, key: str):
-    _tenant_cache.get(tenant_id, {}).pop(key, None)
-
-def _invalidate_module_all_tenants(key: str):
-    for t in list(_tenant_cache):
-        _tenant_cache[t].pop(key, None)
-
-def _refresh_module_all_tenants(hub, key: str):
-    """Drop every tenant's cached entry for ``key`` and re-fetch in the background.
-
-    The common post-write pattern: a spoke mutation invalidates the cached module
-    data for all tenants, then kicks a background re-fetch per tenant so the next
-    read sees fresh data. Previously this two-step was copy-pasted across the
-    NetBox / CPPM / DNS / DHCP write handlers; route it through here instead:
-    ``_refresh_module_all_tenants(hub, "netbox_devices")`` replaces
-    ``_invalidate_module_all_tenants("netbox_devices")`` + the
-    ``for tid in list(_tenant_cache): asyncio.create_task(_fetch_module(hub, tid, "netbox_devices"))``
-    loop. (Some call sites intentionally invalidate multiple keys at once — those
-    keep calling ``_invalidate_module_all_tenants`` directly.)"""
-    _invalidate_module_all_tenants(key)
-    for tid in list(_tenant_cache):
-        asyncio.create_task(_fetch_module(hub, tid, key))
 
 def _normalize_cached(result):
     """Unwrap a cached spoke envelope to its data payload.
@@ -893,288 +803,6 @@ def _hub_msg(spoke_id: str, msg_type: str, data) -> Message:
         ),
         payload=MessagePayload(type=msg_type, data=data),
     )
-
-def _nb_slug(hub, tenant_id: str):
-    try:
-        return (hub.state.get_tenant(tenant_id) or {}).get("netbox_tenant_slug") or None
-    except Exception:
-        return None
-
-def _cppm_own_spoke(hub, tenant_id: str):
-    """The tenant's OWN dedicated CPPM spoke, if any — the source whose records
-    bypass the subnet filter. Guarded with getattr so a minimal fake hub in the
-    tests (which only implements the plural ``get_cppm_spokes_for_tenant``) never
-    raises here."""
-    fn = getattr(hub, "get_cppm_spoke_for_tenant", None)
-    try:
-        return fn(tenant_id) if callable(fn) else None
-    except Exception:  # noqa: BLE001
-        return None
-
-
-async def _cppm_merge_spokes(hub, spokes, cmd: str, list_key: str, timeout: float = 20.0,
-                             own_spoke: str = None):
-    """Query every spoke in ``spokes`` with ``cmd``, merging each response's
-    ``list_key`` list into one combined list — the tenant's own dedicated
-    CPPM (full) plus the shared CPPM (its records narrowed to this tenant by
-    the SAME subnet/tag filter every NAC route already applies downstream).
-    A spoke marked unconfigured or that errors is skipped rather than
-    failing the whole fetch, so one bad/unconfigured source can't blank the
-    other's data. Returns None (caller treats as an error) only when NO
-    usable spoke remains.
-
-    Records from ``own_spoke`` (the tenant's OWN dedicated CPPM) are stamped
-    with ``OWN_SOURCE_MARKER`` so the downstream subnet filter shows every one
-    of them — that appliance is entirely the tenant's equipment; only records
-    merged in from a SHARED CPPM stay subject to the subnet filter."""
-    usable = [s for s in spokes if s not in hub._nac_unconfigured_spokes]
-    if not usable:
-        return None
-
-    async def _one(sid):
-        try:
-            r = await hub.request_response(sid, cmd, {}, timeout=timeout)
-            return sid, _normalize_cached(r)
-        except Exception as e:  # noqa: BLE001 — one bad spoke must not fail the merge
-            logger.warning(f"cppm merge fetch {sid} ({cmd}): {e}")
-            return sid, None
-
-    results = await asyncio.gather(*[_one(s) for s in usable])
-    merged = []
-    for sid, d in results:
-        if isinstance(d, dict) and isinstance(d.get(list_key), list):
-            recs = d[list_key]
-            if own_spoke and sid == own_spoke:
-                recs = [{**r, OWN_SOURCE_MARKER: True} if isinstance(r, dict) else r
-                        for r in recs]
-            merged.extend(recs)
-    return {list_key: merged, "total": len(merged)}
-
-async def _fetch_module(hub, tenant_id: str, module_key: str, fw_id: str = None) -> bool:
-    """Fetch one module from its spoke and store in tenant cache."""
-    cache_key = f"{module_key}:{fw_id}" if fw_id else module_key
-    _set_cache_status(tenant_id, cache_key, "loading")
-    try:
-        result = None
-        if module_key in _FW_MODULES and fw_id:
-            firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
-            fw = next((f for f in firewalls if f["id"] == fw_id), None)
-            if not fw:
-                _set_cache_status(tenant_id, cache_key, "error"); return False
-            spoke_id = fw.get("spoke_id")
-            if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
-                _set_cache_status(tenant_id, cache_key, "error"); return False
-            result = await hub.request_response(spoke_id, _FW_CMD_MAP[module_key], {})
-        elif module_key == "cppm_sessions":
-            # Combined view: the tenant's own dedicated CPPM (get_cppm_spoke_
-            # for_tenant, pinned — never the untargeted, connection-order-
-            # dependent get_spoke_by_type("nac")) PLUS the shared-tenant CPPM
-            # if one is configured (get_cppm_spokes_for_tenant). Merged here
-            # rather than one-spoke-wins so a tenant with access to a shared
-            # ClearPass sees both sources, matching the live /api/cppm/*
-            # routes (routes/cppm.py's _cppm_warm/_nac_merge_fanout use the
-            # same spoke list).
-            # 20s, not the 5.0s default: these bulk CPPM reads hit the same
-            # large ClearPass servers as the /api/cppm routes and (like the
-            # netbox GETs below) blow the bare default on a big fleet. Now in
-            # _KEEPALIVE_CMDS, so the 20s base lets the first keepalive land and
-            # extend the deadline toward the hard ceiling.
-            spokes = hub.get_cppm_spokes_for_tenant(tenant_id)
-            if not spokes: _set_cache_status(tenant_id, cache_key, "error"); return False
-            result = await _cppm_merge_spokes(hub, spokes, "CPPM_GET_ACCESS_TRACKER", "sessions", timeout=20.0,
-                                              own_spoke=_cppm_own_spoke(hub, tenant_id))
-            if result is None: _set_cache_status(tenant_id, cache_key, "error"); return False
-        elif module_key == "cppm_devices":
-            spokes = hub.get_cppm_spokes_for_tenant(tenant_id)  # see cppm_sessions above
-            if not spokes: _set_cache_status(tenant_id, cache_key, "error"); return False
-            result = await _cppm_merge_spokes(hub, spokes, "LIST_ENDPOINTS", "devices", timeout=20.0,
-                                              own_spoke=_cppm_own_spoke(hub, tenant_id))
-            if result is None: _set_cache_status(tenant_id, cache_key, "error"); return False
-        elif module_key in ("netbox_racks", "netbox_devices", "netbox_ips", "netbox_prefixes"):
-            spoke = hub.get_spoke_by_type("ipam")
-            if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False
-            slug = _nb_slug(hub, tenant_id)
-            cmd = {
-                "netbox_racks":    "NETBOX_GET_RACKS",
-                "netbox_devices":  "NETBOX_GET_DEVICES",
-                "netbox_ips":      "NETBOX_GET_IPS",
-                "netbox_prefixes": "NETBOX_GET_PREFIXES",
-            }[module_key]
-            # 30s, not the 5.0s default: the netbox paginated GETs
-            # (NETBOX_GET_IPS/PREFIXES/DEVICES/RACKS) routinely exceed 5s on a
-            # real fleet and the bare default produced recurring
-            # "Request Timeout from lm-svcs-netbox after 5.0s" on cache refresh.
-            # Matches dns_dhcp_sync / endpoint_sync / vm_sync's 30s budget.
-            result = await hub.request_response(spoke, cmd, {"tenant": slug} if slug else {}, timeout=30.0)
-        elif module_key == "pxmx_vms":
-            spoke = hub.get_hypervisor_spoke()
-            if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False
-            cfg = hub.state.get_tenant(tenant_id) or {}
-            payload = {"tag_filter": cfg["proxmox_tag"]} if cfg.get("proxmox_tag") else {}
-            # 30s, not the 5.0s default: PXMX_LIST_VMS is slow on a big cluster
-            # (the other call sites already use 8–30s). It's a keepalive command,
-            # so the 30s base lets the first progress frame land and extend.
-            result = await hub.request_response(spoke, "PXMX_LIST_VMS", payload, timeout=30.0)
-
-        if result is not None:
-            _set_cache_entry(tenant_id, cache_key, _normalize_cached(result))
-            return True
-        _set_cache_status(tenant_id, cache_key, "error")
-        return False
-    except Exception as e:
-        logger.warning(f"Cache fetch [{tenant_id}][{cache_key}]: {e}")
-        _set_cache_status(tenant_id, cache_key, "error")
-        return False
-
-async def _preload_all_parallel(hub, tenant_id: str):
-    """Parallel-fetch all enabled modules for a tenant, gated by the concurrency semaphore."""
-    global _cache_semaphore
-    if _cache_semaphore is None:
-        _cache_semaphore = asyncio.Semaphore(_get_max_concurrent(hub))
-    async with _cache_semaphore:
-        config = _get_cache_config(hub)
-        firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
-        tasks = []
-        for module_key, cfg in config.items():
-            if not cfg.get("enabled", True):
-                continue
-            if module_key in _FW_MODULES:
-                for fw in firewalls:
-                    tasks.append(_fetch_module(hub, tenant_id, module_key, fw_id=fw["id"]))
-            else:
-                tasks.append(_fetch_module(hub, tenant_id, module_key))
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-async def _cache_refresh_loop(hub, tenant_id: str):
-    """Background task: initial parallel preload then periodic refresh per module interval."""
-    try:
-        # Brief delay so the dashboard's own data requests aren't blocked by the
-        # initial burst of cache-preload spoke calls.
-        await asyncio.sleep(3)
-        await _preload_all_parallel(hub, tenant_id)
-        try:  # snapshot for warm-start (off-thread; bounded, once per preload)
-            await asyncio.to_thread(_persist_tenant_cache_sync, hub, tenant_id)
-        except Exception:  # noqa: BLE001
-            pass
-        # Proxied tenants: after persisting, drop the resident RAM copy so the
-        # tenant is served from disk on demand (RAM-free at rest).
-        if _is_proxied_tenant(tenant_id):
-            _evict_tenant_ram(tenant_id)
-        while True:
-            await asyncio.sleep(30)
-            config = _get_cache_config(hub)
-            firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
-            tasks = []
-            for module_key, cfg in config.items():
-                if not cfg.get("enabled", True):
-                    continue
-                interval = cfg.get("interval", 300)
-                if module_key in _FW_MODULES:
-                    for fw in firewalls:
-                        ck = f"{module_key}:{fw['id']}"
-                        cached = _cache_entry(tenant_id, ck)
-                        if not cached or time.time() - cached["fetched_at"] > interval:
-                            tasks.append(_fetch_module(hub, tenant_id, module_key, fw_id=fw["id"]))
-                else:
-                    cached = _cache_entry(tenant_id, module_key)
-                    if not cached or time.time() - cached["fetched_at"] > interval:
-                        tasks.append(_fetch_module(hub, tenant_id, module_key))
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-                try:  # re-snapshot after a refresh batch (off-thread)
-                    await asyncio.to_thread(_persist_tenant_cache_sync, hub, tenant_id)
-                except Exception:  # noqa: BLE001
-                    pass
-                if _is_proxied_tenant(tenant_id):
-                    _evict_tenant_ram(tenant_id)
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        logger.warning(f"Cache refresh loop [{tenant_id}] died: {e}")
-
-# ── warm-start: persist/restore _tenant_cache across a hub restart ────────────
-# Without this the Hypervisors/NetBox/CPPM/Firewall dashboards blank on every
-# restart until a tenant user logs in AND the owning spokes reconnect (login- +
-# reconnect-gated preload). We snapshot each tenant's module cache (encrypted,
-# per-tenant shard) after a preload/refresh batch and warm-load it on boot so the
-# dashboards seed immediately, stale-while-revalidate (the refresh loop below
-# revalidates in the background; the age stamp drives the "cached" UI banner).
-_TENANT_CACHE_MODULE = "api_cache"
-_TENANT_CACHE_NAME = "tenant_cache.json"
-
-
-def _persist_tenant_cache_sync(hub, tenant_id: str) -> None:
-    """Persist ONE tenant's module cache to its encrypted shard. Best-effort;
-    never raises (offloaded via asyncio.to_thread by callers)."""
-    try:
-        from security.encryption import hub_encryption
-        from tenant_sharded import shard_save
-        shard_save(hub.state.data_dir, _TENANT_CACHE_MODULE, _TENANT_CACHE_NAME,
-                   _tenant_cache, tenant_of=lambda k: k, dirty={str(tenant_id)},
-                   encrypt=lambda s: hub_encryption.encrypt(s))
-    except Exception as e:  # noqa: BLE001
-        logger.debug("tenant_cache persist failed for %s: %s", tenant_id, e)
-
-
-def warm_load_tenant_cache(hub) -> None:
-    """Warm-start _tenant_cache from encrypted shards on boot (best-effort) so the
-    module dashboards seed stale-while-revalidate instead of blank-until-preload."""
-    try:
-        from security.encryption import hub_encryption
-        from tenant_sharded import shard_load
-        data = shard_load(hub.state.data_dir, _TENANT_CACHE_MODULE, _TENANT_CACHE_NAME,
-                          decrypt=lambda b: hub_encryption.decrypt(b)) or {}
-        for t, modules in data.items():
-            if isinstance(modules, dict):
-                _tenant_cache[str(t)] = modules
-        if _tenant_cache:
-            logger.info("tenant_cache: warm-loaded %d tenant(s) — dashboards seed stale-while-revalidate",
-                        len(_tenant_cache))
-    except Exception as e:  # noqa: BLE001
-        logger.warning("tenant_cache warm load failed: %s — starting empty", e)
-
-
-def _active_session_tenant_ids(now: float = None) -> set:
-    """Distinct tenant_ids that currently have at least one non-expired session.
-    The set of tenants whose collection loop should be running (started at login,
-    resumed on restart, torn down when the last session for a tenant ends)."""
-    if now is None:
-        now = time.time()
-    return {
-        s.get("user", {}).get("tenant_id")
-        for s in _sessions.values()
-        if s.get("expires", 0) > now and s.get("user", {}).get("tenant_id")
-    }
-
-
-def _start_cache_for_tenant(hub, tenant_id: str):
-    if not tenant_id or tenant_id == "default":
-        return
-    existing = _cache_tasks.get(tenant_id)
-    if existing and not existing.done():
-        return  # already running — second user of same tenant shares the cache
-    _cache_tasks[tenant_id] = asyncio.create_task(_cache_refresh_loop(hub, tenant_id))
-    logger.info(f"[Cache] task started for tenant '{tenant_id}'")
-
-def _stop_cache_for_tenant(tenant_id: str):
-    """Drop cache and cancel task only when no active sessions remain for this tenant."""
-    if not tenant_id:
-        return
-    active = sum(
-        1 for s in _sessions.values()
-        if s.get("user", {}).get("tenant_id") == tenant_id
-        and s.get("expires", 0) > time.time()
-    )
-    if active > 0:
-        return
-    _tenant_cache.pop(tenant_id, None)
-    _cache_status.pop(tenant_id, None)
-    task = _cache_tasks.pop(tenant_id, None)
-    if task:
-        task.cancel()
-    logger.info(f"[Cache] cleared for tenant '{tenant_id}' — no active sessions")
-
 
 # User-facing sentinel raised when a relay target is mid self-update. The WebUI
 # (_spokeErrorBanner) recognises this exact string and renders a neutral
@@ -1422,9 +1050,11 @@ def create_app(hub):
 
     # Attach hub instance to app state for access in routes
     app.state.hub = hub
-    # Also record it at module scope so the module-level cache helpers
-    # (_load_tenant_shard for proxied tenants) can reach data_dir/encryption.
-    set_module_hub(hub)
+    # Module-level helpers (e.g. _trusted_bind_networks) reach the hub here.
+    global _MODULE_HUB
+    _MODULE_HUB = hub
+    # Tell the hub data cache which tenants have active users (fast refresh).
+    hub.cache_active_scopes_fn = _cache_active_scopes
 
     # Rehydrate login sessions from disk so a user who was logged in before a
     # triggered update/restart stays logged in (the lm_session cookie already
@@ -1450,6 +1080,10 @@ def create_app(hub):
         except Exception as e:  # noqa: BLE001 — best-effort on the way out
             logger.warning("shutdown nw-cache flush failed: %s", e)
         try:
+            await hub.warm_cache_flush_now()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("shutdown data-cache flush failed: %s", e)
+        try:
             await hub.state._flush_if_dirty()
         except Exception as e:  # noqa: BLE001
             logger.warning("shutdown state flush failed: %s", e)
@@ -1460,28 +1094,21 @@ def create_app(hub):
     # is still run by the default lifespan.
     app.router.on_shutdown.append(_persist_on_shutdown)
 
-    async def _resume_caches_for_active_sessions():
-        """Restart the per-tenant cache-refresh loop for every tenant that still
-        has an active (non-expired) session after a hub restart.
+    def _cleanup_legacy_tenant_cache_shards():
+        """One-time cleanup: the old per-tenant cache shards
+        (``<data_dir>/tenants/<tid>/api_cache/tenant_cache.json``) are
+        replaced by the hub data cache files and are never read again."""
+        root = os.path.join(getattr(hub.state, "data_dir", "") or "", "tenants")
+        try:
+            for tid in os.listdir(root):
+                path = os.path.join(root, tid, "api_cache", "tenant_cache.json")
+                if os.path.isfile(path):
+                    os.remove(path)
+                    logger.info("[Cache] removed legacy tenant cache shard %s", path)
+        except OSError:
+            pass
 
-        Login is what normally starts a tenant's collection loop
-        (``_start_cache_for_tenant``), but the hub self-updates/restarts often
-        and ``_load_sessions`` rehydrates those logins from disk — WITHOUT the
-        loops, so a still-logged-in tenant would be served only warm-loaded
-        stale data and never actively refreshed until they logged in again. This
-        runs on startup (inside the event loop, so ``asyncio.create_task`` in
-        ``_start_cache_for_tenant`` is safe — it is NOT at ``create_app`` build
-        time) and re-establishes the same collection a fresh login would. A
-        tenant with no live session is left alone (poll-as-needed), matching the
-        logout teardown in ``_stop_cache_for_tenant``."""
-        now = time.time()
-        tids = _active_session_tenant_ids(now)
-        for tid in tids:
-            _start_cache_for_tenant(hub, tid)
-        logger.info("[Cache] restart resume: %d tenant(s) with active sessions "
-                    "→ collection restarted", len(tids))
-
-    app.router.on_startup.append(_resume_caches_for_active_sessions)
+    app.router.on_startup.append(_cleanup_legacy_tenant_cache_shards)
 
     @app.middleware("http")
     async def access_control_middleware(request, call_next):
