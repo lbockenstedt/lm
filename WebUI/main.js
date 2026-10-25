@@ -13911,10 +13911,16 @@ async function loadDhcpServerStatus() {
         const pill = running
             ? '<span class="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700">● Running</span>'
             : '<span class="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700">● Not running</span>';
+        // leases_used null = the spoke couldn't read the Kea lease file; show
+        // "unknown" rather than an empty pool.
+        const unknown = d.leases_used === null;
         const pct = Math.max(0, Math.min(100, Number(d.utilization_pct) || 0));
-        const barColor = pct > 85 ? 'bg-red-500' : pct > 60 ? 'bg-amber-400' : 'bg-green-500';
+        const barColor = unknown ? 'bg-slate-300' : pct > 85 ? 'bg-red-500' : pct > 60 ? 'bg-amber-400' : 'bg-green-500';
         const used = Number(d.leases_used) || 0;
         const size = Number(d.pool_size) || 0;
+        const leaseText = unknown
+            ? `<span title="The spoke could not read the Kea lease file">leases unknown / ${size}</span>`
+            : `leases ${used} / ${size} (${pct.toFixed(1)}%)`;
         const iface = d.iface ? `iface <span class="font-mono">${esc(d.iface)}</span>` : 'iface <span class="text-slate-400">—</span>';
         const subnet = d.subnet ? ` · <span class="font-mono">${esc(d.subnet)}</span>` : '';
         const pool = (d.pool_start && d.pool_end)
@@ -13927,7 +13933,7 @@ async function loadDhcpServerStatus() {
                 <div class="flex-1 bg-slate-200 rounded-full h-2 overflow-hidden">
                     <div class="${barColor} h-2 rounded-full" style="width:${pct}%"></div>
                 </div>
-                <span class="text-xs font-mono text-slate-600 whitespace-nowrap">leases ${used} / ${size} (${pct.toFixed(1)}%)</span>
+                <span class="text-xs font-mono text-slate-600 whitespace-nowrap">${leaseText}</span>
             </div></div>`;
     }).join('');
 }
