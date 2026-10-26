@@ -25,6 +25,18 @@ own command types (``OS_UPDATE_APPLY_PACKAGES`` / ``OS_REBOOT``) and are only
 offered for nodes whose check reported the matching ``features`` — an older
 node never sees a request it would misread as "upgrade everything".
 
+Auto-patch (opt-in, off by default): after each SCHEDULED check, nodes with
+pending updates are deployed automatically through the same rolling,
+hub-last apply, audit-logged as actor "auto-patch". Security-only by default;
+the hub itself is left out unless the operator includes it. Still NEVER
+reboots. Manual checks and a run's own follow-up re-check never trigger it, so
+a node whose update keeps failing is retried once per schedule, not in a loop.
+
+Fixing access: a non-root node without the lm-os-update helper is "blocked".
+``osu_fix_access`` relays a root/sudo login typed once in the WebUI to that
+node, which uses it to install the helper (``os_update.fix_access``). The
+password lives only in that one request — never stored or logged.
+
 The last check results and the current/last run are persisted to
 ``<cache_dir>/os_updates.json`` so a hub restart (including the one the hub's
 own update causes) doesn't blank the panel. A run that was in flight when the
@@ -59,6 +71,7 @@ _NEVER_PROBE_REASON = {
 _CHECK_TIMEOUT_S = 240.0
 _APPLY_TIMEOUT_S = 3700.0
 _REBOOT_TIMEOUT_S = 60.0
+_FIX_ACCESS_TIMEOUT_S = 180.0
 _STATE_FILE = "os_updates.json"
 
 # Auto-check config lives in global_config["os_updates_check"]: {enabled,
@@ -67,6 +80,11 @@ _STATE_FILE = "os_updates.json"
 # operator remembering to click "Check for updates"; every 6h by default.
 _OSU_AUTOCHECK_CFG_KEY = "os_updates_check"
 _OSU_AUTOCHECK_DEFAULT_HOURS = 6.0
+
+# Auto-patch config lives in global_config["os_updates_autopatch"]:
+# {enabled, security_only, include_hub}. Off unless an operator turns it on.
+_OSU_AUTOPATCH_CFG_KEY = "os_updates_autopatch"
+_AUTOPATCH_ACTOR = "auto-patch"
 
 
 class HubOsUpdatesMixin:
@@ -108,6 +126,7 @@ class HubOsUpdatesMixin:
         if isinstance(data.get("nodes"), dict):
             st["nodes"] = data["nodes"]
         st["checked_at"] = float(data.get("checked_at") or 0.0)
+        st["autopatch_at"] = float(data.get("autopatch_at") or 0.0)
         run = data.get("run")
         if isinstance(run, dict):
             if run.get("status") == "running":
@@ -295,10 +314,130 @@ class HubOsUpdatesMixin:
             cfg = self.osu_autocheck_config()
             return (cfg["interval_hours"] * 3600.0) if cfg["enabled"] else 300.0
 
+        async def _check_then_autopatch():
+            await self.osu_check_fleet(refresh=True)
+            await self.osu_autopatch()
+
         await run_sync_loop(stagger=45, guard=_guard,
-                            body=lambda: self.osu_check_fleet(refresh=True),
+                            body=_check_then_autopatch,
                             delay=_delay,
                             error_label="os-updates auto-check loop cycle failed")
+
+    # ── auto-patch (WebUI-configurable, off by default) ─────────────────────
+    def osu_autopatch_config(self) -> Dict[str, Any]:
+        """``{enabled, security_only, include_hub}`` — off / security-only /
+        hub excluded unless set otherwise."""
+        try:
+            cfg = (self.state.system_state.get("global_config", {})
+                   .get(_OSU_AUTOPATCH_CFG_KEY, {})) or {}
+        except Exception:  # noqa: BLE001 — hub without state (tests)
+            cfg = {}
+        return {"enabled": bool(cfg.get("enabled", False)),
+                "security_only": bool(cfg.get("security_only", True)),
+                "include_hub": bool(cfg.get("include_hub", False))}
+
+    def osu_set_autopatch_config(self, enabled: bool, security_only: bool,
+                                 include_hub: bool) -> Dict[str, Any]:
+        gc = self.state.system_state.setdefault("global_config", {})
+        gc[_OSU_AUTOPATCH_CFG_KEY] = {"enabled": bool(enabled),
+                                      "security_only": bool(security_only),
+                                      "include_hub": bool(include_hub)}
+        self.state._mark_dirty()
+        return self.osu_autopatch_config()
+
+    async def osu_autopatch(self) -> Dict[str, Any]:
+        """Deploy what the last check found, if auto-patch is on.
+
+        Same rolling, hub-last, never-reboot apply an operator would approve;
+        only nodes that can actually be patched are picked, so one blocked
+        node doesn't stop the rest. At most once per auto-check interval
+        (persisted), so a hub restart — including one caused by patching the
+        hub — doesn't start another run right away.
+        """
+        cfg = self.osu_autopatch_config()
+        if not cfg["enabled"]:
+            return {"status": "SKIPPED", "message": "auto-patch is off"}
+        st = self._osu_state()
+        run = st.get("run")
+        if run and run.get("status") == "running":
+            return {"status": "SKIPPED", "message": "an update run is already in progress"}
+        interval_s = self.osu_autocheck_config()["interval_hours"] * 3600.0
+        # 0.9: the check loop's own timing jitter must not skip a whole cycle.
+        if time.time() - float(st.get("autopatch_at") or 0.0) < interval_s * 0.9:
+            return {"status": "SKIPPED", "message": "already ran this interval"}
+        keys = []
+        for n in self.osu_snapshot()["nodes"]:
+            if not n.get("eligible") or not n.get("count") or n.get("apply_blocker"):
+                continue
+            if n["kind"] == "hub" and not cfg["include_hub"]:
+                continue
+            if cfg["security_only"]:
+                # Security-only applies a package list, which older nodes can't do.
+                if not n.get("security_count") or "packages" not in (n.get("features") or []):
+                    continue
+            keys.append(f"{n['kind']}:{n['id']}")
+        if not keys:
+            return {"status": "SKIPPED", "message": "nothing to patch"}
+        st["autopatch_at"] = time.time()
+        self._osu_save()
+        logger.warning("OS-UPDATE: auto-patch found updates on %d node(s) (%s)",
+                       len(keys), "security only" if cfg["security_only"] else "all updates")
+        res = await self.osu_apply_fleet(node_keys=keys, actor=_AUTOPATCH_ACTOR,
+                                         security_only=cfg["security_only"])
+        if res.get("status") == "ERROR":
+            logger.warning("OS-UPDATE: auto-patch not started: %s", res.get("message"))
+        return res
+
+    # ── fix access on a blocked (non-root, no helper) node ──────────────────
+    async def osu_fix_access(self, node_key: str, username: str, password: str,
+                             actor: str = "") -> Dict[str, Any]:
+        """Send a one-time root/sudo login to a blocked node so it can install
+        its update helper. The password is passed through, never kept."""
+        n = next((x for x in self.osu_snapshot()["nodes"]
+                  if f"{x['kind']}:{x['id']}" == node_key), None)
+        if n is None:
+            return {"status": "ERROR", "message": f"{node_key}: not connected"}
+        if not n.get("apply_blocker"):
+            return {"status": "ERROR", "message": f"{n['label']}: not blocked — nothing to fix"}
+        if "fix_access" not in (n.get("features") or []):
+            return {"status": "ERROR", "message": f"{n['label']}: needs an LM update "
+                                                  "before access can be fixed from here"}
+        username = (username or "root").strip()
+        logger.warning("OS-UPDATE: fix-access on %s as %s requested by %s",
+                       n["label"], username, actor or "?")
+        try:
+            if n["kind"] == "hub":
+                try:
+                    from .os_update import fix_access
+                except ImportError:
+                    from os_update import fix_access  # type: ignore
+                d = await asyncio.to_thread(fix_access, username, password)
+            elif n["kind"] == "agent":
+                d = _unwrap(await self.request_response(
+                    n["spoke_id"], "AGENT_OS_FIX_ACCESS",
+                    {"agent_id": n.get("agent_id") or n["id"],
+                     "username": username, "password": password},
+                    timeout=_FIX_ACCESS_TIMEOUT_S))
+            else:
+                d = _unwrap(await self.request_response(
+                    n["id"], "OS_FIX_ACCESS",
+                    {"username": username, "password": password},
+                    timeout=_FIX_ACCESS_TIMEOUT_S))
+        except Exception as exc:  # noqa: BLE001
+            d = {"status": "ERROR", "message": str(exc)}
+        ok = isinstance(d, dict) and d.get("status") == "SUCCESS"
+        msg = (d or {}).get("message", "") if isinstance(d, dict) else ""
+        logger.warning("OS-UPDATE: fix-access on %s → %s (%s)", n["label"],
+                       "ok" if ok else "FAILED", msg)
+        if ok:
+            # Re-check just this node so the "blocked" badge clears right away.
+            target = next((t for t in self._osu_targets()
+                           if f"{t['kind']}:{t['id']}" == node_key), None)
+            if target is not None:
+                self._osu_state()["nodes"][node_key] = await self._osu_check_one(target, False)
+                self._osu_save()
+        return {"status": "SUCCESS" if ok else "ERROR",
+                "message": msg or ("access fixed" if ok else "fix failed")}
 
     def osu_snapshot(self) -> Dict[str, Any]:
         st = self._osu_state()

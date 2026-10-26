@@ -56,6 +56,19 @@ class _FakeHub:
     def osu_cancel_run(self, actor=""):
         return {"status": "ERROR", "message": "no update run in progress"}
 
+    def osu_autopatch_config(self):
+        return dict(getattr(self, "_ap", {"enabled": False, "security_only": True,
+                                          "include_hub": False}))
+
+    def osu_set_autopatch_config(self, enabled, security_only, include_hub):
+        self._ap = {"enabled": enabled, "security_only": security_only,
+                    "include_hub": include_hub}
+        return dict(self._ap)
+
+    async def osu_fix_access(self, key, username, password, actor=""):
+        self.fixed = (key, username, password)
+        return {"status": "SUCCESS", "message": "updates enabled"}
+
     async def osu_reboot_node(self, key, actor=""):
         self.rebooted = key
         return {"status": "SUCCESS", "message": "reboot scheduled in 1 minute"}
@@ -148,3 +161,26 @@ def test_reboot_requires_node_and_admin():
     assert r.status_code == 200 and hub.rebooted == "hub:hub"
     c, _ = _client(is_admin=False)
     assert c.post("/api/os-updates/reboot", json={"node": "hub:hub"}).status_code == 403
+
+
+def test_autopatch_roundtrip():
+    c, hub = _client()
+    assert c.get("/api/os-updates/auto-patch").json()["enabled"] is False
+    r = c.post("/api/os-updates/auto-patch",
+               json={"enabled": True, "security_only": False, "include_hub": True})
+    assert r.json() == {"enabled": True, "security_only": False, "include_hub": True}
+
+
+def test_fix_access_requires_a_password_and_relays_it():
+    c, hub = _client()
+    assert c.post("/api/os-updates/fix-access", json={"node": "spoke:s1"}).status_code == 400
+    r = c.post("/api/os-updates/fix-access",
+               json={"node": "spoke:s1", "username": "root", "password": "pw"})
+    assert r.status_code == 200 and hub.fixed == ("spoke:s1", "root", "pw")
+
+
+def test_autopatch_and_fix_access_are_admin_only():
+    c, _ = _client(is_admin=False)
+    assert c.get("/api/os-updates/auto-patch").status_code == 403
+    assert c.post("/api/os-updates/fix-access",
+                  json={"node": "x", "password": "pw"}).status_code == 403

@@ -21,8 +21,15 @@ finishes). See hub_os_updates.py for why.
 Checking IS on a configurable schedule though: the panel auto-checks the fleet
 every ``interval_hours`` (default 6, ``/api/os-updates/auto-check``) so its
 status stays fresh without an operator remembering to click "Check for
-updates" — see ``run_os_updates_check_loop`` in ``hub_os_updates.py``. This is
-read-only, same as the manual button; applying is never scheduled.
+updates" — see ``run_os_updates_check_loop`` in ``hub_os_updates.py``.
+
+Auto-patch (``/api/os-updates/auto-patch``, off by default) is the one
+scheduled apply: after each scheduled check it deploys what was found, through
+the same rolling hub-last roll, audit-logged as "auto-patch". It never reboots.
+
+``/api/os-updates/fix-access`` takes a root/sudo login typed once for a node
+blocked by missing privileges; the password is relayed to that node only and
+never stored or logged.
 """
 from api import HTTPException, Request, logger
 
@@ -82,6 +89,51 @@ def register(app, hub, ctx):
         logger.info("[os-updates] auto-check config updated by %s: enabled=%s "
                    "interval_hours=%g", _who(sess), cfg["enabled"], cfg["interval_hours"])
         return cfg
+
+    @app.get("/api/os-updates/auto-patch")
+    async def os_updates_autopatch_get(request: Request):
+        """Auto-patch config: ``{enabled, security_only, include_hub}``."""
+        _require_admin(request)
+        return hub.osu_autopatch_config()
+
+    @app.post("/api/os-updates/auto-patch")
+    async def os_updates_autopatch_set(request: Request):
+        """Turn auto-patch on/off. Takes effect after the next scheduled check."""
+        sess = _require_admin(request)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        body = body or {}
+        cfg = hub.osu_set_autopatch_config(bool(body.get("enabled", False)),
+                                           bool(body.get("security_only", True)),
+                                           bool(body.get("include_hub", False)))
+        logger.warning("[os-updates] auto-patch config set by %s: enabled=%s "
+                       "security_only=%s include_hub=%s", _who(sess),
+                       cfg["enabled"], cfg["security_only"], cfg["include_hub"])
+        return cfg
+
+    @app.post("/api/os-updates/fix-access")
+    async def os_updates_fix_access(request: Request):
+        """``{"node": "kind:id", "username": "root", "password": "..."}`` —
+        one-time login used by the node to install its update helper."""
+        sess = _require_admin(request)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        body = body or {}
+        key = body.get("node")
+        password = body.get("password")
+        if not isinstance(key, str) or not key:
+            raise HTTPException(status_code=400, detail="'node' (kind:id) is required")
+        if not isinstance(password, str) or not password:
+            raise HTTPException(status_code=400, detail="'password' is required")
+        username = str(body.get("username") or "root")
+        res = await hub.osu_fix_access(key, username, password, actor=_who(sess))
+        if res.get("status") == "ERROR":
+            raise HTTPException(status_code=409, detail=res.get("message", "fix failed"))
+        return res
 
     @app.post("/api/os-updates/apply")
     async def os_updates_apply(request: Request):
