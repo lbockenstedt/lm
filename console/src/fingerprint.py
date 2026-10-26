@@ -99,7 +99,26 @@ PROFILES: List[Dict[str, Any]] = [
     },
     {
         "name": "aruba-cx",
-        "match": re.compile(r"ArubaOS-CX|Aruba.*CX|AOS-CX", re.I),
+        # Besides the OS name, AOS-CX has markers that it shows WITHOUT ever
+        # printing "AOS-CX". We need them because CX also prints "Invalid input:",
+        # which the hp-procurve profile below matches. This profile is checked
+        # first, so a CX switch is not tagged as ProCurve:
+        #  * the login-history line 'User "admin" has logged in 3 times in the
+        #    past 30 days' (AOS-CX only);
+        #  * the default banner's "register your products ... asp.arubanetworks.com"
+        #    followed by a "<host> login:" prompt (ArubaOS-Switch prints a similar
+        #    banner but uses "Username:"/"Press any key", never "login:");
+        #  * a product string "<SKU> <CX family>", e.g. "JL725A 6200F 24G ..." or
+        #    "R8N85A 6000 48G ..." (ProCurve writes "2540-24G-4SFP+ JL354A" or
+        #    "5406Rzl2 J9850A": family first, then SKU);
+        #  * the factory-default hostname, which is the family number ("6300 login:").
+        "match": re.compile(
+            r"ArubaOS-CX|Aruba.*CX|AOS-CX|"
+            r"User \"[^\"]+\" has logged in \d+ times? in the past|"
+            r"asp\.arubanetworks\.com[\s\S]{0,300}?\blogin:|"
+            r"\b(?:JL|R[0-9A-Z]{2})\d{2,3}A\s+(?:6[0-4]\d\d|8[34]\d\d|9300|10000)[A-Z]?\b|"
+            r"(?:^|\s)(?:6[0-4]00|8[34]\d0|9300)\s+login:",
+            re.I),
         "family": "Switch",
         "prompt": re.compile(r"[\w.\-]+[>#]\s*$"),
         "login_prompt": re.compile(r"login:\s*$|[Uu]sername:\s*$"),
@@ -176,6 +195,32 @@ PROFILES: List[Dict[str, Any]] = [
                    "show_running": "show running-config"},
     },
     {
+        # Juniper Session Smart Router (SSR, formerly 128 Technology). It runs on
+        # Oracle Linux, so at its OS login it looks exactly like a Linux server
+        # ("Oracle Linux Server 7.9 / Kernel ... on an x86_64 / <host> login:"),
+        # and once logged in as admin it shows the PCLI prompt
+        # "admin@node0.<router>#". Both used to be reported as "linux" (and the
+        # linux profile's bare-line field regexes then stored the PCLI prompt as
+        # a serial number). No plain Linux servers sit on these console lines,
+        # so an Oracle Linux banner is taken as an SSR. Checked before
+        # juniper-junos, whose "juniper" match would otherwise claim SSR text.
+        "name": "juniper-ssr",
+        "match": re.compile(
+            r"128T|Session Smart|\bSSR\s?\d{3,4}\b|Oracle Linux Server|"
+            r"[\w.\-]+@node\d+\.[\w.\-]+[#>]", re.I),
+        "family": "Firewall/Router",
+        "prompt": re.compile(r"[\w.\-]+@[\w.\-]+(?::[\w.\-/~]*)?[#$>]\s*$"),
+        "login_prompt": re.compile(r"login:\s*$"),
+        "password_prompt": re.compile(r"[Pp]assword:\s*$"),
+        "pager": b" ",
+        # Identity comes from the PCLI prompt (node + router name). The version
+        # is captured for the transcript/LLM path; no fields are parsed from it.
+        "commands": [
+            {"cmd": "show system version"},
+        ],
+        "config": {"enter": None, "exit": None, "save": None, "show_running": None},
+    },
+    {
         "name": "juniper-junos",
         # JUNOS runs on FreeBSD, and a device sitting at a bare login prompt
         # prints no vendor string at all — only "<hostname> (ttyu0)" (or
@@ -185,7 +230,10 @@ PROFILES: List[Dict[str, Any]] = [
         # Linux server. Keep them ahead of that catch-all.
         "match": re.compile(
             r"JUNOS|Junos:|Juniper Networks|juniper|"
-            r"Amnesiac\s*\(tty|\(ttyu\d+\)", re.I),
+            r"Amnesiac\s*\(tty|\(ttyu\d+\)|"
+            # SRX chassis-cluster / EX virtual-chassis status line printed
+            # above every prompt, e.g. "{primary:node0}" or "{master:0}".
+            r"\{(?:primary|secondary|master|backup|linecard|hold):[\w\-]+\}", re.I),
         "family": "Firewall/Router",
         "prompt": re.compile(r"[\w.\-]+[>#%]\s*$"),
         "login_prompt": re.compile(r"login:\s*$"),
@@ -223,10 +271,16 @@ PROFILES: List[Dict[str, Any]] = [
         # apart from a Cisco "host(config)#", which has no space and a hostname
         # glued to the paren). Once matched we pull model + serial so the box can
         # be found in NetBox and physically in the rack.
+        # Also recognised before login: the bare "User:" login prompt (CX and
+        # Junos say "login:", ProCurve and Cisco say "Username:"), and the
+        # factory-default setup dialog ("Enter Option (partial string is
+        # acceptable):", "Auto-provisioning is in progress").
         "name": "aruba-os",
         "match": re.compile(
             r"ArubaOS(?!-?CX)|Aruba Operating System|"
-            r"(?:^|[\r\n\s])\([\w][\w.\-]{1,62}\)\s+\*?\s*[>#]", re.I),
+            r"(?:^|[\r\n\s])\([\w][\w.\-]{1,62}\)\s+\*?\s*[>#]|"
+            r"(?:^|\s)User:\s*$|partial string is acceptable|"
+            r"Auto-provisioning is in progress", re.I),
         "family": "Gateway/Controller",
         "prompt": re.compile(r"\([\w.\-]+\)\s*(?:\([\w .\-]+\)\s*)?\*?\s*[>#]\s*$"),
         "login_prompt": re.compile(r"[Uu]ser:\s*$|login:\s*$"),
@@ -253,7 +307,13 @@ PROFILES: List[Dict[str, Any]] = [
     },
     {
         "name": "linux",
-        "match": re.compile(r"login:\s*$|Linux \S+ \d|Ubuntu|Debian|CentOS|localhost", re.I),
+        # Needs real Linux evidence: a distro/kernel banner or a "user@host:~$"
+        # shell prompt. A bare "login:" used to be enough, but AOS-CX switches
+        # (and the SSR's OS login) also show just "<host> login:", so CX
+        # switches were reported as Linux servers. An unrecognised bare login
+        # prompt now stays unknown until a login or banner identifies it.
+        "match": re.compile(
+            r"Linux \S+ \d|Ubuntu|Debian|CentOS|[\w.\-]+@[\w.\-]+:[~/][^\n]*[#$]\s*$", re.I),
         "family": "Server",
         "prompt": re.compile(r"[\w.\-]+[@:][\w.\-/~]*[#$]\s*$"),
         "login_prompt": re.compile(r"login:\s*$"),
@@ -282,6 +342,96 @@ def normalize_mac(mac: str) -> str:
     if len(hexs) != 12:
         return ""
     return ":".join(hexs[i:i + 2] for i in range(0, 12, 2)).lower()
+
+
+# Words that show up where a hostname is parsed but are never a device's name:
+# prompt/menu words, the echo of the linux profile's own `hostname` command, the
+# AOS-CX VSF member prompt "standby#", the user part of "admin#"/"root#" and
+# Junos's "Amnesiac" (no hostname configured). Live ports showed hostnames
+# literally "hostname" and "standby" before these were filtered.
+_PLACEHOLDER_HOSTNAMES = frozenset({
+    "more", "username", "password", "login", "config", "hostname", "standby",
+    "user", "admin", "root", "last", "amnesiac",
+})
+# A serial number is a single alphanumeric token. Anything else (a captured
+# prompt such as "admin@node0.00900bef026b#", an error message) is junk; it
+# would also become a bogus "serial:..." device key in devices.json.
+_SERIAL_SHAPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-_./]*")
+
+
+def scrub_identity(identity: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy of ``identity`` without values that are provably not identity: a
+    placeholder hostname or a serial that is not serial-shaped. Applied to new
+    results AND to identity loaded from older ports.json/devices.json records,
+    so junk stored by earlier versions stops being shown and matched on."""
+    out = dict(identity or {})
+    host = str(out.get("hostname") or "").strip()
+    if host and host.lower() in _PLACEHOLDER_HOSTNAMES:
+        del out["hostname"]
+    serial = str(out.get("serial") or "").strip()
+    if serial and not _SERIAL_SHAPE.fullmatch(serial):
+        del out["serial"]
+    return out
+
+
+# Vendor verdicts differ in strength. "linux" is the weakest (generic Linux
+# text, which the SSR also shows), and "hp-procurve" can be a CX that has not
+# yet printed a CX-only marker (both print "Invalid input:"). These rules stop a
+# later weaker verdict from overwriting a confident one, e.g. a CX re-detected
+# as "linux" from a bare login prompt.
+def vendor_should_replace(current: Optional[str], candidate: Optional[str]) -> bool:
+    """True if a new ``candidate`` vendor verdict should replace ``current``."""
+    if not candidate or candidate == current:
+        return False
+    if not current:
+        return True
+    if candidate == "linux":
+        return False
+    if current == "aruba-cx" and candidate == "hp-procurve":
+        return False
+    return True
+
+
+def vendor_is_upgrade(current: Optional[str], candidate: Optional[str]) -> bool:
+    """True if ``candidate`` is strictly more specific than an unknown/"linux"
+    ``current``, so it may correct even a logged-in (authoritative) verdict."""
+    if not candidate or candidate == "linux":
+        return False
+    return current in (None, "", "linux")
+
+
+# AOS-CX evidence that cannot come from a neighbour's LLDP/CDP text: the
+# device's own model is a CX product string ("JL725A 6200F 24G CL4 ..."), or the
+# console shows the AOS-CX login-history line. Used to correct ports that an
+# older version stored as hp-procurve (CX also prints "Invalid input:").
+_CX_MODEL = re.compile(r"^\s*(?:JL|R[0-9A-Z]{2})\d{2,3}A\s+(?:6[0-4]\d\d|8[34]\d\d|9300|10000)", re.I)
+_CX_LOGIN_HISTORY = re.compile(r"User \"[^\"]+\" has logged in \d+ times? in the past", re.I)
+
+
+def is_cx_misfiled_as_procurve(vendor: Optional[str], identity: Dict[str, Any], text: str) -> bool:
+    """True if a port stored as hp-procurve is in fact an AOS-CX switch."""
+    if vendor != "hp-procurve":
+        return False
+    return bool(_CX_MODEL.search(str((identity or {}).get("model") or ""))
+                or _CX_LOGIN_HISTORY.search(sanitize_console_text(text or "")))
+
+
+def _strip_echo_and_prompts(text: str, cmd: str, prompt_rx: Optional["re.Pattern"]) -> str:
+    """Command output without the echoed command line or prompt lines.
+
+    The linux profile's fields are whole-line captures (``^(\\S+)$``), so the
+    echo of ``hostname`` was stored as the hostname "hostname", and an SSR PCLI
+    prompt line "admin@node0.<router>#" after a rejected ``cat`` was stored as
+    the serial number."""
+    keep = []
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if s and (s == cmd or s.endswith(" " + cmd)):
+            continue
+        if s and prompt_rx is not None and prompt_rx.search(s):
+            continue
+        keep.append(line)
+    return "\n".join(keep)
 
 
 def detect_vendor(text: str) -> Optional[Dict[str, Any]]:
@@ -409,7 +559,8 @@ def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str],
     identity: Dict[str, str] = {}
     for spec in profile.get("commands", []):
         fields = spec.get("fields") or {}
-        text = outputs.get(spec["cmd"], "")
+        text = _strip_echo_and_prompts(outputs.get(spec["cmd"], ""), spec["cmd"],
+                                       profile.get("prompt"))
         for key, rx in fields.items():
             if key in identity:
                 continue
@@ -430,7 +581,7 @@ def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str],
                     break
     if identity.get("mac"):
         identity["mac"] = normalize_mac(identity["mac"]) or identity["mac"]
-    return identity
+    return scrub_identity(identity)
 
 
 def detect_stack(outputs: Dict[str, str], transcript: str = "") -> Dict[str, Any]:
@@ -521,7 +672,7 @@ _DEFAULT_HOSTNAME_PROMPTS: List[str] = [
     r"(?:^|\r|\n)\s*([\w][\w.\-]{1,62})[>#]\s*$",
 ]
 _GENERIC_MAC = re.compile(r"\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b")
-_PROMPT_HOST_SKIP = frozenset({"more", "username", "password", "login", "config"})
+_PROMPT_HOST_SKIP = _PLACEHOLDER_HOSTNAMES
 # Generic-pass IP fallback: an unlabeled bare IPv4 anywhere in scrollback is as
 # likely to be a firmware version, gateway, or syslog server as the device's
 # own address, so this requires an explicit "IP address"/"IPv4 address"/"inet"
@@ -582,6 +733,23 @@ def prompt_hostname(text: str) -> str:
     controller/gateway, or ``user@host:~$`` on Linux). Terminal escapes are
     stripped first. Returns '' if none or a placeholder."""
     return _prompt_hostname_with(_HOSTNAME_PROMPTS, text)
+
+
+# "<hostname> login:" — the only name a login-locked AOS-CX switch or SSR shows
+# (e.g. "BO-SYDm-ACSW02 login:", "ar30260015 login:"). Kept separate from the
+# CLI-prompt patterns above and used only as a last resort, after any real
+# prompt. The last occurrence wins; placeholders ("Last login:") are skipped.
+_LOGIN_BANNER_HOST = re.compile(r"(?:^|\s)([A-Za-z0-9][\w.\-]{1,62})[ \t]+login:")
+
+
+def login_banner_hostname(text: str) -> str:
+    """Hostname from the last "<host> login:" prompt in ``text``, or ''."""
+    clean = sanitize_console_text(text or "")
+    cand = ""
+    for m in _LOGIN_BANNER_HOST.finditer(clean):
+        if m.group(1).lower() not in _PLACEHOLDER_HOSTNAMES:
+            cand = m.group(1)
+    return cand
 
 # Vendor-agnostic prompt shapes used to log in BEFORE we know the vendor. A device
 # sitting at a bare ``login:`` prompt reveals no banner/system info until you
@@ -744,7 +912,39 @@ def looks_like_prompt(text: str) -> bool:
     watcher to decide a boot cycle reached a usable prompt (vs. hung mid-boot)."""
     tail = _prompt_tail(sanitize_console_text(text or ""))
     return bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)
-                or _SHELL_PROMPT.search(tail) or prompt_hostname(text))
+                or _SHELL_PROMPT.search(tail) or _SETUP_PROMPT.search(tail)
+                or prompt_hostname(text))
+
+
+# Interactive prompts a fully booted OS waits at that are not login or CLI
+# prompts: the ArubaOS gateway/controller factory setup dialog ("Enter Option
+# (partial string is acceptable):", "Enter System name [Aruba7008]:") and the
+# ArubaOS-Switch "Press any key to continue". A gateway sitting at its setup
+# wizard is booted, but these were not recognised, so it aged into "stuck".
+_SETUP_PROMPT = re.compile(
+    r"(?:partial string is acceptable\)|Enter System name[^\n]*|"
+    r"Press any key to continue)\s*:?\s*$", re.I)
+
+# Text that only a fully booted OS prints, seen ANYWHERE in a boot episode (not
+# just at the very end): login-program messages, the AOS-CX login history line,
+# the ArubaOS setup/auto-provisioning dialog and its curl retry warnings, and
+# "<host> login:" / "User:" prompts with whatever was typed after them. The
+# watcher reads a passive capture, so the live prompt is often followed by an
+# echoed username, a retry message or idle-timeout chatter that hides it from
+# the end-anchored prompt check, and the port was then wrongly called "stuck".
+_OS_UP_MARKER = re.compile(
+    r"Login incorrect|Login attempt timed out|Maximum number of tries exceeded|"
+    r"has logged in \d+ times? in the past|Press any key to continue|"
+    r"partial string is acceptable|Auto-provisioning is in progress|"
+    r"Transient problem:|\S[ \t]+login:|^\s*(?:User|Username|Password)\s*:|"
+    r"\(ttyu\d+\)",
+    re.I | re.M)
+
+
+def os_up_marker(text: str) -> str:
+    """The first booted-OS marker in ``text`` (see ``_OS_UP_MARKER``), or ''."""
+    m = _OS_UP_MARKER.search(sanitize_console_text(text or ""))
+    return m.group(0).strip() if m else ""
 
 
 # Boot-time fault signatures — phrases a device prints when it FAILS to boot
@@ -762,10 +962,27 @@ _BOOT_FAULT = re.compile(
     re.I)
 
 
+# Lines that REPORT why the last restart happened ("Last reboot reason:
+# watchdog reset", "Reset cause: ...", "Boot reason: ...") are printed by a
+# device that is booting normally (and by show-version style output). They
+# contain fault words but are history, not a failure of the current boot, and
+# used to flag healthy ports as "stuck". They are blanked (same length, so match
+# offsets stay valid) before fault signatures are searched.
+_FAULT_REPORT_LINE = re.compile(
+    r"^[^\n]*(?:(?:re)?boot|reset|restart)\s+(?:reason|cause)\b[^\n]*$|"
+    r"^[^\n]*\blast\s+(?:reboot|reset|restart)\b[^\n]*$", re.I | re.M)
+
+
+def _fault_scan_text(text: str) -> str:
+    """Sanitized ``text`` with restart-reason report lines blanked out."""
+    clean = sanitize_console_text(text or "")
+    return _FAULT_REPORT_LINE.sub(lambda m: " " * len(m.group(0)), clean)
+
+
 def boot_fault(text: str) -> str:
     """Return the matched boot-fault phrase found in ``text`` (a likely stuck/dead
     boot), or '' if none. Terminal escapes stripped first."""
-    m = _BOOT_FAULT.search(sanitize_console_text(text or ""))
+    m = _BOOT_FAULT.search(_fault_scan_text(text))
     return m.group(0).strip() if m else ""
 
 
@@ -790,7 +1007,7 @@ def current_boot_fault(text: str) -> str:
     """Like :func:`boot_fault`, but a fault followed later in ``text`` by a
     normal (non-bootloader/recovery) prompt is treated as historical — the
     device recovered/rebooted and reached a prompt, so it's not a current fault."""
-    clean = sanitize_console_text(text or "")
+    clean = _fault_scan_text(text)
     last = None
     for m in _BOOT_FAULT.finditer(clean):
         last = m
@@ -851,7 +1068,8 @@ def check_line_responsive(read_fn: Callable[[], bytes], write_fn: Callable[[byte
     behind unrelated console chatter. Returns ``(responsive, transcript)`` where
     ``responsive`` is True if a login/password/shell prompt answered."""
     write_fn(b"\r")
-    transcript = _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT], nudge_secs)
+    transcript = _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT,
+                                       _SETUP_PROMPT], nudge_secs)
     return looks_like_prompt(transcript), transcript
 
 # Console lines are usually silent until they receive a keystroke: a device sits
@@ -1064,8 +1282,9 @@ def passive_identify(text: str) -> Dict[str, Any]:
     if prof and prof.get("family") and prof["name"] != "linux":
         identity["type"] = infer_device_type(identity.get("model"), prof["family"])
     if not identity.get("hostname"):
-        # Glean a hostname from the last shell/CLI prompt we saw.
-        hn = prompt_hostname(text)
+        # Glean a hostname from the last shell/CLI prompt we saw, else from a
+        # "<host> login:" prompt (all a login-locked switch ever shows).
+        hn = prompt_hostname(text) or login_banner_hostname(text)
         if hn:
             identity["hostname"] = hn
     if not identity.get("mac"):
@@ -1080,7 +1299,7 @@ def passive_identify(text: str) -> Dict[str, Any]:
                 break
     if identity.get("mac"):
         identity["mac"] = normalize_mac(identity["mac"]) or identity["mac"]
-    res: Dict[str, Any] = {"vendor": vendor, "identity": identity}
+    res: Dict[str, Any] = {"vendor": vendor, "identity": scrub_identity(identity)}
     res.update(ip_ambiguity(ip_cands))
     return res
 
@@ -1651,6 +1870,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         if stack.get("local_mac") and not result["identity"].get("mac"):
             result["identity"]["mac"] = stack["local_mac"]
 
+    result["identity"] = scrub_identity(result["identity"])
     if result["identity"].get("hostname"):
         result["hostname_source"] = "command"  # parsed from a show/display output
     else:
