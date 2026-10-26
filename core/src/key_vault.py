@@ -32,7 +32,7 @@ import httpx
 
 from http_client import shared_client
 
-from security.oidc import OidcConfig, fetch_app_token
+from security.oidc import OidcConfig, fetch_app_token, forget_app_token
 
 logger = logging.getLogger("KeyVault")
 
@@ -76,8 +76,20 @@ def _base(vault_url: str) -> str:
     return str(vault_url or "").rstrip("/")
 
 
-async def _token(cfg: OidcConfig, http: Optional[httpx.AsyncClient] = None) -> str:
-    return await fetch_app_token(cfg, _SCOPE, http=http)
+async def _send(cfg: OidcConfig, c: httpx.AsyncClient, method: str, url: str,
+                **kwargs) -> httpx.Response:
+    """Send one Key Vault request with the (cached) app token. On a 401 the
+    cached token is dropped and the request retried once with a fresh one, so
+    a revoked or stale token never sticks until it expires."""
+    headers = dict(kwargs.pop("headers", {}) or {})
+    for attempt in (1, 2):
+        token = await fetch_app_token(cfg, _SCOPE, http=c)
+        headers["Authorization"] = f"Bearer {token}"
+        resp = await c.request(method, url, headers=headers, **kwargs)
+        if resp.status_code != 401 or attempt == 2:
+            return resp
+        forget_app_token(cfg, _SCOPE)
+    return resp
 
 
 async def set_secret(cfg: OidcConfig, vault_url: str, name: str, value: str,
@@ -85,11 +97,10 @@ async def set_secret(cfg: OidcConfig, vault_url: str, name: str, value: str,
     """PUT a secret (new version). Returns the secret id."""
     if not vault_url:
         raise KeyVaultError("Key Vault URL not configured")
-    token = await _token(cfg, http=http)
     url = f"{_base(vault_url)}/secrets/{name}?api-version={_API}"
     async with shared_client(http, 20.0) as c:
-        resp = await c.put(url, headers={"Authorization": f"Bearer {token}",
-                                         "Content-Type": "application/json"},
+        resp = await _send(cfg, c, "PUT", url,
+                           headers={"Content-Type": "application/json"},
                            json={"value": value})
     if resp.status_code not in (200, 201):
         raise KeyVaultError(f"Key Vault PUT {name} failed: HTTP {resp.status_code} — {resp.text[:300]}")
@@ -98,10 +109,9 @@ async def set_secret(cfg: OidcConfig, vault_url: str, name: str, value: str,
 
 async def get_secret(cfg: OidcConfig, vault_url: str, name: str,
                      http: Optional[httpx.AsyncClient] = None) -> Optional[str]:
-    token = await _token(cfg, http=http)
     url = f"{_base(vault_url)}/secrets/{name}?api-version={_API}"
     async with shared_client(http, 20.0) as c:
-        resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
+        resp = await _send(cfg, c, "GET", url)
     if resp.status_code == 404:
         return None
     if resp.status_code != 200:
@@ -112,12 +122,11 @@ async def get_secret(cfg: OidcConfig, vault_url: str, name: str,
 async def list_secret_names(cfg: OidcConfig, vault_url: str, prefix: str = "",
                             http: Optional[httpx.AsyncClient] = None) -> List[str]:
     """All secret names (optionally prefix-filtered), paged."""
-    token = await _token(cfg, http=http)
     url = f"{_base(vault_url)}/secrets?api-version={_API}"
     out: List[str] = []
     async with shared_client(http, 20.0) as c:
         while url:
-            resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
+            resp = await _send(cfg, c, "GET", url)
             if resp.status_code != 200:
                 raise KeyVaultError(f"Key Vault list failed: HTTP {resp.status_code} — {resp.text[:200]}")
             body = resp.json()
@@ -132,10 +141,9 @@ async def list_secret_names(cfg: OidcConfig, vault_url: str, prefix: str = "",
 
 async def delete_secret(cfg: OidcConfig, vault_url: str, name: str,
                         http: Optional[httpx.AsyncClient] = None) -> bool:
-    token = await _token(cfg, http=http)
     url = f"{_base(vault_url)}/secrets/{name}?api-version={_API}"
     async with shared_client(http, 20.0) as c:
-        resp = await c.delete(url, headers={"Authorization": f"Bearer {token}"})
+        resp = await _send(cfg, c, "DELETE", url)
     if resp.status_code not in (200, 204, 404):
         raise KeyVaultError(f"Key Vault DELETE {name} failed: HTTP {resp.status_code} — {resp.text[:200]}")
     return True
