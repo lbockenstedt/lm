@@ -23,9 +23,10 @@ every ``interval_hours`` (default 6, ``/api/os-updates/auto-check``) so its
 status stays fresh without an operator remembering to click "Check for
 updates" — see ``run_os_updates_check_loop`` in ``hub_os_updates.py``.
 
-Auto-patch (``/api/os-updates/auto-patch``, off by default) is the one
-scheduled apply: after each scheduled check it deploys what was found, through
-the same rolling hub-last roll, audit-logged as "auto-patch". It never reboots.
+Auto-patch (``/api/os-updates/auto-patch``) is the one scheduled apply and is
+approved PER NODE (none by default): after each scheduled check it deploys what
+was found on the approved nodes, through the same rolling hub-last roll,
+audit-logged as "auto-patch". It never reboots.
 
 ``/api/os-updates/fix-access`` takes a root/sudo login typed once for a node
 blocked by missing privileges; the password is relayed to that node only and
@@ -92,25 +93,33 @@ def register(app, hub, ctx):
 
     @app.get("/api/os-updates/auto-patch")
     async def os_updates_autopatch_get(request: Request):
-        """Auto-patch config: ``{enabled, security_only, include_hub}``."""
+        """Auto-patch config: ``{security_only, nodes}``."""
         _require_admin(request)
         return hub.osu_autopatch_config()
 
     @app.post("/api/os-updates/auto-patch")
     async def os_updates_autopatch_set(request: Request):
-        """Turn auto-patch on/off. Takes effect after the next scheduled check."""
+        """Approve one node: ``{"node": "kind:id", "enabled": bool}``, and/or
+        set ``{"security_only": bool}`` for every auto-patched node."""
         sess = _require_admin(request)
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
             body = {}
         body = body or {}
-        cfg = hub.osu_set_autopatch_config(bool(body.get("enabled", False)),
-                                           bool(body.get("security_only", True)),
-                                           bool(body.get("include_hub", False)))
-        logger.warning("[os-updates] auto-patch config set by %s: enabled=%s "
-                       "security_only=%s include_hub=%s", _who(sess),
-                       cfg["enabled"], cfg["security_only"], cfg["include_hub"])
+        actor = _who(sess)
+        cfg = hub.osu_autopatch_config()
+        if "security_only" in body:
+            cfg = hub.osu_set_autopatch_security_only(bool(body["security_only"]))
+            logger.warning("[os-updates] auto-patch security_only=%s set by %s",
+                           cfg["security_only"], actor)
+        key = body.get("node")
+        if key is not None:
+            if not isinstance(key, str) or not key:
+                raise HTTPException(status_code=400, detail="'node' must be a kind:id key")
+            cfg = hub.osu_set_autopatch_node(key, bool(body.get("enabled", False)))
+            logger.warning("[os-updates] auto-patch %s for %s by %s",
+                           "APPROVED" if key in cfg["nodes"] else "withdrawn", key, actor)
         return cfg
 
     @app.post("/api/os-updates/fix-access")

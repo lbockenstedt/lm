@@ -8146,7 +8146,7 @@ function _renderOsUpdatesView(content) {
                 Operating-system package updates for every spoke and agent — <b>Global-Admin only, every approval is audit-logged</b>.
                 Deploys <code>apt dist-upgrade</code> (everything) — or only the nodes/packages you select, or only security updates.
                 <b>Nothing is ever rebooted automatically</b> — a host needing one is badged with a <b>Reboot…</b> button you use deliberately.
-                <b>Auto-patch</b> (off by default) deploys whatever each scheduled auto-check finds, the same way.
+                <b>Auto-patch</b> is approved <b>per node</b> (tick "Auto-patch" on a node): after each scheduled auto-check, approved nodes get what it found, the same way.
                 Nodes are updated <b>one at a time</b>, and the <b>hub goes last</b> (updating it restarts this page).
                 This is separate from LM code updates.
             </div>
@@ -8163,10 +8163,9 @@ function _renderOsUpdatesView(content) {
                 <span id="osu-autocheck-status" class="text-xs text-slate-400"></span>
             </div>
             <div class="flex flex-wrap items-center gap-4 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
-                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer" title="After each scheduled auto-check, deploy what it found — one node at a time, hub last, never rebooting"><input type="checkbox" id="osu-autopatch-enabled" class="w-4 h-4 text-green-600 rounded">Auto-patch after each auto-check</label>
-                <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer"><input type="checkbox" id="osu-autopatch-security" class="w-4 h-4 rounded" checked>Security updates only</label>
-                <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer" title="Patching the hub restarts LM services (no reboot)"><input type="checkbox" id="osu-autopatch-hub" class="w-4 h-4 rounded">Include the hub</label>
-                <button onclick="osuSaveAutoPatch()" class="${btnSecCls}">Save</button>
+                <span class="text-sm text-slate-600">Auto-patch (approved nodes only):</span>
+                <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer"><input type="checkbox" id="osu-autopatch-security" class="w-4 h-4 rounded" checked onchange="osuSetAutoPatchSecurity(this.checked)">Security updates only</label>
+                <span id="osu-autopatch-count" class="text-xs text-slate-400"></span>
             </div>
             <div class="flex flex-wrap items-center gap-2">
                 <button onclick="osuCheck()" class="${btnSecCls}">↻ Check for updates</button>
@@ -8186,26 +8185,30 @@ function _renderOsUpdatesView(content) {
 async function osuLoadAutoPatch() {
     try {
         const cfg = await apiJson('/api/os-updates/auto-patch');
-        document.getElementById('osu-autopatch-enabled').checked = !!cfg.enabled;
         document.getElementById('osu-autopatch-security').checked = cfg.security_only !== false;
-        document.getElementById('osu-autopatch-hub').checked = !!cfg.include_hub;
     } catch (e) { /* best-effort */ }
 }
 
-window.osuSaveAutoPatch = async function () {
-    const body = {
-        enabled: !!document.getElementById('osu-autopatch-enabled')?.checked,
-        security_only: !!document.getElementById('osu-autopatch-security')?.checked,
-        include_hub: !!document.getElementById('osu-autopatch-hub')?.checked,
-    };
-    if (body.enabled && !confirm('Turn on auto-patch?\n\nAfter every scheduled auto-check, nodes with ' +
-            (body.security_only ? 'pending security updates' : 'any pending updates') +
-            ' are patched automatically — one at a time' + (body.include_hub ? ', hub last' : ', hub excluded') +
-            '. Nothing is rebooted.')) return;
+window.osuSetAutoPatchSecurity = async function (on) {
     try {
-        const cfg = await apiJson('/api/os-updates/auto-patch', { method: 'POST', body: JSON.stringify(body) });
-        showToast(cfg.enabled ? 'Auto-patch on — runs after each auto-check.' : 'Auto-patch off.', 'success');
+        await apiJson('/api/os-updates/auto-patch', { method: 'POST', body: JSON.stringify({ security_only: on }) });
+        showToast(on ? 'Auto-patch: security updates only.' : 'Auto-patch: all updates.', 'success');
     } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+};
+
+window.osuToggleAutoPatch = async function (key, on, el) {
+    const n = ((window._osuData || {}).nodes || []).find(x => `${x.kind}:${x.id}` === key);
+    const label = n ? n.label : key;
+    const hubNote = n && n.kind === 'hub' ? '\n\nThis is the HUB — patching it restarts LM services (no reboot).' : '';
+    if (on && !confirm(`Approve ${label} for auto-patching?\n\nAfter every scheduled auto-check its pending updates are installed automatically. Nothing is rebooted.${hubNote}`)) {
+        if (el) el.checked = false;
+        return;
+    }
+    try {
+        await apiJson('/api/os-updates/auto-patch', { method: 'POST', body: JSON.stringify({ node: key, enabled: on }) });
+        showToast(`${label}: auto-patch ${on ? 'approved' : 'off'}.`, 'success');
+        osuLoad();
+    } catch (e) { if (el) el.checked = !on; showToast('Save failed: ' + (e.message || e), 'error'); }
 };
 
 // One-time login for a node blocked by missing privileges. The password goes
@@ -8459,6 +8462,8 @@ function _osuRender(d) {
             : (n.count ? `<details class="mt-1" ${_osuOpen.has(key) ? 'open' : ''} ontoggle="osuToggleOpen(${jsKey}, this.open)"><summary class="cursor-pointer text-[11px] text-slate-400">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-[11px] mt-1 leading-relaxed">${pickHint}${pkgs}</div></details>${pickNote}` : '');
         const fixBtn = n.apply_blocker && feats.includes('fix_access') && !busy
             ? ` <button onclick="osuFixAccess(${jsKey})" class="ml-1 text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
+        const autoBox = n.eligible
+            ? `<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_patch ? 'text-emerald-700' : 'text-slate-400'} cursor-pointer" title="Install this node's updates automatically after each scheduled auto-check"><input type="checkbox" class="w-3 h-3" ${n.auto_patch ? 'checked' : ''} onchange="osuToggleAutoPatch(${jsKey}, this.checked, this)">Auto-patch</label>` : '';
         const blocker = n.apply_blocker ? `<div class="text-[11px] text-amber-700 mt-1">Can't apply: ${escapeHtml(n.apply_blocker)}${fixBtn}</div>` : '';
         let msg = '';
         if (item && item.message) msg = `<div class="text-[11px] ${item.status === 'done' ? 'text-slate-500' : 'text-red-600'} mt-1">${escapeHtml(item.message)}</div>`;
@@ -8466,9 +8471,11 @@ function _osuRender(d) {
         return `<div class="border border-slate-200 rounded-md p-3 mb-2">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <span class="flex items-center gap-2 text-xs font-bold text-slate-600">${nodeBox}${escapeHtml(n.label)} <span class="font-normal text-slate-400">${escapeHtml(n.kind)}${n.flavor ? ' · ' + escapeHtml(n.flavor) : ''}</span></span>
-              <span class="flex flex-wrap items-center gap-2 justify-end">${rebootBtn}${reboot}${state}</span>
+              <span class="flex flex-wrap items-center gap-2 justify-end">${autoBox}${rebootBtn}${reboot}${state}</span>
             </div>${detail}${blocker}${msg}</div>`;
     }).join('');
+    const apCount = document.getElementById('osu-autopatch-count');
+    if (apCount) { const k = (d.nodes || []).filter(n => n.auto_patch).length; apCount.textContent = k ? `${k} node(s) approved` : 'no nodes approved — tick "Auto-patch" on a node'; }
     const when = d.checked_at ? new Date(d.checked_at * 1000).toLocaleString() : 'never';
     body.innerHTML = summary + (rows || '<p class="text-xs text-slate-400 italic">No nodes reporting.</p>') +
         `<p class="text-[11px] text-slate-400 mt-2">Last checked: ${escapeHtml(when)}</p>`;
