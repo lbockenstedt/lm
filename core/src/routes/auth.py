@@ -6,7 +6,7 @@ from api import (
     _verify_password, cache_kick_login,
     get_netbox_spoke, get_tenant_scoping, logger, os, secrets, time,
 )
-from access import resolve_effective_permissions
+from access import check_tenant_access, resolve_effective_permissions
 from security.credential_store import resolve_password_hash
 
 
@@ -107,6 +107,7 @@ def register(app, hub, ctx):
                 "tenant_id":  tenant_id,
                 "protected":  protected,
             }
+            user_data["default_tenant"] = _default_tenant(hub, user, user_data)
             token = _record_session(hub, user_data, bind_ip=_client_ip(request))
             resp = JSONResponse({"status": "ok", **user_data})
             resp.set_cookie(
@@ -123,6 +124,16 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.exception("local_login failed")
             raise HTTPException(status_code=500, detail="Login request failed")
+
+    def _default_tenant(hub, record, user_data):
+        """The user's saved default tenant while it still exists and they may
+        still view it; otherwise None (the WebUI falls back to its usual pick)."""
+        tenant = (record or {}).get("default_tenant")
+        if not tenant:
+            return None
+        if tenant != "default" and tenant not in hub.state.tenant_state.get("tenants", {}):
+            return None
+        return tenant if check_tenant_access({"user": user_data}, tenant) else None
 
     def _user_snapshot(hub, user_id, user):
         """Build the same session-shaped user dict login uses, so an API token
@@ -273,9 +284,41 @@ def register(app, hub, ctx):
             "email":       _email,
             "display_name": _name or _email or user_id,
         }
+        merged["default_tenant"] = _default_tenant(hub, live, merged)
         # Keep session in sync so middleware checks stay consistent
         sess["user"] = merged
         return {"status": "ok", **merged}
+
+    @app.put("/auth/default-tenant")
+    async def set_default_tenant(request: Request):
+        """Save the tenant the WebUI opens on for the caller (``{"tenant_id": null}``
+        clears it). Self-service: any signed-in user, but only for an existing
+        tenant they are allowed to view."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        tenant = str((data or {}).get("tenant_id") or "").strip()
+        user_id = sess.get("user_id") or sess["user"].get("user_id")
+        user = hub.state.system_state.get("users", {}).get(user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="User record not found")
+        if tenant:
+            known = tenant == "default" or tenant in hub.state.tenant_state.get("tenants", {})
+            if not known:
+                raise HTTPException(status_code=404, detail=f"Unknown tenant '{tenant}'")
+            if not check_tenant_access(sess, tenant):
+                raise HTTPException(status_code=403, detail="You do not have access to that tenant")
+            user["default_tenant"] = tenant
+        else:
+            user.pop("default_tenant", None)
+        await hub.state.save_state_now()
+        sess["user"]["default_tenant"] = tenant or None
+        return {"status": "ok", "default_tenant": tenant or None}
 
     @app.post("/auth/logout")
     async def auth_logout(request: Request):

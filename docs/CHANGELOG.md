@@ -12,6 +12,12 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-10-26
 
+### WebUI
+
+- **Choose your default tenant.** In the header tenant picker, click **☆** next to a tenant
+  to open LM on it every time you sign in (saved on your user, so it follows you to any
+  browser); click **★** to clear it. See [webui.md](webui.md#how-to-use-it).
+
 ### DNS
 
 - **Editable DNS overrides with comments.** DNS → **Overrides** → *Assigned clients* now has
