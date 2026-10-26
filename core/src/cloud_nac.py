@@ -16,6 +16,7 @@ Errors carry the Graph body so the route/UI can show the real reason.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 import string
@@ -109,9 +110,28 @@ async def get_user(token: str, ident: str, http: Optional[httpx.AsyncClient] = N
     return resp.json()
 
 
+async def _reset_password(token: str, oid: str, upn: str, password: str,
+                          http: Optional[httpx.AsyncClient] = None,
+                          retries: int = 5, delay_s: float = 2.0) -> None:
+    """Enable the user and set a non-expiring-on-login password. Retries a
+    404 briefly: a freshly created user can take a few seconds to replicate."""
+    body = {"accountEnabled": True,
+            "passwordProfile": {"password": password, "forceChangePasswordNextSignIn": False}}
+    for attempt in range(retries):
+        resp = await _graph("PATCH", f"/users/{oid}", token, json=body, http=http)
+        if resp.status_code in (200, 204):
+            logger.info("Cloud NAC reset password for Entra user %s", upn)
+            return
+        if resp.status_code != 404 or attempt == retries - 1:
+            break
+        await asyncio.sleep(delay_s)
+    raise CloudNacError(f"Graph reset password {upn} failed: HTTP {resp.status_code} — {resp.text[:200]}")
+
+
 async def provision_user(cfg: OidcConfig, domain: str, username: str,
                          http: Optional[httpx.AsyncClient] = None,
-                         password: Optional[str] = None) -> Dict[str, Any]:
+                         password: Optional[str] = None,
+                         oid: Optional[str] = None) -> Dict[str, Any]:
     """Create the Entra account for ``username`` (or reset its password if it
     exists), non-interactive (``forceChangePasswordNextSignIn=false`` so a
     headless MSCHAPv2 client can auth). Returns
@@ -126,16 +146,15 @@ async def provision_user(cfg: OidcConfig, domain: str, username: str,
     upn = f"{username}@{domain}"
     token = await fetch_app_token(cfg, _GRAPH_SCOPE, http=http)
     password = password or gen_password()
+    if oid:
+        # Caller already knows the object (a rotate). Patch it directly: a
+        # UPN lookup can miss a just-created user (Graph replication lag).
+        await _reset_password(token, oid, upn, password, http)
+        return {"username": username, "upn": upn, "oid": oid, "password": password, "created": False}
     existing = await get_user(token, upn, http=http)
     if existing:
         oid = existing["id"]
-        resp = await _graph("PATCH", f"/users/{oid}", token, json={
-            "accountEnabled": True,
-            "passwordProfile": {"password": password, "forceChangePasswordNextSignIn": False},
-        }, http=http)
-        if resp.status_code not in (200, 204):
-            raise CloudNacError(f"Graph reset password {upn} failed: HTTP {resp.status_code} — {resp.text[:200]}")
-        logger.info("Cloud NAC reset password for existing Entra user %s", upn)
+        await _reset_password(token, oid, upn, password, http)
         return {"username": username, "upn": upn, "oid": oid, "password": password, "created": False}
     body = {
         "accountEnabled": True,
