@@ -34,12 +34,19 @@ _CTRL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")     # keep \t \n \
 
 
 
+_JUNIPER_INTERNAL_NET = ipaddress.IPv4Network("128.0.0.0/16")
+
+
 def is_valid_device_ip(ip: str) -> bool:
     try:
         addr = ipaddress.IPv4Address(ip)
     except ValueError:
         return False
     if addr.is_unspecified or addr.is_loopback or addr.is_multicast or addr == ipaddress.IPv4Address('255.255.255.255'):
+        return False
+    # Juniper's internal routing-engine network (e.g. 128.0.0.1 on em/fxp
+    # internal links) is never the device's reachable management address.
+    if addr in _JUNIPER_INTERNAL_NET:
         return False
     val = int(addr)
     if val >= 0xE0000000:
@@ -352,7 +359,16 @@ def normalize_mac(mac: str) -> str:
 _PLACEHOLDER_HOSTNAMES = frozenset({
     "more", "username", "password", "login", "config", "hostname", "standby",
     "user", "admin", "root", "last", "amnesiac",
+    "localhost", "none", "(none)", "unknown",
 })
+
+
+def is_placeholder_hostname(name: Any) -> bool:
+    """True if ``name`` is empty or a word a parse glitch captures as a name."""
+    h = str(name or "").strip().lower()
+    return not h or h in _PLACEHOLDER_HOSTNAMES
+
+
 # A serial number is a single alphanumeric token. Anything else (a captured
 # prompt such as "admin@node0.00900bef026b#", an error message) is junk; it
 # would also become a bogus "serial:..." device key in devices.json.
@@ -366,7 +382,7 @@ def scrub_identity(identity: Dict[str, Any]) -> Dict[str, Any]:
     so junk stored by earlier versions stops being shown and matched on."""
     out = dict(identity or {})
     host = str(out.get("hostname") or "").strip()
-    if host and host.lower() in _PLACEHOLDER_HOSTNAMES:
+    if "hostname" in out and is_placeholder_hostname(host):
         del out["hostname"]
     serial = str(out.get("serial") or "").strip()
     if serial and not _SERIAL_SHAPE.fullmatch(serial):
@@ -674,7 +690,6 @@ _DEFAULT_HOSTNAME_PROMPTS: List[str] = [
     r"(?:^|\r|\n)\s*([\w][\w.\-]{1,62})[>#]\s*$",
 ]
 _GENERIC_MAC = re.compile(r"\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b")
-_PROMPT_HOST_SKIP = _PLACEHOLDER_HOSTNAMES
 # Generic-pass IP fallback: an unlabeled bare IPv4 anywhere in scrollback is as
 # likely to be a firmware version, gateway, or syslog server as the device's
 # own address, so this requires an explicit "IP address"/"IPv4 address"/"inet"
@@ -722,7 +737,7 @@ def _prompt_hostname_with(patterns: List["re.Pattern"], text: str) -> str:
         cand = ""
         for m in rx.finditer(clean):
             c = (m.group(1) or "").strip()
-            if c and c.lower() not in _PROMPT_HOST_SKIP:
+            if c and not is_placeholder_hostname(c):
                 cand = c
         if cand:
             return cand
@@ -749,7 +764,7 @@ def login_banner_hostname(text: str) -> str:
     clean = sanitize_console_text(text or "")
     cand = ""
     for m in _LOGIN_BANNER_HOST.finditer(clean):
-        if m.group(1).lower() not in _PLACEHOLDER_HOSTNAMES:
+        if not is_placeholder_hostname(m.group(1)):
             cand = m.group(1)
     return cand
 
@@ -1369,6 +1384,16 @@ def _elicit_identity_banner(read_fn: Callable[[], bytes], write_fn: Callable[[by
     return transcript, profile, outputs
 
 
+def _is_garbled(line: str) -> bool:
+    """True if ``line`` is mostly undecodable/non-printable bytes (the U+FFFD
+    replacement chars a wrong baud rate produces) rather than readable text."""
+    text = line.strip()
+    if not text:
+        return False
+    bad = sum(1 for ch in text if ch == "\ufffd" or not ch.isprintable())
+    return bad / len(text) > 0.3
+
+
 def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
                    credentials: List[Dict[str, str]], banner_secs: float = 6.0,
                    step_secs: float = 4.0):
@@ -1432,6 +1457,11 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
                     or _at_new_pw(tail))
     if not at_login:
         # Already at a shell (no auth), or nothing recognizable on the line.
+        # Wrong-baud noise can end in '#' or '>' and look like a prompt; that is
+        # not a login.
+        if _is_garbled(_last_line(tail)):
+            diag["garbled"] = True
+            return False, None, transcript, diag
         return bool(_SHELL_PROMPT.search(tail)), None, transcript, diag
     if not credentials:
         return False, None, transcript, diag
@@ -1914,7 +1944,9 @@ def _login_diag(diag: Dict[str, Any], transcript: str, credentials) -> Dict[str,
             "bad_secret": "`enable` rejected the stored credential's password and a blank secret",
             "no_prompt": "`enable` sent but the device never re-prompted",
         }.get(_en.get("reason") or "", _en.get("reason") or "")
-    if d.get("shell_prompt_seen"):
+    if d.get("garbled"):
+        d["reason"] = "garbled output (likely wrong baud rate)"
+    elif d.get("shell_prompt_seen"):
         d["reason"] = "reached shell prompt"
     elif not d.get("any_output"):
         d["reason"] = ("no output after %d Enter nudge(s) — silent line, wrong "

@@ -188,6 +188,28 @@ def test_disconnected_spoke_cached_ports_warm_start():
     assert "con-9" in body["stale_spokes"]
 
 
+def test_admin_gets_every_connected_console_for_dpa():
+    """A console server with no visible port (no ports at all here) must still
+    be listed by name so an admin can enable DPA on it."""
+    hub = _Hub(connected=["con-1", "con-3"],
+               ports_by_spoke={"con-1": [_port("ttyUSB0", "sw", "sw01")]})
+    hub.state = _State(names={"con-1": "mipbe-con01", "con-3": "mipbe-con03"})
+    body = _build(hub).get("/api/console/ports").json()
+    assert body["dpa_consoles"] == [{"spoke_id": "con-1", "name": "mipbe-con01"},
+                                    {"spoke_id": "con-3", "name": "mipbe-con03"}]
+
+
+def test_nonadmin_gets_no_dpa_console_list(monkeypatch):
+    hub = _Hub(connected=["con-1"], ports_by_spoke={"con-1": [_port("ttyUSB0")]})
+    ctx = _ctx()
+    ctx._is_admin = lambda sess: False
+    app = FastAPI()
+    app.state.hub = hub
+    console.register(app, hub, ctx)
+    body = TestClient(app).get("/api/console/ports").json()
+    assert "dpa_consoles" not in body
+
+
 def test_spoke_down_no_cache_falls_back_to_error():
     hub = _Hub(connected=["con-1"], fail=["con-1"])
     c = _build(hub)
