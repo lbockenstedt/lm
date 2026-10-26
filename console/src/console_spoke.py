@@ -1591,6 +1591,15 @@ class ConsoleSpoke(BaseSpoke):
 
         h = self._health_rec(pid)
         boot = h.get("boot")
+        if boot is not None and boot.get("state") == "stuck" \
+                and not (boot.get("transcript_tail") or "").strip():
+            # The episode never produced readable text: it was started by line
+            # noise (baud mismatch / unplugged adapter bytes), not a boot. With
+            # nothing to show, "boot stuck" is a false alarm that otherwise
+            # never expires on a silent line, so drop back to idle.
+            boot["state"] = "idle"
+            boot["stuck_reason"] = ""
+            boot["reason"] = "line noise only — no readable boot output"
 
         chan = self.sessions.channel(pid)
         if chan is not None and getattr(chan, "capture", None):
