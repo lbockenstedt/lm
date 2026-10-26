@@ -12,6 +12,19 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-10-26
 
+### NetBox
+
+- **Network-device pushes to NetBox work for tenant-attributed devices again.** POLL NOW /
+  nw device pushes failed with "failed to list NetBox devices: 400 Bad Request" (wrong tenant
+  filter). See [netbox.md](netbox.md).
+- **VM primary IPs move off stale owners.** The hypervisor VM sync no longer fails with
+  "Cannot reassign IP address while it is designated as the primary IP for the parent
+  object": the IP's old device (or stale duplicate VM) gives it up as primary first, and gets it
+  back if the move still fails.
+- **Quieter hub log for a tenant with sim quotas but no client-sim spoke bound.** The 45s
+  re-push now logs once when it stalls plus the hourly "STILL stale" warning, not two INFO lines
+  every tick.
+
 ### WebUI
 
 - **Choose your default tenant.** In the header tenant picker, click **☆** next to a tenant
