@@ -1,6 +1,6 @@
 """``routes/os_updates.py`` — admin gating + the auto-check schedule endpoints.
 
-Pins the new "auto-check every N hours" feature (Setup -> OS Updates): a
+Pins the new "auto-check every N hours" feature (OS Updates view): a
 GET/POST pair at ``/api/os-updates/auto-check`` that reads/writes the hub's
 ``osu_autocheck_config()`` / ``osu_set_autocheck_config()`` (HubOsUpdatesMixin,
 see ``test_hub_os_updates.py`` for the mixin-level contract). This module only
