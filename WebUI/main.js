@@ -28589,7 +28589,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
             const overrideCell = !showOverrideCol ? '' : `<td class="px-4 py-2 text-xs whitespace-nowrap">${
                 !isHost ? '<span class="text-slate-300">—</span>'
                 : `${assigned ? `<span class="px-2 py-0.5 rounded-full font-medium ${assigned.exact ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'}" title="${assigned.exact ? 'Assigned to this device' : 'Inherited from subnet ' + escapeHtml(assigned.target)}">${escapeHtml(assigned.profile)}</span>` : '<span class="text-slate-400">none</span>'}${
-                    canAssign ? ` <button onclick="dnsOverrideForRecord(${idx})" title="Apply or remove a DNS override profile for this device" class="ml-1 text-[#01A982] hover:underline font-bold">Override…</button>` : ''}`
+                    canAssign ? ` <button onclick="dnsOverrideForRecord(${idx})" title="Apply or remove a DNS override profile for this device or its subnet" class="ml-1 text-[#01A982] hover:underline font-bold">Override…</button>` : ''}`
             }</td>`;
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                 ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(r._tenant || '—')}</td>` : ''}
@@ -31603,7 +31603,7 @@ function _dnsOverridesView(d, editIcon, delIcon) {
         unreachable: 'bg-red-100 text-red-700', unknown: 'bg-slate-100 text-slate-600' };
     const memberHtml = members.length ? `<div class="flex flex-wrap gap-2 mb-4 text-xs">${members.map(m =>
         `<span class="px-2 py-1 rounded-md ${convColor[m.convergence] || convColor.unknown}" title="${escapeHtml(m.error || m.convergence)}">${escapeHtml(m.display_name || m.id)}: ${escapeHtml(m.convergence)}</span>`).join('')}</div>` : '';
-    const intro = `<p class="text-sm text-slate-500 mb-3">Override profiles give chosen clients different DNS answers. Assign a profile to a device IP (or an admin can assign a whole subnet); that client's queries are answered from the profile first and fall back to normal resolution for everything else. Apply a profile to a single device from the <b>Records</b> tab with <b>Override…</b>.</p>`;
+    const intro = `<p class="text-sm text-slate-500 mb-3">Override profiles give chosen clients different DNS answers. Assign a profile to a device IP or a whole subnet; that client's queries are answered from the profile first and fall back to normal resolution for everything else. Apply a profile from the <b>Records</b> tab with <b>Override…</b> (to that device or its subnet), or use <b>+ Assign</b> to enter any IP or subnet.</p>`;
     const profRows = profiles.map(p => {
         const n = String(p.name).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         return `<tr class="border-b border-slate-100 hover:bg-slate-50">
@@ -31619,7 +31619,7 @@ function _dnsOverridesView(d, editIcon, delIcon) {
     }).join('');
     const asgRows = assignments.map(a => {
         const t = String(a.target).replace(/'/g, "\\'");
-        const removable = admin || (canAssign && /\/(32|128)$/.test(a.target));
+        const removable = canAssign;
         return `<tr class="border-b border-slate-100 hover:bg-slate-50">
             <td class="px-4 py-2 font-mono">${escapeHtml(a.target)}</td>
             <td class="px-4 py-2 text-xs text-slate-600">${escapeHtml(a.label || '')}</td>
@@ -31732,7 +31732,41 @@ async function deleteDnsOverrideProfile(name) {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
-// Assign modal. `preset` = {target, label, lock} when launched from a record row.
+// The default subnet offered for a device IP: its /24 (IPv4) or /64 (IPv6).
+function _dnsOverrideDefaultSubnet(ip) {
+    const v = String(ip || '').trim();
+    if (v.includes(':')) return `${v}/64`;
+    const o = v.split('.');
+    return o.length === 4 ? `${o[0]}.${o[1]}.${o[2]}.0/24` : v;
+}
+
+// The existing assignment whose target is exactly `target` (IP or CIDR), or null.
+function _dnsOverrideExact(target) {
+    let t = String(target || '').trim().toLowerCase();
+    if (t && !t.includes('/')) t += t.includes(':') ? '/128' : '/32';
+    return ((window._dnsOverrides || {}).assignments || []).find(a => String(a.target).toLowerCase() === t) || null;
+}
+
+// Record-row modal: switch the target between the device IP and a subnet.
+function _dnsOverrideScopeChanged() {
+    const modal = document.getElementById('dns-override-assign-modal');
+    const input = document.getElementById('dns-ova-target');
+    if (!modal || !input) return;
+    const subnet = document.getElementById('dns-ova-scope')?.value === 'subnet';
+    const ip = modal.dataset.deviceIp || '';
+    input.value = subnet ? _dnsOverrideDefaultSubnet(ip) : ip;
+    input.readOnly = !subnet;
+    input.classList.toggle('bg-slate-50', !subnet);
+    input.classList.toggle('cursor-not-allowed', !subnet);
+    const existing = _dnsOverrideExact(input.value);
+    const sel = document.getElementById('dns-ova-profile');
+    if (sel) sel.value = existing ? existing.profile : '';
+    const label = document.getElementById('dns-ova-label');
+    if (label) label.value = existing ? (existing.label || '') : (subnet ? '' : modal.dataset.deviceLabel || '');
+}
+
+// Assign modal. `preset` = {target, label, lock} when launched from a record row;
+// there the target starts as the device IP and can be switched to a subnet.
 function showDnsOverrideAssignModal(preset) {
     const d = window._dnsOverrides || {};
     const profiles = d.profiles || [];
@@ -31743,12 +31777,20 @@ function showDnsOverrideAssignModal(preset) {
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const opts = (p.lock ? [`<option value="">None (normal DNS)</option>`] : [])
         .concat(profiles.map(x => `<option value="${escapeHtml(x.name)}" ${x.name === currentProfile ? 'selected' : ''}>${escapeHtml(x.name)}${x.description ? ' — ' + escapeHtml(x.description) : ''}</option>`)).join('');
+    const scopeHtml = p.lock ? `
+            <div class="space-y-1">
+                <label class="text-xs text-slate-500 font-bold uppercase">Apply to</label>
+                <select id="dns-ova-scope" onchange="_dnsOverrideScopeChanged()" class="${inputCls}">
+                    <option value="device">This device only (${escapeHtml(p.target || '')})</option>
+                    <option value="subnet">A subnet</option>
+                </select>
+            </div>` : '';
     openModal('dns-override-assign-modal', `
         <h3 class="text-lg font-bold text-[#263040]">DNS Override</h3>
-        <div class="space-y-3">
+        <div class="space-y-3">${scopeHtml}
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Client IP${isAdmin() ? ' or subnet' : ''}</label>
-                <input id="dns-ova-target" value="${escapeHtml(p.target || '')}" ${p.lock ? 'readonly' : ''} class="${inputCls}${p.lock ? ' bg-slate-50 cursor-not-allowed' : ''}" placeholder="${isAdmin() ? '10.1.2.3 or 10.1.2.0/24' : '10.1.2.3'}">
+                <label class="text-xs text-slate-500 font-bold uppercase">Client IP or subnet</label>
+                <input id="dns-ova-target" value="${escapeHtml(p.target || '')}" ${p.lock ? 'readonly' : ''} class="${inputCls}${p.lock ? ' bg-slate-50 cursor-not-allowed' : ''}" placeholder="10.1.2.3 or 10.1.2.0/24" title="A single IP, or a subnet in CIDR form (e.g. 10.1.2.0/24)${isAdmin() ? '' : ' inside your tenant\'s subnets'}">
                 ${current && !current.exact ? `<p class="text-xs text-amber-700">Currently inherits <b>${escapeHtml(current.profile)}</b> from ${escapeHtml(current.target)}. A device assignment takes precedence.</p>` : ''}
             </div>
             <div class="space-y-1">
@@ -31767,7 +31809,8 @@ function showDnsOverrideAssignModal(preset) {
     const modal = document.getElementById('dns-override-assign-modal');
     if (modal) {
         modal.dataset.returnTab = p.lock ? 'Records' : 'Overrides';
-        modal.dataset.hadExact = currentProfile ? '1' : '';
+        modal.dataset.deviceIp = p.lock ? (p.target || '') : '';
+        modal.dataset.deviceLabel = p.lock ? (p.label || '') : '';
     }
 }
 
@@ -31783,8 +31826,8 @@ async function saveDnsOverrideAssignment() {
     const profile = document.getElementById('dns-ova-profile')?.value || '';
     const label = (document.getElementById('dns-ova-label')?.value || '').trim();
     const tab = (modal && modal.dataset.returnTab) || 'Overrides';
-    if (!target) { showToast('Client IP is required', 'error'); return; }
-    if (!profile && !(modal && modal.dataset.hadExact)) { modal.remove(); return; }
+    if (!target) { showToast('Client IP or subnet is required', 'error'); return; }
+    if (!profile && !_dnsOverrideExact(target)) { modal.remove(); return; }
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/dns/override-assignment' + _dnsOverrideQS(), {
             method: profile ? 'POST' : 'DELETE',

@@ -133,7 +133,7 @@ Module view tabs: **Overview** (total-queries / cache-hit-ratio / recursion / up
 - **Edit a forwarder:** Forwarders tab → Edit action on a forwarder row → update upstream addresses (`PUT /api/dns/forwarders`).
 - **Delete a forwarder:** Forwarders tab → Delete action on a forwarder row → confirms and deletes forwarder (`DELETE /api/dns/forwarders`).
 - **Define an override profile (Global Admin):** Overrides tab → **+ Add Profile** → name (e.g. `PAVO-DEVICE`), one answer per line as `name TYPE value [ttl]`, and optional blocked names.
-- **Apply a profile to a device:** Records tab → **Override…** on the device's A/AAAA row → pick the profile (or *None* to remove it). Or Overrides tab → **+ Assign** → IP (a Global Admin may enter a subnet).
+- **Apply a profile to a device or subnet:** Records tab → **Override…** on the device's A/AAAA row → **Apply to** *This device only* or *A subnet* (pre-filled with the device's /24, or /64 for IPv6; editable) → pick the profile (or *None* to remove it). Or Overrides tab → **+ Assign** → any IP or CIDR subnet.
 - **Confirm the module is alive:** the module tile / `DNS_STATUS` should show Unbound `running` plus a non-zero `record_count` if you have records configured.
 
 ## Troubleshooting / common questions
@@ -163,7 +163,7 @@ Give specific clients (a device IP or a subnet) different DNS answers than every
 **Access.**
 - `GET /api/dns/overrides` — every profile; assignments are filtered to the caller's tenant prefixes when tenant-scoped (`tenant_scoped: true`).
 - `PUT /api/dns/overrides/profile` `{profile, old_name?}` / `DELETE /api/dns/overrides/profile` `{name, force?}` — **Global Admin only**. Delete refuses while the profile is assigned unless `force` (which also removes its assignments).
-- `POST /api/dns/override-assignment` `{target, profile, label?}` / `DELETE /api/dns/override-assignment` `{target}` — Global Admin for any IP/subnet; a tenant Admin only for a **single host IP inside their own subnets** (same constrained-write gate as records).
+- `POST /api/dns/override-assignment` `{target, profile, label?}` / `DELETE /api/dns/override-assignment` `{target}` — Global Admin for any IP/subnet; a tenant Admin only for a host IP or a subnet that lies **entirely inside their own subnets** (same constrained-write gate as records).
 
 **Gotchas.**
 - One profile per client: Unbound picks the **longest matching** `access-control-view`, so a device assignment beats its subnet's, and profiles don't stack.

@@ -1325,24 +1325,24 @@ def register(app, hub, ctx):
     # ── Per-client DNS override profiles (Unbound views) ─────────────────────
     # Profiles are shared resolver config → Global Admin only (also enforced by
     # the /api/dns/ admin write gate in api.py). Assignments follow the DNS
-    # record model: a tenant-admin may apply/remove a profile only for a single
-    # device IP inside their own tenant subnets; subnets stay admin-only.
-    def _dns_override_host_ip(target):
-        try:
-            net = ipaddress.ip_network(str(target or "").strip(), strict=False)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="target must be an IP address or subnet")
-        return str(net.network_address) if net.num_addresses == 1 else ""
-
+    # record model: a tenant-admin may apply/remove a profile only for a device
+    # IP or a subnet that lies entirely inside their own tenant subnets.
     async def _dns_override_constrain(request, target):
         sess = _session_user(request)
         if _is_admin(sess):
             return
-        ip = _dns_override_host_ip(target)
-        if not ip:
-            raise HTTPException(status_code=403,
-                                detail="Only a Global Admin may apply a DNS override to a whole subnet")
-        await _constrain_shared_write(request, {"ip": ip}, ["ip"], "DNS override")
+        try:
+            net = ipaddress.ip_network(str(target or "").strip(), strict=False)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="target must be an IP address or subnet")
+        if net.num_addresses == 1:
+            await _constrain_shared_write(request, {"ip": str(net.network_address)}, ["ip"], "DNS override")
+            return
+        own = _dns_prefix_nets(await access.resolve_prefixes(hub, sess))
+        if not any(net.version == n.version and net.subnet_of(n) for n in own):
+            raise HTTPException(
+                status_code=403,
+                detail="You may only apply a DNS override to a subnet inside your tenant's subnets")
 
     async def _dns_override_body(request):
         try:
@@ -1399,7 +1399,7 @@ def register(app, hub, ctx):
 
     @app.post("/api/dns/override-assignment")
     async def dns_override_assign(request: Request, tenant: str = None):
-        """Apply a profile to a device IP (or, admin only, a subnet)."""
+        """Apply a profile to a device IP or a subnet."""
         body = await _dns_override_body(request)
         target = body.get("target") or body.get("ip") or ""
         await _dns_override_constrain(request, target)
