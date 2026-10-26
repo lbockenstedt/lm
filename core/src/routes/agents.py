@@ -117,8 +117,7 @@ async def _load_roles_impl(hub, spoke_id, data):
                                 "message": "role is required"})
                 continue
             if rname == "ldap-server":
-                rcfg = _enrich_ldap_server_config(hub, rcfg)
-                rcfg = await _auto_cluster_ldap_server_config(hub, spoke_id, rcfg)
+                rcfg = await _ldap_server_load_config(hub, spoke_id, rcfg)
             try:
                 res = await hub.request_response(spoke_id, "LOAD_ROLE",
                                                  {"role": rname, "config": rcfg},
@@ -142,8 +141,7 @@ async def _load_roles_impl(hub, spoke_id, data):
     if not role:
         raise HTTPException(status_code=400, detail="role is required")
     if role == "ldap-server":
-        config = _enrich_ldap_server_config(hub, config)
-        config = await _auto_cluster_ldap_server_config(hub, spoke_id, config)
+        config = await _ldap_server_load_config(hub, spoke_id, config)
     # LOAD_ROLE on the multi-role agent shallow-clones the role's sibling repo on
     # first load — a network git clone that routinely exceeds the 5s default.
     result = await hub.request_response(spoke_id, "LOAD_ROLE",
@@ -167,6 +165,23 @@ async def _load_roles_impl(hub, spoke_id, data):
         if role == "ldap-server":
             await _auto_request_ldap_server_cert(hub, spoke_id, config)
     return payload
+
+
+async def _ldap_server_load_config(hub, spoke_id, cfg):
+    """Config for loading ``ldap-server`` on ``spoke_id``. Once Setup ->
+    Directory has been saved, the node joins that cluster with the stored
+    domain/admin account (see ldap_cluster.join_config); before that, the
+    legacy per-load fields plus 2-node auto-pairing apply."""
+    import ldap_cluster
+    try:
+        joined = await ldap_cluster.join_config(hub, spoke_id, cfg)
+    except Exception as e:  # noqa: BLE001 — never block the deploy
+        logger.warning("ldap-server: joining the directory cluster failed: %s", e)
+        joined = None
+    if joined is not None:
+        return _enrich_ldap_server_config(hub, joined)
+    cfg = _enrich_ldap_server_config(hub, cfg)
+    return await _auto_cluster_ldap_server_config(hub, spoke_id, cfg)
 
 
 def _enrich_ldap_server_config(hub, cfg):
