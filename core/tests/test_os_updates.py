@@ -217,7 +217,7 @@ def test_check_reports_features_and_blocker(monkeypatch):
     seen = []
     monkeypatch.setattr(os_update, "_run", lambda argv, t: (seen.append(argv), _R())[1])
     r = os_update.check_updates(refresh=True)
-    assert r["features"] == ["packages", "reboot"]
+    assert r["features"] == ["packages", "reboot", "fix_access"]
     assert "lm-os-update" in r["apply_blocker"]
     # Blocked node: no privileged refresh attempted, just the unprivileged list.
     assert seen == [["apt", "list", "--upgradable"]]
@@ -245,3 +245,102 @@ def test_helper_script_rejects_bad_package_names_before_apt():
         assert r.returncode == 2 and "invalid package name" in r.stderr
     r = subprocess.run(["bash", str(helper), "rm"], capture_output=True, text=True)
     assert r.returncode == 2
+
+
+# ── fix_access: one-time root/sudo login installs the helper ─────────────────
+
+_FAKE_SU = r'''
+import getpass, sys
+pw = getpass.getpass("Password: ")
+sys.exit(0 if pw == "s3cret" else 1)
+'''
+
+
+def test_password_is_typed_at_the_prompt_over_a_pty(tmp_path):
+    script = tmp_path / "fake_su.py"
+    script.write_text(_FAKE_SU)
+    rc, out = os_update._run_with_password([sys.executable, str(script)], "s3cret", 1, 20)
+    assert rc == 0
+    assert "s3cret" not in out
+    rc, _ = os_update._run_with_password([sys.executable, str(script)], "wrong", 1, 20)
+    assert rc == 1
+
+
+def test_a_second_prompt_beyond_the_limit_is_a_failure_not_a_hang(tmp_path):
+    script = tmp_path / "reprompt.py"
+    script.write_text("import getpass\nwhile True: getpass.getpass('Password: ')\n")
+    rc, _ = os_update._run_with_password([sys.executable, str(script)], "x", 1, 20)
+    assert rc == -1
+
+
+def test_install_script_embeds_helper_and_validates_sudoers():
+    s = os_update._install_script(b"#!/bin/bash\necho hi\n", "svc_lm")
+    assert "base64 -d > /usr/local/bin/lm-os-update.new" in s
+    assert "svc_lm ALL=(ALL) NOPASSWD: /usr/local/bin/lm-os-update *" in s
+    assert s.index("visudo -cf") < s.index("mv -f /etc/sudoers.d/lm-os-update.new")
+    # Helper last: a failed sudoers step must leave the node still "blocked".
+    assert s.index("mv -f /etc/sudoers.d/lm-os-update.new") < s.index("mv -f /usr/local/bin/lm-os-update.new")
+
+
+def _blocked(monkeypatch):
+    state = {"blocked": True}
+    monkeypatch.setattr(os_update, "_privilege_blocker",
+                        lambda: "blocked" if state["blocked"] else "")
+    return state
+
+
+def test_fix_access_is_a_noop_when_not_blocked(monkeypatch):
+    monkeypatch.setattr(os_update, "_privilege_blocker", lambda: "")
+    assert os_update.fix_access("root", "pw")["status"] == "SUCCESS"
+
+
+def test_fix_access_root_uses_su_and_one_prompt(monkeypatch):
+    state = _blocked(monkeypatch)
+    calls = []
+
+    def _fake(argv, password, max_prompts, timeout):
+        calls.append((argv, password, max_prompts))
+        state["blocked"] = False
+        return 0, ""
+
+    class _R:
+        returncode = 0
+    monkeypatch.setattr(os_update, "_run_with_password", _fake)
+    monkeypatch.setattr(os_update, "_run", lambda argv, t: _R())
+    r = os_update.fix_access("root", "pw")
+    assert r["status"] == "SUCCESS"
+    argv, password, max_prompts = calls[0]
+    assert argv[:3] == ["su", "root", "-c"] and argv[3].startswith("sh -c ")
+    assert password == "pw" and max_prompts == 1
+    assert "pw" not in argv[3].split()  # never on the command line
+
+
+def test_fix_access_sudo_user_goes_through_sudo(monkeypatch):
+    state = _blocked(monkeypatch)
+    calls = []
+
+    def _fake(argv, password, max_prompts, timeout):
+        calls.append((argv, max_prompts))
+        state["blocked"] = False
+        return 0, ""
+
+    class _R:
+        returncode = 0
+    monkeypatch.setattr(os_update, "_run_with_password", _fake)
+    monkeypatch.setattr(os_update, "_run", lambda argv, t: _R())
+    assert os_update.fix_access("admin", "pw")["status"] == "SUCCESS"
+    argv, max_prompts = calls[0]
+    assert argv[1] == "admin" and argv[3].startswith("sudo -S ") and max_prompts == 2
+
+
+def test_fix_access_reports_a_wrong_password(monkeypatch):
+    _blocked(monkeypatch)
+    monkeypatch.setattr(os_update, "_run_with_password", lambda *a: (1, "su: Authentication failure"))
+    r = os_update.fix_access("root", "bad")
+    assert r["status"] == "ERROR" and "Authentication failure" in r["message"]
+
+
+def test_fix_access_refuses_bad_input(monkeypatch):
+    _blocked(monkeypatch)
+    assert os_update.fix_access("root; rm -rf /", "pw")["status"] == "ERROR"
+    assert os_update.fix_access("root", "")["status"] == "ERROR"
