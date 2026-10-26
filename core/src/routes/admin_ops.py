@@ -596,6 +596,31 @@ def register(app, hub, ctx):
                        tid, allow, (result or {}).get("status"))
         return {"status": "ok", "result": result}
 
+    @app.post("/admin/ops/dot1x-jit-selftest")
+    async def admin_ops_dot1x_jit_selftest(request: Request):
+        """Create, rotate and delete a throwaway JIT 802.1X account on each
+        backend for one tenant, to prove Entra / LDAP / ClearPass all work.
+
+        Body: ``{"tenant_id": "...", "backends": ["entra","ldap","clearpass"]}``
+        (backends optional, default all). See ``dot1x_jit.selftest``."""
+        _guard(request)
+        import dot1x_jit
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        tid = str((body or {}).get("tenant_id") or "").strip()
+        if not tid:
+            raise HTTPException(status_code=400, detail="tenant_id required")
+        backends = (body or {}).get("backends") or list(dot1x_jit.BACKENDS)
+        bad = [b for b in backends if b not in dot1x_jit.BACKENDS]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"unknown backend(s): {bad}")
+        results = await dot1x_jit.selftest(hub, tid, backends)
+        logger.warning("admin_ops: dot1x-jit-selftest tenant=%s -> %s", tid,
+                       {r["backend"]: r["ok"] for r in results})
+        return {"status": "ok", "tenant_id": tid, "results": results}
+
     @app.get("/admin/ops/netbox-sso")
     async def admin_ops_netbox_sso_get(request: Request):
         """Loopback mirror of GET /setup/netbox-sso (no secret/key echoed)."""

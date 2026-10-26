@@ -319,3 +319,28 @@ def test_validation(hub):
     with pytest.raises(dj.Dot1xJitError):
         dj.normalize_username("bad user")
     assert dj.normalize_username(" JSmith ") == "jsmith"
+
+
+def test_selftest_runs_full_lifecycle_without_delivering(hub):
+    out = run(dj.selftest(hub, "t1", ["ldap", "clearpass"]))
+    assert [r["ok"] for r in out] == [True, True]
+    assert [s["step"] for s in out[0]["steps"]] == ["provision", "rotate", "delete"]
+    assert hub.cmds("LDAP_DELETE_USER") and hub.cmds("CPPM_DELETE_LOCAL_USER")
+    assert not _creds(hub)                 # nothing pushed to any cs spoke
+    assert dj.list_accounts(hub) == []     # nothing left behind
+
+
+def test_selftest_deletes_even_when_rotate_fails(hub):
+    hub.fail["LDAP_SET_PASSWORD"] = "boom"
+    out = run(dj.selftest(hub, "t1", ["ldap"]))
+    steps = {s["step"]: s["ok"] for s in out[0]["steps"]}
+    assert steps == {"provision": True, "rotate": False, "delete": True}
+    assert out[0]["ok"] is False
+    assert dj.list_accounts(hub) == []
+
+
+def test_selftest_reports_provision_failure(hub):
+    hub.fail["LDAP_CREATE_USER"] = "server down"
+    out = run(dj.selftest(hub, "t1", ["ldap"]))
+    assert out[0]["ok"] is False
+    assert out[0]["steps"] == [{"step": "provision", "ok": False, "error": "server down"}]
