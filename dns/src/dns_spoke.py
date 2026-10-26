@@ -33,7 +33,7 @@ RECONCILE_INTERVAL_S = 30.0
 
 _OVERRIDE_COMMANDS = (
     "DNS_OVERRIDES", "DNS_OVERRIDE_PROFILE_SET", "DNS_OVERRIDE_PROFILE_DELETE",
-    "DNS_OVERRIDE_ASSIGN", "DNS_OVERRIDE_UNASSIGN",
+    "DNS_OVERRIDE_ASSIGN", "DNS_OVERRIDE_UNASSIGN", "DNS_OVERRIDES_VERIFY",
 )
 
 
@@ -92,6 +92,7 @@ class DNSSpoke(BaseSpoke):
       DNS_OVERRIDE_PROFILE_SET    — create/replace/rename an override profile
       DNS_OVERRIDE_PROFILE_DELETE — delete an (unassigned) override profile
       DNS_OVERRIDE_ASSIGN         — apply a profile to a client IP or subnet
+      DNS_OVERRIDES_VERIFY        — live check: views loaded + recent override answers
       DNS_OVERRIDE_UNASSIGN       — remove a client's override
     """
 
@@ -721,6 +722,8 @@ class DNSSpoke(BaseSpoke):
         try:
             if cmd == "DNS_OVERRIDES":
                 return await self.overrides.snapshot()
+            if cmd == "DNS_OVERRIDES_VERIFY":
+                return await self.overrides.verify(data.get("minutes") or 60)
             if cmd == "DNS_OVERRIDE_PROFILE_SET":
                 change = upsert_profile(data.get("profile") or {},
                                         old_name=data.get("old_name") or None)
@@ -729,7 +732,8 @@ class DNSSpoke(BaseSpoke):
                                         force=bool(data.get("force")))
             elif cmd == "DNS_OVERRIDE_ASSIGN":
                 change = assign(data.get("target") or data.get("ip"),
-                                data.get("profile") or "", data.get("label") or "")
+                                data.get("profile") or "", data.get("label") or "",
+                                data.get("comment") or "", data.get("old_target") or None)
             else:
                 change = unassign(data.get("target") or data.get("ip"))
             return await self.overrides.mutate(change)

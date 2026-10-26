@@ -18,13 +18,14 @@ import hashlib
 import json
 import logging
 import os
+import subprocess
 import time
 from typing import Any, Dict
 
 try:
-    from unbound_manager import UnboundManager
+    from unbound_manager import QUERY_LOG, UnboundManager
 except ImportError:  # loaded as a package (src.X)
-    from src.unbound_manager import UnboundManager
+    from src.unbound_manager import QUERY_LOG, UnboundManager
 
 try:
     from dns_cluster import (
@@ -35,12 +36,12 @@ except ImportError:  # loaded as a package (src.X)
 
 try:
     from dns_overrides import (
-        EMPTY_DIGEST, DnsOverrideError, overrides_digest, render_unbound,
-        validate_overrides)
+        EMPTY_DIGEST, RENDER_REVISION, DnsOverrideError, override_hits,
+        overrides_digest, parse_rendered, render_unbound, validate_overrides)
 except ImportError:  # loaded as a package (src.X)
     from src.dns_overrides import (  # type: ignore
-        EMPTY_DIGEST, DnsOverrideError, overrides_digest, render_unbound,
-        validate_overrides)
+        EMPTY_DIGEST, RENDER_REVISION, DnsOverrideError, override_hits,
+        overrides_digest, parse_rendered, render_unbound, validate_overrides)
 
 logger = logging.getLogger("DNSWorker")
 
@@ -236,15 +237,22 @@ class DnsWorkerOps:
         digest = overrides_digest(clean)
         claimed = str(data.get("digest") or "")
         if claimed and claimed != digest:
+            logger.warning("Rejected DNS override set v%s: digest mismatch", data.get("version"))
             return {"status": "ERROR", "rejected": True,
                     "message": (f"override digest mismatch (coordinator "
                                 f"{claimed[:12]}…, local {digest[:12]}…)")}
         text = render_unbound(clean)
         result = self.mgr.write_overrides(text)
         if result.get("status") != "SUCCESS":
+            logger.warning("DNS override set v%s failed to apply: %s",
+                           data.get("version"), result.get("message") or result)
             return result
+        logger.info("Serving DNS overrides v%s: %d profile(s), %d assignment(s)%s",
+                    data.get("version"), len(clean["profiles"]), len(clean["assignments"]),
+                    "" if result.get("changed") else " (unchanged)")
         marker = {"version": data.get("version"), "digest": digest,
-                  "file_sha": self._text_sha(text), "at": time.time()}
+                  "file_sha": self._text_sha(text), "render": RENDER_REVISION,
+                  "at": time.time()}
         try:
             directory = os.path.dirname(self._overrides_marker_path)
             if directory:
@@ -270,6 +278,8 @@ class DnsWorkerOps:
         marker = self._load_overrides_marker()
         if text is None and not marker:
             digest = EMPTY_DIGEST
+        elif marker.get("render", 1) != RENDER_REVISION:
+            digest = None  # rendered by an older worker: ask for a re-push
         elif marker.get("file_sha") == self._text_sha(text):
             digest = marker.get("digest")
         else:
@@ -277,6 +287,59 @@ class DnsWorkerOps:
         return {"status": "SUCCESS", "digest": digest,
                 "version": marker.get("version"),
                 "present": text is not None}
+
+    def _read_log_tail(self, max_bytes: int = 8 * 1024 * 1024):
+        try:
+            with open(QUERY_LOG, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, fh.tell() - max_bytes))
+                return fh.read().decode("utf-8", "replace").splitlines()
+        except FileNotFoundError:
+            return None
+
+    @staticmethod
+    def _read_journal(minutes: int):
+        try:
+            r = subprocess.run(["journalctl", "-u", "unbound", "--no-pager", "-o", "short-unix",
+                                "--since", f"{int(minutes)} min ago"],
+                               capture_output=True, text=True, timeout=15)
+            return r.stdout.splitlines()
+        except Exception:  # noqa: BLE001
+            return []
+
+    def overrides_verify(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """``DNSW_OVERRIDES_VERIFY`` — live proof the overrides work here: each
+        view as loaded in the RUNNING Unbound, plus recent queries from assigned
+        clients that were answered (or blocked) from their view."""
+        try:
+            minutes = max(1, min(int((data or {}).get("minutes") or 60), 7 * 1440))
+        except (TypeError, ValueError):
+            minutes = 60
+        rendered = parse_rendered(self.mgr.read_overrides() or "")
+        views = []
+        for view in rendered["views"]:
+            try:
+                r = subprocess.run(["unbound-control", "view_list_local_data", view],
+                                   capture_output=True, text=True, timeout=10)
+                loaded = r.returncode == 0
+                error = "" if loaded else (r.stderr or r.stdout or "unbound-control failed").strip()[:300]
+                answers = len([ln for ln in r.stdout.splitlines() if ln.strip()]) if loaded else 0
+            except Exception as e:  # noqa: BLE001
+                loaded, error, answers = False, str(e), 0
+            views.append({"view": view, "loaded": loaded, "answers": answers, "error": error})
+        opt = self.mgr._run_diag(["unbound-control", "get_option", "log-local-actions"])
+        since = time.time() - minutes * 60
+        lines, source = self._read_log_tail(), QUERY_LOG
+        hits = override_hits(lines or [], rendered, since, self.mgr._line_epoch)
+        if not hits:
+            # Unbound logs to the journal when its logfile is unusable (AppArmor).
+            journal = self._read_journal(minutes)
+            journal_hits = override_hits(journal, rendered, since, self.mgr._line_epoch)
+            if journal_hits or lines is None:
+                hits, source = journal_hits, ("journal" if journal else "")
+        return {"status": "SUCCESS", "views": views, "hits": hits,
+                "log_local_actions": opt["output"].strip() == "yes" if opt["ok"] else None,
+                "log_source": source}
 
     def op_table(self) -> Dict[str, Any]:
         return {
@@ -292,6 +355,7 @@ class DnsWorkerOps:
             "DNSW_FORWARDER_REMOVE": self.remove_forwarder,
             "DNSW_OVERRIDES_APPLY": self.overrides_apply,
             "DNSW_OVERRIDES_STATE": self.overrides_state,
+            "DNSW_OVERRIDES_VERIFY": self.overrides_verify,
             "DNSW_STANDDOWN": self.standdown,
         }
 

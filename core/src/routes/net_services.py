@@ -1374,6 +1374,30 @@ def register(app, hub, ctx):
             data = {**data, "assignments": kept, "tenant_scoped": True}
         return data
 
+    @app.get("/api/dns/overrides/verify")
+    async def dns_overrides_verify(request: Request, tenant: str = None, minutes: int = 60):
+        """Live proof the overrides work: per resolver, whether each profile's
+        view is loaded in the running Unbound, and recent queries from assigned
+        clients answered from it. Tenant-scoped callers see only their clients."""
+        source_prefixes = await _dns_query_source_prefixes(request, tenant)
+        data = await _relay_spoke(_dns_spoke_for_request(request, tenant),
+                                  "DNS_OVERRIDES_VERIFY", {"minutes": minutes},
+                                  log_name="dns_overrides_verify", timeout=30)
+        if source_prefixes is not None and isinstance(data, dict):
+            nets = _dns_prefix_nets(source_prefixes)
+
+            def _mine(value):
+                try:
+                    net = ipaddress.ip_network(str(value), strict=False)
+                except ValueError:
+                    return False
+                return any(net.version == n.version and net.subnet_of(n) for n in nets)
+            data = {**data, "tenant_scoped": True,
+                    "hits": [h for h in data.get("hits") or [] if _mine(h.get("client"))],
+                    "assignments": [a for a in data.get("assignments") or []
+                                    if _mine(a.get("target"))]}
+        return data
+
     @app.put("/api/dns/overrides/profile")
     async def dns_override_profile_set(request: Request, tenant: str = None):
         """Create, replace or rename (``old_name``) an override profile."""
@@ -1399,14 +1423,19 @@ def register(app, hub, ctx):
 
     @app.post("/api/dns/override-assignment")
     async def dns_override_assign(request: Request, tenant: str = None):
-        """Apply a profile to a device IP or a subnet."""
+        """Apply a profile to a device IP or a subnet. ``old_target`` edits an
+        existing override onto a new IP/subnet (the old one is removed in the
+        same change)."""
         body = await _dns_override_body(request)
         target = body.get("target") or body.get("ip") or ""
         await _dns_override_constrain(request, target)
+        payload = {"target": target, "profile": body.get("profile", ""),
+                   "label": body.get("label", ""), "comment": body.get("comment", "")}
+        if body.get("old_target"):
+            await _dns_override_constrain(request, body["old_target"])
+            payload["old_target"] = body["old_target"]
         return await _relay_spoke(_dns_spoke_for_request(request, tenant),
-                                  "DNS_OVERRIDE_ASSIGN",
-                                  {"target": target, "profile": body.get("profile", ""),
-                                   "label": body.get("label", "")},
+                                  "DNS_OVERRIDE_ASSIGN", payload,
                                   log_name="dns_override_assign", timeout=45)
 
     @app.delete("/api/dns/override-assignment")
