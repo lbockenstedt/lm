@@ -606,3 +606,48 @@ def register(app, hub, ctx):
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"push failed: {e}")
         return {"status": "ok", "pushed_to_spokes": len(spokes)}
+
+    # ── Setup → Directory: one-form setup (domain + admin account) ───────────
+    # The hub discovers the ldap-server nodes itself, resets their admin
+    # password, wires replication between them and points the Directory spoke
+    # at all of them (ldap_cluster.py). /setup/* is Global-Admin only (api.py).
+    @app.get("/setup/ldap-directory")
+    async def get_ldap_directory_route():
+        import cred_vault as _cv
+        import ldap_cluster
+        stored = ldap_cluster.stored_setup(hub)
+        servers = await ldap_cluster.discover(hub)
+        try:
+            connected = len(hub.get_all_spokes_by_type("directory") or [])
+        except Exception:  # noqa: BLE001
+            connected = 0
+        return {
+            "domain": stored.get("domain", ""),
+            "admin_user": stored.get("admin_user", ""),
+            "base_dn": stored.get("base_dn", ""),
+            "admin_dn": stored.get("admin_dn", ""),
+            "server_url": stored.get("server_url", ""),
+            "admin_pw_set": bool(stored.get("admin_pw")),
+            "vault_secret": f"{_cv.ADMIN_BUCKET}/{ldap_cluster.VAULT_SECRET}",
+            "vault_psk_required": _cv.bucket_has_psk(hub, _cv.ADMIN_BUCKET),
+            "servers": servers,
+            "spokes_connected": connected,
+        }
+
+    @app.post("/setup/ldap-directory")
+    async def apply_ldap_directory_route(request: Request):
+        import ldap_cluster
+        try:
+            data = await request.json()
+        except Exception:  # noqa: BLE001
+            data = {}
+        data = data or {}
+        sess = _session_user(request) or {}
+        actor = (sess.get("user", {}) or {}).get("username", "?")
+        try:
+            return {"status": "ok", **await ldap_cluster.apply_setup(
+                hub, str(data.get("domain") or ""), str(data.get("admin_user") or ""),
+                admin_pw=str(data.get("admin_pw") or ""), psk=str(data.get("psk") or ""),
+                actor=actor)}
+        except ldap_cluster.LdapSetupError as e:
+            raise HTTPException(status_code=400, detail=str(e))
