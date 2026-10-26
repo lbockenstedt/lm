@@ -327,6 +327,36 @@ def test_restore_last_known_from_hostname_history(spoke):
     assert p["restored_from"] == "hostname_history"
 
 
+def test_restore_skips_a_name_another_port_holds(spoke):
+    spoke.store.update("pid-1", probe={"identity": {"hostname": "MIA-SW-AOSS"}, "source": "active"})
+    spoke.store.update("pid-2", probe={"identity": {}, "source": "active"})
+    spoke._health["pid-2"] = {"identify": {"hostname_history": [{"host": "mia-sw-aoss", "ts": 1}]}}
+    spoke._restore_last_known()
+    assert spoke.store.get("pid-2")["probe"]["identity"] == {}
+
+
+def test_restore_skips_a_name_several_ports_claim(spoke):
+    for pid in ("pid-2", "pid-3"):
+        spoke.store.update(pid, probe={"identity": {}, "source": "active"})
+        spoke._health[pid] = {"identify": {"hostname_history": [{"host": "MIA-SW-AOSS", "ts": 1}]}}
+    spoke.store.update("pid-4", probe={"identity": {}, "source": "active"})
+    spoke._health["pid-4"] = {"identify": {"hostname_history": [{"host": "MIA-GW-01", "ts": 1}]}}
+    spoke._restore_last_known()
+    assert spoke.store.get("pid-2")["probe"]["identity"] == {}
+    assert spoke.store.get("pid-3")["probe"]["identity"] == {}
+    assert spoke.store.get("pid-4")["probe"]["identity"] == {"hostname": "MIA-GW-01"}
+
+
+def test_restore_clears_an_earlier_duplicate_restore(spoke):
+    spoke.store.update("pid-1", probe={"identity": {"hostname": "MIA-SW-AOSS"}, "source": "active"})
+    spoke.store.update("pid-2", probe={"identity": {"hostname": "MIA-SW-AOSS"}, "source": "restored",
+                                       "stale": True, "restored_from": "hostname_history"})
+    spoke._health["pid-2"] = {"identify": {"hostname_history": [{"host": "MIA-SW-AOSS", "ts": 1}]}}
+    spoke._restore_last_known()
+    p = spoke.store.get("pid-2")["probe"]
+    assert p["identity"] == {} and p["source"] == "active" and not p["stale"]
+
+
 def test_restore_never_overrides_existing_identity(spoke):
     spoke.devices.remember({"hostname": "cached"}, port_id="pid-1")
     spoke.store.update("pid-1", probe={"identity": {"hostname": "live"}, "source": "active"})
