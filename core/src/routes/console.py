@@ -1279,8 +1279,15 @@ def register(app, hub, ctx):
 
         all_spokes = list(spokes) + [s for s in stale_spokes if s not in spokes]
         consoles = all_spokes if sel is None else [s for s in all_spokes if s in visible_spokes]
-        return {"consoles": consoles, "ports": ports, "errors": errors,
-                "stale_spokes": sorted(stale_spokes)}
+        out = {"consoles": consoles, "ports": ports, "errors": errors,
+               "stale_spokes": sorted(stale_spokes)}
+        if admin:
+            # DPA is configured per console server (admin-only), so admins get
+            # every connected one by name, including servers with no port
+            # visible under the selected tenant.
+            out["dpa_consoles"] = [{"spoke_id": sid, "name": hub.state.get_module_name(sid) or sid}
+                                   for sid in spokes]
+        return out
 
     @app.get("/api/console/ports")
     async def console_ports(request: Request):

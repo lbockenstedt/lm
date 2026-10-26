@@ -1096,6 +1096,7 @@ def test_is_valid_device_ip():
     assert is_valid_device_ip("192.168.1.10") is True
     assert is_valid_device_ip("10.20.30.40") is True
     assert is_valid_device_ip("0.0.0.0") is False
+    assert is_valid_device_ip("128.0.0.1") is False  # Juniper internal RE address
     assert is_valid_device_ip("127.0.0.1") is False
     assert is_valid_device_ip("255.255.255.255") is False
     assert is_valid_device_ip("255.255.255.0") is False
@@ -1361,3 +1362,21 @@ def test_existing_single_device_identifies_report_no_ambiguity():
     res = fp.run_identify(chan.read, chan.write, [])
     assert res["identity"]["ip"] == "10.0.0.5"
     assert "ambiguous_fields" not in res
+
+
+def test_generic_login_rejects_garbled_line_ending_in_prompt_char():
+    """Wrong-baud noise that happens to end in '#' must not count as a shell."""
+    noise = bytearray(b"\r\n\xff\xfe\x81\x9c\xe3\x8f\xfa\x91\xd2#")
+
+    def read():
+        out = bytes(noise[:256]); del noise[:256]; return out
+
+    logged_in, _idx, _t, diag = fp._generic_login(read, lambda b: None, [], 0.2, 0.2)
+    assert logged_in is False and diag["garbled"] is True
+    assert fp._login_diag(diag, _t, [])["reason"].startswith("garbled")
+
+
+def test_is_garbled_keeps_real_prompts():
+    assert not fp._is_garbled("MIA-SW-AOSS# ")
+    assert not fp._is_garbled("root@host:~$ ")
+    assert fp._is_garbled("\ufffd\ufffd\ufffdx\ufffd#")

@@ -92,6 +92,23 @@ def test_first_seen_new_cable_is_profiled_immediately(monkeypatch, tmp_path):
     assert sp._seen_ports == {"usb-new"}
 
 
+def test_unopenable_port_is_not_identified_or_given_dpa(monkeypatch, tmp_path):
+    ports = [{"port_id": "uart-ttyS0", "device": "/dev/ttyS0"},
+             {"port_id": "usb-ok", "device": "/dev/ttyUSB0"}]
+    sp = _make_spoke(monkeypatch, tmp_path, {"auto_identify": True}, ports)
+    sp._unopenable["uart-ttyS0"] = {"error": "open failed: [Errno 5] EIO", "since": 1.0}
+    called = []
+
+    async def _fake_active(pid, dev):
+        called.append(pid)
+        return {}
+
+    sp._active_identify = _fake_active
+    asyncio.run(sp._autoprobe_scan())
+    assert called == ["usb-ok"]
+    assert [p["port_id"] for p in sp._dpa_ports()] == ["usb-ok"]
+
+
 def test_replug_clears_stale_retry_state(monkeypatch, tmp_path):
     # A port that has vanished has its retry/backoff/fail state cleared so a
     # re-plugged cable starts fresh instead of inheriting a stale give-up state.

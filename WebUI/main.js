@@ -22565,6 +22565,7 @@ async function pxmxCreateVmSubmit() {
 // is dynamic-imported from CDN once (mirrors how noVNC is loaded below).
 let _consolePorts = [];
 let _consoleSpokes = [];
+let _consoleDpaSpokes = [];
 let _xtermMod = null;
 
 async function loadConsoleData() {
@@ -22579,6 +22580,7 @@ async function loadConsoleData() {
         const data = await res.json();
         _consolePorts = data.ports || [];
         _consoleSpokes = data.consoles || [];
+        _consoleDpaSpokes = data.dpa_consoles || [];
         _renderConsolePorts(el, data);
     } catch (e) {
         el.innerHTML = `<div class="py-12 text-center text-red-400 italic">Error: ${escapeHtml(e.message)}</div>`;
@@ -24620,17 +24622,17 @@ function openConsoleDpaModal() {
   document.body.appendChild(modal);
 
   const spokeSelect = modal.querySelector('#dpa-spoke');
-  _consoleSpokes.forEach(spokeId => {
-    const port = _consolePorts.find(p => p.spoke_id === spokeId);
-    const label = (port && port.agent_name) || spokeId;
+  // Every connected console server (admin list from the hub), so a server with
+  // no port visible under the current tenant can still have DPA enabled.
+  _consoleDpaSpokes.forEach(({ spoke_id, name }) => {
     const option = document.createElement('option');
-    option.value = spokeId;
-    option.textContent = label;
+    option.value = spoke_id;
+    option.textContent = name || spoke_id;
     spokeSelect.appendChild(option);
   });
 
-  if (_consoleSpokes.length > 0) {
-    _consoleDpaLoad(_consoleSpokes[0]);
+  if (_consoleDpaSpokes.length > 0) {
+    _consoleDpaLoad(_consoleDpaSpokes[0].spoke_id);
   }
 }
 
