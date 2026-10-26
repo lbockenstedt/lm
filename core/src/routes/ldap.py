@@ -186,9 +186,7 @@ def register(app, hub, ctx):
         instead of returning the envelope with a 200 — otherwise the WebUI shows
         a false 'created' toast for an op that actually failed."""
         result = await hub.request_response(spoke_id, cmd, payload, timeout=20.0)
-        if isinstance(result, dict) and str(result.get("status", "")).upper() == "ERROR":
-            raise HTTPException(status_code=502,
-                                detail=result.get("message") or f"{cmd} failed on the LDAP server")
+        data = _ldap_unwrap(result, cmd)
         # Every _relay command is a write: refresh this OU's cached lists now
         # so the page shows the change (readers briefly wait for it).
         slug = (payload or {}).get("tenant_slug")
@@ -199,19 +197,29 @@ def register(app, hub, ctx):
                              if k.endswith(f"|{slug}"))
                 if keys:
                     hub.cache_refresh(ns, keys, exact=True)
-        return _ldap_unwrap(result)
+        return data
 
-    def _ldap_unwrap(result):
-        """Envelope → inner ``data``, treating an explicit ``data: null`` as NO
-        payload (fall back to the envelope). ``.get("data", result)`` only
-        defaults on an ABSENT key, so a null unwrapped to None and the route
-        returned HTTP 200 with a literal JSON ``null`` body — which the WebUI
-        dereferenced ("null is not an object")."""
-        if isinstance(result, dict):
-            data = result.get("data")
-            # `is not None`: an empty-but-real payload ({}, []) is data.
-            return data if data is not None else result
-        return result
+    def _ldap_unwrap(result, cmd):
+        """Spoke reply → the spoke's own result, raising 502 on an ERROR.
+
+        ``request_response`` returns the whole reply frame
+        (``{"header", "payload": {"data": <spoke result>}}``), so the spoke's
+        ``status`` is inside ``payload.data``. Checking only the top level
+        missed it: lists came back as the raw frame (the WebUI showed "no
+        users") and a failed write showed a false "created" toast.
+
+        A spoke result of ``{"status", "data": [...]}`` (lists) returns the
+        inner ``data``; one without ``data`` (create → ``dn``/``password``)
+        returns the result itself."""
+        body = access.unwrap_spoke(result)
+        if not isinstance(body, dict):
+            return body
+        if str(body.get("status", "")).upper() == "ERROR":
+            raise HTTPException(status_code=502,
+                                detail=body.get("message") or f"{cmd} failed on the LDAP server")
+        data = body.get("data")
+        # `is not None`: an empty-but-real payload ({}, []) is data.
+        return data if data is not None else body
 
     def ldap_cache_job(cmd: str, tid: str, slug: str) -> CacheJob:
         """Hub-cache job for a directory LIST (users or groups) of one tenant
@@ -224,12 +232,9 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=503, detail="No spoke connected")
             result = await hub.request_response(spoke_id, cmd, {"tenant_slug": slug},
                                                 timeout=20.0)
-            # Never cache an ERROR envelope as data (a SERVER_DOWN would hide
-            # the outage behind junk) — raise so last-known data is kept.
-            if isinstance(result, dict) and str(result.get("status", "")).upper() == "ERROR":
-                raise HTTPException(status_code=502,
-                                    detail=result.get("message") or f"{cmd} failed on the LDAP server")
-            return _ldap_unwrap(result)
+            # Never cache an ERROR as data (a SERVER_DOWN would hide the
+            # outage behind junk) — _ldap_unwrap raises so last-known data is kept.
+            return _ldap_unwrap(result, cmd)
         # Key = "<tenant id>|<OU slug>": the fetch goes to THIS tenant's
         # directory spoke, so two tenants that happen to map to the same OU
         # slug must never share an entry.
@@ -292,6 +297,7 @@ def register(app, hub, ctx):
             try:
                 result = await hub.request_response(spoke_id, "LIST_OUS",
                                                     {}, timeout=60.0)
+                result = access.unwrap_spoke(result)
                 if isinstance(result, dict) and \
                         str(result.get("status", "")).upper() == "ERROR":
                     ldap = {"status": "down",
