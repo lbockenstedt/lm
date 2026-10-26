@@ -41,6 +41,33 @@ from access import unwrap_spoke  # sibling leaf (no main/api back-import)
 logger = logging.getLogger("Hub")
 
 
+def _dedupe_by_cluster_vmid(raw_vms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One row per Proxmox VM.
+
+    ``unique_id`` is ``cluster/node/vmid``, so a VM that migrated can arrive
+    twice — once from the agent that sees the new node, once from a lagging
+    cluster-mate still reporting the old one. Same name + same cluster makes
+    NetBox reject the second create ("name must be unique per cluster"). A
+    vmid is unique across a Proxmox cluster, so keep only the freshest report
+    (highest ``telemetry_ts``; first seen wins a tie) per (cluster, vmid).
+    Rows without a cluster or vmid are kept as-is.
+    """
+    best: Dict[tuple, Dict[str, Any]] = {}
+    out: List[Dict[str, Any]] = []
+    for vm in raw_vms or []:
+        vm = vm or {}
+        cluster = str(vm.get("cluster") or "").strip()
+        vmid = str(vm.get("vmid") or "").strip()
+        if not cluster or not vmid:
+            out.append(vm)
+            continue
+        key = (cluster, vmid)
+        cur = best.get(key)
+        if cur is None or (vm.get("telemetry_ts") or 0) > (cur.get("telemetry_ts") or 0):
+            best[key] = vm
+    return out + list(best.values())
+
+
 class VmSyncMixin:
     """Pulls each tenant's VM inventory from a hypervisor source spoke and
     pushes it to the netbox (IPAM) spoke via ``NETBOX_SYNC_VMS`` so NetBox's
@@ -265,30 +292,40 @@ class VmSyncMixin:
         tenants = (self.state.tenant_state or {}).get("tenants", {}) or {}
         tag_to_tid, tid_to_cfg = self._vm_sync_tag_to_tid(tenants)
 
-        # One grab-all pull (no tag_filter — the spoke returns every VM).
+        # One grab-all pull (no tag_filter) from EVERY connected hypervisor
+        # spoke. Each spoke fronts a different Proxmox cluster; listing only
+        # the first one (get_spoke_by_type) and pushing with replace=True
+        # deleted every other cluster's VMs from NetBox, and which spoke came
+        # "first" changed with reconnects — the inventory flapped 213 <-> 25.
         list_payload: Dict[str, Any] = {}
         agent_id = str(self._vm_sync_cfg().get("agent_id") or "").strip()
         if agent_id:
             list_payload["agent_id"] = agent_id
+            spokes = [self.get_spoke_for_agent(agent_id) or hyp]
+        else:
+            spokes = self.get_all_spokes_by_type(
+                se.get("module_type", "hypervisor")) or [hyp]
+        failed: List[str] = []
         try:
-            r = await self.request_response(
-                hyp, se.get("list_command", "PXMX_LIST_VMS"),
-                list_payload, timeout=30.0)
-            data = unwrap_spoke(r) if isinstance(r, dict) else {}
-            if isinstance(data, dict) and data.get("status") == "ERROR":
-                msg = f"{label}: {data.get('message', 'error')}"
-                logger.info("vm sync ALL SKIP: %s returned ERROR: %s",
-                            label, data.get('message', 'error'))
-                return {"status": "error", "pushed": 0, "errors": 0, "skipped": 0,
-                        "deleted": 0, "vms_total": 0, "per_tenant": {},
-                        "results": [], "message": msg}
+            from routes.pxmx import _aggregate_pxmx_vms
+            data = await _aggregate_pxmx_vms(self, spokes, list_payload,
+                                             timeout=30.0, failed=failed)
             resp_key = se.get("response_key", "vms")
             raw_vms = (data.get(resp_key, []) if isinstance(data, dict) else []) or []
         except Exception as e:
-            logger.debug("vm sync ALL pull failed: %s", e)
+            logger.info("vm sync ALL SKIP: %s list failed on every spoke: %s", label, e)
             return {"status": "error", "pushed": 0, "errors": 0, "skipped": 0,
                     "deleted": 0, "vms_total": 0, "per_tenant": {},
-                    "results": [], "message": str(e)}
+                    "results": [], "message": f"{label}: {e}"}
+        raw_vms = _dedupe_by_cluster_vmid(raw_vms)
+        # Replace-delete is only safe on a COMPLETE inventory: if any spoke
+        # failed to answer, its VMs are missing from this batch and would be
+        # deleted. Upsert only this round; the next full run cleans up.
+        replace = not failed
+        if failed:
+            logger.warning("vm sync ALL: %d of %d %s spoke(s) did not answer (%s) "
+                           "— upserting only, no deletes this run",
+                           len(failed), len(spokes), label, ", ".join(failed))
 
         # Attribute + normalize each VM. tagged → that tenant's netbox slug;
         # untagged/no-match → tenant_slug None (NetBox creates it unassigned).
@@ -349,7 +386,7 @@ class VmSyncMixin:
         # "netbox" (NetBox owns → only-add-missing). Default external (Proxmox).
         sot = self._vm_sync_sot()
         payload = {"source": se.get("label", "Hypervisor"),
-                   "replace": True, "vms": vms,
+                   "replace": replace, "vms": vms,
                    "source_of_truth": sot}
         try:
             rr = await self.request_response(netbox, self._VM_SYNC_PUSH_COMMAND,
