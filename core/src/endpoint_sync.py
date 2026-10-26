@@ -137,8 +137,13 @@ class EndpointSyncMixin:
             n = 8
         return max(1, min(16, n))
 
-    async def sync_tenant_endpoints(self, tenant_id: str) -> Dict[str, Any]:
+    async def sync_tenant_endpoints(self, tenant_id: str,
+                                    allow_mass_remove: bool = False) -> Dict[str, Any]:
         """Pull this tenant's endpoints from the configured IPAM source, push to CPPM.
+
+        ``allow_mass_remove`` is only set by the operator one-off
+        (/admin/ops/endpoint-sync): it lets the CPPM spoke remove more than half
+        of the tenant's tagged endpoints when the IPAM data really shrank.
 
         Returns a status dict {tenant_id, status, pushed, errors, message,
         last_sync_ts, endpoints_total}. Idempotent + best-effort: an IPAM/CPPM
@@ -222,6 +227,8 @@ class EndpointSyncMixin:
             payload = {"tenant_id": tenant_id, "tenant_slug": scope,
                        "tenant_name": tenant_name, "source": se.get("label", "IPAM"),
                        "replace": True, "endpoints": endpoints}
+            if allow_mass_remove:
+                payload["allow_mass_remove"] = True
             # 185+ sequential endpoint PUTs to ClearPass can exceed the old 60s
             # ceiling → "Timed out waiting for spoke response" (the sync had
             # sent=185 pushed=185 but reported status=error). 180s matches the
