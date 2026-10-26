@@ -214,3 +214,19 @@ def test_join_with_offline_server_loads_standalone(vault):
     cfg = asyncio.run(lc.join_config(hub, "g4", {}))
     assert cfg["admin_pw"] == "pw1" and "server_id" not in cfg and "peers" not in cfg
     assert hub.load_roles == [] and lc.stored_setup(hub)["server_url"] == url_before
+
+
+def test_reapply_keeps_password_and_skips_vault(vault):
+    hub = _two_node_hub()
+    asyncio.run(lc.apply_setup(hub, "orange-tme.com", "Administrator", admin_pw="pw1"))
+    hub.load_roles.clear()
+    vault.clear()
+    res = asyncio.run(lc.reapply(hub))
+    assert {t for t, _ in hub.load_roles} == {"g1", "g2"}
+    assert all(p["config"]["admin_pw"] == "pw1" and p["force"] for _, p in hub.load_roles)
+    assert vault == {} and len(res["servers"]) == 2
+
+
+def test_reapply_requires_setup(vault):
+    with pytest.raises(lc.LdapSetupError):
+        asyncio.run(lc.reapply(_two_node_hub()))
