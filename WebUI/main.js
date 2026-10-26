@@ -2919,6 +2919,37 @@ function closeTenantPicker() {
     const m = document.getElementById('tenant-picker-menu');
     if (m) m.classList.add('hidden');
 }
+
+// ★ next to each tenant in the picker: the tenant LM opens on at sign-in.
+// Saved on the user's record by the hub, so it follows them to any browser.
+function _tenantDefaultStar(tenantId) {
+    const on = currentUser?.default_tenant === tenantId;
+    const tip = on ? 'Default tenant — click to clear' : 'Open on this tenant when I sign in';
+    return `<button data-default-tid="${escapeHtml(tenantId)}" onclick="setDefaultTenant('${escapeHtml(tenantId)}', event)" title="${tip}" aria-label="${tip}" class="px-2 py-1.5 text-[12px] leading-none ${on ? 'text-amber-300' : 'text-slate-500 hover:text-white'}">${on ? '★' : '☆'}</button>`;
+}
+
+async function setDefaultTenant(tenantId, evt) {
+    if (evt) evt.stopPropagation();  // starring must not switch tenant or close the menu
+    const clear = currentUser?.default_tenant === tenantId;
+    try {
+        const r = await fetch('/auth/default-tenant', {
+            method: 'PUT',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenant_id: clear ? null : tenantId }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || r.statusText);
+        currentUser.default_tenant = d.default_tenant;
+        document.querySelectorAll('#tenant-picker-menu button[data-default-tid]').forEach(b => {
+            b.outerHTML = _tenantDefaultStar(b.dataset.defaultTid);
+        });
+        const name = (window._lmTenantPicker || []).find(t => t.id === tenantId)?.name || tenantId;
+        showToast(clear ? 'Default tenant cleared' : `${name} is now your default tenant`, 'success');
+    } catch (e) {
+        showToast(`Could not save default tenant: ${e.message}`, 'error');
+    }
+}
 let _tpListenersBound = false;
 function _bindTenantPickerListeners() {
     if (_tpListenersBound) return;
@@ -36063,6 +36094,7 @@ async function _pingSession() {
                     tenants:      fresh.tenants      ?? currentUser.tenants,
                     tenant_id:    fresh.tenant_id    ?? currentUser.tenant_id,
                     protected:    fresh.protected    ?? currentUser.protected,
+                    default_tenant: fresh.default_tenant,
                 };
                 if (wasAdmin !== isAdmin()) {
                     // Admin status changed mid-session — re-render the sidebar so
@@ -36085,7 +36117,12 @@ async function _initApp() {
         // stale localStorage value from a previous session doesn't scope their view.
         const allowed = userAllowedTenants();
         let resolved;
-        if (currentUser?.protected && !allowed.length) {
+        // The user's chosen default tenant wins (the hub only returns it while
+        // the tenant exists and the user may still view it).
+        const preferred = currentUser?.default_tenant;
+        if (preferred && canAccessTenant(preferred)) {
+            resolved = preferred;
+        } else if (currentUser?.protected && !allowed.length) {
             resolved = 'default';
             localStorage.removeItem('lm_tenant');
         } else {
@@ -36163,10 +36200,13 @@ async function _initApp() {
                             </button>
                             <div id="tenant-picker-menu" class="hidden absolute top-full left-0 mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl z-50 min-w-[140px] max-h-[60vh] overflow-y-auto py-1">
                                 ${pickerTenants.map(t => `
-                                    <button data-tid="${escapeHtml(t.id)}" onclick="viewAsTenant('${escapeHtml(t.id)}')" title="${t.isGroup ? escapeHtml('Tenant group — shows: ' + (t.members.join(', ') || 'no members')) : ''}" class="w-full text-left px-3 py-1.5 text-[11px] text-slate-200 hover:bg-[#01A982] hover:text-white transition-colors flex items-center justify-between gap-2 ${t.id===currentTenant?'font-bold text-[#01A982]':''}">
+                                    <div class="flex items-center hover:bg-[#01A982] group">
+                                    <button data-tid="${escapeHtml(t.id)}" onclick="viewAsTenant('${escapeHtml(t.id)}')" title="${t.isGroup ? escapeHtml('Tenant group — shows: ' + (t.members.join(', ') || 'no members')) : ''}" class="flex-1 text-left pl-3 pr-1 py-1.5 text-[11px] text-slate-200 group-hover:text-white transition-colors flex items-center justify-between gap-2 ${t.id===currentTenant?'font-bold text-[#01A982]':''}">
                                         <span>${escapeHtml(t.name)}</span>
                                         ${t.isGroup ? `<span class="px-1 rounded bg-slate-600 text-slate-200 text-[9px] font-bold uppercase tracking-wider shrink-0">Group</span>` : ''}
                                     </button>
+                                    ${_tenantDefaultStar(t.id)}
+                                    </div>
                                 `).join('')}
                             </div>
                         </div>`;
