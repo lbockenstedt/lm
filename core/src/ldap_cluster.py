@@ -168,6 +168,44 @@ def stored_setup(hub) -> Dict[str, Any]:
     return dict(gc.get("ldap") or {})
 
 
+async def _all_online_nodes(hub) -> List[Dict[str, Any]]:
+    """Every ldap-server node; refuses if any is offline (it would miss the
+    password change and break replication)."""
+    nodes = await discover(hub)
+    offline = [n["name"] for n in nodes if not (n["connected"] and n["address"])]
+    if offline:
+        raise LdapSetupError("LDAP server(s) offline or without an address: "
+                             + ", ".join(offline) + " — bring them online and retry")
+    return nodes
+
+
+async def _push_all(hub, nodes, base_dn, admin_dn, admin_pw):
+    """Re-deploy ldap-server on every node, each peered with all the others."""
+    configs = build_node_configs(nodes, base_dn, admin_dn, admin_pw)
+    results = []
+    for n in nodes:
+        res = await _push_node(hub, n["spoke_id"], configs[n["spoke_id"]])
+        results.append({"name": n["name"], "spoke_id": n["spoke_id"],
+                        "server_id": configs[n["spoke_id"]]["server_id"],
+                        "address": n["address"], **res})
+    return configs, results
+
+
+async def reapply(hub, actor: str = "") -> Dict[str, Any]:
+    """Re-push the stored setup (same domain and password, vault untouched) to
+    every server — e.g. after a server was offline or an installer fix."""
+    stored = stored_setup(hub)
+    if not (stored.get("domain") and stored.get("admin_pw")):
+        raise LdapSetupError("Setup -> Directory has not been applied yet")
+    nodes = await _all_online_nodes(hub)
+    configs, results = await _push_all(hub, nodes, stored["base_dn"],
+                                       stored["admin_dn"], stored["admin_pw"])
+    await _save_and_push_client(hub, {**stored, "server_url": client_server_url(configs)})
+    logger.info("ldap setup: %s re-applied to %d server(s) by %s",
+                stored["base_dn"], len(nodes), actor or "?")
+    return {"base_dn": stored["base_dn"], "servers": results}
+
+
 async def apply_setup(hub, domain: str, admin_user: str, admin_pw: str = "",
                       psk: str = "", actor: str = "") -> Dict[str, Any]:
     """Apply the one-form setup to every ldap-server node and the Directory
@@ -179,11 +217,7 @@ async def apply_setup(hub, domain: str, admin_user: str, admin_pw: str = "",
     admin_dn = admin_dn_for(admin_user, base_dn)
     admin_pw = admin_pw or secrets.token_urlsafe(24)
 
-    nodes = await discover(hub)
-    offline = [n["name"] for n in nodes if not (n["connected"] and n["address"])]
-    if offline:
-        raise LdapSetupError("LDAP server(s) offline or without an address: "
-                             + ", ".join(offline) + " — bring them online and retry")
+    nodes = await _all_online_nodes(hub)
 
     # Vault first: if the write is refused (e.g. wrong pass-phrase) nothing
     # has been changed on the servers yet.
@@ -198,13 +232,7 @@ async def apply_setup(hub, domain: str, admin_user: str, admin_pw: str = "",
     except _cv.CredVaultError as e:
         raise LdapSetupError(f"could not store the password in the vault: {e}")
 
-    configs = build_node_configs(nodes, base_dn, admin_dn, admin_pw)
-    results = []
-    for n in nodes:
-        res = await _push_node(hub, n["spoke_id"], configs[n["spoke_id"]])
-        results.append({"name": n["name"], "spoke_id": n["spoke_id"],
-                        "server_id": configs[n["spoke_id"]]["server_id"],
-                        "address": n["address"], **res})
+    configs, results = await _push_all(hub, nodes, base_dn, admin_dn, admin_pw)
 
     prev = stored_setup(hub)
     await _save_and_push_client(hub, {
