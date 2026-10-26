@@ -11121,7 +11121,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self.seed_staleness_sweep_defaults()
         staleness_sweep_task = asyncio.create_task(self.run_staleness_sweep_loop())
         # Fleet OS-updates auto-check (HubOsUpdatesMixin): every interval_hours
-        # (default 6, WebUI-configurable in Setup → OS Updates) re-probes every
+        # (default 6, WebUI-configurable in the OS Updates view) re-probes every
         # spoke/agent/hub for pending apt updates — the scheduled twin of the
         # "Check for updates" button, so the panel's status stays fresh without
         # an operator remembering to click it. Never applies anything itself.
