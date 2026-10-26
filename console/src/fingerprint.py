@@ -409,8 +409,10 @@ _CX_LOGIN_HISTORY = re.compile(r"User \"[^\"]+\" has logged in \d+ times? in the
 
 
 def is_cx_misfiled_as_procurve(vendor: Optional[str], identity: Dict[str, Any], text: str) -> bool:
-    """True if a port stored as hp-procurve is in fact an AOS-CX switch."""
-    if vendor != "hp-procurve":
+    """True if a port stored as hp-procurve (or still unknown) is in fact an
+    AOS-CX switch, e.g. a CX whose model "JL725A 6200F ..." was read but whose
+    vendor was never set."""
+    if vendor not in (None, "", "hp-procurve"):
         return False
     return bool(_CX_MODEL.search(str((identity or {}).get("model") or ""))
                 or _CX_LOGIN_HISTORY.search(sanitize_console_text(text or "")))
