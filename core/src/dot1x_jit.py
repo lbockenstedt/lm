@@ -251,7 +251,8 @@ async def _backend_upsert(hub, rec: Dict[str, Any], password: str, *, owned: boo
     if backend == "entra":
         cfg, oidc = _entra_cfg(hub)
         try:
-            res = await cloud_nac.provision_user(oidc, cfg["domain"], username, password=password)
+            res = await cloud_nac.provision_user(oidc, cfg["domain"], username, password=password,
+                oid=rec.get("oid") if owned else None)
         except cloud_nac.CloudNacError as e:
             raise Dot1xJitError(str(e)) from e
         rec["upn"], rec["oid"] = res.get("upn"), res.get("oid")
