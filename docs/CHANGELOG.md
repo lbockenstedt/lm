@@ -10,6 +10,20 @@ first. This is a pointer index, not the source of truth — each entry links to
 the module doc that describes the behaviour in full. Internal refactors and
 CI/tooling changes are omitted unless they change what an operator sees.
 
+## Week of 2026-10-26
+
+### DNS
+
+- **Editable DNS overrides with comments.** DNS → **Overrides** → *Assigned clients* now has
+  an edit icon to change an applied override's IP/subnet, profile, label or comment, and every
+  override can carry a one-line **Comment** documenting why it exists.
+  See [dns.md](dns.md#per-client-override-profiles).
+- **DNS override Live check.** DNS → **Overrides** now proves overrides work: per DNS server,
+  whether each profile is loaded in the running Unbound; per assigned client, how many queries
+  were answered from its override; and the recent override answers. Resolvers turn on
+  Unbound `log-local-actions` with the next push (automatic, reload only).
+  See [dns.md](dns.md#per-client-override-profiles).
+
 ## Week of 2026-10-19
 
 ### Simulations

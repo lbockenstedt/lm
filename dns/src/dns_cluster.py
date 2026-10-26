@@ -53,6 +53,7 @@ DNS_WORKER_OPS = (
     "DNSW_FORWARDER_UPDATE",  # update an LM-managed forwarding zone
     "DNSW_OVERRIDES_APPLY",   # replace the per-client override views
     "DNSW_OVERRIDES_STATE",   # report the override set digest being served
+    "DNSW_OVERRIDES_VERIFY",  # live view check + recent override answers
     "DNSW_STANDDOWN",    # leave the cluster: forget the applied-version marker
 )
 
