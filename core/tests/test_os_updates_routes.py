@@ -47,6 +47,19 @@ class _FakeHub:
         self.checked.append(refresh)
         return self._snapshot
 
+    async def osu_apply_fleet(self, node_keys=None, actor="", packages=None,
+                              security_only=False):
+        self.applied = {"nodes": node_keys, "packages": packages,
+                        "security_only": security_only}
+        return {"status": "SUCCESS", "queued": 1}
+
+    def osu_cancel_run(self, actor=""):
+        return {"status": "ERROR", "message": "no update run in progress"}
+
+    async def osu_reboot_node(self, key, actor=""):
+        self.rebooted = key
+        return {"status": "SUCCESS", "message": "reboot scheduled in 1 minute"}
+
 
 def _client(is_admin=True):
     app = FastAPI()
@@ -105,3 +118,33 @@ def test_manual_check_still_works_alongside_autocheck_route():
     r = c.post("/api/os-updates/check", json={"refresh": True})
     assert r.status_code == 200
     assert hub.checked == [True]
+
+
+def test_apply_passes_packages_and_security_only():
+    c, hub = _client()
+    r = c.post("/api/os-updates/apply", json={
+        "nodes": ["spoke:a"], "packages": {"agent:b": ["openssl"]}, "security_only": True})
+    assert r.status_code == 200
+    assert hub.applied == {"nodes": ["spoke:a"], "packages": {"agent:b": ["openssl"]},
+                           "security_only": True}
+
+
+def test_apply_rejects_malformed_packages():
+    c, _ = _client()
+    assert c.post("/api/os-updates/apply", json={"packages": ["openssl"]}).status_code == 400
+    assert c.post("/api/os-updates/apply",
+                  json={"packages": {"spoke:a": "openssl"}}).status_code == 400
+
+
+def test_cancel_without_a_run_is_409():
+    c, _ = _client()
+    assert c.post("/api/os-updates/cancel", json={}).status_code == 409
+
+
+def test_reboot_requires_node_and_admin():
+    c, hub = _client()
+    assert c.post("/api/os-updates/reboot", json={}).status_code == 400
+    r = c.post("/api/os-updates/reboot", json={"node": "hub:hub"})
+    assert r.status_code == 200 and hub.rebooted == "hub:hub"
+    c, _ = _client(is_admin=False)
+    assert c.post("/api/os-updates/reboot", json={"node": "hub:hub"}).status_code == 403
