@@ -215,6 +215,21 @@ def test_genuine_hang_without_prompt_still_stuck(spoke, monkeypatch):
     assert info["state"] == "stuck"
 
 
+def test_noise_only_stuck_verdict_clears(spoke, monkeypatch):
+    # Live lrb: episodes started by unreadable line noise were left "stuck" for
+    # weeks with an empty transcript. No readable output means no boot.
+    clock = [1_700_000_000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    chan = _install_fake_boot_chan(spoke, "good")
+    spoke._health_rec("good")["boot"] = {
+        "state": "stuck", "started_at": clock[0] - 86400, "last_output_at": clock[0] - 86400,
+        "prompt_seen": False, "relocked": True, "transcript_tail": "",
+        "stuck_reason": "no prompt within boot timeout", "reason": "confirmed stuck"}
+    _drive_boot(spoke, "good", clock, chan, 0)
+    info = spoke._boot_info("good")
+    assert info["state"] == "idle" and info["stuck_reason"] == ""
+
+
 # ── Spoke: stored vendor / identity ──────────────────────────────────────────
 
 def _emit(spoke, pid, res):
