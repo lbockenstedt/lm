@@ -67,6 +67,10 @@ def test_cx_login_history_beats_procurve_invalid_input():
     assert fp.detect_vendor(CX_BAR_AGG)["name"] == "aruba-cx"
     assert fp.is_cx_misfiled_as_procurve("hp-procurve", {"model": CX_BAR_AGG_MODEL}, "")
     assert fp.is_cx_misfiled_as_procurve("hp-procurve", {}, CX_BAR_AGG)
+    # Unknown vendor with a CX model (live: ra BAR-AGG) is corrected too,
+    # but a confident non-CX verdict is left alone.
+    assert fp.is_cx_misfiled_as_procurve(None, {"model": CX_BAR_AGG_MODEL}, "")
+    assert not fp.is_cx_misfiled_as_procurve("aruba-os", {"model": CX_BAR_AGG_MODEL}, "")
     assert fp.detect_vendor("R8N85A 6000 48G CL4 4SFP Swch")["name"] == "aruba-cx"
 
 
