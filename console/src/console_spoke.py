@@ -17,7 +17,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from base_spoke import BaseSpoke
@@ -36,7 +36,7 @@ try:
                              count_line_reconnects, set_patience,
                              check_line_responsive, FACTORY_DEFAULT_CREDENTIALS,
                              os_up_marker, scrub_identity, vendor_should_replace, vendor_is_upgrade,
-                             is_cx_misfiled_as_procurve, detect_vendor)
+                             is_cx_misfiled_as_procurve, detect_vendor, is_placeholder_hostname)
     from dpa import DpaManager
     from dpa_config import DpaConfigStore, detect_advertise_host
     import dpa_ssh
@@ -52,25 +52,18 @@ except ImportError:  # loaded as a package (agent role loader) or from repo root
                               count_line_reconnects, set_patience,
                               check_line_responsive, FACTORY_DEFAULT_CREDENTIALS,
                               os_up_marker, scrub_identity, vendor_should_replace, vendor_is_upgrade,
-                              is_cx_misfiled_as_procurve, detect_vendor)
+                              is_cx_misfiled_as_procurve, detect_vendor, is_placeholder_hostname)
     from .dpa import DpaManager  # type: ignore
     from .dpa_config import DpaConfigStore, detect_advertise_host  # type: ignore
     from . import dpa_ssh  # type: ignore
 
 logger = logging.getLogger("ConsoleSpoke")
 
-# Placeholder strings a parse glitch can capture as a "hostname" (a command echo,
-# a prompt word, an unset default). Never treated as a real device name.
-_JUNK_HOSTNAMES = frozenset({
-    "hostname", "localhost", "none", "(none)", "unknown", "more", "username",
-    "password", "login", "config",
-})
-
 
 def _real_hostname(value: Any) -> str:
-    """``value`` stripped, or '' if empty or a known placeholder."""
+    """``value`` stripped, or '' if empty or a placeholder/factory-default name."""
     h = str(value or "").strip()
-    return "" if h.lower() in _JUNK_HOSTNAMES else h
+    return "" if is_placeholder_hostname(h) else h
 
 
 class ConsoleSpoke(BaseSpoke):
@@ -278,6 +271,13 @@ class ConsoleSpoke(BaseSpoke):
         if self._ports_cache is not None:
             return self._ports_cache
         return self._enumerate_ports_sync()
+
+    def _dpa_ports(self) -> List[Dict[str, Any]]:
+        """Ports that get a DPA listener: the same set the port list shows, so a
+        dead built-in UART that can't be opened gets no listener."""
+        return [p for p in self._enum_cached()
+                if p["port_id"] not in self._unopenable
+                or self.sessions.has_user_sessions(p["port_id"])]
 
     def _port_device(self, port_id: str) -> Optional[str]:
         for p in self._enum_cached():
@@ -903,6 +903,10 @@ class ConsoleSpoke(BaseSpoke):
                 probe["baud_confident"] = True
             if res.get("detected_baud"):
                 self.store.update(port_id, settings={"baud": res["detected_baud"]})
+        # A garbled line at an automatically locked rate means the lock is wrong
+        # (or the device changed rate): drop it so the next identify re-sweeps.
+        if (res.get("diag") or {}).get("garbled") and not prev.get("baud_pinned"):
+            probe["baud_confident"] = False
         # Reconcile: this identity (serial/MAC learned from the DEVICE, not the
         # USB adapter) may already be known under a different, now-absent
         # port_id — e.g. a reboot renumbered /dev/ttyUSBn, or the cable moved
@@ -1078,33 +1082,34 @@ class ConsoleSpoke(BaseSpoke):
         if getattr(self, "_restored_last_known", False):
             return
         self._restored_last_known = True
+        # Pass 1: names held by live identities, and a restore candidate for every
+        # blank (or previously restored) port.
+        held = set()
+        candidates: Dict[str, Tuple[Dict[str, Any], Dict[str, Any], Any, str]] = {}
         for pid, saved in self.store.all_items().items():
             probe = dict(saved.get("probe") or {})
             ident = probe.get("identity") or {}
-            junk_restore = (probe.get("source") == "restored"
-                            and not _real_hostname(ident.get("hostname"))
-                            and not any(v for k, v in ident.items() if k != "hostname"))
-            if any(v for v in ident.values()) and not junk_restore:
-                continue
-            identity: Dict[str, Any] = {}
-            vendor = None
-            origin = ""
-            cached = self.devices.lookup_port(pid)
-            if cached and (_real_hostname((cached.get("identity") or {}).get("hostname"))
-                           or any(v for k, v in (cached.get("identity") or {}).items()
-                                  if k != "hostname")):
-                identity = {k: v for k, v in cached["identity"].items() if v}
-                vendor = cached.get("vendor") or None
-                origin = "device_cache"
-            else:
-                hist = ((self._health.get(pid) or {}).get("identify") or {}).get("hostname_history") or []
-                host = next((h for h in (_real_hostname((e or {}).get("host"))
-                                         for e in reversed(hist)) if h), "")
+            if probe.get("source") != "restored" and any(v for v in ident.values()):
+                host = _real_hostname(ident.get("hostname"))
                 if host:
-                    identity = {"hostname": host}
-                    origin = "hostname_history"
+                    held.add(host.lower())
+                continue
+            identity, vendor, origin = self._last_known_identity(pid)
+            candidates[pid] = (probe, identity, vendor, origin)
+        claims: Dict[str, int] = {}
+        for _probe, identity, _vendor, _origin in candidates.values():
+            host = _real_hostname(identity.get("hostname")).lower()
+            if host:
+                claims[host] = claims.get(host, 0) + 1
+        # Pass 2: a port id can drift onto another cable (USB bus renumbering),
+        # so a name another port already holds, or that several ports claim, is
+        # ambiguous and is not restored. The live identify will name it.
+        for pid, (probe, identity, vendor, origin) in candidates.items():
+            host = _real_hostname(identity.get("hostname")).lower()
+            if host and (host in held or claims.get(host, 0) > 1):
+                identity = {}
             if not identity:
-                if junk_restore:  # an earlier build restored a placeholder name
+                if probe.get("source") == "restored":  # drop an earlier bad restore
                     probe.update({"identity": {}, "source": "active",
                                   "stale": False, "restored_from": ""})
                     self.store.update(pid, probe=probe)
@@ -1114,6 +1119,20 @@ class ConsoleSpoke(BaseSpoke):
             self.store.update(pid, probe=probe)
             logger.info("console: restored last-known profile for %s from %s (%s)",
                         pid, origin, identity.get("hostname") or identity.get("serial") or "?")
+
+    def _last_known_identity(self, pid: str) -> Tuple[Dict[str, Any], Any, str]:
+        """(identity, vendor, origin) for a port from devices.json's last-known
+        record, else the newest real hostname in its identify history."""
+        cached = self.devices.lookup_port(pid)
+        cached_ident = (cached or {}).get("identity") or {}
+        if _real_hostname(cached_ident.get("hostname")) or any(
+                v for k, v in cached_ident.items() if k != "hostname"):
+            return {k: v for k, v in cached_ident.items() if v}, cached.get("vendor") or None, "device_cache"
+        hist = ((self._health.get(pid) or {}).get("identify") or {}).get("hostname_history") or []
+        host = next((h for h in (_real_hostname((e or {}).get("host")) for e in reversed(hist)) if h), "")
+        if host:
+            return {"hostname": host}, None, "hostname_history"
+        return {}, None, ""
 
     async def _autoprobe_scan(self) -> None:
         """Probe each newly-seen port with the stored credentials. Guardrails:
@@ -1140,6 +1159,8 @@ class ConsoleSpoke(BaseSpoke):
         self._seen_ports = set(live)
         for pid, p in live.items():
             if self.sessions.has_user_sessions(pid) or pid in self._probing:
+                continue
+            if pid in self._unopenable:  # can't open at all — monitor_scan handles recovery
                 continue
             probe = self.store.get(pid).get("probe") or {}
             if self._probe_identified(probe):
@@ -1324,7 +1345,7 @@ class ConsoleSpoke(BaseSpoke):
     def _dpa_manager(self, *, proto: str, bind: str, base: int, allow, loop) -> DpaManager:
         return DpaManager(
             store=self.store,
-            enumerate_ports=self._enum_cached,
+            enumerate_ports=self._dpa_ports,
             open_session=self._open_user_session,
             write_session=self.sessions.write,
             close_session=self.sessions.close,
