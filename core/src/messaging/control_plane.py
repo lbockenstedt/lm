@@ -2160,14 +2160,25 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # NOTE: this is the OS package axis, NOT SPOKE_UPDATE (our code). Both
         # run off the event loop so a long dist-upgrade never stalls the shared
         # spoke/role loop.
-        if cmd_type in ("OS_UPDATE_CHECK", "OS_UPDATE_APPLY"):
+        #
+        # Package-selective apply and reboot are NEW command types rather than
+        # extra fields on OS_UPDATE_APPLY: an older node would ignore a
+        # ``packages`` field and run a full dist-upgrade, whereas an unknown
+        # command type fails safely.
+        if cmd_type in ("OS_UPDATE_CHECK", "OS_UPDATE_APPLY",
+                        "OS_UPDATE_APPLY_PACKAGES", "OS_REBOOT"):
             try:
-                from ..os_update import check_updates, apply_updates
+                from ..os_update import check_updates, apply_updates, reboot_node
             except ImportError:  # bare-module path (production: core/src on sys.path)
-                from os_update import check_updates, apply_updates  # type: ignore
+                from os_update import check_updates, apply_updates, reboot_node  # type: ignore
             if cmd_type == "OS_UPDATE_CHECK":
                 res = await asyncio.to_thread(
                     check_updates, bool(data.get("refresh", True)))
+            elif cmd_type == "OS_UPDATE_APPLY_PACKAGES":
+                res = await asyncio.to_thread(
+                    apply_updates, list(data.get("packages") or []))
+            elif cmd_type == "OS_REBOOT":
+                res = await asyncio.to_thread(reboot_node)
             else:
                 res = await asyncio.to_thread(apply_updates)
             res.setdefault("status", "SUCCESS")

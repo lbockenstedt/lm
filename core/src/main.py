@@ -1248,6 +1248,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # of 503-ing until the nw spoke reconnects. See nw_cache.NwCacheMixin.
         self.nw_cache_init()
         self.nw_cache_load()
+        # Fleet OS updates: last check + run survive a restart (HubOsUpdatesMixin).
+        self.osu_load_state()
         # TrueNAS (storage) cache twin — same atomic-persist + warm-start shape
         # as nw_cache (serves last-known data when the truenas spoke is offline).
         self.truenas_cache_init()

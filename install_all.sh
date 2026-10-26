@@ -710,6 +710,9 @@ $SvcUser ALL=(ALL) NOPASSWD: /usr/local/bin/lm-fix-perms
 # /opt/lm first, so it deploys the latest committed watchdog body. Exact path,
 # no args (the script takes none; run it via its shebang, not `bash <script>`).
 $SvcUser ALL=(ALL) NOPASSWD: /opt/lm/scripts/install-lm-watchdog.sh
+# Setup → OS Updates on the hub itself: fixed-action apt/reboot helper (see
+# scripts/lm-os-update), root-owned COPY outside /opt/lm so svc_lm can't edit it.
+$SvcUser ALL=(ALL) NOPASSWD: /usr/local/bin/lm-os-update *
 SUDOERS
 chmod 440 /etc/sudoers.d/lm
 
@@ -842,6 +845,11 @@ if ( cd "$BASE_DIR" && git reset --hard HEAD ); then
     log_c "✅ Hub laid down as a git checkout (Update button + auto-update will use git pull)."
 else
     log_e "git checkout of the hub tree failed — hub may not be updatable via the button."
+fi
+# OS Updates helper (sudoers rule above): installed from the code just laid
+# down, root-owned outside $BASE_DIR so $SvcUser can't edit what sudo runs.
+if [ -f "$BASE_DIR/scripts/lm-os-update" ]; then
+    install -o root -g root -m 0755 "$BASE_DIR/scripts/lm-os-update" /usr/local/bin/lm-os-update
 fi
 # The git ops above ran as root, so .git/objects + the tree are root-owned. The
 # hub runs as $SvcUser and the Update button / auto-update do `git pull` as that
