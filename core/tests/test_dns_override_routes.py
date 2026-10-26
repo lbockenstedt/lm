@@ -30,6 +30,14 @@ SNAPSHOT = {
     "members": [],
 }
 
+VERIFY = {
+    "status": "SUCCESS", "minutes": 60,
+    "members": [{"id": "m1", "display_name": "svcs01", "ok": True, "views": []}],
+    "hits": [{"client": "10.1.0.5", "name": "a.x.com", "member": "svcs01"},
+             {"client": "10.2.0.9", "name": "a.x.com", "member": "svcs01"}],
+    "assignments": SNAPSHOT["assignments"],
+}
+
 
 class FakeState:
     system_state = {"global_config": {}}
@@ -68,7 +76,8 @@ class FakeHub:
 
     async def request_response(self, sid, cmd, payload=None, timeout=None):
         self.forwarded.append((sid, cmd, payload))
-        reply = SNAPSHOT if cmd == "DNS_OVERRIDES" else {"status": "SUCCESS"}
+        reply = {"DNS_OVERRIDES": SNAPSHOT, "DNS_OVERRIDES_VERIFY": VERIFY}.get(
+            cmd, {"status": "SUCCESS"})
         return {"payload": {"data": copy.deepcopy(reply)}}
 
 
@@ -128,6 +137,20 @@ def test_tenant_sees_only_assignments_inside_its_prefixes():
     assert body["tenant_scoped"] is True
 
 
+def test_live_check_is_relayed_with_its_window():
+    client, hub = _client(admin=True)
+    body = client.get("/api/dns/overrides/verify?minutes=1440").json()
+    assert hub.forwarded[-1][1:] == ("DNS_OVERRIDES_VERIFY", {"minutes": 1440})
+    assert len(body["hits"]) == 2 and body["members"][0]["display_name"] == "svcs01"
+
+
+def test_tenant_live_check_shows_only_its_clients():
+    client, _ = _client(admin=False)
+    body = client.get("/api/dns/overrides/verify").json()
+    assert [h["client"] for h in body["hits"]] == ["10.1.0.5"]
+    assert [a["target"] for a in body["assignments"]] == ["10.1.0.5/32", "10.1.0.0/25"]
+
+
 def test_profile_writes_are_admin_only():
     client, hub = _client(admin=False)
     assert client.put("/api/dns/overrides/profile",
@@ -152,10 +175,29 @@ def test_admin_profile_set_and_delete_relay():
 def test_admin_may_assign_a_subnet():
     client, hub = _client(admin=True)
     r = client.post("/api/dns/override-assignment",
-                    json={"target": "10.9.0.0/16", "profile": "PAVO-DEVICE", "label": "lab"})
+                    json={"target": "10.9.0.0/16", "profile": "PAVO-DEVICE", "label": "lab",
+                          "comment": "lab kit needs the staging API"})
     assert r.status_code == 200
     assert hub.forwarded[-1] == ("dns-1", "DNS_OVERRIDE_ASSIGN",
-                                 {"target": "10.9.0.0/16", "profile": "PAVO-DEVICE", "label": "lab"})
+                                 {"target": "10.9.0.0/16", "profile": "PAVO-DEVICE", "label": "lab",
+                                  "comment": "lab kit needs the staging API"})
+
+
+def test_edit_forwards_old_target():
+    client, hub = _client(admin=True)
+    r = client.post("/api/dns/override-assignment",
+                    json={"target": "10.9.1.0/24", "profile": "PAVO-DEVICE",
+                          "old_target": "10.9.0.0/16"})
+    assert r.status_code == 200
+    assert hub.forwarded[-1][2]["old_target"] == "10.9.0.0/16"
+
+
+def test_tenant_cannot_move_another_tenants_override_into_its_subnet():
+    client, hub = _client(admin=False)
+    r = client.post("/api/dns/override-assignment",
+                    json={"target": "10.1.0.5", "profile": "PAVO-DEVICE", "old_target": "10.2.0.9"})
+    assert r.status_code == 403
+    assert hub.forwarded == []
 
 
 def test_tenant_may_assign_and_remove_its_own_device():

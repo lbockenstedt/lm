@@ -40,6 +40,9 @@ logger = logging.getLogger("DNSOverrides")
 DEFAULT_OVERRIDES_STATE = "/var/lib/lm-dns/overrides.json"
 OVERRIDES_CONF_NAME = "lm-overrides.conf"
 VIEW_PREFIX = "lm-ov-"
+#: Bumped whenever render_unbound's output changes for the same override set,
+#: so workers still serving the old rendering report drift and get re-pushed.
+RENDER_REVISION = 2
 
 OVERRIDE_RECORD_TYPES = ("A", "AAAA", "CNAME")
 MAX_PROFILES = 64
@@ -236,6 +239,7 @@ def validate_assignment(raw: Any) -> Dict[str, Any]:
         "target": normalize_target(raw.get("target") or raw.get("ip")),
         "profile": str(raw.get("profile") or "").strip(),
         "label": _text(raw.get("label"), "label", 128),
+        "comment": _text(raw.get("comment"), "comment", 500),
     }
 
 
@@ -286,8 +290,8 @@ def validate_overrides(raw: Any) -> Dict[str, Any]:
 
 
 def overrides_digest(clean: Dict[str, Any]) -> str:
-    """Digest of the DNS-affecting content (descriptions/labels excluded so a
-    cosmetic rename does not count as a different resolver config)."""
+    """Digest of the DNS-affecting content (descriptions/labels/comments
+    excluded so a cosmetic edit does not count as a different resolver config)."""
     canonical = {
         "profiles": [{k: p[k] for k in ("name", "records", "block")}
                      for p in clean.get("profiles") or []],
@@ -315,7 +319,9 @@ def render_unbound(clean: Dict[str, Any]) -> str:
              "# Per-client DNS override profiles (one view per profile).\n"]
     assignments = clean.get("assignments") or []
     if assignments:
-        lines.append("server:\n")
+        # Logs "<zone> <action> <client>@<port> <name> <type> IN" for every
+        # locally answered query — the proof an override actually answered.
+        lines.append("server:\n    log-local-actions: yes\n")
         for a in assignments:
             lines.append(f"    access-control-view: {a['target']} {view_name(a['profile'])}\n")
     for profile in clean.get("profiles") or []:
@@ -339,6 +345,87 @@ def render_unbound(clean: Dict[str, Any]) -> str:
             lines.append(
                 f'    local-data: "{owner} {record["ttl"]} IN {record["type"]} {value}"\n')
     return "".join(lines)
+
+
+_LOCAL_ACTION_RE = re.compile(
+    r"info:\s+(?P<zone>\S+)\s+(?P<action>[a-z_]+)\s+(?P<ip>[0-9a-fA-F.:]+)@\d+\s+"
+    r"(?P<name>\S+?)\.?\s+(?P<type>\w+)\s+IN\s*$")
+
+
+def parse_rendered(text: str) -> Dict[str, Any]:
+    """The views and client bindings in a rendered ``lm-overrides.conf``:
+    ``{"views": {view: [zone]}, "data": {view: [[name, type]]}, "targets": [(cidr, view)]}``."""
+    views: Dict[str, List[str]] = {}
+    data: Dict[str, List[List[str]]] = {}
+    targets = []
+    current = None
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        m = re.match(r'name:\s*"([^"]+)"', line)
+        if m:
+            current = m.group(1)
+            views[current], data[current] = [], []
+            continue
+        m = re.match(r'local-zone:\s*"([^"]+)"', line)
+        if m and current:
+            views[current].append(m.group(1).rstrip(".").lower())
+            continue
+        m = re.match(r'local-data:\s*"(\S+)\s+\d+\s+IN\s+(\w+)', line)
+        if m and current:
+            data[current].append([m.group(1).rstrip(".").lower(), m.group(2).upper()])
+            continue
+        m = re.match(r"access-control-view:\s*(\S+)\s+(\S+)", line)
+        if m:
+            targets.append((m.group(1), m.group(2)))
+    return {"views": views, "data": data, "targets": targets}
+
+
+def override_hits(lines: Iterable[str], rendered: Dict[str, Any], since: float,
+                  line_epoch: Callable[[str], float], limit: int = 500) -> List[Dict[str, Any]]:
+    """Queries answered FROM an override view, newest first.
+
+    A ``log-local-actions`` line counts only when its client is bound to a view
+    (longest-prefix, as Unbound picks) and the answering zone belongs to that
+    view, so ordinary local records are never mistaken for override answers.
+    An exact-name record has no explicit zone: Unbound gives it an implicit
+    ``transparent`` zone, which also logs queries it passes on to normal
+    resolution — those count only when the view holds data for that name/type."""
+    nets = []
+    for cidr, view in rendered.get("targets") or []:
+        try:
+            nets.append((ipaddress.ip_network(cidr, strict=False), view))
+        except ValueError:
+            continue
+    nets.sort(key=lambda item: item[0].prefixlen, reverse=True)
+    views = rendered.get("views") or {}
+    data = {v: {tuple(item) for item in items}
+            for v, items in (rendered.get("data") or {}).items()}
+    hits = []
+    for line in lines:
+        m = _LOCAL_ACTION_RE.search(line)
+        if not m:
+            continue
+        ts = line_epoch(line)
+        if ts < since:
+            continue
+        try:
+            addr = ipaddress.ip_address(m.group("ip"))
+        except ValueError:
+            continue
+        view = next((v for net, v in nets if addr.version == net.version and addr in net), None)
+        if not view:
+            continue
+        zone = m.group("zone").rstrip(".").lower()
+        name, rtype = m.group("name").lower(), m.group("type").upper()
+        if zone not in views.get(view, []):
+            owned = data.get(view, set())
+            if zone != name or not ((name, rtype) in owned or (name, "CNAME") in owned):
+                continue
+        hits.append({"time": ts, "client": m.group("ip"), "name": name,
+                     "type": rtype, "view": view,
+                     "action": "blocked" if m.group("action") == "always_nxdomain" else "answered"})
+    hits.sort(key=lambda h: h["time"], reverse=True)
+    return hits[:limit]
 
 
 class DnsOverrideState:
@@ -490,6 +577,42 @@ class DnsOverrideCoordinator:
                         "message": self.state.broken})
         return out
 
+    async def verify(self, minutes: int = 60) -> Dict[str, Any]:
+        """Live proof from every resolver: is each profile's view loaded in the
+        RUNNING Unbound, and which assigned clients were answered from it."""
+        try:
+            minutes = max(1, min(int(minutes or 60), 7 * 1440))
+        except (TypeError, ValueError):
+            minutes = 60
+        names = {view_name(p["name"]): p["name"] for p in self.state.data["profiles"]}
+        fan = await self.transport.fanout("DNSW_OVERRIDES_VERIFY", {"minutes": minutes},
+                                          timeout=20.0)
+        results = fan.get("results") or {}
+        members, hits = [], []
+        for link in self.transport.member_links():
+            reply = results.get(link["id"]) or {}
+            ok = reply.get("status") == "SUCCESS"
+            label = link.get("display_name") or link.get("hostname") or link["id"]
+            loaded = {v["view"]: v for v in reply.get("views") or []}
+            views = [{"profile": name, "view": view,
+                      "loaded": bool((loaded.get(view) or {}).get("loaded")),
+                      "answers": (loaded.get(view) or {}).get("answers", 0),
+                      "error": (loaded.get(view) or {}).get("error", "")}
+                     for view, name in names.items()]
+            members.append({"id": link["id"], "display_name": label,
+                            "connected": bool(link.get("connected")),
+                            "ok": ok, "error": "" if ok else _reply_reason(reply),
+                            "log_local_actions": reply.get("log_local_actions"),
+                            "log_source": reply.get("log_source", ""),
+                            "views": views})
+            for h in reply.get("hits") or []:
+                hits.append({**h, "member": label,
+                             "profile": names.get(h.get("view"), h.get("view"))})
+        hits.sort(key=lambda h: h.get("time") or 0, reverse=True)
+        return {"status": "SUCCESS", "minutes": minutes, "version": self.state.version,
+                "members": members, "hits": hits[:500],
+                "assignments": copy.deepcopy(self.state.data["assignments"])}
+
     # ── Write ───────────────────────────────────────────────────────────────
 
     async def mutate(self, change: Callable[[Dict[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
@@ -499,7 +622,7 @@ class DnsOverrideCoordinator:
             candidate = validate_overrides(change(copy.deepcopy(self.state.data)))
             digest = overrides_digest(candidate)
             if digest == self.state.digest:
-                # Description/label-only edits still need persisting.
+                # Description/label/comment-only edits still need persisting.
                 if candidate != self.state.data:
                     self.state.persist(candidate, self.state.version)
                 return {"status": "SUCCESS", "changed": False,
@@ -520,6 +643,8 @@ class DnsOverrideCoordinator:
                     offline.append(member_id)
 
             if rejected or not applied:
+                logger.warning("DNS override change v%s not applied: rejected=%s offline=%s",
+                               version, rejected, offline)
                 rollback = await self._rollback(applied)
                 reasons = "; ".join(f"{mid}: {why}" for mid, why in rejected.items())
                 message = "DNS override change was not applied"
@@ -542,6 +667,10 @@ class DnsOverrideCoordinator:
                 self.reported[member_id] = {"digest": digest, "version": version,
                                             "at": time.time()}
                 self.member_errors.pop(member_id, None)
+            logger.info("DNS overrides v%s committed: %d profile(s), %d assignment(s); "
+                        "applied on %s%s", version, len(candidate["profiles"]),
+                        len(candidate["assignments"]), applied,
+                        f"; offline {offline}" if offline else "")
             out = {"status": "SUCCESS" if not offline else "PARTIAL",
                    "changed": True, "version": version,
                    "members_applied": applied, "members_offline": offline,
@@ -639,12 +768,20 @@ def delete_profile(name: str, force: bool = False):
     return change
 
 
-def assign(target: Any, profile: str, label: Any = ""):
-    clean = validate_assignment({"target": target, "profile": profile, "label": label})
+def assign(target: Any, profile: str, label: Any = "", comment: Any = "",
+           old_target: Any = None):
+    """Apply ``profile`` to ``target``. ``old_target`` (an edit that moves the
+    override to a different IP/subnet) is removed in the same change."""
+    clean = validate_assignment({"target": target, "profile": profile,
+                                 "label": label, "comment": comment})
+    old = normalize_target(old_target) if old_target else clean["target"]
 
     def change(data):
+        targets = {a["target"] for a in data["assignments"]}
+        if old != clean["target"] and old not in targets:
+            raise DnsOverrideError(f"{old} has no override assigned")
         data["assignments"] = [a for a in data["assignments"]
-                               if a["target"] != clean["target"]]
+                               if a["target"] not in (old, clean["target"])]
         data["assignments"].append(clean)
         return data
     return change
