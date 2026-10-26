@@ -401,44 +401,62 @@ def _node(kind, nid, count=2, security=1, blocker="", features=("packages",)):
             "features": list(features)}
 
 
-def test_autopatch_is_off_by_default():
-    assert _FakeHub().osu_autopatch_config() == {
-        "enabled": False, "security_only": True, "include_hub": False}
+def test_autopatch_has_no_nodes_by_default():
+    assert _FakeHub().osu_autopatch_config() == {"security_only": True, "nodes": []}
+
+
+def test_autopatch_nodes_are_approved_one_at_a_time():
+    hub = _FakeHub()
+    hub.osu_set_autopatch_node("spoke:s1", True)
+    hub.osu_set_autopatch_node("agent:a1", True)
+    hub.osu_set_autopatch_node("spoke:s1", False)
+    hub.osu_set_autopatch_security_only(False)
+    assert hub.osu_autopatch_config() == {"security_only": False, "nodes": ["agent:a1"]}
+
+
+def test_snapshot_flags_approved_nodes():
+    hub = _FakeHub(connections={"spoke-1": object(), "spoke-2": object()})
+    hub.osu_set_autopatch_node("spoke:spoke-1", True)
+    flags = {n["id"]: n["auto_patch"] for n in hub.osu_snapshot()["nodes"]}
+    assert flags == {"spoke-1": True, "spoke-2": False, "hub": False}
 
 
 @pytest.mark.asyncio
-async def test_autopatch_off_does_nothing():
+async def test_autopatch_with_no_approved_nodes_does_nothing():
     hub, applied = _hub_with([_node("spoke", "s1")])
     assert (await hub.osu_autopatch())["status"] == "SKIPPED"
     assert not applied
 
 
 @pytest.mark.asyncio
-async def test_autopatch_security_only_skips_hub_blocked_and_non_security():
+async def test_autopatch_only_patches_approved_nodes():
     hub, applied = _hub_with([
         _node("spoke", "s1"),
+        _node("spoke", "not-approved"),
         _node("spoke", "s2", security=0),
         _node("agent", "a1", blocker="no helper"),
         _node("agent", "old", features=()),
         _node("hub", "hub"),
     ])
-    hub.osu_set_autopatch_config(True, True, False)
+    for k in ("spoke:s1", "spoke:s2", "agent:a1", "agent:old", "hub:hub"):
+        hub.osu_set_autopatch_node(k, True)
     await hub.osu_autopatch()
-    assert applied == [(["spoke:s1"], "auto-patch", True)]
+    assert applied == [(["spoke:s1", "hub:hub"], "auto-patch", True)]
 
 
 @pytest.mark.asyncio
-async def test_autopatch_all_updates_with_hub():
-    hub, applied = _hub_with([_node("spoke", "s2", security=0), _node("hub", "hub")])
-    hub.osu_set_autopatch_config(True, False, True)
+async def test_autopatch_all_updates():
+    hub, applied = _hub_with([_node("spoke", "s2", security=0)])
+    hub.osu_set_autopatch_node("spoke:s2", True)
+    hub.osu_set_autopatch_security_only(False)
     await hub.osu_autopatch()
-    assert applied == [(["spoke:s2", "hub:hub"], "auto-patch", False)]
+    assert applied == [(["spoke:s2"], "auto-patch", False)]
 
 
 @pytest.mark.asyncio
 async def test_autopatch_waits_for_a_running_run():
     hub, applied = _hub_with([_node("spoke", "s1")])
-    hub.osu_set_autopatch_config(True, True, False)
+    hub.osu_set_autopatch_node("spoke:s1", True)
     hub._osu_state()["run"] = {"status": "running"}
     assert (await hub.osu_autopatch())["status"] == "SKIPPED"
     assert not applied
@@ -497,7 +515,7 @@ async def test_fix_access_refuses_unblocked_or_old_nodes():
 @pytest.mark.asyncio
 async def test_autopatch_runs_at_most_once_per_interval():
     hub, applied = _hub_with([_node("spoke", "s1")])
-    hub.osu_set_autopatch_config(True, True, False)
+    hub.osu_set_autopatch_node("spoke:s1", True)
     await hub.osu_autopatch()
     # A hub restart re-runs the loop body straight away — no second run.
     assert (await hub.osu_autopatch())["status"] == "SKIPPED"

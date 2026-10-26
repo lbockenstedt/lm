@@ -25,11 +25,10 @@ own command types (``OS_UPDATE_APPLY_PACKAGES`` / ``OS_REBOOT``) and are only
 offered for nodes whose check reported the matching ``features`` — an older
 node never sees a request it would misread as "upgrade everything".
 
-Auto-patch (opt-in, off by default): after each SCHEDULED check, nodes with
-pending updates are deployed automatically through the same rolling,
-hub-last apply, audit-logged as actor "auto-patch". Security-only by default;
-the hub itself is left out unless the operator includes it. Still NEVER
-reboots. Manual checks and a run's own follow-up re-check never trigger it, so
+Auto-patch (opt-in PER NODE, none by default): after each SCHEDULED check,
+the nodes an operator approved for auto-patching that have pending updates are
+deployed automatically through the same rolling, hub-last apply, audit-logged
+as actor "auto-patch". Security-only by default. Still NEVER reboots. Manual checks and a run's own follow-up re-check never trigger it, so
 a node whose update keeps failing is retried once per schedule, not in a loop.
 
 Fixing access: a non-root node without the lm-os-update helper is "blocked".
@@ -82,7 +81,7 @@ _OSU_AUTOCHECK_CFG_KEY = "os_updates_check"
 _OSU_AUTOCHECK_DEFAULT_HOURS = 6.0
 
 # Auto-patch config lives in global_config["os_updates_autopatch"]:
-# {enabled, security_only, include_hub}. Off unless an operator turns it on.
+# {security_only, nodes: ["kind:id", ...]}. Only listed nodes are auto-patched.
 _OSU_AUTOPATCH_CFG_KEY = "os_updates_autopatch"
 _AUTOPATCH_ACTOR = "auto-patch"
 
@@ -325,38 +324,47 @@ class HubOsUpdatesMixin:
 
     # ── auto-patch (WebUI-configurable, off by default) ─────────────────────
     def osu_autopatch_config(self) -> Dict[str, Any]:
-        """``{enabled, security_only, include_hub}`` — off / security-only /
-        hub excluded unless set otherwise."""
+        """``{security_only, nodes}`` — the node keys approved for auto-patch."""
         try:
             cfg = (self.state.system_state.get("global_config", {})
                    .get(_OSU_AUTOPATCH_CFG_KEY, {})) or {}
         except Exception:  # noqa: BLE001 — hub without state (tests)
             cfg = {}
-        return {"enabled": bool(cfg.get("enabled", False)),
-                "security_only": bool(cfg.get("security_only", True)),
-                "include_hub": bool(cfg.get("include_hub", False))}
+        return {"security_only": bool(cfg.get("security_only", True)),
+                "nodes": sorted(str(k) for k in (cfg.get("nodes") or []))}
 
-    def osu_set_autopatch_config(self, enabled: bool, security_only: bool,
-                                 include_hub: bool) -> Dict[str, Any]:
+    def _osu_save_autopatch(self, security_only: bool, nodes: List[str]) -> Dict[str, Any]:
         gc = self.state.system_state.setdefault("global_config", {})
-        gc[_OSU_AUTOPATCH_CFG_KEY] = {"enabled": bool(enabled),
-                                      "security_only": bool(security_only),
-                                      "include_hub": bool(include_hub)}
+        gc[_OSU_AUTOPATCH_CFG_KEY] = {"security_only": bool(security_only),
+                                      "nodes": sorted(set(nodes))}
         self.state._mark_dirty()
         return self.osu_autopatch_config()
 
+    def osu_set_autopatch_security_only(self, security_only: bool) -> Dict[str, Any]:
+        return self._osu_save_autopatch(security_only, self.osu_autopatch_config()["nodes"])
+
+    def osu_set_autopatch_node(self, node_key: str, enabled: bool) -> Dict[str, Any]:
+        """Approve (or withdraw) one node for auto-patching."""
+        cfg = self.osu_autopatch_config()
+        nodes = set(cfg["nodes"])
+        if enabled:
+            nodes.add(node_key)
+        else:
+            nodes.discard(node_key)
+        return self._osu_save_autopatch(cfg["security_only"], list(nodes))
+
     async def osu_autopatch(self) -> Dict[str, Any]:
-        """Deploy what the last check found, if auto-patch is on.
+        """Deploy what the last check found on the nodes approved for it.
 
         Same rolling, hub-last, never-reboot apply an operator would approve;
-        only nodes that can actually be patched are picked, so one blocked
-        node doesn't stop the rest. At most once per auto-check interval
-        (persisted), so a hub restart — including one caused by patching the
-        hub — doesn't start another run right away.
+        only approved nodes that can actually be patched are picked, so one
+        blocked node doesn't stop the rest. At most once per auto-check
+        interval (persisted), so a hub restart — including one caused by
+        patching the hub — doesn't start another run right away.
         """
         cfg = self.osu_autopatch_config()
-        if not cfg["enabled"]:
-            return {"status": "SKIPPED", "message": "auto-patch is off"}
+        if not cfg["nodes"]:
+            return {"status": "SKIPPED", "message": "no nodes approved for auto-patch"}
         st = self._osu_state()
         run = st.get("run")
         if run and run.get("status") == "running":
@@ -366,10 +374,11 @@ class HubOsUpdatesMixin:
         if time.time() - float(st.get("autopatch_at") or 0.0) < interval_s * 0.9:
             return {"status": "SKIPPED", "message": "already ran this interval"}
         keys = []
+        approved = set(cfg["nodes"])
         for n in self.osu_snapshot()["nodes"]:
-            if not n.get("eligible") or not n.get("count") or n.get("apply_blocker"):
+            if f"{n['kind']}:{n['id']}" not in approved:
                 continue
-            if n["kind"] == "hub" and not cfg["include_hub"]:
+            if not n.get("eligible") or not n.get("count") or n.get("apply_blocker"):
                 continue
             if cfg["security_only"]:
                 # Security-only applies a package list, which older nodes can't do.
@@ -465,6 +474,9 @@ class HubOsUpdatesMixin:
                     "agent_id": t.get("agent_id", ""), "checked": False, "eligible": None, "unmanaged": False,
                     "unreachable": False, "reason": "not checked yet", "count": 0,
                 }
+        approved = set(self.osu_autopatch_config()["nodes"])
+        for key, n in merged.items():
+            n["auto_patch"] = key in approved
         nodes = sorted(merged.values(), key=lambda n: (n["kind"] != "hub", n["label"]))
         pending = [n for n in nodes if n.get("eligible") and n.get("count")
                    and not n.get("apply_blocker")]

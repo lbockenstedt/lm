@@ -57,13 +57,17 @@ class _FakeHub:
         return {"status": "ERROR", "message": "no update run in progress"}
 
     def osu_autopatch_config(self):
-        return dict(getattr(self, "_ap", {"enabled": False, "security_only": True,
-                                          "include_hub": False}))
+        return {"security_only": getattr(self, "_sec", True),
+                "nodes": sorted(getattr(self, "_nodes", set()))}
 
-    def osu_set_autopatch_config(self, enabled, security_only, include_hub):
-        self._ap = {"enabled": enabled, "security_only": security_only,
-                    "include_hub": include_hub}
-        return dict(self._ap)
+    def osu_set_autopatch_security_only(self, on):
+        self._sec = on
+        return self.osu_autopatch_config()
+
+    def osu_set_autopatch_node(self, key, on):
+        self._nodes = getattr(self, "_nodes", set())
+        (self._nodes.add if on else self._nodes.discard)(key)
+        return self.osu_autopatch_config()
 
     async def osu_fix_access(self, key, username, password, actor=""):
         self.fixed = (key, username, password)
@@ -163,12 +167,15 @@ def test_reboot_requires_node_and_admin():
     assert c.post("/api/os-updates/reboot", json={"node": "hub:hub"}).status_code == 403
 
 
-def test_autopatch_roundtrip():
+def test_autopatch_per_node_roundtrip():
     c, hub = _client()
-    assert c.get("/api/os-updates/auto-patch").json()["enabled"] is False
-    r = c.post("/api/os-updates/auto-patch",
-               json={"enabled": True, "security_only": False, "include_hub": True})
-    assert r.json() == {"enabled": True, "security_only": False, "include_hub": True}
+    assert c.get("/api/os-updates/auto-patch").json() == {"security_only": True, "nodes": []}
+    c.post("/api/os-updates/auto-patch", json={"node": "spoke:s1", "enabled": True})
+    r = c.post("/api/os-updates/auto-patch", json={"security_only": False})
+    assert r.json() == {"security_only": False, "nodes": ["spoke:s1"]}
+    r = c.post("/api/os-updates/auto-patch", json={"node": "spoke:s1", "enabled": False})
+    assert r.json()["nodes"] == []
+    assert c.post("/api/os-updates/auto-patch", json={"node": ""}).status_code == 400
 
 
 def test_fix_access_requires_a_password_and_relays_it():
