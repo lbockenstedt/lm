@@ -2148,7 +2148,7 @@ const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
     settings: ['General', 'User Access', 'Cloud', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons', 'Diagnostics'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-console', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
-    setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'OS Updates', 'Test Data Feed'],
+    setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'Test Data Feed'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Diagnostics', 'Settings'],
     ldap: ['Users', 'Groups'],
@@ -3931,6 +3931,13 @@ function _rebuildMainNav(allSpokes, connections) {
             <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg></div>
             <span>Security</span>
         </div>`;
+    // OS Updates — fleet OS patching (hub_os_updates.py); Global Admin only,
+    // like its /api/os-updates routes. Download-tray icon.
+    const _osUpdatesNavHtml = () => `
+        <div onclick="setView('osupdates')" id="nav-osupdates" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">
+            <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"></path></svg></div>
+            <span>OS Updates</span>
+        </div>`;
     // Cert Expiry Monitor — Global Admin only, and only once switched on in
     // System → General (window.__lmCertMonEnabled, from /api/certmon/status).
     const _certMonNavHtml = () => `
@@ -3957,6 +3964,7 @@ function _rebuildMainNav(allSpokes, connections) {
         ${isAdmin() ? adminSettings : ''}
         ${isAdmin() ? adminLogs : ''}
         ${isAdmin() ? _securityNavHtml() : ''}
+        ${isAdmin() ? _osUpdatesNavHtml() : ''}
         ${(isAdmin() && window.__lmCertMonEnabled) ? _certMonNavHtml() : ''}
         ${(isAdmin() || isTenantAdmin()) ? _credVaultNavHtml() : ''}
         ${isAdmin() ? _templateRepoNavHtml() : ''}
@@ -4214,6 +4222,9 @@ async function setView(viewId) {
     // Credential Vault — reachable by a tenant-admin (own-tenant buckets) or a
     // Global Admin; the server enforces per-bucket reach + pass-phrase on top.
     if (viewId === 'credvault' && !(isTenantAdmin() || isAdmin())) {
+        return;
+    }
+    if (viewId === 'osupdates' && !isAdmin()) {
         return;
     }
     // Cert Expiry Monitor — Global Admin only, and only while enabled.
@@ -4812,6 +4823,9 @@ function _viewTemplate(viewId) {
   </div>
   <div id="reports-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
 </div>`;
+
+        case 'osupdates':
+            return `<div id="osupdates-content"></div>`;
 
         case 'security':
             return `<div class="space-y-4">
@@ -6025,6 +6039,9 @@ function initView(viewId, subView) {
             break;
         case 'security':
             loadSecurityData();
+            break;
+        case 'osupdates':
+            _renderOsUpdatesView(document.getElementById('osupdates-content'));
             break;
         case 'reports':
             loadReportsData();
@@ -8075,7 +8092,7 @@ function _onSaTenantFilterChange() {
 // doesn't mean dropping into CLI. Global-Admin only (nav + backend gated), OFF by
 // default, audit-logged. Endpoints: /api/exec/config (GET/POST knobs),
 // /api/exec/targets (GET), /api/exec (POST run).
-// ── Setup → OS Updates (Global-Admin) ───────────────────────────────────────
+// ── OS Updates (left-nav view, Global-Admin) ────────────────────────────────
 // Fleet OS package updates. The HUB is the module: it collects pending-update
 // state from every spoke and agent and, on explicit approval, sends the apply
 // commands. Nodes never update themselves.
@@ -8085,7 +8102,7 @@ function _onSaTenantFilterChange() {
 // hidden, so "up to date" is never confused with "not covered".
 let _osuPoll = null;
 
-function _renderSetupOsUpdatesTile(content) {
+function _renderOsUpdatesView(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
         <div class="${card} space-y-4">
@@ -12497,6 +12514,7 @@ const LM_NAV_ICONS = [
     { id: 17, name: 'Setup',        key: 'setup',      svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26"></path></svg>' },
     { id: 18, name: 'System',       key: 'settings',   svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>' },
     { id: 19, name: 'Logs',         key: 'logs',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.25 6.75h12M8.25 12h12M8.25 17.25h12M3.75 6.75h.007v.008H3.75V6.75zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zM3.75 12h.007v.008H3.75V12zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm-.375 5.25h.007v.008H3.75v-.008zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z"></path></svg>' },
+    { id: 20, name: 'OS Updates',   key: 'osupdates',  svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3"></path></svg>' },
     { id: 101, name: 'Storage',      key: 'truenas',    svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25z"></path></svg>' },
 ];
 
@@ -13730,7 +13748,6 @@ const SETUP_TILES = {
     'User Access':      _renderSetupUserAccessTile,
     'Simulations':      _renderSetupSimulationsTile,
     'Remote Console':   _renderSetupRemoteConsoleTile,
-    'OS Updates':       _renderSetupOsUpdatesTile,
     'Test Data Feed':   _renderSetupTestFeedTile,
 };
 
