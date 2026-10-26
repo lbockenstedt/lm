@@ -500,7 +500,7 @@ const AGENT_ROLES = {
     'netbox-server': { name: 'NetBox Server', desc: 'Deploys the NetBox application itself — PostgreSQL, Redis, gunicorn, and nginx serving the WebUI on port 80. Runs as its own service on this host; does NOT create a spoke. Load the "IPAM/DCIM (NetBox)" module role to talk to it.', deploy: true },
     'opnsense':   { name: 'Firewall (OPNsense)',   desc: 'Manages an OPNsense firewall — aliases, filter/NAT rules, Unbound DNS, DHCP leases, ARP. Syncs DHCP/ARP into NetBox.', deploy: false },
     'ldap':       { name: 'Directory (LDAP)',      desc: 'Wraps an LDAP directory for identity/group lookups.', deploy: false },
-    'ldap-server': { name: 'LDAP Server (OpenLDAP)', desc: 'Deploys OpenLDAP itself (slapd + ldaps, optional 2-node delta-syncrepl mirror). Runs as its own service on this host; does NOT create a spoke. Load the "Directory (LDAP)" module role to talk to it. Entra creds are sourced from the hub OIDC config automatically.', deploy: true },
+    'ldap-server': { name: 'LDAP Server (OpenLDAP)', desc: 'Deploys OpenLDAP itself (slapd + ldaps). Joins the directory set in Setup → Directory (LDAP) and replicates with the other LDAP servers automatically. Runs as its own service on this host; does NOT create a spoke. Entra creds are sourced from the hub OIDC config automatically.', deploy: true },
     'simulation': { name: 'Client Simulator (cs)', desc: 'Client-sim engine, client registry, USB auto-provisioning relay, per-client override control panel, and the DHCP/client API for the isolated sim-client network.', deploy: false },
     'cppm':       { name: 'NAC (Aruba ClearPass)', desc: 'Syncs ClearPass sessions/endpoints (by-MAC / by-IP) into NetBox.', deploy: false },
     'proxmox':    { name: 'Hypervisor (Proxmox / pxmx)', desc: 'Proxmox spoke bridging the hub to per-host pxmx agents (VM lifecycle, VNC console, USB auto-provisioning).', deploy: false },
@@ -9276,56 +9276,68 @@ function _attachAutoSave(root, mapFn, flag) {
 
 
 
-// Setup → Directory (LDAP) — SERVER connection config (Global Admin only).
-// GET/POST /setup/ldap-config (core/src/routes/ldap.py) store the connection
-// under global_config["ldap"]; Save re-pushes UPDATE_CONFIG to every connected
-// directory spoke via hub.push_ldap_config_all(). This is the SERVER connection
-// (base DN + admin bind account + URL + mirror peers) that the spoke used to get
-// only from install flags/defaults — NOT per-tenant (TENANT == OU is unchanged).
+// Setup → Directory (LDAP) — one-form setup (Global Admin only).
+// The operator gives only the domain and admin account. The hub
+// (core/src/ldap_cluster.py, GET/POST /setup/ldap-directory) finds every agent
+// running the ldap-server role, resets their admin password (stored in the
+// Credential Vault), wires replication between them, and points the Directory
+// spoke at all of them for failover.
 function _renderSetupLdapConfigTile(content) {
-    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
+    const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex items-center justify-between mb-2">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Directory (LDAP) — server connection</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Directory (LDAP)</h3>
                     <span id="ldapcfg-spokes-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">The directory <b>server connection</b> the hub pushes to the Directory (LDAP) spoke(s): base DN, the admin bind account, the server URL, and any mirror peers. Saving stores it and pushes <code>UPDATE_CONFIG</code> to every connected directory spoke immediately — these values take precedence over the install-time defaults. <b>Global Admin only.</b> This is the server config, not per-tenant: each tenant is still its own OU under the base DN.</p>
+                <p class="text-xs text-slate-400 mb-3">Enter the domain and admin account. LM finds the LDAP servers (every agent with the <b>LDAP Server</b> role), sets the admin password on all of them, sets up replication between them, and connects the Directory module to them. The password is stored in the Credential Vault. <b>Global Admin only.</b></p>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div class="space-y-1"><label class="${labelCls}">Base DN</label><input id="ldapcfg-base-dn" type="text" placeholder="dc=example,dc=org" autocomplete="off" title="LDAP root search base DN (e.g. dc=example,dc=org)" class="${inputCls} font-mono text-xs"></div>
-                    <div class="space-y-1"><label class="${labelCls}">Admin DN</label><input id="ldapcfg-admin-dn" type="text" placeholder="cn=admin,dc=example,dc=org" autocomplete="off" title="Distinguished Name (DN) of directory administrator bind account" class="${inputCls} font-mono text-xs"></div>
-                    <div class="space-y-1"><label class="${labelCls}">Admin Password <span class="text-slate-400 normal-case font-normal">(blank = keep existing)</span></label><input id="ldapcfg-admin-pw" type="password" placeholder="•••••••• (unset)" autocomplete="new-password" title="Password for administrator bind account (leave blank to keep existing)" class="${inputCls} font-mono text-xs"></div>
-                    <div class="space-y-1"><label class="${labelCls}">Server URL</label><input id="ldapcfg-server-url" type="text" placeholder="ldap://localhost:389" autocomplete="off" title="Directory server LDAP URL and port (e.g. ldap://localhost:389)" class="${inputCls} font-mono text-xs"></div>
-                    <div class="space-y-1"><label class="${labelCls}">Server ID <span class="text-slate-400 normal-case font-normal">(mirror replication id, optional)</span></label><input id="ldapcfg-server-id" type="text" placeholder="1" autocomplete="off" title="Unique mirror server identifier for multi-master replication" class="${inputCls} font-mono text-xs"></div>
-                    <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Mirror Peers <span class="text-slate-400 normal-case font-normal">(other node URLs — comma or newline separated; blank for a single node)</span></label><textarea id="ldapcfg-peers" rows="2" placeholder="ldap://ldap-2.example.org:389" title="List of mirror replication peer URLs (comma or newline separated)" class="${inputCls} font-mono text-xs"></textarea></div>
+                    <div class="space-y-1"><label class="${labelCls}">Domain name</label><input id="ldapcfg-domain" type="text" placeholder="orange-tme.com" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
+                    <div class="space-y-1"><label class="${labelCls}">Admin username</label><input id="ldapcfg-admin-user" type="text" value="Administrator" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
+                    <div class="space-y-1"><label class="${labelCls}">Admin password <span class="text-slate-400 normal-case font-normal">(blank = generate a new one)</span></label><input id="ldapcfg-admin-pw" type="password" autocomplete="new-password" class="${inputCls} font-mono text-xs"></div>
+                    <div id="ldapcfg-psk-wrap" class="space-y-1 hidden"><label class="${labelCls}">Vault pass-phrase <span class="text-slate-400 normal-case font-normal">(__admin__ bucket)</span></label><input id="ldapcfg-psk" type="password" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
+                </div>
+                <p id="ldapcfg-derived" class="mt-2 text-[11px] text-slate-500 font-mono"></p>
+                <div class="mt-4">
+                    <p class="${labelCls} mb-1">LDAP servers</p>
+                    <div id="ldapcfg-servers" class="text-xs text-slate-500">Loading…</div>
                 </div>
                 <div class="mt-4 flex items-center justify-between gap-3">
                     <span id="ldapcfg-msg" class="text-xs text-slate-400"></span>
-                    <div class="flex items-center gap-2">
-                        <button type="button" onclick="pushLdapConfig()" id="ldapcfg-push-btn" title="Immediately push directory configuration to all connected LDAP spokes" class="${btnSecCls}">Push to spokes now</button>
-                        <button type="button" onclick="saveLdapConfig()" id="ldapcfg-save-btn" title="Save directory server configuration" class="${btnCls}">Save</button>
-                    </div>
+                    <button type="button" onclick="saveLdapConfig()" id="ldapcfg-save-btn" class="${btnCls}">Apply</button>
                 </div>
             </div>`;
     loadLdapConfig();
 }
 
+function _ldapServersTable(servers, results) {
+    if (!servers.length) return '<p class="italic">No LDAP servers yet — load the <b>LDAP Server (OpenLDAP)</b> role on an agent. It joins this directory automatically.</p>';
+    const res = Object.fromEntries((results || []).map(r => [r.spoke_id, r]));
+    return `<table class="w-full text-left"><thead><tr class="text-slate-400"><th class="py-1">Server</th><th>Address</th><th>Replication id</th><th>Status</th></tr></thead><tbody>${servers.map(s => {
+        const r = res[s.spoke_id];
+        const status = r ? (r.status === 'SUCCESS' ? '<span class="text-green-700">applying (re-deploying)</span>' : `<span class="text-red-700">${escapeHtml(r.message || 'failed')}</span>`)
+            : (s.connected ? '<span class="text-green-700">online</span>' : '<span class="text-red-700">offline</span>');
+        return `<tr class="border-t border-slate-100"><td class="py-1 font-medium text-slate-700">${escapeHtml(s.name)}</td><td class="font-mono">${escapeHtml(s.address || '—')}</td><td>${escapeHtml(String((r && r.server_id) || s.server_id || '—'))}</td><td>${status}</td></tr>`;
+    }).join('')}</tbody></table>`;
+}
+
 async function loadLdapConfig() {
     try {
-        const data = await apiJson('/setup/ldap-config');
-        const c = data.config || {};
-        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? '' : v; };
-        set('ldapcfg-base-dn', c.base_dn);
-        set('ldapcfg-admin-dn', c.admin_dn);
-        set('ldapcfg-server-url', c.server_url);
-        set('ldapcfg-server-id', c.server_id);
-        set('ldapcfg-peers', (c.mirror_peers || []).map(p => (p && p.url) || p).filter(Boolean).join('\n'));
+        const d = await apiJson('/setup/ldap-directory');
+        const set = (id, v) => { const el = document.getElementById(id); if (el && v) el.value = v; };
+        set('ldapcfg-domain', d.domain);
+        set('ldapcfg-admin-user', d.admin_user);
         const pw = document.getElementById('ldapcfg-admin-pw');
-        if (pw) pw.placeholder = c.admin_pw_set ? '•••••••• (stored — leave blank to keep)' : '•••••••• (unset)';
+        if (pw) pw.placeholder = d.admin_pw_set ? 'blank = generate a new one' : 'blank = generate one';
+        document.getElementById('ldapcfg-psk-wrap')?.classList.toggle('hidden', !d.vault_psk_required);
+        const derived = document.getElementById('ldapcfg-derived');
+        if (derived) derived.textContent = d.base_dn ? `Base DN ${d.base_dn} · Admin DN ${d.admin_dn} · Password in vault ${d.vault_secret} · Directory connects to ${d.server_url}` : '';
+        const tbl = document.getElementById('ldapcfg-servers');
+        if (tbl) tbl.innerHTML = _ldapServersTable(d.servers || []);
         const pill = document.getElementById('ldapcfg-spokes-pill');
         if (pill) {
-            const n = data.spokes_connected || 0;
-            pill.textContent = n ? `${n} SPOKE${n === 1 ? '' : 'S'} CONNECTED` : 'NO SPOKE CONNECTED';
+            const n = d.spokes_connected || 0;
+            pill.textContent = n ? `${n} DIRECTORY SPOKE${n === 1 ? '' : 'S'} CONNECTED` : 'NO DIRECTORY SPOKE';
             pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (n ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500');
         }
     } catch (e) { console.error('loadLdapConfig failed', e); }
@@ -9370,51 +9382,31 @@ function stopLdapHealthPoll() {
     if (_ldapHealthTimer) { clearInterval(_ldapHealthTimer); _ldapHealthTimer = null; }
 }
 
-function _ldapConfigForm() {
-    const v = id => (document.getElementById(id)?.value || '').trim();
-    const cfg = {
-        base_dn: v('ldapcfg-base-dn'),
-        admin_dn: v('ldapcfg-admin-dn'),
-        server_url: v('ldapcfg-server-url'),
-        server_id: v('ldapcfg-server-id'),
-        mirror_peers: v('ldapcfg-peers'),
-    };
-    const pw = document.getElementById('ldapcfg-admin-pw')?.value || '';
-    if (pw) cfg.admin_pw = pw;  // blank = keep stored
-    return cfg;
-}
-
 async function saveLdapConfig() {
     const btn = document.getElementById('ldapcfg-save-btn');
     const msg = document.getElementById('ldapcfg-msg');
-    const config = _ldapConfigForm();
-    if (!config.base_dn) { showToast('Base DN is required', 'error'); return; }
-    if (!config.admin_dn) { showToast('Admin DN is required', 'error'); return; }
-    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    const body = { domain: v('ldapcfg-domain'), admin_user: v('ldapcfg-admin-user') || 'Administrator',
+                   admin_pw: document.getElementById('ldapcfg-admin-pw')?.value || '', psk: document.getElementById('ldapcfg-psk')?.value || '' };
+    if (!body.domain) { showToast('Domain name is required', 'error'); return; }
+    if (!confirm(`Apply directory ${body.domain}? This ${body.admin_pw ? 'sets' : 'generates'} a new admin password on every LDAP server and re-deploys them with replication.`)) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
     try {
-        const d = await apiJson('/setup/ldap-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config }) });
-        const n = d.pushed_to_spokes || 0;
-        if (msg) msg.textContent = `Saved. Pushed to ${n} spoke${n === 1 ? '' : 's'}.`;
-        showToast(`Directory config saved${n ? ` — pushed to ${n} spoke${n === 1 ? '' : 's'}` : ' (no directory spoke connected)'}.`, 'success');
-        loadLdapConfig();
+        const d = await apiJson('/setup/ldap-directory', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const servers = d.servers || [];
+        const failed = servers.filter(s => s.status !== 'SUCCESS').length;
+        if (msg) msg.textContent = `Applied to ${servers.length} server${servers.length === 1 ? '' : 's'}${failed ? ` — ${failed} failed` : ''}. Re-deploy takes a few minutes.`;
+        showToast(`Directory ${d.base_dn} applied${failed ? ` (${failed} server(s) failed)` : ''}.`, failed ? 'error' : 'success');
+        const pw = document.getElementById('ldapcfg-admin-pw'); if (pw) pw.value = '';
+        await loadLdapConfig();
+        const tbl = document.getElementById('ldapcfg-servers');
+        if (tbl && servers.length) tbl.innerHTML = _ldapServersTable(servers.map(s => ({ ...s, connected: true })), servers);
     } catch (e) {
-        showToast('Save failed: ' + (e.message || e), 'error');
-        if (msg) msg.textContent = 'Save failed.';
-    } finally { if (btn) { btn.disabled = false; btn.textContent = 'Save'; } }
+        showToast('Apply failed: ' + (e.message || e), 'error');
+        if (msg) msg.textContent = 'Apply failed.';
+    } finally { if (btn) { btn.disabled = false; btn.textContent = 'Apply'; } }
 }
-
-async function pushLdapConfig() {
-    const btn = document.getElementById('ldapcfg-push-btn');
-    if (btn) { btn.disabled = true; btn.textContent = 'Pushing…'; }
-    try {
-        const d = await apiJson('/setup/ldap-config/push', { method: 'POST' });
-        const n = d.pushed_to_spokes || 0;
-        showToast(n ? `Pushed to ${n} spoke${n === 1 ? '' : 's'}.` : 'No directory spoke connected.', n ? 'success' : 'info');
-    } catch (e) {
-        showToast('Push failed: ' + (e.message || e), 'error');
-    } finally { if (btn) { btn.disabled = false; btn.textContent = 'Push to spokes now'; } }
-}
-window.saveLdapConfig = saveLdapConfig; window.pushLdapConfig = pushLdapConfig;
+window.saveLdapConfig = saveLdapConfig;
 
 
 
@@ -19024,26 +19016,8 @@ async function showLoadRoleModal(spokeId) {
                     </div>
                     <p class="text-[11px] text-slate-500">Sets the NetBox WebUI login. Leave blank to auto-generate (shown in the deploy log).</p>
                 </div>
-                <div id="ldap-server-cfg" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
-                    <p class="text-xs font-semibold text-slate-700">LDAP server</p>
-                    <div class="p-2 bg-blue-50 border border-blue-200 rounded-md space-y-2">
-                        <p class="text-xs font-semibold text-slate-700">Quick fill</p>
-                        <div class="grid grid-cols-2 gap-2">
-                            <input id="lsrv-wiz-domain" type="text" placeholder="domain name (e.g. orange-tme.com)" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-blue-500 focus:border-blue-500">
-                            <input id="lsrv-wiz-admin" type="text" placeholder="admin username" value="Administrator" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-blue-500 focus:border-blue-500">
-                        </div>
-                        <button type="button" onclick="fillLdapServerWizard()" class="px-3 py-1.5 text-xs font-bold text-blue-700 bg-white border border-blue-300 rounded-md hover:bg-blue-100 transition-colors">Fill in LDAP fields</button>
-                        <p class="text-[11px] text-slate-500">Derives the Base DN and Admin DN from the domain, and pre-selects server-id 1 below — every field stays editable so you can review (and set the server/peer URLs) before loading the role.</p>
-                    </div>
-                    <div class="grid grid-cols-2 gap-2">
-                        <input id="lsrv-base-dn" type="text" placeholder="base DN (e.g. dc=lab,dc=example,dc=com)" autocomplete="off" class="col-span-2 w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
-                        <input id="lsrv-admin-dn" type="text" placeholder="admin DN (e.g. cn=admin,dc=lab,dc=example,dc=com)" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
-                        <input id="lsrv-admin-pw" type="password" placeholder="admin password (blank = auto-generate)" autocomplete="new-password" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
-                        <select id="lsrv-server-id" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500"><option value="1">server-id 1</option><option value="2">server-id 2</option></select>
-                        <input id="lsrv-server-url" type="text" placeholder="this node ldaps:// URL" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
-                        <input id="lsrv-peer" type="text" placeholder="peer node ldaps:// URL (for the 2-node mirror; blank = single node)" autocomplete="off" class="col-span-2 w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
-                    </div>
-                    <p class="text-[11px] text-slate-500">Entra credentials are injected from the hub OIDC config automatically. For a 2-node mirror, load this role on both hosts with matching base DN, server-id 1 &amp; 2, and each node's peer URL set to the OTHER node.</p>
+                <div id="ldap-server-cfg" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md">
+                    <p class="text-xs text-slate-600">No settings needed here. This server joins the directory set in <strong>Setup → Directory (LDAP)</strong>: it gets that domain and admin account, and replication with the other LDAP servers is set up automatically. If the directory isn't set up yet, the server installs on its own; Apply in Setup → Directory then includes it.</p>
                 </div>
                 <div id="console-dpa-cfg" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
                     <label class="flex items-center gap-2 text-xs font-semibold text-slate-700">
@@ -19148,26 +19122,6 @@ async function showLoadRoleModal(spokeId) {
     }
 }
 
-// Quick-fill the ldap-server config from just a domain name + admin username:
-// derives Base DN (dc=... per label) and Admin DN (cn=<admin>,<base DN>), and
-// pre-selects server-id 1 as a sane single/first-node default. Leaves
-// admin password, server URL, and peer untouched — those remain editable so
-// the operator reviews the final values before loading the role.
-function fillLdapServerWizard() {
-    const domain = document.getElementById('lsrv-wiz-domain')?.value.trim().toLowerCase();
-    if (!domain) { showToast('Enter a domain name first (e.g. orange-tme.com)', 'info'); return; }
-    const admin = document.getElementById('lsrv-wiz-admin')?.value.trim() || 'Administrator';
-    const baseDn = domain.split('.').map(s => s.trim()).filter(Boolean).map(p => `dc=${p}`).join(',');
-    if (!baseDn) { showToast('That domain name doesn\'t look valid.', 'error'); return; }
-    const baseEl = document.getElementById('lsrv-base-dn');
-    const adminEl = document.getElementById('lsrv-admin-dn');
-    const serverIdEl = document.getElementById('lsrv-server-id');
-    if (baseEl) baseEl.value = baseDn;
-    if (adminEl) adminEl.value = `cn=${admin},${baseDn}`;
-    if (serverIdEl && !serverIdEl.value) serverIdEl.value = '1';
-    showToast('Base DN and Admin DN filled in — review all fields below before loading the role.', 'success');
-}
-
 // Show the NetBox admin-account inputs only while the netbox-server role is
 // checked — the deploy passes them through to install.sh as the admin login.
 function syncNetboxCreds() {
@@ -19250,19 +19204,9 @@ async function loadRole(spokeId) {
         if (p) netboxCfg.admin_password = p;
     }
 
-    // ldap-server topology (Entra creds are injected hub-side from OIDC config).
-    let ldapSrvCfg = null;
-    if (checked.includes('ldap-server')) {
-        ldapSrvCfg = {};
-        const g = id => document.getElementById(id)?.value?.trim();
-        if (g('lsrv-base-dn')) ldapSrvCfg.base_dn = g('lsrv-base-dn');
-        if (g('lsrv-admin-dn')) ldapSrvCfg.admin_dn = g('lsrv-admin-dn');
-        const pw = document.getElementById('lsrv-admin-pw')?.value;
-        if (pw) ldapSrvCfg.admin_pw = pw;
-        if (g('lsrv-server-id')) ldapSrvCfg.server_id = g('lsrv-server-id');
-        if (g('lsrv-server-url')) ldapSrvCfg.server_url = g('lsrv-server-url');
-        if (g('lsrv-peer')) ldapSrvCfg.peers = [g('lsrv-peer')];
-    }
+    // ldap-server: the hub fills in the whole config from Setup → Directory
+    // (core/src/ldap_cluster.py join_config), so the modal sends nothing.
+    const ldapSrvCfg = checked.includes('ldap-server') ? {} : null;
 
     // console role: optional Direct Port Access (DPA). Off by default; only sent
     // when the operator ticks it. Bind stays 127.0.0.1 unless widened, and a
