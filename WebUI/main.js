@@ -220,6 +220,7 @@ const ROUTES = {
     showDnsForwarderModal:  { m: 'POST', p: () => '/api/dns/forwarders' + _tenantQS(), api: 'dns_add_forwarder', via: 'saveDnsForwarder' }, // (modal; p is a thunk, NEVER invoke it here — ROUTES is a top-level const evaluated at load, before `let currentTenant` initializes, so calling _tenantQS() eagerly throws a TDZ ReferenceError that aborts main.js and takes the whole UI down. saveDnsForwarder() builds its own tenant-scoped URL at call time; this thunk exists only so the tenant-scoping invariant test can verify the endpoint carries _tenantQS())
     showDnsOverrideProfileModal:{ m: 'PUT|DELETE', p: '/api/dns/overrides/profile', api: 'dns_override_profile_set/delete (admin)', via: 'saveDnsOverrideProfile' }, // (modal)
     showDnsOverrideAssignModal:{ m: 'POST|DELETE', p: '/api/dns/override-assignment', api: 'dns_override_assign/unassign', via: 'saveDnsOverrideAssignment' }, // (modal)
+    loadDnsOverrideLiveCheck:{ m: 'GET', p: '/api/dns/overrides/verify', api: 'dns_overrides_verify' },
     loadDHCPData:           { m: 'GET',  p: '/api/dhcp/{subnets|leases|reservations}', api: 'dhcp_list_subnets/dhcp_list_leases/dhcp_list_reservations' },
     showDhcpReservationModal:{ m: 'GET', p: '/api/dhcp/subnets',          api: 'dhcp_list_subnets', via: '_loadDhcpSubnetOptions' }, // (modal)
 
@@ -28554,6 +28555,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
             }
             window._dnsOverrides = d;
             container.innerHTML = _dnsOverridesView(d, editIcon, delIcon);
+            loadDnsOverrideLiveCheck();
             return;
         }
 
@@ -31624,7 +31626,10 @@ function _dnsOverridesView(d, editIcon, delIcon) {
             <td class="px-4 py-2 font-mono">${escapeHtml(a.target)}</td>
             <td class="px-4 py-2 text-xs text-slate-600">${escapeHtml(a.label || '')}</td>
             <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">${escapeHtml(a.profile)}</span></td>
-            <td class="px-4 py-2 whitespace-nowrap">${removable ? `<button onclick="removeDnsOverrideAssignment('${t}')" class="text-slate-400 hover:text-red-500" title="Remove this override (client returns to normal DNS)">${delIcon}</button>` : ''}</td>
+            <td class="px-4 py-2 text-xs text-slate-600">${escapeHtml(a.comment || '')}</td>
+            <td class="px-4 py-2 whitespace-nowrap">${removable ? `
+                <button onclick="editDnsOverrideAssignment('${t}')" class="text-slate-400 hover:text-[#01A982] mr-2" title="Edit this override (IP/subnet, profile, label, comment)">${editIcon}</button>
+                <button onclick="removeDnsOverrideAssignment('${t}')" class="text-slate-400 hover:text-red-500" title="Remove this override (client returns to normal DNS)">${delIcon}</button>` : ''}</td>
         </tr>`;
     }).join('');
     return `<div class="p-4">${intro}${memberHtml}
@@ -31632,9 +31637,101 @@ function _dnsOverridesView(d, editIcon, delIcon) {
         ${profiles.length ? `<div class="mb-6">${tableWrap(tableHead(['Name', 'Description', 'Answers', 'Blocked', 'Clients', '']) + `<tbody>${profRows}</tbody>`)}</div>`
             : `<p class="text-sm text-slate-400 mb-6">No override profiles defined${admin ? ' — use <b>+ Add Profile</b>.' : '.'}</p>`}
         <h4 class="text-sm font-bold text-[#263040] mb-2">Assigned clients</h4>
-        ${assignments.length ? tableWrap(tableHead(['Client IP / Subnet', 'Label', 'Profile', '']) + `<tbody>${asgRows}</tbody>`)
+        ${assignments.length ? tableWrap(tableHead(['Client IP / Subnet', 'Label', 'Profile', 'Comment', '']) + `<tbody>${asgRows}</tbody>`)
             : `<p class="text-sm text-slate-400">No clients have an override applied.</p>`}
+        <div id="dns-override-live" class="mt-6"></div>
     </div>`;
+}
+
+// ── Live check: proof the overrides actually answer ─────────────────────────
+// Each resolver reports whether every profile's view is loaded in its RUNNING
+// Unbound, and the queries from assigned clients that Unbound answered (or
+// blocked) from that view (its log-local-actions lines).
+async function loadDnsOverrideLiveCheck(minutes) {
+    const box = document.getElementById('dns-override-live');
+    if (!box) return;
+    const mins = minutes || parseInt(box.dataset.minutes || '60', 10);
+    box.dataset.minutes = mins;
+    box.innerHTML = `<h4 class="text-sm font-bold text-[#263040] mb-2">Live check</h4><p class="text-sm text-slate-400">Checking every DNS server…</p>`;
+    const qs = _tenantQS();
+    try {
+        const { ok, data: d, detail } = await _spokeFetch(`/api/dns/overrides/verify${qs}${qs ? '&' : '?'}minutes=${mins}`);
+        if (!ok || !d || d.status !== 'SUCCESS') {
+            box.innerHTML = _dnsOverrideLiveView(null, mins, detail || d?.message || 'Live check unavailable');
+            return;
+        }
+        box.innerHTML = _dnsOverrideLiveView(d, mins);
+    } catch (e) {
+        box.innerHTML = _dnsOverrideLiveView(null, mins, e.message);
+    }
+}
+
+function _dnsOverrideLiveView(d, mins, error) {
+    const windows = [[60, 'Last hour'], [1440, 'Last 24 hours'], [10080, 'Last 7 days']];
+    const header = `<div class="flex items-center gap-2 mb-2">
+        <h4 class="text-sm font-bold text-[#263040]">Live check</h4>
+        <select onchange="loadDnsOverrideLiveCheck(parseInt(this.value, 10))" class="ml-auto border border-slate-300 rounded-md px-2 py-1 text-xs">
+            ${windows.map(([v, t]) => `<option value="${v}" ${v === mins ? 'selected' : ''}>${t}</option>`).join('')}
+        </select>
+        <button onclick="loadDnsOverrideLiveCheck()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold">Re-check</button>
+    </div>`;
+    if (!d) return header + `<p class="text-sm text-red-600">${escapeHtml(error || 'Live check unavailable')}</p>`;
+    const hits = d.hits || [];
+    const fmt = t => escapeHtml(new Date((t || 0) * 1000).toLocaleString());
+    const ok = 'bg-green-100 text-green-700', bad = 'bg-red-100 text-red-700', warn = 'bg-amber-100 text-amber-800';
+
+    const memberRows = (d.members || []).map(m => {
+        const memberHits = hits.filter(h => h.member === m.display_name).length;
+        const views = !m.ok ? `<span class="px-2 py-0.5 rounded-md text-xs ${bad}" title="${escapeHtml(m.error)}">no answer: ${escapeHtml(m.error || 'unreachable')}</span>`
+            : (m.views || []).map(v => v.loaded
+                ? `<span class="px-2 py-0.5 rounded-md text-xs ${ok}" title="${v.answers} answer line(s) loaded in Unbound">${escapeHtml(v.profile)} ✓ loaded</span>`
+                : `<span class="px-2 py-0.5 rounded-md text-xs ${bad}" title="${escapeHtml(v.error)}">${escapeHtml(v.profile)} ✗ not loaded</span>`).join(' ') || '<span class="text-xs text-slate-400">no profiles</span>';
+        const logging = !m.ok ? '' : m.log_local_actions === true ? `<span class="px-2 py-0.5 rounded-md text-xs ${ok}">on</span>`
+            : m.log_local_actions === false ? `<span class="px-2 py-0.5 rounded-md text-xs ${warn}" title="Turns on automatically with the next override push to this server">off</span>`
+            : '<span class="text-xs text-slate-400">unknown</span>';
+        return `<tr class="border-b border-slate-100">
+            <td class="px-4 py-2 text-sm font-medium">${escapeHtml(m.display_name)}</td>
+            <td class="px-4 py-2">${views}</td>
+            <td class="px-4 py-2">${logging}</td>
+            <td class="px-4 py-2 text-center text-xs">${m.ok ? memberHits : ''}</td>
+        </tr>`;
+    }).join('');
+
+    const perTarget = {};
+    hits.forEach(h => {
+        const a = _dnsOverrideFor(h.client);
+        if (!a) return;
+        const row = perTarget[a.target] || (perTarget[a.target] = { count: 0, last: 0 });
+        row.count += 1;
+        row.last = Math.max(row.last, h.time || 0);
+    });
+    const clientRows = (d.assignments || []).map(a => {
+        const r = perTarget[a.target];
+        return `<tr class="border-b border-slate-100">
+            <td class="px-4 py-2 font-mono text-sm">${escapeHtml(a.target)}</td>
+            <td class="px-4 py-2 text-xs text-slate-600">${escapeHtml(a.label || '')}</td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(a.profile)}</td>
+            <td class="px-4 py-2">${r ? `<span class="px-2 py-0.5 rounded-md text-xs ${ok}">${r.count} override answer(s)</span>`
+                : '<span class="px-2 py-0.5 rounded-md text-xs bg-slate-100 text-slate-600" title="This client has not queried a name in its profile in this window">no overridden queries</span>'}</td>
+            <td class="px-4 py-2 text-xs text-slate-500">${r ? fmt(r.last) : ''}</td>
+        </tr>`;
+    }).join('');
+
+    const hitRows = hits.slice(0, 100).map(h => `<tr class="border-b border-slate-100">
+            <td class="px-4 py-2 text-xs whitespace-nowrap">${fmt(h.time)}</td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(h.member)}</td>
+            <td class="px-4 py-2 font-mono text-xs">${escapeHtml(h.client)}</td>
+            <td class="px-4 py-2 font-mono text-xs">${escapeHtml(h.name)}</td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(h.type)}</td>
+            <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-md text-xs ${h.action === 'blocked' ? bad : ok}">${h.action === 'blocked' ? 'Blocked' : 'Override answer'}</span></td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(h.profile)}</td>
+        </tr>`).join('');
+
+    return header + `<p class="text-xs text-slate-500 mb-2">Asks every DNS server whether each profile is loaded in its running Unbound, and which assigned clients were answered from their override (Unbound logs every local answer with the client IP).</p>
+        <div class="mb-4">${tableWrap(tableHead(['DNS server', 'Profiles in Unbound', 'Answer logging', 'Override answers']) + `<tbody>${memberRows}</tbody>`)}</div>
+        ${clientRows ? `<div class="mb-4">${tableWrap(tableHead(['Client IP / Subnet', 'Label', 'Profile', 'Status', 'Last override answer']) + `<tbody>${clientRows}</tbody>`)}</div>` : ''}
+        ${hits.length ? tableWrap(tableHead(['Time', 'DNS server', 'Client', 'Name', 'Type', 'Result', 'Profile']) + `<tbody>${hitRows}</tbody>`)
+            : '<p class="text-sm text-slate-400">No assigned client queried a name in its profile in this window.</p>'}`;
 }
 
 function editDnsOverrideProfile(name) {
@@ -31763,17 +31860,26 @@ function _dnsOverrideScopeChanged() {
     if (sel) sel.value = existing ? existing.profile : '';
     const label = document.getElementById('dns-ova-label');
     if (label) label.value = existing ? (existing.label || '') : (subnet ? '' : modal.dataset.deviceLabel || '');
+    const comment = document.getElementById('dns-ova-comment');
+    if (comment) comment.value = existing ? (existing.comment || '') : '';
+}
+
+function editDnsOverrideAssignment(target) {
+    const a = ((window._dnsOverrides || {}).assignments || []).find(x => x.target === target);
+    if (a) showDnsOverrideAssignModal({ target: a.target, label: a.label, comment: a.comment, profile: a.profile, edit: true });
 }
 
 // Assign modal. `preset` = {target, label, lock} when launched from a record row;
 // there the target starts as the device IP and can be switched to a subnet.
+// `preset.edit` (from the Overrides tab) edits an existing assignment in place.
 function showDnsOverrideAssignModal(preset) {
     const d = window._dnsOverrides || {};
     const profiles = d.profiles || [];
     if (!profiles.length) { showToast('No override profiles are defined yet' + (isAdmin() ? ' — add one first.' : '. Ask a Global Admin to create one.'), 'error'); return; }
     const p = preset || {};
     const current = p.target ? _dnsOverrideFor(p.target) : null;
-    const currentProfile = current && current.exact ? current.profile : '';
+    const currentProfile = p.profile || (current && current.exact ? current.profile : '');
+    const currentComment = p.edit ? (p.comment || '') : (current && current.exact ? (current.comment || '') : '');
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const opts = (p.lock ? [`<option value="">None (normal DNS)</option>`] : [])
         .concat(profiles.map(x => `<option value="${escapeHtml(x.name)}" ${x.name === currentProfile ? 'selected' : ''}>${escapeHtml(x.name)}${x.description ? ' — ' + escapeHtml(x.description) : ''}</option>`)).join('');
@@ -31786,7 +31892,7 @@ function showDnsOverrideAssignModal(preset) {
                 </select>
             </div>` : '';
     openModal('dns-override-assign-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">DNS Override</h3>
+        <h3 class="text-lg font-bold text-[#263040]">${p.edit ? 'Edit DNS Override' : 'DNS Override'}</h3>
         <div class="space-y-3">${scopeHtml}
             <div class="space-y-1">
                 <label class="text-xs text-slate-500 font-bold uppercase">Client IP or subnet</label>
@@ -31801,9 +31907,13 @@ function showDnsOverrideAssignModal(preset) {
                 <label class="text-xs text-slate-500 font-bold uppercase">Label</label>
                 <input id="dns-ova-label" value="${escapeHtml(p.label || '')}" class="${inputCls}" placeholder="Device name (optional)">
             </div>
+            <div class="space-y-1">
+                <label class="text-xs text-slate-500 font-bold uppercase">Comment</label>
+                <input id="dns-ova-comment" value="${escapeHtml(currentComment)}" maxlength="500" class="${inputCls}" placeholder="Why this override exists (optional)">
+            </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsOverrideAssignment()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Apply</button>
+            <button onclick="saveDnsOverrideAssignment()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${p.edit ? 'Save Changes' : 'Apply'}</button>
             <button onclick="document.getElementById('dns-override-assign-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     const modal = document.getElementById('dns-override-assign-modal');
@@ -31811,6 +31921,7 @@ function showDnsOverrideAssignModal(preset) {
         modal.dataset.returnTab = p.lock ? 'Records' : 'Overrides';
         modal.dataset.deviceIp = p.lock ? (p.target || '') : '';
         modal.dataset.deviceLabel = p.lock ? (p.label || '') : '';
+        modal.dataset.editTarget = p.edit ? p.target : '';
     }
 }
 
@@ -31825,6 +31936,8 @@ async function saveDnsOverrideAssignment() {
     const target = (document.getElementById('dns-ova-target')?.value || '').trim();
     const profile = document.getElementById('dns-ova-profile')?.value || '';
     const label = (document.getElementById('dns-ova-label')?.value || '').trim();
+    const comment = (document.getElementById('dns-ova-comment')?.value || '').trim();
+    const oldTarget = (modal && modal.dataset.editTarget) || '';
     const tab = (modal && modal.dataset.returnTab) || 'Overrides';
     if (!target) { showToast('Client IP or subnet is required', 'error'); return; }
     if (!profile && !_dnsOverrideExact(target)) { modal.remove(); return; }
@@ -31832,7 +31945,7 @@ async function saveDnsOverrideAssignment() {
         const { ok, data: d, detail } = await _spokeFetch('/api/dns/override-assignment' + _dnsOverrideQS(), {
             method: profile ? 'POST' : 'DELETE',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(profile ? { target, profile, label } : { target }),
+            body: JSON.stringify(profile ? { target, profile, label, comment, ...(oldTarget ? { old_target: oldTarget } : {}) } : { target }),
         });
         if (ok && (d.status === 'SUCCESS' || d.status === 'PARTIAL')) {
             modal.remove();
