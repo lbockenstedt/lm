@@ -621,6 +621,20 @@ def register(app, hub, ctx):
                        {r["backend"]: r["ok"] for r in results})
         return {"status": "ok", "tenant_id": tid, "results": results}
 
+    @app.post("/admin/ops/ldap-directory-reapply")
+    async def admin_ops_ldap_directory_reapply(request: Request):
+        """Re-push the saved Setup -> Directory config (same password, vault
+        untouched) to every ldap-server node. See ``ldap_cluster.reapply``."""
+        _guard(request)
+        import ldap_cluster
+        try:
+            res = await ldap_cluster.reapply(hub, actor="admin-ops")
+        except ldap_cluster.LdapSetupError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        logger.warning("admin_ops: ldap-directory-reapply -> %s",
+                       [(r["name"], r["status"]) for r in res["servers"]])
+        return {"status": "ok", **res}
+
     @app.get("/admin/ops/netbox-sso")
     async def admin_ops_netbox_sso_get(request: Request):
         """Loopback mirror of GET /setup/netbox-sso (no secret/key echoed)."""
