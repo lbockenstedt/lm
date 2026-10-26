@@ -8079,9 +8079,9 @@ function _onSaTenantFilterChange() {
 // Fleet OS package updates. The HUB is the module: it collects pending-update
 // state from every spoke and agent and, on explicit approval, sends the apply
 // commands. Nodes never update themselves.
-// Behaviour is fixed by design, not exposed as knobs (see hub_os_updates.py):
-// dist-upgrade (everything), NEVER auto-reboot, rolling one node at a time, hub
-// last. Ineligible nodes are listed as unmanaged WITH a reason rather than
+// Rolling one node at a time, hub last, NEVER auto-reboot (see
+// hub_os_updates.py). Deploy everything, or only selected nodes / packages /
+// security updates; reboot is a separate per-node action. Ineligible nodes are listed as unmanaged WITH a reason rather than
 // hidden, so "up to date" is never confused with "not covered".
 let _osuPoll = null;
 
@@ -8095,8 +8095,8 @@ function _renderSetupOsUpdatesTile(content) {
             </div>
             <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-[11px] text-amber-800 leading-snug">
                 Operating-system package updates for every spoke and agent — <b>Global-Admin only, every approval is audit-logged</b>.
-                Applies <code>apt dist-upgrade</code>: security, regular and dependency updates together.
-                <b>Nothing is ever rebooted automatically</b> — a host needing one is badged, and you reboot it deliberately.
+                Deploys <code>apt dist-upgrade</code> (everything) — or only the nodes/packages you select, or only security updates.
+                <b>Nothing is ever rebooted automatically</b> — a host needing one is badged with a <b>Reboot…</b> button you use deliberately.
                 Nodes are updated <b>one at a time</b>, and the <b>hub goes last</b> (updating it restarts this page).
                 This is separate from LM code updates.
             </div>
@@ -8114,7 +8114,10 @@ function _renderSetupOsUpdatesTile(content) {
             </div>
             <div class="flex flex-wrap items-center gap-2">
                 <button onclick="osuCheck()" class="${btnSecCls}">↻ Check for updates</button>
-                <button id="osu-apply" onclick="osuApply()" class="${btnCls}">Approve &amp; deploy all</button>
+                <button id="osu-apply-selected" onclick="osuApplySelected()" class="${btnCls}" disabled>Deploy selected (0)</button>
+                <button id="osu-apply" onclick="osuApply()" class="${btnSecCls}">Approve &amp; deploy all</button>
+                <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer" title="Nodes without picked packages get only their pending security updates"><input type="checkbox" id="osu-security-only" class="w-4 h-4 rounded">Security updates only</label>
+                <button id="osu-cancel" onclick="osuCancel()" class="${btnSecCls} hidden">Cancel run</button>
                 <span id="osu-run" class="text-xs text-slate-500"></span>
             </div>
             <div id="osu-body"><p class="text-xs text-slate-400 italic">Loading…</p></div>
@@ -8160,20 +8163,85 @@ window.osuCheck = async function () {
     finally { if (st) st.textContent = ''; }
 };
 
-window.osuApply = async function () {
-    const d = window._osuData || {};
-    const n = (d.totals || {}).with_updates || 0;
-    if (!n) { showToast('No nodes have pending updates.', 'info'); return; }
-    // Deliberate friction: this changes packages on every node in the fleet.
-    if (!confirm(`Approve and deploy OS updates to ${n} node(s)?\n\n` +
-                 `• apt dist-upgrade (security + regular + dependency changes)\n` +
+// Selection survives the 5s progress re-render: node keys picked whole, and
+// per-node package picks (a node with package picks applies only those). A
+// package pick never selects the whole node — clearing the last pick must not
+// leave a full dist-upgrade selected.
+const _osuSel = { nodes: new Set(), pkgs: {} };
+const _osuOpen = new Set();
+
+function _osuSelectedKeys() { return [...new Set([..._osuSel.nodes, ...Object.keys(_osuSel.pkgs)])]; }
+
+function _osuBusy() { const r = (window._osuData || {}).run; return !!(r && r.status === 'running'); }
+
+window.osuToggleNode = function (key, on) {
+    _osuSel.nodes[on ? 'add' : 'delete'](key);
+    delete _osuSel.pkgs[key];
+    _osuRender(window._osuData || {});
+};
+
+window.osuTogglePkg = function (key, pkg, on) {
+    const set = _osuSel.pkgs[key] || (_osuSel.pkgs[key] = new Set());
+    if (on) { set.add(pkg); _osuSel.nodes.delete(key); } else set.delete(pkg);
+    if (!set.size) delete _osuSel.pkgs[key];
+    _osuRender(window._osuData || {});
+};
+
+window.osuToggleOpen = function (key, open) { if (open) _osuOpen.add(key); else _osuOpen.delete(key); };
+
+async function _osuDeploy(body, summary) {
+    const secOnly = !!document.getElementById('osu-security-only')?.checked;
+    body.security_only = secOnly;
+    // Deliberate friction: this changes packages on real hosts.
+    if (!confirm(`Approve and deploy OS updates?\n\n${summary}\n\n` +
+                 `• ${secOnly ? 'security updates only (unless packages were picked)' : 'apt dist-upgrade, or just the picked packages'}\n` +
                  `• one node at a time, hub last\n` +
                  `• nothing is rebooted automatically — you'll get a badge instead`)) return;
     try {
-        const r = await apiJson('/api/os-updates/apply', { method: 'POST', body: JSON.stringify({}) });
+        const r = await apiJson('/api/os-updates/apply', { method: 'POST', body: JSON.stringify(body) });
         showToast(`Deploying to ${r.queued} node(s) — one at a time.`, 'success');
+        _osuSel.nodes.clear(); Object.keys(_osuSel.pkgs).forEach(k => delete _osuSel.pkgs[k]);
         _osuStartPoll();
     } catch (e) { showToast('Apply failed: ' + (e.message || e), 'error'); }
+}
+
+window.osuApply = async function () {
+    const n = ((window._osuData || {}).totals || {}).with_updates || 0;
+    if (!n) { showToast('No nodes have pending updates.', 'info'); return; }
+    _osuDeploy({}, `All ${n} node(s) with pending updates.`);
+};
+
+window.osuApplySelected = async function () {
+    const keys = _osuSelectedKeys();
+    if (!keys.length) { showToast('Select at least one node or package.', 'info'); return; }
+    const labels = Object.fromEntries(((window._osuData || {}).nodes || []).map(n => [`${n.kind}:${n.id}`, n.label]));
+    const packages = {};
+    const lines = keys.map(k => {
+        const picked = _osuSel.pkgs[k];
+        if (picked && picked.size) { packages[k] = [...picked]; return `• ${labels[k] || k}: ${picked.size} package(s)`; }
+        return `• ${labels[k] || k}: all pending`;
+    });
+    const nodes = keys.filter(k => !packages[k]);
+    _osuDeploy({ nodes, packages }, lines.join('\n'));
+};
+
+window.osuCancel = async function () {
+    if (!confirm('Cancel the update run?\n\nThe node currently updating will finish (apt cannot be safely interrupted); queued nodes are skipped.')) return;
+    try { const r = await apiJson('/api/os-updates/cancel', { method: 'POST', body: '{}' }); showToast(r.message || 'Cancelling…', 'success'); }
+    catch (e) { showToast('Cancel failed: ' + (e.message || e), 'error'); }
+};
+
+window.osuReboot = async function (key) {
+    const n = ((window._osuData || {}).nodes || []).find(x => `${x.kind}:${x.id}` === key);
+    if (!n) return;
+    const warn = n.kind === 'hub' ? '\n\nThis is the HUB — the WebUI and every spoke connection drop until it is back.'
+        : (n.flavor === 'proxmox' ? '\n\nThis is a Proxmox host — every VM on it goes down with it.' : '');
+    if (!confirm(`Reboot ${n.label} in 1 minute?${warn}\n\n(Cancel on the host with: shutdown -c)`)) return;
+    try {
+        const r = await apiJson('/api/os-updates/reboot', { method: 'POST', body: JSON.stringify({ node: key }) });
+        showToast(`${n.label}: ${r.message || 'reboot scheduled'}`, 'success');
+        osuLoad();
+    } catch (e) { showToast('Reboot failed: ' + (e.message || e), 'error'); }
 };
 
 function _osuStartPoll() {
@@ -8189,59 +8257,101 @@ function _osuStartPoll() {
     }, 5000);
 }
 
+// Literal class strings: Tailwind is precompiled, so built-up names wouldn't exist.
+const _OSU_BADGE_CLS = {
+    blue: 'text-blue-700 bg-blue-50 border-blue-200',
+    red: 'text-red-700 bg-red-50 border-red-200',
+    emerald: 'text-emerald-700 bg-emerald-50 border-emerald-200',
+    amber: 'text-amber-800 bg-amber-50 border-amber-200',
+    slate: 'text-slate-500 bg-slate-100 border-slate-300',
+};
+const _osuBadge = (text, color, title) => `<span class="text-[10px] font-bold ${_OSU_BADGE_CLS[color]} border rounded-full px-2 py-0.5"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(text)}</span>`;
+
 function _osuRender(d) {
     window._osuData = d;
     const body = document.getElementById('osu-body');
     if (!body) return;
     const t = d.totals || {};
     const run = d.run;
+    const busy = _osuBusy();
     const runEl = document.getElementById('osu-run');
     if (runEl) {
-        runEl.textContent = run && run.status === 'running'
-            ? `deploying ${run.done}/${run.total} — current: ${run.current || '…'}`
-            : (run && run.status === 'finished' ? `last run: ${run.done}/${run.total} complete` : '');
+        const label = { finished: 'complete', cancelled: 'cancelled', interrupted: 'interrupted by a hub restart' };
+        runEl.textContent = busy
+            ? `deploying ${run.done}/${run.total} — current: ${run.current || '…'}${run.cancel_requested ? ' (cancelling after this node)' : ''}`
+            : (run && label[run.status] ? `last run: ${run.done}/${run.total} ${label[run.status]}` : '');
     }
+    const nSel = _osuSelectedKeys().length;
     const btn = document.getElementById('osu-apply');
-    if (btn) btn.disabled = !!(run && run.status === 'running');
+    if (btn) btn.disabled = busy;
+    const selBtn = document.getElementById('osu-apply-selected');
+    if (selBtn) { selBtn.disabled = busy || !nSel; selBtn.textContent = `Deploy selected (${nSel})`; }
+    const cancelBtn = document.getElementById('osu-cancel');
+    if (cancelBtn) cancelBtn.classList.toggle('hidden', !busy);
     const chip = (label, val, cls) => `<span class="inline-flex items-baseline gap-1 border rounded-full px-2.5 py-0.5 ${cls || 'bg-white border-slate-200'}"><b class="text-slate-700">${escapeHtml(String(val))}</b><span class="text-slate-500">${escapeHtml(label)}</span></span>`;
     const summary = `<div class="flex flex-wrap items-center gap-1.5 text-xs mb-3">
         ${chip('nodes with updates', t.with_updates || 0, (t.with_updates ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'))}
         ${chip('packages', t.packages || 0)}
         ${chip('security', t.security || 0, (t.security ? 'bg-red-50 border-red-200' : 'bg-white border-slate-200'))}
         ${chip('need reboot', t.reboot_required || 0, (t.reboot_required ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'))}
+        ${chip('blocked', t.blocked || 0, (t.blocked ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'))}
         ${chip('unmanaged', t.unmanaged || 0)}
         ${chip('unreachable', t.unreachable || 0, (t.unreachable ? 'bg-red-50 border-red-200' : 'bg-white border-slate-200'))}
         ${chip('not checked yet', t.not_checked || 0, (t.not_checked ? 'bg-slate-100 border-slate-300' : 'bg-white border-slate-200'))}
       </div>`;
     const rows = (d.nodes || []).map(n => {
         const key = `${n.kind}:${n.id}`;
+        const jsKey = escapeHtml(JSON.stringify(key));
+        const feats = n.features || [];
         const item = run && (run.items || []).find(i => i.key === key);
         let state;
-        if (item && item.status === 'applying') state = '<span class="text-[10px] font-bold text-blue-700 bg-blue-50 border border-blue-200 rounded-full px-2 py-0.5">applying…</span>';
-        else if (item && item.status === 'failed') state = `<span class="text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">failed</span>`;
-        else if (item && item.status === 'done') state = '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">updated</span>';
-        else if (n.unreachable) state = `<span class="text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">unreachable</span>`;
-        else if (n.unmanaged) state = '<span class="text-[10px] font-bold text-slate-500 bg-slate-100 border border-slate-200 rounded-full px-2 py-0.5">unmanaged</span>';
-        else if (n.checked === false) state = '<span class="text-[10px] font-bold text-slate-500 bg-slate-100 border border-slate-300 rounded-full px-2 py-0.5">not checked yet</span>';
-        else if (!n.count) state = '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">up to date</span>';
-        else state = `<span class="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">${n.count} pending</span>`;
-        const reboot = n.reboot_required ? '<span class="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5" title="A kernel/PVE update needs a reboot. Nothing reboots automatically — do it deliberately.">reboot required</span>' : '';
-        const pkgs = (n.packages || []).slice(0, 40).map(p =>
-            `<span class="inline-block mr-2 ${p.security ? 'text-red-700' : 'text-slate-500'}">${escapeHtml(p.package)} <span class="text-slate-400">${escapeHtml(p.current)}→${escapeHtml(p.candidate)}</span></span>`).join('');
-        const more = (n.packages || []).length > 40 ? `<span class="text-slate-400">… +${(n.packages || []).length - 40} more</span>` : '';
+        if (item && item.status === 'applying') state = _osuBadge('applying…', 'blue');
+        else if (item && item.status === 'failed') state = _osuBadge('failed', 'red');
+        else if (item && item.status === 'interrupted') state = _osuBadge('interrupted', 'red');
+        else if (item && item.status === 'queued') state = _osuBadge('queued', 'slate');
+        else if (item && item.status === 'done' && busy) state = _osuBadge('updated', 'emerald');
+        else if (n.unreachable) state = _osuBadge('unreachable', 'red');
+        else if (n.unmanaged) state = _osuBadge('unmanaged', 'slate');
+        else if (n.checked === false) state = _osuBadge('not checked yet', 'slate');
+        else if (!n.count) state = _osuBadge('up to date', 'emerald');
+        else state = _osuBadge(`${n.count} pending`, 'amber');
+        const scheduled = n.reboot_scheduled_at && (Date.now() / 1000 - n.reboot_scheduled_at) < 900;
+        const reboot = scheduled ? _osuBadge('reboot scheduled', 'blue')
+            : (n.reboot_required ? _osuBadge('reboot required', 'amber', 'A kernel/PVE update needs a reboot. Nothing reboots automatically — do it deliberately.') : '');
+        const canReboot = n.eligible && n.reboot_required && !scheduled && feats.includes('reboot') && !busy;
+        const rebootBtn = canReboot ? `<button onclick="osuReboot(${jsKey})" class="text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Reboot…</button>` : '';
+        const selectable = n.eligible && n.count && !n.apply_blocker && !busy;
+        const nodeBox = selectable
+            ? `<input type="checkbox" class="w-4 h-4 rounded" ${_osuSel.nodes.has(key) ? 'checked' : ''} onchange="osuToggleNode(${jsKey}, this.checked)" title="Upgrade everything pending on this node">`
+            : '';
+        const canPick = selectable && feats.includes('packages');
+        const picked = _osuSel.pkgs[key] || new Set();
+        const pkgs = (n.packages || []).map(p => {
+            const label = `${escapeHtml(p.package)} <span class="text-slate-400">${escapeHtml(p.current)}→${escapeHtml(p.candidate)}</span>`;
+            const cls = p.security ? 'text-red-700' : 'text-slate-500';
+            if (!canPick) return `<span class="inline-block mr-2 ${cls}">${label}</span>`;
+            return `<label class="inline-flex items-center gap-1 mr-3 ${cls} cursor-pointer"><input type="checkbox" class="w-3 h-3" ${picked.has(p.package) ? 'checked' : ''} onchange="osuTogglePkg(${jsKey}, ${escapeHtml(JSON.stringify(p.package))}, this.checked)">${label}</label>`;
+        }).join('');
+        const pickNote = selectable && !feats.includes('packages')
+            ? '<div class="text-[10px] text-slate-400 mt-1">Update LM on this node to pick individual packages — it can only be updated whole.</div>' : '';
+        const pickHint = canPick ? `<div class="text-[10px] text-slate-400 mb-1">${picked.size ? `${picked.size} picked — only these will be upgraded on this node.` : 'Pick packages to upgrade only those, or tick the node to upgrade everything.'}</div>` : '';
         const detail = n.reason
             ? `<div class="text-[11px] text-slate-500 mt-1">${escapeHtml(n.reason)}</div>`
-            : (n.count ? `<details class="mt-1"><summary class="cursor-pointer text-[11px] text-slate-400">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-[11px] mt-1 leading-relaxed">${pkgs}${more}</div></details>` : '');
-        const msg = item && item.message ? `<div class="text-[11px] text-red-600 mt-1">${escapeHtml(item.message)}</div>` : '';
+            : (n.count ? `<details class="mt-1" ${_osuOpen.has(key) ? 'open' : ''} ontoggle="osuToggleOpen(${jsKey}, this.open)"><summary class="cursor-pointer text-[11px] text-slate-400">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-[11px] mt-1 leading-relaxed">${pickHint}${pkgs}</div></details>${pickNote}` : '');
+        const blocker = n.apply_blocker ? `<div class="text-[11px] text-amber-700 mt-1">Can't apply: ${escapeHtml(n.apply_blocker)}</div>` : '';
+        let msg = '';
+        if (item && item.message) msg = `<div class="text-[11px] ${item.status === 'done' ? 'text-slate-500' : 'text-red-600'} mt-1">${escapeHtml(item.message)}</div>`;
+        else if (item && item.status === 'done' && item.mode === 'packages') msg = `<div class="text-[11px] text-slate-500 mt-1">upgraded ${escapeHtml((item.packages || []).join(', '))}</div>`;
         return `<div class="border border-slate-200 rounded-md p-3 mb-2">
             <div class="flex flex-wrap items-center justify-between gap-2">
-              <span class="text-xs font-bold text-slate-600">${escapeHtml(n.label)} <span class="font-normal text-slate-400">${escapeHtml(n.kind)}${n.flavor ? ' · ' + escapeHtml(n.flavor) : ''}</span></span>
-              <span class="flex flex-wrap items-center gap-2 justify-end">${reboot}${state}</span>
-            </div>${detail}${msg}</div>`;
+              <span class="flex items-center gap-2 text-xs font-bold text-slate-600">${nodeBox}${escapeHtml(n.label)} <span class="font-normal text-slate-400">${escapeHtml(n.kind)}${n.flavor ? ' · ' + escapeHtml(n.flavor) : ''}</span></span>
+              <span class="flex flex-wrap items-center gap-2 justify-end">${rebootBtn}${reboot}${state}</span>
+            </div>${detail}${blocker}${msg}</div>`;
     }).join('');
     const when = d.checked_at ? new Date(d.checked_at * 1000).toLocaleString() : 'never';
     body.innerHTML = summary + (rows || '<p class="text-xs text-slate-400 italic">No nodes reporting.</p>') +
         `<p class="text-[11px] text-slate-400 mt-2">Last checked: ${escapeHtml(when)}</p>`;
+    if (busy && !_osuPoll) _osuStartPoll();
 }
 
 function _renderSetupRemoteConsoleTile(content) {

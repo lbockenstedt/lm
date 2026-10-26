@@ -198,12 +198,22 @@ class AgentHostingControlPlane(BaseControlPlane):
         # Mirrors AGENT_RUN_COMMAND below. The apply timeout is generous because a
         # Proxmox dist-upgrade genuinely runs for many minutes; the agent bounds
         # it too, so a wedged apt can't hold the relay open forever.
-        if cmd_type in ("AGENT_OS_UPDATE_CHECK", "AGENT_OS_UPDATE_APPLY"):
-            _apply = cmd_type.endswith("APPLY")
-            _to = 3700.0 if _apply else 240.0
+        # Package-selective apply / reboot keep their own command types end to
+        # end so an older relay or agent rejects them instead of running a full
+        # dist-upgrade (see control_plane OS_UPDATE_* for why).
+        _osu_relay = {
+            "AGENT_OS_UPDATE_CHECK": ("OS_UPDATE_CHECK", 240.0),
+            "AGENT_OS_UPDATE_APPLY": ("OS_UPDATE_APPLY", 3700.0),
+            "AGENT_OS_UPDATE_APPLY_PACKAGES": ("OS_UPDATE_APPLY_PACKAGES", 3700.0),
+            "AGENT_OS_REBOOT": ("OS_REBOOT", 60.0),
+        }
+        if cmd_type in _osu_relay:
+            _agent_cmd, _to = _osu_relay[cmd_type]
+            _fwd = {"refresh": bool(data.get("refresh", True))}
+            if cmd_type == "AGENT_OS_UPDATE_APPLY_PACKAGES":
+                _fwd["packages"] = list(data.get("packages") or [])
             resp = await self.send_to_agent(
-                "OS_UPDATE_APPLY" if _apply else "OS_UPDATE_CHECK",
-                {"refresh": bool(data.get("refresh", True))},
+                _agent_cmd, _fwd,
                 agent_id=data.get("agent_id"),
                 timeout=_to)
             if isinstance(resp, dict):

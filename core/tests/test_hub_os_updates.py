@@ -23,6 +23,16 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from hub_os_updates import HubOsUpdatesMixin  # noqa: E402
+import os_update  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _hub_host_not_eligible(monkeypatch):
+    """The "hub" node checks THIS machine via os_update.check_updates. Pin it
+    so results don't depend on the test host (a Linux CI runner has apt and
+    isn't root, so it would count as an extra blocked node)."""
+    monkeypatch.setattr(os_update, "check_updates",
+                        lambda refresh=True: {"eligible": False, "reason": "test host"})
 
 
 class _FakeState:
@@ -223,3 +233,148 @@ async def test_autocheck_loop_skips_body_when_disabled(monkeypatch):
     assert hub._osu_state()["checked_at"] == 0.0
     # Disabled cycles use the short 300s re-check delay, not interval_hours*3600.
     assert 300.0 in calls
+
+
+# ── selective apply / cancel / reboot / persistence ──────────────────────────
+
+class _RecordingHub(_FakeHub):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.sent = []
+
+    async def request_response(self, target, cmd, data, timeout=None):
+        self.sent.append((target, cmd, dict(data or {})))
+        if cmd.endswith("CHECK"):
+            return await super().request_response(target, cmd, data, timeout)
+        return {"payload": {"data": {"status": "SUCCESS", "message": ""}}}
+
+
+_PKGS = [{"package": "openssl", "security": True},
+         {"package": "curl", "security": False}]
+
+
+def _checked_hub(features=("packages", "reboot"), blocker=""):
+    hub = _RecordingHub(
+        connections={"spoke-1": object()},
+        agent_info={"guid-123": {"spoke_id": "spoke-1", "agent_id": "pve-host-1",
+                                 "hostname": "pve1"}},
+        module_metadata={"spoke-1": {"display_name": "Spoke One"}},
+        responses={k: {"eligible": True, "count": 2, "packages": _PKGS,
+                       "features": list(features), "apply_blocker": blocker,
+                       "reboot_required": True}
+                   for k in ("spoke-1", "pve-host-1")})
+    return hub
+
+
+async def _drain():
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_guid_keyed_agent_is_relayed_by_its_raw_agent_id():
+    hub = _checked_hub()
+    await hub.osu_check_fleet(refresh=False)
+    checks = [s for s in hub.sent if s[1] == "AGENT_OS_UPDATE_CHECK"]
+    assert checks and checks[0][2]["agent_id"] == "pve-host-1"
+    node = next(n for n in hub.osu_snapshot()["nodes"] if n["kind"] == "agent")
+    assert node["id"] == "guid-123" and node["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_apply_selected_packages_uses_the_package_command():
+    hub = _checked_hub()
+    await hub.osu_check_fleet(refresh=False)
+    hub.sent.clear()
+    r = await hub.osu_apply_fleet(packages={"agent:guid-123": ["openssl"]},
+                                  node_keys=["spoke:spoke-1"])
+    assert r == {"status": "SUCCESS", "queued": 2}
+    await _drain()
+    applies = [s for s in hub.sent if "APPLY" in s[1]]
+    assert ("spoke-1", "OS_UPDATE_APPLY", {}) in applies
+    assert ("spoke-1", "AGENT_OS_UPDATE_APPLY_PACKAGES",
+            {"agent_id": "pve-host-1", "packages": ["openssl"]}) in applies
+    assert hub._osu_state()["run"]["status"] == "finished"
+
+
+@pytest.mark.asyncio
+async def test_security_only_sends_only_security_packages():
+    hub = _checked_hub()
+    await hub.osu_check_fleet(refresh=False)
+    hub.sent.clear()
+    await hub.osu_apply_fleet(node_keys=["spoke:spoke-1"], security_only=True)
+    await _drain()
+    assert ("spoke-1", "OS_UPDATE_APPLY_PACKAGES", {"packages": ["openssl"]}) in hub.sent
+
+
+@pytest.mark.asyncio
+async def test_bad_selections_are_refused_before_anything_runs():
+    hub = _checked_hub(features=())
+    await hub.osu_check_fleet(refresh=False)
+    hub.sent.clear()
+    r = await hub.osu_apply_fleet(packages={"spoke:spoke-1": ["openssl"]})
+    assert r["status"] == "ERROR" and "LM update" in r["message"]
+    hub = _checked_hub()
+    await hub.osu_check_fleet(refresh=False)
+    hub.sent.clear()
+    r = await hub.osu_apply_fleet(packages={"spoke:spoke-1": ["not-pending"]})
+    assert r["status"] == "ERROR" and "not pending" in r["message"]
+    r = await hub.osu_apply_fleet(node_keys=["spoke:nope"])
+    assert r["status"] == "ERROR"
+    assert not hub.sent and hub._osu_state()["run"] is None
+
+
+@pytest.mark.asyncio
+async def test_blocked_nodes_are_excluded_from_apply_all():
+    hub = _checked_hub(blocker="no helper")
+    await hub.osu_check_fleet(refresh=False)
+    r = await hub.osu_apply_fleet()
+    assert r["status"] == "ERROR"
+    assert hub.osu_snapshot()["totals"]["blocked"] == 2
+
+
+@pytest.mark.asyncio
+async def test_cancel_skips_queued_nodes():
+    hub = _checked_hub()
+    await hub.osu_check_fleet(refresh=False)
+    await hub.osu_apply_fleet()
+    assert hub.osu_cancel_run("me")["status"] == "SUCCESS"
+    await _drain()
+    run = hub._osu_state()["run"]
+    assert run["status"] == "cancelled"
+    assert all(i["status"] == "skipped" for i in run["items"])
+    assert hub.osu_cancel_run("me")["status"] == "ERROR"
+
+
+@pytest.mark.asyncio
+async def test_reboot_is_explicit_feature_gated_and_relayed_by_name():
+    hub = _checked_hub()
+    await hub.osu_check_fleet(refresh=False)
+    r = await hub.osu_reboot_node("agent:guid-123", actor="me")
+    assert r["status"] == "SUCCESS"
+    assert ("spoke-1", "AGENT_OS_REBOOT", {"agent_id": "pve-host-1"}) in hub.sent
+    old = _checked_hub(features=())
+    await old.osu_check_fleet(refresh=False)
+    r = await old.osu_reboot_node("spoke:spoke-1")
+    assert r["status"] == "ERROR" and "LM update" in r["message"]
+    assert not any(s[1] == "OS_REBOOT" for s in old.sent)
+
+
+@pytest.mark.asyncio
+async def test_state_persists_and_an_inflight_run_loads_as_interrupted(tmp_path):
+    hub = _checked_hub()
+    hub.cache_dir = str(tmp_path)
+    await hub.osu_check_fleet(refresh=False)
+    st = hub._osu_state()
+    st["run"] = {"status": "running", "done": 0, "total": 2, "current": "x",
+                 "items": [{"key": "a", "status": "applying"},
+                           {"key": "b", "status": "queued"}]}
+    await hub._osu_file().flush_now()
+    fresh = _checked_hub()
+    fresh.cache_dir = str(tmp_path)
+    fresh.osu_load_state()
+    run = fresh._osu_state()["run"]
+    assert run["status"] == "interrupted"
+    assert [i["status"] for i in run["items"]] == ["interrupted", "skipped"]
+    node = next(n for n in fresh.osu_snapshot()["nodes"] if n["kind"] == "spoke")
+    assert node["checked"] is True and node["count"] == 2
