@@ -1623,7 +1623,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         else:
             reason = (f"push only queued (didn't land live): "
                       f"{getattr(result, 'message', '') or 'draining/unreachable'}")
-        if n >= 3:
+        # Warn on the 3rd stalled tick, then about hourly (80 × 45s) — a tenant
+        # with quotas but no cs spoke bound otherwise warned every tick forever.
+        if n == 3 or (n > 3 and n % 80 == 0):
             logger.warning(
                 "reconcile-push [%s]: STILL stale after %d re-push(es) — %s; "
                 "the spoke's effective set isn't adopting the hub target. "

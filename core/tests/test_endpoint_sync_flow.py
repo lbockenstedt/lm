@@ -166,3 +166,33 @@ async def test_sync_error_emits_sync_error_marker_with_message(caplog):
     assert any("[sync-error]" in r.getMessage() and "first error: mac required" in r.getMessage()
                and "tenant=acme" in r.getMessage() for r in warns), \
         "expected a [sync-error] WARNING with the sink's first-error message"
+
+@pytest.mark.asyncio
+async def test_empty_ipam_tenant_skips_replace_and_is_not_an_error(caplog):
+    """A tenant with no IPs in NetBox: an empty replace batch is always refused
+    by the CPPM mass-delete guard, so it is not sent at all and the cycle is
+    recorded as a clean success — no [sync-error] every cycle (LM-HUB had
+    'shared' and 'stme-cordelia' erroring every run)."""
+    hub = _SyncHub(responses={
+        ("netbox-spoke-1", "NETBOX_GET_IPS"):
+            {"payload": {"data": {"status": "SUCCESS", "ip_addresses": []}}},
+    })
+    with caplog.at_level(logging.INFO):
+        status = await hub.sync_tenant_endpoints("acme")
+    assert status["status"] == "success"
+    assert status["endpoints_total"] == 0 and status["errors"] == 0
+    assert all(cmd != "CPPM_SYNC_ENDPOINTS" for _, cmd, _ in hub.request_log)
+    assert "[sync-error]" not in caplog.text
+    assert hub.simulations_store.recorded["acme"] is status
+
+
+@pytest.mark.asyncio
+async def test_only_unsyncable_records_also_skips_replace():
+    hub = _SyncHub(responses={
+        ("netbox-spoke-1", "NETBOX_GET_IPS"): {"payload": {"data": {
+            "status": "SUCCESS",
+            "ip_addresses": [{"address": None, "custom_fields": {}}]}}},
+    })
+    status = await hub.sync_tenant_endpoints("acme")
+    assert status["status"] == "success" and status["hub_skipped"] == 1
+    assert all(cmd != "CPPM_SYNC_ENDPOINTS" for _, cmd, _ in hub.request_log)

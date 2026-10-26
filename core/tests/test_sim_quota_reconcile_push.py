@@ -162,3 +162,23 @@ def test_reconcile_no_forward_when_tenant_has_no_quotas():
     assert pushed is False
     assert hub.pushed == []
     assert hub.forwarded == []  # the spoke was NOT polled
+
+def test_reconcile_stall_warning_is_throttled_when_no_spoke_bound(caplog):
+    """A tenant with quotas but NO cs spoke bound can never converge; it used
+    to WARN every 45s tick forever (LM-HUB: 248 warnings / 6h for 'lrb').
+    Now: warn on the 3rd stalled tick, then every 80th (~hourly)."""
+    import logging
+    hub = _build(
+        spoke_effective=[],
+        csc={"ignore_global_quotas": True,
+             "sim_quotas": [_q("ssidpw_fail", "MIA", 5)]})
+    hub.get_client_sim_spokes = lambda t: []
+    hub.get_client_sim_spoke = lambda t: None
+    hub.active_connections = set()
+    with caplog.at_level(logging.INFO):
+        for _ in range(160):
+            _run(hub._reconcile_push_tenant("10"))
+    warns = [r for r in caplog.records
+             if r.levelno == logging.WARNING and "STILL stale" in r.getMessage()]
+    assert len(warns) == 3   # ticks 3, 80, 160
+    assert "STILL stale after 3 " in warns[0].getMessage()
