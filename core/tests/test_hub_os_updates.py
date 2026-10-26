@@ -23,6 +23,16 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from hub_os_updates import HubOsUpdatesMixin  # noqa: E402
+import os_update  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _hub_host_not_eligible(monkeypatch):
+    """The "hub" node checks THIS machine via os_update.check_updates. Pin it
+    so results don't depend on the test host (a Linux CI runner has apt and
+    isn't root, so it would count as an extra blocked node)."""
+    monkeypatch.setattr(os_update, "check_updates",
+                        lambda refresh=True: {"eligible": False, "reason": "test host"})
 
 
 class _FakeState:
