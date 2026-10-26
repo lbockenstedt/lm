@@ -630,6 +630,17 @@ chmod 600 "$ENV_FILE"
 
 provision_coordinator_tls
 
+# Hub Setup → OS Updates: this spoke runs as svc_lm, so apt/reboot go through
+# the fixed-action helper (core/src/os_update.py). Installed root-owned outside
+# $INSTALL_DIR so svc_lm can't edit what sudo runs.
+if [[ -f "$INSTALL_DIR/scripts/lm-os-update" ]]; then
+    install -o root -g root -m 0755 "$INSTALL_DIR/scripts/lm-os-update" /usr/local/bin/lm-os-update
+    mkdir -p /etc/sudoers.d
+    echo "svc_lm ALL=(ALL) NOPASSWD: /usr/local/bin/lm-os-update *" > /etc/sudoers.d/lm-os-update
+    chmod 0440 /etc/sudoers.d/lm-os-update
+    visudo -cf /etc/sudoers.d/lm-os-update >/dev/null 2>&1 || rm -f /etc/sudoers.d/lm-os-update
+fi
+
 cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=Lab Manager DHCP Spoke (Kea)
