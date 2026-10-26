@@ -127,3 +127,18 @@ def test_for_tenant_unassigned_must_be_connected_and_approved():
     hub2 = _DirHub(["dir-shared"], {"dir-shared": {}},
                    active={"other"})  # dir-shared not in active → disconnected
     assert LabManagerHub.get_directory_spoke_for_tenant(hub2, "tenantA") is None
+
+def test_for_tenant_falls_back_to_a_spoke_bound_to_the_shared_tenant():
+    """A directory spoke bound to the SHARED tenant is the shared OU server:
+    every tenant uses it (was a 503 "No spoke connected" when switching
+    tenants on the Directory page)."""
+    hub = _DirHub(["dir-1"], {"dir-1": {"tenant_id": "shared"}})
+    assert LabManagerHub.get_directory_spoke_for_tenant(hub, "lrb") == "dir-1"
+    assert LabManagerHub.get_directory_spoke_for_tenant(hub, "ra") == "dir-1"
+
+
+def test_for_tenant_prefers_bound_over_shared():
+    hub = _DirHub(["dir-s", "dir-a"], {"dir-s": {"tenant_id": "shared"},
+                                       "dir-a": {"tenant_id": "tenantA"}})
+    assert LabManagerHub.get_directory_spoke_for_tenant(hub, "tenantA") == "dir-a"
+    assert LabManagerHub.get_directory_spoke_for_tenant(hub, "tenantB") == "dir-s"

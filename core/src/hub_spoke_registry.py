@@ -478,8 +478,8 @@ class SpokeRegistryMixin:
         serves the asking tenant.
 
         With a real ``tenant_id``: prefer a connected, approved directory spoke
-        BOUND to that tenant; if none, fall back to an UNASSIGNED directory spoke
-        (the shared OU server); else ``None``. NEVER return a spoke bound to a
+        BOUND to that tenant; if none, fall back to an UNASSIGNED or
+        SHARED-tenant directory spoke (the shared OU server); else ``None``. NEVER return a spoke bound to a
         DIFFERENT tenant — that would relay this tenant's OU ops to another
         tenant's spoke (the cross-tenant leak this closes in a multi-spoke
         deploy; the spoke-side OU slug is the backstop, this is defense-in-depth).
@@ -503,8 +503,12 @@ class SpokeRegistryMixin:
         # UNASSIGNED directory spoke serves every tenant via ou=<slug>,<base>.
         # This fallback is intentional and DIFFERENT from nw/hypervisor (which
         # return None here) — do not "fix" it to match them.
-        unassigned = [sid for sid in cands if not (md.get(sid, {}).get("tenant_id") or "")]
-        return unassigned[0] if unassigned else None
+        # A spoke bound to the SHARED tenant is the same shared server.
+        from access import tenant_is_shared
+        shared = [sid for sid in cands
+                  if not (md.get(sid, {}).get("tenant_id") or "")
+                  or tenant_is_shared(md.get(sid, {}).get("tenant_id"))]
+        return shared[0] if shared else None
 
     def get_nw_spoke_for_shared(self) -> Optional[str]:
         """The nw spoke that owns the SHARED-tenant devices. Shared devices are
