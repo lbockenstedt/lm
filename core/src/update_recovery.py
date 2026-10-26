@@ -576,6 +576,39 @@ def _cli_markbadcommit(args) -> int:
 _LM_UNIT_PATH = "/etc/systemd/system/lm.service"
 
 
+def _dedupe_unit_std_lines(unit_path: str, unit: str) -> bool:
+    """Collapse repeated ``StandardOutput=`` / ``StandardError=`` directives
+    (left by the old substring-matching heal) to the first of each. Returns
+    True only if it rewrote the file. Best-effort; never raises."""
+    seen = set()
+    out = []
+    for line in unit.splitlines(keepends=True):
+        key = line.split("=", 1)[0].strip()
+        if key in ("StandardOutput", "StandardError"):
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(line)
+    s = "".join(out)
+    if s == unit:
+        return False
+    try:
+        tmp = unit_path + ".heal.tmp"
+        with open(tmp, "w") as f:
+            f.write(s)
+        os.replace(tmp, unit_path)
+    except Exception:  # noqa: BLE001 — not root / read-only: leave it
+        return False
+    try:
+        subprocess.run(["systemctl", "daemon-reload"], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info("Healed lm.service: collapsed duplicate StandardOutput/"
+                "StandardError lines.")
+    return True
+
+
 def heal_hub_service_unit(unit_path: str = _LM_UNIT_PATH) -> bool:
     """Idempotently migrate lm.service from the legacy ``Type=oneshot`` +
     ``start_all.sh`` form (which nohup-detached the hub → ``MainPID=0``, no
@@ -593,10 +626,17 @@ def heal_hub_service_unit(unit_path: str = _LM_UNIT_PATH) -> bool:
             unit = f.read()
     except Exception:
         return False
-    if "Type=oneshot" not in unit:
-        return False  # already migrated, or never the legacy form
+    import re
+    # Match a real ``Type=oneshot`` DIRECTIVE line only. The current
+    # install_all.sh unit mentions "Type=oneshot" in a COMMENT; a substring
+    # test re-"healed" that already-migrated unit on every update and each
+    # pass appended another StandardOutput/StandardError pair (LM-HUB grew
+    # hundreds of them). A Type=exec unit carrying such duplicates is
+    # repaired by collapsing them below.
+    legacy = re.search(r"(?m)^Type=oneshot\s*$", unit) is not None
+    if not legacy:
+        return _dedupe_unit_std_lines(unit_path, unit)
     try:
-        import re
         base = "/opt/lm"
         m = re.search(r"(?m)^WorkingDirectory=(.+)$", unit)
         if m and m.group(1).strip():
@@ -605,10 +645,11 @@ def heal_hub_service_unit(unit_path: str = _LM_UNIT_PATH) -> bool:
         main = f"{base}/core/src/main.py"
         s = re.sub(r"(?m)^Type=oneshot\s*$", "Type=exec", unit)
         s = re.sub(r"(?m)^RemainAfterExit=.*\n", "", s)
+        s = re.sub(r"(?m)^Standard(Output|Error)=.*\n", "", s)
         s = re.sub(r"(?m)^ExecStart=.*$",
                    f"ExecStart={py} {main}\n"
                    f"StandardOutput=append:/var/log/lm/hub.log\n"
-                   f"StandardError=append:/var/log/lm/hub.log", s)
+                   f"StandardError=append:/var/log/lm/hub.log", s, count=1)
         s = re.sub(r"(?m)^ExecStop=.*\n", "", s)
         tmp = unit_path + ".heal.tmp"
         with open(tmp, "w") as f:
