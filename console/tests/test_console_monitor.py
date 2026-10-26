@@ -721,7 +721,9 @@ def test_boot_watch_no_stuck_while_user_retries_login_behind_banner(spoke, monke
         clock[0] += 40
         chan.last_user_write_at = clock[0]
         _drive_boot(spoke, "good", clock, chan, len(transcript) + 1)
-        assert spoke._boot_info("good")["state"] == "booting"
+        # "<host> login:" and "Login incorrect" prove the OS is up, so this is
+        # now recognised as booted outright (it used to merely stay deferred).
+        assert spoke._boot_info("good")["state"] == "booted"
     asyncio.run(_run())
 
 

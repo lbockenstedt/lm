@@ -34,7 +34,9 @@ try:
                              sanitize_console_text, _extract_profile_fields, prompt_hostname,
                              looks_like_prompt, boot_fault, current_boot_fault, is_recovery_prompt,
                              count_line_reconnects, set_patience,
-                             check_line_responsive, FACTORY_DEFAULT_CREDENTIALS)
+                             check_line_responsive, FACTORY_DEFAULT_CREDENTIALS,
+                             os_up_marker, scrub_identity, vendor_should_replace, vendor_is_upgrade,
+                             is_cx_misfiled_as_procurve, detect_vendor)
     from dpa import DpaManager
     from dpa_config import DpaConfigStore, detect_advertise_host
     import dpa_ssh
@@ -48,7 +50,9 @@ except ImportError:  # loaded as a package (agent role loader) or from repo root
                               sanitize_console_text, _extract_profile_fields, prompt_hostname,
                               looks_like_prompt, boot_fault, current_boot_fault, is_recovery_prompt,
                               count_line_reconnects, set_patience,
-                              check_line_responsive, FACTORY_DEFAULT_CREDENTIALS)
+                              check_line_responsive, FACTORY_DEFAULT_CREDENTIALS,
+                              os_up_marker, scrub_identity, vendor_should_replace, vendor_is_upgrade,
+                              is_cx_misfiled_as_procurve, detect_vendor)
     from .dpa import DpaManager  # type: ignore
     from .dpa_config import DpaConfigStore, detect_advertise_host  # type: ignore
     from . import dpa_ssh  # type: ignore
@@ -818,6 +822,18 @@ class ConsoleSpoke(BaseSpoke):
             except Exception:  # noqa: BLE001
                 pass
 
+    @staticmethod
+    def _stored_vendor(probe: Dict[str, Any]) -> Optional[str]:
+        """The port's stored vendor, re-checked if it is "linux". Older versions
+        tagged any bare "login:" prompt as linux (AOS-CX switches and SSRs
+        included), so a stored "linux" is re-derived from the saved banner with
+        the current rules; it becomes unknown if no rule matches."""
+        vendor = probe.get("vendor")
+        if vendor == "linux":
+            prof = detect_vendor(probe.get("banner") or "")
+            vendor = prof["name"] if prof else None
+        return vendor
+
     async def _emit_probe_result(self, port_id: str, res: Dict[str, Any], method: str = "login") -> None:
         """Persist the probe + push CONSOLE_PROBE_RESULT up (hub → NetBox).
 
@@ -825,10 +841,18 @@ class ConsoleSpoke(BaseSpoke):
         "llm" for hub LLM-driven identify). ``source`` stays "active" for both —
         a logged-in identity is authoritative and outranks passive glean."""
         prev = self.store.get(port_id).get("probe") or {}
-        prev_ident = {k: v for k, v in (prev.get("identity") or {}).items()
-                      if v not in (None, "", [], {})}
-        new_ident = {k: v for k, v in (res.get("identity") or {}).items()
-                     if v not in (None, "", [], {})}
+        # scrub_identity also cleans junk stored by older versions (hostname
+        # "hostname"/"standby", a prompt stored as the serial).
+        prev_ident = scrub_identity({k: v for k, v in (prev.get("identity") or {}).items()
+                                     if v not in (None, "", [], {})})
+        new_ident = scrub_identity({k: v for k, v in (res.get("identity") or {}).items()
+                                    if v not in (None, "", [], {})})
+        prev_vendor = self._stored_vendor(prev)
+        # A weaker verdict (e.g. "linux" or unknown from a login-locked switch)
+        # must not overwrite a confident one learned earlier (see
+        # vendor_should_replace).
+        vendor = res.get("vendor") if vendor_should_replace(prev_vendor, res.get("vendor")) \
+            else prev_vendor
         # MERGE, never blank: a probe that learns nothing (silent device, idle
         # timeout, creds not pushed yet — routine right after an update restart
         # re-verifies every port) must not wipe the last-known name/serial/type.
@@ -840,11 +864,9 @@ class ConsoleSpoke(BaseSpoke):
                 identity, vendor = new_ident, res.get("vendor")
             else:
                 identity = {**prev_ident, **new_ident}
-                vendor = res.get("vendor") or prev.get("vendor")
             source, stale = "active", False
         else:
             identity = prev_ident
-            vendor = res.get("vendor") or prev.get("vendor")
             source = (prev.get("source") or "active") if prev_ident else "active"
             stale = bool(prev_ident)
         probe = {
@@ -921,10 +943,11 @@ class ConsoleSpoke(BaseSpoke):
                         fields["tenant_id"] = cached["tenant_id"]
                     # Backfill the profile itself (name/type/model…) the probe
                     # didn't re-learn this time — gap-fill only, never override.
-                    for k, v in (cached.get("identity") or {}).items():
+                    for k, v in scrub_identity(cached.get("identity") or {}).items():
                         if v and not identity.get(k):
                             identity[k] = v
-                    if cached.get("vendor") and not probe.get("vendor"):
+                    # A cached "linux" is a legacy bare-"login:" guess; don't revive it.
+                    if cached.get("vendor") not in (None, "", "linux") and not probe.get("vendor"):
                         probe["vendor"] = cached["vendor"]
             if fields:
                 self.store.update(port_id, **fields)
@@ -1575,7 +1598,7 @@ class ConsoleSpoke(BaseSpoke):
             tail = raw.decode("utf-8", "replace")
             score = score_sample(raw)
         else:
-            tail, score = "", 1.0
+            raw, tail, score = b"", "", 1.0
 
         if talking:
             last_new = self._mon_new_at.get(pid, 0.0)
@@ -1591,8 +1614,23 @@ class ConsoleSpoke(BaseSpoke):
                     "prompt_seen": False, "relocked": False,
                     "reason": "output after silence — capturing boot cycle",
                     "stuck_reason": "", "transcript_tail": "", "reconnects": 0,
+                    # Capture offset where this episode began, so booted-OS
+                    # markers are only looked for in THIS episode's output.
+                    "start_bytes": cur - new_bytes,
                 }
                 h["boot"] = boot
+            elif boot is not None and boot.get("state") == "stuck" and not current_boot_fault(tail) \
+                    and self._boot_reached_os(tail, raw[-new_bytes:].decode("utf-8", "replace")):
+                # A "stuck" verdict is not final: if the device later shows a
+                # login/CLI/setup prompt in new output (and no current fault),
+                # it did boot. Before this, a passing benign fault phrase or a
+                # slow boot stayed "stuck" until the next power cycle.
+                boot["state"] = "booted"
+                boot["prompt_seen"] = True
+                boot["reason"] = "recovered: reached a prompt after '%s'" % (
+                    boot.get("stuck_reason") or "stuck")
+                boot["stuck_reason"] = ""
+                boot["booted_at"] = now
             if boot is not None and boot.get("state") == "booting":
                 boot["last_output_at"] = now
                 boot["transcript_tail"] = sanitize_console_text(tail)[-1600:]
@@ -1619,7 +1657,7 @@ class ConsoleSpoke(BaseSpoke):
                     boot["stuck_reason"] = fault
                     boot["reason"] = "boot fault detected: %s" % fault
                     boot["stuck_at"] = now
-                elif looks_like_prompt(tail) and not is_recovery_prompt(tail):
+                elif self._boot_reached_os(tail, self._boot_episode_text(boot, raw, cur)):
                     boot["state"] = "booted"
                     boot["prompt_seen"] = True
                     boot["reason"] = "reached a login/shell prompt"
@@ -1642,7 +1680,7 @@ class ConsoleSpoke(BaseSpoke):
             since_out = now - boot.get("last_output_at", now)
             elapsed = now - boot.get("started_at", now)
             if since_out >= cfg["idle_secs"]:
-                if looks_like_prompt(tail) and not is_recovery_prompt(tail):
+                if self._boot_reached_os(tail, self._boot_episode_text(boot, raw, cur)):
                     boot["state"] = "booted"
                     boot["prompt_seen"] = True
                     boot["reason"] = "reached a login/shell prompt"
@@ -1655,6 +1693,30 @@ class ConsoleSpoke(BaseSpoke):
                         boot["reason"] = "boot output stopped before a prompt appeared"
                         boot["stuck_at"] = now
         self._health_save()
+
+    @staticmethod
+    def _boot_episode_text(boot: Dict[str, Any], raw: bytes, cur: int) -> str:
+        """The part of the capture tail written since this boot episode began
+        (the whole tail if the episode predates start-offset tracking)."""
+        start = boot.get("start_bytes")
+        n = cur - start if isinstance(start, int) else 0
+        if 0 < n < len(raw):
+            raw = raw[-n:]
+        return raw.decode("utf-8", "replace")
+
+    @staticmethod
+    def _boot_reached_os(tail: str, episode_text: str) -> bool:
+        """True if the device has evidently booted its OS: the tail ends at a
+        login/CLI/setup prompt, or this episode's output contains text only a
+        running OS prints (see fingerprint.os_up_marker: "Login incorrect",
+        "<host> login: admin", the ArubaOS setup dialog, ...). The marker check
+        matters because the passive tail often ends in an echoed username, a
+        retry message or idle chatter after the prompt, and those booted
+        devices were reported "stuck". A bootloader prompt at the tail still
+        means not booted."""
+        if is_recovery_prompt(tail):
+            return False
+        return looks_like_prompt(tail) or bool(os_up_marker(episode_text))
 
     @staticmethod
     def _boot_output_repetitive(tail: str) -> bool:
@@ -2223,11 +2285,12 @@ class ConsoleSpoke(BaseSpoke):
             return
         res = passive_identify(text)
         gleaned = dict(res.get("identity") or {})
+        stored_vendor = self._stored_vendor(probe)
         # We already know the vendor → apply that profile's anchored field regexes
         # directly (detect_vendor can fail to re-recognize a truncated banner) to
         # backfill any missing fields, e.g. an AOS-S "System Name : <host>".
-        if probe.get("vendor"):
-            prof = next((p for p in PROFILES if p["name"] == probe["vendor"]), None)
+        if stored_vendor:
+            prof = next((p for p in PROFILES if p["name"] == stored_vendor), None)
             if prof:
                 for k, v in _extract_profile_fields(prof, text).items():
                     gleaned.setdefault(k, v)
@@ -2235,11 +2298,16 @@ class ConsoleSpoke(BaseSpoke):
             hn = prompt_hostname(text)
             if hn:
                 gleaned["hostname"] = hn
-        if not (gleaned or res.get("vendor")):
+        gleaned = scrub_identity(gleaned)
+        stored_ident = probe.get("identity") or {}
+        merged = scrub_identity(stored_ident)
+        # Junk stored by an older version (or a legacy "linux" verdict) is
+        # corrected even when nothing new was gleaned.
+        changed = merged != stored_ident or stored_vendor != probe.get("vendor")
+        probe["vendor"] = stored_vendor
+        if not (gleaned or res.get("vendor") or changed):
             return
         active = probe.get("source") == "active"
-        merged = dict(probe.get("identity") or {})
-        changed = False
         for k, v in gleaned.items():
             if not v:
                 continue
@@ -2252,8 +2320,17 @@ class ConsoleSpoke(BaseSpoke):
             elif not active and merged.get(k) != v:
                 merged[k] = v
                 changed = True
-        if not active and res.get("vendor") and probe.get("vendor") != res["vendor"]:
-            probe["vendor"] = res["vendor"]
+        # A passive verdict may refine a passive one, but never downgrade a
+        # confident vendor to a weaker one. Even a logged-in (active) verdict is
+        # corrected when it was unknown/"linux", or when it says hp-procurve but
+        # the device's own model / login-history line is AOS-CX.
+        cand = res.get("vendor")
+        if is_cx_misfiled_as_procurve(stored_vendor, merged, text):
+            probe["vendor"] = "aruba-cx"
+            changed = True
+        elif (not active and vendor_should_replace(stored_vendor, cand)) \
+                or vendor_is_upgrade(stored_vendor, cand):
+            probe["vendor"] = cand
             changed = True
         # Refresh the banner tail with LIVE output (never overwrite it with itself)
         # so the port shows recent console output.
