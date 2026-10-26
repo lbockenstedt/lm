@@ -19,15 +19,29 @@ Operator-chosen behaviour (see the WebUI panel):
     with a reason rather than hidden — a partial fleet view that looks complete
     is how "up to date" gets confused with "not covered".
 
+Selective patching: an apply can target chosen nodes, chosen packages on a
+node, or only the security updates. Package-level apply and reboot use their
+own command types (``OS_UPDATE_APPLY_PACKAGES`` / ``OS_REBOOT``) and are only
+offered for nodes whose check reported the matching ``features`` — an older
+node never sees a request it would misread as "upgrade everything".
+
+The last check results and the current/last run are persisted to
+``<cache_dir>/os_updates.json`` so a hub restart (including the one the hub's
+own update causes) doesn't blank the panel. A run that was in flight when the
+hub stopped is marked ``interrupted`` on load. A run can be cancelled: the node
+currently applying finishes (apt can't be safely aborted), the rest are skipped.
+
 This module is DISTINCT from ``update_pipeline.py``, which ships LM's own code.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional
 
+from cache_core import JsonCacheFile  # sibling leaf
 from sync_loop import run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
@@ -44,6 +58,8 @@ _NEVER_PROBE_REASON = {
 
 _CHECK_TIMEOUT_S = 240.0
 _APPLY_TIMEOUT_S = 3700.0
+_REBOOT_TIMEOUT_S = 60.0
+_STATE_FILE = "os_updates.json"
 
 # Auto-check config lives in global_config["os_updates_check"]: {enabled,
 # interval_hours}. Enabled by default (seeded once — see
@@ -63,6 +79,50 @@ class HubOsUpdatesMixin:
             st = {"nodes": {}, "checked_at": 0.0, "run": None}
             self._os_update_state = st
         return st
+
+    def _osu_file(self) -> Optional[JsonCacheFile]:
+        """Persistence for check results + runs; None on a hub without a cache dir."""
+        if not getattr(self, "cache_dir", None):
+            return None
+        f = getattr(self, "_osu_cache_file", None)
+        if f is None:
+            f = JsonCacheFile("os-updates", lambda: os.path.join(self.cache_dir, _STATE_FILE),
+                              self._osu_state, flush_delay_s=1.0)
+            self._osu_cache_file = f
+        return f
+
+    def _osu_save(self) -> None:
+        f = self._osu_file()
+        if f is not None:
+            f.schedule_save()
+
+    def osu_load_state(self) -> None:
+        """Restore the last check + run at startup. A run that was still
+        "running" died with the previous process — most often the hub's own
+        update restarting it — so it is marked interrupted, not resumed."""
+        f = self._osu_file()
+        data = f.load() if f is not None else None
+        if not isinstance(data, dict):
+            return
+        st = self._osu_state()
+        if isinstance(data.get("nodes"), dict):
+            st["nodes"] = data["nodes"]
+        st["checked_at"] = float(data.get("checked_at") or 0.0)
+        run = data.get("run")
+        if isinstance(run, dict):
+            if run.get("status") == "running":
+                run["status"] = "interrupted"
+                run["current"] = ""
+                for item in run.get("items") or []:
+                    if item.get("status") == "applying":
+                        item["status"] = "interrupted"
+                        item["message"] = ("hub restarted while this node was "
+                                           "updating — check it, then re-check")
+                    elif item.get("status") == "queued":
+                        item["status"] = "skipped"
+            st["run"] = run
+        logger.info("os-updates: restored %d node result(s) from %s",
+                    len(st["nodes"]), _STATE_FILE)
 
     # ── inventory ────────────────────────────────────────────────────────────
     def _osu_targets(self) -> List[Dict[str, str]]:
@@ -86,11 +146,15 @@ class HubOsUpdatesMixin:
             out.append({"kind": "spoke", "id": sid, "spoke_id": sid,
                         "label": str(label), "module_type": mtype})
         # Agents, routed via their owning spoke.
+        # agent_info is guid-keyed once an agent is migrated (B2); the owning
+        # spoke only knows the agent by the raw ``agent_id`` it reported, so the
+        # relay must address it by that name (same as Remote Console).
         for aid, info in (getattr(self, "agent_info", {}) or {}).items():
             sid = (info or {}).get("spoke_id") or ""
             if not sid:
                 continue
             out.append({"kind": "agent", "id": aid, "spoke_id": sid,
+                        "agent_id": str((info or {}).get("agent_id") or aid),
                         "label": str((info or {}).get("hostname") or aid),
                         "module_type": "agent"})
         out.append({"kind": "hub", "id": "hub", "spoke_id": "",
@@ -100,7 +164,8 @@ class HubOsUpdatesMixin:
     # ── check ────────────────────────────────────────────────────────────────
     async def _osu_check_one(self, t: Dict[str, str], refresh: bool) -> Dict[str, Any]:
         base = {"kind": t["kind"], "id": t["id"], "label": t["label"],
-                "module_type": t["module_type"], "spoke_id": t.get("spoke_id", "")}
+                "module_type": t["module_type"], "spoke_id": t.get("spoke_id", ""),
+                "agent_id": t.get("agent_id", "")}
         mtype = (t.get("module_type") or "").lower()
         if mtype in _NEVER_PROBE_TYPES:
             return {**base, "eligible": False, "unmanaged": True,
@@ -115,7 +180,7 @@ class HubOsUpdatesMixin:
             elif t["kind"] == "agent":
                 resp = await self.request_response(
                     t["spoke_id"], "AGENT_OS_UPDATE_CHECK",
-                    {"agent_id": t["id"], "refresh": refresh},
+                    {"agent_id": t.get("agent_id") or t["id"], "refresh": refresh},
                     timeout=_CHECK_TIMEOUT_S)
                 d = _unwrap(resp)
             else:
@@ -141,6 +206,9 @@ class HubOsUpdatesMixin:
             "reboot_required": bool(d.get("reboot_required")),
             "packages": d.get("packages") or [],
             "warnings": d.get("warnings") or [],
+            "features": d.get("features") or [],
+            "apply_blocker": d.get("apply_blocker") or "",
+            "checked_at": time.time(),
         }
 
     async def osu_check_fleet(self, refresh: bool = True) -> Dict[str, Any]:
@@ -153,6 +221,7 @@ class HubOsUpdatesMixin:
         st = self._osu_state()
         st["nodes"] = {f"{n['kind']}:{n['id']}": n for n in nodes}
         st["checked_at"] = time.time()
+        self._osu_save()
         return self.osu_snapshot()
 
     # ── auto-check schedule (WebUI-configurable) ────────────────────────────
@@ -245,16 +314,21 @@ class HubOsUpdatesMixin:
         for key, t in live.items():
             cached = st["nodes"].get(key)
             if cached is not None:
-                merged[key] = {"checked": True, **cached}
+                # Live routing wins over a persisted entry (an agent's raw name
+                # or owning spoke can change across a hub restart).
+                merged[key] = {"checked": True, **cached,
+                               "spoke_id": t.get("spoke_id", ""),
+                               "agent_id": t.get("agent_id", "")}
             else:
                 merged[key] = {
                     "kind": t["kind"], "id": t["id"], "label": t["label"],
                     "module_type": t["module_type"], "spoke_id": t.get("spoke_id", ""),
-                    "checked": False, "eligible": None, "unmanaged": False,
+                    "agent_id": t.get("agent_id", ""), "checked": False, "eligible": None, "unmanaged": False,
                     "unreachable": False, "reason": "not checked yet", "count": 0,
                 }
         nodes = sorted(merged.values(), key=lambda n: (n["kind"] != "hub", n["label"]))
-        pending = [n for n in nodes if n.get("eligible") and n.get("count")]
+        pending = [n for n in nodes if n.get("eligible") and n.get("count")
+                   and not n.get("apply_blocker")]
         return {
             "checked_at": st["checked_at"],
             "nodes": nodes,
@@ -267,6 +341,7 @@ class HubOsUpdatesMixin:
                 "packages": sum(int(n.get("count") or 0) for n in nodes),
                 "security": sum(int(n.get("security_count") or 0) for n in nodes),
                 "reboot_required": sum(1 for n in nodes if n.get("reboot_required")),
+                "blocked": sum(1 for n in nodes if n.get("apply_blocker")),
                 "not_checked": sum(1 for n in nodes if not n.get("checked")),
             },
             "run": st.get("run"),
@@ -274,8 +349,21 @@ class HubOsUpdatesMixin:
 
     # ── rolling apply ────────────────────────────────────────────────────────
     async def osu_apply_fleet(self, node_keys: Optional[List[str]] = None,
-                              actor: str = "") -> Dict[str, Any]:
+                              actor: str = "",
+                              packages: Optional[Dict[str, List[str]]] = None,
+                              security_only: bool = False) -> Dict[str, Any]:
         """Approve-once, rolling apply. Returns immediately; progress via snapshot.
+
+        Scope:
+          * ``node_keys`` — only these ``kind:id`` nodes (default: every node
+            with pending updates).
+          * ``packages`` — ``{kind:id: [pkg, ...]}``: upgrade only those packages
+            on that node (the node is included even if not in ``node_keys``).
+          * ``security_only`` — for nodes without an explicit package list,
+            upgrade only their pending security packages; nodes with none are
+            left out.
+        Everything requested is validated BEFORE anything runs, so a bad
+        selection is refused outright rather than half-applied.
 
         One node at a time so a bad update can't hit the fleet at once, and the
         HUB LAST because applying to it restarts the process running this loop.
@@ -284,49 +372,164 @@ class HubOsUpdatesMixin:
         run = st.get("run")
         if run and run.get("status") == "running":
             return {"status": "ERROR", "message": "an update run is already in progress"}
+        packages = {k: list(v or []) for k, v in (packages or {}).items()}
         snap = self.osu_snapshot()
-        targets = [n for n in snap["nodes"] if n.get("eligible") and n.get("count")]
-        if node_keys:
-            want = set(node_keys)
-            targets = [n for n in targets if f"{n['kind']}:{n['id']}" in want]
-        if not targets:
-            return {"status": "ERROR", "message": "no eligible nodes with pending updates"}
+        by_key = {f"{n['kind']}:{n['id']}": n for n in snap["nodes"]}
+        wanted = list(dict.fromkeys(list(node_keys or []) + list(packages)))
+        if not wanted:
+            wanted = [k for k, n in by_key.items() if n.get("eligible") and n.get("count")
+                      and not n.get("apply_blocker")]
+        problems: List[str] = []
+        plan: List[Dict[str, Any]] = []
+        for key in wanted:
+            n = by_key.get(key)
+            if n is None:
+                problems.append(f"{key}: not connected")
+                continue
+            if not n.get("eligible") or not n.get("count"):
+                problems.append(f"{n['label']}: no pending updates")
+                continue
+            if n.get("apply_blocker"):
+                problems.append(f"{n['label']}: {n['apply_blocker']}")
+                continue
+            pending = {p.get("package"): p for p in n.get("packages") or []}
+            pkgs: Optional[List[str]] = None
+            if key in packages:
+                pkgs = list(dict.fromkeys(packages[key]))
+                unknown = [p for p in pkgs if p not in pending]
+                if not pkgs:
+                    problems.append(f"{n['label']}: no packages selected")
+                    continue
+                if unknown:
+                    problems.append(f"{n['label']}: not pending: {', '.join(unknown[:10])}")
+                    continue
+            elif security_only:
+                pkgs = [name for name, p in pending.items() if p.get("security")]
+                if not pkgs:
+                    continue  # nothing security-related pending — leave it alone
+            if pkgs is not None and "packages" not in (n.get("features") or []):
+                problems.append(f"{n['label']}: needs an LM update before individual "
+                                "packages can be applied")
+                continue
+            plan.append({**n, "key": key, "apply_packages": pkgs})
+        if problems:
+            return {"status": "ERROR", "message": "; ".join(problems)}
+        if not plan:
+            return {"status": "ERROR", "message": "no eligible nodes with pending updates"
+                                                  + (" (security-only)" if security_only else "")}
         # Hub last — see the module docstring.
-        targets.sort(key=lambda n: n["kind"] == "hub")
+        plan.sort(key=lambda n: n["kind"] == "hub")
         st["run"] = {
             "status": "running", "started_at": time.time(), "actor": actor,
-            "total": len(targets), "done": 0, "current": "",
-            "items": [{"key": f"{n['kind']}:{n['id']}", "label": n["label"],
-                       "status": "queued"} for n in targets],
+            "total": len(plan), "done": 0, "current": "", "cancel_requested": False,
+            "security_only": bool(security_only),
+            "items": [{"key": n["key"], "label": n["label"], "status": "queued",
+                       "mode": "all" if n["apply_packages"] is None else "packages",
+                       "packages": n["apply_packages"] or []} for n in plan],
         }
-        logger.warning("OS-UPDATE: fleet apply approved by %s — %d node(s), hub last",
-                       actor or "?", len(targets))
-        asyncio.create_task(self._osu_run(targets))
-        return {"status": "SUCCESS", "queued": len(targets)}
+        self._osu_save()
+        logger.warning("OS-UPDATE: apply approved by %s — %s, hub last", actor or "?",
+                       ", ".join(f"{n['label']}[{'all' if n['apply_packages'] is None else len(n['apply_packages'])}]"
+                                 for n in plan))
+        asyncio.create_task(self._osu_run(plan))
+        return {"status": "SUCCESS", "queued": len(plan)}
+
+    def osu_cancel_run(self, actor: str = "") -> Dict[str, Any]:
+        """Stop the roll after the node currently applying (apt can't be safely
+        interrupted mid-transaction); every queued node is skipped."""
+        run = self._osu_state().get("run")
+        if not run or run.get("status") != "running":
+            return {"status": "ERROR", "message": "no update run in progress"}
+        run["cancel_requested"] = True
+        run["cancelled_by"] = actor
+        self._osu_save()
+        logger.warning("OS-UPDATE: run cancel requested by %s (current node finishes)",
+                       actor or "?")
+        return {"status": "SUCCESS", "message": "cancelling after the current node"}
+
+    async def osu_reboot_node(self, node_key: str, actor: str = "") -> Dict[str, Any]:
+        """Explicit, operator-approved reboot of ONE node (``shutdown -r +1``).
+        Never part of an apply. Refused during a run and on nodes that haven't
+        reported the ``reboot`` feature."""
+        st = self._osu_state()
+        run = st.get("run")
+        if run and run.get("status") == "running":
+            return {"status": "ERROR", "message": "an update run is in progress — "
+                                                  "reboot after it finishes"}
+        n = next((x for x in self.osu_snapshot()["nodes"]
+                  if f"{x['kind']}:{x['id']}" == node_key), None)
+        if n is None:
+            return {"status": "ERROR", "message": f"{node_key}: not connected"}
+        if not n.get("eligible"):
+            return {"status": "ERROR", "message": f"{n['label']}: not a managed node"}
+        if "reboot" not in (n.get("features") or []):
+            return {"status": "ERROR", "message": f"{n['label']}: needs an LM update "
+                                                  "before it can be rebooted from here"}
+        logger.warning("OS-UPDATE: REBOOT of %s approved by %s", n["label"], actor or "?")
+        try:
+            if n["kind"] == "hub":
+                try:
+                    from .os_update import reboot_node
+                except ImportError:
+                    from os_update import reboot_node  # type: ignore
+                d = await asyncio.to_thread(reboot_node)
+            elif n["kind"] == "agent":
+                d = _unwrap(await self.request_response(
+                    n["spoke_id"], "AGENT_OS_REBOOT",
+                    {"agent_id": n.get("agent_id") or n["id"]}, timeout=_REBOOT_TIMEOUT_S))
+            else:
+                d = _unwrap(await self.request_response(
+                    n["id"], "OS_REBOOT", {}, timeout=_REBOOT_TIMEOUT_S))
+        except Exception as exc:  # noqa: BLE001
+            d = {"status": "ERROR", "message": str(exc)}
+        ok = isinstance(d, dict) and d.get("status") == "SUCCESS"
+        msg = (d or {}).get("message", "") if isinstance(d, dict) else ""
+        logger.warning("OS-UPDATE: reboot %s → %s (%s)", n["label"],
+                       "scheduled" if ok else "FAILED", msg)
+        if ok:
+            cached = st["nodes"].get(node_key)
+            if cached is not None:
+                cached["reboot_scheduled_at"] = time.time()
+                self._osu_save()
+        return {"status": "SUCCESS" if ok else "ERROR",
+                "message": msg or ("reboot scheduled" if ok else "reboot failed")}
+
+    async def _osu_apply_one(self, n: Dict[str, Any]) -> Dict[str, Any]:
+        pkgs = n.get("apply_packages")
+        if n["kind"] == "hub":
+            try:
+                from .os_update import apply_updates
+            except ImportError:
+                from os_update import apply_updates  # type: ignore
+            return await asyncio.to_thread(apply_updates, pkgs)
+        if n["kind"] == "agent":
+            cmd = "AGENT_OS_UPDATE_APPLY" if pkgs is None else "AGENT_OS_UPDATE_APPLY_PACKAGES"
+            data: Dict[str, Any] = {"agent_id": n.get("agent_id") or n["id"]}
+            if pkgs is not None:
+                data["packages"] = pkgs
+            return _unwrap(await self.request_response(
+                n["spoke_id"], cmd, data, timeout=_APPLY_TIMEOUT_S))
+        cmd = "OS_UPDATE_APPLY" if pkgs is None else "OS_UPDATE_APPLY_PACKAGES"
+        return _unwrap(await self.request_response(
+            n["id"], cmd, {} if pkgs is None else {"packages": pkgs},
+            timeout=_APPLY_TIMEOUT_S))
 
     async def _osu_run(self, targets: List[Dict[str, Any]]) -> None:
         st = self._osu_state()
         run = st["run"]
         for n in targets:
             key = f"{n['kind']}:{n['id']}"
-            run["current"] = n["label"]
             item = next((i for i in run["items"] if i["key"] == key), None)
+            if run.get("cancel_requested"):
+                if item:
+                    item["status"] = "skipped"
+                continue
+            run["current"] = n["label"]
             if item:
                 item["status"] = "applying"
+            self._osu_save()
             try:
-                if n["kind"] == "hub":
-                    try:
-                        from .os_update import apply_updates
-                    except ImportError:
-                        from os_update import apply_updates  # type: ignore
-                    d = await asyncio.to_thread(apply_updates)
-                elif n["kind"] == "agent":
-                    d = _unwrap(await self.request_response(
-                        n["spoke_id"], "AGENT_OS_UPDATE_APPLY",
-                        {"agent_id": n["id"]}, timeout=_APPLY_TIMEOUT_S))
-                else:
-                    d = _unwrap(await self.request_response(
-                        n["id"], "OS_UPDATE_APPLY", {}, timeout=_APPLY_TIMEOUT_S))
+                d = await self._osu_apply_one(n)
             except Exception as exc:  # noqa: BLE001 — one failure must not abort the roll
                 d = {"status": "ERROR", "message": str(exc)}
             ok = isinstance(d, dict) and d.get("status") == "SUCCESS"
@@ -335,15 +538,18 @@ class HubOsUpdatesMixin:
                     "status": "done" if ok else "failed",
                     "applied": (d or {}).get("applied"),
                     "remaining": (d or {}).get("remaining"),
+                    "skipped_packages": (d or {}).get("skipped") or [],
                     "reboot_required": bool((d or {}).get("reboot_required")),
                     "message": (d or {}).get("message", ""),
                 })
             run["done"] += 1
+            self._osu_save()
             logger.warning("OS-UPDATE: %s → %s (%s)", n["label"],
                            "ok" if ok else "FAILED", (d or {}).get("message", "") or "")
-        run["status"] = "finished"
+        run["status"] = "cancelled" if run.get("cancel_requested") else "finished"
         run["current"] = ""
         run["finished_at"] = time.time()
+        self._osu_save()
         # Refresh so the panel reflects reality (and any new reboot_required)
         # without the operator having to hit Check again.
         try:

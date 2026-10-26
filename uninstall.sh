@@ -103,7 +103,7 @@ LM_FILES=(
     /etc/systemd/system/dnsmasq.service.d/wait-for-interface.conf
 )
 LM_BIN_GLOBS=(/usr/local/bin/lm-* /usr/local/bin/ab-*)
-LM_SUDOERS=(/etc/sudoers.d/lm /etc/sudoers.d/lm-agent /etc/sudoers.d/lm-netbox
+LM_SUDOERS=(/etc/sudoers.d/lm /etc/sudoers.d/lm-agent /etc/sudoers.d/lm-netbox /etc/sudoers.d/lm-os-update
             /etc/sudoers.d/lm-component-update /etc/sudoers.d/ab
             /etc/sudoers.d/client-sim-dashboard)
 # svc_lm/svc_bg are LM-specific; sim-user/dashboard removed only if their units were found.
