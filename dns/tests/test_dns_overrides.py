@@ -362,19 +362,22 @@ def test_override_hits_counts_only_view_answers_to_assigned_clients():
     epoch = UnboundManager._line_epoch
     t = 1_800_000_000
     lines = [
-        _log(t, "api.example.com", "transparent", "10.0.0.7", "api.example.com"),
+        # Exact-name record: Unbound's implicit transparent zone is the PARENT.
+        _log(t, "example.com", "transparent", "10.0.0.7", "api.example.com"),
         _log(t + 1, "telemetry.example.com", "always_nxdomain", "10.0.0.7",
              "x.telemetry.example.com", "AAAA"),
         _log(t + 2, "cdn.example.com", "redirect", "10.0.0.7", "img.cdn.example.com"),
-        _log(t + 3, "api.example.com", "transparent", "10.0.0.7",
-             "api.example.com", "AAAA"),                                           # passed through
-        _log(t + 4, "lab.local", "static", "10.0.0.7", "host.lab.local"),          # not a view zone
-        _log(t + 5, "api.example.com", "transparent", "10.0.0.8", "api.example.com"),  # unassigned
-        _log(t - 900, "api.example.com", "transparent", "10.0.0.7", "api.example.com"),  # too old
-        f"[{t + 6}] unbound[812:0] info: 10.0.0.7 api.example.com. A IN",           # plain query
+        _log(t + 3, "example.com", "transparent", "10.0.0.7",
+             "api.example.com", "AAAA"),                                           # NODATA from view
+        _log(t + 4, "example.com", "transparent", "10.0.0.7", "www.example.com"),  # not in profile
+        _log(t + 5, "lab.local", "static", "10.0.0.7", "host.lab.local"),          # not a view zone
+        _log(t + 6, "example.com", "transparent", "10.0.0.8", "api.example.com"),  # unassigned
+        _log(t - 900, "example.com", "transparent", "10.0.0.7", "api.example.com"),  # too old
+        f"[{t + 7}] unbound[812:0] info: 10.0.0.7 api.example.com. A IN",           # plain query
     ]
     hits = override_hits(lines, _rendered(), since=t - 60, line_epoch=epoch)
     assert [(h["time"] - t, h["action"], h["name"], h["type"]) for h in hits] == [
+        (3, "answered", "api.example.com", "AAAA"),
         (2, "answered", "img.cdn.example.com", "A"),
         (1, "blocked", "x.telemetry.example.com", "AAAA"),
         (0, "answered", "api.example.com", "A")]
@@ -401,8 +404,8 @@ def test_verify_reports_loaded_views_and_recent_override_answers(tmp_path, monke
     now = int(dns_worker.time.time())
     log = tmp_path / "queries.log"
     log.write_text("\n".join([
-        _log(now - 30, "api.example.com", "transparent", "10.0.0.7", "api.example.com"),
-        _log(now - 7200, "api.example.com", "transparent", "10.0.0.7", "api.example.com")]) + "\n")
+        _log(now - 30, "example.com", "transparent", "10.0.0.7", "api.example.com"),
+        _log(now - 7200, "example.com", "transparent", "10.0.0.7", "api.example.com")]) + "\n")
     monkeypatch.setattr(dns_worker, "QUERY_LOG", str(log))
 
     class _Done:
