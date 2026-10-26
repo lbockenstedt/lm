@@ -553,3 +553,64 @@ async def test_inrepo_static_gate_bypassed_by_force(patched_clock):
     hub._remote_tip = "ddd2"
     await hub.perform_update(force=True)
     assert len(hub.pushes) == 2
+
+
+LM_REPO = "https://github.com/lbockenstedt/lm.git"
+
+
+class _CoreHub(_StubHub):
+    """Spoke repo (opnsense) stays put while the lm core tip moves. The hub
+    itself tracks the core tip (local == remote) so it never self-updates."""
+
+    def __init__(self, remote_tip, core_tip, static_only=False):
+        super().__init__(remote_tip)
+        self.state._gc["update_sources"] = {"opnsense": OPNSENSE_REPO, "hub": LM_REPO}
+        self.core_tip = core_tip
+        self._static_only = static_only
+
+    async def get_local_commit(self):
+        return self.core_tip
+
+    async def get_remote_commit(self, repo_url=None, branch=None):
+        if repo_url is None or "lbockenstedt/lm" in (repo_url or ""):
+            return self.core_tip
+        return self._remote_tip
+
+    async def _only_static_paths_between(self, hub_root, from_commit, to_commit):
+        if not from_commit or not to_commit:
+            return False
+        return self._static_only
+
+
+@pytest.mark.asyncio
+async def test_core_only_change_repushes_spoke_outside_lm_repo(patched_clock):
+    """cs/pxmx/... spokes run lm core from their own /opt/lm checkout, which
+    only moves on SPOKE_UPDATE. An lm-only change must still reach them even
+    though their own repo tip did not move."""
+    hub = _CoreHub(remote_tip="cccc1", core_tip="core1")
+    await hub.perform_update()
+    assert len(hub.pushes) == 1
+    assert hub.state.get_global_config()["spoke_update_core_commits"] == {
+        "lm-opnsense-spoke-1": "core1"}
+    patched_clock.advance(_COOLDOWN_S + 1)
+    await hub.perform_update()
+    assert len(hub.pushes) == 1  # nothing moved
+    hub.core_tip = "core2"
+    patched_clock.advance(_COOLDOWN_S + 1)
+    await hub.perform_update()
+    assert len(hub.pushes) == 2
+    assert hub.state.get_global_config()["spoke_update_core_commits"] == {
+        "lm-opnsense-spoke-1": "core2"}
+
+
+@pytest.mark.asyncio
+async def test_core_static_only_change_does_not_repush(patched_clock):
+    hub = _CoreHub(remote_tip="cccc1", core_tip="core1", static_only=True)
+    await hub.perform_update()
+    assert len(hub.pushes) == 1
+    hub.core_tip = "core2"
+    patched_clock.advance(_COOLDOWN_S + 1)
+    await hub.perform_update()
+    assert len(hub.pushes) == 1
+    assert hub.state.get_global_config()["spoke_update_core_commits"] == {
+        "lm-opnsense-spoke-1": "core2"}
