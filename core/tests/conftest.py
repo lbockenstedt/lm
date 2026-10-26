@@ -63,3 +63,14 @@ def _current_event_loop():
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
     yield
+
+
+@pytest.fixture(autouse=True)
+def _clear_app_token_cache():
+    """security.oidc caches Entra app tokens process-wide; start every test
+    with an empty cache so a token minted by one test never leaks into another."""
+    oidc_mod = sys.modules.get("security.oidc")
+    clear = getattr(oidc_mod, "clear_app_token_cache", None)  # some tests stub the module
+    if clear is not None:
+        clear()
+    yield

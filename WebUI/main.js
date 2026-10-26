@@ -9522,7 +9522,10 @@ function _setHealthDot(dotId, labelId, status, detail) {
     lbl.textContent = detail ? `${m.s} — ${detail}` : m.s;  // textContent → no XSS from detail
 }
 async function pollLdapHealth() {
-    if (currentView !== 'ldap') { stopLdapHealthPoll(); return; }
+    // Stop when the user leaves the view OR the session expired (a 401 clears
+    // currentUser) — otherwise a tab left open keeps polling a dead session
+    // every 10s forever. Logging back in re-renders the view and restarts it.
+    if (currentView !== 'ldap' || !currentUser) { stopLdapHealthPoll(); return; }
     try {
         const h = await apiJson('/api/ldap/health', { method: 'GET' });
         _setHealthDot('ldap-health-dot', 'ldap-health-label', h.ldap && h.ldap.status, h.ldap && h.ldap.detail);

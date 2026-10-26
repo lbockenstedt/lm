@@ -316,7 +316,9 @@ def register(app, hub, ctx):
                 entra = {"status": "degraded", "detail": "not configured"}
             else:
                 try:
-                    await fetch_app_graph_token(cfg)
+                    # Reuse a token up to 5 min old: still proves the cert and
+                    # app registration work, without minting one every 10s poll.
+                    await fetch_app_graph_token(cfg, max_age=300)
                     entra = {"status": "healthy", "detail": "Entra online"}
                 except OidcError as e:
                     entra = {"status": "down", "detail": str(e)[:160]}

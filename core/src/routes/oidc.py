@@ -107,7 +107,7 @@ from security.oidc import (
     provision_or_sync_entra_user, sign_state_cookie, verify_id_token,
     verify_state_cookie, authorize_url, build_user_data,
     generate_client_cert, cert_thumbprint_x5t, fetch_directory_groups,
-    fetch_user_groups_via_app, default_oidc_dir,
+    fetch_user_groups_via_app, default_oidc_dir, clear_app_token_cache,
 )
 from security.credential_store import resolve_private_key_material
 import os as _os
@@ -322,6 +322,7 @@ def register(app, hub, ctx):
         gc["oidc"] = oidc
         hub.state.system_state["global_config"] = gc
         hub.state._mark_dirty()
+        clear_app_token_cache()
         # A fresh Entra client cert/key changes what the directory mirror must use
         # for Entra (ROPC) auth — re-push to every connected ldap spoke now.
         try:
@@ -393,6 +394,7 @@ def register(app, hub, ctx):
             global_config["oidc"] = clean
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
+            clear_app_token_cache()
             # The hub's OIDC login is hub-side only, BUT the directory (LDAP)
             # spoke reuses these Entra app creds for ROPC auth of Entra-backed
             # directory users — re-push the LDAP+Entra config to every connected

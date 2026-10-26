@@ -19,7 +19,9 @@ Design notes
 * ``verify_id_token`` accepts the JWKS keys directly (or fetches them) so the
   MFA / nonce / claim extraction logic is unit-testable without a network.
 
-This module is stateless except for the discovery-cache; it holds no secrets.
+This module is stateless except for the discovery-cache and the in-memory
+app-token cache (see ``fetch_app_token``; tokens are never logged or written to
+disk).
 The client private key is read from ``key_path`` — never stored in
 ``global_config`` — and resolved through ``security.credential_store`` so it
 may be a filesystem path OR a Key Vault reference (``kv:<secret-name>``).
@@ -598,14 +600,93 @@ async def fetch_member_groups_via_graph(access_token: str,
         return [v["id"] for v in resp.json().get("value", []) if "id" in v]
 
 
+# ── App-token cache ─────────────────────────────────────────────────────────
+# Every Key Vault read, Graph call and ARM call needs an app token. Minting one
+# per call sent ~2,000 token requests a day to Entra, in bursts of 30-60 when
+# the console credential scan reads its vault secrets in parallel. Tokens live
+# ~60-90 min, so cache each one until shortly before it expires.
+#
+# The cache key includes the cert file's mtime, so "Generate certificate"
+# (which rewrites the file in place) never reuses a token minted with the old
+# cert. Saving the OIDC config also clears the cache (clear_app_token_cache).
+_APP_TOKEN_EXPIRY_MARGIN_S = 60
+_app_tokens: dict = {}       # key -> (token, minted_at, expires_at)
+_app_token_locks: dict = {}  # (key, event loop) -> asyncio.Lock
+
+
+def clear_app_token_cache() -> None:
+    """Forget every cached app token (call after the OIDC config or cert changes)."""
+    _app_tokens.clear()
+
+
+def forget_app_token(cfg: OidcConfig, scope: str) -> None:
+    """Drop the cached token for ``scope`` (e.g. after a resource returned 401)."""
+    _app_tokens.pop(_app_token_key(cfg, scope), None)
+
+
+def _app_token_key(cfg: OidcConfig, scope: str) -> tuple:
+    try:
+        cert_mtime = os.path.getmtime(cfg.cert_path) if cfg.cert_path else None
+    except OSError:
+        cert_mtime = None
+    return (cfg.tenant_id, cfg.client_id, cfg.key_path, cfg.cert_path, cert_mtime, scope)
+
+
+def _app_token_lock(key: tuple):
+    import asyncio
+    # asyncio locks belong to one event loop; key by loop so tests (a new loop
+    # per test) never share a lock across loops.
+    lock_key = (key, asyncio.get_running_loop())
+    if lock_key not in _app_token_locks:
+        _app_token_locks[lock_key] = asyncio.Lock()
+    return _app_token_locks[lock_key]
+
+
+def _cached_app_token(key: tuple, max_age: float | None) -> str | None:
+    entry = _app_tokens.get(key)
+    if not entry:
+        return None
+    token, minted_at, expires_at = entry
+    now = time.time()
+    if now >= expires_at:
+        return None
+    if max_age is not None and now - minted_at > max_age:
+        return None
+    return token
+
+
 async def fetch_app_token(cfg: OidcConfig, scope: str,
-                          http: httpx.AsyncClient | None = None) -> str:
-    """Mint an app-only (client-credentials) token for the HUB'S OWN APP, signed
+                          http: httpx.AsyncClient | None = None,
+                          max_age: float | None = None) -> str:
+    """Return an app-only (client-credentials) token for the HUB'S OWN APP, signed
     with the cert ``client_assertion`` — for ANY resource the app has rights to.
     ``scope`` is the resource's ``.default`` scope, e.g.
     ``https://graph.microsoft.com/.default`` (directory reads) or
     ``https://management.azure.com/.default`` (Azure Resource Manager / NSG).
-    The app registration must hold the matching permission/RBAC role."""
+    The app registration must hold the matching permission/RBAC role.
+
+    Tokens are cached until shortly before they expire, and concurrent callers
+    for the same scope share one mint. ``max_age`` (seconds) forces a fresh mint
+    when the cached token is older than that — the health check uses it so a
+    broken cert or app registration still shows red within a few minutes."""
+    key = _app_token_key(cfg, scope)
+    token = _cached_app_token(key, max_age)
+    if token:
+        return token
+    async with _app_token_lock(key):
+        # Another caller may have minted while we waited for the lock.
+        token = _cached_app_token(key, max_age)
+        if token:
+            return token
+        token, expires_in = await _mint_app_token(cfg, scope, http)
+        now = time.time()
+        _app_tokens[key] = (token, now, now + max(0, expires_in - _APP_TOKEN_EXPIRY_MARGIN_S))
+        return token
+
+
+async def _mint_app_token(cfg: OidcConfig, scope: str,
+                          http: httpx.AsyncClient | None) -> tuple:
+    """Request a new app token from Entra. Returns ``(token, expires_in_seconds)``."""
     token_endpoint = f"https://login.microsoftonline.com/{cfg.tenant_id}/oauth2/v2.0/token"
     data = {
         "grant_type": "client_credentials",
@@ -622,14 +703,20 @@ async def fetch_app_token(cfg: OidcConfig, scope: str,
     tok = resp.json().get("access_token")
     if not tok:
         raise OidcError("app-token response had no access_token")
-    return tok
+    try:
+        expires_in = int(resp.json().get("expires_in") or 0)
+    except (TypeError, ValueError):
+        expires_in = 0  # unknown lifetime → don't cache
+    return tok, expires_in
 
 
 async def fetch_app_graph_token(cfg: OidcConfig,
-                                http: httpx.AsyncClient | None = None) -> str:
+                                http: httpx.AsyncClient | None = None,
+                                max_age: float | None = None) -> str:
     """Microsoft Graph app-only token (see :func:`fetch_app_token`). Requires the
     app to hold a Graph **application** permission (e.g. ``Group.Read.All``)."""
-    return await fetch_app_token(cfg, "https://graph.microsoft.com/.default", http=http)
+    return await fetch_app_token(cfg, "https://graph.microsoft.com/.default",
+                                 http=http, max_age=max_age)
 
 
 async def fetch_directory_groups(cfg: OidcConfig,
