@@ -2165,13 +2165,19 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # extra fields on OS_UPDATE_APPLY: an older node would ignore a
         # ``packages`` field and run a full dist-upgrade, whereas an unknown
         # command type fails safely.
+        # OS_FIX_ACCESS carries a one-time root/sudo password typed in the
+        # WebUI; it is used for this single call and never stored or logged.
         if cmd_type in ("OS_UPDATE_CHECK", "OS_UPDATE_APPLY",
-                        "OS_UPDATE_APPLY_PACKAGES", "OS_REBOOT"):
+                        "OS_UPDATE_APPLY_PACKAGES", "OS_REBOOT", "OS_FIX_ACCESS"):
             try:
-                from ..os_update import check_updates, apply_updates, reboot_node
+                from ..os_update import check_updates, apply_updates, reboot_node, fix_access
             except ImportError:  # bare-module path (production: core/src on sys.path)
-                from os_update import check_updates, apply_updates, reboot_node  # type: ignore
-            if cmd_type == "OS_UPDATE_CHECK":
+                from os_update import check_updates, apply_updates, reboot_node, fix_access  # type: ignore
+            if cmd_type == "OS_FIX_ACCESS":
+                res = await asyncio.to_thread(
+                    fix_access, str(data.get("username") or "root"),
+                    str(data.get("password") or ""))
+            elif cmd_type == "OS_UPDATE_CHECK":
                 res = await asyncio.to_thread(
                     check_updates, bool(data.get("refresh", True)))
             elif cmd_type == "OS_UPDATE_APPLY_PACKAGES":

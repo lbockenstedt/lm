@@ -8146,6 +8146,7 @@ function _renderOsUpdatesView(content) {
                 Operating-system package updates for every spoke and agent — <b>Global-Admin only, every approval is audit-logged</b>.
                 Deploys <code>apt dist-upgrade</code> (everything) — or only the nodes/packages you select, or only security updates.
                 <b>Nothing is ever rebooted automatically</b> — a host needing one is badged with a <b>Reboot…</b> button you use deliberately.
+                <b>Auto-patch</b> (off by default) deploys whatever each scheduled auto-check finds, the same way.
                 Nodes are updated <b>one at a time</b>, and the <b>hub goes last</b> (updating it restarts this page).
                 This is separate from LM code updates.
             </div>
@@ -8161,6 +8162,12 @@ function _renderOsUpdatesView(content) {
                 <button onclick="osuSaveAutoCheck()" class="${btnSecCls}">Save</button>
                 <span id="osu-autocheck-status" class="text-xs text-slate-400"></span>
             </div>
+            <div class="flex flex-wrap items-center gap-4 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
+                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer" title="After each scheduled auto-check, deploy what it found — one node at a time, hub last, never rebooting"><input type="checkbox" id="osu-autopatch-enabled" class="w-4 h-4 text-green-600 rounded">Auto-patch after each auto-check</label>
+                <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer"><input type="checkbox" id="osu-autopatch-security" class="w-4 h-4 rounded" checked>Security updates only</label>
+                <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer" title="Patching the hub restarts LM services (no reboot)"><input type="checkbox" id="osu-autopatch-hub" class="w-4 h-4 rounded">Include the hub</label>
+                <button onclick="osuSaveAutoPatch()" class="${btnSecCls}">Save</button>
+            </div>
             <div class="flex flex-wrap items-center gap-2">
                 <button onclick="osuCheck()" class="${btnSecCls}">↻ Check for updates</button>
                 <button id="osu-apply-selected" onclick="osuApplySelected()" class="${btnCls}" disabled>Deploy selected (0)</button>
@@ -8173,7 +8180,70 @@ function _renderOsUpdatesView(content) {
         </div>`;
     osuLoad();
     osuLoadAutoCheck();
+    osuLoadAutoPatch();
 }
+
+async function osuLoadAutoPatch() {
+    try {
+        const cfg = await apiJson('/api/os-updates/auto-patch');
+        document.getElementById('osu-autopatch-enabled').checked = !!cfg.enabled;
+        document.getElementById('osu-autopatch-security').checked = cfg.security_only !== false;
+        document.getElementById('osu-autopatch-hub').checked = !!cfg.include_hub;
+    } catch (e) { /* best-effort */ }
+}
+
+window.osuSaveAutoPatch = async function () {
+    const body = {
+        enabled: !!document.getElementById('osu-autopatch-enabled')?.checked,
+        security_only: !!document.getElementById('osu-autopatch-security')?.checked,
+        include_hub: !!document.getElementById('osu-autopatch-hub')?.checked,
+    };
+    if (body.enabled && !confirm('Turn on auto-patch?\n\nAfter every scheduled auto-check, nodes with ' +
+            (body.security_only ? 'pending security updates' : 'any pending updates') +
+            ' are patched automatically — one at a time' + (body.include_hub ? ', hub last' : ', hub excluded') +
+            '. Nothing is rebooted.')) return;
+    try {
+        const cfg = await apiJson('/api/os-updates/auto-patch', { method: 'POST', body: JSON.stringify(body) });
+        showToast(cfg.enabled ? 'Auto-patch on — runs after each auto-check.' : 'Auto-patch off.', 'success');
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+};
+
+// One-time login for a node blocked by missing privileges. The password goes
+// to that node once to install its update helper; LM never stores it.
+window.osuFixAccess = function (key) {
+    const n = ((window._osuData || {}).nodes || []).find(x => `${x.kind}:${x.id}` === key);
+    if (!n) return;
+    const inp = 'w-full px-3 py-2 border border-slate-200 rounded-md text-sm';
+    openModal('osu-fix-modal', `
+      <h3 class="text-lg font-bold text-[#263040]">Fix update access — ${escapeHtml(n.label)}</h3>
+      <p class="text-sm text-slate-500">Enter the root password (or a user that can sudo) for this node, one time. It is used once to install LM's update helper and is <b>never stored</b>.</p>
+      <input id="osu-fix-user" type="text" value="root" autocomplete="off" placeholder="username" class="${inp}">
+      <input id="osu-fix-pw" type="password" autocomplete="off" placeholder="password" class="${inp}">
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="document.getElementById('osu-fix-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button id="osu-fix-go" onclick="osuDoFixAccess(${escapeHtml(JSON.stringify(key))})" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Fix access</button>
+      </div>`, { backdropClose: true });
+    document.getElementById('osu-fix-pw')?.focus();
+};
+
+window.osuDoFixAccess = async function (key) {
+    const pwEl = document.getElementById('osu-fix-pw');
+    const username = (document.getElementById('osu-fix-user')?.value || 'root').trim();
+    const password = pwEl?.value || '';
+    if (!password) { showToast('Enter the password.', 'info'); return; }
+    const btn = document.getElementById('osu-fix-go');
+    if (btn) { btn.disabled = true; btn.textContent = 'Fixing…'; }
+    try {
+        const r = await apiJson('/api/os-updates/fix-access', { method: 'POST', body: JSON.stringify({ node: key, username, password }) });
+        document.getElementById('osu-fix-modal')?.remove();
+        showToast(r.message || 'Access fixed.', 'success');
+        osuLoad();
+    } catch (e) {
+        if (pwEl) pwEl.value = '';
+        if (btn) { btn.disabled = false; btn.textContent = 'Fix access'; }
+        showToast('Fix failed: ' + (e.message || e), 'error');
+    }
+};
 
 async function osuLoadAutoCheck() {
     try {
@@ -8328,7 +8398,7 @@ function _osuRender(d) {
         const label = { finished: 'complete', cancelled: 'cancelled', interrupted: 'interrupted by a hub restart' };
         runEl.textContent = busy
             ? `deploying ${run.done}/${run.total} — current: ${run.current || '…'}${run.cancel_requested ? ' (cancelling after this node)' : ''}`
-            : (run && label[run.status] ? `last run: ${run.done}/${run.total} ${label[run.status]}` : '');
+            : (run && label[run.status] ? `last run${run.actor === 'auto-patch' ? ' (auto-patch)' : ''}: ${run.done}/${run.total} ${label[run.status]}` : '');
     }
     const nSel = _osuSelectedKeys().length;
     const btn = document.getElementById('osu-apply');
@@ -8387,7 +8457,9 @@ function _osuRender(d) {
         const detail = n.reason
             ? `<div class="text-[11px] text-slate-500 mt-1">${escapeHtml(n.reason)}</div>`
             : (n.count ? `<details class="mt-1" ${_osuOpen.has(key) ? 'open' : ''} ontoggle="osuToggleOpen(${jsKey}, this.open)"><summary class="cursor-pointer text-[11px] text-slate-400">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-[11px] mt-1 leading-relaxed">${pickHint}${pkgs}</div></details>${pickNote}` : '');
-        const blocker = n.apply_blocker ? `<div class="text-[11px] text-amber-700 mt-1">Can't apply: ${escapeHtml(n.apply_blocker)}</div>` : '';
+        const fixBtn = n.apply_blocker && feats.includes('fix_access') && !busy
+            ? ` <button onclick="osuFixAccess(${jsKey})" class="ml-1 text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
+        const blocker = n.apply_blocker ? `<div class="text-[11px] text-amber-700 mt-1">Can't apply: ${escapeHtml(n.apply_blocker)}${fixBtn}</div>` : '';
         let msg = '';
         if (item && item.message) msg = `<div class="text-[11px] ${item.status === 'done' ? 'text-slate-500' : 'text-red-600'} mt-1">${escapeHtml(item.message)}</div>`;
         else if (item && item.status === 'done' && item.mode === 'packages') msg = `<div class="text-[11px] text-slate-500 mt-1">upgraded ${escapeHtml((item.packages || []).join(', '))}</div>`;
