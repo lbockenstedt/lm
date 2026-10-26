@@ -203,6 +203,22 @@ class EndpointSyncMixin:
                     continue  # nothing to sync
                 ep = {"ip": address, "mac": mac, "hostname": hostname}
                 endpoints.append(ep)
+            if not endpoints:
+                # Nothing in IPAM for this tenant. A replace with an empty batch
+                # is always refused by the CPPM spoke's mass-delete guard
+                # ("replace-scan aborted: empty batch … refusing to remove any
+                # tagged endpoints"), so sending it only produced a
+                # [sync-error] every cycle for tenants that are simply empty.
+                logger.info("endpoint sync tenant=%s(%s) no endpoints in %s — "
+                            "nothing to sync (replace skipped)",
+                            tenant_id, tenant_name, se.get("label", "IPAM"))
+                status = {"tenant_id": tenant_id, "tenant_name": tenant_name,
+                          "status": "success", "pushed": 0, "errors": 0,
+                          "skipped": 0, "hub_skipped": hub_skipped,
+                          "message": "no endpoints in IPAM — nothing to sync",
+                          "last_sync_ts": now, "endpoints_total": 0}
+                await self.simulations_store.set_endpoint_sync_status(tenant_id, status)
+                return status
             payload = {"tenant_id": tenant_id, "tenant_slug": scope,
                        "tenant_name": tenant_name, "source": se.get("label", "IPAM"),
                        "replace": True, "endpoints": endpoints}
