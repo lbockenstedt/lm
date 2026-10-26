@@ -532,7 +532,7 @@ def test_boot_watch_nudge_confirms_live_prompt_not_stuck(spoke, monkeypatch):
     chan = _install_fake_boot_chan(spoke, "good")
     _drive_boot(spoke, "good", clock, chan, 0)
     clock[0] += 100
-    chan.set("Console terminated due to inactivity.\r\n" * 20)
+    chan.set("Waiting for link on uplink...\r\n" * 20)
     _drive_boot(spoke, "good", clock, chan, 50)
     assert spoke._boot_info("good")["state"] == "booting"
 
@@ -744,7 +744,7 @@ def test_boot_watch_user_attaches_during_pending_nudge_not_condemned(spoke, monk
     chan = _install_fake_boot_chan(spoke, "good")
     _drive_boot(spoke, "good", clock, chan, 0)
     clock[0] += 100
-    chan.set("Console terminated due to inactivity.\r\n" * 20)
+    chan.set("Waiting for link on uplink...\r\n" * 20)
     _drive_boot(spoke, "good", clock, chan, 50)
     assert spoke._boot_info("good")["state"] == "booting"
 
@@ -789,7 +789,7 @@ def test_boot_liveness_apply_does_not_discard_a_genuine_booted_result(spoke, mon
     chan = _install_fake_boot_chan(spoke, "good")
     _drive_boot(spoke, "good", clock, chan, 0)
     clock[0] += 100
-    chan.set("Console terminated due to inactivity.\r\n" * 20)
+    chan.set("Waiting for link on uplink...\r\n" * 20)
     _drive_boot(spoke, "good", clock, chan, 50)
     assert spoke._boot_info("good")["state"] == "booting"
 
@@ -853,7 +853,7 @@ def test_boot_nudge_cooldown_defers_new_episode(spoke, monkeypatch):
         spoke._loop = asyncio.get_running_loop()
         _drive_boot(spoke, "good", clock, chan, 0)
         clock[0] += 100
-        chan.set("Console terminated due to inactivity.\r\n")
+        chan.set("Waiting for link on uplink...\r\n")
         _drive_boot(spoke, "good", clock, chan, 50)
         clock[0] += 200
         _drive_boot(spoke, "good", clock, chan, 50)

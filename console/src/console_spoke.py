@@ -1591,15 +1591,24 @@ class ConsoleSpoke(BaseSpoke):
 
         h = self._health_rec(pid)
         boot = h.get("boot")
-        if boot is not None and boot.get("state") == "stuck" \
-                and not (boot.get("transcript_tail") or "").strip():
-            # The episode never produced readable text: it was started by line
-            # noise (baud mismatch / unplugged adapter bytes), not a boot. With
-            # nothing to show, "boot stuck" is a false alarm that otherwise
-            # never expires on a silent line, so drop back to idle.
-            boot["state"] = "idle"
-            boot["stuck_reason"] = ""
-            boot["reason"] = "line noise only — no readable boot output"
+        if boot is not None and boot.get("state") == "stuck":
+            stored = boot.get("transcript_tail") or ""
+            if not stored.strip():
+                # The episode never produced readable text: it was started by line
+                # noise (baud mismatch / unplugged adapter bytes), not a boot. With
+                # nothing to show, "boot stuck" is a false alarm that otherwise
+                # never expires on a silent line, so drop back to idle.
+                boot["state"] = "idle"
+                boot["stuck_reason"] = ""
+                boot["reason"] = "line noise only — no readable boot output"
+            elif os_up_marker(stored) and not current_boot_fault(stored):
+                # The stored episode already shows a running OS (e.g. an idle
+                # logout message) that an older rule set missed. A silent line
+                # never produces new output to heal it, so re-judge it here.
+                boot["state"] = "booted"
+                boot["prompt_seen"] = True
+                boot["stuck_reason"] = ""
+                boot["reason"] = "recovered: transcript shows a running OS"
 
         chan = self.sessions.channel(pid)
         if chan is not None and getattr(chan, "capture", None):

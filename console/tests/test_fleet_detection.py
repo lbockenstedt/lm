@@ -146,7 +146,8 @@ def test_setup_dialog_and_login_text_count_as_booted():
                  "Login incorrect\r\n",
                  "Login attempt timed out after 120 seconds.\r\n",
                  "Warning: Transient problem: timeout Will retry in 4 seconds\r\n",
-                 "User: root\r\n"):
+                 "User: root\r\n",
+                 "Console terminated due to inactivity.\r\n"):
         assert fp.os_up_marker(text), text
     assert not fp.os_up_marker("U-Boot 2013.01\r\nStarting kernel ...\r\n")
 
@@ -228,6 +229,35 @@ def test_noise_only_stuck_verdict_clears(spoke, monkeypatch):
     _drive_boot(spoke, "good", clock, chan, 0)
     info = spoke._boot_info("good")
     assert info["state"] == "idle" and info["stuck_reason"] == ""
+
+
+def test_stored_stuck_with_idle_logout_heals_to_booted(spoke, monkeypatch):
+    # Live az19 MIPBE-AJ19-L1SW-1: the only output was the switch's idle-session
+    # logout, which proves the OS is up, yet the silent line stayed "stuck".
+    clock = [1_700_000_000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    chan = _install_fake_boot_chan(spoke, "good")
+    spoke._health_rec("good")["boot"] = {
+        "state": "stuck", "started_at": clock[0] - 86400, "last_output_at": clock[0] - 86400,
+        "prompt_seen": False, "relocked": False,
+        "transcript_tail": "Console terminated due to inactivity.",
+        "stuck_reason": "no prompt within boot timeout", "reason": "confirmed stuck"}
+    _drive_boot(spoke, "good", clock, chan, 0)
+    info = spoke._boot_info("good")
+    assert info["state"] == "booted" and info["stuck_reason"] == ""
+
+
+def test_stored_stuck_with_real_fault_stays_stuck(spoke, monkeypatch):
+    clock = [1_700_000_000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    chan = _install_fake_boot_chan(spoke, "good")
+    spoke._health_rec("good")["boot"] = {
+        "state": "stuck", "started_at": clock[0] - 86400, "last_output_at": clock[0] - 86400,
+        "prompt_seen": False, "relocked": False,
+        "transcript_tail": "Starting kernel ...\r\nKernel panic - not syncing",
+        "stuck_reason": "kernel panic", "reason": "boot fault detected"}
+    _drive_boot(spoke, "good", clock, chan, 0)
+    assert spoke._boot_info("good")["state"] == "stuck"
 
 
 # ── Spoke: stored vendor / identity ──────────────────────────────────────────
