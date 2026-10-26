@@ -388,8 +388,9 @@ def override_hits(lines: Iterable[str], rendered: Dict[str, Any], since: float,
     (longest-prefix, as Unbound picks) and the answering zone belongs to that
     view, so ordinary local records are never mistaken for override answers.
     An exact-name record has no explicit zone: Unbound gives it an implicit
-    ``transparent`` zone, which also logs queries it passes on to normal
-    resolution — those count only when the view holds data for that name/type."""
+    ``transparent`` zone at the parent domain (``devices.x.com`` → ``x.com.``),
+    so such a line counts only when the view holds data for that exact name —
+    any type, since a query for a type it lacks gets NODATA from the view."""
     nets = []
     for cidr, view in rendered.get("targets") or []:
         try:
@@ -398,8 +399,8 @@ def override_hits(lines: Iterable[str], rendered: Dict[str, Any], since: float,
             continue
     nets.sort(key=lambda item: item[0].prefixlen, reverse=True)
     views = rendered.get("views") or {}
-    data = {v: {tuple(item) for item in items}
-            for v, items in (rendered.get("data") or {}).items()}
+    names = {v: {name for name, _type in items}
+             for v, items in (rendered.get("data") or {}).items()}
     hits = []
     for line in lines:
         m = _LOCAL_ACTION_RE.search(line)
@@ -417,10 +418,8 @@ def override_hits(lines: Iterable[str], rendered: Dict[str, Any], since: float,
             continue
         zone = m.group("zone").rstrip(".").lower()
         name, rtype = m.group("name").lower(), m.group("type").upper()
-        if zone not in views.get(view, []):
-            owned = data.get(view, set())
-            if zone != name or not ((name, rtype) in owned or (name, "CNAME") in owned):
-                continue
+        if zone not in views.get(view, []) and name not in names.get(view, set()):
+            continue
         hits.append({"time": ts, "client": m.group("ip"), "name": name,
                      "type": rtype, "view": view,
                      "action": "blocked" if m.group("action") == "always_nxdomain" else "answered"})

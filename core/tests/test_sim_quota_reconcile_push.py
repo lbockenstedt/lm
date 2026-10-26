@@ -182,3 +182,7 @@ def test_reconcile_stall_warning_is_throttled_when_no_spoke_bound(caplog):
              if r.levelno == logging.WARNING and "STILL stale" in r.getMessage()]
     assert len(warns) == 3   # ticks 3, 80, 160
     assert "STILL stale after 3 " in warns[0].getMessage()
+    # Per-tick INFO noise is gone too: only the stall's first "re-pushing" line.
+    infos = [r for r in caplog.records
+             if r.levelno == logging.INFO and "reconcile-push" in r.getMessage()]
+    assert len(infos) == 1 and "re-pushing" in infos[0].getMessage()
