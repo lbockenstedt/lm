@@ -572,7 +572,7 @@ def _spoke_data_or_raise(sid, cmd, res):
     return data
 
 
-async def _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0):
+async def _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0, failed=None):
     """Fan ``PXMX_LIST_VMS`` out to EVERY given agent-hosting spoke CONCURRENTLY
     and merge the responses into one ``{vms, nodes, spoke_connected}`` envelope.
 
@@ -589,6 +589,8 @@ async def _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0):
     per-request timeout) and never drops the rest — a per-spoke failure is
     logged and skipped so a still-reachable host stays visible. Raises only if
     EVERY spoke fails, so the caller's warm-cache fallback still triggers.
+    When ``failed`` (a list) is given, each failed spoke id is appended to it
+    so a caller that deletes "missing" VMs can tell a partial answer apart.
     Module-level (depends only on ``hub`` + the spoke list) for testability.
     """
     async def _one(sid):
@@ -606,6 +608,8 @@ async def _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0):
         if isinstance(r, Exception):
             last_err = r
             logger.warning("PXMX_LIST_VMS fan-out: spoke %s failed: %s", sid, r)
+            if failed is not None:
+                failed.append(sid)
             continue
         any_ok = True
         if isinstance(r, dict):
