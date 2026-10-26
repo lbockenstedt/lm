@@ -981,8 +981,16 @@ def register(app, hub, ctx):
         inner = payload.get("data", resp) or {}
         r = inner.get("result") if isinstance(inner, dict) else None
         if not isinstance(r, dict):
+            # Surface the spoke's own error (rejected command, timeout, ...)
+            # instead of a generic "no result".
+            why = ""
+            for env in (inner, payload, resp):
+                if isinstance(env, dict) and (env.get("message") or env.get("error")):
+                    why = str(env.get("message") or env.get("error"))
+                    break
             return {"ok": False, "rc": None, "stdout": "", "stderr": "",
-                    "truncated": False, "error": "no result (offline / timed out?)"}
+                    "truncated": False,
+                    "error": why or "no result (offline / timed out?)"}
         return r
 
     async def _relay_exec(target: str, command: str, timeout: float) -> dict:
