@@ -378,3 +378,127 @@ async def test_state_persists_and_an_inflight_run_loads_as_interrupted(tmp_path)
     assert [i["status"] for i in run["items"]] == ["interrupted", "skipped"]
     node = next(n for n in fresh.osu_snapshot()["nodes"] if n["kind"] == "spoke")
     assert node["checked"] is True and node["count"] == 2
+
+
+# ── auto-patch ───────────────────────────────────────────────────────────────
+
+def _hub_with(nodes):
+    hub = _RecordingHub()
+    hub._osu_state()["nodes"] = {}
+    hub.osu_snapshot = lambda: {"nodes": nodes}
+    applied = []
+
+    async def _apply(node_keys=None, actor="", packages=None, security_only=False):
+        applied.append((node_keys, actor, security_only))
+        return {"status": "SUCCESS", "queued": len(node_keys)}
+    hub.osu_apply_fleet = _apply
+    return hub, applied
+
+
+def _node(kind, nid, count=2, security=1, blocker="", features=("packages",)):
+    return {"kind": kind, "id": nid, "label": nid, "eligible": True, "count": count,
+            "security_count": security, "apply_blocker": blocker,
+            "features": list(features)}
+
+
+def test_autopatch_is_off_by_default():
+    assert _FakeHub().osu_autopatch_config() == {
+        "enabled": False, "security_only": True, "include_hub": False}
+
+
+@pytest.mark.asyncio
+async def test_autopatch_off_does_nothing():
+    hub, applied = _hub_with([_node("spoke", "s1")])
+    assert (await hub.osu_autopatch())["status"] == "SKIPPED"
+    assert not applied
+
+
+@pytest.mark.asyncio
+async def test_autopatch_security_only_skips_hub_blocked_and_non_security():
+    hub, applied = _hub_with([
+        _node("spoke", "s1"),
+        _node("spoke", "s2", security=0),
+        _node("agent", "a1", blocker="no helper"),
+        _node("agent", "old", features=()),
+        _node("hub", "hub"),
+    ])
+    hub.osu_set_autopatch_config(True, True, False)
+    await hub.osu_autopatch()
+    assert applied == [(["spoke:s1"], "auto-patch", True)]
+
+
+@pytest.mark.asyncio
+async def test_autopatch_all_updates_with_hub():
+    hub, applied = _hub_with([_node("spoke", "s2", security=0), _node("hub", "hub")])
+    hub.osu_set_autopatch_config(True, False, True)
+    await hub.osu_autopatch()
+    assert applied == [(["spoke:s2", "hub:hub"], "auto-patch", False)]
+
+
+@pytest.mark.asyncio
+async def test_autopatch_waits_for_a_running_run():
+    hub, applied = _hub_with([_node("spoke", "s1")])
+    hub.osu_set_autopatch_config(True, True, False)
+    hub._osu_state()["run"] = {"status": "running"}
+    assert (await hub.osu_autopatch())["status"] == "SKIPPED"
+    assert not applied
+
+
+@pytest.mark.asyncio
+async def test_scheduled_check_runs_autopatch(monkeypatch):
+    hub = _FakeHub()
+    ran = []
+
+    async def _check(refresh=True):
+        ran.append("check")
+
+    async def _autopatch():
+        ran.append("autopatch")
+    hub.osu_check_fleet = _check
+    hub.osu_autopatch = _autopatch
+    calls = []
+
+    async def _fake_sleep(_secs):
+        calls.append(_secs)
+        if len(calls) >= 2:
+            raise asyncio.CancelledError()
+
+    import hub_os_updates as hou
+    monkeypatch.setattr(hou.asyncio, "sleep", _fake_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await hub.run_os_updates_check_loop()
+    assert ran == ["check", "autopatch"]
+
+
+# ── fix access ───────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_fix_access_relays_login_to_a_blocked_agent():
+    hub = _checked_hub(features=("packages", "reboot", "fix_access"), blocker="no helper")
+    await hub.osu_check_fleet(refresh=False)
+    hub.sent.clear()
+    r = await hub.osu_fix_access("agent:guid-123", "root", "pw", actor="admin")
+    assert r["status"] == "SUCCESS"
+    assert ("spoke-1", "AGENT_OS_FIX_ACCESS",
+            {"agent_id": "pve-host-1", "username": "root", "password": "pw"}) in hub.sent
+
+
+@pytest.mark.asyncio
+async def test_fix_access_refuses_unblocked_or_old_nodes():
+    hub = _checked_hub(features=("packages", "reboot", "fix_access"))
+    await hub.osu_check_fleet(refresh=False)
+    assert (await hub.osu_fix_access("spoke:spoke-1", "root", "pw"))["status"] == "ERROR"
+    hub = _checked_hub(blocker="no helper")
+    await hub.osu_check_fleet(refresh=False)
+    r = await hub.osu_fix_access("spoke:spoke-1", "root", "pw")
+    assert r["status"] == "ERROR" and "LM update" in r["message"]
+
+
+@pytest.mark.asyncio
+async def test_autopatch_runs_at_most_once_per_interval():
+    hub, applied = _hub_with([_node("spoke", "s1")])
+    hub.osu_set_autopatch_config(True, True, False)
+    await hub.osu_autopatch()
+    # A hub restart re-runs the loop body straight away — no second run.
+    assert (await hub.osu_autopatch())["status"] == "SKIPPED"
+    assert len(applied) == 1
