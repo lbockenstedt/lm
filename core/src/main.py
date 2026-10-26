@@ -6334,7 +6334,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """
         spoke_id = conn.spoke_id
         if not conn.mtls_enroll_only:
-            await self.mailbox.flush_mailbox(conn.pk, self.send_to_spoke)
+            # A fresh connection is a fresh spoke process, so any self-update
+            # it was draining for is over. Without this, spokes that never send
+            # "draining: false" telemetry (everything except cs) had every
+            # request short-circuited as a timeout for the full DRAIN_WINDOW_S
+            # (3 min) after each hub restart's SPOKE_UPDATE fan-out.
+            self.clear_draining(conn.pk)
+            updates_sent = await self.mailbox.flush_mailbox(conn.pk, self.send_to_spoke)
+            if updates_sent:
+                self.mark_draining(conn.pk)
 
         # cs reconnect config push, deferred from push_config_to_spoke so it
         # lands AFTER any queued (older) CS_CONFIG_UPDATE and runs as a task
