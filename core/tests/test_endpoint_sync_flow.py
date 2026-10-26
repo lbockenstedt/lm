@@ -196,3 +196,25 @@ async def test_only_unsyncable_records_also_skips_replace():
     status = await hub.sync_tenant_endpoints("acme")
     assert status["status"] == "success" and status["hub_skipped"] == 1
     assert all(cmd != "CPPM_SYNC_ENDPOINTS" for _, cmd, _ in hub.request_log)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_sync_never_sends_allow_mass_remove():
+    hub = _SyncHub(responses={
+        ("netbox-spoke-1", "NETBOX_GET_IPS"): _netbox_ips_payload(),
+        ("cppm-spoke-1", "CPPM_SYNC_ENDPOINTS"): _cppm_ok_payload(),
+    })
+    await hub.sync_tenant_endpoints("acme")
+    cppm_call = [c for c in hub.request_log if c[1] == "CPPM_SYNC_ENDPOINTS"][0]
+    assert "allow_mass_remove" not in cppm_call[2]
+
+
+@pytest.mark.asyncio
+async def test_operator_sync_passes_allow_mass_remove_to_cppm():
+    hub = _SyncHub(responses={
+        ("netbox-spoke-1", "NETBOX_GET_IPS"): _netbox_ips_payload(),
+        ("cppm-spoke-1", "CPPM_SYNC_ENDPOINTS"): _cppm_ok_payload(),
+    })
+    await hub.sync_tenant_endpoints("acme", allow_mass_remove=True)
+    cppm_call = [c for c in hub.request_log if c[1] == "CPPM_SYNC_ENDPOINTS"][0]
+    assert cppm_call[2]["allow_mass_remove"] is True

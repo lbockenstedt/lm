@@ -572,6 +572,30 @@ def register(app, hub, ctx):
                 "dns": hub.dns_dhcp_sync_status.get("dns"),
                 "dhcp": hub.dns_dhcp_sync_status.get("dhcp")}
 
+    @app.post("/admin/ops/endpoint-sync")
+    async def admin_ops_endpoint_sync(request: Request):
+        """Run the IPAM -> CPPM endpoint sync for one tenant now.
+
+        Body: ``{"tenant_id": "...", "allow_mass_remove": false}``.
+        ``allow_mass_remove: true`` is the operator's confirmation that the
+        tenant's IPAM data really shrank: the CPPM spoke then removes absent
+        endpoints even when that is more than half of the tenant's inventory
+        (normally refused as a likely truncated batch). An empty batch is
+        still never applied."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        tid = str((body or {}).get("tenant_id") or "").strip()
+        if not tid:
+            raise HTTPException(status_code=400, detail="tenant_id required")
+        allow = (body or {}).get("allow_mass_remove") is True
+        result = await hub.sync_tenant_endpoints(tid, allow_mass_remove=allow)
+        logger.warning("admin_ops: endpoint-sync tenant=%s allow_mass_remove=%s -> %s",
+                       tid, allow, (result or {}).get("status"))
+        return {"status": "ok", "result": result}
+
     @app.get("/admin/ops/netbox-sso")
     async def admin_ops_netbox_sso_get(request: Request):
         """Loopback mirror of GET /setup/netbox-sso (no secret/key echoed)."""
