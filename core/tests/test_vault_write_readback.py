@@ -57,10 +57,10 @@ async def test_set_secret_retries_until_the_value_is_readable(monkeypatch):
 
     monkeypatch.setattr(cloud_vault, "active_provider", lambda hub: "oci")
     monkeypatch.setattr(cloud_vault, "get_secret", fake_get)
-    sys.modules["oci_vault"] = type("M", (), {
+    monkeypatch.setitem(sys.modules, "oci_vault", type("M", (), {
         "get_oci_config": staticmethod(lambda hub: None),
         "set_secret": staticmethod(_async_return("ocid1.secret")),
-    })
+    }))
 
     out = await cloud_vault.set_secret(_Hub(_OCI_GC), "n", "v", delay=0)
     assert out == "ocid1.secret"
@@ -75,10 +75,10 @@ async def test_set_secret_does_not_raise_when_readback_times_out(monkeypatch, ca
 
     monkeypatch.setattr(cloud_vault, "active_provider", lambda hub: "oci")
     monkeypatch.setattr(cloud_vault, "get_secret", never)
-    sys.modules["oci_vault"] = type("M", (), {
+    monkeypatch.setitem(sys.modules, "oci_vault", type("M", (), {
         "get_oci_config": staticmethod(lambda hub: None),
         "set_secret": staticmethod(_async_return("ocid1.secret")),
-    })
+    }))
 
     with caplog.at_level("WARNING"):
         out = await cloud_vault.set_secret(_Hub(_OCI_GC), "n", "v", attempts=2, delay=0)
@@ -100,10 +100,10 @@ async def test_a_transient_read_error_is_retried_not_fatal(monkeypatch):
 
     monkeypatch.setattr(cloud_vault, "active_provider", lambda hub: "oci")
     monkeypatch.setattr(cloud_vault, "get_secret", flaky)
-    sys.modules["oci_vault"] = type("M", (), {
+    monkeypatch.setitem(sys.modules, "oci_vault", type("M", (), {
         "get_oci_config": staticmethod(lambda hub: None),
         "set_secret": staticmethod(_async_return("id")),
-    })
+    }))
 
     assert await cloud_vault.set_secret(_Hub(_OCI_GC), "n", "v", delay=0) == "id"
     assert reads["n"] == 2
@@ -123,12 +123,12 @@ async def test_azure_writes_are_confirmed_too(monkeypatch):
 
     monkeypatch.setattr(cloud_vault, "active_provider", lambda hub: "azure")
     monkeypatch.setattr(cloud_vault, "get_secret", fake_get)
-    sys.modules["key_vault"] = type("M", (), {
+    monkeypatch.setitem(sys.modules, "key_vault", type("M", (), {
         "set_secret": staticmethod(_async_return({"id": "https://kv/secrets/n"})),
-    })
-    sys.modules["security.oidc"] = type("M", (), {
+    }))
+    monkeypatch.setitem(sys.modules, "security.oidc", type("M", (), {
         "get_oidc_config": staticmethod(lambda hub: None),
-    })
+    }))
 
     gc = {"key_vault": {"enabled": True, "vault_url": "https://kv.vault.azure.net"}}
     await cloud_vault.set_secret(_Hub(gc), "n", "v", delay=0)
@@ -146,10 +146,10 @@ async def test_confirmation_can_be_opted_out(monkeypatch):
 
     monkeypatch.setattr(cloud_vault, "active_provider", lambda hub: "oci")
     monkeypatch.setattr(cloud_vault, "get_secret", fake_get)
-    sys.modules["oci_vault"] = type("M", (), {
+    monkeypatch.setitem(sys.modules, "oci_vault", type("M", (), {
         "get_oci_config": staticmethod(lambda hub: None),
         "set_secret": staticmethod(_async_return("id")),
-    })
+    }))
 
     await cloud_vault.set_secret(_Hub(_OCI_GC), "n", "v", confirm=False)
     assert reads["n"] == 0
