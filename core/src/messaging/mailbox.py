@@ -362,10 +362,14 @@ class Mailbox:
         logger.info(f"Queued message {message.header.message_id} for offline spoke {spoke_id}")
         await self._asave()
 
-    async def flush_mailbox(self, spoke_id: str, send_func):
+    async def flush_mailbox(self, spoke_id: str, send_func) -> int:
         """
         Sends all queued messages for a newly connected spoke.
+
+        Returns how many SPOKE_UPDATEs were actually delivered (not deferred),
+        so the hub knows whether the spoke is about to restart again.
         """
+        updates_sent = 0
         if spoke_id in self.spoke_queues and self.spoke_queues[spoke_id]:
             messages = self.spoke_queues[spoke_id][:]
             logger.info(f"Flushing mailbox for spoke {spoke_id} ({len(messages)} messages)")
@@ -388,12 +392,14 @@ class Mailbox:
                                     f"delivery cooldown {left}s remaining")
                         deferred.append(msg)
                         continue
+                    updates_sent += 1
                 await self.push(msg, send_func)
 
             # Retain only the cooldown-deferred messages; everything else was
             # pushed into pending_ack.
             self.spoke_queues[spoke_id] = deferred
             await self._asave()
+        return updates_sent
 
     def _expire_stale(self, now: float, connected: Optional[set] = None) -> int:
         """Drop backlog messages from BOTH pending_ack and the per-spoke offline
