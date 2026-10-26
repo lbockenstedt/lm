@@ -12,9 +12,11 @@ Security posture (mirrors Remote Console):
 Commands reach a node as an HMAC-signed OS_UPDATE_* frame (control_plane), so a
 spoke trusts them exactly like SPOKE_UPDATE.
 
-Behaviour is fixed by design, not exposed as knobs: dist-upgrade (everything —
-security, regular, dependency transitions), NEVER auto-reboot, rolling one node
-at a time, hub last. See hub_os_updates.py for why.
+Behaviour: rolling one node at a time, hub last, NEVER auto-reboot. An apply
+is a full dist-upgrade by default, or narrowed to chosen nodes, chosen packages
+per node, or security updates only. Rebooting is its own explicit, audited
+action per node, and a running roll can be cancelled (the current node
+finishes). See hub_os_updates.py for why.
 
 Checking IS on a configurable schedule though: the panel auto-checks the fleet
 every ``interval_hours`` (default 6, ``/api/os-updates/auto-check``) so its
@@ -85,8 +87,13 @@ def register(app, hub, ctx):
     async def os_updates_apply(request: Request):
         """Approve + deploy. Returns immediately; poll the snapshot for progress.
 
-        ``nodes`` (optional) restricts the roll to specific ``kind:id`` keys;
-        omitted means every eligible node with pending updates.
+        Body (all optional):
+          * ``nodes`` — restrict the roll to these ``kind:id`` keys; omitted
+            means every eligible node with pending updates.
+          * ``packages`` — ``{"kind:id": ["pkg", ...]}``: upgrade only those
+            packages on that node.
+          * ``security_only`` — nodes without an explicit package list get
+            only their pending security packages.
         """
         sess = _require_admin(request)
         try:
@@ -96,10 +103,49 @@ def register(app, hub, ctx):
         keys = (body or {}).get("nodes") or None
         if keys is not None and not isinstance(keys, list):
             raise HTTPException(status_code=400, detail="'nodes' must be a list")
+        packages = (body or {}).get("packages") or None
+        if packages is not None and not (
+                isinstance(packages, dict)
+                and all(isinstance(v, list) and all(isinstance(p, str) for p in v)
+                        for v in packages.values())):
+            raise HTTPException(status_code=400,
+                                detail="'packages' must map node key -> list of package names")
+        security_only = bool((body or {}).get("security_only", False))
         actor = _who(sess)
-        logger.warning("[os-updates] APPLY approved by %s — nodes=%s",
-                       actor, keys if keys else "ALL eligible")
-        res = await hub.osu_apply_fleet(node_keys=keys, actor=actor)
+        logger.warning("[os-updates] APPLY approved by %s — nodes=%s packages=%s security_only=%s",
+                       actor, keys if keys else "ALL eligible",
+                       {k: len(v) for k, v in (packages or {}).items()} or "all",
+                       security_only)
+        res = await hub.osu_apply_fleet(node_keys=keys, actor=actor,
+                                        packages=packages, security_only=security_only)
         if res.get("status") == "ERROR":
             raise HTTPException(status_code=409, detail=res.get("message", "cannot apply"))
+        return res
+
+    @app.post("/api/os-updates/cancel")
+    async def os_updates_cancel(request: Request):
+        """Stop the running roll after the node currently applying."""
+        sess = _require_admin(request)
+        res = hub.osu_cancel_run(actor=_who(sess))
+        if res.get("status") == "ERROR":
+            raise HTTPException(status_code=409, detail=res.get("message", "cannot cancel"))
+        return res
+
+    @app.post("/api/os-updates/reboot")
+    async def os_updates_reboot(request: Request):
+        """Reboot ONE node (``{"node": "kind:id"}``) in one minute. Never
+        automatic — this endpoint is the only way LM reboots a host."""
+        sess = _require_admin(request)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        key = (body or {}).get("node")
+        if not isinstance(key, str) or not key:
+            raise HTTPException(status_code=400, detail="'node' (kind:id) is required")
+        actor = _who(sess)
+        logger.warning("[os-updates] REBOOT requested by %s — node=%s", actor, key)
+        res = await hub.osu_reboot_node(key, actor=actor)
+        if res.get("status") == "ERROR":
+            raise HTTPException(status_code=409, detail=res.get("message", "cannot reboot"))
         return res
