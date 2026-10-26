@@ -934,12 +934,14 @@ _SETUP_PROMPT = re.compile(
 # watcher reads a passive capture, so the live prompt is often followed by an
 # echoed username, a retry message or idle-timeout chatter that hides it from
 # the end-anchored prompt check, and the port was then wrongly called "stuck".
+# A switch's idle-session logout ("Console terminated due to inactivity.") is
+# also proof the OS is running, even when nothing else follows it.
 _OS_UP_MARKER = re.compile(
     r"Login incorrect|Login attempt timed out|Maximum number of tries exceeded|"
     r"has logged in \d+ times? in the past|Press any key to continue|"
     r"partial string is acceptable|Auto-provisioning is in progress|"
     r"Transient problem:|\S[ \t]+login:|^\s*(?:User|Username|Password)\s*:|"
-    r"\(ttyu\d+\)",
+    r"\(ttyu\d+\)|Console terminated due to inactivity",
     re.I | re.M)
 
 
