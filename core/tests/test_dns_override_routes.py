@@ -2,7 +2,7 @@
 
 * Profiles (the answers themselves) are Global-Admin only.
 * Assigning/removing a profile is allowed to a tenant Admin, but only for a
-  single host IP inside their own subnets — a whole subnet is admin-only.
+  host IP or a subnet that lies entirely inside their own subnets.
 * The listing shows every profile (so a tenant can pick one) but only the
   assignments inside the caller's tenant prefixes.
 """
@@ -87,6 +87,10 @@ def _scope(monkeypatch):
     async def in_scope(hub, sess, record, fields):
         return str(record.get("ip", "")).startswith("10.1.0.")
 
+    async def by_session(hub, sess):
+        return TENANT_PREFIXES.get(sess["user"]["tenant_id"], [])
+
+    monkeypatch.setattr(ns.access, "resolve_prefixes", by_session)
     monkeypatch.setattr(ns.access, "resolve_prefixes_for_tenant", by_tenant)
     monkeypatch.setattr(ns.access, "resolve_prefixes_for_session_tenant", by_session_tenant)
     monkeypatch.setattr(ns.access, "record_in_tenant_scope", in_scope)
@@ -163,7 +167,17 @@ def test_tenant_may_assign_and_remove_its_own_device():
     assert [c[1] for c in hub.forwarded] == ["DNS_OVERRIDE_ASSIGN", "DNS_OVERRIDE_UNASSIGN"]
 
 
-@pytest.mark.parametrize("target", ["10.2.0.9", "10.1.0.0/24", "garbage"])
+@pytest.mark.parametrize("target", ["10.1.0.0/24", "10.1.0.128/25"])
+def test_tenant_may_assign_and_remove_a_subnet_inside_its_prefixes(target):
+    client, hub = _client(admin=False)
+    assert client.post("/api/dns/override-assignment",
+                       json={"target": target, "profile": "PAVO-DEVICE"}).status_code == 200
+    assert client.request("DELETE", "/api/dns/override-assignment",
+                          json={"target": target}).status_code == 200
+    assert [c[1] for c in hub.forwarded] == ["DNS_OVERRIDE_ASSIGN", "DNS_OVERRIDE_UNASSIGN"]
+
+
+@pytest.mark.parametrize("target", ["10.2.0.9", "10.1.0.0/23", "10.2.0.0/24", "garbage"])
 def test_tenant_cannot_touch_other_devices_or_subnets(target):
     client, hub = _client(admin=False)
     r = client.post("/api/dns/override-assignment",
