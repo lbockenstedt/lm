@@ -1630,8 +1630,15 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
         data = unwrap_spoke(result)
         out = [p["prefix"] for p in (data.get("prefixes", []) if isinstance(data, dict) else []) if p.get("prefix")]
         if not out:
-            logger.warning("fetch_tenant_prefixes tenant=%s payload=%s spoke=%s returned none (resp=%s)",
-                           tenant_id, payload, spoke_id, str(data)[:200])
+            # A SUCCESS reply with an empty list is a tenant that simply has no
+            # prefixes in NetBox — normal, so INFO. Anything else (error
+            # envelope, malformed reply) stays a WARNING.
+            ok_empty = (isinstance(data, dict)
+                        and str(data.get("status", "")).upper() == "SUCCESS"
+                        and isinstance(data.get("prefixes"), list))
+            (logger.info if ok_empty else logger.warning)(
+                "fetch_tenant_prefixes tenant=%s payload=%s spoke=%s returned none (resp=%s)",
+                tenant_id, payload, spoke_id, str(data)[:200])
             return _from_warm()
         return out
     except Exception as e:
