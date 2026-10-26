@@ -224,6 +224,8 @@ HUB_STUBS = {
     "_vm_live_set": [None, RAISE],
     "_mtls_enrollment_done": [None, None, RAISE],
     "_mark_spoke_disconnected": [None],
+    "clear_draining": [None],
+    "mark_draining": [None],
     # async
     "_install_active_connection": [True, True, False],
     "_install_pending_connection": ["take", "take", "keep"],
