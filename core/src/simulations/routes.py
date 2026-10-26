@@ -1580,7 +1580,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             # Spoke is current — clear any prior stall counter.
             _reconcile_stall.pop(tenant_id, None)
             return False
-        logger.info(
+        prev_stall = _reconcile_stall.get(tenant_id, 0)
+        # Log the stale set once when a stall starts; while it persists the
+        # throttled STILL-stale warning below carries the signal.
+        logger.log(
+            logging.INFO if prev_stall == 0 else logging.DEBUG,
             "reconcile-push [%s]: %d stale quota(s) — re-pushing: %s",
             tenant_id, len(stale),
             ", ".join(
@@ -1594,7 +1598,6 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # hub can only be a leftover 90s window from a prior live-push timeout;
         # force-live blows past it. (A genuinely-restarting spoke just times out
         # and re-queues — no worse than today.)
-        prev_stall = _reconcile_stall.get(tenant_id, 0)
         force_live = prev_stall >= 2
         try:
             result = await _push_sim_quotas(tenant_id, force_live=force_live)
@@ -1633,8 +1636,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 "effective_sim_quotas push may be timing out the live ack.",
                 tenant_id, n, reason)
         else:
-            logger.info("reconcile-push [%s]: %s (stall tick %d%s)",
-                        tenant_id, reason, n, ", force_live" if force_live else "")
+            # No spoke bound can't change until one is bound — keep it out of
+            # the INFO log (it was ~1,900 lines/day for an unbound tenant).
+            logger.log(logging.INFO if pushed else logging.DEBUG,
+                       "reconcile-push [%s]: %s (stall tick %d%s)",
+                       tenant_id, reason, n, ", force_live" if force_live else "")
         return True
 
     async def _run_adaptive_controller() -> None:
