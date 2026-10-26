@@ -159,7 +159,8 @@ def test_clearpass_local_user(hub):
 def test_entra_uses_cloud_nac_with_chosen_password(hub, monkeypatch):
     seen = {}
 
-    async def provision_user(oidc, domain, username, http=None, password=None):
+    async def provision_user(oidc, domain, username, http=None, password=None, oid=None):
+        seen.setdefault("oids", []).append(oid)
         seen.update(domain=domain, username=username, password=password)
         return {"upn": f"{username}@{domain}", "oid": "oid-1"}
 
@@ -172,6 +173,9 @@ def test_entra_uses_cloud_nac_with_chosen_password(hub, monkeypatch):
     rec = run(dj.provision(hub, "t1", "cs1", "bob-1", "bob", "entra"))
     assert seen["password"] == _creds(hub)[0][2]["password"]
     assert rec["identity"] == "bob@x.com"
+    # Rotate patches the known object id (UPN lookups lag right after create).
+    run(dj.rotate(hub, "t1", "entra", "bob"))
+    assert seen["oids"] == [None, "oid-1"]
     # Same Entra username for another tenant is refused (one global directory).
     with pytest.raises(dj.Dot1xJitError, match="already JIT-provisioned"):
         run(dj.provision(hub, "t2", "cs2", "bob-9", "bob", "entra"))
