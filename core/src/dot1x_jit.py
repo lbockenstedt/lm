@@ -677,3 +677,40 @@ def list_accounts(hub, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
         rows.append(row)
     rows.sort(key=lambda r: (str(r.get("tenant_id")), r["username"], r["backend"]))
     return rows
+
+
+async def selftest(hub, tenant_id: str,
+                   backends: Iterable[str] = BACKENDS) -> List[Dict[str, Any]]:
+    """Operator check (/admin/ops/dot1x-jit-selftest): for each backend run the
+    real lifecycle on a throwaway account — provision, rotate, delete.
+
+    The test hostname has no spoke, so no credential is delivered anywhere.
+    Delete is always attempted once provisioning succeeded, so a failed rotate
+    never leaves a test account behind. Returns one row per backend:
+    ``{backend, username, ok, steps: [{step, ok, error?}]}``.
+    """
+    out: List[Dict[str, Any]] = []
+    for backend in backends:
+        backend = normalize_backend(backend)
+        username = f"lmjit-selftest-{uuid.uuid4().hex[:8]}"
+        steps: List[Dict[str, Any]] = []
+
+        async def _step(name, coro):
+            try:
+                await coro
+                steps.append({"step": name, "ok": True})
+                return True
+            except Exception as e:  # noqa: BLE001 — reported, not raised
+                steps.append({"step": name, "ok": False, "error": str(e)})
+                return False
+
+        if await _step("provision", provision(hub, tenant_id, "", "lmjit-selftest",
+                                              username, backend)):
+            await _step("rotate", rotate(hub, tenant_id, backend, username))
+            await _step("delete", delete(hub, tenant_id, backend, username))
+        out.append({"backend": backend, "username": username,
+                    "ok": all(s["ok"] for s in steps), "steps": steps})
+        logger.info("dot1x_jit: selftest tenant=%s backend=%s ok=%s %s",
+                    tenant_id, backend, out[-1]["ok"],
+                    [s for s in steps if not s["ok"]])
+    return out
