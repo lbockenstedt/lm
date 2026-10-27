@@ -708,8 +708,11 @@ async def _merge_pinned_agent_vms(hub, data, tid, visible_spokes, timeout=10.0, 
         # connected agents by the agent's raw name — sending the guid made the
         # spoke answer "not connected" and every pinned host's VMs were dropped.
         wire_id = hub._agent_relay_name(apk)
+        # prefer_cache: answer from the agent's fresh telemetry instead of a
+        # live 10-15s PVE query on every page load (same as the Dashboard).
         try:
-            r = await hub.request_response(sp, "PXMX_LIST_VMS", {"agent_id": wire_id},
+            r = await hub.request_response(sp, "PXMX_LIST_VMS",
+                                           {"agent_id": wire_id, "prefer_cache": True},
                                            timeout=timeout)
         except Exception as e:
             logger.warning("pinned-agent VM merge: agent %s (spoke %s) failed: %s",
