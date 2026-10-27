@@ -42,3 +42,45 @@ async def test_error_reply_still_warns(caplog):
         out = await fetch_tenant_prefixes(_Hub({"status": "ERROR", "message": "boom"}), "acme")
     assert out == []
     assert logging.WARNING in _levels(caplog)
+
+
+class _CountingHub(_Hub):
+    def __init__(self, reply):
+        super().__init__(reply)
+        self.calls = 0
+
+    async def request_response(self, spoke_id, command, payload, timeout=30.0):
+        self.calls += 1
+        return await super().request_response(spoke_id, command, payload, timeout)
+
+
+@pytest.mark.asyncio
+async def test_prefixes_cached_between_reads():
+    """Every filtered list read calls this; it must not hit NetBox each time."""
+    hub = _CountingHub({"status": "SUCCESS", "prefixes": [{"prefix": "10.1.0.0/24"}]})
+    assert await fetch_tenant_prefixes(hub, "acme") == ["10.1.0.0/24"]
+    assert await fetch_tenant_prefixes(hub, "acme") == ["10.1.0.0/24"]
+    assert hub.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_clear_prefix_cache_forces_refetch():
+    from access import clear_prefix_cache
+    hub = _CountingHub({"status": "SUCCESS", "prefixes": [{"prefix": "10.1.0.0/24"}]})
+    await fetch_tenant_prefixes(hub, "acme")
+    clear_prefix_cache(hub)
+    await fetch_tenant_prefixes(hub, "acme")
+    assert hub.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_lookup_retried_after_short_ttl(monkeypatch):
+    import access
+    hub = _CountingHub({"status": "ERROR", "message": "Timed out waiting for spoke response"})
+    await fetch_tenant_prefixes(hub, "acme")
+    await fetch_tenant_prefixes(hub, "acme")
+    assert hub.calls == 1
+    now = access.time.time()
+    monkeypatch.setattr(access.time, "time", lambda: now + access._PREFIX_FAIL_TTL + 1)
+    await fetch_tenant_prefixes(hub, "acme")
+    assert hub.calls == 2

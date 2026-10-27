@@ -218,6 +218,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "CPPM_REFRESH_CACHE", {}, timeout=20.0)
+            hub.cache_refresh("cppm_get_nac_status", (cppm_spoke,), exact=True)
             return result
         except Exception as e:
             logger.error(f"API: Error refreshing CPPM cache: {e}", exc_info=True)
@@ -675,13 +676,22 @@ def register(app, hub, ctx):
 
     @app.get("/api/cppm/nac-status")
     async def get_cppm_nac_status(request: Request, tenant: str = None):
+        """NAC landing page status, served from the hub data cache per nac
+        spoke (the request picks the spoke, so tenant scoping is unchanged)."""
         hub = app.state.hub
         cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             raise HTTPException(status_code=503, detail="No spoke connected")
+        tid = _effective_tenant(request, tenant)
+
+        async def fetch():
+            return _cppm_unwrap(await hub.request_response(
+                cppm_spoke, "CPPM_GET_NAC_STATUS", {}, timeout=20.0))
+
+        job = CacheJob("cppm_get_nac_status", cppm_spoke, fetch,
+                       (tid,) if tid else (ALL_SCOPE,), lane="nac")
         try:
-            result = await hub.request_response(cppm_spoke, "CPPM_GET_NAC_STATUS", {}, timeout=20.0)
-            return _cppm_unwrap(result)
+            return hub.cache_annotate(await _nac_read(job), job.ns, job.key)
         except HTTPException:
             raise
         except Exception as e:
