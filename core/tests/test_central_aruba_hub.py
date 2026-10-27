@@ -128,6 +128,22 @@ def test_static_access_token_short_circuits_new_central():
     assert token == "STATIC"
 
 
+def test_new_central_client_credentials_beat_a_stale_static_token():
+    # A pasted access token expires (~2h); with client creds also saved, the
+    # hub must keep minting fresh tokens instead of replaying the dead one.
+    def handler(request):
+        return httpx.Response(200, json={"access_token": "FRESH", "expires_in": 7200})
+
+    cfg = {"api_version": "new_central", "client_id": "cid", "client_secret": "sec",
+           "access_token": "EXPIRED-STATIC"}
+    client = ArubaClient(cfg)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            return await client._ensure_token(http)
+    assert asyncio.run(go()) == "FRESH"
+
+
 def test_classic_missing_refresh_token_raises():
     cfg = {"cluster_url": "https://x", "api_version": "classic",
            "client_id": "cid", "client_secret": "sec"}
