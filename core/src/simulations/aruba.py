@@ -157,9 +157,12 @@ class ArubaClient:
             return token_state["access_token"]
 
         if self.api_version == "new_central":
-            # Static access token — use directly, no OAuth exchange.
+            # Client credentials win: they mint a fresh token on every expiry.
+            # A pasted static access token expires (~2h) and can't be renewed,
+            # so it's only used when no client_id/client_secret are configured.
+            has_client_creds = bool(self.config.get("client_id") and self.config.get("client_secret"))
             static_token = str(self.config.get("access_token") or "").strip()
-            if static_token:
+            if static_token and not has_client_creds:
                 token_state.clear()
                 token_state.update({"access_token": static_token, "expires_at": now + 7200})
                 return static_token
