@@ -28,6 +28,7 @@ import time
 from typing import Any, Dict, Optional
 
 from .aruba import ArubaClient
+from . import central_secrets
 from .check_eval import count_for_check, normalize_counts
 from tenant_sharded import migrate_legacy, shard_load, shard_save
 
@@ -958,7 +959,7 @@ class CentralHubPoller:
 
     async def _poll_tenant(self, tenant_id: str, central_config: Dict[str, Any]) -> None:
         # ArubaClient maps central_config's ``mode`` -> api_version itself.
-        client = ArubaClient(central_config)
+        client = ArubaClient(await central_secrets.resolve(self.hub, central_config))
         if not client.is_configured():
             self._status.pop(tenant_id, None)
             self._cc.forget(tenant_id)

@@ -11297,6 +11297,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # data; distributed mode gets it from the spoke's on-prem poller via
         # CS_TELEMETRY (Phase 5). See simulations/central_hub_poller.py.
         central_on_prem_poll_task = asyncio.create_task(self.central_on_prem_hub_poller.run_loop())
+        # Move any inline Central API secrets into the vault (no-op without one).
+        from simulations import central_secrets as _central_secrets
+        asyncio.create_task(_central_secrets.migrate_to_vault(self, self.simulations_store))
         # Scheduled email health report: fires each tenant's Checks + Client Count
         # report on its configured cadence via the tenant's SMTP (Setup →
         # Notifications → Email Reports). Off unless enabled per tenant.
