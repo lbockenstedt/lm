@@ -1136,7 +1136,7 @@ function _lmLoadingToastRegion() {
     if (!el) {
         el = document.createElement('div');
         el.id = 'lm-loading-toast-region';
-        el.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10000;pointer-events:none;display:flex;flex-direction:column;align-items:center;';
+        el.style.cssText = 'position:fixed;bottom:3.5rem;right:1.5rem;z-index:10000;pointer-events:none;display:flex;flex-direction:column;align-items:flex-end;';
         document.body.appendChild(el);
     }
     return el;
@@ -1156,7 +1156,7 @@ function showLoadingToast(label) {
     toast.className = 'lm-toast';
     toast.style.cssText = `
         display:flex;align-items:center;gap:.75rem;
-        background:#01A982;color:#fff;
+        background:var(--hpe-navy, #263040);color:#fff;
         padding:.75rem 1rem .75rem 1.25rem;border-radius:.5rem;font-size:.875rem;
         box-shadow:0 4px 12px rgba(0,0,0,.2);opacity:0;
         transition:opacity .2s ease;width:100%;max-width:24rem;min-width:18rem;box-sizing:border-box;pointer-events:auto;`;
