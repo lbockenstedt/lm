@@ -226,6 +226,7 @@ HUB_STUBS = {
     "_mark_spoke_disconnected": [None],
     "clear_draining": [None],
     "mark_draining": [None],
+    "_clear_drain_on_update_reply": [None],
     # async
     "_install_active_connection": [True, True, False],
     "_install_pending_connection": ["take", "take", "keep"],

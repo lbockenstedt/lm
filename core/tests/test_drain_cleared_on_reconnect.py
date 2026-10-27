@@ -6,7 +6,8 @@ SPOKE_UPDATE, and while draining every request_response short-circuits as
 ``draining: false``, so DHCP/DNS/hypervisor spokes looked dead for 3 minutes
 after every hub restart even though they reconnected within seconds. A fresh
 connection now clears the mark, unless the reconnect flush itself delivers a
-new SPOKE_UPDATE.
+new SPOKE_UPDATE, and so does the spoke's reply to SPOKE_UPDATE (a restarting
+spoke exits without replying).
 """
 import asyncio
 import time
@@ -32,6 +33,7 @@ class _Hub:
     is_draining = LabManagerHub.is_draining
     clear_draining = LabManagerHub.clear_draining
     _flush_spoke_backlog = LabManagerHub._flush_spoke_backlog
+    _clear_drain_on_update_reply = LabManagerHub._clear_drain_on_update_reply
 
     def __init__(self, mailbox):
         self._draining_spokes = {}
@@ -79,3 +81,37 @@ def test_deferred_update_does_not_count_as_delivered(tmp_path):
 
     assert not hub.is_draining(SID)
     assert len(mb.spoke_queues[SID]) == 1  # still queued for later
+
+
+def _pending_update(tmp_path):
+    mb = Mailbox(state_dir=str(tmp_path))
+    msg = _update(SID)
+    mb.pending_ack[msg.header.message_id] = (msg, time.time(), 0)
+    hub = _Hub(mb)
+    hub.mark_draining(SID)
+    return hub, msg.header.message_id
+
+
+def test_update_reply_without_restart_clears_drain(tmp_path):
+    hub, mid = _pending_update(tmp_path)
+
+    hub._clear_drain_on_update_reply(SID, mid, {"status": "SUCCESS", "message": "Already up to date"})
+
+    assert not hub.is_draining(SID)
+
+
+def test_update_reply_for_restart_in_progress_keeps_drain(tmp_path):
+    hub, mid = _pending_update(tmp_path)
+
+    hub._clear_drain_on_update_reply(SID, mid, {"status": "SUCCESS", "message": "update already in progress"})
+    hub._clear_drain_on_update_reply(SID, mid, {"status": "SUCCESS", "message": "Updated x; reloading role 'dhcp' in place"})
+
+    assert hub.is_draining(SID)
+
+
+def test_reply_to_other_message_keeps_drain(tmp_path):
+    hub, _ = _pending_update(tmp_path)
+
+    hub._clear_drain_on_update_reply(SID, "some-other-id", {"status": "SUCCESS"})
+
+    assert hub.is_draining(SID)

@@ -62,6 +62,7 @@ class _Hub:
         self.sent = []
         self.on_send = None  # optional async hook(msg) run inside send_to_spoke
         self.is_draining = lambda sid: False
+        self._clear_drain_on_update_reply = lambda sid, corr_id, reply: None
         bind = lambda name: getattr(main.LabManagerHub, name).__get__(self)
         self.request_response = bind("request_response")
         self._route_spoke_reply = bind("_route_spoke_reply")
