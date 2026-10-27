@@ -461,6 +461,7 @@ function updateHeaderModule() {
 // overlapped this footer). cs gets force=true to bypass the auto-refresh
 // throttle, matching the former FAB.
 function refreshCurrentView() {
+    _lmNavSeq++;
     if (currentView === 'cs') {
         loadCSData(currentSubView, currentSubChild, true);
         return;
@@ -790,7 +791,26 @@ function _lmOnFetchCountChange(fn) {
     return () => _lmActiveFetchListeners.delete(fn);
 }
 
+// Navigation counter, bumped by every view/tab change (setView, setSubView,
+// setSubChild, setSubGrandchild, refreshCurrentView). Page loaders render
+// whatever their fetch returns into the page, so a slow response for a tab the
+// user already left would paint over the tab they moved to. lmFetch drops such
+// responses instead: the promise never settles, so the old loader just stops.
+// 0 = before the first view render; boot-time requests are never dropped.
+let _lmNavSeq = 0;
+
+// True for a page read (GET) that started before the user's latest navigation.
+// Background polls, boot-time requests and callers that pass
+// `_keepOnNavigate: true` (downloads, shared state) always complete.
+function _lmLeftPageSince(navAtStart, input, init) {
+    if (navAtStart === 0 || navAtStart === _lmNavSeq) return false;
+    if (init && init._keepOnNavigate) return false;
+    const method = (init && init.method) || (input && input.method) || 'GET';
+    return method.toUpperCase() === 'GET';
+}
+
 window.fetch = async function lmFetch(input, init) {
+    const navAtStart = _lmNavSeq;
     let isBg = false;
     try {
         if (init && init._background) isBg = true;
@@ -808,19 +828,24 @@ window.fetch = async function lmFetch(input, init) {
         _lmNotifyFetchState();
     }
 
+    let res;
     try {
-        const res = await _lmOrigFetch(input, init);
-        if (res && res.status === 401 && currentUser && !_lmIsAuthSubmitEndpoint(input)) {
-            handleSessionExpired();
-            throw new Error('Session expired');
-        }
-        return res;
+        res = await _lmOrigFetch(input, init);
+    } catch (err) {
+        if (!isBg && _lmLeftPageSince(navAtStart, input, init)) return new Promise(() => {});
+        throw err;
     } finally {
         if (!isBg) {
             _lmActiveFetchCount = Math.max(0, _lmActiveFetchCount - 1);
             _lmNotifyFetchState();
         }
     }
+    if (res && res.status === 401 && currentUser && !_lmIsAuthSubmitEndpoint(input)) {
+        handleSessionExpired();
+        throw new Error('Session expired');
+    }
+    if (!isBg && _lmLeftPageSince(navAtStart, input, init)) return new Promise(() => {});
+    return res;
 };
 
 // ── pollManager — visibility-aware recurring timers ─────────────────────────
@@ -2064,7 +2089,7 @@ async function loadTenantPrefixes() {
         // client filtering on the stale session-tenant prefixes. Admins early-
         // return above (they don't client-filter; the server filters by ?tenant=).
         const qs = currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
-        const r = await fetch(`/auth/prefixes${qs}`, { credentials: 'same-origin' });
+        const r = await fetch(`/auth/prefixes${qs}`, { credentials: 'same-origin', _keepOnNavigate: true });
         if (!r.ok) { _tenantPrefixes = []; return; }
         const d = await r.json();
         _tenantPrefixes = d.prefixes || [];
@@ -4315,7 +4340,7 @@ async function setView(viewId) {
     currentSubView = (VIEW_SUBMENUS[currentView] || ['General'])[0];
     currentSubChild = _csDefaultChild(currentView, currentSubView);
     currentSubGrandchild = _csDefaultGrandchild(currentView, currentSubView, currentSubChild);
-
+    _lmNavSeq++;
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
     const navItem = document.getElementById(`nav-${isClass ? viewId : currentView}`);
     if (navItem) navItem.classList.add('active');
@@ -4387,6 +4412,7 @@ const VIEW_LOADERS = {
 
 async function setSubView(subMenu) {
     if (subMenu === 'Diagnostics' && !isAdmin()) return;
+    _lmNavSeq++;
     currentSubView = subMenu;
     // Leaving the Certificates tab: stop the in-flight distribution poller/
     // ticker so it doesn't keep fetching /api/le/inflight in the background.
@@ -4534,6 +4560,7 @@ function renderTertiaryNav(viewId) {
 // grandchild, updates the secondary strip's active state + the tertiary strip,
 // and dispatches the child renderer.
 async function setSubChild(child) {
+    _lmNavSeq++;
     currentSubChild = child;
     currentSubGrandchild = _csDefaultGrandchild(currentView, currentSubView, child);
     document.querySelectorAll('#top-nav-secondary .sub-nav-item').forEach(el => {
@@ -4554,6 +4581,7 @@ window.setSubChild = setSubChild;
 // Settings → Cloud → Azure → 'NSG'). Sets currentSubGrandchild, updates the
 // tertiary strip's active state, and re-renders the settings tile.
 function setSubGrandchild(gchild) {
+    _lmNavSeq++;
     currentSubGrandchild = gchild;
     document.querySelectorAll('#top-nav-tertiary .sub-nav-item').forEach(el => {
         el.classList.toggle('active', el.dataset.subgrandchild === gchild);
@@ -8919,7 +8947,7 @@ async function loadSelfBackupStatus() {
 
 async function downloadSelfBackup(name) {
     try {
-        const r = await setupFetch('/setup/backup/download?name=' + encodeURIComponent(name));
+        const r = await setupFetch('/setup/backup/download?name=' + encodeURIComponent(name), { _keepOnNavigate: true });
         if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || ('HTTP ' + r.status)); }
         const blob = await r.blob();
         const url = URL.createObjectURL(blob);
@@ -11907,7 +11935,7 @@ async function deleteCollabPcap() {
 async function downloadCollabPcap(ev) {
     if (ev) ev.preventDefault();
     try {
-        const r = await setupFetch('/setup/collab/pcap');
+        const r = await setupFetch('/setup/collab/pcap', { _keepOnNavigate: true });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const blob = await r.blob();
         const url = URL.createObjectURL(blob);
@@ -12552,7 +12580,7 @@ async function onAcsResourceChanged() {
 
 async function downloadKeyVaultMin() {
     try {
-        const r = await setupFetch('/setup/key-vault/download-min');
+        const r = await setupFetch('/setup/key-vault/download-min', { _keepOnNavigate: true });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const blob = await r.blob();
         const url = URL.createObjectURL(blob);
@@ -18166,19 +18194,22 @@ function _mountModal(modal) {
 // still happens: the later response replaces a dialog the user may already be
 // typing into, discarding the input. Keyed on the ARGUMENTS so suppression is
 // limited to re-clicking the same button -- picking a different row (editUser(7)
-// after editUser(3)) is a different key and still opens.
+// after editUser(3)) is a different key and still opens. A pending call from
+// before the last navigation is ignored: lmFetch drops its response, so it
+// never settles and would otherwise block the opener for good.
 function _singleFlight(fn) {
-    const pending = new Map();
+    const pending = new Map();   // key -> { out, nav }
     return function (...args) {
         let key;
         try { key = JSON.stringify(args); } catch (e) { key = String(args); }
-        if (pending.has(key)) return pending.get(key);
+        const prev = pending.get(key);
+        if (prev && prev.nav === _lmNavSeq) return prev.out;
         const out = fn.apply(this, args);
         // Only a thenable has a window during which a second click can land; a
         // synchronous opener is finished before the next event can be handled.
         if (out && typeof out.then === 'function') {
-            pending.set(key, out);
-            const clear = () => pending.delete(key);
+            pending.set(key, { out, nav: _lmNavSeq });
+            const clear = () => { if (pending.get(key)?.out === out) pending.delete(key); };
             out.then(clear, clear);
         }
         return out;
@@ -25386,7 +25417,7 @@ async function pxmxRefreshConsoleDir(force) {
     if (btn) btn.classList.add('animate-spin');
     try {
         const res = await fetch(`/api/pxmx/vms?tenant=${encodeURIComponent(currentTenant)}`,
-                                { credentials: 'same-origin' });
+                                { credentials: 'same-origin', _keepOnNavigate: true });
         if (res.ok) {
             const data = await res.json();
             window._pxmxConsoleDirVms = data.vms || [];
@@ -26111,6 +26142,13 @@ async function loadPxmxData(subMenu, forceRefresh = false) {    const container 
             return;
         }
         if (subMenu === 'Overview' || subMenu === 'Virtual Machines') {
+            // A one-shot flag distinguishes "arrived via node click" (scoped) from
+            // "clicked the VM tab directly" (all VMs flat, no stale filter). Read
+            // before the fetch: if the user leaves this tab mid-load, lmFetch drops
+            // the response and the flag must not leak into a later VM tab visit.
+            const filter = (subMenu === 'Virtual Machines' && window._pxmxNodeFilterPending)
+                ? window._pxmxNodeSel : null;
+            window._pxmxNodeFilterPending = false;
             const [vmR, nodesR] = await Promise.all([
                 fetch(`/api/pxmx/vms?tenant=${encodeURIComponent(currentTenant)}`),
                 fetch('/api/pxmx/nodes?tenant=' + encodeURIComponent(currentTenant)),
@@ -26158,11 +26196,6 @@ async function loadPxmxData(subMenu, forceRefresh = false) {    const container 
             }
 
             // --- 'Virtual Machines': scoped to a node if arrived via a node click ---
-            // A one-shot flag distinguishes "arrived via node click" (scoped) from
-            // "clicked the VM tab directly" (all VMs flat, no stale filter).
-            const filter = window._pxmxNodeFilterPending ? window._pxmxNodeSel : null;
-            window._pxmxNodeFilterPending = false;
-
             if (vmData.select_tenant || nodesData.select_tenant) {
                 container.innerHTML = pxmxSelectTenantPromptHtml();
                 return;
@@ -28818,10 +28851,13 @@ function _leChallengeLabel(v) {
 }
 
 async function loadLEData(subMenu) {
-    if (window._leLoading) return;  // don't overlap the inflight poller
+    // Holds the _lmNavSeq of the running load. A load from an earlier navigation
+    // doesn't block: lmFetch dropped its response, so its finally never runs.
+    if (window._leLoading === _lmNavSeq) return;  // don't overlap the inflight poller
     const container = document.getElementById('le-content');
     if (!container) return;
-    window._leLoading = true;
+    const nav = _lmNavSeq;
+    window._leLoading = nav;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
 
     // Live in-flight indicators (yellow target badges + elapsed timer) need a
@@ -29132,7 +29168,7 @@ async function loadLEData(subMenu) {
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
     } finally {
-        window._leLoading = false;
+        if (window._leLoading === nav) window._leLoading = false;
     }
 }
 
@@ -29166,7 +29202,7 @@ function startLeInflightPollers() {
     if (_leInflightPoller) return;  // idempotent — don't stack intervals
     _leInflightTicker = pollManager.register(updateLeInflightTimers, 1000);
     _leInflightPoller = pollManager.register(() => {
-        if (window._leLoading) return;  // don't overlap a manual load
+        if (window._leLoading === _lmNavSeq) return;  // don't overlap a manual load
         if (!document.getElementById('le-content')) { clearLeInflightPollers(); return; }
         // Only auto-refresh while a cert distribution is IN FLIGHT (there's a
         // pending deploy whose result we're waiting on) — no constant reloading
