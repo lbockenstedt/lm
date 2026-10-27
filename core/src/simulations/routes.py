@@ -33,6 +33,7 @@ from .sim_quota import validate_sim_quotas, guard_sim_quota_wipe, sim_quota_cata
 from . import sim_quota
 from . import email_report
 from . import github_config_client
+from . import central_secrets
 from access import safe_external_url, host_resolves_external, has_edit_access
 from urllib.parse import urlsplit
 
@@ -2339,6 +2340,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             ("central_on_prem_sites_config", store.get_central_on_prem_sites_config)):
             try:
                 v = await getter(tenant_id)
+                if key in ("central_config", "central_on_prem_config"):
+                    v = await central_secrets.resolve(hub, v)
             except Exception:  # noqa: BLE001
                 v = None
             if isinstance(v, dict) and v:
@@ -2586,7 +2589,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         modes = await store.get_processing_modes(tenant_id)
         if store.central_api_is_centralized(modes):  # unset defaults to centralized
             cc = await store.get_central_config(tenant_id)
-            result = await browse_all_from_config(cc or {})
+            result = await browse_all_from_config(await central_secrets.resolve(hub, cc))
         else:
             try:
                 result = await _cs_forward(tenant_id, "CS_CENTRAL_BROWSE", {}, timeout=30.0)
@@ -2683,7 +2686,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 "die_off_pct": _cnum(_t.get("die_off_pct"), 20.0, 0.0, 100.0),
                 "min_peak": int(_cnum(_t.get("min_peak"), 5, 1, 1_000_000)),
             }
-        await store.set_central_config(tenant_id, cfg)
+        # With a vault configured the secrets go there and only kv: references
+        # are stored; spokes still get the real values.
+        try:
+            stored = await central_secrets.to_vault(hub, "central_config", tenant_id, cfg)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502,
+                                detail=f"Could not store the Central secret in the vault: {exc}")
+        await store.set_central_config(tenant_id, stored)
+        cfg = await central_secrets.resolve(hub, stored)
         # Push ``cfg`` (NOT ``hub_cc``): cfg carries ``mode`` on top of the
         # cluster creds, and the spoke's poller (_build_config) needs ``mode`` to
         # pick classic vs new_central. Pushing hub_cc dropped mode, so the spoke
@@ -2889,7 +2900,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         modes = await store.get_processing_modes(tenant_id)
         if store.central_on_prem_api_is_centralized(modes):  # unset → centralized
             cc = await store.get_central_on_prem_config(tenant_id)
-            result = await browse_all_from_config(cc or {})
+            result = await browse_all_from_config(await central_secrets.resolve(hub, cc))
         else:
             try:
                 result = await _cs_forward(tenant_id, "CS_CENTRAL_ON_PREM_BROWSE",
@@ -2958,7 +2969,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 "die_off_pct": _cnum(_t.get("die_off_pct"), 20.0, 0.0, 100.0),
                 "min_peak": int(_cnum(_t.get("min_peak"), 5, 1, 1_000_000)),
             }
-        await store.set_central_on_prem_config(tenant_id, cfg)
+        # With a vault configured the secrets go there and only kv: references
+        # are stored; spokes still get the real values.
+        try:
+            stored = await central_secrets.to_vault(hub, "central_on_prem_config", tenant_id, cfg)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502,
+                                detail=f"Could not store the Central secret in the vault: {exc}")
+        await store.set_central_on_prem_config(tenant_id, stored)
+        cfg = await central_secrets.resolve(hub, stored)
         # Push ``cfg`` (carries ``mode`` on top of the cluster creds) — mirror of
         # cloud Central's save; the spoke's on-prem poller needs ``mode`` to pick
         # classic vs new_central (Phase 5).
@@ -6096,7 +6115,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         modes = await store.get_processing_modes(tenant_id)
         if store.central_api_is_centralized(modes):  # unset defaults to centralized
             cc = await store.get_central_config(tenant_id)
-            return await get_central_available_from_config(cc or {})
+            return await get_central_available_from_config(await central_secrets.resolve(hub, cc))
         try:
             return await _cs_forward(tenant_id, "CS_GET_CENTRAL_AVAILABLE", {}, timeout=15.0)
         except HTTPException:
@@ -6133,7 +6152,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         modes = await store.get_processing_modes(tenant_id)
         if store.central_api_is_centralized(modes):  # unset defaults to centralized
             cc = await store.get_central_config(tenant_id)
-            return {"spokes": [await test_central_from_config(cc or {}, spoke_id="hub")]}
+            return {"spokes": [await test_central_from_config(await central_secrets.resolve(hub, cc), spoke_id="hub")]}
         # Registered Client-Sim spokes for this tenant (approved + bound, or
         # unassigned → claimable), looked up from module_metadata INDEPENDENT of
         # the CS_TELEMETRY cache. A stalled/flapping spoke that stopped relaying
@@ -6265,7 +6284,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         modes = await store.get_processing_modes(tenant_id)
         if store.central_on_prem_api_is_centralized(modes):  # unset → centralized
             cc = await store.get_central_on_prem_config(tenant_id)
-            return await get_central_available_from_config(cc or {})
+            return await get_central_available_from_config(await central_secrets.resolve(hub, cc))
         try:
             return await _cs_forward(tenant_id, "CS_GET_CENTRAL_ON_PREM_AVAILABLE",
                                      {}, timeout=15.0)
@@ -6288,7 +6307,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         modes = await store.get_processing_modes(tenant_id)
         if store.central_on_prem_api_is_centralized(modes):  # unset → centralized
             cc = await store.get_central_on_prem_config(tenant_id)
-            return {"spokes": [await test_central_from_config(cc or {}, spoke_id="hub")]}
+            return {"spokes": [await test_central_from_config(await central_secrets.resolve(hub, cc), spoke_id="hub")]}
         out: list = []
         cache = _tenant_cache(tenant_id)
         md = hub.state.system_state.get("module_metadata", {}) or {}
