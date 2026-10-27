@@ -218,3 +218,39 @@ def test_loop_uses_the_fingerprint_helper_not_a_raw_hash():
     assert "sig = _sentinel_fingerprint(errs)" in src
     assert 'sha256("\\n".join(errs[-40:])' not in src
     assert "log_escalation_cooldown_h" in src
+
+
+# --------------------------------------------------------------------------
+# high-volume warnings + persisted ledger
+# --------------------------------------------------------------------------
+
+def _timeout_warn(i):
+    return (f"2026-10-27 00:08:{i % 60:02d} - Hub - WARNING - dhcp_feed: spoke "
+            f"8889182b-a4c5-58df-8456-d2fe1e048edd rejected DHCP_STATS: Timed out waiting")
+
+
+def test_volume_lines_flag_repeated_warnings_with_stable_text():
+    lines = [_timeout_warn(i) for i in range(120)] + ["2026-10-27 - Hub - WARNING - rare thing"]
+
+    out = main._sentinel_volume_lines(lines, threshold=50, minutes=30)
+
+    assert len(out) == 1
+    assert "at least 50 WARNING lines in 30m" in out[0]
+    assert "Timed out waiting" in out[0]
+    assert main._sentinel_volume_lines(lines + lines[:30], 50, 30) == out  # same bucket
+
+
+def test_volume_lines_ignore_patterns_below_threshold():
+    assert main._sentinel_volume_lines([_timeout_warn(i) for i in range(49)], 50, 30) == []
+
+
+def test_escalation_ledger_survives_restart(tmp_path):
+    import types
+    hub = types.SimpleNamespace(state=types.SimpleNamespace(data_dir=str(tmp_path)),
+                                _log_sentinel_escalated={"hub|abc": 123.0})
+    for name in ("_sentinel_ledger_path", "_load_sentinel_ledger", "_save_sentinel_ledger"):
+        setattr(hub, name, getattr(main.LabManagerHub, name).__get__(hub))
+
+    hub._save_sentinel_ledger()
+
+    assert hub._load_sentinel_ledger() == {"hub|abc": 123.0}
