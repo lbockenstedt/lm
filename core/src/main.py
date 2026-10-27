@@ -417,6 +417,37 @@ def _sentinel_fingerprint(errs):
     return hashlib.sha256("\n".join(sorted(norm)).encode("utf-8", "ignore")).hexdigest()
 
 
+def _sentinel_volume_lines(lines, threshold, minutes):
+    """Synthetic error lines for WARNING patterns that repeat at least
+    ``threshold`` times in the window.
+
+    The sentinel only reads error-level lines, so high-volume warnings (spoke
+    request timeouts, unknown-ack floods) never reached ab. Lines are grouped
+    with every id and number blanked out; the reported count is rounded down
+    to threshold x 10^k so the fingerprint stays stable while the rate is
+    roughly unchanged."""
+    if threshold <= 0:
+        return []
+    counts = {}
+    for line in lines or ():
+        if " - WARNING - " not in line:
+            continue
+        msg = line.split(" - WARNING - ", 1)[1]
+        msg = _SENTINEL_UUID_RE.sub("<ID>", msg)
+        msg = re.sub(r"\d+", "N", msg)[:160].strip()
+        counts[msg] = counts.get(msg, 0) + 1
+    out = []
+    for msg, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        if n < threshold:
+            break
+        bucket = threshold
+        while bucket * 10 <= n:
+            bucket *= 10
+        out.append(f"[log-volume] ERROR - at least {bucket} WARNING lines "
+                   f"in {minutes}m: {msg}")
+    return out
+
+
 def _log_cs_op_failure(source: str, cs_type: str, data: Dict[str, Any]) -> None:
     """Write a failed agent op (per-VM CS_PROGRESS result or a failed
     CS_COMMAND_RESULT terminal) to hub.log, so "VM 90012 · failed" in the UI
@@ -9550,6 +9581,28 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         kws = ("ERROR", "CRITICAL", "Traceback", "Exception", "FATAL")
         return [l for l in lines if any(k in l for k in kws)]
 
+    def _sentinel_ledger_path(self):
+        return os.path.join(self.state.data_dir, "log_sentinel_escalated.json")
+
+    def _load_sentinel_ledger(self):
+        """Escalation ledger ("module|fingerprint" -> epoch seconds) from disk, so
+        a hub restart doesn't re-escalate everything it already sent to ab."""
+        try:
+            with open(self._sentinel_ledger_path()) as f:
+                data = json.load(f)
+            return {str(k): float(v) for k, v in data.items()}
+        except (OSError, ValueError, AttributeError, TypeError):
+            return {}
+
+    def _save_sentinel_ledger(self):
+        try:
+            path = self._sentinel_ledger_path()
+            with open(path + ".tmp", "w") as f:
+                json.dump(self._log_sentinel_escalated, f)
+            os.replace(path + ".tmp", path)
+        except (OSError, AttributeError) as e:
+            logger.debug(f"[log-sentinel] could not save escalation ledger: {e}")
+
     async def _escalate_to_ab(self, module, log_slice, analysis, verdict):
         """Ship a Tier-1 'escalate' verdict to the ab spoke for deep triage
         (ESCALATE_LOG_ISSUE → file_escalated_issue). Best-effort; logs the outcome."""
@@ -9584,7 +9637,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # intermittent fault that alternates present/absent slips through it every
         # other sweep. This ledger is what actually stops duplicate issues.
         if not hasattr(self, "_log_sentinel_escalated"):
-            self._log_sentinel_escalated = {}
+            self._log_sentinel_escalated = self._load_sentinel_ledger()
         self._log_sentinel_metric = getattr(self, "_log_sentinel_metric", {})
         last_sweep = 0.0
         last_dur = 0.0
@@ -9608,6 +9661,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         # activity, not the whole tail.
                         lines = self._window_log_lines(self._gather_module_log_lines(module), interval_min)
                         errs = self._error_lines(lines)
+                        if gc.get("log_volume_triage", False):
+                            # Off by default; see _sentinel_volume_lines.
+                            errs += _sentinel_volume_lines(
+                                self._window_log_lines(
+                                    self._gather_module_log_lines(module, n=5000), interval_min),
+                                int(gc.get("log_volume_threshold", 50) or 50), interval_min)
                         # Fingerprint the NORMALIZED errors, not the raw tail: every
                         # log line carries its own timestamp, so hashing raw text made
                         # a persistent condition look new on every single sweep.
@@ -9660,22 +9719,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             # different fault (different device, different command) is
                             # never suppressed by an unrelated one.
                             cd_h = float(gc.get("log_escalation_cooldown_h", 24) or 24)
-                            now_m = _t.monotonic()
-                            ekey = (module, sig)
+                            now_w = _t.time()
+                            ekey = f"{module}|{sig}"
                             last_esc = self._log_sentinel_escalated.get(ekey)
-                            if last_esc is not None and (now_m - last_esc) < cd_h * 3600:
+                            if last_esc is not None and (now_w - last_esc) < cd_h * 3600:
                                 logger.info(
                                     f"[log-sentinel] {module}: escalation suppressed, same "
                                     f"condition already escalated "
-                                    f"{round((now_m - last_esc) / 60)}m ago "
+                                    f"{round((now_w - last_esc) / 60)}m ago "
                                     f"(cooldown {cd_h}h, fp {sig[:8]})")
                             else:
-                                self._log_sentinel_escalated[ekey] = now_m
+                                self._log_sentinel_escalated[ekey] = now_w
                                 # Bound the ledger: drop anything already past cooldown.
-                                cutoff = now_m - cd_h * 3600
+                                cutoff = now_w - cd_h * 3600
                                 for k in [k for k, v in self._log_sentinel_escalated.items()
                                           if v < cutoff]:
                                     self._log_sentinel_escalated.pop(k, None)
+                                self._save_sentinel_ledger()
                                 await self._escalate_to_ab(
                                     module, "\n".join(errs[-60:]), res.get("analysis", ""),
                                     "escalate")
