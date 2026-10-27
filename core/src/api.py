@@ -728,6 +728,8 @@ def _refresh_module_all_tenants(hub, key: str) -> int:
     """After a write: refresh module ``key`` (legacy key name, e.g.
     ``netbox_devices``, ``cppm_devices``, ``pxmx_vms``, ``rules``) for EVERY
     tenant now. Maps onto ``hub.cache_refresh``; returns refreshes started."""
+    if key == "netbox_prefixes":
+        access.clear_prefix_cache(hub)
     if not hasattr(hub, "cache_refresh"):
         return 0
     namespaces = _legacy_cache_namespaces(key)

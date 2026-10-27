@@ -51,6 +51,8 @@ logger = logging.getLogger("Hub")
 # ── Constants ───────────────────────────────────────────────────────────────
 
 _PREFIX_CACHE_TTL = 300  # seconds — session-prefix cache TTL (was a create_app local)
+# A failed NetBox lookup is retried after this long instead of on every read.
+_PREFIX_FAIL_TTL = 60
 
 # Per-module enable map for server-side subnet filtering. Modules whose data
 # carries tenant IP addresses (nac, firewall, netbox, dhcp, hypervisor) default
@@ -1586,11 +1588,32 @@ def effective_tenant_slug(hub, sessions: dict, request: "Request", explicit: str
 
 # ── Prefix resolution ────────────────────────────────────────────────────────
 
+def _hub_prefix_cache(hub):
+    """Per-hub ``{netbox scope key: (prefixes, expires_at)}``, or None when
+    the hub object can't hold one."""
+    try:
+        return vars(hub).setdefault("_tenant_prefix_cache", {})
+    except TypeError:
+        return None
+
+
+def clear_prefix_cache(hub) -> None:
+    """Drop cached tenant prefixes (call after a NetBox prefix write)."""
+    cache = _hub_prefix_cache(hub)
+    if cache is not None:
+        cache.clear()
+
+
 async def fetch_tenant_prefixes(hub, tenant_id) -> list:
-    """NetBox prefixes for an arbitrary tenant id (by slug). No session cache,
-    no admin no-op — the raw fetch shared by ``resolve_prefixes`` (session
-    tenant) and ``resolve_prefixes_for_tenant`` (selected tenant). Empty when
-    the tenant is unconfigured or the NetBox spoke is down."""
+    """NetBox prefixes for an arbitrary tenant id (by slug), no admin no-op —
+    the fetch shared by ``resolve_prefixes`` (session tenant) and
+    ``resolve_prefixes_for_tenant`` (selected tenant). Empty when the tenant
+    is unconfigured or the NetBox spoke is down.
+
+    Cached per NetBox scope for ``_PREFIX_CACHE_TTL`` (``_PREFIX_FAIL_TTL``
+    after a failure): the tenant filter on every cached list page calls this
+    on every read, and a live NetBox round-trip each time made those pages
+    slow (up to 30s when the spoke was busy)."""
     if not tenant_id:
         return []
     # Routed through netbox_tenant_scope (not a raw netbox_tenant_slug read) so
@@ -1608,11 +1631,21 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
         if not scope.get("tenant_group"):
             return []
         payload = {"tenant_group": scope["tenant_group"]}
+    key = payload.get("tenant") or ("group:" + str(payload.get("tenant_group")))
+    cache = _hub_prefix_cache(hub)
+    hit = cache.get(key) if cache is not None else None
+    if hit and hit[1] > time.time():
+        return list(hit[0])
+
+    def _remember(prefixes, ttl):
+        if cache is not None:
+            cache[key] = (list(prefixes), time.time() + ttl)
+        return prefixes
+
     def _from_warm():
         # Last-known prefixes for this scope (same cache the NetBox page uses),
         # so a restarting/unreachable spoke doesn't make a tenant look empty.
         try:
-            key = payload.get("tenant") or ("group:" + str(payload.get("tenant_group")))
             cached = hub.warm_get("nb_netbox_prefixes", key)
             data = unwrap_spoke(cached) if cached is not None else None
             if isinstance(data, dict) and "data" in data and "prefixes" not in data:
@@ -1639,11 +1672,11 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
             (logger.info if ok_empty else logger.warning)(
                 "fetch_tenant_prefixes tenant=%s payload=%s spoke=%s returned none (resp=%s)",
                 tenant_id, payload, spoke_id, str(data)[:200])
-            return _from_warm()
-        return out
+            return _remember(_from_warm(), _PREFIX_CACHE_TTL if ok_empty else _PREFIX_FAIL_TTL)
+        return _remember(out, _PREFIX_CACHE_TTL)
     except Exception as e:
         logger.warning(f"Failed to fetch prefixes for tenant '{tenant_id}': {e}")
-        return _from_warm()
+        return _remember(_from_warm(), _PREFIX_FAIL_TTL)
 
 
 async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
