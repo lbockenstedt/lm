@@ -141,3 +141,22 @@ def test_pinned_agent_queried_by_wire_name_not_guid():
     )
     out = _run(_merge_pinned_agent_vms(hub, filtered, "default", {"shared-pxmx"}))
     assert sorted(v["vmid"] for v in out["vms"]) == [1, 2, 3]
+
+
+def test_pinned_agent_request_prefers_telemetry_cache():
+    """Every Hypervisors page read runs this merge, so it must ask the spoke
+    for the agent's cached telemetry rather than a live 10-15s PVE query."""
+    sent = []
+    hub = _FakeHub(
+        agent_config={"ag1": {"client_simulation": {"tenant_id": "central"}}},
+        agent_spokes={"ag1": "cs-spoke"},
+        responses={},
+    )
+
+    async def _record(spoke, cmd, payload=None, timeout=None):
+        sent.append(payload)
+        return {"vms": [_vm(1)]}
+
+    hub.request_response = _record
+    _run(_merge_pinned_agent_vms(hub, {"vms": []}, "central", {"cs-spoke"}))
+    assert sent == [{"agent_id": "ag1", "prefer_cache": True}]
