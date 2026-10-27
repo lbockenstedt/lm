@@ -418,3 +418,17 @@ def test_tenants_never_share_a_cache_entry():
     entries = hub.warm_cache["list_endpoints"]
     assert entries["_all_:tenantA"]["tenants"] == ["tenantA"]
     assert entries["_all_:tenantB"]["tenants"] == ["tenantB"]
+
+
+def test_nac_status_second_read_served_from_cache():
+    hub = FakeHub(
+        {"cppm-a"},
+        replies={"cppm-a": {"CPPM_GET_NAC_STATUS": {"status": "SUCCESS", "active_sessions": 7}}},
+        module_metadata={"cppm-a": {"tenant_id": "tenantA"}},
+    )
+    c = _build(_tenant_user("tenantA"), hub)
+    assert c.get("/api/cppm/nac-status").json()["active_sessions"] == 7
+    second = c.get("/api/cppm/nac-status").json()
+    assert len(hub.forwarded) == 1               # no new spoke round-trip
+    assert second["active_sessions"] == 7
+    assert second.get("cached_at")

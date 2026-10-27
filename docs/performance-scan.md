@@ -439,3 +439,14 @@ Tests: `core/tests/test_dashboard_overview_fanout.py`,
 | S24 | `ab` | `time.sleep` inside async code. | Use `await asyncio.sleep`. | S |
 
 **Order:** S1, S17, S18, S3, S16, then S12 and S13.
+
+# Hidden live reads on cached pages — 2026-10
+
+Each of these pages read its main list from the hub cache, but a per-read
+step still made a live spoke round-trip, so every click waited on a spoke anyway.
+
+| Page | Hidden live call | Fix |
+|---|---|---|
+| Hypervisors | `_merge_pinned_agent_vms` sent `PXMX_LIST_VMS` (live PVE + guest-IP probes) per pinned agent | Send `prefer_cache: True`, as the Dashboard already does |
+| DNS, DHCP, CPPM, NetBox, Hypervisors (explicit tenant) | `filter_tenant` → `fetch_tenant_prefixes` sent `NETBOX_GET_PREFIXES` (30s timeout) on every read | Per-hub prefix cache in `access.py` (300s, failures 60s), cleared when the `netbox_prefixes` module refreshes |
+| CPPM landing | `/api/cppm/nac-status` sent `CPPM_GET_NAC_STATUS` live | Served via `hub.cache_read`, keyed per nac spoke; `/api/cppm/refresh` refreshes it |
