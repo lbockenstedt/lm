@@ -28,7 +28,9 @@ node never sees a request it would misread as "upgrade everything".
 Auto-patch (opt-in PER NODE, none by default): after each SCHEDULED check,
 the nodes an operator approved for auto-patching that have pending updates are
 deployed automatically through the same rolling, hub-last apply, audit-logged
-as actor "auto-patch". Security-only by default. Still NEVER reboots. Manual checks and a run's own follow-up re-check never trigger it, so
+as actor "auto-patch". Security-only by default. Packages matching the
+operator's exclude list (names or globs, e.g. ``linux-image-*``) are never
+auto-installed. Still NEVER reboots. Manual checks and a run's own follow-up re-check never trigger it, so
 a node whose update keeps failing is retried once per schedule, not in a loop.
 
 Fixing access: a non-root node without the lm-os-update helper is "blocked".
@@ -47,6 +49,7 @@ This module is DISTINCT from ``update_pipeline.py``, which ships LM's own code.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import logging
 import os
 import time
@@ -81,7 +84,8 @@ _OSU_AUTOCHECK_CFG_KEY = "os_updates_check"
 _OSU_AUTOCHECK_DEFAULT_HOURS = 6.0
 
 # Auto-patch config lives in global_config["os_updates_autopatch"]:
-# {security_only, nodes: ["kind:id", ...]}. Only listed nodes are auto-patched.
+# {security_only, nodes: ["kind:id", ...], exclude: ["pkg-or-glob", ...]}.
+# Only listed nodes are auto-patched; excluded packages are never auto-installed.
 _OSU_AUTOPATCH_CFG_KEY = "os_updates_autopatch"
 _AUTOPATCH_ACTOR = "auto-patch"
 
@@ -324,24 +328,33 @@ class HubOsUpdatesMixin:
 
     # ── auto-patch (WebUI-configurable, off by default) ─────────────────────
     def osu_autopatch_config(self) -> Dict[str, Any]:
-        """``{security_only, nodes}`` — the node keys approved for auto-patch."""
+        """``{security_only, nodes, exclude}`` — the node keys approved for
+        auto-patch and the package names/globs it must never install."""
         try:
             cfg = (self.state.system_state.get("global_config", {})
                    .get(_OSU_AUTOPATCH_CFG_KEY, {})) or {}
         except Exception:  # noqa: BLE001 — hub without state (tests)
             cfg = {}
         return {"security_only": bool(cfg.get("security_only", True)),
-                "nodes": sorted(str(k) for k in (cfg.get("nodes") or []))}
+                "nodes": sorted(str(k) for k in (cfg.get("nodes") or [])),
+                "exclude": sorted(str(p) for p in (cfg.get("exclude") or []))}
 
-    def _osu_save_autopatch(self, security_only: bool, nodes: List[str]) -> Dict[str, Any]:
+    def _osu_save_autopatch(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         gc = self.state.system_state.setdefault("global_config", {})
-        gc[_OSU_AUTOPATCH_CFG_KEY] = {"security_only": bool(security_only),
-                                      "nodes": sorted(set(nodes))}
+        gc[_OSU_AUTOPATCH_CFG_KEY] = {"security_only": bool(cfg["security_only"]),
+                                      "nodes": sorted(set(cfg["nodes"])),
+                                      "exclude": sorted(set(cfg["exclude"]))}
         self.state._mark_dirty()
         return self.osu_autopatch_config()
 
     def osu_set_autopatch_security_only(self, security_only: bool) -> Dict[str, Any]:
-        return self._osu_save_autopatch(security_only, self.osu_autopatch_config()["nodes"])
+        return self._osu_save_autopatch({**self.osu_autopatch_config(),
+                                         "security_only": security_only})
+
+    def osu_set_autopatch_exclude(self, patterns: List[str]) -> Dict[str, Any]:
+        """Replace the never-auto-install list (package names or globs)."""
+        exclude = [p.strip() for p in patterns if p and p.strip()]
+        return self._osu_save_autopatch({**self.osu_autopatch_config(), "exclude": exclude})
 
     def osu_set_autopatch_node(self, node_key: str, enabled: bool) -> Dict[str, Any]:
         """Approve (or withdraw) one node for auto-patching."""
@@ -351,7 +364,7 @@ class HubOsUpdatesMixin:
             nodes.add(node_key)
         else:
             nodes.discard(node_key)
-        return self._osu_save_autopatch(cfg["security_only"], list(nodes))
+        return self._osu_save_autopatch({**cfg, "nodes": list(nodes)})
 
     async def osu_autopatch(self) -> Dict[str, Any]:
         """Deploy what the last check found on the nodes approved for it.
@@ -374,24 +387,41 @@ class HubOsUpdatesMixin:
         if time.time() - float(st.get("autopatch_at") or 0.0) < interval_s * 0.9:
             return {"status": "SKIPPED", "message": "already ran this interval"}
         keys = []
+        packages: Dict[str, List[str]] = {}
         approved = set(cfg["nodes"])
+        exclude = cfg["exclude"]
         for n in self.osu_snapshot()["nodes"]:
-            if f"{n['kind']}:{n['id']}" not in approved:
+            key = f"{n['kind']}:{n['id']}"
+            if key not in approved:
                 continue
             if not n.get("eligible") or not n.get("count") or n.get("apply_blocker"):
                 continue
+            can_pick_packages = "packages" in (n.get("features") or [])
             if cfg["security_only"]:
                 # Security-only applies a package list, which older nodes can't do.
-                if not n.get("security_count") or "packages" not in (n.get("features") or []):
+                if not n.get("security_count") or not can_pick_packages:
                     continue
-            keys.append(f"{n['kind']}:{n['id']}")
+            if exclude:
+                # Excluding packages means sending an explicit package list.
+                if not can_pick_packages:
+                    continue
+                pkgs = [p["package"] for p in n.get("packages") or []
+                        if p.get("package")
+                        and (p.get("security") or not cfg["security_only"])
+                        and not any(fnmatch.fnmatch(p["package"], pat) for pat in exclude)]
+                if not pkgs:
+                    continue
+                packages[key] = pkgs
+            keys.append(key)
         if not keys:
             return {"status": "SKIPPED", "message": "nothing to patch"}
         st["autopatch_at"] = time.time()
         self._osu_save()
-        logger.warning("OS-UPDATE: auto-patch found updates on %d node(s) (%s)",
-                       len(keys), "security only" if cfg["security_only"] else "all updates")
+        logger.warning("OS-UPDATE: auto-patch found updates on %d node(s) (%s%s)",
+                       len(keys), "security only" if cfg["security_only"] else "all updates",
+                       f", excluding {', '.join(exclude)}" if exclude else "")
         res = await self.osu_apply_fleet(node_keys=keys, actor=_AUTOPATCH_ACTOR,
+                                         packages=packages or None,
                                          security_only=cfg["security_only"])
         if res.get("status") == "ERROR":
             logger.warning("OS-UPDATE: auto-patch not started: %s", res.get("message"))
