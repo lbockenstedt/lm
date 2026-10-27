@@ -1721,9 +1721,27 @@ class UpdatePipelineMixin:
             pushed_ts.pop(_stale, None)
             commits_changed = True
         _selfupdate_hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+        # Spokes outside the lm repo (cs, pxmx, netbox, ...) also run lm core
+        # from their own /opt/lm checkout, which only moves on a SPOKE_UPDATE.
+        # Track the core tip each one last got so an lm-only change still
+        # reaches them (WebUI/docs-only core changes are ignored).
+        core_pushed = dict(config.get("spoke_update_core_commits", {}) or {})
+        for _stale in [sid for sid in core_pushed if sid not in _approved_ids]:
+            core_pushed.pop(_stale, None)
+            commits_changed = True
+        core_url = sources.get("hub")
+        core_tip = await self.get_remote_commit(core_url, branch) if core_url else "unknown"
         for repo_url, spoke_ids in repo_spokes.items():
             tip = await self.get_remote_commit(repo_url, branch)
             for sid in spoke_ids:
+                uses_own_core = (core_tip != "unknown" and repo_url != core_url
+                                 and self._effective_module_type(sid) not in _IN_LM_REPO_MODULE_TYPES)
+                core_behind = (uses_own_core and core_pushed.get(sid) != core_tip
+                               and not await self._only_static_paths_between(
+                                   _selfupdate_hub_root, core_pushed.get(sid), core_tip))
+                if uses_own_core and not core_behind and core_pushed.get(sid) != core_tip:
+                    core_pushed[sid] = core_tip
+                    commits_changed = True
                 # Version-evidence override for the "believed current but never
                 # applied" strand. last_pushed[sid]==tip advances the instant a
                 # SPOKE_UPDATE is DELIVERED to a connected spoke — a PROXY for
@@ -1742,7 +1760,7 @@ class UpdatePipelineMixin:
                 _running = (getattr(self, "spoke_versions", {}) or {}).get(sid)
                 behind = _version_behind(_running, _latest)
                 at_tip = tip != "unknown" and last_pushed.get(sid) == tip
-                if not spoke_force and at_tip and not behind:
+                if not spoke_force and at_tip and not behind and not core_behind:
                     update_results.append(f"{sid}: up-to-date ({repo_url})")
                     continue
                 # In-lm-repo spokes (proxy/dns/dhcp/etc) share the hub's own repo,
@@ -1803,6 +1821,8 @@ class UpdatePipelineMixin:
                     commits_changed = True
                     if connected and tip != "unknown":
                         last_pushed[sid] = tip
+                    if connected and uses_own_core:
+                        core_pushed[sid] = core_tip
                 else:
                     logger.error(f"Failed to push update for {sid}: {err}")
                     update_results.append(f"{sid}: failed")
@@ -1826,6 +1846,7 @@ class UpdatePipelineMixin:
 
         if commits_changed:
             self.state.update_global_config({"spoke_update_commits": last_pushed,
+                                             "spoke_update_core_commits": core_pushed,
                                              "spoke_update_pushed_ts": pushed_ts})
             await self.state.save_state_now()
 
