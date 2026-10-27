@@ -2041,6 +2041,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         if spoke_id:
             self._draining_spokes.pop(self._drain_key(spoke_id), None)
 
+    def _clear_drain_on_update_reply(self, spoke_id: str, corr_id: str, reply: Any) -> None:
+        """A spoke that answers its SPOKE_UPDATE is not restarting — the restart
+        path os._exit(3)s without replying ("Already up to date", pull error,
+        ...). End the drain now instead of short-circuiting every request to it
+        as a timeout for the rest of DRAIN_WINDOW_S. Two replies still mean a
+        restart/reload is under way and keep the drain."""
+        pending = self.mailbox.pending_ack.get(corr_id)
+        if not pending or getattr(pending[0].payload, "type", None) != "SPOKE_UPDATE":
+            return
+        message = str((reply or {}).get("message") or "") if isinstance(reply, dict) else ""
+        if "already in progress" in message or "reloading" in message:
+            return
+        self.clear_draining(spoke_id)
+
     async def _drain_aware_config_push(self, spoke_id: str, command_type: str,
                                        data: Dict[str, Any], timeout: Optional[float] = None) -> Dict[str, Any]:
         """Config-push (CS_CONFIG_UPDATE) that respects spoke drain state.
@@ -6641,6 +6655,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 message_type=payload.get("type"),
                 source_ip=remote_ip,
             )
+            self._clear_drain_on_update_reply(pk, corr_id, _pdata)
             await self.mailbox.acknowledge(ack)
 
         # Debug: Log this response is actually expected
