@@ -26,7 +26,8 @@ updates" — see ``run_os_updates_check_loop`` in ``hub_os_updates.py``.
 Auto-patch (``/api/os-updates/auto-patch``) is the one scheduled apply and is
 approved PER NODE (none by default): after each scheduled check it deploys what
 was found on the approved nodes, through the same rolling hub-last roll,
-audit-logged as "auto-patch". It never reboots.
+audit-logged as "auto-patch". It never reboots, and never installs a package
+on the operator's exclude list (names or globs).
 
 ``/api/os-updates/fix-access`` takes a root/sudo login typed once for a node
 blocked by missing privileges; the password is relayed to that node only and
@@ -93,14 +94,16 @@ def register(app, hub, ctx):
 
     @app.get("/api/os-updates/auto-patch")
     async def os_updates_autopatch_get(request: Request):
-        """Auto-patch config: ``{security_only, nodes}``."""
+        """Auto-patch config: ``{security_only, nodes, exclude}``."""
         _require_admin(request)
         return hub.osu_autopatch_config()
 
     @app.post("/api/os-updates/auto-patch")
     async def os_updates_autopatch_set(request: Request):
-        """Approve one node: ``{"node": "kind:id", "enabled": bool}``, and/or
-        set ``{"security_only": bool}`` for every auto-patched node."""
+        """Approve one node: ``{"node": "kind:id", "enabled": bool}``, set
+        ``{"security_only": bool}`` for every auto-patched node, and/or replace
+        ``{"exclude": ["pkg", "linux-image-*", ...]}`` — packages auto-patch
+        never installs."""
         sess = _require_admin(request)
         try:
             body = await request.json()
@@ -113,6 +116,13 @@ def register(app, hub, ctx):
             cfg = hub.osu_set_autopatch_security_only(bool(body["security_only"]))
             logger.warning("[os-updates] auto-patch security_only=%s set by %s",
                            cfg["security_only"], actor)
+        if "exclude" in body:
+            exclude = body["exclude"]
+            if not isinstance(exclude, list) or not all(isinstance(p, str) for p in exclude):
+                raise HTTPException(status_code=400, detail="'exclude' must be a list of package names")
+            cfg = hub.osu_set_autopatch_exclude(exclude)
+            logger.warning("[os-updates] auto-patch exclude=%s set by %s",
+                           cfg["exclude"], actor)
         key = body.get("node")
         if key is not None:
             if not isinstance(key, str) or not key:

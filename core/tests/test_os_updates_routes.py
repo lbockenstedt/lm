@@ -58,7 +58,12 @@ class _FakeHub:
 
     def osu_autopatch_config(self):
         return {"security_only": getattr(self, "_sec", True),
-                "nodes": sorted(getattr(self, "_nodes", set()))}
+                "nodes": sorted(getattr(self, "_nodes", set())),
+                "exclude": getattr(self, "_exclude", [])}
+
+    def osu_set_autopatch_exclude(self, patterns):
+        self._exclude = patterns
+        return self.osu_autopatch_config()
 
     def osu_set_autopatch_security_only(self, on):
         self._sec = on
@@ -169,10 +174,14 @@ def test_reboot_requires_node_and_admin():
 
 def test_autopatch_per_node_roundtrip():
     c, hub = _client()
-    assert c.get("/api/os-updates/auto-patch").json() == {"security_only": True, "nodes": []}
+    assert c.get("/api/os-updates/auto-patch").json() == {"security_only": True, "nodes": [],
+                                                          "exclude": []}
     c.post("/api/os-updates/auto-patch", json={"node": "spoke:s1", "enabled": True})
     r = c.post("/api/os-updates/auto-patch", json={"security_only": False})
-    assert r.json() == {"security_only": False, "nodes": ["spoke:s1"]}
+    assert r.json() == {"security_only": False, "nodes": ["spoke:s1"], "exclude": []}
+    r = c.post("/api/os-updates/auto-patch", json={"exclude": ["linux-image-*"]})
+    assert r.json()["exclude"] == ["linux-image-*"]
+    assert c.post("/api/os-updates/auto-patch", json={"exclude": "vim"}).status_code == 400
     r = c.post("/api/os-updates/auto-patch", json={"node": "spoke:s1", "enabled": False})
     assert r.json()["nodes"] == []
     assert c.post("/api/os-updates/auto-patch", json={"node": ""}).status_code == 400
