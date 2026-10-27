@@ -390,19 +390,22 @@ def _hub_with(nodes):
 
     async def _apply(node_keys=None, actor="", packages=None, security_only=False):
         applied.append((node_keys, actor, security_only))
+        hub.applied_packages = packages
         return {"status": "SUCCESS", "queued": len(node_keys)}
     hub.osu_apply_fleet = _apply
     return hub, applied
 
 
-def _node(kind, nid, count=2, security=1, blocker="", features=("packages",)):
+def _node(kind, nid, count=2, security=1, blocker="", features=("packages",), packages=()):
     return {"kind": kind, "id": nid, "label": nid, "eligible": True, "count": count,
             "security_count": security, "apply_blocker": blocker,
-            "features": list(features)}
+            "features": list(features),
+            "packages": [{"package": name, "security": sec} for name, sec in packages]}
 
 
 def test_autopatch_has_no_nodes_by_default():
-    assert _FakeHub().osu_autopatch_config() == {"security_only": True, "nodes": []}
+    assert _FakeHub().osu_autopatch_config() == {"security_only": True, "nodes": [],
+                                                 "exclude": []}
 
 
 def test_autopatch_nodes_are_approved_one_at_a_time():
@@ -411,7 +414,9 @@ def test_autopatch_nodes_are_approved_one_at_a_time():
     hub.osu_set_autopatch_node("agent:a1", True)
     hub.osu_set_autopatch_node("spoke:s1", False)
     hub.osu_set_autopatch_security_only(False)
-    assert hub.osu_autopatch_config() == {"security_only": False, "nodes": ["agent:a1"]}
+    hub.osu_set_autopatch_exclude([" linux-image-* ", "", "docker-ce"])
+    assert hub.osu_autopatch_config() == {"security_only": False, "nodes": ["agent:a1"],
+                                          "exclude": ["docker-ce", "linux-image-*"]}
 
 
 def test_snapshot_flags_approved_nodes():
@@ -451,6 +456,33 @@ async def test_autopatch_all_updates():
     hub.osu_set_autopatch_security_only(False)
     await hub.osu_autopatch()
     assert applied == [(["spoke:s2"], "auto-patch", False)]
+
+
+@pytest.mark.asyncio
+async def test_autopatch_never_installs_excluded_packages():
+    pending = [("linux-image-amd64", True), ("openssl", True), ("docker-ce", False), ("vim", False)]
+    hub, applied = _hub_with([
+        _node("spoke", "s1", count=4, security=2, packages=pending),
+        _node("spoke", "only-kernel", count=1, packages=[("linux-image-amd64", True)]),
+        _node("agent", "old", features=(), packages=pending),
+    ])
+    for k in ("spoke:s1", "spoke:only-kernel", "agent:old"):
+        hub.osu_set_autopatch_node(k, True)
+    hub.osu_set_autopatch_security_only(False)
+    hub.osu_set_autopatch_exclude(["linux-image-*", "docker-ce"])
+    await hub.osu_autopatch()
+    assert applied == [(["spoke:s1"], "auto-patch", False)]
+    assert hub.applied_packages == {"spoke:s1": ["openssl", "vim"]}
+
+
+@pytest.mark.asyncio
+async def test_autopatch_exclude_with_security_only():
+    pending = [("linux-image-amd64", True), ("openssl", True), ("vim", False)]
+    hub, applied = _hub_with([_node("spoke", "s1", count=3, security=2, packages=pending)])
+    hub.osu_set_autopatch_node("spoke:s1", True)
+    hub.osu_set_autopatch_exclude(["linux-image-*"])
+    await hub.osu_autopatch()
+    assert hub.applied_packages == {"spoke:s1": ["openssl"]}
 
 
 @pytest.mark.asyncio

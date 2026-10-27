@@ -8174,7 +8174,7 @@ function _renderOsUpdatesView(content) {
                 Operating-system package updates for every spoke and agent — <b>Global-Admin only, every approval is audit-logged</b>.
                 Deploys <code>apt dist-upgrade</code> (everything) — or only the nodes/packages you select, or only security updates.
                 <b>Nothing is ever rebooted automatically</b> — a host needing one is badged with a <b>Reboot…</b> button you use deliberately.
-                <b>Auto-patch</b> is approved <b>per node</b> (tick "Auto-patch" on a node): after each scheduled auto-check, approved nodes get what it found, the same way.
+                <b>Auto-patch</b> is approved <b>per node</b> (tick "Auto-patch" on a node): after each scheduled auto-check, approved nodes get what it found, the same way — security updates only or all updates, minus any packages you list under "Never auto-install".
                 Nodes are updated <b>one at a time</b>, and the <b>hub goes last</b> (updating it restarts this page).
                 This is separate from LM code updates.
             </div>
@@ -8190,10 +8190,21 @@ function _renderOsUpdatesView(content) {
                 <button onclick="osuSaveAutoCheck()" class="${btnSecCls}">Save</button>
                 <span id="osu-autocheck-status" class="text-xs text-slate-400"></span>
             </div>
-            <div class="flex flex-wrap items-center gap-4 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
-                <span class="text-sm text-slate-600">Auto-patch (approved nodes only):</span>
-                <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer"><input type="checkbox" id="osu-autopatch-security" class="w-4 h-4 rounded" checked onchange="osuSetAutoPatchSecurity(this.checked)">Security updates only</label>
-                <span id="osu-autopatch-count" class="text-xs text-slate-400"></span>
+            <div class="flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
+                <span class="text-sm text-slate-600 self-center">Auto-patch (approved nodes only):</span>
+                <div class="space-y-1">
+                    <label class="${labelCls}">Install</label>
+                    <select id="osu-autopatch-security" class="${inputCls} w-48" onchange="osuSetAutoPatchSecurity(this.value === 'security')">
+                        <option value="security">Security updates only</option>
+                        <option value="all">All updates</option>
+                    </select>
+                </div>
+                <div class="space-y-1 flex-1 min-w-[16rem]">
+                    <label class="${labelCls}" title="Package names or globs, comma-separated. Auto-patch never installs these; manual deploys are unaffected.">Never auto-install</label>
+                    <input type="text" id="osu-autopatch-exclude" class="${inputCls}" placeholder="e.g. linux-image-*, docker-ce, proxmox-*">
+                </div>
+                <button onclick="osuSaveAutoPatchExclude()" class="${btnSecCls}">Save</button>
+                <span id="osu-autopatch-count" class="text-xs text-slate-400 self-center"></span>
             </div>
             <div class="flex flex-wrap items-center gap-2">
                 <button onclick="osuCheck()" class="${btnSecCls}">↻ Check for updates</button>
@@ -8213,9 +8224,22 @@ function _renderOsUpdatesView(content) {
 async function osuLoadAutoPatch() {
     try {
         const cfg = await apiJson('/api/os-updates/auto-patch');
-        document.getElementById('osu-autopatch-security').checked = cfg.security_only !== false;
+        document.getElementById('osu-autopatch-security').value = cfg.security_only !== false ? 'security' : 'all';
+        document.getElementById('osu-autopatch-exclude').value = (cfg.exclude || []).join(', ');
     } catch (e) { /* best-effort */ }
 }
+
+window.osuSaveAutoPatchExclude = async function () {
+    const exclude = document.getElementById('osu-autopatch-exclude').value
+        .split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+    try {
+        const cfg = await apiJson('/api/os-updates/auto-patch', { method: 'POST', body: JSON.stringify({ exclude }) });
+        document.getElementById('osu-autopatch-exclude').value = (cfg.exclude || []).join(', ');
+        showToast(cfg.exclude && cfg.exclude.length
+            ? `Auto-patch will never install: ${cfg.exclude.join(', ')}.`
+            : 'Auto-patch exclusions cleared.', 'success');
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+};
 
 window.osuSetAutoPatchSecurity = async function (on) {
     try {
