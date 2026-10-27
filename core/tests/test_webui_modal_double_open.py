@@ -182,7 +182,7 @@ def test_an_idless_modal_still_mounts(tmp_path):
 def test_single_flight_suppresses_the_second_click(tmp_path):
     """Two clicks while the fetch is outstanding must do the work ONCE — the
     late response otherwise replaces a dialog the user is typing into."""
-    js = _extract("_singleFlight", _src()) + """
+    js = "var _lmNavSeq = 1;\n" + _extract("_singleFlight", _src()) + """
     var calls = 0, release;
     var open = _singleFlight(function () {
         calls++;
@@ -204,7 +204,7 @@ def test_single_flight_suppresses_the_second_click(tmp_path):
 def test_single_flight_is_keyed_on_arguments(tmp_path):
     """editUser(7) right after editUser(3) is a different dialog, not a
     double-click — it must still open."""
-    js = _extract("_singleFlight", _src()) + """
+    js = "var _lmNavSeq = 1;\n" + _extract("_singleFlight", _src()) + """
     var seen = [];
     var open = _singleFlight(function (id) {
         seen.push(id);
@@ -218,7 +218,7 @@ def test_single_flight_is_keyed_on_arguments(tmp_path):
 
 def test_single_flight_reopens_after_a_failure(tmp_path):
     """A rejected load must not wedge the button permanently."""
-    js = _extract("_singleFlight", _src()) + """
+    js = "var _lmNavSeq = 1;\n" + _extract("_singleFlight", _src()) + """
     var calls = 0;
     var open = _singleFlight(function () {
         calls++;
@@ -237,7 +237,7 @@ def test_single_flight_reopens_after_a_failure(tmp_path):
 
 def test_single_flight_passes_a_synchronous_opener_through(tmp_path):
     """No await means no window for a second click, so nothing is retained."""
-    js = _extract("_singleFlight", _src()) + """
+    js = "var _lmNavSeq = 1;\n" + _extract("_singleFlight", _src()) + """
     var calls = 0;
     var open = _singleFlight(function () { calls++; return 'done'; });
     var a = open(), b = open();
