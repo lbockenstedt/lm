@@ -268,7 +268,22 @@ class _SpokeLogRelayHandler(logging.Handler):
             return not any(name == p or name.startswith(p) for p in exc)
         return True
 
+    _emitting = threading.local()
+
     def emit(self, record: logging.LogRecord) -> None:
+        # A GC finalizer (e.g. a destroyed pending asyncio Task) can log while
+        # this thread is inside queue.put holding the queue's non-reentrant
+        # lock. Re-entering put would deadlock the thread forever, so drop the
+        # nested record instead.
+        if getattr(self._emitting, "active", False):
+            return
+        self._emitting.active = True
+        try:
+            self._emit(record)
+        finally:
+            self._emitting.active = False
+
+    def _emit(self, record: logging.LogRecord) -> None:
         try:
             if not self._in_scope(record.name):
                 return
