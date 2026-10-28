@@ -702,6 +702,12 @@
         // event's filename → treat a core-asset error as fatal; ignore benign
         // resource 404s for non-core assets.
         var f = (e && e.filename) || '';
+        // Browsers redact cross-origin exceptions to "Script error." with
+        // no source, location or Error object. These cannot identify an app
+        // fault: don't show a runtime banner or auto-file an empty bug report.
+        // Keep errors with any diagnostic detail on the normal reporting path.
+        if (e && /^script error\.?$/i.test(String(e.message || '').trim())
+            && !f && !e.lineno && !e.colno && !e.error) return;
         var coreAsset = /main\.js|sim-views\.js|update_handler\.js|help\.js/.test(f);
         // If the app already initialized (the sentinel global exists), a
         // core-asset error is a RUNTIME error (e.g. a ReferenceError thrown in
