@@ -50,3 +50,26 @@ def test_spoke_log_relay_handler_uses_canonical_formatter():
     assert "%(levelname)s" in fmt._fmt
     # Dashed separators, not spaces — matches logging_setup.DEFAULT_FORMAT.
     assert " - " in fmt._fmt
+
+def test_log_from_inside_queue_put_does_not_deadlock():
+    """A GC finalizer (e.g. a destroyed pending asyncio Task) can log while
+    the same thread is inside queue.put holding the queue's non-reentrant lock.
+    Re-entering put there used to hang that thread forever."""
+    import threading
+
+    class ReentrantQueue(queue.Queue):
+        def _put(self, item):
+            super()._put(item)
+            if len(self.queue) == 1:  # log once more while the lock is held
+                h.emit(logging.LogRecord("x", logging.ERROR, __file__, 1, "nested", None, None))
+
+    q = ReentrantQueue(maxsize=10)
+    h = cp._SpokeLogRelayHandler(q)
+    t = threading.Thread(
+        target=h.emit,
+        args=(logging.LogRecord("x", logging.WARNING, __file__, 1, "outer", None, None),),
+        daemon=True)
+    t.start()
+    t.join(timeout=5)
+    assert not t.is_alive(), "relay handler deadlocked on a re-entrant log"
+    assert q.qsize() == 1
