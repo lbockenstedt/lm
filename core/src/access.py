@@ -1795,6 +1795,23 @@ async def resolve_prefixes_for_session_tenant(hub, sess, tenant_id) -> list:
     return prefixes
 
 
+async def resolve_owned_prefixes(hub, sess) -> list:
+    """Prefixes across EVERY tenant the session user holds (``user.tenants``
+    plus the primary ``tenant_id``). For WRITE gates: a user of several
+    tenants may change records in any of them, not only their primary one.
+    Empty for admins / users with no tenant."""
+    if not sess or is_admin(sess):
+        return []
+    user = sess.get("user", {}) or {}
+    tids = dict.fromkeys(t for t in (user.get("tenants") or []) + [user.get("tenant_id")] if t)
+    out = []
+    for tid in tids:
+        for p in await resolve_prefixes_for_session_tenant(hub, sess, tid) or []:
+            if p not in out:
+                out.append(p)
+    return out
+
+
 async def resolve_prefixes_for_tenant(hub, tenant_id) -> list:
     """Prefixes for an explicit tenant id (selected tenant), used by the
     tenant-aware NAC filters so admins / multi-tenant users scope by the tenant
@@ -2065,10 +2082,10 @@ async def record_in_tenant_scope(hub, sess, record, fields) -> bool:
     ignoring the display toggle so shared writes are always constrained. Empty
     prefixes or a record with no concrete in-tenant IP → False (deny, safe): a
     tenant-admin may only add/edit/delete records whose address is in their own
-    subnets; anything else is a Global-Admin action."""
+    subnets (any of their tenants'); anything else is a Global-Admin action."""
     if not isinstance(record, dict):
         return False
-    prefixes = await resolve_prefixes(hub, sess)
+    prefixes = await resolve_owned_prefixes(hub, sess)
     if not prefixes:
         return False
     out = filter_items_by_prefixes([record], prefixes, fields, drop_no_ip=True)
