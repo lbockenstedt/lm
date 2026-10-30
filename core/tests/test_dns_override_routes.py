@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 import routes.net_services as ns
 from routes.net_services import register
 
-TENANT_PREFIXES = {"t-a": ["10.1.0.0/24"]}
+TENANT_PREFIXES = {"t-a": ["10.1.0.0/24"], "t-b": ["10.3.0.0/24"]}
 
 SNAPSHOT = {
     "status": "SUCCESS",
@@ -105,9 +105,11 @@ def _scope(monkeypatch):
     monkeypatch.setattr(ns.access, "record_in_tenant_scope", in_scope)
 
 
-def _client(admin):
+def _client(admin, tenants=None):
     hub = FakeHub()
     sess = {"user": {"is_admin": admin, "tenant_id": None if admin else "t-a"}}
+    if tenants:
+        sess["user"].update(tenants=tenants, tenant_id=tenants[0])
     app = FastAPI()
     ctx = SimpleNamespace(
         _session_user=lambda request: sess,
@@ -228,3 +230,32 @@ def test_tenant_cannot_touch_other_devices_or_subnets(target):
     r = client.request("DELETE", "/api/dns/override-assignment", json={"target": target})
     assert r.status_code in (400, 403)
     assert hub.forwarded == []
+
+
+def test_multi_tenant_user_may_assign_a_subnet_in_a_secondary_tenant():
+    # Reported: a tenant admin of two tenants got "You may only apply a DNS
+    # override to a subnet inside your tenant's subnets" for a subnet of their
+    # non-primary tenant — only the primary tenant's prefixes were checked.
+    client, hub = _client(admin=False, tenants=["t-b", "t-a"])
+    r = client.post("/api/dns/override-assignment",
+                    json={"target": "10.1.0.0/24", "profile": "PAVO-DEVICE"})
+    assert r.status_code == 200, r.text
+    r = client.post("/api/dns/override-assignment",
+                    json={"target": "10.2.0.0/24", "profile": "PAVO-DEVICE"})
+    assert r.status_code == 403
+
+
+def test_record_scope_covers_every_tenant_the_user_holds(monkeypatch):
+    import asyncio
+    import access
+    monkeypatch.undo()  # the real record_in_tenant_scope, not the fixture stub
+
+    async def by_session_tenant(hub, sess, tid):
+        return TENANT_PREFIXES.get(tid, [])
+    monkeypatch.setattr(access, "resolve_prefixes_for_session_tenant", by_session_tenant)
+    sess = {"user": {"tenants": ["t-b", "t-a"], "tenant_id": "t-b"}}
+
+    def ok(ip):
+        return asyncio.run(access.record_in_tenant_scope(None, sess, {"ip": ip}, ["ip"]))
+    assert ok("10.1.0.5") and ok("10.3.0.5")
+    assert not ok("10.2.0.5")
