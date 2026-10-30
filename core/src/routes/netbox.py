@@ -78,6 +78,7 @@ def register(app, hub, ctx):
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
     _resolve_tenant = ctx._resolve_tenant
+    _acting_tenant = getattr(ctx, "_acting_tenant", lambda request: _resolve_tenant(request, None))
     _filter_session = ctx._filter_session
     _trigger_endpoint_sync_after_ipam_edit = ctx._trigger_endpoint_sync_after_ipam_edit
 
@@ -895,7 +896,7 @@ def register(app, hub, ctx):
             if _is_admin(sess):
                 tenant = body.get("tenant")
             else:
-                tenant = get_tenant_scoping(hub, _resolve_tenant(request, None))["netbox_tenant_slug"] or None
+                tenant = get_tenant_scoping(hub, _acting_tenant(request))["netbox_tenant_slug"] or None
             payload = {
                 "prefix": prefix,
                 "tenant": tenant,

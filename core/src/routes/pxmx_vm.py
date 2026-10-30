@@ -92,6 +92,7 @@ def register(app, hub, ctx):
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
     _resolve_tenant = ctx._resolve_tenant
+    _acting_tenant = getattr(ctx, "_acting_tenant", lambda request: _resolve_tenant(request, None))
     _filter_tenant = ctx._filter_tenant
     _trigger_vm_sync_after_pxmx_edit = ctx._trigger_vm_sync_after_pxmx_edit
 
@@ -537,7 +538,7 @@ def register(app, hub, ctx):
         pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "Hypervisor")
         # Resolve the acting tenant's labels (display name + proxmox_tag) —
         # same model as clone so the new VM is visible to the tenant and synced.
-        tid = _resolve_tenant(request, None)
+        tid = _acting_tenant(request)
         scoping = get_tenant_scoping(hub, tid) or {}
         tenant_tag = scoping.get("proxmox_tag") or ""
         tenant_name = ""
@@ -636,7 +637,7 @@ def register(app, hub, ctx):
         # proxmox_tag (the Hypervisor→NetBox VM sync matches on it, so the new
         # VM must carry it to be attributed to this tenant on the next sync).
         # Templates are shared across tenants; the cloning tenant owns the new VM.
-        tid = _resolve_tenant(request, None)
+        tid = _acting_tenant(request)
         scoping = get_tenant_scoping(hub, tid) or {}
         tenant_tag = scoping.get("proxmox_tag") or ""
         tenant_name = ""
@@ -799,7 +800,7 @@ def register(app, hub, ctx):
 
         hub = app.state.hub
         pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "Hypervisor")
-        tid = _resolve_tenant(request, None)
+        tid = _acting_tenant(request)
 
         # Resolve the tenant's labels for the new VM (display name + proxmox_tag),
         # identical to clone so the deployed spoke's backing VM is attributed to
