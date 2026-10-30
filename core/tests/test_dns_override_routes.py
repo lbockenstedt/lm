@@ -259,3 +259,21 @@ def test_record_scope_covers_every_tenant_the_user_holds(monkeypatch):
         return asyncio.run(access.record_in_tenant_scope(None, sess, {"ip": ip}, ["ip"]))
     assert ok("10.1.0.5") and ok("10.3.0.5")
     assert not ok("10.2.0.5")
+
+
+def test_firewall_write_scope_covers_every_tenant_the_user_holds(monkeypatch):
+    import asyncio
+    import access
+    monkeypatch.undo()
+
+    async def by_session_tenant(hub, sess, tid):
+        return TENANT_PREFIXES.get(tid, [])
+    monkeypatch.setattr(access, "resolve_prefixes_for_session_tenant", by_session_tenant)
+    endpoint, fields = "dns", ["ip"]
+    sess = {"user": {"tenants": ["t-b", "t-a"], "tenant_id": "t-b"}}
+
+    def ok(ip):
+        rec = {f: ip for f in fields}
+        return asyncio.run(access.fw_rule_in_tenant_scope(None, sess, endpoint, None, rec))
+    assert ok("10.1.0.5") and ok("10.3.0.5")
+    assert not ok("10.2.0.5")
