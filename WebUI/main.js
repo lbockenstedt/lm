@@ -22447,7 +22447,7 @@ async function pxmxCloneVmSubmit(uniqueId) {
     if (vmidRaw.trim() && !isNaN(nvid)) body.new_vmid = nvid;
     if (pool) body.pool = pool;
     try {
-        const r = await setupFetch('/api/pxmx/clone', { method: 'POST', body: JSON.stringify(body) });
+        const r = await setupFetch('/api/pxmx/clone' + _tenantQS(), { method: 'POST', body: JSON.stringify(body) });
         const data = await r.json().catch(() => ({}));
         if (r.ok && data && data.status === 'SUCCESS') {
             showToast(`Cloned to VMID ${data.vmid} (${data.name})`, 'success');
@@ -22527,7 +22527,7 @@ async function pxmxDeploySpokeSubmit(uniqueId) {
     if (goBtn) { goBtn.disabled = true; goBtn.textContent = 'Deploying…'; }
     if (statusEl) statusEl.textContent = 'Cloning the golden template — a full-disk clone can take a minute…';
     try {
-        const r = await setupFetch('/api/pxmx/deploy-spoke', { method: 'POST', body: JSON.stringify(body) });
+        const r = await setupFetch('/api/pxmx/deploy-spoke' + _tenantQS(), { method: 'POST', body: JSON.stringify(body) });
         const data = await r.json().catch(() => ({}));
         if (r.ok && data && data.status === 'SUCCESS') {
             const startedMsg = data.started ? 'started — it will self-onboard shortly'
@@ -22676,7 +22676,7 @@ async function pxmxCreateVmSubmit() {
     if (goBtn) { goBtn.disabled = true; goBtn.textContent = 'Creating…'; }
     if (statusEl) statusEl.textContent = 'Creating VM (defines + tags)…';
     try {
-        const r = await setupFetch('/api/pxmx/create-vm', { method: 'POST', body: JSON.stringify(body) });
+        const r = await setupFetch('/api/pxmx/create-vm' + _tenantQS(), { method: 'POST', body: JSON.stringify(body) });
         const data = await r.json().catch(() => ({}));
         if (r.ok && data && data.status === 'SUCCESS') {
             showToast(`Created VMID ${data.vmid} (${data.name}) — boot it from Console to install`, 'success');
@@ -27270,7 +27270,7 @@ async function submitFindSubnetAssign() {
         exclusion_ranges: get('nb-f-exclusions'),
     };
     try {
-        const d = await apiJson('/api/netbox/subnet-assign', {
+        const d = await apiJson('/api/netbox/subnet-assign' + _tenantQS(), {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ prefix, description: desc, status: 'active', custom_fields: customFields }),
             credentials: 'same-origin',
