@@ -2785,7 +2785,7 @@ def register(app, hub, ctx):
         if sess and not _is_admin(sess) and access.filter_enabled(hub, "le"):
             import ipaddress
             nets = []
-            for p in (await access.resolve_prefixes(hub, sess)) or []:
+            for p in (await access.resolve_owned_prefixes(hub, sess)) or []:
                 try:
                     nets.append(ipaddress.ip_network(p, strict=False))
                 except ValueError:

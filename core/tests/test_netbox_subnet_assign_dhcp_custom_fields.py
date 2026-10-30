@@ -77,3 +77,23 @@ def test_subnet_assign_triggers_dhcp_sync_on_success(tmp_path, monkeypatch):
     loop.run_until_complete(asyncio.sleep(0))
 
     assert sync_calls, "subnet-assign must trigger a DHCP sync on success, same as allocate/update prefix"
+
+
+def test_subnet_assign_files_the_prefix_under_the_selected_tenant(tmp_path, monkeypatch):
+    # A tenant admin of RA + Central (primary RA) working in Central must get
+    # the subnet assigned to Central, not their primary tenant.
+    import routes.netbox as nb
+    from test_auth_session_security import _mint_tenant_admin_session
+    monkeypatch.setattr(nb, "get_tenant_scoping", lambda hub, tid: {"netbox_tenant_slug": tid})
+    c, hub = _build({}, tmp_path)
+    calls = _capture_request_response(hub)
+    tok = _mint_tenant_admin_session(hub, "tme", ["ra", "central"])
+
+    def assigned(qs):
+        r = c.post("/api/netbox/subnet-assign" + qs, json={"prefix": "10.0.0.0/24"},
+                   cookies={"lm_session": tok})
+        assert r.status_code == 200, r.text
+        return dict(calls)["NETBOX_CLAIM_PREFIX"]["tenant"]
+
+    assert assigned("?tenant=central") == "central"
+    assert assigned("") == "ra"
