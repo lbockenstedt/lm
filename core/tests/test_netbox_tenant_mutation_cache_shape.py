@@ -37,7 +37,7 @@ import pytest
 import api as api_mod
 
 from test_auth_session_security import (  # noqa: F401  (fixtures)
-    _build, _mint_session, _mint_tenant_session, _isolate,
+    _build, _mint_session, _mint_tenant_session, _mint_tenant_admin_session, _isolate,
 )
 
 
@@ -147,6 +147,29 @@ def test_one_tenants_cache_never_authorises_another_tenants_user(tmp_path):
     c, hub = _build({}, tmp_path)
     _seed(hub, "tB", "netbox_prefixes", _envelope("prefixes", [{"id": 42}]))
     tok = _mint_tenant_session(hub, "lrb", "tA", rights=("ipam", "edit"))
+    r = c.put("/api/netbox/prefixes/42", json={"description": "x"},
+              cookies={"lm_session": tok})
+    assert r.status_code == 403
+
+
+# --- users with more than one tenant ------------------------------------
+
+def test_a_tenant_admin_can_enable_dhcp_in_their_secondary_tenant(tmp_path):
+    # Reported: a tenant admin of RA + Central (primary RA) got the 403 when
+    # enabling DHCP on a Central subnet — only the primary tenant was checked.
+    c, hub = _build({}, tmp_path)
+    _seed(hub, "central", "netbox_prefixes", _envelope("prefixes", [{"id": 42}]))
+    tok = _mint_tenant_admin_session(hub, "tme", ["ra", "central"])
+    r = c.put("/api/netbox/prefixes/42?tenant=central",
+              json={"custom_fields": {"dhcp_enabled": True}},
+              cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+
+
+def test_a_multi_tenant_user_is_still_denied_a_tenant_they_dont_hold(tmp_path):
+    c, hub = _build({}, tmp_path)
+    _seed(hub, "other", "netbox_prefixes", _envelope("prefixes", [{"id": 42}]))
+    tok = _mint_tenant_admin_session(hub, "tme", ["ra", "central"])
     r = c.put("/api/netbox/prefixes/42", json={"description": "x"},
               cookies={"lm_session": tok})
     assert r.status_code == 403
