@@ -1920,6 +1920,9 @@ def create_app(hub):
     def _effective_tenant(request, explicit=None):
         return access.effective_tenant(_sessions, request, explicit)
 
+    def _acting_tenant(request):
+        return access.acting_tenant(_sessions, request)
+
     def _effective_tenant_slug(request, explicit=None):
         return access.effective_tenant_slug(hub, _sessions, request, explicit)
 
@@ -1963,7 +1966,7 @@ def create_app(hub):
             if scope:
                 tid = hub.tenant_id_for_ipam_scope(scope)
             if not tid:
-                tid = _resolve_tenant(request, None)
+                tid = _acting_tenant(request)
             hub.trigger_endpoint_sync(tid)
         except Exception as e:
             logger.debug("endpoint-sync trigger after IPAM edit skipped: %s", e)
@@ -1979,7 +1982,7 @@ def create_app(hub):
         is a no-op (the scheduled loop covers unbound tenants).
         """
         try:
-            tid = _resolve_tenant(request, None)
+            tid = _acting_tenant(request)
             hub.trigger_vm_sync(tid)
         except Exception as e:
             logger.debug("vm-sync trigger after pxmx edit skipped: %s", e)
@@ -2002,6 +2005,7 @@ def create_app(hub):
         _fetch_tenant_prefixes=_fetch_tenant_prefixes,
         _resolve_prefixes=_resolve_prefixes,
         _effective_tenant=_effective_tenant,
+        _acting_tenant=_acting_tenant,
         _effective_tenant_slug=_effective_tenant_slug,
         _resolve_prefixes_for_tenant=_resolve_prefixes_for_tenant,
         _filter_enabled=_filter_enabled,

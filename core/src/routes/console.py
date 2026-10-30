@@ -427,11 +427,8 @@ def register(app, hub, ctx):
             return True                      # dedicated to a tenant the caller owns
         if not access.filter_enabled(hub, "console"):
             return True                      # subnet mask off → shared is open to all
-        scope_tid = (sess or {}).get("user", {}).get("tenant_id") or None
-        if not scope_tid:
-            return False
         try:
-            prefixes = await access.resolve_prefixes_for_tenant(hub, scope_tid)
+            prefixes = await access.resolve_owned_prefixes(hub, sess)
         except Exception:  # noqa: BLE001
             prefixes = []
         if not prefixes:

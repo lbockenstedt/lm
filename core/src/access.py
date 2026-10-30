@@ -1570,6 +1570,18 @@ def effective_tenant(sessions: dict, request: "Request", explicit: str = None) -
     return sess.get("user", {}).get("tenant_id") or None
 
 
+def acting_tenant(sessions: dict, request: "Request") -> str | None:
+    """The tenant a WRITE that creates something should land in. Non-admin →
+    the tenant picker's ``?tenant=`` when they own it, else their primary
+    tenant (a multi-tenant user working in their second tenant must not have
+    new objects filed under the first). Admin → unchanged
+    :func:`resolve_tenant` behavior (their session tenant)."""
+    sess = session_user(sessions, request)
+    if sess and not is_admin(sess):
+        return effective_tenant(sessions, request, request.query_params.get("tenant"))
+    return resolve_tenant(sessions, request, None)
+
+
 def effective_tenant_slug(hub, sessions: dict, request: "Request", explicit: str = None) -> str | None:
     """NetBox tenant slug for the effective (selected) tenant, or None when the
     tenant is unbound to NetBox / unknown / unselected. None → callers treat as
@@ -2010,7 +2022,7 @@ async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload
     if not spec:
         return False
     mode, fields = spec
-    prefixes = await resolve_prefixes(hub, sess)
+    prefixes = await resolve_owned_prefixes(hub, sess)
     if not prefixes:
         return False
     if mode == "fw":
