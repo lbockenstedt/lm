@@ -1338,7 +1338,7 @@ def register(app, hub, ctx):
         if net.num_addresses == 1:
             await _constrain_shared_write(request, {"ip": str(net.network_address)}, ["ip"], "DNS override")
             return
-        own = _dns_prefix_nets(await access.resolve_prefixes(hub, sess))
+        own = _dns_prefix_nets(await access.resolve_owned_prefixes(hub, sess))
         if not any(net.version == n.version and net.subnet_of(n) for n in own):
             raise HTTPException(
                 status_code=403,
