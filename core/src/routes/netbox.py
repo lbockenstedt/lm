@@ -131,14 +131,20 @@ def register(app, hub, ctx):
         failure. The hub data cache is the fast path; on a miss the tenant's
         list is fetched live once (``cache_fetch_now``) and re-checked, so a
         legit delete of a just-created object isn't false-denied. Spoke down
-        on a miss → 403 (fail closed: ownership can't be verified)."""
+        on a miss → 403 (fail closed: ownership can't be verified).
+
+        A user with several tenants owns an object if ANY of them holds it —
+        checking only the session's primary ``tenant_id`` denied edits made
+        while working in a secondary tenant."""
         sess = _session_user(request)
         if sess and _is_admin(sess):
             return None
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
-        tid = _resolve_tenant(request, None) or (sess.get("user", {}) or {}).get("tenant_id")
-        if not tid:
+        user = sess.get("user", {}) or {}
+        tids = list(dict.fromkeys(
+            t for t in (user.get("tenants") or []) + [user.get("tenant_id")] if t))
+        if not tids:
             raise HTTPException(status_code=403, detail="No tenant context for this user")
         sid = str(obj_id)
 
@@ -147,20 +153,25 @@ def register(app, hub, ctx):
             return any(isinstance(it, dict) and str(it.get(id_field)) == sid
                        for it in (rows or []))
 
-        job = nb_cache_job(hub, module_key, netbox_tenant_scope(hub, tid))
-        if _in(hub.warm_get(job.ns, job.key)):
-            return tid
-        # Not in the cached list (new object, or cache older than the
-        # object) → fetch the tenant's list live once and re-check.
-        try:
-            fresh = await hub.cache_fetch_now(job.ns, job.key, job.fetch,
-                                              tenants=job.tenants, lane=job.lane)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("netbox ownership refresh [%s][%s] %s failed: %s",
-                           tid, module_key, sid, e)
-            fresh = None
-        if _in(fresh):
-            return tid
+        jobs = {}
+        for tid in tids:
+            job = nb_cache_job(hub, module_key, netbox_tenant_scope(hub, tid))
+            jobs.setdefault((job.ns, job.key), (tid, job))
+        for tid, job in jobs.values():
+            if _in(hub.warm_get(job.ns, job.key)):
+                return tid
+        # Not in any cached list (new object, or cache older than the
+        # object) → fetch each tenant's list live once and re-check.
+        for tid, job in jobs.values():
+            try:
+                fresh = await hub.cache_fetch_now(job.ns, job.key, job.fetch,
+                                                  tenants=job.tenants, lane=job.lane)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("netbox ownership refresh [%s][%s] %s failed: %s",
+                               tid, module_key, sid, e)
+                continue
+            if _in(fresh):
+                return tid
         raise HTTPException(status_code=403,
                             detail="Object not found in your tenant (cross-tenant mutation denied)")
 
