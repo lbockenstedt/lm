@@ -24,6 +24,7 @@ import os
 import re
 
 import pytest
+from webui_src import main_js_source
 
 
 def _repo_root():
@@ -37,8 +38,7 @@ def _repo_root():
 
 @pytest.fixture(scope="module")
 def main_js():
-    with open(os.path.join(_repo_root(), "WebUI", "main.js"), encoding="utf-8") as fh:
-        return fh.read()
+    return main_js_source()
 
 
 @pytest.fixture(scope="module")

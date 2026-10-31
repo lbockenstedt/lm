@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routes.request_assistant import register
+from webui_src import main_js_source
 
 
 class _Hub:
@@ -174,7 +175,7 @@ def test_webui_footer_modal_offers_guided_mode_with_quick_form_fallback():
     d = os.path.dirname(os.path.abspath(__file__))
     while not os.path.isdir(os.path.join(d, "WebUI")):
         d = os.path.dirname(d)
-    src = open(os.path.join(d, "WebUI", "main.js"), encoding="utf-8").read()
+    src = main_js_source()
     body = src[src.index("async function fileBug(prefill = '')"):src.index("// Shared capture for manual")]
     assert "/api/request-assistant/available" in body and "_reqAsstProbe(" in body
     assert 'onclick="submitBugReport()"' in body and "bugUseQuickForm" in body

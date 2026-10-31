@@ -20,6 +20,7 @@ server-reported message gets through.
 
 import os
 import re
+from webui_src import main_js_source
 
 MAIN_JS = os.path.abspath(os.path.join(
     os.path.dirname(__file__), "..", "..", "WebUI", "main.js"))
@@ -31,7 +32,7 @@ def _filter_regex():
     Plain alternation + anchors + \\b + \\w, which mean the same in both
     engines, so matching here is a faithful stand-in for the browser.
     """
-    src = open(MAIN_JS, encoding="utf-8").read()
+    src = main_js_source()
     start = src.index("function showToast(")
     body = src[start:start + 2000]
     m = re.search(r"if \(/(\^.+?)/i\.test\(bare\)\)", body)
@@ -83,7 +84,7 @@ def test_filter_is_anchored_not_a_bare_search():
 
 
 def test_filter_only_applies_to_error_toasts():
-    src = open(MAIN_JS, encoding="utf-8").read()
+    src = main_js_source()
     start = src.index("function showToast(")
     body = src[start:start + 2000]
     assert "if (type === 'error')" in body, \

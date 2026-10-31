@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 
 import pytest
+from webui_src import main_js_source
 
 MAIN_JS = os.path.abspath(os.path.join(
     os.path.dirname(__file__), "..", "..", "WebUI", "main.js"))
@@ -34,7 +35,7 @@ _JSC = ("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A"
 
 def _role_cell_callback() -> str:
     """Return the body of the Agents-tile role-cell callback."""
-    src = open(MAIN_JS, encoding="utf-8").read()
+    src = main_js_source()
     start = src.index(_ANCHOR)
     open_brace = src.index("{", start + len(_ANCHOR) - 1)
     depth = 0
@@ -53,7 +54,7 @@ def _role_cell_callback() -> str:
 def test_tile_fetches_the_durable_role_state_not_just_active():
     """fetchLoadedRoles() returns only `active`, which can never contain a
     deploy role. The tile must pull the full role state instead."""
-    src = open(MAIN_JS, encoding="utf-8").read()
+    src = main_js_source()
     assert _ANCHOR in src, "tile must fetch full role state, not fetchLoadedRoles"
     assert "Promise.all([fetchLoadedRoles(aid), fetchDeployStatus(aid)])" not in src
 

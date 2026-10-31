@@ -22,6 +22,7 @@ These tests hold the *hub* to its two jobs:
 import re
 import textwrap
 from pathlib import Path
+from webui_src import main_js_source
 
 ROOT = Path(__file__).resolve().parents[2]
 MAIN_JS = ROOT / "WebUI" / "main.js"
@@ -107,7 +108,7 @@ def test_a_degraded_report_is_unchanged_by_the_widened_keep_list():
 # --- the WebUI must consume them ------------------------------------------
 
 def _js():
-    return MAIN_JS.read_text(encoding="utf-8")
+    return main_js_source()
 
 
 def _fn(name, end_marker):
