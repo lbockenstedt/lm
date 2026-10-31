@@ -423,7 +423,7 @@ const MODULE_CLASSES = {
     'Simulations': ['cs'],
     'Certificates': ['le'],
     'Storage': ['truenas'],
-    'Monitoring': ['zabbix'],
+    'Monitoring': ['zabbix', 'zabbix-server', 'zbxproxy'],
     'Console': ['console']
 };
 
@@ -513,6 +513,8 @@ const AGENT_ROLES = {
     'proxmox':    { name: 'Hypervisor (Proxmox / pxmx)', desc: 'Proxmox spoke bridging the hub to per-host pxmx agents (VM lifecycle, VNC console, USB auto-provisioning).', deploy: false },
     'le':         { name: 'Certificate Management (Let\'s Encrypt)', desc: 'Issues/renews prod Let\'s Encrypt certs via certbot (HTTP-01 / DNS-01) and serves them to the hub for distribution to target spokes (e.g. OPNsense). Installs certbot + DNS-01 plugins.', deploy: false },
     'console':    { name: 'Console Server', desc: 'Serial console access to attached hardware (USB adapters + on-board UART). Auto-detects baud, auto-identifies devices, and relays an xterm.js terminal through the hub.', deploy: false },
+    'zabbix-server': { name: 'Zabbix Server', desc: 'Deploys the Zabbix 7.0 server and web frontend on this host. Runs as its own service; does NOT create a spoke. Load "Monitoring (Zabbix)" to feed it inventory.', deploy: true },
+    'zbxproxy':   { name: 'Zabbix Proxy', desc: 'Deploys an active Zabbix proxy that dials out to the Zabbix server. One per tenant network. Runs as its own service; does NOT create a spoke.', deploy: true },
     'zabbix':     { name: 'Monitoring (Zabbix)', desc: 'Syncs LM inventory into a multi-tenant Zabbix server — hosts are created, refreshed, disabled after 7 days unseen and deleted 30 days later. Back-end only; tenants see results in the LM WebUI.', deploy: false },
     'truenas':    { name: 'Storage (TrueNAS)', desc: 'Polls and manages TrueNAS appliances over the official WebSocket JSON-RPC client — pools, datasets, shares (SMB/NFS), disks, alerts, services, capacity; gated management actions (create/delete datasets, create shares, take snapshots, run scrubs). Reports health + capacity and syncs into NetBox.', deploy: false },
     'statuspage': { name: 'Simulation Status Page', desc: 'Public, read-only status page for one tenant — cloud-provider style (overall banner, per-component status, 90-day uptime history) plus a Clients view whose demo dropdown lets visitors trigger a live 2h simulation. Bind it to a tenant; the hub pushes that tenant\'s redacted dashboard down. Serves its own HTTPS page (cert via the le role).', deploy: false },

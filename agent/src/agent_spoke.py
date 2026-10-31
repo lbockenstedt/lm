@@ -231,6 +231,8 @@ def _infra_install_cmd(installer_url: str) -> list:
 _LDAP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/ldap/main/install_ldap.sh"
 # dns/dhcp installers live IN the lm repo (in-repo modules), so their deploy-role
 # installer URL is the lm raw path (not a sibling repo like netbox/ldap).
+_ZBX_SERVER_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbix/main/install_zabbix_server.sh"
+_ZBX_PROXY_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbix/main/install_zbxproxy.sh"
 _DNS_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dns/install_dns.sh"
 _DHCP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dhcp/install_dhcp.sh"
 
@@ -285,6 +287,17 @@ _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
         "cmd": _infra_install_cmd(_DHCP_INSTALLER_URL),
         "module_type": "agent",
     },
+    # ZABBIX SERVER / PROXY: deploy the Zabbix 7.0 server+frontend, or a tenant's
+    # active proxy, via the zabbix repo installers. The management spoke is the
+    # separate "zabbix" role in _ROLE_MAP. Config -> flags in _zabbix_install_args.
+    "zabbix-server": {
+        "cmd": _infra_install_cmd(_ZBX_SERVER_INSTALLER_URL),
+        "module_type": "agent",
+    },
+    "zbxproxy": {
+        "cmd": _infra_install_cmd(_ZBX_PROXY_INSTALLER_URL),
+        "module_type": "agent",
+    },
 }
 
 _DEPLOY_ROLE_MARKERS = {
@@ -293,6 +306,8 @@ _DEPLOY_ROLE_MARKERS = {
     "ldap-server": "/usr/sbin/slapd",
     "dns-server": "/usr/sbin/unbound",
     "dhcp-server": "/usr/sbin/kea-dhcp4",
+    "zabbix-server": "/usr/sbin/zabbix_server",
+    "zbxproxy": "/usr/sbin/zabbix_proxy",
 }
 
 # The service binary alone is ambiguous for dhcp-server: the simulation role's
@@ -1077,7 +1092,23 @@ class GenericAgent(BaseSpoke):
             extra = self._service_worker_install_args(role_name, config or {})
             if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
                 cmd[-1] = cmd[-1] + extra
+        elif role_name in ("zabbix-server", "zbxproxy"):
+            extra = self._zabbix_install_args(role_name, config or {})
+            if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
+                cmd[-1] = cmd[-1] + extra
         return cmd
+
+    @staticmethod
+    def _zabbix_install_args(role_name: str, config: dict) -> str:
+        """Project LOAD_ROLE config into zabbix installer flags (shlex-quoted)."""
+        flags = {"zabbix-server": (("db_host", "db-host"), ("db_port", "db-port"),
+                                   ("db_name", "db-name"), ("db_user", "db-user"),
+                                   ("db_pass", "db-pass"), ("server_name", "server-name")),
+                 "zbxproxy": (("server", "server"), ("proxy_name", "proxy-name"),
+                              ("tls_ca", "tls-ca"), ("tls_cert", "tls-cert"),
+                              ("tls_key", "tls-key"))}[role_name]
+        return "".join(" --" + flag + " " + shlex.quote(str(config[key]))
+                       for key, flag in flags if config.get(key))
 
     @staticmethod
     def _service_worker_install_args(role_name, config: dict = None) -> str:
