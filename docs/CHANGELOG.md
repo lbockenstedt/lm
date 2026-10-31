@@ -12,6 +12,16 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-10-26
 
+### Credential Vault
+
+- **"API key + secret" secret type.** Store a firewall's API key and secret (e.g.
+  OPNsense) as one vault secret and pick it when adding the firewall.
+- **Vault on → no inline secrets in device forms.** With the vault enabled, the
+  Add/Edit device and instance forms hide the secret fields (they were rejected
+  anyway), and a firewall must use a Credential Vault credential. The Firewall
+  module's Edit button now opens the same form. See
+  [credential-vault.md](credential-vault.md#how-modules-consume-vault-secrets).
+
 ### Cert Monitor
 
 - **Hourly checks near expiry.** While a cert expires within 24 hours (or has expired),

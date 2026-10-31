@@ -125,10 +125,12 @@ async function _henetVaultCredOptions() {
 async function _instanceVaultCredOptions() {
     try {
         const v = await apiJson('/tenant/cred-vault/automation-secrets');
-        return ((v && v.secrets) || []).map(s => ({
+        const opts = ((v && v.secrets) || []).map(s => ({
             bucket: s.bucket, name: s.name,
-            label: `${s.is_admin_slot ? 'Global Admin' : s.bucket} › ${s.name}${s.type ? ' (' + s.type + ')' : ''}`,
+            label: `${s.is_admin_slot ? 'Global Admin' : s.bucket} › ${s.name}${s.type ? ' (' + _cvTypeLabel(s.type) + ')' : ''}`,
         }));
+        opts.vaultAvailable = !!(v && v.vault_available);
+        return opts;
     } catch (e) { return []; }
 }
 
@@ -147,7 +149,11 @@ function _vaultCredSelectHtml(elId) {
 // Populate a Vault-credential <select> and preselect the record's existing
 // {bucket,name} reference (if any). Options are cached on the element so the
 // save handler can map the chosen index back to a {bucket,name}.
-async function _fillVaultCredSelect(elId, current) {
+//
+// ``vaultOnly`` = {inputIds, required}: when the hub's cloud vault is enabled
+// the server rejects inline secrets, so those inputs are hidden (and skipped on
+// save), and with ``required`` a vault credential must be picked.
+async function _fillVaultCredSelect(elId, current, vaultOnly) {
     const el = document.getElementById(elId);
     if (!el) return;
     const opts = await _instanceVaultCredOptions();
@@ -168,6 +174,33 @@ async function _fillVaultCredSelect(elId, current) {
     } else {
         el.value = curIdx;
     }
+    if (vaultOnly && opts.vaultAvailable) _vaultOnlyForm(el, opts, vaultOnly);
+}
+
+function _vaultOnlyForm(el, opts, { inputIds = [], required = false }) {
+    inputIds.forEach(id => {
+        const input = document.getElementById(id);
+        if (!input) return;
+        input.dataset.vaultHidden = '1';
+        (input.closest('.space-y-2') || input).style.display = 'none';
+    });
+    const box = el.parentElement;
+    const label = box.querySelector('label');
+    if (label) label.textContent = required ? 'Credential Vault (required)' : 'Credential Vault';
+    const none = el.querySelector('option[value=""]');
+    if (none) none.textContent = required ? '— select a vault credential —' : '— none —';
+    const hint = box.querySelector('p');
+    if (hint) hint.textContent = (opts.length ? '' : 'No automation-readable secrets yet — add one in Credential Vault first. ')
+        + 'The Credential Vault is enabled, so connection secrets come from the vault and are not entered here.';
+    el.dataset.required = required ? '1' : '';
+}
+
+// True (after telling the user) when a required vault credential is not picked.
+function _vaultCredMissing(elId) {
+    const el = document.getElementById(elId);
+    if (!el || el.dataset.required !== '1' || _collectVaultCred(elId)) return false;
+    showToast('Select a Credential Vault credential — the vault is enabled, so secrets cannot be entered inline.', 'error');
+    return true;
 }
 
 // Resolve a Vault-credential <select> to the value to send: a {bucket,name}

@@ -271,7 +271,8 @@ def register(app, hub, ctx):
                 out.append({"bucket": b, "name": s["name"], "type": s.get("type", "generic"),
                             "fields": s.get("fields", []), "description": s.get("description", ""),
                             "is_admin_slot": b == _cv.ADMIN_BUCKET})
-        return {"secrets": out, "is_global_admin": _is_global_admin(sess)}
+        return {"secrets": out, "is_global_admin": _is_global_admin(sess),
+                "vault_available": _cv._vault_available(hub)}
 
     # ── pass-phrase ─────────────────────────────────────────────────────────
     @app.post("/tenant/cred-vault/psk")
