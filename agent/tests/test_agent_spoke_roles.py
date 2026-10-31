@@ -44,6 +44,7 @@ def test_role_map_has_all_roles_with_correct_module_types():
         "statuspage": "statuspage",
         "proxy":      "proxy",
         "truenas":    "storage",
+        "zabbix":     "monitoring",
     }
     assert set(_ROLE_MAP.keys()) == set(expected.keys()), \
         f"missing/extra roles: {set(_ROLE_MAP.keys()) ^ set(expected.keys())}"

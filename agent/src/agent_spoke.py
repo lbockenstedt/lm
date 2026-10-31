@@ -168,6 +168,7 @@ _ROLE_MAP = {
     "statuspage": ("statuspage/src/statuspage_spoke.py", "StatusPageSpoke", "statuspage", None),
     "proxy":      ("proxy/src/proxy_spoke.py",      "ProxySpoke", "proxy",       None),
     "truenas":    ("truenas/src/truenas_spoke.py",  "TruenasSpoke", "storage",   "https://github.com/lbockenstedt/truenas.git"),
+    "zabbix":     ("zabbix/src/zabbix_spoke.py",    "ZabbixSpoke",  "monitoring", "https://github.com/lbockenstedt/zabbix.git"),
 }
 
 # Logger-name prefixes each role emits under. Used by the multi-role agent's
@@ -210,6 +211,7 @@ _ROLE_LOG_PREFIXES: Dict[str, tuple] = {
     "statuspage": ("StatusPageSpoke",),
     "proxy":      ("ProxySpoke",),
     "truenas":    ("Truenas",),
+    "zabbix":     ("Zabbix",),
 }
 
 # Deploy roles: instead of morphing the agent into a service, these run an
