@@ -9,6 +9,7 @@ keeping the localhost-bind + allow-list security posture.
 
 import os
 import re
+from webui_src import main_js_source
 
 
 MAIN_JS = os.path.abspath(os.path.join(
@@ -17,7 +18,7 @@ MAIN_JS = os.path.abspath(os.path.join(
 
 def _fn(name):
     """Brace-balanced body of an `(async) function <name>(` in main.js."""
-    src = open(MAIN_JS, encoding="utf-8").read()
+    src = main_js_source()
     start = src.index(f"function {name}(")
     depth = 0
     for i in range(src.index("{", start), len(src)):

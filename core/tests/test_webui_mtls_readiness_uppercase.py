@@ -6,9 +6,10 @@ tooltip, copy/paste and in-page search still work against the real spoke id. A
 ``.toUpperCase()`` on the data would break all three, so that's pinned too.
 """
 from pathlib import Path
+from webui_src import main_js_source
 
 _MAIN = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
-_SRC = _MAIN.read_text(encoding="utf-8")
+_SRC = main_js_source()
 
 
 def _readiness_fn():

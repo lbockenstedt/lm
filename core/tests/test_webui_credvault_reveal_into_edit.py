@@ -28,6 +28,7 @@ import shutil
 import subprocess
 
 import pytest
+from webui_src import main_js_paths, main_js_source
 
 WEBUI = os.path.join(os.path.dirname(__file__), "..", "..", "WebUI")
 MAIN_JS = os.path.abspath(os.path.join(WEBUI, "main.js"))
@@ -37,8 +38,7 @@ JSC = ("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/"
 
 
 def _src():
-    with open(MAIN_JS, encoding="utf-8") as fh:
-        return fh.read()
+    return main_js_source()
 
 
 def _extract(name, src):
@@ -233,12 +233,13 @@ def test_main_js_still_parses():
     engine = _js_engine()
     if not engine:
         pytest.skip("no JavaScript engine available to parse main.js")
-    check = ("try { new Function(readFile(%s)); print('OK'); } "
-             "catch (e) { print('ERR ' + e); throw e; }" % json.dumps(MAIN_JS))
-    if engine[0] != JSC:  # node has no readFile()
-        check = ("const fs=require('fs');new Function(fs.readFileSync(%s,'utf8'));"
-                 "console.log('OK');" % json.dumps(MAIN_JS))
-    proc = subprocess.run(engine + ["-e", check], capture_output=True,
-                          text=True, timeout=120)
-    assert proc.returncode == 0 and "OK" in proc.stdout, (
-        proc.stderr or proc.stdout)
+    for path in main_js_paths():
+        check = ("try { new Function(readFile(%s)); print('OK'); } "
+                 "catch (e) { print('ERR ' + e); throw e; }" % json.dumps(str(path)))
+        if engine[0] != JSC:  # node has no readFile()
+            check = ("const fs=require('fs');new Function(fs.readFileSync(%s,'utf8'));"
+                     "console.log('OK');" % json.dumps(str(path)))
+        proc = subprocess.run(engine + ["-e", check], capture_output=True,
+                              text=True, timeout=120)
+        assert proc.returncode == 0 and "OK" in proc.stdout, (
+            path.name, proc.stderr or proc.stdout)

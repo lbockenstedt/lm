@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from search_index import topup_cold_legs  # noqa: E402
+from webui_src import main_js_source
 
 DASHBOARD_PY = Path(__file__).resolve().parents[1] / "src" / "routes" / "dashboard.py"
 MAIN_JS = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
@@ -92,7 +93,7 @@ async def test_legs_run_concurrently():
 
 
 def test_handle_search_reports_degraded_legs():
-    src = MAIN_JS.read_text(encoding="utf-8")
+    src = main_js_source()
     start = src.index("function handleSearch(")
     end = src.index("const more = d.total > 12", start)
     body = src[start:end + 400]

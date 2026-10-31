@@ -7,13 +7,14 @@ onboarding).
 """
 
 from pathlib import Path
+from webui_src import main_js_source
 
 
 MAIN_JS = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
 
 
 def _source():
-    return MAIN_JS.read_text(encoding="utf-8")
+    return main_js_source()
 
 
 def _modal_fn():

@@ -3,6 +3,7 @@
 import ast
 import os
 import re
+from webui_src import main_js_source
 
 
 MAIN_JS = os.path.abspath(os.path.join(
@@ -10,8 +11,7 @@ MAIN_JS = os.path.abspath(os.path.join(
 
 
 def _src():
-    with open(MAIN_JS, encoding="utf-8") as fh:
-        return fh.read()
+    return main_js_source()
 
 
 def _function(name):
