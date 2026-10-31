@@ -131,7 +131,7 @@ def register(app, hub, ctx):
                       ".idea", ".vscode", "site-packages", "coverage", "htmlcov"}
     _SRC_SKIP_FILE_HINTS = (".env", "secret", "credential", ".key", ".pem",
                             ".crt", ".p12", ".pfx", "id_rsa", ".pyc")
-    _SRC_MAX_BYTES = 4_000_000        # main.js is ~2MB — keep it searchable
+    _SRC_MAX_BYTES = 4_000_000        # per file; sim-views.js is ~1MB — keep it searchable
     _SRC_MAX_MATCHES = 14
     _SRC_MAX_FILES = 6000
     _SRC_SNIPPET_CTX = 4              # lines of context above/below a hit

@@ -13,47 +13,46 @@
 // They share globals with this file. Only code that runs at load time is
 // order-sensitive, which is why VIEW_LOADERS calls its loaders by name.
 //
-// Three fetch helpers are used (see setupFetch JSDoc ~line 1862 for the full
-// comparison):
+// Three fetch helpers are used (see the setupFetch JSDoc in
+// js/reports-alerts-security.js for the full comparison):
 //   fetch(url)        — public routes (no auth header, same-origin cookie only).
 //   setupFetch(url)   — hub /setup/* + /api/* + /admin/* admin routes; adds
 //                       JSON content-type + same-origin credentials.
 //   csFetch(url)      — Simulations /sim/api/* routes (defined in sim-views.js);
 //                       prepends /sim/api, injects tenant id, handles 401/404.
 //
-// Section index (names only — line numbers were dropped because they drift on
-// every edit; grep the section name instead):
-//   Bug-report console capture (window.__lmBugBuffer ring buffer)
-//   Global registries: MODULE_CLASSES, PRODUCT_MAP, VIEW_* registries
-//   Auth helpers: isAdmin(), canSeeModule()
-//   UI utilities: showToast(), fileBug(), submitBugReport()
-//   refreshModuleCache() — per-module cache invalidation
-//   updateStatus() + _updateMetrics/_applyHubHealth/_updateSpokeCount/
-//          _rebuildMainNav/_renderDashboardLists + _renderSpokeAgentRow — the
-//          periodic /status poll that drives dashboard tiles + sidebar lists
-//   renderSpokeIndicators() — header status dots
-//   Navigation: setView(), setSubView() + VIEW_LOADERS dispatch table
-//   setupFetch() — authed fetch helper
-//   Section renderers: _renderLogsSection, _renderSettingsSection,
-//          _renderSetupSection (+ _renderSetup*Tile helpers + SETUP_TILES)
-//   Setup → Simulations admin overview (subnet-filter, USB, DHCP status)
-//   Setup data loaders (cache, firewalls, spokes/agents, users, sessions)
-//   Diagnostics & logs (loadModuleLogs, loadRecoveryLogs,
-//          loadBugReports, showBugReport)
-//   Generic agents & roles (loadApprovedSpokes, fetchLoadedRoles,
-//          showLoadRoleModal, loadRole)
-//   OPNsense management (loadOpnsenseManagement + add/edit modals)
-//   Proxmox (loadPxmxData)
-//   NetBox IPAM/DCIM (loadNetboxData + device/rack/prefix/IP modals)
-//   DNS (loadDNSData + record modal)
-//   DHCP (loadDHCPData + reservation modal)
-//   CPPM/NAC (loadCPPMNACStatus, loadCPPMData, device detail, claim)
-//   OPNsense add/edit submit handlers
-//   LDAP (loadLDAPData + entity/password modals)
-//   User/firewall/instance modals (showAddUserModal, showAddFirewallModal,
-//          loadInstances, showAddInstanceModal)
-//   Appearance (loadAppearance, loadAppearanceForm, saveAppearance)
-//   Dashboard (loadAllTenantsOverview, loadDashboardSummary, showDeviceDashboard)
+// Section index (names and files only — line numbers drift on every edit;
+// grep the section or function name instead):
+//   main.js:
+//     Bug-report console capture (window.__lmBugBuffer ring buffer)
+//     Global registries: MODULE_CLASSES, PRODUCT_MAP, VIEW_* registries
+//     Auth helpers: isAdmin(), canSeeModule()
+//     UI utilities: showToast(), fileBug(), submitBugReport()
+//     refreshModuleCache() — per-module cache invalidation
+//     updateStatus() + _updateMetrics/_applyHubHealth/_updateSpokeCount/
+//            _rebuildMainNav/_renderDashboardLists + _renderSpokeAgentRow — the
+//            periodic /status poll that drives dashboard tiles + sidebar lists
+//     renderSpokeIndicators() — header status dots
+//     Navigation: setView(), setSubView() + VIEW_LOADERS dispatch table
+//   js/reports-alerts-security.js: setupFetch(), _renderLogsSection,
+//          diagnostics & logs (loadRecoveryLogs, loadBugReports, showBugReport)
+//   js/settings.js: _renderSettingsSection and the Settings tiles (OS Updates…)
+//   js/sync-sources.js: _renderSetupSection (+ SETUP_TILES), Setup →
+//          Simulations admin overview, setup data loaders (cache, firewalls)
+//   js/fleet-admin.js: spokes/agents, users, loadModuleLogs, generic agents &
+//          roles (loadApprovedSpokes, fetchLoadedRoles, showLoadRoleModal,
+//          loadRole), OPNsense management (loadOpnsenseManagement)
+//   js/nw.js, js/pxmx-console.js (loadPxmxData), js/netbox.js (loadNetboxData)
+//   js/dns-dhcp-cluster.js: DNS (loadDNSData), clustered DNS / HA DHCP panels
+//   js/certificates.js: certificate management (le), DNS record modals
+//   js/external-dns-dhcp.js: DHCP (loadDHCPData + reservation modal), external DNS
+//   js/cppm-ldap-users.js: CPPM/NAC (loadCPPMNACStatus, loadCPPMData, claim),
+//          OPNsense add/edit modals + submit handlers, LDAP (loadLDAPData),
+//          user/firewall modals (showAddUserModal, showAddFirewallModal)
+//   js/module-management.js: instances (loadInstances, showAddInstanceModal),
+//          Appearance (loadAppearance, saveAppearance), DOMContentLoaded startup
+//   js/dashboard-search-login.js: Dashboard (loadAllTenantsOverview,
+//          loadDashboardSummary, showDeviceDashboard); sets window.lmCoreLoaded
 //
 // ────────────────────────────────────────────────────────────────────────────
 // ROUTES — handler → backend endpoint map. `api` is the handler function in

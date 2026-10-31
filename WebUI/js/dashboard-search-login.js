@@ -608,3 +608,7 @@ async function loadWhatsNew() {
         body.innerHTML = `<p class="text-xs text-red-400 px-2 py-1">Error: ${escapeHtml(err.message || String(err))}</p>`;
     }
 }
+
+// Last core script: tells the index.html error guard that every core file
+// (main.js + js/*.js) loaded and ran. Keep this at the end of the last file.
+window.lmCoreLoaded = true;
