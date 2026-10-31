@@ -633,7 +633,14 @@ function _renderOsUpdatesView(content) {
     content.innerHTML = `
         <div class="${card} space-y-4">
             <div class="flex items-center justify-between">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OS Updates ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OS Updates ${helpIcon('lm-hub', null, 'Hub help')} <span class="cursor-help normal-case font-normal text-slate-400" title="Operating-system package updates (apt dist-upgrade) for every spoke and agent. Global Admin only; every approval is audit-logged.
+• Deploy everything, only selected nodes/packages, or only security updates.
+• A manual deploy never reboots; a host that needs one gets a Reboot… button. Proxmox cluster nodes are the exception (below).
+• Auto-patch is approved per node and runs only in the maintenance window, minus packages under &quot;Never auto-install&quot;.
+• Auto-reboot (on by default for auto-patch nodes) reboots nodes that installed something once the run is done, hub last.
+• Proxmox cluster nodes reboot only when needed, in HA maintenance mode (guests move off first), one node at a time.
+• Nodes update one at a time; the hub goes last (this page restarts).
+• Separate from LM code updates.">ⓘ</span></h3>
                 <span id="osu-status" class="text-xs text-slate-400"></span>
             </div>
             <div class="${osuFleetCls} flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
