@@ -68,7 +68,8 @@ optional and explain why in your final report.
 ## 3 — The view — REQUIRED
 
 ### ☐ The control's markup, in the view function that renders this feature area
-- `main.js` for anything outside Simulations; `sim-views.js` for anything
+- `main.js` / `js/*.js` for anything outside Simulations (the file whose
+  header names the feature area); `sim-views.js` for anything
   inside it (see §5 for the twin implication of choosing `sim-views.js`).
 - Match the existing button convention: inline
   `onclick="fnName('${arg}')"` on a template-literal `<button>` — not
@@ -144,7 +145,7 @@ async function <feature>DoThing(arg) {
   quota/config system: check the `sim_quota.py` twin
   (`lm/core/src/simulations/sim_quota.py` ⇄ `cs/lm-spoke/src/sim_quota.py`)
   too.
-- If the control lives anywhere else (`main.js`, `index.html`, `help.js`,
+- If the control lives anywhere else (`main.js`, `js/*.js`, `index.html`, `help.js`,
   `update_handler.js`), there is no twin — this section is a no-op, report
   it as such rather than silently skipping it.
 
