@@ -15,9 +15,16 @@ done earlier is redone later.
 - [done] core/tests/test_webui_inline_handlers_defined.py: every function an
   inline handler (onclick=, onchange=, ...) calls must be defined as a global
   somewhere in the WebUI. Catches the main breakage of Phases 1, 4 and 5.
-- [todo, before Phase 3] Browser smoke test (Playwright, CI only): real
-  create_app + fake hub, admin session, visit every nav view, fail on uncaught
-  page errors. Phase 3 changes rendering, which static checks can't see.
+- [done, 0b] Browser smoke test (Playwright, CI only):
+  core/tests/test_webui_browser_smoke.py serves the real create_app with a
+  fake hub, logs in as admin and walks every view, sub-view and child tab in
+  headless Chromium (~50s). Fails on uncaught errors / unhandled rejections
+  / the error banner; API 500s from the fake hub are expected and ignored.
+  The walk itself is core/tests/webui_walk.py: it only calls the UI's own
+  navigation functions (no button clicks), so AB can reuse it on a live hub.
+  Verified it catches a missing loader, a throw in a render, an async throw
+  and a missing <script> tag. Locally: pip install playwright &&
+  python -m playwright install chromium (skips if missing; never in CI).
 
 ## Phase 1 - Split files (item 6, part A) - zero behavior change
 - [done] main.js (37k lines) cut into main.js (core: routes, helpers, nav,
@@ -113,6 +120,21 @@ Phase 6 htm is bound to `phtml`, so no name clash.
 - Use for new views and the most interactive existing ones; createView's
   state/setState/actions maps 1:1 to useState/handlers, so a migration is a
   mechanical port, not a redesign. createView stays for simple views.
+
+## AB continuous UI walker (todo, after 0b)
+Run the webui_walk.py walk continuously from AB against the live hub and
+feed failures into the existing bug pipeline (HubScan files, RepoScan fixes).
+1. [todo] Read-only probe session on the hub: a "probe" user that sees the
+   admin views but every POST/PUT/PATCH/DELETE (and WebSocket send) is
+   rejected 403 and audit-logged. Server-enforced -- the real guarantee.
+2. [todo] AB walker: Playwright as the probe user, plus browser-side guards:
+   block writes and WS sends (log "would call X", mark untested), cancel
+   every confirm()/prompt(), skip data-destructive / destructive-verb
+   handlers, logout, tenant switch, external links and downloads. Failure =
+   uncaught error, error banner, 5xx or empty view; file only after it
+   reproduces twice, dedupe by signature, rate-limit.
+   Also: audit GET routes with side effects; CI check that destructive-verb
+   handlers confirm() or carry data-destructive.
 
 ## Per-PR rules
 - One view (or small group) per PR, Phase 0 tests green, promote dev->qa->main.
