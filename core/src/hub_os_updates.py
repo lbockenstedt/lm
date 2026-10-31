@@ -532,7 +532,27 @@ class HubOsUpdatesMixin:
         st["autopatch_at"] = now
         self._osu_save()
         _opened, closes = window_bounds(cfg["window"], now)
-        keys = []
+        keys, packages = self._osu_autopatch_plan(cfg)
+        if not keys:
+            return {"status": "SKIPPED", "message": "nothing to patch"}
+        exclude = cfg["exclude"]
+        logger.warning("OS-UPDATE: auto-patch found updates on %d node(s) (%s%s)",
+                       len(keys), "security only" if cfg["security_only"] else "all updates",
+                       f", excluding {', '.join(exclude)}" if exclude else "")
+        res = await self.osu_apply_fleet(node_keys=keys, actor=_AUTOPATCH_ACTOR,
+                                         packages=packages or None,
+                                         security_only=cfg["security_only"],
+                                         reboot_after=[k for k in keys if k in cfg["reboot_nodes"]],
+                                         until=closes)
+        if res.get("status") == "ERROR":
+            logger.warning("OS-UPDATE: auto-patch not started: %s", res.get("message"))
+        return res
+
+    def _osu_autopatch_plan(self, cfg: Dict[str, Any]) -> "tuple[List[str], Dict[str, List[str]]]":
+        """``(node keys, {key: package list})`` auto-patch would deploy now,
+        from the last check. Only approved nodes that can actually be patched
+        are picked, so one blocked node doesn't stop the rest."""
+        keys: List[str] = []
         packages: Dict[str, List[str]] = {}
         approved = set(cfg["nodes"])
         exclude = cfg["exclude"]
@@ -559,19 +579,39 @@ class HubOsUpdatesMixin:
                     continue
                 packages[key] = pkgs
             keys.append(key)
-        if not keys:
-            return {"status": "SKIPPED", "message": "nothing to patch"}
-        logger.warning("OS-UPDATE: auto-patch found updates on %d node(s) (%s%s)",
-                       len(keys), "security only" if cfg["security_only"] else "all updates",
-                       f", excluding {', '.join(exclude)}" if exclude else "")
-        res = await self.osu_apply_fleet(node_keys=keys, actor=_AUTOPATCH_ACTOR,
-                                         packages=packages or None,
-                                         security_only=cfg["security_only"],
-                                         reboot_after=[k for k in keys if k in cfg["reboot_nodes"]],
-                                         until=closes)
-        if res.get("status") == "ERROR":
-            logger.warning("OS-UPDATE: auto-patch not started: %s", res.get("message"))
-        return res
+        return keys, packages
+
+    def osu_pending_reboots(self) -> Dict[str, Any]:
+        """Nodes auto-reboot will restart in the current maintenance window —
+        for the "Pending Reboot" alert in the WebUI footer.
+
+        ``{in_window, window, nodes: [{key, label, note}]}``. While an
+        auto-patch run is going: its auto-reboot nodes not rebooted yet. Before
+        it starts: the auto-reboot nodes it would patch. A clustered Proxmox
+        node only reboots if the update needs it, so it is listed as "may"."""
+        cfg = self.osu_autopatch_config()
+        now = time.time()
+        bounds = window_bounds(cfg["window"], now)
+        by_key = {f"{n['kind']}:{n['id']}": n for n in self.osu_snapshot()["nodes"]}
+        st = self._osu_state()
+        run = st.get("run") or {}
+        if run.get("status") == "running":
+            keys = [i["key"] for i in run.get("items") or []
+                    if i["key"] in (run.get("reboot_after") or [])
+                    and not i.get("auto_reboot") and i.get("status") in ("queued", "applying", "done")]
+        elif bounds and float(st.get("autopatch_at") or 0.0) < bounds[0]:
+            keys = [k for k in self._osu_autopatch_plan(cfg)[0] if k in cfg["reboot_nodes"]]
+        else:
+            keys = []
+        nodes = []
+        for key in keys:
+            n = by_key.get(key) or {}
+            clustered = bool(n.get("pve_cluster")) and "maintenance" in (n.get("features") or [])
+            nodes.append({"key": key, "label": n.get("label") or key,
+                          "note": ("may reboot (Proxmox cluster, HA maintenance mode)" if clustered
+                                   else "reboots after patching")})
+        return {"in_window": bounds is not None or run.get("status") == "running",
+                "window": cfg["window"], "nodes": nodes}
 
     # ── fix access on a blocked (non-root, no helper) node ──────────────────
     async def osu_fix_access(self, node_key: str, username: str, password: str,

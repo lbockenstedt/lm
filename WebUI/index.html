@@ -568,6 +568,13 @@
             </div>
             <div class="flex items-center gap-3">
                 <div id="footer-console-slot" class="flex items-center gap-2"></div>
+                <!-- Auto-reboot alert (settings.js osuRefreshRebootTray): only shown in the
+                     maintenance window while nodes are about to be rebooted. -->
+                <div id="reboot-tray" class="hidden items-center gap-1.5 group relative cursor-pointer" onclick="setView('osupdates')">
+                    <div class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></div>
+                    <span class="text-[10px] uppercase tracking-widest text-amber-300">Pending Reboot</span>
+                    <div id="reboot-tray-tooltip" class="absolute bottom-full right-0 mb-2 hidden group-hover:block bg-slate-800 text-white text-[10px] p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[220px]"></div>
+                </div>
                 <div id="system-status-group" class="flex items-center gap-4 group relative" onclick="setView('setup'); setSubView('Spokes & Agents');">
                     <div id="hub-status-container" class="flex items-center gap-2 cursor-pointer">
                         <div id="hub-status-dot" class="w-2 h-2 rounded-full bg-slate-500 shadow-[0_0_5px_rgba(0,0,0,0.6)] transition-all"></div>
