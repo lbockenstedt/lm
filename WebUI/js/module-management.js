@@ -411,9 +411,9 @@ const INSTANCE_PRODUCTS = {
         fields: [
             { id: 'host', label: 'CPPM Host', placeholder: 'https://clearpass.example.com' },
             { id: 'client_id', label: 'OAuth2 Client ID', placeholder: 'API client ID' },
-            { id: 'client_secret', label: 'OAuth2 Client Secret', type: 'password', placeholder: 'Client secret' },
-            { id: 'user', label: 'Fallback Username', placeholder: 'admin' },
-            { id: 'password', label: 'Fallback Password', type: 'password', placeholder: 'Password' },
+            { id: 'client_secret', label: 'OAuth2 Client Secret', type: 'password', placeholder: 'Client secret', vaultSecret: true },
+            { id: 'user', label: 'Fallback Username', placeholder: 'admin', vaultSecret: true },
+            { id: 'password', label: 'Fallback Password', type: 'password', placeholder: 'Password', vaultSecret: true },
             { id: 'verify_ssl', label: 'TLS Certificate', type: 'select', options: [['true', 'Verify cert (secure)'], ['false', 'Allow untrusted / self-signed cert']] },
         ],
     },
@@ -428,7 +428,7 @@ const INSTANCE_PRODUCTS = {
         rowSummary: inst => `${inst.url || '—'}`,
         fields: [
             { id: 'url', label: 'NetBox URL', placeholder: 'http://netbox.example.com' },
-            { id: 'api_token', label: 'API Token', type: 'password', placeholder: 'API token' },
+            { id: 'api_token', label: 'API Token', type: 'password', placeholder: 'API token', vaultSecret: true },
             { id: 'verify_ssl', label: 'TLS Certificate', type: 'select', options: [['1', 'Verify cert (secure)'], ['0', 'Ignore cert (self-signed / internal CA)']] },
         ],
     },
@@ -478,9 +478,9 @@ const INSTANCE_PRODUCTS = {
         rowSummary: inst => `${inst.name || '—'}${inst.username ? ' · ' + inst.username : ''}`,
         fields: [
             { id: 'username', label: 'SSH Username', placeholder: 'admin' },
-            { id: 'password', label: 'SSH Password', type: 'password', placeholder: 'Password' },
-            { id: 'enable_secret', label: 'Enable Secret', type: 'password', placeholder: 'Optional (AOS-S enable)' },
-            { id: 'snmp_community', label: 'SNMP Community', placeholder: 'public' },
+            { id: 'password', label: 'SSH Password', type: 'password', placeholder: 'Password', vaultSecret: true },
+            { id: 'enable_secret', label: 'Enable Secret', type: 'password', placeholder: 'Optional (AOS-S enable)', vaultSecret: true },
+            { id: 'snmp_community', label: 'SNMP Community', placeholder: 'public', vaultSecret: true },
         ],
     },
 };
@@ -514,13 +514,14 @@ const DEVICE_TYPES = {
         payloadKey: 'firewall',
         badgeLabel: 'Firewall',
         vaultPicker: true,
+        vaultRequired: true,  // with the vault on, the API key + secret must come from it
         rowSummary: d => `${d.host || '—'}${d.port ? ':' + d.port : ''}`,
         fields: [
             { id: 'model', label: 'Model', type: 'select', options: [['opnsense','OPNsense'],['juniper','Juniper'],['fortigate','Fortigate'],['pfsense','pfSense']] },
             { id: 'host', label: 'Host / IP', placeholder: '172.16.1.1' },
             { id: 'port', label: 'Port', placeholder: '8443', coerce: 'int', default: 8443 },
-            { id: 'api_key', label: 'API Key' },
-            { id: 'api_secret', label: 'API Secret', type: 'password' },
+            { id: 'api_key', label: 'API Key', vaultSecret: true },
+            { id: 'api_secret', label: 'API Secret', type: 'password', vaultSecret: true },
         ],
     },
     nw: {
@@ -539,10 +540,10 @@ const DEVICE_TYPES = {
             { id: 'address', label: 'Address / Host IP', placeholder: '10.0.0.1' },
             { id: 'port', label: 'Port', placeholder: '22 / 443', coerce: 'int' },
             { id: 'username', label: 'Username' },
-            { id: 'password', label: 'Password', type: 'password' },
-            { id: 'enable_secret', label: 'Enable Secret', type: 'password' },
-            { id: 'api_token', label: 'API Token', type: 'password' },
-            { id: 'snmp_community', label: 'SNMP Community' },
+            { id: 'password', label: 'Password', type: 'password', vaultSecret: true },
+            { id: 'enable_secret', label: 'Enable Secret', type: 'password', vaultSecret: true },
+            { id: 'api_token', label: 'API Token', type: 'password', vaultSecret: true },
+            { id: 'snmp_community', label: 'SNMP Community', vaultSecret: true },
             { id: 'poll_interval', label: 'Auto-Poll Interval', type: 'select', coerce: 'nullableInt',
               options: [['','Inherit module default'],['0','Off (manual Poll Now only)'],['60','Every 1 minute'],['300','Every 5 minutes'],['900','Every 15 minutes'],['1800','Every 30 minutes'],['3600','Every hour'],['21600','Every 6 hours'],['86400','Every day']] },
         ],
@@ -682,7 +683,8 @@ ${schemaBtnHtml}
     document.body.appendChild(modal);
     modal.dataset.product = productKey;
     if (editItem) modal.dataset.instanceId = editItem.id;
-    if (p.vaultPicker) _fillVaultCredSelect('inst-vaultcred', editItem && editItem.vault_credential);
+    if (p.vaultPicker) _fillVaultCredSelect('inst-vaultcred', editItem && editItem.vault_credential, {
+        inputIds: p.fields.filter(f => f.vaultSecret).map(f => 'inst-' + f.id), required: !!p.vaultRequired });
 
     loadApprovedSpokes().then(spokes => {
         const selector = document.getElementById('inst-spoke');
@@ -757,8 +759,11 @@ async function saveInstance(productKey) {
         config.spoke_pool = Array.from(document.querySelectorAll('#inst-spoke-pool .inst-pool-cb:checked'))
             .map(cb => cb.value);
     }
+    if (p.vaultPicker && _vaultCredMissing('inst-vaultcred')) return;
     p.fields.forEach(f => {
-        let v = document.getElementById('inst-' + f.id).value;
+        const input = document.getElementById('inst-' + f.id);
+        if (input.dataset.vaultHidden) return;  // secret comes from the vault
+        let v = input.value;
         // A select whose options are literally true/false (e.g. verify_ssl)
         // saves as a real boolean, not the string 'false' — which Python
         // treats as truthy and would silently invert the setting.
@@ -1091,7 +1096,8 @@ function _renderDeviceModalFields(typeKey, values) {
     // async from the record's existing {bucket,name} reference.
     if (wrap && t.vaultPicker) {
         wrap.innerHTML += `<div class="md:col-span-2">${_vaultCredSelectHtml('dev-vaultcred')}</div>`;
-        _fillVaultCredSelect('dev-vaultcred', values && values.vault_credential);
+        _fillVaultCredSelect('dev-vaultcred', values && values.vault_credential, {
+            inputIds: t.fields.filter(f => f.vaultSecret).map(f => 'dev-' + f.id), required: !!t.vaultRequired });
     }
     // Name is only auto-filled from the edit item (top-level field), not fields.
     if (values && values.name) {
@@ -1137,8 +1143,10 @@ async function saveDevice() {
         spoke_id: document.getElementById('dev-spoke').value,
     };
     if (!config.name) { showToast('Device name is required.', 'error'); return; }
+    if (t.vaultPicker && _vaultCredMissing('dev-vaultcred')) return;
     t.fields.forEach(f => {
         const el = document.getElementById('dev-' + f.id);
+        if (el && el.dataset.vaultHidden) return;  // secret comes from the vault
         let v = el ? el.value : '';
         if (f.coerce === 'int') v = parseInt(v, 10) || (f.default != null ? f.default : null);
         // Nullable-int (e.g. nw Auto-Poll Interval): blank = inherit (null);
@@ -1166,6 +1174,7 @@ async function saveDevice() {
             showToast(`Device ${id ? 'updated' : 'added'} successfully`, 'success');
             closeDeviceModal();
             loadAllDevices();
+            if (typeof loadFirewallsList === 'function') loadFirewallsList();
         } else {
             const err = await r.json().catch(() => ({}));
             showToast('Failed to save device: ' + (err.detail || r.status), 'error');

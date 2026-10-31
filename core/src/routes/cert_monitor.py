@@ -1,7 +1,8 @@
 """Cert Expiry Monitor routes — GLOBAL ADMIN ONLY (on top of the /api/* session
 gate). Config lives in global_config["cert_monitor"]; results are written to
 $LM_STATE_DIR/cert_monitor.json by cert_monitor.run_checks. A startup-launched
-scheduler runs a check at most once per 24h while the feature is enabled, and
+scheduler runs a check once per 24h (hourly while a cert expires within a
+day) while the feature is enabled, and
 evaluates the alert rules (cert_monitor_alerts) after every check and tick.
 Per-cert ignores (global_config["cert_monitor_ignored"], keyed host:port) keep
 a cert listed but drop it from the counts and the alert evaluation.
@@ -102,7 +103,7 @@ def register(app, hub, ctx):
 
     def _refresh_days(results, now):
         """Recompute days_left / status from not_after so the view stays
-        accurate between the once-a-day checks."""
+        accurate between the scheduled checks."""
         out = []
         for r in results or []:
             r = dict(r)
@@ -165,7 +166,7 @@ def register(app, hub, ctx):
         if cfg["enabled"] and data.get("last_run"):
             try:
                 next_run = (_dt.datetime.fromisoformat(data["last_run"])
-                            + _dt.timedelta(seconds=cm.CHECK_INTERVAL_S)).isoformat()
+                            + _dt.timedelta(seconds=cm.check_interval(data, _ignored(), now))).isoformat()
             except ValueError:
                 next_run = None
         return {
@@ -213,7 +214,7 @@ def register(app, hub, ctx):
         started = False
         if cfg["enabled"] and not was_enabled:
             data = await asyncio.to_thread(cm.load_results)
-            if cm.is_due(data):
+            if cm.is_due(data, ignored=_ignored()):
                 started = _kick("enabled")
         return {"status": "ok", "config": cfg, "check_started": started}
 
@@ -338,8 +339,8 @@ def register(app, hub, ctx):
             try:
                 if _cfg()["enabled"]:
                     data = await asyncio.to_thread(cm.load_results)
-                    if cm.is_due(data):
-                        await _run("daily")
+                    if cm.is_due(data, ignored=_ignored()):
+                        await _run("scheduled")
                     else:
                         await _evaluate_alerts(data)
             except asyncio.CancelledError:

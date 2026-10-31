@@ -30,6 +30,10 @@ logger = logging.getLogger("Hub")
 STATE_DIR = os.environ.get("LM_STATE_DIR", "/var/lib/lm/state")
 RESULTS_FILE = "cert_monitor.json"
 CHECK_INTERVAL_S = 24 * 3600
+# Hourly while any cert expires within a day (or has expired), so a renewal
+# shows up — and stops the reminder emails — within the hour.
+URGENT_CHECK_S = 3600
+URGENT_WINDOW_S = 24 * 3600
 RED_DAYS = 30
 YELLOW_DAYS = 90
 PROBE_TIMEOUT_S = 8.0
@@ -626,7 +630,27 @@ def _write_json(path, data, prefix):
         raise
 
 
-def is_due(data, now=None, interval_s=CHECK_INTERVAL_S):
+def check_interval(data, ignored=None, now=None):
+    """Seconds between checks: URGENT_CHECK_S while a non-ignored cert expires
+    within URGENT_WINDOW_S (or has expired), else CHECK_INTERVAL_S."""
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    for r in (data or {}).get("results") or []:
+        if not r.get("not_after") or cert_key(r) in (ignored or {}):
+            continue
+        try:
+            ts = _dt.datetime.fromisoformat(r["not_after"])
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_dt.timezone.utc)
+        if (ts - now).total_seconds() < URGENT_WINDOW_S:
+            return URGENT_CHECK_S
+    return CHECK_INTERVAL_S
+
+
+def is_due(data, now=None, interval_s=None, ignored=None):
+    if interval_s is None:
+        interval_s = check_interval(data, ignored, now)
     last = (data or {}).get("last_run")
     if not last:
         return True

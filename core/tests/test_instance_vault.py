@@ -343,3 +343,21 @@ def test_validate_noop_for_unsupported_product_even_with_vault_available(monkeyp
     _run(iv.validate_ref(object(), {"password": "inline"}, {"user": {"tenants": []}},
                          is_admin=True, storage_key="ldap_instances"))
 
+
+
+def test_firewall_requires_vault_ref_when_vault_available(monkeypatch):
+    monkeypatch.setattr(cred_vault, "_vault_available", lambda hub: True)
+    with pytest.raises(HTTPException) as ei:
+        _run(iv.validate_ref(object(), {"host": "h", "model": "opnsense"},
+                             {"user": {"tenants": []}}, is_admin=True, storage_key="firewalls"))
+    assert ei.value.status_code == 400 and "select a Credential" in ei.value.detail
+    monkeypatch.setattr(cred_vault, "_vault_available", lambda hub: False)
+    _run(iv.validate_ref(object(), {"host": "h", "api_key": "k", "api_secret": "s"},
+                         {"user": {"tenants": []}}, is_admin=True, storage_key="firewalls"))
+
+
+def test_firewall_overlay_from_api_key_secret_pair(monkeypatch):
+    _patch_get(monkeypatch, {"api_key": "KEY", "api_secret": "SECRET"})
+    out = _run(iv.overlay(object(), {"host": "h", "vault_credential": {"bucket": "b", "name": "n"}},
+                          "firewalls"))
+    assert out["api_key"] == "KEY" and out["api_secret"] == "SECRET"
