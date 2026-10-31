@@ -6,13 +6,13 @@ from api import (
 from update_pipeline import _version_behind
 from spoke_alert_sync import direct_module_ids as _direct_module_ids
 from whats_new_prs import (
-    _WHATS_NEW_REPOS, fetch_recent_merged_prs, merged_prs_to_items,
+    _WHATS_NEW_REPOS, fetch_recent_merged_prs, merged_prs_to_items, recent_commit_items,
 )
 
 from . import frontmatter
 
 # Cap for the WebUI "What's New" popover (GET /api/whats-new).
-_WHATS_NEW_LIMIT = 15
+_WHATS_NEW_LIMIT = 30
 # Only surface updates merged within this many days ("the last 2 weeks").
 _WHATS_NEW_DAYS = 14
 
@@ -1131,7 +1131,7 @@ def register(app, hub, ctx):
     async def whats_new():
         """List recently merged bug fixes + features for the "What's New" popover.
 
-        Merges TWO independent sources:
+        Merges THREE independent sources:
         1. bug-store reports ab has built & closed — its MARK_BUG_FIXED cascade
            flips the report to status=="fixed" with a fixed_at epoch + the closed
            issue_url — of type bug or feature (see _committed_features). This is
@@ -1143,10 +1143,13 @@ def register(app, hub, ctx):
            guessed). ``promote/*`` and ``backmerge/*`` branches (and matching
            title prefixes) are excluded as release-flow noise — the real PR they
            carry already appears on its own.
+        3. the commits on this hub's own checkout (whats_new_prs.recent_commit_items).
+           Most work reaches main as direct commits carried by those excluded
+           promote/* PRs, so without this source it never showed up.
 
-        The two lists are merged, deduped by normalized summary (a bug-store
-        item wins over a PR-sourced duplicate), sorted newest-first by
-        fixed_at, and capped at 15 (_dedupe_and_cap). Each item carries a
+        The lists are merged, deduped by normalized summary (bug-store first,
+        then PRs, then commits — the first wins), sorted newest-first by
+        fixed_at, and capped at 30 (_dedupe_and_cap). Each item carries a
         ``type`` so the UI can badge "Bug fix" vs "Feature". Readable by ANY
         authenticated user: the /api/ prefix is session-gated but not
         admin-only (unlike /setup/bug-reports, which is global-admin gated).
@@ -1176,7 +1179,14 @@ def register(app, hub, ctx):
         except Exception as e:  # noqa: BLE001 — PR source must never break the popover
             logger.warning("whats-new: PR source failed: %s", e)
             pr_items = []
-        return {"features": _dedupe_and_cap(bug_items + pr_items)}
+        commit_items = []
+        try:
+            commit_items = await asyncio.to_thread(
+                recent_commit_items, _WHATS_NEW_DAYS,
+                repo_url=f"https://github.com/{_WHATS_NEW_REPOS[0]}")
+        except Exception as e:  # noqa: BLE001 — never break the popover
+            logger.warning("whats-new: commit source failed: %s", e)
+        return {"features": _dedupe_and_cap(bug_items + pr_items + commit_items)}
 
     # Bug Reports log view (admin-only, like the rest of /setup/): lists filed
     # reports and serves the full artifacts (console/HTML/screenshot) for an

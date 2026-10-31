@@ -1,11 +1,14 @@
-"""Merged-GitHub-PR source for the "What's New" popover (routes/setup_admin.py) -
-independent of the bug-store (AB's filed-and-fixed-report cascade), which only
-ever contains items that started life as a WebUI "File a Bug" report. A leaf:
-stdlib + httpx only, no import of main/api/hub."""
+"""Merged-GitHub-PR and git-commit sources for the "What's New" popover
+(routes/setup_admin.py) - independent of the bug-store (AB's
+filed-and-fixed-report cascade), which only ever contains items that started
+life as a WebUI "File a Bug" report. A leaf: stdlib + httpx only, no import of
+main/api/hub."""
 from __future__ import annotations
 
 import logging
+import os
 import re
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -103,6 +106,72 @@ def merged_prs_to_items(prs: list, *, now: float = None, within_days: int = 14) 
             "issue_url": pr.get("html_url") or "",
         })
     items.sort(key=lambda x: x.get("fixed_at") or 0, reverse=True)
+    return items
+
+
+# ── commits on the running checkout ─────────────────────────────────────────
+# Most work reaches main as direct commits carried by promote/* PRs, which the
+# PR source skips, so the hub's own git log is the complete record of what it
+# runs. A subject whose prefix (text before the first ":") names tests, docs or
+# housekeeping is skipped, as are release bumps, merges, reverts and "AI Fix #" /
+# "AI Feature #" commits (those are already in the bug store with a curated summary).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_SKIP_COMMIT_RE = re.compile(r"^(release\b|merge\b|revert\b|ai (fix|feature) #)", re.I)
+_SKIP_COMMIT_PREFIX_RE = re.compile(r"\b(tests?|docs?|chore|ci|build|style|refactor)\b", re.I)
+_FIX_WORD_RE = re.compile(r"\bfix(e[sd])?\b", re.I)
+_COMMIT_CACHE_TTL = 600.0
+_COMMIT_CACHE: Dict[Tuple[str, int], Tuple[float, list]] = {}
+
+
+def commit_to_item(sha: str, when: float, subject: str, repo_url: str = "") -> Optional[dict]:
+    """One commit -> a popover item, or None if it isn't user-facing.
+    ``fix``-type commits (conventional ``fix:`` or the word "fix" in a plain
+    subject) are bug fixes; everything else that survives the filters is a
+    feature. Pure."""
+    s = (subject or "").strip()
+    prefix = s.split(":", 1)[0] if ":" in s[:40] else ""
+    if not s or "[skip ci]" in s or _SKIP_COMMIT_RE.match(s) or _SKIP_COMMIT_PREFIX_RE.search(prefix):
+        return None
+    m = _CONVENTIONAL_TITLE_RE.match(s)
+    is_fix = m.group(1).lower() == "fix" if m else bool(_FIX_WORD_RE.search(s))
+    return {
+        "id": f"commit-{sha[:8]}",
+        "summary": pr_summary(s),
+        "type": "bug" if is_fix else "feature",
+        "fixed_at": when,
+        "issue_url": f"{repo_url}/commit/{sha}" if repo_url else "",
+    }
+
+
+def recent_commit_items(within_days: int = 14, repo_root: str = _REPO_ROOT,
+                        repo_url: str = "") -> list:
+    """Popover items for the non-merge commits of the last ``within_days`` on
+    the checkout this hub runs from, newest first. Cached for 10 minutes.
+    Fail-soft: no git or no checkout (tarball install) -> ``[]``. Blocking."""
+    key = (repo_root, within_days)
+    cached = _COMMIT_CACHE.get(key)
+    if cached and time.time() - cached[0] < _COMMIT_CACHE_TTL:
+        return cached[1]
+    try:
+        r = subprocess.run(
+            ["git", "-c", f"safe.directory={repo_root}", "-C", repo_root, "log",
+             f"--since={within_days}.days", "--no-merges", "--format=%H%x1f%ct%x1f%s"],
+            capture_output=True, text=True, timeout=10)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("whats-new: git log failed: %s", e)
+        return []
+    if r.returncode != 0:
+        logger.warning("whats-new: git log exited %s: %s", r.returncode, r.stderr.strip()[:200])
+        return []
+    items = []
+    for line in r.stdout.splitlines():
+        parts = line.split("\x1f")
+        if len(parts) != 3 or not parts[1].isdigit():
+            continue
+        item = commit_to_item(parts[0], float(parts[1]), parts[2], repo_url)
+        if item:
+            items.append(item)
+    _COMMIT_CACHE[key] = (time.time(), items)
     return items
 
 
