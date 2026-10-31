@@ -219,8 +219,9 @@ def test_check_reports_features_and_blocker(monkeypatch):
     r = os_update.check_updates(refresh=True)
     assert r["features"] == ["packages", "reboot", "fix_access"]
     assert "lm-os-update" in r["apply_blocker"]
-    # Blocked node: no privileged refresh attempted, just the unprivileged list.
-    assert seen == [["apt", "list", "--upgradable"]]
+    # Blocked node: no privileged refresh attempted, just unprivileged reads.
+    assert seen[0] == ["apt", "list", "--upgradable"]
+    assert not any(a[0] == "sudo" for a in seen)
     assert r["count"] == 1
 
 

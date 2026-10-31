@@ -32,8 +32,15 @@ on the operator's exclude list (names or globs).
 ``/api/os-updates/fix-access`` takes a root/sudo login typed once for a node
 blocked by missing privileges; the password is relayed to that node only and
 never stored or logged.
+
+``/api/os-updates/cves?q=`` answers "who is affected by this CVE?" from the
+installed packages each node reports with its check (see ``os_cve.py``).
 """
+import re
+
 from api import HTTPException, Request, logger
+
+_CVE_QUERY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+-]*$")
 
 
 def register(app, hub, ctx):
@@ -55,6 +62,20 @@ def register(app, hub, ctx):
         """Last known fleet state. Cheap — serves the cache, probes nothing."""
         _require_admin(request)
         return hub.osu_snapshot()
+
+    @app.get("/api/os-updates/cves")
+    async def os_updates_cves(request: Request, q: str = ""):
+        """Who is affected: ``?q=CVE-2026-1234`` lists the nodes running a
+        vulnerable package (and those already patched); ``?q=php`` lists the
+        open CVEs of matching packages and their nodes. Matches the installed
+        packages reported at the last check against Debian's security
+        tracker — probes nothing."""
+        _require_admin(request)
+        q = (q or "").strip()
+        if not (2 <= len(q) <= 64) or not _CVE_QUERY_RE.match(q):
+            raise HTTPException(status_code=400,
+                                detail="enter a CVE id (CVE-2026-1234) or a package name")
+        return await hub.osu_cve_search(q)
 
     @app.post("/api/os-updates/check")
     async def os_updates_check(request: Request):

@@ -8214,6 +8214,16 @@ function _renderOsUpdatesView(content) {
                 <button id="osu-cancel" onclick="osuCancel()" class="${btnSecCls} hidden">Cancel run</button>
                 <span id="osu-run" class="text-xs text-slate-500"></span>
             </div>
+            <div class="border border-slate-200 rounded-md px-3 py-2 bg-slate-50 space-y-2">
+                <div class="flex flex-wrap items-end gap-3">
+                    <div class="space-y-1 flex-1 min-w-[16rem]">
+                        <label class="${labelCls}" title="Matches each node's installed packages (reported at the last check) against Debian's security tracker">Who is affected? — CVE id or package</label>
+                        <input type="text" id="osu-cve-q" class="${inputCls}" placeholder="e.g. CVE-2026-1234 or php" onkeydown="if (event.key === 'Enter') osuCveSearch()">
+                    </div>
+                    <button onclick="osuCveSearch()" class="${btnSecCls}">Look up</button>
+                </div>
+                <div id="osu-cve-body"></div>
+            </div>
             <div id="osu-body"><p class="text-xs text-slate-400 italic">Loading…</p></div>
         </div>`;
     osuLoad();
@@ -8362,6 +8372,93 @@ window.osuTogglePkg = function (key, pkg, on) {
 };
 
 window.osuToggleOpen = function (key, open) { if (open) _osuOpen.add(key); else _osuOpen.delete(key); };
+
+// CVE lookup: which nodes run a package vulnerable to a CVE (or, for a package
+// name, that package's open CVEs). Served from the last check's inventory.
+window.osuCveSearch = async function () {
+    const q = (document.getElementById('osu-cve-q')?.value || '').trim();
+    const out = document.getElementById('osu-cve-body');
+    if (!out || !q) return;
+    out.innerHTML = '<p class="text-xs text-slate-400 italic">Looking up…</p>';
+    try {
+        const d = await apiJson('/api/os-updates/cves?q=' + encodeURIComponent(q));
+        window._osuCve = d;
+        out.innerHTML = _osuCveHtml(d);
+    } catch (e) {
+        out.innerHTML = `<p class="text-xs text-red-600">${escapeHtml(e.message || String(e))}</p>`;
+    }
+};
+
+// Pending upgrades on each affected node that belong to the vulnerable packages.
+function _osuCveFixes(d) {
+    const nodes = {};
+    ((window._osuData || {}).nodes || []).forEach(n => { nodes[`${n.kind}:${n.id}`] = n; });
+    const picks = [];
+    (d.results || []).forEach(r => r.affected.forEach(a => {
+        const pending = new Set(((nodes[a.node] || {}).packages || []).map(p => p.package));
+        a.binaries.filter(b => pending.has(b)).forEach(b => picks.push([a.node, b]));
+    }));
+    return picks;
+}
+
+window.osuCveSelectFixes = function () {
+    const picks = _osuCveFixes(window._osuCve || {});
+    picks.forEach(([key, pkg]) => {
+        (_osuSel.pkgs[key] || (_osuSel.pkgs[key] = new Set())).add(pkg);
+        _osuSel.nodes.delete(key);
+    });
+    _osuRender(window._osuData || {});
+    showToast(`${picks.length} package update(s) selected — review, then "Deploy selected".`, 'success');
+};
+
+function _osuCveHtml(d) {
+    const note = (cls, text) => `<p class="text-xs ${cls}">${text}</p>`;
+    const parts = [];
+    if (!Object.keys(d.feeds || {}).length) {
+        parts.push(note('text-amber-700', 'No Debian security data yet — run "Check for updates" so nodes report their installed packages and the hub fetches the tracker feed.'));
+    } else if (d.kind === 'cve' && !d.known) {
+        parts.push(note('text-slate-500', `${escapeHtml(d.query)} is not in Debian's security tracker for the release(s) in this fleet — it may not affect Debian packages, or not be published yet.`));
+    } else if (!(d.results || []).length) {
+        parts.push(note('text-slate-500', `No open CVEs match "${escapeHtml(d.query)}" on any checked node.`));
+    } else {
+        const fixes = _osuCveFixes(d).length;
+        parts.push(`<div class="flex flex-wrap items-center gap-2 text-xs">
+            <b class="${d.affected_nodes ? 'text-red-700' : 'text-emerald-700'}">${d.affected_nodes} of ${d.checked_nodes} checked node(s) affected</b>
+            ${fixes ? `<button onclick="osuCveSelectFixes()" class="text-[10px] font-bold text-emerald-800 border border-emerald-300 rounded px-2 py-0.5 hover:bg-emerald-50" title="Pick the pending updates of the vulnerable packages on affected nodes">Select fixes (${fixes})</button>` : ''}
+            ${d.truncated ? '<span class="text-slate-400">showing the first 200 CVEs — narrow the search</span>' : ''}</div>`);
+        parts.push(...d.results.map(r => {
+            const flags = [r.urgency ? `${r.urgency} urgency` : '', r.remote ? 'remote' : ''].filter(Boolean).join(' · ');
+            const row = (a, patched) => {
+                const status = patched ? _osuBadge('patched', 'emerald')
+                    : a.update_pending ? _osuBadge('update pending', 'amber', 'An update for this package is waiting — deploy it from this page')
+                    : a.fix_available ? _osuBadge('fixed in Debian — not yet installable here', 'amber', 'Run "Check for updates"; the node may lack the security repo')
+                    : _osuBadge('no fix yet', 'red', 'Debian has not released a fix for this release');
+                return `<div class="flex flex-wrap items-center justify-between gap-2 py-0.5">
+                    <span><b class="text-slate-700">${escapeHtml(a.label)}</b> <span class="text-slate-400">debian ${escapeHtml(a.release)}</span>
+                    — ${escapeHtml(a.package)} <span class="text-slate-400">${escapeHtml(a.version)}</span>
+                    <span class="text-slate-400">(${escapeHtml(a.binaries.join(', '))})</span></span>${status}</div>`;
+            };
+            const patched = (r.patched || []).length
+                ? `<details class="mt-1"><summary class="cursor-pointer text-[11px] text-slate-400">${r.patched.length} node(s) have the package and are patched</summary>${r.patched.map(a => row(a, true)).join('')}</details>` : '';
+            return `<div class="border border-slate-200 rounded-md p-2 bg-white text-[11px]">
+                <div class="flex flex-wrap items-center gap-2">
+                    <a href="https://security-tracker.debian.org/tracker/${encodeURIComponent(r.cve)}" target="_blank" rel="noopener" class="font-bold text-slate-700 underline">${escapeHtml(r.cve)}</a>
+                    <span class="text-slate-400">${escapeHtml(flags)}</span>
+                    ${r.affected.length ? _osuBadge(`${r.affected.length} affected`, 'red') : _osuBadge('no node affected', 'emerald')}
+                </div>
+                <div class="text-slate-500 mt-0.5">${escapeHtml(r.description || '')}</div>
+                ${r.affected.map(a => row(a, false)).join('')}${patched}</div>`;
+        }));
+    }
+    if ((d.unknown || []).length) {
+        parts.push(`<details><summary class="cursor-pointer text-[11px] text-amber-700">${d.unknown.length} node(s) could not be assessed</summary>
+            ${d.unknown.map(u => `<div class="text-[11px] text-slate-500"><b>${escapeHtml(u.label)}</b> — ${escapeHtml(u.reason)}</div>`).join('')}</details>`);
+    }
+    const feeds = Object.entries(d.feeds || {}).map(([c, f]) =>
+        `${escapeHtml(c)}${f.fetched_at ? ' ' + new Date(f.fetched_at * 1000).toLocaleString() : ''}${f.error ? ' (refresh failed: ' + escapeHtml(f.error) + ')' : ''}`).join(', ');
+    parts.push(`<p class="text-[10px] text-slate-400">Installed packages as of the last check · Debian security tracker data: ${feeds || 'none available'}</p>`);
+    return `<div class="space-y-2">${parts.join('')}</div>`;
+}
 
 async function _osuDeploy(body, summary) {
     const secOnly = !!document.getElementById('osu-security-only')?.checked;
@@ -36342,7 +36439,7 @@ async function _initApp() {
                                 <span id="user-chip-tenant">${escapeHtml(chipLabel)}</span>
                                 <svg class="w-2.5 h-2.5 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"/></svg>
                             </button>
-                            <div id="tenant-picker-menu" class="hidden absolute top-full left-0 mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl z-50 min-w-[140px] max-h-[60vh] overflow-y-auto py-1">
+                            <div id="tenant-picker-menu" class="hidden absolute top-full left-1/2 -translate-x-1/2 mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl z-50 min-w-[140px] max-h-[60vh] overflow-y-auto py-1">
                                 ${pickerTenants.map(t => `
                                     <div class="flex items-center hover:bg-[#01A982] group">
                                     <button data-tid="${escapeHtml(t.id)}" onclick="viewAsTenant('${escapeHtml(t.id)}')" title="${t.isGroup ? escapeHtml('Tenant group — shows: ' + (t.members.join(', ') || 'no members')) : ''}" class="flex-1 text-left pl-3 pr-1 py-1.5 text-[11px] text-slate-200 group-hover:text-white transition-colors flex items-center justify-between gap-2 ${t.id===currentTenant?'font-bold text-[#01A982]':''}">
