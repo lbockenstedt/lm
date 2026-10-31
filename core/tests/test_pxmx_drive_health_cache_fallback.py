@@ -17,6 +17,7 @@ from cache_core import DEFAULT_EXPIRE_AFTER_S
 from routes import pxmx
 
 from test_pxmx_drive_health_route import _MockHub, _build_client
+from webui_src import main_js_source
 
 _NS = "pxmx_drive_health"
 
@@ -238,7 +239,7 @@ def test_recovery_replaces_stale_with_live():
 
 def _main_js():
     from pathlib import Path
-    return (Path(__file__).resolve().parents[2] / "WebUI" / "main.js").read_text()
+    return main_js_source()
 
 
 def test_stale_banner_markup_is_not_duplicated():

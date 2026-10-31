@@ -16,6 +16,7 @@ import shutil
 import subprocess
 
 import pytest
+from webui_src import main_js_source
 
 WEBUI = os.path.join(os.path.dirname(__file__), "..", "..", "WebUI")
 MAIN_JS = os.path.abspath(os.path.join(WEBUI, "main.js"))
@@ -25,8 +26,7 @@ JSC = ("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/"
 
 
 def _src():
-    with open(MAIN_JS, encoding="utf-8") as fh:
-        return fh.read()
+    return main_js_source()
 
 
 def _extract(name, src):

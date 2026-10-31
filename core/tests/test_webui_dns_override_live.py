@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from webui_src import main_js_source
 
 MAIN_JS = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
 
@@ -45,7 +46,7 @@ VERIFY = {
 
 
 def _extract(name: str) -> str:
-    js = MAIN_JS.read_text(encoding="utf-8")
+    js = main_js_source()
     start = re.search(r"(async )?function %s\(" % re.escape(name), js).start()
     end = js.index("\n}\n", start) + len("\n}\n")
     return js[start:end]

@@ -18,14 +18,14 @@ Three round-2 blockers are locked in here:
 
 import os
 import re
+from webui_src import main_js_source
 
 MAIN_JS = os.path.abspath(os.path.join(
     os.path.dirname(__file__), "..", "..", "WebUI", "main.js"))
 
 
 def _src():
-    with open(MAIN_JS, encoding="utf-8") as fh:
-        return fh.read()
+    return main_js_source()
 
 
 def _function(name):

@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import pytest
+from webui_src import main_js_source
 
 # Ensure console/src is importable
 CONSOLE_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "console", "src"))
@@ -106,7 +107,7 @@ def mock_serial(monkeypatch):
 
 def test_webui_serial_add_console_tab_convert_eol():
     """Assert convertEol: true is present in serialAddConsoleTab terminal instantiation."""
-    src = open(MAIN_JS, encoding="utf-8").read()
+    src = main_js_source()
     body = _extract_fn(src, "serialAddConsoleTab")
     assert "new Terminal(" in body
     # Verify convertEol: true is present in Terminal options
@@ -118,7 +119,7 @@ def test_webui_serial_add_console_tab_convert_eol():
 
 def test_webui_serial_add_console_tab_ro_warning():
     """Assert read-only feedback check entry.ro warning toast is present in term.onData."""
-    src = open(MAIN_JS, encoding="utf-8").read()
+    src = main_js_source()
     body = _extract_fn(src, "serialAddConsoleTab")
     assert "term.onData(" in body
     assert "entry.ro" in body
