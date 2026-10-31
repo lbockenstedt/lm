@@ -266,3 +266,79 @@ def test_ignore_route_roundtrip(tmp_path, monkeypatch):
 def test_ignore_route_admin_only(tmp_path, monkeypatch):
     client, _ = _client(False, tmp_path, monkeypatch)
     assert client.post("/api/certmon/ignore", json={"host": "a.example.com"}).status_code == 403
+
+
+# ── host list auto-update ───────────────────────────────────────────────────
+
+_MIST_PAGE = """<table><tr><td>manage.gc1.mist.com</td></tr>
+<tr><td>ep-terminator.gc1.mist.com (TCP 443)</td></tr>
+<tr><td>oc-term.gc1.mist.com (TCP 2200)</td></tr>
+<tr><td>srx-log-terminator.gc1.mist.com (TCP 6514)</td></tr>
+<tr><td>radsec.nac.mist.com (TCP 2083)</td></tr>
+<tr><td>www.mist.com</td><td>manage.gc1.mist.com</td></tr></table>"""
+
+
+def _mist():
+    return next(s for s in cm.SOURCES if s["id"] == "mist")
+
+
+def test_parse_source_ports_and_skips():
+    got = {(h["host"], h["port"]): h for h in cm.parse_source(_mist(), _MIST_PAGE)}
+    assert set(got) == {("manage.gc1.mist.com", 443), ("ep-terminator.gc1.mist.com", 443),
+                        ("srx-log-terminator.gc1.mist.com", 6514), ("radsec.nac.mist.com", 2083)}
+    assert got[("manage.gc1.mist.com", 443)]["region"] == "Global 02"
+    assert got[("manage.gc1.mist.com", 443)]["service"] == "Juniper Mist"
+
+
+def test_parse_source_central_filters_internal():
+    src = next(s for s in cm.SOURCES if s["id"] == "new-central")
+    page = "us1.api.central.arubanetworks.com internal.api.central.arubanetworks.com cn1.api.central.arubanetworks.com.cn"
+    assert [h["host"] for h in cm.parse_source(src, page)] == [
+        "us1.api.central.arubanetworks.com", "cn1.api.central.arubanetworks.com.cn"]
+
+
+def _fake_fetch(pages):
+    def fetch(url):
+        for sid, page in pages.items():
+            if next(s for s in cm.SOURCES if s["id"] == sid)["url"] == url:
+                if isinstance(page, Exception):
+                    raise page
+                return page
+        raise OSError("unreachable")
+    return fetch
+
+
+def test_refresh_sources_add_remove_and_swap(tmp_path):
+    hosts = [f"h{i}.gc1.mist.com" for i in range(60)]
+    page = " ".join(hosts)
+    seed_mist = [h for h in cm.BUILTIN_HOSTS if h["service"] == "Juniper Mist"]
+    data = cm.refresh_sources(str(tmp_path), fetch=_fake_fetch({"mist": page}))
+    mist = data["mist"]
+    assert len(mist["hosts"]) == 60 and mist["error"] == ""
+    assert "h0.gc1.mist.com:443" in mist["added"]
+    assert "www.mist.com:443" in mist["removed"]
+    # unreachable sources keep the seed and record the error
+    assert data["new-central"]["error"] and "hosts" not in data["new-central"]
+    live = cm.builtin_hosts(str(tmp_path))
+    live_mist = {h["host"] for h in live if h["service"] == "Juniper Mist"}
+    assert live_mist == set(hosts)
+    assert len(live) == len(cm.BUILTIN_HOSTS) - len(seed_mist) + 60
+
+
+def test_refresh_sources_keeps_list_when_page_shrinks(tmp_path):
+    page = " ".join(f"h{i}.gc1.mist.com" for i in range(60))
+    cm.refresh_sources(str(tmp_path), fetch=_fake_fetch({"mist": page}))
+    data = cm.refresh_sources(str(tmp_path), fetch=_fake_fetch({"mist": "h1.gc1.mist.com h2.gc1.mist.com"}))
+    assert len(data["mist"]["hosts"]) == 60
+    assert "only 2 host(s)" in data["mist"]["error"]
+    data = cm.refresh_sources(str(tmp_path), fetch=_fake_fetch({"mist": OSError("timeout")}))
+    assert len(data["mist"]["hosts"]) == 60 and "timeout" in data["mist"]["error"]
+
+
+def test_sources_due_daily():
+    now = _dt.datetime(2026, 1, 2, tzinfo=_dt.timezone.utc)
+    fresh = {s["id"]: {"checked_at": (now - _dt.timedelta(hours=2)).isoformat()} for s in cm.SOURCES}
+    assert cm.sources_due({}, now) is True
+    assert cm.sources_due(fresh, now) is False
+    fresh["mist"]["checked_at"] = (now - _dt.timedelta(hours=25)).isoformat()
+    assert cm.sources_due(fresh, now) is True

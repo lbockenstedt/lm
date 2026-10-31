@@ -14,6 +14,11 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ### Cert Monitor
 
+- **Mist / Central host list updates itself daily.** The built-in endpoint list is
+  refreshed from Juniper's and Aruba's published endpoint pages before each daily check —
+  new endpoints (e.g. Mist SRX log terminators, RadSec, New Central GB1/IN1/CN1) are added
+  and retired ones dropped; a bad read keeps the last list. See
+  [cert-monitor.md](cert-monitor.md#built-in-host-list-auto-update).
 - **Reminder emails with an escalation ladder.** A Cert Monitor alert rule can now repeat
   its email every N hours while a cert stays bad, and an expiring rule can escalate, e.g.
   one email at 30 days, daily inside 7 days, every 6 hours once expired. Set it in
