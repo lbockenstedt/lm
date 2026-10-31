@@ -4025,7 +4025,7 @@ function _rebuildMainNav(allSpokes, connections) {
         ${isAdmin() ? adminSettings : ''}
         ${isAdmin() ? adminLogs : ''}
         ${isAdmin() ? _securityNavHtml() : ''}
-        ${isAdmin() ? _osUpdatesNavHtml() : ''}
+        ${(isAdmin() || isTenantAdmin()) ? _osUpdatesNavHtml() : ''}
         ${(isAdmin() && window.__lmCertMonEnabled) ? _certMonNavHtml() : ''}
         ${(isAdmin() || isTenantAdmin()) ? _credVaultNavHtml() : ''}
         ${isAdmin() ? _templateRepoNavHtml() : ''}
@@ -4285,7 +4285,7 @@ async function setView(viewId) {
     if (viewId === 'credvault' && !(isTenantAdmin() || isAdmin())) {
         return;
     }
-    if (viewId === 'osupdates' && !isAdmin()) {
+    if (viewId === 'osupdates' && !(isAdmin() || isTenantAdmin())) {
         return;
     }
     // Cert Expiry Monitor — Global Admin only, and only while enabled.

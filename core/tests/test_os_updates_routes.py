@@ -40,8 +40,14 @@ class _FakeHub:
         self._cfg = {"enabled": bool(enabled), "interval_hours": hours}
         return dict(self._cfg)
 
-    def osu_snapshot(self):
-        return self._snapshot
+    def osu_snapshot(self, only=None):
+        if only is None:
+            return self._snapshot
+        return {**self._snapshot, "nodes": [n for n in self._snapshot["nodes"]
+                                            if f"{n['kind']}:{n['id']}" in only]}
+
+    def osu_tenant_node_keys(self, tenants):
+        return {"spoke:mine"} if "t1" in tenants else set()
 
     async def osu_check_fleet(self, refresh=True):
         self.checked.append(refresh)
@@ -89,7 +95,7 @@ class _FakeHub:
         (self._reboot.add if on else self._reboot.discard)(key)
         return self.osu_autopatch_config()
 
-    def osu_pending_reboots(self):
+    def osu_pending_reboots(self, only=None):
         return {"in_window": True, "window": {}, "nodes": [{"key": "hub:hub"}]}
 
     async def osu_fix_access(self, key, username, password, actor=""):
@@ -101,12 +107,13 @@ class _FakeHub:
         return {"status": "SUCCESS", "message": "reboot scheduled in 1 minute"}
 
 
-def _client(is_admin=True):
+def _client(is_admin=True, tenant_admin=False):
     app = FastAPI()
     hub = _FakeHub()
     ctx = SimpleNamespace(
-        _session_user=lambda req: {"user": "root", "is_admin": is_admin},
+        _session_user=lambda req: {"username": "ta", "user": {"tenants": ["t1"]}},
         _is_admin=lambda s: is_admin,
+        _is_tenant_admin=lambda s: tenant_admin,
     )
     os_updates_routes.register(app, hub, ctx)
     return TestClient(app), hub
@@ -235,3 +242,35 @@ def test_pending_reboots_is_admin_only():
     assert c.get("/api/os-updates/pending-reboots").json()["nodes"] == [{"key": "hub:hub"}]
     c, _ = _client(is_admin=False)
     assert c.get("/api/os-updates/pending-reboots").status_code == 403
+
+
+def _tenant_client():
+    c, hub = _client(is_admin=False, tenant_admin=True)
+    hub._snapshot = {"nodes": [
+        {"kind": "hub", "id": "hub", "eligible": True, "count": 3},
+        {"kind": "spoke", "id": "mine", "eligible": True, "count": 2},
+        {"kind": "spoke", "id": "other", "eligible": True, "count": 1}], "totals": {}}
+    return c, hub
+
+
+def test_global_admin_sees_every_node():
+    _, tenant_hub = _tenant_client()
+    c, hub = _client()
+    hub._snapshot = tenant_hub._snapshot
+    assert len(c.get("/api/os-updates").json()["nodes"]) == 3
+
+
+def test_tenant_admin_sees_and_patches_only_their_nodes():
+    c, hub = _tenant_client()
+    assert [n["id"] for n in c.get("/api/os-updates").json()["nodes"]] == ["mine"]
+    assert c.post("/api/os-updates/apply", json={}).status_code == 200
+    assert hub.applied["nodes"] == ["spoke:mine"]
+    assert c.post("/api/os-updates/apply", json={"nodes": ["spoke:other"]}).status_code == 403
+    assert c.post("/api/os-updates/reboot", json={"node": "hub:hub"}).status_code == 403
+    assert c.post("/api/os-updates/auto-patch",
+                  json={"node": "spoke:mine", "enabled": True}).status_code == 200
+    assert c.post("/api/os-updates/auto-patch",
+                  json={"node": "spoke:other", "enabled": True}).status_code == 403
+    assert c.post("/api/os-updates/auto-patch",
+                  json={"window": {"start": "02:00", "end": "04:00"}}).status_code == 403
+    assert c.post("/api/os-updates/auto-check", json={"enabled": False}).status_code == 403

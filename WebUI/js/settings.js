@@ -627,6 +627,8 @@ function _onSaTenantFilterChange() {
 let _osuPoll = null;
 
 function _renderOsUpdatesView(content) {
+    // Fleet-wide settings are Global Admin only; a Tenant Admin sees just their nodes.
+    const osuFleetCls = isAdmin() ? '' : 'hidden';
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
         <div class="${card} space-y-4">
@@ -644,7 +646,7 @@ function _renderOsUpdatesView(content) {
                 Nodes are updated <b>one at a time</b>, and the <b>hub goes last</b> (updating it restarts this page).
                 This is separate from LM code updates.
             </div>
-            <div class="flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
+            <div class="${osuFleetCls} flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
                 <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="osu-autocheck-enabled" class="w-4 h-4 text-green-600 rounded">Auto-check the fleet</label>
                 <div class="space-y-1">
                     <label class="${labelCls}">Every</label>
@@ -656,7 +658,7 @@ function _renderOsUpdatesView(content) {
                 <button onclick="osuSaveAutoCheck()" class="${btnSecCls}">Save</button>
                 <span id="osu-autocheck-status" class="text-xs text-slate-400"></span>
             </div>
-            <div class="flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
+            <div class="${osuFleetCls} flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
                 <span class="text-sm text-slate-600 self-center">Auto-patch (approved nodes only):</span>
                 <div class="space-y-1">
                     <label class="${labelCls}">Install</label>
@@ -672,7 +674,7 @@ function _renderOsUpdatesView(content) {
                 <button onclick="osuSaveAutoPatchExclude()" class="${btnSecCls}">Save</button>
                 <span id="osu-autopatch-count" class="text-xs text-slate-400 self-center"></span>
             </div>
-            <div class="flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
+            <div class="${osuFleetCls} flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
                 <span class="text-sm text-slate-600 self-center" title="Auto-patch and auto-reboot only run in this window (once per window). Same start and end = any time.">Maintenance window (off hours):</span>
                 <div class="space-y-1">
                     <label class="${labelCls}">From</label>
@@ -716,13 +718,13 @@ function _renderOsUpdatesView(content) {
 }
 
 // Footer "Pending Reboot" alert: during the maintenance window, lists the
-// nodes auto-reboot is about to restart (hover for the list). Admin only,
-// like the rest of OS Updates; refreshed every minute.
+// nodes auto-reboot is about to restart (hover for the list). Admins (a
+// Tenant Admin sees their own nodes), like the rest of OS Updates; refreshed every minute.
 async function osuRefreshRebootTray() {
     const tray = document.getElementById('reboot-tray');
     if (!tray) return;
     let data = { nodes: [] };
-    if (typeof isAdmin === 'function' && isAdmin()) {
+    if (typeof isAdmin === 'function' && (isAdmin() || isTenantAdmin())) {
         try { data = await apiJson('/api/os-updates/pending-reboots'); } catch (e) { /* keep hidden */ }
     }
     const nodes = data.in_window ? (data.nodes || []) : [];

@@ -25,7 +25,8 @@ own command types (``OS_UPDATE_APPLY_PACKAGES`` / ``OS_REBOOT``) and are only
 offered for nodes whose check reported the matching ``features`` — an older
 node never sees a request it would misread as "upgrade everything".
 
-Auto-patch (opt-in PER NODE, none by default) only runs inside the
+Auto-patch (PER NODE; new spokes/agents are enrolled with auto-reboot on
+first sight, the hub never is) only runs inside the
 maintenance window (``window``: start/end "HH:MM" in a timezone, default
 01:00-05:00; start == end means any time). Once per window, as soon as it
 opens, the fleet is re-checked and the nodes an operator approved for
@@ -117,6 +118,9 @@ _OSU_AUTOCHECK_DEFAULT_HOURS = 6.0
 #  reboot_nodes: ["kind:id", ...], window: {start, end, tz}}.
 # Only listed nodes are auto-patched; excluded packages are never auto-installed.
 # reboot_nodes (always a subset of nodes) are rebooted after an auto-patch run.
+# known: every node key ever seen. A node not in it yet is new and is enrolled
+# in auto-patch + auto-reboot on first sight (the hub never is); after that the
+# operator's choice sticks.
 _OSU_AUTOPATCH_CFG_KEY = "os_updates_autopatch"
 _AUTOPATCH_ACTOR = "auto-patch"
 _AUTOREBOOT_ACTOR = "auto-reboot"
@@ -243,13 +247,22 @@ class HubOsUpdatesMixin:
                      or md.get("hostname") or sid)
             out.append({"kind": "spoke", "id": sid, "spoke_id": sid,
                         "label": str(label), "module_type": mtype})
-        # Agents, routed via their owning spoke.
+        def _host(name):
+            return str(name or "").split(".")[0].strip().lower()
+        spoke_hosts = set()
+        for sid in conns:
+            md = meta.get(sid, {}) or {}
+            spoke_hosts |= {_host(md.get(f)) for f in ("display_name", "name", "hostname")}
+        spoke_hosts.discard("")
+        # Agents, routed via their owning spoke. An agent on a machine that is
+        # already listed as a spoke is the same OS — patching it twice would
+        # just duplicate the row, so it is skipped.
         # agent_info is guid-keyed once an agent is migrated (B2); the owning
         # spoke only knows the agent by the raw ``agent_id`` it reported, so the
         # relay must address it by that name (same as Remote Console).
         for aid, info in (getattr(self, "agent_info", {}) or {}).items():
             sid = (info or {}).get("spoke_id") or ""
-            if not sid:
+            if not sid or _host((info or {}).get("hostname")) in spoke_hosts:
                 continue
             out.append({"kind": "agent", "id": aid, "spoke_id": sid,
                         "agent_id": str((info or {}).get("agent_id") or aid),
@@ -258,6 +271,18 @@ class HubOsUpdatesMixin:
         out.append({"kind": "hub", "id": "hub", "spoke_id": "",
                     "label": "hub (this server)", "module_type": "hub"})
         return out
+
+    def osu_tenant_node_keys(self, tenants: "set[str]") -> "set[str]":
+        """Node keys a tenant admin of ``tenants`` may see and patch: spokes
+        bound to one of those tenants, and the agents those spokes own. Never
+        the hub."""
+        keys = set()
+        for t in self._osu_targets():
+            if t["kind"] == "hub":
+                continue
+            if self.state.get_spoke_tenant(t["spoke_id"]) in tenants:
+                keys.add(f"{t['kind']}:{t['id']}")
+        return keys
 
     # ── check ────────────────────────────────────────────────────────────────
     async def _osu_check_one(self, t: Dict[str, str], refresh: bool) -> Dict[str, Any]:
@@ -332,6 +357,7 @@ class HubOsUpdatesMixin:
                 inventory.pop(key, None)  # node too old to report one
         st["nodes"] = {f"{n['kind']}:{n['id']}": n for n in nodes}
         st["checked_at"] = time.time()
+        self._osu_enroll_new_nodes(list(st["nodes"]))
         self._osu_save()
         # Warm the CVE feeds now so a lookup doesn't wait on a download.
         await asyncio.to_thread(self._osu_feeds_for, inventory)
@@ -426,7 +452,7 @@ class HubOsUpdatesMixin:
         await run_sync_loop(stagger=90, body=_tick, delay=lambda: _AUTOPATCH_TICK_S,
                             error_label="os-updates auto-patch loop cycle failed")
 
-    # ── auto-patch (WebUI-configurable, off by default) ─────────────────────
+    # ── auto-patch (WebUI-configurable, per node) ────────────────────────────
     def osu_autopatch_config(self) -> Dict[str, Any]:
         """``{security_only, nodes, exclude, reboot_nodes}`` — the node keys
         approved for auto-patch, the package names/globs it must never install,
@@ -446,14 +472,37 @@ class HubOsUpdatesMixin:
 
     def _osu_save_autopatch(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         gc = self.state.system_state.setdefault("global_config", {})
+        old = gc.get(_OSU_AUTOPATCH_CFG_KEY) or {}
         nodes = set(cfg["nodes"])
         gc[_OSU_AUTOPATCH_CFG_KEY] = {"security_only": bool(cfg["security_only"]),
                                       "nodes": sorted(nodes),
                                       "exclude": sorted(set(cfg["exclude"])),
                                       "reboot_nodes": sorted(set(cfg["reboot_nodes"]) & nodes),
-                                      "window": _parse_window(cfg["window"])}
+                                      "window": _parse_window(cfg["window"]),
+                                      "known": sorted(set(cfg.get("known", old.get("known") or [])))}
         self.state._mark_dirty()
         return self.osu_autopatch_config()
+
+    def _osu_enroll_new_nodes(self, keys: List[str]) -> None:
+        """Turn auto-patch and auto-reboot on for nodes seen for the first
+        time. The first run on a hub that predates this only records the
+        current fleet, so nobody's existing choices change."""
+        try:
+            raw = self.state.system_state.get("global_config", {}).get(_OSU_AUTOPATCH_CFG_KEY) or {}
+        except Exception:  # noqa: BLE001 — hub without state (tests)
+            return
+        cfg = self.osu_autopatch_config()
+        known = set(raw.get("known") or [])
+        new = [k for k in keys if k not in known and not k.startswith("hub:")]
+        if "known" in raw and not new:
+            return
+        if "known" in raw:
+            logger.info("[os-updates] auto-patch + auto-reboot enabled for new node(s): %s",
+                     ", ".join(new))
+            cfg["nodes"] = cfg["nodes"] + new
+            cfg["reboot_nodes"] = cfg["reboot_nodes"] + new
+        cfg["known"] = list(known | set(keys))
+        self._osu_save_autopatch(cfg)
 
     def osu_set_autopatch_security_only(self, security_only: bool) -> Dict[str, Any]:
         return self._osu_save_autopatch({**self.osu_autopatch_config(),
@@ -581,7 +630,7 @@ class HubOsUpdatesMixin:
             keys.append(key)
         return keys, packages
 
-    def osu_pending_reboots(self) -> Dict[str, Any]:
+    def osu_pending_reboots(self, only: "Optional[set[str]]" = None) -> Dict[str, Any]:
         """Nodes auto-reboot will restart in the current maintenance window —
         for the "Pending Reboot" alert in the WebUI footer.
 
@@ -603,6 +652,8 @@ class HubOsUpdatesMixin:
             keys = [k for k in self._osu_autopatch_plan(cfg)[0] if k in cfg["reboot_nodes"]]
         else:
             keys = []
+        if only is not None:
+            keys = [k for k in keys if k in only]
         nodes = []
         for key in keys:
             n = by_key.get(key) or {}
@@ -664,7 +715,9 @@ class HubOsUpdatesMixin:
         return {"status": "SUCCESS" if ok else "ERROR",
                 "message": msg or ("access fixed" if ok else "fix failed")}
 
-    def osu_snapshot(self) -> Dict[str, Any]:
+    def osu_snapshot(self, only: "Optional[set[str]]" = None) -> Dict[str, Any]:
+        """Panel state. ``only``: just these node keys (a tenant admin's view);
+        the run then lists only their items."""
         st = self._osu_state()
         # Merge in the CURRENTLY connected targets so a spoke/agent that is
         # installed and reporting in over the control plane always appears in
@@ -695,7 +748,12 @@ class HubOsUpdatesMixin:
         for key, n in merged.items():
             n["auto_patch"] = key in approved
             n["auto_reboot"] = key in reboot
+        if only is not None:
+            merged = {k: n for k, n in merged.items() if k in only}
         nodes = sorted(merged.values(), key=lambda n: (n["kind"] != "hub", n["label"]))
+        run = st.get("run")
+        if only is not None and run:
+            run = {**run, "items": [i for i in run.get("items") or [] if i["key"] in only]}
         pending = [n for n in nodes if n.get("eligible") and n.get("count")
                    and not n.get("apply_blocker")]
         return {
@@ -713,7 +771,7 @@ class HubOsUpdatesMixin:
                 "blocked": sum(1 for n in nodes if n.get("apply_blocker")),
                 "not_checked": sum(1 for n in nodes if not n.get("checked")),
             },
-            "run": st.get("run"),
+            "run": run,
         }
 
     # ── CVE lookup: "who is affected by CVE-XXXX-YYYY?" ─────────────────────
@@ -732,9 +790,14 @@ class HubOsUpdatesMixin:
         fc = self._osu_feed_cache()
         return {c: f for c in sorted(codenames) if c and (f := fc.get(c)) is not None}
 
-    def _osu_cve_search_sync(self, query: str) -> Dict[str, Any]:
+    def _osu_cve_search_sync(self, query: str,
+                             only: "Optional[set[str]]" = None) -> Dict[str, Any]:
         st = self._osu_state()
         inventory = dict(st.get("inventory") or {})
+        nodes = st.get("nodes") or {}
+        if only is not None:
+            inventory = {k: v for k, v in inventory.items() if k in only}
+            nodes = {k: v for k, v in nodes.items() if k in only}
         feeds = self._osu_feeds_for(inventory)
         fc = self._osu_feed_cache()
         is_cve = bool(CVE_RE.match(query))
@@ -742,7 +805,6 @@ class HubOsUpdatesMixin:
 
         results: Dict[str, Dict[str, Any]] = {}
         unknown: List[Dict[str, str]] = []
-        nodes = st.get("nodes") or {}
         labels = {k: n.get("label") or k for k, n in nodes.items()}
         for key, n in nodes.items():
             inv = inventory.get(key)
@@ -800,20 +862,31 @@ class HubOsUpdatesMixin:
                       for c in feeds},
         }
 
-    def _osu_fleet_cves_sync(self) -> List[Dict[str, Any]]:
+    def _osu_fleet_cves_sync(self, only: "Optional[set[str]]" = None) -> List[Dict[str, Any]]:
         """Every CVE that affects at least one node right now, newest first:
         ``[{cve, description, urgency, nodes}]`` (``nodes`` is a count). Feeds
         the search box's suggestions. Matches each node's installed packages
         against the feed entries for just those packages, and is cached until
-        the next check or feed refresh."""
+        the next check or feed refresh. ``only``: count just these nodes."""
         st = self._osu_state()
         inventory = dict(st.get("inventory") or {})
         feeds = self._osu_feeds_for(inventory)
         fc = self._osu_feed_cache()
         stamp = (st.get("checked_at"), tuple((c, fc.fetched_at(c)) for c in feeds))
         cached = getattr(self, "_osu_fleet_cves", None)
-        if cached and cached[0] == stamp:
-            return cached[1]
+        if not (cached and cached[0] == stamp):
+            cached = (stamp, self._osu_fleet_cve_nodes(inventory, feeds))
+            self._osu_fleet_cves = cached
+        out = []
+        for r in cached[1]:
+            n = len(r["nodes"] if only is None else r["nodes"] & only)
+            if n:
+                out.append({**r, "nodes": n})
+        return out
+
+    def _osu_fleet_cve_nodes(self, inventory: Dict[str, Any],
+                             feeds: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """``[{cve, description, urgency, nodes: {node keys}}]``, newest first."""
         found: Dict[str, Dict[str, Any]] = {}
         for key, inv in inventory.items():
             os_info = inv.get("os") or {}
@@ -830,19 +903,19 @@ class HubOsUpdatesMixin:
                                                 "description": feed.descriptions.get(f["cve"], "")[:160],
                                                 "urgency": f["urgency"], "nodes": set()})
                 r["nodes"].add(key)
-        out = [{**r, "nodes": len(r["nodes"])} for r in found.values()]
+        out = list(found.values())
         out.sort(key=lambda r: [-int(p) for p in r["cve"].split("-")[1:]])
-        self._osu_fleet_cves = (stamp, out)
         return out
 
-    async def osu_fleet_cves(self) -> List[Dict[str, Any]]:
-        return await asyncio.to_thread(self._osu_fleet_cves_sync)
+    async def osu_fleet_cves(self, only: "Optional[set[str]]" = None) -> List[Dict[str, Any]]:
+        return await asyncio.to_thread(self._osu_fleet_cves_sync, only)
 
-    async def osu_cve_search(self, query: str) -> Dict[str, Any]:
+    async def osu_cve_search(self, query: str,
+                             only: "Optional[set[str]]" = None) -> Dict[str, Any]:
         """Which nodes run a package vulnerable to ``query`` — a CVE id, or a
         package-name fragment (e.g. ``php``) listing its open CVEs. Matches the
         inventory from the last check; never probes the nodes."""
-        return await asyncio.to_thread(self._osu_cve_search_sync, query.strip())
+        return await asyncio.to_thread(self._osu_cve_search_sync, query.strip(), only)
 
     # ── rolling apply ────────────────────────────────────────────────────────
     async def osu_apply_fleet(self, node_keys: Optional[List[str]] = None,
