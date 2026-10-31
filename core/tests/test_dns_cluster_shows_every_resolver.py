@@ -21,6 +21,7 @@ A single-host (non-clustered) module must render exactly as before.
 
 import re
 from pathlib import Path
+from webui_src import main_js_source
 
 ROOT = Path(__file__).resolve().parents[2]
 MAIN_JS = ROOT / "WebUI" / "main.js"
@@ -28,7 +29,7 @@ DNS_SPOKE = ROOT / "dns" / "src" / "dns_spoke.py"
 
 
 def _js():
-    return MAIN_JS.read_text(encoding="utf-8")
+    return main_js_source()
 
 
 def _member_evidence():

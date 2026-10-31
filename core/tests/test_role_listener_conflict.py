@@ -15,6 +15,7 @@ import pytest
 
 from routes import agents
 from fastapi import HTTPException
+from webui_src import main_js_source
 
 
 # ── the pure conflict helper ────────────────────────────────────────────────
@@ -186,7 +187,7 @@ def test_webui_table_matches_the_backend_table():
     import os
     import re
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    js = open(os.path.join(root, "WebUI", "main.js")).read()
+    js = main_js_source()
     block = re.search(r"const ROLE_LISTENER_PORTS = \{(.*?)\};", js, re.S).group(1)
     ui = {m.group(1): int(m.group(2))
           for m in re.finditer(r"'([\w-]+)'\s*:\s*(\d+)", block)}

@@ -9,9 +9,10 @@ unexplained on the third.
 """
 import re
 from pathlib import Path
+from webui_src import main_js_source
 
 _MAIN = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
-_SRC = _MAIN.read_text(encoding="utf-8")
+_SRC = main_js_source()
 
 
 def _fn(name):

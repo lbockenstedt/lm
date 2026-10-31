@@ -2,6 +2,7 @@
 
 import os
 import re
+from webui_src import main_js_source
 
 
 MAIN_JS = os.path.abspath(os.path.join(
@@ -9,7 +10,7 @@ MAIN_JS = os.path.abspath(os.path.join(
 
 
 def _show_load_role_modal():
-    src = open(MAIN_JS, encoding="utf-8").read()
+    src = main_js_source()
     start = src.index("async function showLoadRoleModal(")
     depth = 0
     for i in range(src.index("{", start), len(src)):

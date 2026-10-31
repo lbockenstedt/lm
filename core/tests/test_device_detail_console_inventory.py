@@ -6,6 +6,7 @@ from api import Request, FastAPI
 
 from routes.console import console_port_search_blob, console_port_result
 from routes.cppm import register
+from webui_src import main_js_source
 
 # Mock Hub
 class MockHub:
@@ -132,8 +133,7 @@ async def test_get_device_detail_ignores_bare_device_path_match(monkeypatch):
 
 def test_webui_main_js_console_fastpath_is_admin_gated():
     import os
-    with open(Path(__file__).resolve().parents[2] / "WebUI" / "main.js", "r") as f:
-        content = f.read()
+    content = main_js_source()
 
     # Non-admins can't use /api/device-detail, so the terminal fast-path must exist but be admin-gated
     assert "item.source === 'console' && item.spoke_id && item.port_id && !isAdmin()" in content
@@ -142,8 +142,7 @@ def test_webui_main_js_console_fastpath_is_admin_gated():
 
 def test_webui_main_js_forwards_serial():
     import os
-    with open(Path(__file__).resolve().parents[2] / "WebUI" / "main.js", "r") as f:
-        content = f.read()
+    content = main_js_source()
     
     assert "params.set('serial', item.serial);" in content
     assert "params.set('port_id', item.port_id);" in content

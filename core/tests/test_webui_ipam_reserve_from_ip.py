@@ -15,13 +15,14 @@ and not a lease conversion that would try to purge a lease that may not exist.
 
 import os
 import re
+from webui_src import main_js_source
 
 MAIN_JS = os.path.abspath(os.path.join(
     os.path.dirname(__file__), "..", "..", "WebUI", "main.js"))
 
 
 def _src():
-    return open(MAIN_JS, encoding="utf-8").read()
+    return main_js_source()
 
 
 def _fn(name):
