@@ -11,9 +11,10 @@ and the suite doesn't execute the browser bundle), pinning the contract:
   * repeat clicks on the same thing refresh one toast, never stack.
 """
 from pathlib import Path
+from webui_src import main_js_source
 
 _MAIN = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
-_SRC = _MAIN.read_text(encoding="utf-8")
+_SRC = main_js_source()
 
 
 def _fn(name):

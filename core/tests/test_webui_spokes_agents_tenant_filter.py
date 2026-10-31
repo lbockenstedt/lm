@@ -20,13 +20,14 @@ harness in this suite.
 import shutil
 import subprocess
 from pathlib import Path
+from webui_src import main_js_paths, main_js_source
 
 WEBUI_JS = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
 
 
 def _content():
     assert WEBUI_JS.exists(), f"WebUI/main.js not found at {WEBUI_JS}"
-    return WEBUI_JS.read_text(encoding="utf-8")
+    return main_js_source()
 
 
 def test_pxmx_agent_tenant_filter_prefers_the_agents_own_effective_tenant():
@@ -44,5 +45,6 @@ def test_js_syntax_valid():
     if not shutil.which("node"):
         import pytest
         pytest.skip("node not available")
-    res = subprocess.run(["node", "--check", str(WEBUI_JS)], capture_output=True, text=True)
-    assert res.returncode == 0, f"Node syntax error: {res.stderr}"
+    for path in main_js_paths():
+        res = subprocess.run(["node", "--check", str(path)], capture_output=True, text=True)
+        assert res.returncode == 0, f"Node syntax error in {path.name}: {res.stderr}"

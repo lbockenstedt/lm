@@ -3,6 +3,7 @@
 import ast
 import re
 from pathlib import Path
+from webui_src import main_js_source
 
 
 MAIN_JS = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
@@ -19,7 +20,7 @@ def _submenu(view, src):
 
 
 def test_dns_and_dhcp_navigation_include_diagnostics():
-    src = MAIN_JS.read_text(encoding="utf-8")
+    src = main_js_source()
     assert "Diagnostics" in _submenu("dns", src)
     assert "Diagnostics" in _submenu("dhcp", src)
 
@@ -29,7 +30,7 @@ def test_diagnostics_is_the_last_tab():
     sits at the END of the strip — matching `settings`, which already lists it
     last. It previously sat 3rd (DNS) and 2nd (DHCP), pushing the day-to-day
     record/lease tabs to the right."""
-    src = MAIN_JS.read_text(encoding="utf-8")
+    src = main_js_source()
     for view in ("dns", "dhcp"):
         assert _submenu(view, src)[-1] == "Diagnostics", (
             "%s: Diagnostics must be the last tab" % view)
@@ -38,13 +39,13 @@ def test_diagnostics_is_the_last_tab():
 def test_overview_stays_the_default_tab():
     """setSubView defaults to element [0], so the first entry is the landing
     tab — reordering must not make Diagnostics the default."""
-    src = MAIN_JS.read_text(encoding="utf-8")
+    src = main_js_source()
     for view in ("dns", "dhcp"):
         assert _submenu(view, src)[0] == "Overview"
 
 
 def test_no_tabs_were_lost_in_the_reorder():
-    src = MAIN_JS.read_text(encoding="utf-8")
+    src = main_js_source()
     assert sorted(_submenu("dns", src)) == sorted(
         ["Overview", "Records", "Forwarders", "Overrides", "External DNS", "Diagnostics"])
     assert sorted(_submenu("dhcp", src)) == sorted(
@@ -52,7 +53,7 @@ def test_no_tabs_were_lost_in_the_reorder():
 
 
 def test_diagnostics_views_call_the_read_only_endpoints():
-    src = MAIN_JS.read_text(encoding="utf-8")
+    src = main_js_source()
     # Scoped to the tenant picker: these endpoints resolve WHICH module spoke
     # answers from the caller's effective tenant, so an unscoped request would
     # silently land on whichever spoke connected first.
@@ -63,14 +64,14 @@ def test_diagnostics_views_call_the_read_only_endpoints():
 
 
 def test_global_admin_dhcp_view_auto_discovers_the_ha_pair():
-    src = MAIN_JS.read_text(encoding="utf-8")
+    src = main_js_source()
     assert "isAdmin()) {" in src
     assert "'/api/dhcp/ha/discover' + _tenantQS()" in src
     assert "loadDHCPData(subMenu, true)" in src
 
 
 def test_dhcp_configuration_tile_renders_details_button_and_modal():
-    src = MAIN_JS.read_text(encoding="utf-8")
+    src = main_js_source()
     assert "_showDhcpConfigDetailsModal" in src
     assert "dhcp-cfg-details-modal" in src
     assert "check('Configuration', !!cfg.ok, cfgSub, cfgAction)" in src
@@ -82,7 +83,7 @@ def test_dhcp_diagnostics_renders_the_real_time_dns_hook_panel_and_toggle():
     control at all — the feature was unreachable regardless of how its
     settings defaulted. This locks in the Diagnostics-tab panel + admin-only
     enable/disable toggle that calls the new /api/dhcp/dns-hook route."""
-    src = MAIN_JS.read_text(encoding="utf-8")
+    src = main_js_source()
     assert "fetch('/api/dhcp/dns-hook' + _tenantQS())" in src
     assert "_dhcpDnsHookPanel(dnsHook)" in src
     assert "function toggleDhcpDnsHook(enable)" in src

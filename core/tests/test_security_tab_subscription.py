@@ -13,14 +13,14 @@ import os
 import re
 
 import pytest
+from webui_src import main_js_source
 
 MAIN_JS = os.path.join(os.path.dirname(__file__), "..", "..", "WebUI", "main.js")
 
 
 @pytest.fixture(scope="module")
 def js():
-    with open(MAIN_JS, encoding="utf-8") as f:
-        return f.read()
+    return main_js_source()
 
 
 @pytest.fixture(scope="module")

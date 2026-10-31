@@ -1,13 +1,14 @@
 """WebUI wiring for adding persistent DNS forwarders."""
 
 from pathlib import Path
+from webui_src import main_js_source
 
 
 MAIN_JS = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
 
 
 def _source():
-    return MAIN_JS.read_text(encoding="utf-8")
+    return main_js_source()
 
 
 def test_forwarder_add_button_is_global_admin_only():

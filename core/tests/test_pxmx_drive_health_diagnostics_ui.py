@@ -1,6 +1,7 @@
 import pytest
 import os
 from pathlib import Path
+from webui_src import main_js_source
 
 @pytest.mark.asyncio
 async def test_get_pxmx_drive_health_diagnostics():
@@ -106,8 +107,7 @@ async def test_get_pxmx_drive_health_diagnostics():
 
 def test_main_js_content():
     js_path = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
-    with open(js_path, "r") as f:
-        content = f.read()
+    content = main_js_source()
     
     assert "smartctl: Installed" in content
     assert "smartctl: Missing" in content

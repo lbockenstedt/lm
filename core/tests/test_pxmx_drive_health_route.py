@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from routes import pxmx
 from warm_cache import WarmCacheMixin
+from webui_src import main_js_source
 
 MAIN_JS_PATH = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
 
@@ -283,7 +284,7 @@ def test_drive_health_tenant_spoke_resolution():
 def test_webui_main_js_submenus_and_diagnostics_renderer():
     """Verify WebUI/main.js has 'Diagnostics' in subMenus.pxmx and renderPxmxDiagnostics."""
     assert MAIN_JS_PATH.exists(), f"WebUI/main.js not found at {MAIN_JS_PATH}"
-    content = MAIN_JS_PATH.read_text(encoding="utf-8")
+    content = main_js_source()
 
     # Verify 'Diagnostics' is present in pxmx submenu
     assert "pxmx: ['Overview', 'Virtual Machines', 'Diagnostics', 'Settings']" in content or (
