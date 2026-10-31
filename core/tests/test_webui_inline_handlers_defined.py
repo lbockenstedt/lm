@@ -7,9 +7,8 @@ moves a lot of code between files; this check catches a dropped global before
 it ships.
 """
 import re
-from pathlib import Path
 
-WEBUI = Path(__file__).resolve().parents[2] / "WebUI"
+from webui_src import WEBUI
 
 # Names that are not WebUI functions: JS keywords and browser globals.
 BUILTINS = set("""
