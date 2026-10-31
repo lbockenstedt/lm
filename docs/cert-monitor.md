@@ -92,6 +92,28 @@ stored in `global_config.cert_monitor_ignored` as
 - Config is stored in `global_config.cert_monitor`:
   `{enabled, custom_hosts, disabled_builtin}`.
 
+## Built-in host list auto-update
+
+Before the daily check, the built-in Mist / Central list is refreshed (at most once
+per 24h) from the vendors' published endpoint pages:
+
+| Source | Page | Replaces built-in |
+|---|---|---|
+| `mist` | Juniper Mist "Firewall ports to open" | all Juniper Mist hosts (ports taken from "host (TCP n)"; `oc-term` TCP 2200 skipped — SSH, not TLS) |
+| `central-apigw` | Aruba developer "API OAuth access token" | Aruba Central API gateways |
+| `new-central` | Aruba developer "Getting started with REST APIs" | New Central API gateways |
+
+- New endpoints are added and retired ones dropped. Hosts not covered by a source
+  (Central portals / device endpoints, GreenLake) stay on the static list.
+- A page that can't be fetched, or that yields fewer than half the hosts it had
+  (page moved / redesigned), is **not** used: the previous list is kept and the error
+  is shown on the Cert Monitor page under **Built-in host list**.
+- State lives in `$LM_STATE_DIR/cert_monitor_sources.json`
+  (`{source: {hosts, updated_at, checked_at, error, added, removed, changed_at}}`).
+  Delete the file to fall back to the static list. `GET /api/certmon/overview`
+  returns it as `host_sources`.
+- Disabled built-ins (by host) and ignored certs (by `host:port`) survive a refresh.
+
 ## Alert rules
 
 Cert alert rules live in the single **Alert Rules** tile of the **Reports**
