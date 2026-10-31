@@ -11212,6 +11212,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # the auto-check out of the box. See run_os_updates_check_loop.
         self.seed_os_updates_check_defaults()
         os_updates_check_task = asyncio.create_task(self.run_os_updates_check_loop())
+        # Auto-patch only inside its maintenance window (default 01:00-05:00),
+        # once per window. See run_os_updates_autopatch_loop.
+        os_updates_autopatch_task = asyncio.create_task(self.run_os_updates_autopatch_loop())
         # Hub self-backup (SelfBackupMixin): on a schedule (backup_interval_hours)
         # takes a rotated, optionally Fernet-encrypted tarball of hub state +
         # the key/secret stores under <state_dir>/self-backup/, and optionally

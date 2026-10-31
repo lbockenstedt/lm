@@ -103,6 +103,18 @@ def test_cve_search_unknown_cve_and_package_query(tmp_path):
         {"CVE-2026-0001": ["S1"]}
 
 
+def test_fleet_cves_lists_only_cves_affecting_a_node(tmp_path):
+    hub = _cve_hub(tmp_path)
+    # 0002 is for a package no node has; 0003 is fixed in S1's and S2's versions.
+    assert asyncio.run(hub.osu_fleet_cves()) == [
+        {"cve": "CVE-2026-0001", "description": "PHP heap overflow", "urgency": "high", "nodes": 1}]
+    hub._osu_state()["inventory"]["spoke:s2"]["installed"][0][1] = "8.4.5-1~deb13u1"
+    hub._osu_state()["inventory"]["spoke:s2"]["installed"][0][3] = "8.4.5-1~deb13u1"
+    assert asyncio.run(hub.osu_fleet_cves())[0]["nodes"] == 1  # cached until the next check
+    hub._osu_state()["checked_at"] += 1
+    assert asyncio.run(hub.osu_fleet_cves())[0]["nodes"] == 2
+
+
 def test_inventory_survives_unreachable_check_and_hub_restart(tmp_path):
     hub = _cve_hub(tmp_path)
 

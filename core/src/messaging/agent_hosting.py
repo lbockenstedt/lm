@@ -207,12 +207,15 @@ class AgentHostingControlPlane(BaseControlPlane):
             "AGENT_OS_UPDATE_APPLY_PACKAGES": ("OS_UPDATE_APPLY_PACKAGES", 3700.0),
             "AGENT_OS_REBOOT": ("OS_REBOOT", 60.0),
             "AGENT_OS_FIX_ACCESS": ("OS_FIX_ACCESS", 150.0),
+            "AGENT_OS_MAINTENANCE": ("OS_MAINTENANCE", 50.0),
         }
         if cmd_type in _osu_relay:
             _agent_cmd, _to = _osu_relay[cmd_type]
             _fwd = {"refresh": bool(data.get("refresh", True))}
             if cmd_type == "AGENT_OS_UPDATE_APPLY_PACKAGES":
                 _fwd["packages"] = list(data.get("packages") or [])
+            if cmd_type == "AGENT_OS_MAINTENANCE":
+                _fwd["action"] = data.get("action") or "status"
             if cmd_type == "AGENT_OS_FIX_ACCESS":
                 _fwd["username"] = data.get("username") or "root"
                 _fwd["password"] = data.get("password") or ""

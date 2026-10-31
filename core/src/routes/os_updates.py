@@ -12,7 +12,7 @@ Security posture (mirrors Remote Console):
 Commands reach a node as an HMAC-signed OS_UPDATE_* frame (control_plane), so a
 spoke trusts them exactly like SPOKE_UPDATE.
 
-Behaviour: rolling one node at a time, hub last, NEVER auto-reboot. An apply
+Behaviour: rolling one node at a time, hub last; a manual apply never reboots. An apply
 is a full dist-upgrade by default, or narrowed to chosen nodes, chosen packages
 per node, or security updates only. Rebooting is its own explicit, audited
 action per node, and a running roll can be cancelled (the current node
@@ -24,17 +24,22 @@ status stays fresh without an operator remembering to click "Check for
 updates" — see ``run_os_updates_check_loop`` in ``hub_os_updates.py``.
 
 Auto-patch (``/api/os-updates/auto-patch``) is the one scheduled apply and is
-approved PER NODE (none by default): after each scheduled check it deploys what
+approved PER NODE (none by default) and only runs inside its maintenance window
+(default 01:00-05:00): once per window it re-checks the fleet and deploys what
 was found on the approved nodes, through the same rolling hub-last roll,
-audit-logged as "auto-patch". It never reboots, and never installs a package
-on the operator's exclude list (names or globs).
+audit-logged as "auto-patch". It never installs a package on the operator's
+exclude list (names or globs). Auto-reboot (per node, on by default for an
+auto-patch node) reboots the nodes that installed something, hub last,
+audit-logged as "auto-reboot".
 
 ``/api/os-updates/fix-access`` takes a root/sudo login typed once for a node
 blocked by missing privileges; the password is relayed to that node only and
 never stored or logged.
 
 ``/api/os-updates/cves?q=`` answers "who is affected by this CVE?" from the
-installed packages each node reports with its check (see ``os_cve.py``).
+installed packages each node reports with its check (see ``os_cve.py``);
+``/api/os-updates/cves/fleet`` lists just the CVEs affecting the fleet, for the
+search box's suggestions.
 """
 import re
 
@@ -77,6 +82,20 @@ def register(app, hub, ctx):
                                 detail="enter a CVE id (CVE-2026-1234) or a package name")
         return await hub.osu_cve_search(q)
 
+    @app.get("/api/os-updates/pending-reboots")
+    async def os_updates_pending_reboots(request: Request):
+        """Nodes auto-reboot will restart in the current maintenance window
+        (footer "Pending Reboot" alert): ``{in_window, window, nodes}``."""
+        _require_admin(request)
+        return hub.osu_pending_reboots()
+
+    @app.get("/api/os-updates/cves/fleet")
+    async def os_updates_fleet_cves(request: Request):
+        """CVEs that affect at least one node now (``[{cve, description,
+        urgency, nodes}]``) — the suggestions for the who-is-affected box."""
+        _require_admin(request)
+        return await hub.osu_fleet_cves()
+
     @app.post("/api/os-updates/check")
     async def os_updates_check(request: Request):
         """Re-probe every node (apt-get update + list upgradable). Read-only."""
@@ -115,7 +134,7 @@ def register(app, hub, ctx):
 
     @app.get("/api/os-updates/auto-patch")
     async def os_updates_autopatch_get(request: Request):
-        """Auto-patch config: ``{security_only, nodes, exclude}``."""
+        """Auto-patch config: ``{security_only, nodes, exclude, reboot_nodes, window}``."""
         _require_admin(request)
         return hub.osu_autopatch_config()
 
@@ -124,7 +143,10 @@ def register(app, hub, ctx):
         """Approve one node: ``{"node": "kind:id", "enabled": bool}``, set
         ``{"security_only": bool}`` for every auto-patched node, and/or replace
         ``{"exclude": ["pkg", "linux-image-*", ...]}`` — packages auto-patch
-        never installs."""
+        never installs. ``{"node": "kind:id", "auto_reboot": bool}`` turns
+        auto-reboot on/off for an auto-patch node (approving a node turns it on).
+        ``{"window": {"start": "01:00", "end": "05:00", "tz": "America/Chicago"}}``
+        sets the maintenance window auto-patch (and auto-reboot) runs in."""
         sess = _require_admin(request)
         try:
             body = await request.json()
@@ -144,13 +166,29 @@ def register(app, hub, ctx):
             cfg = hub.osu_set_autopatch_exclude(exclude)
             logger.warning("[os-updates] auto-patch exclude=%s set by %s",
                            cfg["exclude"], actor)
+        if "window" in body:
+            if not isinstance(body["window"], dict):
+                raise HTTPException(status_code=400, detail="'window' must be {start, end, tz}")
+            try:
+                cfg = hub.osu_set_autopatch_window(body["window"])
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"bad maintenance window: {exc}")
+            logger.warning("[os-updates] auto-patch window=%s set by %s", cfg["window"], actor)
         key = body.get("node")
         if key is not None:
             if not isinstance(key, str) or not key:
                 raise HTTPException(status_code=400, detail="'node' must be a kind:id key")
-            cfg = hub.osu_set_autopatch_node(key, bool(body.get("enabled", False)))
-            logger.warning("[os-updates] auto-patch %s for %s by %s",
-                           "APPROVED" if key in cfg["nodes"] else "withdrawn", key, actor)
+            if "auto_reboot" in body:
+                try:
+                    cfg = hub.osu_set_autoreboot_node(key, bool(body["auto_reboot"]))
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc))
+                logger.warning("[os-updates] auto-reboot %s for %s by %s",
+                               "ON" if key in cfg["reboot_nodes"] else "off", key, actor)
+            else:
+                cfg = hub.osu_set_autopatch_node(key, bool(body.get("enabled", False)))
+                logger.warning("[os-updates] auto-patch %s for %s by %s",
+                               "APPROVED" if key in cfg["nodes"] else "withdrawn", key, actor)
         return cfg
 
     @app.post("/api/os-updates/fix-access")
