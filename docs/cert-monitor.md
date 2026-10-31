@@ -84,7 +84,10 @@ stored in `global_config.cert_monitor_ignored` as
 ## Schedule & storage
 
 - A scheduler started with the hub checks every 15 minutes whether a run is due.
-  A run happens at most **once per 24h**, and only while the feature is enabled.
+  A run happens **once per 24h**, and only while the feature is enabled.
+  While any non-ignored cert expires within 24 hours (or has already expired) the
+  run happens **every hour** instead, so a renewal is picked up — and its reminder
+  emails stop — within the hour. Ignore a dead cert to drop back to daily.
   **Check now** forces an immediate run.
 - Results are written atomically to `$LM_STATE_DIR/cert_monitor.json`
   (default `/var/lib/lm/state/cert_monitor.json`). The file holds `last_run`,

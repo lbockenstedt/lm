@@ -1496,6 +1496,7 @@ function _cvRenderSecretsTable() {
 // 'token' secret is only rewritten to 'apikey' if someone edits and saves it).
 function _cvTypeLabel(t) {
     const v = t || 'generic';
+    if (v === 'apipair') return 'api key + secret';
     return (v === 'apikey' || v === 'token') ? 'api key / token' : v;
 }
 
@@ -1718,9 +1719,10 @@ function _cvAddSecretModal(preset) {
       <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} secret — ${escapeHtml(_cvBucketLabel({ bucket: _cvCurrentBucket }))}</h3>
       <input id="cv-add-name" type="text" autocomplete="off" ${nameAttrs} title="A name to identify this secret within the bucket (e.g. 'HE.NET DDNS key', 'Cloudflare token')" class="${_CV_INP}${editing ? ' bg-slate-100 text-slate-500' : ''}">
       <div class="flex gap-2">
-        <select id="cv-add-type" onchange="_cvRenderAddFields()" class="${_CV_INP}" title="Secret shape. 'API key / token' holds one opaque secret (an API key, bearer token, or similar). DNS = DNS provider creds (a 'Hurricane Electric (account login)' DNS secret is used by BOTH the External DNS / HE.NET module and certificate DNS-01 issuance, so store just one HE credential); Login = username+password (or an OAuth client pair).">
+        <select id="cv-add-type" onchange="_cvRenderAddFields()" class="${_CV_INP}" title="Secret shape. 'API key / token' holds one opaque secret (an API key, bearer token, or similar); 'API key + secret' holds a key and its secret (e.g. an OPNsense firewall API key). DNS = DNS provider creds (a 'Hurricane Electric (account login)' DNS secret is used by BOTH the External DNS / HE.NET module and certificate DNS-01 issuance, so store just one HE credential); Login = username+password (or an OAuth client pair).">
           <option value="login"${sel(pType, 'login')}>Login (username + password)</option>
           <option value="apikey"${(pType === 'apikey' || pType === 'token') ? ' selected' : ''}>API key / token (single secret)</option>
+          <option value="apipair"${sel(pType, 'apipair')}>API key + secret (e.g. OPNsense)</option>
           <option value="dns"${sel(pType, 'dns')}>DNS</option>
           ${(editing && pType === 'henet') ? `<option value="henet" selected>HE.NET DDNS key (Hurricane Electric public DNS)</option>` : ``}
           <option value="generic"${sel(pType, 'generic')}>Generic (key + value)</option>
@@ -1784,6 +1786,15 @@ function _cvRenderAddFields() {
     // nw_devices.password and nw_scan_credentials.password -- so canonicalising
     // the other way would stop a re-saved secret resolving as a device password.
     else if (t === 'apikey' || t === 'token') el.innerHTML = f('cv-f-apikey', 'api key or token', 'password');
+    else if (t === 'apipair') {
+        // Device API credentials (e.g. an OPNsense firewall) — the hub reads them
+        // unattended when it pushes the connection, so automation-readable is forced.
+        el.innerHTML = f('cv-f-api-key', 'API key') + f('cv-f-api-secret', 'API secret', 'password')
+            + `<p class="text-[11px] text-slate-400 mt-1">Pick this secret under <b>Credential Vault</b> when adding the firewall.</p>`;
+        const modeSel = document.getElementById('cv-add-mode');
+        if (modeSel) { modeSel.value = 'hub'; modeSel.disabled = true; }
+        return;
+    }
     else if (t === 'dns') {
         // A DNS-01 credential the LE module resolves unattended at issue time.
         // Present the same friendly, per-provider fields the LE module used
@@ -1871,6 +1882,7 @@ function _cvCollectAddValue() {
         ? { client_id: v('cv-f-client-id'), client_secret: v('cv-f-client-secret') }
         : { username: v('cv-f-username'), password: v('cv-f-password') };
     if (t === 'apikey' || t === 'token') return { apikey: v('cv-f-apikey') };
+    if (t === 'apipair') return { api_key: v('cv-f-api-key').trim(), api_secret: v('cv-f-api-secret') };
     if (t === 'dns') {
         const p = document.getElementById('cv-f-dns-provider')?.value || '';
         const def = DNS_CRED_PROVIDERS[p];
@@ -1926,6 +1938,7 @@ function _cvFillAddFields(value) {
         set('cv-f-apikey', value.apikey !== undefined ? value.apikey : value.token);
         return;
     }
+    if (t === 'apipair') { set('cv-f-api-key', value.api_key); set('cv-f-api-secret', value.api_secret); return; }
     if (t === 'henet') { set('cv-f-henet-key', value.ddns_key); return; }
     if (t === 'dns') {
         const provSel = document.getElementById('cv-f-dns-provider');
@@ -2011,6 +2024,9 @@ async function _cvDoAddSecret() {
     if (value.provider && DNS_CRED_PROVIDERS[value.provider] && DNS_CRED_PROVIDERS[value.provider].login
         && (!value.he_username || !value.he_password)) {
         showToast('Enter both the account email and password', 'error'); return;
+    }
+    if (type === 'apipair' && (!value.api_key || !value.api_secret)) {
+        showToast('Enter both the API key and the API secret', 'error'); return;
     }
     if (type === 'login' && window._cvLoginOauth && (!value.client_id || !value.client_secret)) {
         showToast('Enter both the Client ID and Client secret', 'error'); return;

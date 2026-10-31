@@ -100,6 +100,11 @@ SECRET_FIELDS = {
 # ClearPass API client (grant_type=client_credentials needs both) even though
 # client_id itself is not a secret. When the referenced secret is a plain
 # username/password login (no client_id), the inline client_id is kept as-is.
+# Products whose connection only works with a secret: once the hub's cloud
+# vault is available, a record must reference a vault credential.
+VAULT_REQUIRED = {"firewalls"}
+
+
 NONSECRET_VAULT_FIELDS = {
     "nac_instances": {
         "client_id": ("client_id", "clientid", "client"),
@@ -246,6 +251,12 @@ async def validate_ref(hub, record, sess, *, is_admin, storage_key):
         return  # product has no vault-backed secret fields — nothing to validate
     ref = _normalize_ref(record)
     if ref is None:
+        if storage_key in VAULT_REQUIRED and cred_vault._vault_available(hub):
+            raise HTTPException(
+                status_code=400,
+                detail="Credential Vault is enabled for this hub — select a Credential "
+                       "Vault credential (e.g. an 'API key + secret' secret) for this "
+                       "connection.")
         if _vault_only_violation(hub, record, spec):
             raise HTTPException(
                 status_code=400,
