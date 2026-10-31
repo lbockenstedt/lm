@@ -34,6 +34,13 @@ jobs:
           done < <(find . -name 'requirements*.txt' \
                      -not -path './_lm/*' -not -path '*/venv/*' \
                      -not -path '*/node_modules/*' | sort)
+      - name: Install browser for the WebUI smoke test
+        # CI only -- the fleet never installs this. core/tests/
+        # test_webui_browser_smoke.py walks every WebUI view in headless
+        # Chromium and must run here (it only skips when CI is unset).
+        run: |
+          pip install playwright==1.64.1
+          python -m playwright install --with-deps chromium
       - name: Run tests
         # One pytest process PER COMPONENT, not one for all of them.
         #
