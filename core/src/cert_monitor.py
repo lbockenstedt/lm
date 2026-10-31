@@ -8,15 +8,22 @@ endpoints present private device-CA certs), and ``trusted`` records whether it
 validated against the system trust store. Results are written to
 ``$LM_STATE_DIR/cert_monitor.json``; the scheduler (routes/cert_monitor.py)
 runs a check at most once every 24h while the feature is enabled.
+
+The built-in Mist / Central host list is a hard-coded seed; once a day the
+parts the vendors publish (see SOURCES) are re-read and replace the seed's
+matching hosts, so new endpoints are added and retired ones dropped.
 """
 import concurrent.futures
 import datetime as _dt
+import html as _html
 import json
 import logging
 import os
+import re
 import socket
 import ssl
 import tempfile
+import urllib.request
 
 logger = logging.getLogger("Hub")
 
@@ -66,7 +73,7 @@ _CENTRAL_CLUSTERS = [
      ["app-uaenorth1", "device-uaenorth1"]),
 ]
 _NEW_CENTRAL_GATEWAYS = ["us1", "us2", "us4", "us5", "us6", "de1", "de2", "de3",
-                         "ca1", "in", "jp1", "au1", "ae1"]
+                         "ca1", "gb1", "in1", "jp1", "au1", "ae1", "cn1"]
 
 
 def _build_builtin_hosts():
@@ -102,7 +109,8 @@ def _build_builtin_hosts():
                       "port": 443, "service": "Aruba Central",
                       "region": "China-1", "role": role})
     for r in _NEW_CENTRAL_GATEWAYS:
-        hosts.append({"host": f"{r}.api.central.arubanetworks.com", "port": 443,
+        tld = ".com.cn" if r == "cn1" else ".com"
+        hosts.append({"host": f"{r}.api.central.arubanetworks{tld}", "port": 443,
                       "service": "Aruba Central (New Central)",
                       "region": r.upper(), "role": "API gateway"})
     for h, role in (("common.cloud.hpe.com", "GreenLake portal"),
@@ -117,6 +125,162 @@ def _build_builtin_hosts():
 
 
 BUILTIN_HOSTS = _build_builtin_hosts()
+
+
+# ── host list auto-update ───────────────────────────────────────────────────
+# Each source is a vendor page listing endpoints. A source "owns" the seed
+# hosts with its service (and role, if set): once it has been read, those seed
+# hosts are replaced by what the page lists. A read that finds too few hosts
+# (page moved / redesigned) is not used, so the list never collapses.
+
+SOURCES_FILE = "cert_monitor_sources.json"
+SOURCE_REFRESH_S = 24 * 3600
+SOURCE_TIMEOUT_S = 20
+_HOST_RE = r"[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*"
+SOURCES = [
+    {"id": "mist", "service": "Juniper Mist", "role": None,
+     "url": "https://www.juniper.net/documentation/us/en/software/mist/"
+            "mist-management/topics/ref/firewall-ports-to-open.html",
+     "pattern": _HOST_RE + r"\.(?:mist\.com|mistsys\.net)",
+     # oc-term (TCP 2200) is Junos outbound SSH, not TLS.
+     "skip_ports": {2200}},
+    {"id": "central-apigw", "service": "Aruba Central", "role": "API gateway",
+     "url": "https://developer.arubanetworks.com/aruba-central/docs/api-oauth-access-token",
+     "pattern": _HOST_RE + r"\.central\.arubanetworks\.com(?:\.cn)?",
+     "keep": lambda h: "apigw" in h or h.startswith("api-")},
+    {"id": "new-central", "service": "Aruba Central (New Central)", "role": None,
+     "url": "https://developer.arubanetworks.com/new-central/docs/getting-started-with-rest-apis",
+     "pattern": r"[a-z0-9]+\.api\.central\.arubanetworks\.com(?:\.cn)?"},
+]
+_MIN_SOURCE_HOSTS = 3
+_MIST_REGION_BY_PREFIX = {p.rstrip("."): r for p, r in _MIST_REGIONS}
+_MIST_ROLE_BY_SUB = dict(_MIST_ROLES, **{
+    "srx-log-terminator": "SRX log terminator", "radsec": "Access Assurance RadSec",
+    "radsec-eu": "Access Assurance RadSec", "redirect": "Device redirect",
+    "support-portal": "Support portal"})
+_CENTRAL_CLUSTER_BY_GW = {gw: c for c, _ui, gw, _d in _CENTRAL_CLUSTERS}
+
+
+def _owned(src, h):
+    return h["service"] == src["service"] and (src["role"] is None or h["role"] == src["role"])
+
+
+def _label(src, host):
+    """→ (region, role) for a host found on a source page."""
+    if src["id"] == "mist":
+        sub, _, rest = host.partition(".")
+        inst = rest.rsplit(".", 2)[0] if rest.count(".") >= 2 else ""
+        role = _MIST_ROLE_BY_SUB.get(sub, sub)
+        if not inst:
+            region = "Global 01" if sub in _MIST_ROLE_BY_SUB and rest == "mist.com" else "Global"
+        else:
+            region = _MIST_REGION_BY_PREFIX.get(inst, inst.upper())
+        return region, role
+    first = host.split(".")[0]
+    if src["id"] == "central-apigw":
+        if host.endswith(".cn"):
+            return "China-1", "API gateway"
+        region = _CENTRAL_CLUSTER_BY_GW.get(first) or first.replace("apigw", "").strip("-").upper()
+        return region, "API gateway"
+    return first.upper(), "API gateway"
+
+
+def parse_source(src, page):
+    """Vendor page (HTML) → host entries it lists. ``host (TCP n)`` sets the port."""
+    text = _html.unescape(re.sub(r"<[^>]+>", " ", page or "")).lower()
+    found, seen = [], set()
+    for m in re.finditer(r"(?<![a-z0-9.-])(" + src["pattern"] + r")(?![a-z0-9-])"
+                         r"(?:\s*\(tcp\s*(\d+)\))?", text):
+        host, port = m.group(1), int(m.group(2) or 443)
+        if (host.startswith(("internal", "www.")) or port in src.get("skip_ports", ())
+                or not src.get("keep", lambda h: True)(host) or (host, port) in seen):
+            continue
+        seen.add((host, port))
+        region, role = _label(src, host)
+        found.append({"host": host, "port": port, "service": src["service"],
+                      "region": region, "role": role})
+    return found
+
+
+def sources_path(state_dir=None):
+    return os.path.join(state_dir or STATE_DIR, SOURCES_FILE)
+
+
+def load_sources(state_dir=None):
+    """source id → {"hosts", "updated_at", "checked_at", "error", "added", "removed", "changed_at"}."""
+    try:
+        with open(sources_path(state_dir), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[certmon] could not read %s: %s", sources_path(state_dir), e)
+        return {}
+
+
+def _fetch(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (LM cert monitor)"})
+    with urllib.request.urlopen(req, timeout=SOURCE_TIMEOUT_S) as resp:
+        return resp.read(4 * 1024 * 1024).decode("utf-8", "replace")
+
+
+def refresh_sources(state_dir=None, fetch=_fetch, now=None):
+    """Re-read every source page and store its host list. Returns the new
+    sources data. Keeps a source's previous list when the read fails or
+    finds less than half as many hosts as before."""
+    now = (now or _dt.datetime.now(_dt.timezone.utc)).isoformat(timespec="seconds")
+    data = load_sources(state_dir)
+    for src in SOURCES:
+        cur = dict(data.get(src["id"]) or {})
+        old = cur.get("hosts") or [h for h in BUILTIN_HOSTS if _owned(src, h)]
+        cur["checked_at"] = now
+        try:
+            hosts = parse_source(src, fetch(src["url"]))
+            if len(hosts) < max(_MIN_SOURCE_HOSTS, len(old) // 2):
+                raise ValueError(f"only {len(hosts)} host(s) found on the page (had {len(old)})")
+        except Exception as e:  # noqa: BLE001
+            cur["error"] = str(e)[:200]
+            logger.warning("[certmon] host list source %s not updated: %s", src["id"], e)
+            data[src["id"]] = cur
+            continue
+        old_keys = {cert_key(h) for h in old}
+        new_keys = {cert_key(h) for h in hosts}
+        cur.update({"hosts": hosts, "updated_at": now, "error": "", "url": src["url"]})
+        added, removed = sorted(new_keys - old_keys), sorted(old_keys - new_keys)
+        if added or removed:  # keep the last real change on show
+            cur.update({"added": added, "removed": removed, "changed_at": now})
+            logger.info("[certmon] host list source %s: +%d -%d (%s)", src["id"], len(added),
+                        len(removed), ", ".join(["+" + k for k in added] + ["-" + k for k in removed])[:500])
+        data[src["id"]] = cur
+    _write_json(sources_path(state_dir), data, ".cert_monitor_sources.")
+    return data
+
+
+def sources_due(data, now=None):
+    times = [(data.get(s["id"]) or {}).get("checked_at") for s in SOURCES]
+    if not all(times):
+        return True
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    try:
+        oldest = min(_dt.datetime.fromisoformat(t) for t in times)
+    except ValueError:
+        return True
+    return (now - oldest).total_seconds() >= SOURCE_REFRESH_S
+
+
+def builtin_hosts(state_dir=None):
+    """The seed list with each read source's hosts swapped in for the seed's."""
+    data = load_sources(state_dir)
+    live = [s for s in SOURCES if (data.get(s["id"]) or {}).get("hosts")]
+    hosts = [dict(h) for h in BUILTIN_HOSTS if not any(_owned(s, h) for s in live)]
+    have = {cert_key(h) for h in hosts}
+    for s in live:
+        for h in data[s["id"]]["hosts"]:
+            if cert_key(h) not in have:
+                have.add(cert_key(h))
+                hosts.append(dict(h))
+    return hosts
 
 
 # ── config ──────────────────────────────────────────────────────────────────
@@ -156,7 +320,7 @@ def normalize_config(cfg):
         if p and p not in seen:
             seen.add(p)
             custom.append(p[0] if p[1] == 443 else f"{p[0]}:{p[1]}")
-    builtin_names = {h["host"] for h in BUILTIN_HOSTS}
+    builtin_names = {h["host"] for h in BUILTIN_HOSTS} | {h["host"] for h in builtin_hosts()}
     disabled = sorted({str(h).strip().lower()
                        for h in (cfg.get("disabled_builtin") or [])
                        if str(h).strip().lower() in builtin_names})
@@ -168,7 +332,7 @@ def normalize_config(cfg):
 def effective_hosts(cfg):
     cfg = normalize_config(cfg)
     disabled = set(cfg["disabled_builtin"])
-    hosts = [dict(h) for h in BUILTIN_HOSTS if h["host"] not in disabled]
+    hosts = [h for h in builtin_hosts() if h["host"] not in disabled]
     have = {(h["host"], h["port"]) for h in hosts}
     for entry in cfg["custom_hosts"]:
         host, port = parse_host_entry(entry)
@@ -442,10 +606,13 @@ def load_results(state_dir=None):
 
 
 def save_results(data, state_dir=None):
-    path = results_path(state_dir)
+    _write_json(results_path(state_dir), data, ".cert_monitor.")
+
+
+def _write_json(path, data, prefix):
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".cert_monitor.", dir=d)
+    fd, tmp = tempfile.mkstemp(prefix=prefix, dir=d)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)

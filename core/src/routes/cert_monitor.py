@@ -4,7 +4,9 @@ $LM_STATE_DIR/cert_monitor.json by cert_monitor.run_checks. A startup-launched
 scheduler runs a check at most once per 24h while the feature is enabled, and
 evaluates the alert rules (cert_monitor_alerts) after every check and tick.
 Per-cert ignores (global_config["cert_monitor_ignored"], keyed host:port) keep
-a cert listed but drop it from the counts and the alert evaluation."""
+a cert listed but drop it from the counts and the alert evaluation.
+Before a check, the built-in Mist / Central host list is refreshed from the
+vendor pages once a day (cert_monitor.refresh_sources)."""
 import asyncio
 import datetime as _dt
 import logging
@@ -71,6 +73,11 @@ def register(app, hub, ctx):
         async with run_lock:
             runtime["running"] = True
             try:
+                try:
+                    if cm.sources_due(await asyncio.to_thread(cm.load_sources)):
+                        await asyncio.to_thread(cm.refresh_sources)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[certmon] host list refresh failed: %s", e)
                 hosts = cm.effective_hosts(_cfg())
                 logger.info("[certmon] checking %d host(s) (%s)", len(hosts), reason)
                 data = await asyncio.to_thread(cm.run_checks, hosts)
@@ -127,6 +134,19 @@ def register(app, hub, ctx):
                 logger.warning("[certmon] alert evaluation failed: %s", e)
                 return {}
 
+    def _host_sources():
+        data = cm.load_sources()
+        out = []
+        for src in cm.SOURCES:
+            d = data.get(src["id"]) or {}
+            out.append({"id": src["id"], "service": src["service"], "role": src["role"],
+                        "url": src["url"], "hosts": len(d.get("hosts") or []),
+                        "updated_at": d.get("updated_at"), "checked_at": d.get("checked_at"),
+                        "error": d.get("error") or "", "added": d.get("added") or [],
+                        "removed": d.get("removed") or [],
+                        "changed_at": d.get("changed_at")})
+        return out
+
     @app.get("/api/certmon/status")
     async def certmon_status(request: Request):
         """Lightweight flag for the left-nav: is the feature enabled?"""
@@ -150,7 +170,8 @@ def register(app, hub, ctx):
                 next_run = None
         return {
             "config": cfg,
-            "builtin_hosts": cm.BUILTIN_HOSTS,
+            "builtin_hosts": await asyncio.to_thread(cm.builtin_hosts),
+            "host_sources": await asyncio.to_thread(_host_sources),
             "thresholds": {"red_days": cm.RED_DAYS, "yellow_days": cm.YELLOW_DAYS},
             "running": runtime["running"],
             "last_run": data.get("last_run"),

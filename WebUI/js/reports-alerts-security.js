@@ -454,9 +454,25 @@ async function loadCertMonData() {
         <textarea id="certmon-custom" rows="4" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500">${escapeHtml((cfg.custom_hosts || []).join('\n'))}</textarea>
         <div class="flex justify-end mt-2"><button onclick="certMonSaveCustom(this)" class="text-xs px-3 py-1 rounded-md bg-green-600 text-white hover:bg-green-700">Save</button></div>
       </div>
+      <div class="${card}">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Built-in host list</h3>
+        <p class="text-xs text-slate-400 mb-2">Refreshed once a day, before the check, from the vendors' published endpoint lists: new endpoints are added and retired ones dropped. A page that can't be read keeps its last list.</p>
+        <ul class="text-xs text-slate-600 space-y-1">${(d.host_sources || []).map(_certMonSourceLine).join('')}</ul>
+      </div>
       <p class="text-xs text-slate-400">Cert alert rules (expiry / error / untrusted emails) are managed under <a href="#" onclick="setView('reports'); return false;" class="text-[#01A982] hover:underline">Reports</a>.</p>`;
     if (filt) { const f = document.getElementById('certmon-filter'); if (f) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); } }
     if (d.running) { clearTimeout(window._certMonPoll); window._certMonPoll = setTimeout(() => { if (currentView === 'certmon') loadCertMonData(); }, 5000); }
+}
+
+// One line per host-list source: "Juniper Mist — 100 hosts, updated <date> · +2 −1 (hover for names)".
+function _certMonSourceLine(s) {
+    const what = escapeHtml(s.service + (s.role ? ' ' + s.role + 's' : ''));
+    const when = s.updated_at ? `${s.hosts} hosts, updated ${escapeHtml(new Date(s.updated_at).toLocaleString())}` : 'not read yet (using the built-in list)';
+    const chg = (s.added.length || s.removed.length)
+        ? ` · <span class="text-green-700" title="${escapeHtml(s.added.join('\n'))}">+${s.added.length}</span> <span class="text-red-600" title="${escapeHtml(s.removed.join('\n'))}">−${s.removed.length}</span> on ${escapeHtml(new Date(s.changed_at).toLocaleDateString())}`
+        : '';
+    const err = s.error ? ` · <span class="text-red-600">last read failed: ${escapeHtml(s.error)}</span>` : '';
+    return `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noopener" class="text-[#01A982] hover:underline">${what}</a> — ${when}${chg}${err}</li>`;
 }
 
 async function certMonRunNow(btn) {
