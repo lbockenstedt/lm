@@ -226,3 +226,70 @@ def test_rule_test_send_skips_ignored_hosts(tmp_path, monkeypatch):
     monkeypatch.setattr(notifications, "send_email", fake_send)
     assert client.post(f"/api/certmon/alerts/rules/{rid}/test").status_code == 200
     assert "b.example.com" in got[-1] and "a.example.com" not in got[-1]
+
+
+def test_clean_rule_reminder_ladder():
+    r = cma.clean_rule({"trigger": "expiring", "repeat_hours": "x", "reminders": [
+        {"days": 0, "every_hours": 6}, {"days": "7", "every_hours": 24},
+        {"days": 7, "every_hours": 12}, {"days": "", "every_hours": 1}, "junk",
+        {"days": 30, "every_hours": 99999}]})
+    assert r["repeat_hours"] == 0
+    # most days first, one step per day count (last wins), hours clamped
+    assert r["reminders"] == [{"days": 30, "every_hours": cma.MAX_REPEAT_HOURS},
+                              {"days": 7, "every_hours": 12}, {"days": 0, "every_hours": 6}]
+    assert cma.clean_rule({"trigger": "error", "reminders": [{"days": 7}]})["reminders"] == []
+
+
+def test_run_alerts_escalation_ladder(tmp_path, monkeypatch):
+    # 30 days out: one email; inside 7 days: daily; expired: every 6h.
+    hub = _hub()
+    rule = cma.clean_rule({"trigger": "expiring", "threshold_days": 30, "recipients": ["n@x.com"],
+                           "reminders": [{"days": 7, "every_hours": 24}, {"days": 0, "every_hours": 6}]})
+    hub.state.system_state["global_config"][cma.CONFIG_KEY] = {"rules": [rule]}
+    sent = []
+
+    async def fake_send(h, r, subj, text, html):
+        sent.append(subj)
+        return True
+    monkeypatch.setattr(cma, "_send", fake_send)
+    d, H = str(tmp_path), 3600
+
+    def tick(days, hours):
+        asyncio.run(cma.run_alerts(hub, [_r("a", days)], state_dir=d, now=hours * H))
+        return len(sent)
+
+    assert tick(20, 0) == 1 and "1 breached" in sent[-1]
+    assert tick(19, 24) == 1              # no repeat above 7 days
+    assert tick(6, 48) == 2 and "[LM REMINDER]" in sent[-1] and "1 still bad" in sent[-1]
+    assert tick(6, 60) == 2               # not a day yet
+    assert tick(5, 72) == 3               # daily
+    assert tick(-1, 80) == 4              # expired → right away
+    assert tick(-1, 83) == 4
+    assert tick(-1, 86) == 5              # every 6h
+    assert tick(300, 87) == 6 and "1 recovered" in sent[-1]
+    assert cma.load_sent(d) == {}
+
+
+def test_run_alerts_repeat_hours_and_failed_reminder_retries(tmp_path, monkeypatch):
+    hub = _hub()
+    rule = cma.clean_rule({"trigger": "error", "repeat_hours": 12, "recipients": ["n@x.com"]})
+    hub.state.system_state["global_config"][cma.CONFIG_KEY] = {"rules": [rule]}
+    sent, ok = [], {"v": True}
+
+    async def fake_send(h, r, subj, text, html):
+        sent.append(subj)
+        return ok["v"]
+    monkeypatch.setattr(cma, "_send", fake_send)
+    d, H, res = str(tmp_path), 3600, [_r("a", None, error="DNS")]
+    run = lambda hours: asyncio.run(cma.run_alerts(hub, res, state_dir=d, now=hours * H))
+    run(0)
+    run(11)
+    assert len(sent) == 1
+    ok["v"] = False
+    run(12)
+    assert len(sent) == 2
+    ok["v"] = True
+    run(12.25)                            # failed reminder is retried next tick
+    assert len(sent) == 3
+    run(13)
+    assert len(sent) == 3
