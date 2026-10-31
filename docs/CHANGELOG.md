@@ -12,6 +12,13 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-10-26
 
+### Cert Monitor
+
+- **Reminder emails with an escalation ladder.** A Cert Monitor alert rule can now repeat
+  its email every N hours while a cert stays bad, and an expiring rule can escalate, e.g.
+  one email at 30 days, daily inside 7 days, every 6 hours once expired. Set it in
+  Reports → Alert Rules. See [cert-monitor.md](cert-monitor.md#alert-rules).
+
 ### NetBox
 
 - **Network-device pushes to NetBox work for tenant-attributed devices again.** POLL NOW /

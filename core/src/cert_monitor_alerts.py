@@ -1,9 +1,16 @@
-"""Cert Expiry Monitor alerting — edge-triggered breach + recovery emails.
+"""Cert Expiry Monitor alerting — breach, reminder and recovery emails.
 
 The Cert Monitor counterpart of the Simulation module's realtime alert rules
 (``alert_engine.py``): an operator defines rules (trigger + recipients +
 human/raw format); one email goes out when hosts newly breach a rule and one
-when they recover. A still-bad host stays silent.
+when they recover. A still-bad host is reminded about on the rule's schedule:
+  * ``repeat_hours`` — re-send every N hours while the host stays bad
+    (0 = never, i.e. one email per breach);
+  * ``reminders`` (``expiring`` rules only) — an escalation ladder of
+    ``{"days": D, "every_hours": H}`` steps: once fewer than D days are left
+    (0 = expired) remind every H hours (0 = just once on entering the step).
+    The most urgent matching step wins, and entering a more urgent step sends
+    a reminder right away.
 
 Differences from the per-tenant sim engine, because Cert Monitor is a hub-wide,
 Global-Admin-only feature that checks ~160 hosts that often share one cert:
@@ -51,6 +58,11 @@ DEFAULT_THRESHOLD_DAYS = cm.RED_DAYS
 MAX_RULES = 50
 MAX_RECIPIENTS = 20
 MAX_HOSTS_IN_EMAIL = 100
+MAX_REMINDER_STEPS = 10
+MAX_REPEAT_HOURS = 24 * 30
+# Alerts are evaluated every 15 min; send a reminder that is due within this
+# slack now rather than a whole tick late, so "every 24h" doesn't drift.
+REMINDER_SLACK_S = 10 * 60
 
 
 def service_names() -> List[str]:
@@ -62,6 +74,25 @@ def service_names() -> List[str]:
 
 
 # ── rules ───────────────────────────────────────────────────────────────────
+
+def _int(v, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(int(v), hi))
+    except (TypeError, ValueError):
+        return default
+
+
+def clean_reminders(steps: Any) -> List[Dict[str, int]]:
+    """Validated escalation ladder, least urgent (most days) first, one step per day count."""
+    out: Dict[int, int] = {}
+    for st in steps if isinstance(steps, list) else []:
+        if not isinstance(st, dict) or st.get("days") in (None, ""):
+            continue
+        days = _int(st.get("days"), 0, -365, 825)
+        out[days] = _int(st.get("every_hours"), 0, 0, MAX_REPEAT_HOURS)
+    ladder = [{"days": d, "every_hours": h} for d, h in sorted(out.items(), reverse=True)]
+    return ladder[:MAX_REMINDER_STEPS]
+
 
 def clean_rule(body: Dict[str, Any], existing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     body = body if isinstance(body, dict) else {}
@@ -85,6 +116,8 @@ def clean_rule(body: Dict[str, Any], existing: Optional[Dict[str, Any]] = None) 
         "recipients": [str(r).strip() for r in recips if str(r).strip()][:MAX_RECIPIENTS],
         "enabled": bool(body.get("enabled", True)),
         "format": "raw" if str(body.get("format") or "human").lower() == "raw" else "human",
+        "repeat_hours": _int(body.get("repeat_hours"), 0, 0, MAX_REPEAT_HOURS),
+        "reminders": clean_reminders(body.get("reminders")) if trig == "expiring" else [],
     }
 
 
@@ -159,17 +192,54 @@ def evaluate_rule(rule: Dict[str, Any], results: List[Dict[str, Any]],
     return breached, recovered, sorted(bad_now)
 
 
+def reminder_step(rule: Dict[str, Any], r: Dict[str, Any]) -> Tuple[Optional[int], int]:
+    """→ (step days or None, repeat every N hours) for a host that breaches
+    ``rule``: the most urgent ladder step it is in, else the rule's repeat."""
+    dl = r.get("days_left")
+    if rule.get("trigger") == "expiring" and dl is not None:
+        for st in sorted(rule.get("reminders") or [], key=lambda s: s["days"]):
+            if dl < st["days"]:
+                return st["days"], st["every_hours"]
+    return None, int(rule.get("repeat_hours") or 0)
+
+
+def due_reminders(rule: Dict[str, Any], results: List[Dict[str, Any]], prev_bad: List[str],
+                  sent: Dict[str, List[Any]], now: float) -> List[Dict[str, Any]]:
+    """Hosts that were already bad, still are, and are due a reminder: their
+    repeat interval has passed since the last email, or they moved into a
+    more urgent ladder step. ``sent`` maps host key → [last email ts, step]."""
+    prev = set(prev_bad or [])
+    due = []
+    for r in results or []:
+        if r.get("ignored") or not _in_scope(rule, r) or not is_bad(rule, r):
+            continue
+        k = item_key(r)
+        if k not in prev:
+            continue  # a new breach, reported as such
+        step, every = reminder_step(rule, r)
+        last_ts, last_step = (sent.get(k) or [None, None])[:2]
+        if last_ts is None:
+            if every or step is not None:
+                due.append(r)
+            continue
+        escalated = step is not None and (last_step is None or step < last_step)
+        repeat = every > 0 and now - float(last_ts) >= every * 3600 - REMINDER_SLACK_S
+        if escalated or repeat:
+            due.append(r)
+    return due
+
+
 # ── state ───────────────────────────────────────────────────────────────────
 
 def state_path(state_dir: Optional[str] = None) -> str:
     return os.path.join(state_dir or cm.STATE_DIR, STATE_FILE)
 
 
-def load_state(state_dir: Optional[str] = None) -> Dict[str, List[str]]:
+def _load_file(state_dir: Optional[str] = None) -> Dict[str, Any]:
     try:
         with open(state_path(state_dir), "r", encoding="utf-8") as f:
             data = json.load(f)
-        return {k: list(v) for k, v in (data.get("bad") or {}).items() if isinstance(v, list)}
+        return data if isinstance(data, dict) else {}
     except FileNotFoundError:
         return {}
     except Exception as e:  # noqa: BLE001
@@ -177,14 +247,33 @@ def load_state(state_dir: Optional[str] = None) -> Dict[str, List[str]]:
         return {}
 
 
-def save_state(bad: Dict[str, List[str]], state_dir: Optional[str] = None) -> None:
+def load_state(state_dir: Optional[str] = None) -> Dict[str, List[str]]:
+    """rule id → keys of the hosts currently breaching it."""
+    bad = _load_file(state_dir).get("bad") or {}
+    return {k: list(v) for k, v in bad.items() if isinstance(v, list)}
+
+
+def load_sent(state_dir: Optional[str] = None) -> Dict[str, Dict[str, List[Any]]]:
+    """rule id → host key → [ts of the last email about it, ladder step]."""
+    sent = _load_file(state_dir).get("sent") or {}
+    return {k: dict(v) for k, v in sent.items() if isinstance(v, dict)}
+
+
+def save_state(bad: Dict[str, List[str]], state_dir: Optional[str] = None,
+               sent: Optional[Dict[str, Dict[str, List[Any]]]] = None) -> None:
+    if sent is None:
+        sent = load_sent(state_dir)
+    # Only hosts that are still bad need a "last emailed" record.
+    sent = {rid: {k: v for k, v in hosts.items() if k in set(bad.get(rid) or [])}
+            for rid, hosts in sent.items() if rid in bad}
+    sent = {rid: hosts for rid, hosts in sent.items() if hosts}
     path = state_path(state_dir)
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".cert_monitor_alert_state.", dir=d)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"bad": bad}, f, indent=2)
+            json.dump({"bad": bad, "sent": sent}, f, indent=2)
         os.chmod(tmp, 0o640)
         os.replace(tmp, path)
     except Exception:
@@ -234,28 +323,35 @@ def _raw_host(rule: Dict[str, Any], r: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_email(rule: Dict[str, Any], breached: List[Dict[str, Any]],
                 recovered: List[Dict[str, Any]], ts: str = "",
-                test: bool = False) -> Tuple[str, str, str]:
-    """→ (subject, text body, html body). ``html`` is "" for the raw format."""
+                test: bool = False,
+                reminders: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, str, str]:
+    """→ (subject, text body, html body). ``html`` is "" for the raw format.
+    ``reminders`` are hosts that were already reported and are still bad."""
+    reminders = reminders or []
     ts = ts or _dt.datetime.now().isoformat(timespec="seconds")
     trig = rule.get("trigger") or "expiring"
     label = TRIGGER_LABELS.get(trig, trig)
     if trig == "expiring":
         label = f"{label} (< {rule.get('threshold_days')} days)"
-    tag = "TEST" if test else ("ALERT" if breached else "OK")
+    tag = "TEST" if test else ("ALERT" if breached else ("REMINDER" if reminders else "OK"))
     if rule.get("format") == "raw":
         payload = {"event": "lm_certmon_alert", "test": test, "rule": rule.get("name"),
                    "rule_id": rule.get("id"), "trigger": trig,
                    "threshold_days": rule.get("threshold_days") if trig == "expiring" else None,
                    "breached": [_raw_host(rule, r) for r in breached[:MAX_HOSTS_IN_EMAIL]],
                    "recovered": [_raw_host(rule, r) for r in recovered[:MAX_HOSTS_IN_EMAIL]],
+                   "reminder": [_raw_host(rule, r) for r in reminders[:MAX_HOSTS_IN_EMAIL]],
                    "ts": ts}
         subj = (f"lm.certmon {trig} {'test' if test else ''}"
-                f" breached={len(breached)} recovered={len(recovered)}").replace("  ", " ")
+                f" breached={len(breached)} recovered={len(recovered)}"
+                f"{f' reminder={len(reminders)}' if reminders else ''}").replace("  ", " ")
         return subj, json.dumps(payload, separators=(",", ":")), ""
 
     parts = []
     if breached:
         parts.append(f"{len(breached)} breached")
+    if reminders:
+        parts.append(f"{len(reminders)} still bad")
     if recovered:
         parts.append(f"{len(recovered)} recovered")
     subj = f"[LM {tag}] Cert Monitor — {label}: {', '.join(parts) or 'no matching hosts'}"
@@ -272,10 +368,11 @@ def build_email(rule: Dict[str, Any], breached: List[Dict[str, Any]],
 
     text = (f"Cert Monitor {label}{' (TEST)' if test else ''}\nRule: {rule.get('name')}\n"
             f"Time: {ts}\n\n" + _text_block("BREACHED", breached)
+            + _text_block("STILL BAD (reminder)", reminders)
             + _text_block("RECOVERED", recovered))
 
     P = "font-family:Arial,Helvetica,sans-serif"
-    hdr = "#c0322a" if breached else "#0f7a58"
+    hdr = "#c0322a" if (breached or reminders) else "#0f7a58"
 
     def _html_block(title, rows, color):
         if not rows:
@@ -298,7 +395,9 @@ def build_email(rule: Dict[str, Any], breached: List[Dict[str, Any]],
             f'<div style="{P};font-size:15px;font-weight:bold;color:{hdr}">Cert Monitor — {_esc(label)}{" (TEST)" if test else ""}</div>'
             f'<div style="{P};font-size:12px;color:#6b7280;margin-top:2px">Rule: {_esc(rule.get("name"))} · {_esc(ts)}</div></div>'
             f'<div style="padding:4px 20px 18px">'
-            + (_html_block("Breached", breached, "#c0322a") + _html_block("Recovered", recovered, "#0f7a58")
+            + (_html_block("Breached", breached, "#c0322a")
+               + _html_block("Still bad (reminder)", reminders, "#c0322a")
+               + _html_block("Recovered", recovered, "#0f7a58")
                or f'<p style="{P};font-size:12px;color:#6b7280">No hosts currently match this rule.</p>')
             + '</div></div></div>')
     return subj, text, html
@@ -319,34 +418,45 @@ async def send_test(hub, rule: Dict[str, Any], results: List[Dict[str, Any]]) ->
 
 
 async def run_alerts(hub, results: List[Dict[str, Any]],
-                     state_dir: Optional[str] = None) -> Dict[str, Dict[str, int]]:
+                     state_dir: Optional[str] = None,
+                     now: Optional[float] = None) -> Dict[str, Dict[str, int]]:
     """Evaluate every enabled rule against ``results`` (days_left already
-    refreshed) and send breach/recovery digests. Returns per-rule counts."""
+    refreshed) and send breach/reminder/recovery digests. Returns per-rule counts."""
+    now = _dt.datetime.now().timestamp() if now is None else now
     rules = get_rules(hub)
     state = load_state(state_dir)
+    last_sent = load_sent(state_dir)
     new_state: Dict[str, List[str]] = {}
+    new_sent: Dict[str, Dict[str, List[Any]]] = {}
     sent: Dict[str, Dict[str, int]] = {}
     for rule in rules:
         rid = rule["id"]
         prev = state.get(rid, [])
+        rule_sent = dict(last_sent.get(rid) or {})
+        new_sent[rid] = rule_sent
         if not rule.get("enabled") or not rule.get("recipients"):
             new_state[rid] = prev
             continue
         breached, recovered, bad_now = evaluate_rule(rule, results, prev)
-        if not breached and not recovered:
+        reminders = due_reminders(rule, results, prev, rule_sent, now)
+        if not breached and not recovered and not reminders:
             new_state[rid] = bad_now
             continue
-        subj, text, html = build_email(rule, breached, recovered)
+        subj, text, html = build_email(rule, breached, recovered, reminders=reminders)
         ok = False
         try:
             ok = await _send(hub, rule, subj, text, html)
         except Exception as e:  # noqa: BLE001
             logger.warning("[certmon] alert send failed (%s): %s", rule.get("name"), e)
-        # Only advance the edge once delivered, so a failed send retries next tick.
+        # Only advance the state once delivered, so a failed send retries next tick.
         new_state[rid] = bad_now if ok else prev
-        sent[rid] = {"breached": len(breached), "recovered": len(recovered), "sent": int(ok)}
-        logger.info("[certmon] alert rule '%s': breached=%d recovered=%d sent=%s",
-                    rule.get("name"), len(breached), len(recovered), ok)
-    if new_state != state:
-        save_state(new_state, state_dir)
+        if ok:
+            for r in breached + reminders:
+                rule_sent[item_key(r)] = [now, reminder_step(rule, r)[0]]
+        sent[rid] = {"breached": len(breached), "recovered": len(recovered),
+                     "reminders": len(reminders), "sent": int(ok)}
+        logger.info("[certmon] alert rule '%s': breached=%d reminders=%d recovered=%d sent=%s",
+                    rule.get("name"), len(breached), len(reminders), len(recovered), ok)
+    if new_state != state or new_sent != last_sent:
+        save_state(new_state, state_dir, new_sent)
     return sent

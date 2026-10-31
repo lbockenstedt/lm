@@ -1,5 +1,5 @@
 ---
-summary: "Cert Expiry Monitor: Global-Admin-only, opt-in daily TLS certificate expiry check of public Aruba Central / HPE GreenLake and Juniper Mist cloud endpoints, stored as JSON on the hub, with edge-triggered email alert rules."
+summary: "Cert Expiry Monitor: Global-Admin-only, opt-in daily TLS certificate expiry check of public Aruba Central / HPE GreenLake and Juniper Mist cloud endpoints, stored as JSON on the hub, with email alert rules (breach, scheduled reminders with an escalation ladder, recovery)."
 keywords: [cert-monitor, certmon, certificate, expiry, tls, aruba-central, greenlake, mist, alerts, notifications]
 ---
 
@@ -106,6 +106,13 @@ rules are hub-wide, not per-tenant. Each rule has:
 - a format: **human** (a formatted email with a host table) or **raw** (a JSON
   body for automation)
 - an on/off switch
+- **Repeat every N hours while still bad** (`repeat_hours`, 0 = no reminders)
+- for `expiring` rules, an **escalation** ladder (`reminders`) of
+  `{days, every_hours}` steps: once fewer than `days` days are left
+  (0 = expired), remind every `every_hours` hours (0 = one email on entering the
+  step). The most urgent matching step wins; above every step the rule's repeat
+  applies. New rules start with the example "fewer than 7 days: every 24 h;
+  expired: every 6 h".
 
 | Trigger | A host breaches when |
 | :-- | :-- |
@@ -113,11 +120,14 @@ rules are hub-wide, not per-tenant. Each rule has:
 | `error` | the check failed (DNS failure, timeout or handshake error) |
 | `untrusted` | the cert did not validate against the system trust store (expected for private device-CA endpoints) |
 
-Alerts are **edge-triggered**:
+How emails go out:
 - One email goes out when hosts newly breach a rule, and one when they recover.
-  A host that stays bad does not trigger more emails.
-- Each email is a digest: it lists every host that changed in that evaluation,
-  so a shared wildcard cert on many endpoints sends one email, not dozens.
+- A host that stays bad gets a reminder when its repeat interval has passed
+  since its last email, or right away when it moves into a more urgent
+  escalation step. With no repeat and no steps it stays silent.
+- Each email is a digest: it lists every host that breached, is due a reminder
+  ("still bad") or recovered in that evaluation, so a shared wildcard cert on
+  many endpoints sends one email, not dozens.
 - If a host can't be reached, an `expiring` rule keeps its last verdict instead
   of reporting it as recovered.
 
@@ -126,9 +136,9 @@ using days left recalculated from `not_after`. That way a threshold crossed
 between daily checks still fires. Evaluation only runs while the feature is
 enabled.
 
-The breach state is saved in
+The breach state and the time of each host's last email are saved in
 `$LM_STATE_DIR/cert_monitor_alert_state.json`, so a hub restart does not repeat
-alerts that were already sent. A rule's state only moves forward after its
+alerts that were already sent or reset the reminder clock. A rule's state only moves forward after its
 email is delivered, so a failed send is retried on the next tick. Changing a
 rule's trigger resets that rule's state. Deleting a rule drops its state.
 
@@ -148,7 +158,7 @@ Rules are stored in `global_config.cert_monitor_alerts.rules`. The code is in
 | POST | `/api/certmon/run` | start a check now (409 when disabled) |
 | POST | `/api/certmon/ignore` | `{host, port?, ignored}` — ignore (`true`, default) or un-ignore (`false`) one cert; `host` may be `host:port`. 400 for a bad host, 404 when ignoring a host that isn't monitored |
 | GET | `/api/certmon/alerts/rules` | rules plus the trigger and service lists |
-| POST | `/api/certmon/alerts/rules` | create `{name, trigger, threshold_days, services, recipients, format, enabled}` |
+| POST | `/api/certmon/alerts/rules` | create `{name, trigger, threshold_days, services, recipients, format, enabled, repeat_hours, reminders}` |
 | PUT | `/api/certmon/alerts/rules/{id}` | update a rule |
 | DELETE | `/api/certmon/alerts/rules/{id}` | delete a rule |
 | POST | `/api/certmon/alerts/rules/{id}/test` | send a test email with the current matches |

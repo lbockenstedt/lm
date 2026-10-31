@@ -83,7 +83,7 @@ async function loadAlertRules() {
     const rows = rowsArr.length ? rowsArr.join('') : '<tr><td colspan="6" class="px-3 py-4 text-slate-400 italic">No alert rules — click "Add alert".</td></tr>';
     el.innerHTML = `
       <div class="flex items-center justify-between mb-3">
-        <div><p class="text-sm font-bold text-slate-600">Alert Rules <span class="text-slate-400 font-normal">— ${escapeHtml(currentTenant || 'default')}</span></p><p class="text-xs text-slate-400 max-w-xl">One email when a monitored source breaches, one on recovery. Pick a source + who to notify. Delivered via Setup → Notifications.</p></div>
+        <div><p class="text-sm font-bold text-slate-600">Alert Rules <span class="text-slate-400 font-normal">— ${escapeHtml(currentTenant || 'default')}</span></p><p class="text-xs text-slate-400 max-w-xl">One email when a monitored source breaches, one on recovery; Cert Monitor rules can also remind on a schedule. Pick a source + who to notify. Delivered via Setup → Notifications.</p></div>
         <button onclick="editAlertRule('')" class="shrink-0 bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500 px-3 py-1.5 rounded-md text-sm font-bold">+ Add alert</button>
       </div>
       ${certErr ? `<p class="text-xs text-red-500 mb-2">Could not load Cert Monitor alert rules: ${escapeHtml(certErr)}</p>` : ''}
@@ -93,7 +93,24 @@ async function loadAlertRules() {
 function _certMonRuleWhat(r) {
     const L = window._certMonAlertMeta?.trigger_labels || {};
     const base = r.trigger === 'expiring' ? `Expiring in < ${r.threshold_days} days` : (L[r.trigger] || r.trigger);
-    return base + ((r.services || []).length ? ` · ${r.services.join(', ')}` : ' · all services');
+    return base + ((r.services || []).length ? ` · ${r.services.join(', ')}` : ' · all services') + ' · ' + _certMonCadence(r);
+}
+
+// "once", "every 24h", "once; <7d every 24h; expired every 6h" …
+function _certMonCadence(r) {
+    const every = h => h ? `every ${h}h` : 'once';
+    const steps = (r.reminders || []).map(st => `${st.days > 0 ? '<' + st.days + 'd' : (st.days === 0 ? 'expired' : 'expired >' + (-st.days) + 'd')} ${every(st.every_hours)}`);
+    return [every(r.repeat_hours || 0)].concat(steps).join('; ');
+}
+
+function _alrStepRow(st) {
+    return `<div class="alr-step flex items-center gap-2 text-xs text-slate-600">
+        <span>fewer than</span><input type="number" min="-365" max="825" class="alr-step-days w-16 border border-slate-300 rounded px-2 py-1" value="${escapeHtml(String(st.days))}"><span>days left → every</span>
+        <input type="number" min="0" max="720" class="alr-step-hours w-16 border border-slate-300 rounded px-2 py-1" value="${escapeHtml(String(st.every_hours))}"><span>hours</span>
+        <button type="button" onclick="this.closest('.alr-step').remove()" class="text-red-500 hover:text-red-700 ml-auto" title="Remove step">&times;</button></div>`;
+}
+function _alrAddStep() {
+    document.getElementById('alr-steps')?.insertAdjacentHTML('beforeend', _alrStepRow({ days: 0, every_hours: 6 }));
 }
 
 // A Cert Monitor source is encoded as "certmon:<trigger>" in the source picker.
@@ -102,8 +119,10 @@ function _alrSourceChanged() {
     const cert = v.startsWith('certmon:');
     const w = document.getElementById('alr-cert-w');
     const dw = document.getElementById('alr-days-w');
+    const lw = document.getElementById('alr-ladder-w');
     if (w) w.style.display = cert ? '' : 'none';
     if (dw) dw.style.display = v === 'certmon:expiring' ? '' : 'none';
+    if (lw) lw.style.display = v === 'certmon:expiring' ? '' : 'none';
 }
 
 function editAlertRule(id, kind) {
@@ -124,6 +143,9 @@ function editAlertRule(id, kind) {
     const svcSel = new Set(isCert && existing ? (existing.services || []) : []);
     const svcBoxes = ((meta && meta.services) || []).map(s => `<label class="flex items-center gap-2"><input type="checkbox" class="alr-svc w-4 h-4 rounded" value="${escapeHtml(s)}" ${svcSel.has(s) ? 'checked' : ''}> ${escapeHtml(s)}</label>`).join('');
     const days = isCert && existing ? existing.threshold_days : ((meta && meta.default_threshold_days) || 30);
+    const repeatH = isCert && existing ? (existing.repeat_hours || 0) : 0;
+    // New rules start with an example ladder: daily inside a week, every 6h once expired.
+    const steps = isCert && existing ? (existing.reminders || []) : [{ days: 7, every_hours: 24 }, { days: 0, every_hours: 6 }];
     document.getElementById('alert-edit-modal')?.remove();
     const modal = document.createElement('div');
     modal.id = 'alert-edit-modal';
@@ -135,7 +157,12 @@ function editAlertRule(id, kind) {
       <label class="block text-xs text-slate-500">Name<input id="alr-name" value="${escapeHtml(existing ? existing.name : '')}" placeholder="VM offline → NOC" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
       <label class="block text-xs text-slate-500">Source (what to watch)<select id="alr-source" onchange="_alrSourceChanged()" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm">${srcOpts}</select></label>
       <div id="alr-cert-w" class="space-y-3" style="display:none">
-        <label id="alr-days-w" class="block text-xs text-slate-500">Alert when fewer than N days are left<input id="alr-days" type="number" min="1" max="825" value="${escapeHtml(String(days))}" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"><span class="block text-[11px] text-slate-400 mt-1">Expired certs always match. Add several rules (e.g. 90, 30, 7) for escalating warnings.</span></label>
+        <label id="alr-days-w" class="block text-xs text-slate-500">Alert when fewer than N days are left<input id="alr-days" type="number" min="1" max="825" value="${escapeHtml(String(days))}" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"><span class="block text-[11px] text-slate-400 mt-1">Expired certs always match.</span></label>
+        <label class="block text-xs text-slate-500">Repeat every N hours while still bad<input id="alr-repeat" type="number" min="0" max="720" value="${escapeHtml(String(repeatH))}" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"><span class="block text-[11px] text-slate-400 mt-1">0 = one email when it first breaches (plus one on recovery).</span></label>
+        <div id="alr-ladder-w" class="text-xs text-slate-500">Escalation <span class="text-slate-400">(overrides the repeat as expiry gets closer)</span>
+          <div id="alr-steps" class="space-y-1 mt-1">${steps.map(_alrStepRow).join('')}</div>
+          <button type="button" onclick="_alrAddStep()" class="mt-1 text-[#01A982] hover:underline">+ Add step</button>
+          <span class="block text-[11px] text-slate-400 mt-1">0 days = expired. 0 hours = one email on entering the step. Entering a more urgent step emails right away.</span></div>
         <div class="text-xs text-slate-500">Services <span class="text-slate-400">(none ticked = all)</span><div class="grid grid-cols-2 gap-1 mt-1 text-slate-600">${svcBoxes}</div></div>
       </div>
       <label class="block text-xs text-slate-500">Format<select id="alr-format" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm">
@@ -164,6 +191,11 @@ async function saveAlertRule(id) {
         body = Object.assign(common, {
             trigger: src.slice('certmon:'.length),
             threshold_days: parseInt(v('alr-days').value, 10) || 30,
+            repeat_hours: parseInt(v('alr-repeat').value, 10) || 0,
+            reminders: Array.from(document.querySelectorAll('#alr-steps .alr-step')).map(row => ({
+                days: row.querySelector('.alr-step-days').value,
+                every_hours: parseInt(row.querySelector('.alr-step-hours').value, 10) || 0,
+            })).filter(st => st.days !== '').map(st => Object.assign(st, { days: parseInt(st.days, 10) })),
             services: Array.from(document.querySelectorAll('#alert-edit-modal .alr-svc:checked')).map(x => x.value),
         });
         url = id ? ('/api/certmon/alerts/rules/' + encodeURIComponent(id)) : '/api/certmon/alerts/rules';
