@@ -42,6 +42,9 @@ class _FakeState:
     def _mark_dirty(self):
         pass
 
+    def get_spoke_tenant(self, module_id):
+        return self.system_state["module_metadata"].get(module_id, {}).get("tenant_id")
+
 
 class _FakeHub(HubOsUpdatesMixin):
     """Minimal hub: active_connections + agent_info + module_metadata, plus a
@@ -63,6 +66,25 @@ class _FakeHub(HubOsUpdatesMixin):
 
 
 # ── _osu_targets ──────────────────────────────────────────────────────────
+
+def test_tenant_node_keys_are_their_spokes_and_agents_never_the_hub():
+    hub = _FakeHub(
+        connections={"s1": object(), "s2": object()},
+        agent_info={"a1": {"spoke_id": "s1", "hostname": "pve1"},
+                    "a2": {"spoke_id": "s2", "hostname": "pve2"}},
+        module_metadata={"s1": {"display_name": "one", "tenant_id": "t1"},
+                         "s2": {"display_name": "two", "tenant_id": "t2"}})
+    assert hub.osu_tenant_node_keys({"t1"}) == {"spoke:s1", "agent:a1"}
+
+
+def test_targets_skip_an_agent_on_a_spoke_host():
+    hub = _FakeHub(
+        connections={"spoke-1": object()},
+        agent_info={"agent-1": {"spoke_id": "spoke-1", "hostname": "MIPBE-SVCS01.lab.local"},
+                    "agent-2": {"spoke_id": "spoke-1", "hostname": "other"}},
+        module_metadata={"spoke-1": {"display_name": "mipbe-svcs01", "module_type": "netbox"}})
+    assert [t["id"] for t in hub._osu_targets()] == ["spoke-1", "agent-2", "hub"]
+
 
 def test_targets_include_connected_spokes_agents_and_hub():
     hub = _FakeHub(
@@ -405,6 +427,18 @@ def _node(kind, nid, count=2, security=1, blocker="", features=("packages",), pa
             "security_count": security, "apply_blocker": blocker,
             "features": list(features),
             "packages": [{"package": name, "security": sec} for name, sec in packages]}
+
+
+def test_new_nodes_are_enrolled_in_autopatch_and_reboot():
+    hub = _FakeHub()
+    hub._osu_enroll_new_nodes(["hub:hub", "spoke:s1"])  # first run: just remember the fleet
+    assert hub.osu_autopatch_config()["nodes"] == []
+    hub.osu_set_autopatch_node("spoke:s1", True)
+    hub.osu_set_autopatch_node("spoke:s1", False)  # operator opted out
+    hub._osu_enroll_new_nodes(["hub:hub", "spoke:s1", "agent:a1"])
+    cfg = hub.osu_autopatch_config()
+    assert cfg["nodes"] == ["agent:a1"]
+    assert cfg["reboot_nodes"] == ["agent:a1"]
 
 
 def test_autopatch_has_no_nodes_by_default():
@@ -800,6 +834,31 @@ async def test_cluster_node_that_does_not_return_stops_the_run(monkeypatch):
     items = hub._osu_state()["run"]["items"]
     assert items[0]["auto_reboot"].startswith("failed: did not come back")
     assert items[1]["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_manual_deploy_to_a_cluster_node_uses_maintenance_mode(monkeypatch):
+    hub, events = _cluster_hub(monkeypatch, [[]])
+    await hub.osu_apply_fleet(node_keys=["agent:pve1"], actor="alice")  # no reboot_after
+    for _ in range(5):
+        await _drain()
+    assert events == [("apply", "pve1"), ("maint", "pve1", "enable"),
+                      ("reboot", "pve1", "alice"), ("maint", "pve1", "disable")]
+
+
+@pytest.mark.asyncio
+async def test_reboot_button_on_a_cluster_node_uses_maintenance_mode(monkeypatch):
+    hub, events = _cluster_hub(monkeypatch, [["vm:100"], []])
+    hub._osu_state()["run"] = None
+    res = await hub.osu_reboot_node("agent:pve1", actor="alice")
+    assert res["status"] == "SUCCESS"
+    for _ in range(5):
+        await _drain()
+    assert events == [("maint", "pve1", "enable"), ("maint", "pve1", "status"),
+                      ("reboot", "pve1", "alice"), ("maint", "pve1", "disable")]
+    run = hub._osu_state()["run"]
+    assert run["status"] == "finished"
+    assert run["items"][0]["auto_reboot"] == "rebooted (cluster maintenance mode)"
 
 
 # ── footer "Pending Reboot" alert ────────────────────────────────────────────
