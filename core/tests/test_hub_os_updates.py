@@ -800,3 +800,38 @@ async def test_cluster_node_that_does_not_return_stops_the_run(monkeypatch):
     items = hub._osu_state()["run"]["items"]
     assert items[0]["auto_reboot"].startswith("failed: did not come back")
     assert items[1]["status"] == "skipped"
+
+
+# ── footer "Pending Reboot" alert ────────────────────────────────────────────
+
+def test_pending_reboots_lists_autoreboot_nodes_due_in_this_window(monkeypatch):
+    import hub_os_updates as hou
+    pve = {**_node("agent", "pve1", features=("packages", "maintenance")),
+           "pve_cluster": {"name": "lab"}}
+    hub, _ = _hub_with([_node("spoke", "s1"), _node("spoke", "keep-up"),
+                        _node("spoke", "no-updates", count=0), pve])
+    for k in ("spoke:s1", "spoke:keep-up", "spoke:no-updates", "agent:pve1"):
+        hub.osu_set_autopatch_node(k, True)
+    hub.osu_set_autoreboot_node("spoke:keep-up", False)
+    hub.osu_set_autopatch_window({"start": "01:00", "end": "05:00", "tz": "UTC"})
+    monkeypatch.setattr(hou.time, "time", lambda: _ts("2026-11-02 12:00"))
+    assert hub.osu_pending_reboots()["in_window"] is False
+    assert hub.osu_pending_reboots()["nodes"] == []
+    monkeypatch.setattr(hou.time, "time", lambda: _ts("2026-11-02 01:01"))
+    got = hub.osu_pending_reboots()
+    assert got["in_window"] is True
+    assert [(n["key"], n["note"].startswith("may")) for n in got["nodes"]] == \
+        [("spoke:s1", False), ("agent:pve1", True)]
+    # Once the window's run is over nothing is pending any more.
+    hub._osu_state()["autopatch_at"] = _ts("2026-11-02 01:00")
+    assert hub.osu_pending_reboots()["nodes"] == []
+
+
+def test_pending_reboots_follows_the_running_run():
+    hub, _ = _hub_with([_node("spoke", "s1"), _node("spoke", "s2")])
+    hub._osu_state()["run"] = {"status": "running", "reboot_after": ["spoke:s1", "spoke:s2"],
+                               "items": [{"key": "spoke:s1", "status": "done",
+                                          "auto_reboot": "scheduled"},
+                                         {"key": "spoke:s2", "status": "queued"}]}
+    got = hub.osu_pending_reboots()
+    assert got["in_window"] and [n["key"] for n in got["nodes"]] == ["spoke:s2"]

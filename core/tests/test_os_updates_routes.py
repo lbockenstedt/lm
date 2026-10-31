@@ -89,6 +89,9 @@ class _FakeHub:
         (self._reboot.add if on else self._reboot.discard)(key)
         return self.osu_autopatch_config()
 
+    def osu_pending_reboots(self):
+        return {"in_window": True, "window": {}, "nodes": [{"key": "hub:hub"}]}
+
     async def osu_fix_access(self, key, username, password, actor=""):
         self.fixed = (key, username, password)
         return {"status": "SUCCESS", "message": "updates enabled"}
@@ -225,3 +228,10 @@ def test_autopatch_and_fix_access_are_admin_only():
     assert c.get("/api/os-updates/auto-patch").status_code == 403
     assert c.post("/api/os-updates/fix-access",
                   json={"node": "x", "password": "pw"}).status_code == 403
+
+
+def test_pending_reboots_is_admin_only():
+    c, _ = _client()
+    assert c.get("/api/os-updates/pending-reboots").json()["nodes"] == [{"key": "hub:hub"}]
+    c, _ = _client(is_admin=False)
+    assert c.get("/api/os-updates/pending-reboots").status_code == 403
