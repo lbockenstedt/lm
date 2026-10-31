@@ -391,3 +391,36 @@ def test_dedupe_and_cap_caps_at_limit():
 def test_dedupe_and_cap_empty():
     from routes.setup_admin import _dedupe_and_cap
     assert _dedupe_and_cap([]) == []
+
+
+# ── commit source ────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("subject,expected", [
+    ("feat(os-updates): configure what auto-patch installs", ("feature", "configure what auto-patch installs")),
+    ("fix: clear spoke drain state on reconnect", ("bug", "clear spoke drain state on reconnect")),
+    ("OS Updates: CVE lookup — who is affected", ("feature", "OS Updates: CVE lookup — who is affected")),
+    ("WebUI split: fix error-guard recovery", ("bug", "WebUI split: fix error-guard recovery")),
+    ("WebUI tests: read main.js via a shared helper", None),
+    ("docs: phase plan", None),
+    ("release v1.00 [skip ci]", None),
+    ("AI Fix #1358: Bug Report - Script error", None),
+    ("AI Feature #1247: Simulation change", None),
+])
+def test_commit_to_item_classifies_and_filters(subject, expected):
+    item = wn.commit_to_item("abcdef1234", 100.0, subject, "https://github.com/o/r")
+    if expected is None:
+        assert item is None
+    else:
+        assert (item["type"], item["summary"]) == expected
+        assert item["issue_url"] == "https://github.com/o/r/commit/abcdef1234"
+
+
+def test_recent_commit_items_reads_git_log(tmp_path):
+    import subprocess
+    git = ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(git[:3] + ["init", "-q"], check=True)
+    for msg in ("feat: new thing", "tests: more tests", "fix: broken thing"):
+        subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", msg], check=True)
+    items = wn.recent_commit_items(14, repo_root=str(tmp_path))
+    assert [(i["type"], i["summary"]) for i in items] == [("bug", "broken thing"), ("feature", "new thing")]
+    assert wn.recent_commit_items(14, repo_root=str(tmp_path / "nope")) == []

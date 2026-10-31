@@ -619,9 +619,10 @@ function _onSaTenantFilterChange() {
 // Fleet OS package updates. The HUB is the module: it collects pending-update
 // state from every spoke and agent and, on explicit approval, sends the apply
 // commands. Nodes never update themselves.
-// Rolling one node at a time, hub last, NEVER auto-reboot (see
+// Rolling one node at a time, hub last; a manual deploy never reboots (see
 // hub_os_updates.py). Deploy everything, or only selected nodes / packages /
-// security updates; reboot is a separate per-node action. Ineligible nodes are listed as unmanaged WITH a reason rather than
+// security updates; reboot is a separate per-node action, or Auto-reboot on an
+// auto-patch node. Ineligible nodes are listed as unmanaged WITH a reason rather than
 // hidden, so "up to date" is never confused with "not covered".
 let _osuPoll = null;
 
@@ -636,8 +637,10 @@ function _renderOsUpdatesView(content) {
             <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-[11px] text-amber-800 leading-snug">
                 Operating-system package updates for every spoke and agent — <b>Global-Admin only, every approval is audit-logged</b>.
                 Deploys <code>apt dist-upgrade</code> (everything) — or only the nodes/packages you select, or only security updates.
-                <b>Nothing is ever rebooted automatically</b> — a host needing one is badged with a <b>Reboot…</b> button you use deliberately.
-                <b>Auto-patch</b> is approved <b>per node</b> (tick "Auto-patch" on a node): after each scheduled auto-check, approved nodes get what it found, the same way — security updates only or all updates, minus any packages you list under "Never auto-install".
+                A manual deploy <b>never reboots</b> — a host needing one is badged with a <b>Reboot…</b> button you use deliberately.
+                <b>Auto-patch</b> is approved <b>per node</b> (tick "Auto-patch" on a node) and only runs in the <b>maintenance window</b> below: once per window the fleet is re-checked and approved nodes get what was found, the same way — security updates only or all updates, minus any packages you list under "Never auto-install".
+                <b>Auto-reboot</b> (on by default for an auto-patch node — untick it to keep a node up) reboots each node that installed something once the run is done, hub last. No new node is started after the window closes; the auto-check only detects updates.
+                A node in a <b>Proxmox cluster</b> is only rebooted if it needs it, in <b>HA maintenance mode</b> (HA guests move to the other nodes first), and the run waits until it is back before taking maintenance off and moving on — one cluster node down at a time.
                 Nodes are updated <b>one at a time</b>, and the <b>hub goes last</b> (updating it restarts this page).
                 This is separate from LM code updates.
             </div>
@@ -669,6 +672,22 @@ function _renderOsUpdatesView(content) {
                 <button onclick="osuSaveAutoPatchExclude()" class="${btnSecCls}">Save</button>
                 <span id="osu-autopatch-count" class="text-xs text-slate-400 self-center"></span>
             </div>
+            <div class="flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
+                <span class="text-sm text-slate-600 self-center" title="Auto-patch and auto-reboot only run in this window (once per window). Same start and end = any time.">Maintenance window (off hours):</span>
+                <div class="space-y-1">
+                    <label class="${labelCls}">From</label>
+                    <input type="time" id="osu-window-start" class="${inputCls} w-32" value="01:00">
+                </div>
+                <div class="space-y-1">
+                    <label class="${labelCls}">To</label>
+                    <input type="time" id="osu-window-end" class="${inputCls} w-32" value="05:00">
+                </div>
+                <div class="space-y-1">
+                    <label class="${labelCls}">Timezone</label>
+                    <input type="text" id="osu-window-tz" class="${inputCls} w-48" placeholder="e.g. America/Chicago">
+                </div>
+                <button onclick="osuSaveWindow()" class="${btnSecCls}">Save</button>
+            </div>
             <div class="flex flex-wrap items-center gap-2">
                 <button onclick="osuCheck()" class="${btnSecCls}">↻ Check for updates</button>
                 <button id="osu-apply-selected" onclick="osuApplySelected()" class="${btnCls}" disabled>Deploy selected (0)</button>
@@ -681,7 +700,8 @@ function _renderOsUpdatesView(content) {
                 <div class="flex flex-wrap items-end gap-3">
                     <div class="space-y-1 flex-1 min-w-[16rem]">
                         <label class="${labelCls}" title="Matches each node's installed packages (reported at the last check) against Debian's security tracker">Who is affected? — CVE id or package</label>
-                        <input type="text" id="osu-cve-q" class="${inputCls}" placeholder="e.g. CVE-2026-1234 or php" onkeydown="if (event.key === 'Enter') osuCveSearch()">
+                        <input type="text" id="osu-cve-q" list="osu-cve-list" autocomplete="off" class="${inputCls}" placeholder="e.g. CVE-2026-1234 or php" onkeydown="if (event.key === 'Enter') osuCveSearch()" oninput="osuCvePicked(this.value)">
+                        <datalist id="osu-cve-list"></datalist>
                     </div>
                     <button onclick="osuCveSearch()" class="${btnSecCls}">Look up</button>
                 </div>
@@ -692,6 +712,50 @@ function _renderOsUpdatesView(content) {
     osuLoad();
     osuLoadAutoCheck();
     osuLoadAutoPatch();
+    osuLoadFleetCves();
+}
+
+// Footer "Pending Reboot" alert: during the maintenance window, lists the
+// nodes auto-reboot is about to restart (hover for the list). Admin only,
+// like the rest of OS Updates; refreshed every minute.
+async function osuRefreshRebootTray() {
+    const tray = document.getElementById('reboot-tray');
+    if (!tray) return;
+    let data = { nodes: [] };
+    if (typeof isAdmin === 'function' && isAdmin()) {
+        try { data = await apiJson('/api/os-updates/pending-reboots'); } catch (e) { /* keep hidden */ }
+    }
+    const nodes = data.in_window ? (data.nodes || []) : [];
+    tray.classList.toggle('hidden', !nodes.length);
+    tray.classList.toggle('flex', nodes.length > 0);
+    if (!nodes.length) return;
+    const w = data.window || {};
+    document.getElementById('reboot-tray-tooltip').innerHTML =
+        `<div class="font-bold mb-1">${nodes.length} system(s) will be rebooted</div>`
+        + nodes.map(n => `<div class="flex justify-between gap-4 py-0.5"><span>${escapeHtml(n.label)}</span><span class="opacity-60">${escapeHtml(n.note)}</span></div>`).join('')
+        + `<div class="opacity-60 mt-1">Maintenance window ${escapeHtml(w.start || '')}–${escapeHtml(w.end || '')} ${escapeHtml(w.tz || '')}</div>`;
+}
+setTimeout(osuRefreshRebootTray, 5000);
+setInterval(osuRefreshRebootTray, 60000);
+
+// Picking a suggestion looks it up straight away.
+window.osuCvePicked = function (value) {
+    const opts = document.getElementById('osu-cve-list')?.options || [];
+    if (Array.from(opts).some(o => o.value === value)) osuCveSearch();
+};
+
+// Suggestions for the who-is-affected box: only the CVEs that affect at least
+// one node, shown with their description so the right id is easy to pick.
+async function osuLoadFleetCves() {
+    try {
+        const cves = await apiJson('/api/os-updates/cves/fleet');
+        const list = document.getElementById('osu-cve-list');
+        if (!list) return;
+        list.innerHTML = cves.map(c => `<option value="${escapeHtml(c.cve)}" label="${escapeHtml(
+            `${c.urgency ? c.urgency + ' · ' : ''}${c.nodes} node(s) · ${c.description}`)}"></option>`).join('');
+        const q = document.getElementById('osu-cve-q');
+        if (q) q.title = `${cves.length} CVE(s) affect the fleet — start typing to pick one`;
+    } catch (e) { /* best-effort — typing an id still works */ }
 }
 
 async function osuLoadAutoPatch() {
@@ -699,8 +763,34 @@ async function osuLoadAutoPatch() {
         const cfg = await apiJson('/api/os-updates/auto-patch');
         document.getElementById('osu-autopatch-security').value = cfg.security_only !== false ? 'security' : 'all';
         document.getElementById('osu-autopatch-exclude').value = (cfg.exclude || []).join(', ');
+        osuShowWindow(cfg.window);
     } catch (e) { /* best-effort */ }
 }
+
+function osuShowWindow(w) {
+    if (!w) return;
+    document.getElementById('osu-window-start').value = w.start;
+    document.getElementById('osu-window-end').value = w.end;
+    document.getElementById('osu-window-tz').value = w.tz;
+}
+
+window.osuSaveWindow = async function () {
+    const window_ = {
+        start: document.getElementById('osu-window-start').value,
+        end: document.getElementById('osu-window-end').value,
+        // Default to this browser's timezone so "01:00" means the operator's 1 AM.
+        tz: document.getElementById('osu-window-tz').value.trim()
+            || Intl.DateTimeFormat().resolvedOptions().timeZone,
+    };
+    try {
+        const cfg = await apiJson('/api/os-updates/auto-patch', { method: 'POST', body: JSON.stringify({ window: window_ }) });
+        osuShowWindow(cfg.window);
+        const w = cfg.window;
+        showToast(w.start === w.end
+            ? `Auto-patch may run at any time (${w.tz}).`
+            : `Auto-patch runs between ${w.start} and ${w.end} (${w.tz}).`, 'success');
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+};
 
 window.osuSaveAutoPatchExclude = async function () {
     const exclude = document.getElementById('osu-autopatch-exclude').value
@@ -724,14 +814,24 @@ window.osuSetAutoPatchSecurity = async function (on) {
 window.osuToggleAutoPatch = async function (key, on, el) {
     const n = ((window._osuData || {}).nodes || []).find(x => `${x.kind}:${x.id}` === key);
     const label = n ? n.label : key;
-    const hubNote = n && n.kind === 'hub' ? '\n\nThis is the HUB — patching it restarts LM services (no reboot).' : '';
-    if (on && !confirm(`Approve ${label} for auto-patching?\n\nAfter every scheduled auto-check its pending updates are installed automatically. Nothing is rebooted.${hubNote}`)) {
+    const hubNote = n && n.kind === 'hub' ? '\n\nThis is the HUB — patching it restarts LM services, and Auto-reboot reboots it last.' : '';
+    if (on && !confirm(`Approve ${label} for auto-patching?\n\nIn each maintenance window its pending updates are installed automatically, then the node is rebooted (Auto-reboot — untick it to keep the node up).${hubNote}`)) {
         if (el) el.checked = false;
         return;
     }
     try {
         await apiJson('/api/os-updates/auto-patch', { method: 'POST', body: JSON.stringify({ node: key, enabled: on }) });
         showToast(`${label}: auto-patch ${on ? 'approved' : 'off'}.`, 'success');
+        osuLoad();
+    } catch (e) { if (el) el.checked = !on; showToast('Save failed: ' + (e.message || e), 'error'); }
+};
+
+window.osuToggleAutoReboot = async function (key, on, el) {
+    const n = ((window._osuData || {}).nodes || []).find(x => `${x.kind}:${x.id}` === key);
+    const label = n ? n.label : key;
+    try {
+        await apiJson('/api/os-updates/auto-patch', { method: 'POST', body: JSON.stringify({ node: key, auto_reboot: on }) });
+        showToast(`${label}: auto-reboot ${on ? 'on' : 'off'}.`, 'success');
         osuLoad();
     } catch (e) { if (el) el.checked = !on; showToast('Save failed: ' + (e.message || e), 'error'); }
 };
@@ -1075,15 +1175,18 @@ function _osuRender(d) {
         const fixBtn = n.apply_blocker && feats.includes('fix_access') && !busy
             ? ` <button onclick="osuFixAccess(${jsKey})" class="ml-1 text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
         const autoBox = n.eligible
-            ? `<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_patch ? 'text-emerald-700' : 'text-slate-400'} cursor-pointer" title="Install this node's updates automatically after each scheduled auto-check"><input type="checkbox" class="w-3 h-3" ${n.auto_patch ? 'checked' : ''} onchange="osuToggleAutoPatch(${jsKey}, this.checked, this)">Auto-patch</label>` : '';
+            ? `<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_patch ? 'text-emerald-700' : 'text-slate-400'} cursor-pointer" title="Install this node's updates automatically in the maintenance window"><input type="checkbox" class="w-3 h-3" ${n.auto_patch ? 'checked' : ''} onchange="osuToggleAutoPatch(${jsKey}, this.checked, this)">Auto-patch</label>` : '';
+        const rebootBox = n.eligible && n.auto_patch
+            ? `<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_reboot ? 'text-emerald-700' : 'text-slate-400'} cursor-pointer" title="Reboot this node after auto-patch installs something"><input type="checkbox" class="w-3 h-3" ${n.auto_reboot ? 'checked' : ''} onchange="osuToggleAutoReboot(${jsKey}, this.checked, this)">Auto-reboot</label>` : '';
         const blocker = n.apply_blocker ? `<div class="text-[11px] text-amber-700 mt-1">Can't apply: ${escapeHtml(n.apply_blocker)}${fixBtn}</div>` : '';
         let msg = '';
         if (item && item.message) msg = `<div class="text-[11px] ${item.status === 'done' ? 'text-slate-500' : 'text-red-600'} mt-1">${escapeHtml(item.message)}</div>`;
         else if (item && item.status === 'done' && item.mode === 'packages') msg = `<div class="text-[11px] text-slate-500 mt-1">upgraded ${escapeHtml((item.packages || []).join(', '))}</div>`;
+        if (item && item.auto_reboot) msg += `<div class="text-[11px] ${item.auto_reboot === 'scheduled' ? 'text-slate-500' : 'text-red-600'} mt-1">auto-reboot ${escapeHtml(item.auto_reboot)}</div>`;
         return `<div class="border border-slate-200 rounded-md p-3 mb-2">
             <div class="flex flex-wrap items-center justify-between gap-2">
-              <span class="flex items-center gap-2 text-xs font-bold text-slate-600">${nodeBox}${escapeHtml(n.label)} <span class="font-normal text-slate-400">${escapeHtml(n.kind)}${n.flavor ? ' · ' + escapeHtml(n.flavor) : ''}</span></span>
-              <span class="flex flex-wrap items-center gap-2 justify-end">${autoBox}${rebootBtn}${reboot}${state}</span>
+              <span class="flex items-center gap-2 text-xs font-bold text-slate-600">${nodeBox}${escapeHtml(n.label)} <span class="font-normal text-slate-400">${escapeHtml(n.kind)}${n.flavor ? ' · ' + escapeHtml(n.flavor) : ''}${n.pve_cluster && n.pve_cluster.name ? ' · PVE cluster ' + escapeHtml(n.pve_cluster.name) : ''}</span></span>
+              <span class="flex flex-wrap items-center gap-2 justify-end">${autoBox}${rebootBox}${rebootBtn}${reboot}${state}</span>
             </div>${detail}${blocker}${msg}</div>`;
     }).join('');
     const apCount = document.getElementById('osu-autopatch-count');

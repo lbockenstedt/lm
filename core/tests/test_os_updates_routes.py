@@ -59,7 +59,9 @@ class _FakeHub:
     def osu_autopatch_config(self):
         return {"security_only": getattr(self, "_sec", True),
                 "nodes": sorted(getattr(self, "_nodes", set())),
-                "exclude": getattr(self, "_exclude", [])}
+                "exclude": getattr(self, "_exclude", []),
+                "reboot_nodes": sorted(getattr(self, "_reboot", set())),
+                "window": getattr(self, "_window", None)}
 
     def osu_set_autopatch_exclude(self, patterns):
         self._exclude = patterns
@@ -71,8 +73,24 @@ class _FakeHub:
 
     def osu_set_autopatch_node(self, key, on):
         self._nodes = getattr(self, "_nodes", set())
+        self._reboot = getattr(self, "_reboot", set())
         (self._nodes.add if on else self._nodes.discard)(key)
+        (self._reboot.add if on else self._reboot.discard)(key)
         return self.osu_autopatch_config()
+
+    def osu_set_autopatch_window(self, window):
+        import hub_os_updates
+        self._window = hub_os_updates._parse_window(window)
+        return self.osu_autopatch_config()
+
+    def osu_set_autoreboot_node(self, key, on):
+        if key not in getattr(self, "_nodes", set()):
+            raise ValueError(f"{key}: approve it for auto-patch first")
+        (self._reboot.add if on else self._reboot.discard)(key)
+        return self.osu_autopatch_config()
+
+    def osu_pending_reboots(self):
+        return {"in_window": True, "window": {}, "nodes": [{"key": "hub:hub"}]}
 
     async def osu_fix_access(self, key, username, password, actor=""):
         self.fixed = (key, username, password)
@@ -175,16 +193,26 @@ def test_reboot_requires_node_and_admin():
 def test_autopatch_per_node_roundtrip():
     c, hub = _client()
     assert c.get("/api/os-updates/auto-patch").json() == {"security_only": True, "nodes": [],
-                                                          "exclude": []}
+                                                          "exclude": [], "reboot_nodes": [],
+                                                          "window": None}
     c.post("/api/os-updates/auto-patch", json={"node": "spoke:s1", "enabled": True})
     r = c.post("/api/os-updates/auto-patch", json={"security_only": False})
-    assert r.json() == {"security_only": False, "nodes": ["spoke:s1"], "exclude": []}
+    assert r.json() == {"security_only": False, "nodes": ["spoke:s1"], "exclude": [],
+                        "reboot_nodes": ["spoke:s1"], "window": None}
+    r = c.post("/api/os-updates/auto-patch", json={"node": "spoke:s1", "auto_reboot": False})
+    assert r.json()["nodes"] == ["spoke:s1"] and r.json()["reboot_nodes"] == []
+    assert c.post("/api/os-updates/auto-patch",
+                  json={"node": "spoke:nope", "auto_reboot": True}).status_code == 409
     r = c.post("/api/os-updates/auto-patch", json={"exclude": ["linux-image-*"]})
     assert r.json()["exclude"] == ["linux-image-*"]
     assert c.post("/api/os-updates/auto-patch", json={"exclude": "vim"}).status_code == 400
     r = c.post("/api/os-updates/auto-patch", json={"node": "spoke:s1", "enabled": False})
     assert r.json()["nodes"] == []
     assert c.post("/api/os-updates/auto-patch", json={"node": ""}).status_code == 400
+    w = {"start": "22:00", "end": "04:00", "tz": "America/Chicago"}
+    assert c.post("/api/os-updates/auto-patch", json={"window": w}).json()["window"] == w
+    for bad in ("x", {"start": "9am"}, {"tz": "Nowhere/Land"}):
+        assert c.post("/api/os-updates/auto-patch", json={"window": bad}).status_code == 400
 
 
 def test_fix_access_requires_a_password_and_relays_it():
@@ -200,3 +228,10 @@ def test_autopatch_and_fix_access_are_admin_only():
     assert c.get("/api/os-updates/auto-patch").status_code == 403
     assert c.post("/api/os-updates/fix-access",
                   json={"node": "x", "password": "pw"}).status_code == 403
+
+
+def test_pending_reboots_is_admin_only():
+    c, _ = _client()
+    assert c.get("/api/os-updates/pending-reboots").json()["nodes"] == [{"key": "hub:hub"}]
+    c, _ = _client(is_admin=False)
+    assert c.get("/api/os-updates/pending-reboots").status_code == 403
