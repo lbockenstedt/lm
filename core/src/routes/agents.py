@@ -112,6 +112,7 @@ async def _load_roles_impl(hub, spoke_id, data):
         for r in roles:
             rname = (r.get("role") if isinstance(r, dict) else r)
             rcfg = (r.get("config", {}) if isinstance(r, dict) else {})
+            rforce = bool(r.get("force")) if isinstance(r, dict) else False
             if not rname:
                 results.append({"role": None, "status": "ERROR",
                                 "message": "role is required"})
@@ -120,7 +121,8 @@ async def _load_roles_impl(hub, spoke_id, data):
                 rcfg = await _ldap_server_load_config(hub, spoke_id, rcfg)
             try:
                 res = await hub.request_response(spoke_id, "LOAD_ROLE",
-                                                 {"role": rname, "config": rcfg},
+                                                 {"role": rname, "config": rcfg,
+                                                  **({"force": True} if rforce else {})},
                                                  timeout=120.0)
                 pl = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
                 if isinstance(pl, dict) and pl.get("status") == "SUCCESS" \
@@ -145,7 +147,8 @@ async def _load_roles_impl(hub, spoke_id, data):
     # LOAD_ROLE on the multi-role agent shallow-clones the role's sibling repo on
     # first load — a network git clone that routinely exceeds the 5s default.
     result = await hub.request_response(spoke_id, "LOAD_ROLE",
-                                        {"role": role, "config": config},
+                                        {"role": role, "config": config,
+                                         **({"force": True} if data.get("force") else {})},
                                         timeout=120.0)
     payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
     # Multi-role agent: the base stays module_type "agent" and HOSTS the role as
