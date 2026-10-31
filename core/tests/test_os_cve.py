@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import os_cve  # noqa: E402
 import os_update  # noqa: E402
 from os_cve import Feed, match_node, version_compare  # noqa: E402
-from test_hub_os_updates import _FakeHub  # noqa: E402
+from test_hub_os_updates import _FakeHub, _hub_host_not_eligible  # noqa: E402,F401 (autouse fixture)
 
 FEED = zlib.compress("\n".join([
     "VERSION 1",
