@@ -10,7 +10,21 @@ from pathlib import Path
 WEBUI = Path(__file__).resolve().parents[2] / "WebUI"
 
 # WebUI-relative paths, in the order index.html loads them.
-MAIN_JS_PARTS = ["main.js"]
+MAIN_JS_PARTS = ["main.js"] + [f"js/{name}.js" for name in (
+    "reports-alerts-security",
+    "settings",
+    "sync-sources",
+    "fleet-admin",
+    "nw",
+    "pxmx-console",
+    "netbox",
+    "dns-dhcp-cluster",
+    "certificates",
+    "external-dns-dhcp",
+    "cppm-ldap-users",
+    "module-management",
+    "dashboard-search-login",
+)]
 
 
 def main_js_paths():
