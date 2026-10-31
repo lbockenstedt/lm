@@ -77,6 +77,7 @@ The add-secret form (`WebUI/main.js:4486-4625`) supports:
 | :--- | :--- | :--- |
 | `login` | `{username, password}` | generic |
 | `apikey` | `{apikey}` | generic |
+| `apipair` (API key + secret) | `{api_key, api_secret}` — always automation-readable | firewalls (e.g. OPNsense) |
 | `token` | `{token}` | generic |
 | `dns` (DNS) | `he-login`: `{provider, he_username, he_password}`; others: `{provider, dns_creds}` (INI) | LE DNS-01 issuance (and shared with HE.NET) |
 | `henet` | `{ddns_key}` | HE.NET (and shared with LE) |
@@ -144,15 +145,22 @@ value.
   (`nac_instances`) → `client_secret` / `user` / `password`; **network devices**
   (`nw_devices`) → `password` / `enable_secret` / `api_token` / `snmp_community`;
   **NetBox/IPAM** (`ipam_instances`) → `api_token`; **firewalls**
-  (`firewalls`) → `api_key` / `api_secret` (a Credential Vault "Generic" secret
-  `{api_key, api_secret}`, or a "Login" secret whose `username`/`password`
-  alias onto them). On save the inline secret is stripped and the ref
+  (`firewalls`) → `api_key` / `api_secret` (an "API key + secret" secret,
+  or a "Login" secret whose `username`/`password` alias onto them). On save the inline secret is stripped and the ref
   validated; at push time `instance_vault.overlay()` fills the field(s) the
   resolved secret carries before the config reaches the spoke — this covers the
   add/update routes (`routes/firewall.py`, `routes/tenant_devices.py`) AND the
   spoke-reconnect re-push (`main.py`'s `module_key == 'opn'` branch), so a
   vault-backed firewall still authenticates after an hourly self-update
   restart. See [cppm.md](cppm.md) and [netbox.md](netbox.md).
+
+**Vault enabled → secrets come only from the vault.** Once a cloud vault is
+available (`cred_vault._vault_available`), `validate_ref` rejects inline
+secrets for every product above, and **firewalls must carry a
+`vault_credential`** (`instance_vault.VAULT_REQUIRED`). The Add/Edit device and
+instance forms match: `automation-secrets` returns `vault_available`, and when
+it is true the secret inputs are hidden (and not sent), and the firewall form
+requires a vault pick (`_fillVaultCredSelect(..., {inputIds, required})`).
 
 ## WebUI
 

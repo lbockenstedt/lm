@@ -109,6 +109,18 @@ def test_is_due_once_a_day():
     assert cm.is_due(old, now=NOW)
 
 
+def test_is_due_hourly_while_a_cert_expires_within_a_day():
+    def data(expires_in, ran_ago=_dt.timedelta(hours=2)):
+        return {"last_run": (NOW - ran_ago).isoformat(),
+                "results": [{"host": "a.io", "port": 443, "not_after": (NOW + expires_in).isoformat()}]}
+    assert not cm.is_due(data(_dt.timedelta(days=5)), now=NOW)
+    assert cm.is_due(data(_dt.timedelta(hours=20)), now=NOW)
+    assert cm.is_due(data(-_dt.timedelta(days=3)), now=NOW)  # expired
+    assert not cm.is_due(data(_dt.timedelta(hours=20), _dt.timedelta(minutes=30)), now=NOW)
+    # an ignored cert does not speed up the schedule
+    assert not cm.is_due(data(_dt.timedelta(hours=20)), now=NOW, ignored={"a.io:443": {}})
+
+
 def test_save_and_load_roundtrip(tmp_path):
     data = {"last_run": NOW.isoformat(), "results": [{"host": "a"}]}
     cm.save_results(data, state_dir=str(tmp_path))

@@ -1331,110 +1331,11 @@ async function promptSetPassword(userId) {
     }
 }
 
-function showAddFirewallModal() {
-    const modal = document.createElement('div');
-    modal.id = 'firewall-modal';
-    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
-    modal.innerHTML = `
-        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
-            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]" id="fw-modal-title">Add New Firewall</h3>
-                <button onclick="closeFirewallModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
-            </div>
-            <div class="p-6 space-y-4">
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Firewall Name</label><input type="text" id="fw-name" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                <div class="grid grid-cols-2 gap-4">
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Model</label><select id="fw-model" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="opnsense">OPNsense</option><option value="juniper">Juniper</option><option value="fortigate">Fortigate</option><option value="pfsense">pfSense</option></select></div>
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Spoke</label><select id="fw-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
-                </div>
-                <div class="grid grid-cols-2 gap-4">
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Host/IP</label><input type="text" id="fw-host" placeholder="172.16.1.1" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Port</label><input type="text" id="fw-port" placeholder="8443" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                </div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Key</label><input type="text" id="fw-api-key" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Secret</label><input type="password" id="fw-api-secret" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-            </div>
-            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-                <button onclick="closeFirewallModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveFirewall()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Firewall</button>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(modal);
-
-    loadApprovedSpokes().then(spokes => {
-        const selector = document.getElementById('fw-spoke');
-        if (selector) {
-            const fwSpokes = spokes.filter(s =>
-                (s.module_type === 'firewall' ||
-                 /^(opn|fw|firewall|pfsense|fortigate|juniper)/.test(s.spoke_id))
-                && _spokeBindable(s)
-            );
-            selector.innerHTML = fwSpokes.length > 0
-                ? '<option value="">— select spoke —</option>' + fwSpokes.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(_spokeName(s))}</option>`).join('')
-                : '<option value="">No firewall spokes found</option>';
-        }
-    });
-}
-
 async function editFirewall(id) {
     const firewalls = await loadFirewalls();
     const fw = firewalls.find(f => f.id === id);
     if (!fw) return;
-
-    showAddFirewallModal();
-    document.getElementById('fw-modal-title').textContent = 'Edit Firewall';
-    document.getElementById('fw-name').value = fw.name;
-    document.getElementById('fw-model').value = fw.model;
-    document.getElementById('fw-host').value = fw.host;
-    document.getElementById('fw-port').value = fw.port;
-    document.getElementById('fw-api-key').value = fw.api_key;
-    document.getElementById('fw-api-secret').value = fw.api_secret;
-
-    setTimeout(() => {
-        const selector = document.getElementById('fw-spoke');
-        if (selector) selector.value = fw.spoke_id || '';
-    }, 100);
-
-    document.getElementById('firewall-modal').dataset.firewallId = id;
+    // Same form as Setup → Devices, so the Credential Vault picker is offered.
+    showAddDeviceModal('firewall', fw);
 }
 
-async function saveFirewall() {
-    const modal = document.getElementById('firewall-modal');
-    const id = modal.dataset.firewallId;
-    const config = {
-        name: document.getElementById('fw-name').value,
-        model: document.getElementById('fw-model').value,
-        spoke_id: document.getElementById('fw-spoke').value,
-        host: document.getElementById('fw-host').value,
-        port: parseInt(document.getElementById('fw-port').value) || 8443,
-        api_key: document.getElementById('fw-api-key').value,
-        api_secret: document.getElementById('fw-api-secret').value,
-    };
-
-    try {
-        const method = id ? 'PUT' : 'POST';
-        const url = id ? `/setup/firewalls/${id}` : '/setup/firewalls';
-        const payload = id ? { config: config } : { firewall: config };
-        const response = await setupFetch(url, {
-            method: method,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        if (response.ok) {
-            showToast(`Firewall ${id ? 'updated' : 'added'} successfully!`, 'success');
-            closeFirewallModal();
-            setView(currentView);
-        } else {
-            const err = await response.json().catch(() => ({}));
-            showToast('Failed to save firewall configuration: ' + (err.detail || response.status), 'error');
-        }
-    } catch (err) {
-        showToast('Error saving firewall: ' + err.message, 'error');
-    }
-}
-
-function closeFirewallModal() {
-    const modal = document.getElementById('firewall-modal');
-    if (modal) modal.remove();
-}
