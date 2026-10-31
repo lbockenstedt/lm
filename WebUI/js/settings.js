@@ -639,10 +639,10 @@ function _renderOsUpdatesView(content) {
             <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-[11px] text-amber-800 leading-snug">
                 Operating-system package updates for every spoke and agent — <b>Global-Admin only, every approval is audit-logged</b>.
                 Deploys <code>apt dist-upgrade</code> (everything) — or only the nodes/packages you select, or only security updates.
-                A manual deploy <b>never reboots</b> — a host needing one is badged with a <b>Reboot…</b> button you use deliberately.
+                A manual deploy <b>never reboots</b> — a host needing one is badged with a <b>Reboot…</b> button you use deliberately — except a <b>Proxmox cluster</b> node (below), which is always rebooted the safe way when its update needs it.
                 <b>Auto-patch</b> is approved <b>per node</b> (tick "Auto-patch" on a node) and only runs in the <b>maintenance window</b> below: once per window the fleet is re-checked and approved nodes get what was found, the same way — security updates only or all updates, minus any packages you list under "Never auto-install".
                 <b>Auto-reboot</b> (on by default for an auto-patch node — untick it to keep a node up) reboots each node that installed something once the run is done, hub last. No new node is started after the window closes; the auto-check only detects updates.
-                A node in a <b>Proxmox cluster</b> is only rebooted if it needs it, in <b>HA maintenance mode</b> (HA guests move to the other nodes first), and the run waits until it is back before taking maintenance off and moving on — one cluster node down at a time.
+                A node in a <b>Proxmox cluster</b> (manual deploy, auto-reboot or its Reboot… button) is only rebooted if it needs it, in <b>HA maintenance mode</b> (HA guests move to the other nodes first), and the run waits until it is back before taking maintenance off and moving on — one cluster node down at a time.
                 Nodes are updated <b>one at a time</b>, and the <b>hub goes last</b> (updating it restarts this page).
                 This is separate from LM code updates.
             </div>
@@ -1142,6 +1142,7 @@ function _osuRender(d) {
         const item = run && (run.items || []).find(i => i.key === key);
         let state;
         if (item && item.status === 'applying') state = _osuBadge('applying…', 'blue');
+        else if (item && item.status === 'rebooting') state = _osuBadge('rebooting…', 'blue');
         else if (item && item.status === 'failed') state = _osuBadge('failed', 'red');
         else if (item && item.status === 'interrupted') state = _osuBadge('interrupted', 'red');
         else if (item && item.status === 'queued') state = _osuBadge('queued', 'slate');
@@ -1184,7 +1185,7 @@ function _osuRender(d) {
         let msg = '';
         if (item && item.message) msg = `<div class="text-[11px] ${item.status === 'done' ? 'text-slate-500' : 'text-red-600'} mt-1">${escapeHtml(item.message)}</div>`;
         else if (item && item.status === 'done' && item.mode === 'packages') msg = `<div class="text-[11px] text-slate-500 mt-1">upgraded ${escapeHtml((item.packages || []).join(', '))}</div>`;
-        if (item && item.auto_reboot) msg += `<div class="text-[11px] ${item.auto_reboot === 'scheduled' ? 'text-slate-500' : 'text-red-600'} mt-1">auto-reboot ${escapeHtml(item.auto_reboot)}</div>`;
+        if (item && item.auto_reboot) msg += `<div class="text-[11px] ${item.auto_reboot.startsWith('failed') ? 'text-red-600' : 'text-slate-500'} mt-1">reboot: ${escapeHtml(item.auto_reboot)}</div>`;
         return `<div class="border border-slate-200 rounded-md p-3 mb-2">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <span class="flex items-center gap-2 text-xs font-bold text-slate-600">${nodeBox}${escapeHtml(n.label)} <span class="font-normal text-slate-400">${escapeHtml(n.kind)}${n.flavor ? ' · ' + escapeHtml(n.flavor) : ''}${n.pve_cluster && n.pve_cluster.name ? ' · PVE cluster ' + escapeHtml(n.pve_cluster.name) : ''}</span></span>

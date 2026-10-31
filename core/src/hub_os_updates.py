@@ -53,7 +53,8 @@ migrate to the other nodes; non-HA guests stay and are not critical), rebooted,
 and the run waits until it is back and no longer needs a reboot before
 clearing maintenance mode and moving on — so only one cluster node is ever
 down. If it doesn't come back in time it is left in maintenance mode and the
-rest of the run is stopped.
+rest of the run is stopped. The same happens on a MANUAL deploy to a cluster
+node (a manual deploy otherwise never reboots) and for its Reboot button.
 
 Fixing access: a non-root node without the lm-os-update helper is "blocked".
 ``osu_fix_access`` relays a root/sudo login typed once in the WebUI to that
@@ -657,7 +658,7 @@ class HubOsUpdatesMixin:
         nodes = []
         for key in keys:
             n = by_key.get(key) or {}
-            clustered = bool(n.get("pve_cluster")) and "maintenance" in (n.get("features") or [])
+            clustered = _is_cluster_node(n)
             nodes.append({"key": key, "label": n.get("label") or key,
                           "note": ("may reboot (Proxmox cluster, HA maintenance mode)" if clustered
                                    else "reboots after patching")})
@@ -935,7 +936,9 @@ class HubOsUpdatesMixin:
             upgrade only their pending security packages; nodes with none are
             left out.
           * ``reboot_after`` — ``kind:id`` nodes to reboot after they installed
-            something (auto-reboot; see ``_osu_auto_reboot``).
+            something (auto-reboot; see ``_osu_auto_reboot``). Omitted (a
+            manual deploy): just the Proxmox cluster nodes, which are rebooted
+            in maintenance mode only if the update needs it.
           * ``until`` — no node is started after this time (end of the
             maintenance window); the rest are skipped.
         Everything requested is validated BEFORE anything runs, so a bad
@@ -993,6 +996,8 @@ class HubOsUpdatesMixin:
         if not plan:
             return {"status": "ERROR", "message": "no eligible nodes with pending updates"
                                                   + (" (security-only)" if security_only else "")}
+        if reboot_after is None:
+            reboot_after = [n["key"] for n in plan if _is_cluster_node(n)]
         # Hub last — see the module docstring.
         plan.sort(key=lambda n: n["kind"] == "hub")
         st["run"] = {
@@ -1043,7 +1048,30 @@ class HubOsUpdatesMixin:
         if "reboot" not in (n.get("features") or []):
             return {"status": "ERROR", "message": f"{n['label']}: needs an LM update "
                                                   "before it can be rebooted from here"}
+        if _is_cluster_node(n):
+            return self._osu_start_cluster_reboot(n, actor)
         return await self._osu_reboot(n, actor)
+
+    def _osu_start_cluster_reboot(self, n: Dict[str, Any], actor: str) -> Dict[str, Any]:
+        """Reboot button on a Proxmox cluster node: a one-node run so the panel
+        shows progress and nothing else starts until the node is back."""
+        key = f"{n['kind']}:{n['id']}"
+        item = {"key": key, "label": n["label"], "status": "rebooting", "mode": "reboot",
+                "packages": []}
+        run = {"status": "running", "started_at": time.time(), "actor": actor,
+               "total": 1, "done": 0, "current": "", "cancel_requested": False,
+               "security_only": False, "reboot_after": [], "until": None, "items": [item]}
+        self._osu_state()["run"] = run
+        self._osu_save()
+
+        async def _go():
+            item["auto_reboot"], _ = await self._osu_cluster_reboot(n, run, actor)
+            item["status"] = "failed" if item["auto_reboot"].startswith("failed") else "done"
+            run.update(status="finished", current="", done=1, finished_at=time.time())
+            self._osu_save()
+        asyncio.create_task(_go())
+        return {"status": "SUCCESS",
+                "message": "entering maintenance mode — HA guests move off, then it reboots"}
 
     async def _osu_reboot(self, n: Dict[str, Any], actor: str) -> Dict[str, Any]:
         """Send the reboot command to one node (no checks — see callers)."""
@@ -1135,12 +1163,13 @@ class HubOsUpdatesMixin:
             self._osu_save()
             logger.warning("OS-UPDATE: %s → %s (%s)", n["label"],
                            "ok" if ok else "FAILED", (d or {}).get("message", "") or "")
-            if (ok and item and key in (run.get("reboot_after") or [])
-                    and n.get("pve_cluster") and "maintenance" in (n.get("features") or [])):
+            if ok and item and key in (run.get("reboot_after") or []) and _is_cluster_node(n):
                 if not item["reboot_required"]:
                     item["auto_reboot"] = "not needed"
                 else:
-                    item["auto_reboot"], stop = await self._osu_cluster_reboot(n, run)
+                    actor = (_AUTOREBOOT_ACTOR if run.get("actor") == _AUTOPATCH_ACTOR
+                             else run.get("actor") or _AUTOREBOOT_ACTOR)
+                    item["auto_reboot"], stop = await self._osu_cluster_reboot(n, run, actor)
                     if stop:
                         run["cancel_requested"] = True
                 self._osu_save()
@@ -1167,16 +1196,16 @@ class HubOsUpdatesMixin:
         except Exception as exc:  # noqa: BLE001
             return {"status": "ERROR", "message": str(exc)}
 
-    async def _osu_cluster_reboot(self, n: Dict[str, Any],
-                                  run: Dict[str, Any]) -> "tuple[str, bool]":
+    async def _osu_cluster_reboot(self, n: Dict[str, Any], run: Dict[str, Any],
+                                  actor: str = _AUTOREBOOT_ACTOR) -> "tuple[str, bool]":
         """Maintenance mode -> wait for HA guests to leave -> reboot -> wait
         until the node is back without a pending reboot -> maintenance off.
         Returns ``(result text for the run item, stop the rest of the run)``."""
         key, label = f"{n['kind']}:{n['id']}", n["label"]
         run["current"] = f"{label} — entering maintenance mode"
         self._osu_save()
-        logger.warning("OS-UPDATE: %s (Proxmox cluster %s) → maintenance mode before auto-reboot",
-                       label, (n.get("pve_cluster") or {}).get("name", "?"))
+        logger.warning("OS-UPDATE: %s (Proxmox cluster %s) → maintenance mode before reboot by %s",
+                       label, (n.get("pve_cluster") or {}).get("name", "?"), actor)
         r = await self._osu_maintenance(n, "enable")
         if r.get("status") != "SUCCESS":
             return f"failed: maintenance mode: {r.get('message', '')}", False
@@ -1192,7 +1221,7 @@ class HubOsUpdatesMixin:
             r = await self._osu_maintenance(n, "status")
             if r.get("status") == "SUCCESS":
                 guests = r.get("ha_guests") or []
-        res = await self._osu_reboot(n, _AUTOREBOOT_ACTOR)
+        res = await self._osu_reboot(n, actor)
         if res.get("status") != "SUCCESS":
             await self._osu_maintenance(n, "disable")
             return f"failed: {res.get('message', '')} — maintenance mode cleared", False
@@ -1216,7 +1245,7 @@ class HubOsUpdatesMixin:
                         "rest of the run stopped"), True
             await asyncio.sleep(_MAINT_POLL_S)
         r = await self._osu_maintenance(n, "disable")
-        logger.warning("OS-UPDATE: %s back from auto-reboot; maintenance mode %s",
+        logger.warning("OS-UPDATE: %s back from its reboot; maintenance mode %s",
                        label, "cleared" if r.get("status") == "SUCCESS" else "NOT cleared")
         if r.get("status") != "SUCCESS":
             return f"rebooted, but maintenance mode NOT cleared: {r.get('message', '')}", False
@@ -1245,6 +1274,11 @@ class HubOsUpdatesMixin:
                 item["auto_reboot"] = ("scheduled" if res.get("status") == "SUCCESS"
                                        else f"failed: {res.get('message', '')}")
             self._osu_save()
+
+
+def _is_cluster_node(n: Dict[str, Any]) -> bool:
+    """A Proxmox host in a cluster whose agent can do HA maintenance mode."""
+    return bool(n.get("pve_cluster")) and "maintenance" in (n.get("features") or [])
 
 
 def _unwrap(resp: Any) -> Dict[str, Any]:

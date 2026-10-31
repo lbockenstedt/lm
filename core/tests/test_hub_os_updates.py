@@ -836,6 +836,31 @@ async def test_cluster_node_that_does_not_return_stops_the_run(monkeypatch):
     assert items[1]["status"] == "skipped"
 
 
+@pytest.mark.asyncio
+async def test_manual_deploy_to_a_cluster_node_uses_maintenance_mode(monkeypatch):
+    hub, events = _cluster_hub(monkeypatch, [[]])
+    await hub.osu_apply_fleet(node_keys=["agent:pve1"], actor="alice")  # no reboot_after
+    for _ in range(5):
+        await _drain()
+    assert events == [("apply", "pve1"), ("maint", "pve1", "enable"),
+                      ("reboot", "pve1", "alice"), ("maint", "pve1", "disable")]
+
+
+@pytest.mark.asyncio
+async def test_reboot_button_on_a_cluster_node_uses_maintenance_mode(monkeypatch):
+    hub, events = _cluster_hub(monkeypatch, [["vm:100"], []])
+    hub._osu_state()["run"] = None
+    res = await hub.osu_reboot_node("agent:pve1", actor="alice")
+    assert res["status"] == "SUCCESS"
+    for _ in range(5):
+        await _drain()
+    assert events == [("maint", "pve1", "enable"), ("maint", "pve1", "status"),
+                      ("reboot", "pve1", "alice"), ("maint", "pve1", "disable")]
+    run = hub._osu_state()["run"]
+    assert run["status"] == "finished"
+    assert run["items"][0]["auto_reboot"] == "rebooted (cluster maintenance mode)"
+
+
 # ── footer "Pending Reboot" alert ────────────────────────────────────────────
 
 def test_pending_reboots_lists_autoreboot_nodes_due_in_this_window(monkeypatch):
