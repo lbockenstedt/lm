@@ -174,3 +174,17 @@ def test_missing_version_is_ignored(tmp_path):
     that then 'drifts' on the next real poll."""
     got = _run([None, None, "1.72", "1.72"], tmp_path)
     assert got["reloaded"] is False
+
+
+def test_cache_bust_token_tracks_split_js_files(tmp_path):
+    """The ?v= token must change when a file under WebUI/js/ changes, or
+    browsers keep serving a cached copy of the old split file."""
+    import api
+    (tmp_path / "VERSION").write_text("1.00")
+    (tmp_path / "main.js").write_text("// core")
+    (tmp_path / "js").mkdir()
+    part = tmp_path / "js" / "settings.js"
+    part.write_text("// v1")
+    before = api._webui_version(str(tmp_path))
+    part.write_text("// version two")
+    assert api._webui_version(str(tmp_path)) != before

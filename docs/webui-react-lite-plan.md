@@ -20,12 +20,20 @@ done earlier is redone later.
   page errors. Phase 3 changes rendering, which static checks can't see.
 
 ## Phase 1 - Split files (item 6, part A) - zero behavior change
-- Cut main.js into classic scripts by area: WebUI/js/core.js (api, state, utils),
-  js/views/<view>.js ... Load in the same order from index.html.
+- [done] main.js (37k lines) cut into main.js (core: routes, helpers, nav,
+  ~4.9k lines) + 13 contiguous WebUI/js/<area>.js classic scripts, loaded in
+  the same order from index.html. Pure cut, verified lossless.
 - Classic scripts share global scope, so inline onclick keeps working.
-- Pure cut/paste; diff = moves only. One PR per few views.
-- core/src/api.py _webui_asset_fingerprint only stats top-level WebUI/*.js;
-  make it include WebUI/js/** or browsers keep stale split files.
+- The only cross-file hazard is load-time code using a function declared in a
+  later file (function hoisting no longer spans files). An acorn scan found
+  two: VIEW_LOADERS and EXTERNAL_DNS_PROVIDERS stored function references at
+  load time; both now call by name (`(subMenu) => loadX(subMenu)`).
+- api.py _webui_asset_fingerprint now includes WebUI/js/*.js (cache-bust);
+  index.html's error guard treats js/*.js as core assets; build-tailwind.sh
+  scans js/**; verify_build.sh syntax-checks every part.
+- Verified: full core suite; headless Chrome loads old and split UI with no
+  errors and the same 1465 global functions.
+- Later (optional): regroup functions by view inside js/ (moves only).
 
 ## Phase 2 - Safe templating (item 5)
 - js/core/html.js: `html` tagged template auto-escapes values; `raw(str)` marks

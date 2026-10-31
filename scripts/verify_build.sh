@@ -14,7 +14,9 @@ echo "✅ Python syntax checks passed."
 echo "🔍 Checking JavaScript syntax..."
 # We use node -c to check syntax without executing
 if command -v node >/dev/null 2>&1; then
-    node -c /Users/lbockenstedt/vscode/lm/WebUI/main.js || { echo "❌ Syntax error in WebUI/main.js"; exit 1; }
+    for file in /Users/lbockenstedt/vscode/lm/WebUI/main.js /Users/lbockenstedt/vscode/lm/WebUI/js/*.js; do
+        node -c "$file" || { echo "❌ Syntax error in $file"; exit 1; }
+    done
     echo "✅ JavaScript syntax checks passed."
 else
     echo "⚠️  Node.js not found, skipping JS syntax check."
