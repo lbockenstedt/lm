@@ -928,20 +928,23 @@ _WEBUI_VER_CACHE: Dict[str, Any] = {}
 
 
 def _webui_asset_fingerprint(ui_path: str):
-    """``(name, size, mtime_ns)`` for every top-level WebUI ``.js``, sorted.
-    A handful of stat() calls; no file is read."""
+    """``(name, size, mtime_ns)`` for every WebUI ``.js`` at the top level and
+    in ``js/``, sorted. A few dozen stat() calls; no file is read."""
     out = []
-    try:
-        for name in sorted(os.listdir(ui_path)):
+    for sub in ("", "js"):
+        try:
+            names = sorted(os.listdir(os.path.join(ui_path, sub)))
+        except OSError:
+            continue
+        for name in names:
             if not name.endswith(".js"):
                 continue
+            rel = os.path.join(sub, name) if sub else name
             try:
-                st = os.stat(os.path.join(ui_path, name))
+                st = os.stat(os.path.join(ui_path, rel))
             except OSError:
                 continue
-            out.append((name, st.st_size, st.st_mtime_ns))
-    except OSError:
-        pass
+            out.append((rel, st.st_size, st.st_mtime_ns))
     return tuple(out)
 
 

@@ -708,7 +708,7 @@
         // Keep errors with any diagnostic detail on the normal reporting path.
         if (e && /^script error\.?$/i.test(String(e.message || '').trim())
             && !f && !e.lineno && !e.colno && !e.error) return;
-        var coreAsset = /main\.js|sim-views\.js|update_handler\.js|help\.js/.test(f);
+        var coreAsset = /main\.js|\/js\/[\w-]+\.js|sim-views\.js|update_handler\.js|help\.js/.test(f);
         // If the app already initialized (the sentinel global exists), a
         // core-asset error is a RUNTIME error (e.g. a ReferenceError thrown in
         // a click handler) — reloading won't fix it and only loses the user's
@@ -741,7 +741,22 @@
       });
     })();
     </script>
+    <!-- main.js + js/*.js are one app split into files; keep this order
+         (core/tests/webui_src.py lists the same order). -->
     <script src="main.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/reports-alerts-security.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/settings.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/sync-sources.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/fleet-admin.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/nw.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/pxmx-console.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/netbox.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/dns-dhcp-cluster.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/certificates.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/external-dns-dhcp.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/cppm-ldap-users.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/module-management.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/dashboard-search-login.js?v=__WEBUI_VERSION__"></script>
     <script src="sim-views.js?v=__WEBUI_VERSION__"></script>
     <script src="update_handler.js?v=__WEBUI_VERSION__"></script>
     <script src="help.js?v=__WEBUI_VERSION__"></script>

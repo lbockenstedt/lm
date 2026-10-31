@@ -26,7 +26,7 @@ echo "Installing tailwindcss (scratch dir: ${WORK_DIR})..."
 
 cat > "${WORK_DIR}/tailwind.config.js" <<CONFIG
 module.exports = {
-  content: ["${WEBUI_DIR}/*.html", "${WEBUI_DIR}/*.js"],
+  content: ["${WEBUI_DIR}/*.html", "${WEBUI_DIR}/*.js", "${WEBUI_DIR}/js/**/*.js"],
   theme: { extend: {} },
   plugins: [],
 };
