@@ -393,7 +393,8 @@ stage_role() {
         le)         ROLE_REPO="https://github.com/lbockenstedt/le.git";        ROLE_CLONE_DIR="le";       ROLE_REQ="$INSTALL_DIR/le/requirements.txt"
                     ROLE_APT="certbot python3-certbot-dns-cloudflare python3-certbot-dns-route53 openssl" ;;
         truenas)    ROLE_REPO="https://github.com/lbockenstedt/truenas.git";    ROLE_CLONE_DIR="truenas";  ROLE_REQ="$INSTALL_DIR/truenas/requirements.txt" ;;   # sibling repo; requirements.txt pins truenas-api-client (official WS JSON-RPC client) + websockets
-        *) echo "❌ Unknown role '$role'"; echo "Valid: dns henet dhcp network netbox opnsense ldap simulation cppm proxmox le console statuspage proxy truenas"; exit 1 ;;
+        zabbix)    ROLE_REPO="https://github.com/lbockenstedt/zabbix.git";    ROLE_CLONE_DIR="zabbix";  ROLE_REQ="$INSTALL_DIR/zabbix/requirements.txt" ;;   # sibling repo; requirements.txt pins zabbix-api-client (official WS JSON-RPC client) + websockets
+        *) echo "❌ Unknown role '$role'"; echo "Valid: dns henet dhcp network netbox opnsense ldap simulation cppm proxmox le console statuspage proxy truenas zabbix"; exit 1 ;;
     esac
 
     if [[ -n "$ROLE_REPO" ]]; then
