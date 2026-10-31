@@ -17,7 +17,8 @@ description: >-
 # Add a WebUI Control
 
 LM's WebUI (`WebUI/`) is a single-page, client-side app — one `index.html`
-shell + `main.js` (the whole app, HTML strings rendered into `#viewport`) +
+shell + `main.js` and `js/*.js` (the app, split into ordered classic scripts
+that share globals; HTML strings rendered into `#viewport`) +
 `sim-views.js` (the Simulations module only). There is no build step: files
 are served static, versioned by a `?v=` query string. Adding one control is a
 small, bounded change across a backend route, the view that renders it, and
@@ -43,7 +44,7 @@ touch-points and code shapes; this file is the shape + the boundaries.
    default on its next read — no migration/backfill step needed. Never
    invent a second config-loading pattern.
 3. **The view** — add the control's markup where the feature area's view is
-   rendered in `main.js` (or `sim-views.js` — see step 5 for what that
+   rendered in `main.js`/`js/*.js` (or `sim-views.js` — see step 5 for what that
    implies). Follow the existing button-shape convention: an inline
    `onclick="fnName(args)"` on a template-literal `<button>`, styled from
    `docs/webui-style.md`'s token set (HPE-green primary:
@@ -104,7 +105,7 @@ touch-points and code shapes; this file is the shape + the boundaries.
 - **A `title=` tooltip is mandatory on every new action control.**
 - **`sim-views.js` changes need the dual-copy-guard skill** — `cs/lm-spoke/
   static/sim-views.js` is a hand-maintained twin, not generated, and drifts
-  silently otherwise. `main.js`/`index.html`/`help.js`/`update_handler.js`
+  silently otherwise. `main.js`/`js/*.js`/`index.html`/`help.js`/`update_handler.js`
   have no twin — a change there is single-copy and complete on its own.
 
 ## Scope

@@ -590,7 +590,7 @@
     </footer>
 
     <!-- Error boundary — armed BEFORE the app scripts so it catches even a
-         parse error in main.js (a bad deploy). A single JS failure must never
+         parse error in main.js or js/*.js (a bad deploy). A single JS failure must never
          leave a silent white screen: show a banner + recovery, and note the
          backend is likely fine. Tiny + dependency-free so it can't itself break. -->
     <script>
@@ -701,7 +701,10 @@
         // Script parse/exec failures surface here with no column/line on the
         // event's filename → treat a core-asset error as fatal; ignore benign
         // resource 404s for non-core assets.
-        var f = (e && e.filename) || '';
+        // A script that failed to download (404) fires a resource error with
+        // no filename; its <script src> names the file instead.
+        var t = e && e.target;
+        var f = (e && e.filename) || (t && t.tagName === 'SCRIPT' && t.src) || '';
         // Browsers redact cross-origin exceptions to "Script error." with
         // no source, location or Error object. These cannot identify an app
         // fault: don't show a runtime banner or auto-file an empty bug report.
@@ -709,12 +712,13 @@
         if (e && /^script error\.?$/i.test(String(e.message || '').trim())
             && !f && !e.lineno && !e.colno && !e.error) return;
         var coreAsset = /main\.js|\/js\/[\w-]+\.js|sim-views\.js|update_handler\.js|help\.js/.test(f);
-        // If the app already initialized (the sentinel global exists), a
-        // core-asset error is a RUNTIME error (e.g. a ReferenceError thrown in
-        // a click handler) — reloading won't fix it and only loses the user's
-        // place, so surface it dismissibly. Only route to onFatal (reload-once
-        // cache-bust) when main.js never initialized — a stale/partial deploy.
-        if (coreAsset && typeof window.updateStatus !== 'function') { onFatal(e.message); return; }
+        // If the app already initialized (window.lmCoreLoaded, set at the end
+        // of the last core file), a core-asset error is a RUNTIME error (e.g.
+        // a ReferenceError thrown in a click handler) — reloading won't fix it
+        // and only loses the user's place, so surface it dismissibly. Only
+        // route to onFatal (reload-once cache-bust) when the core scripts did
+        // not all load and run — a stale/partial deploy.
+        if (coreAsset && !window.lmCoreLoaded) { onFatal(e.message || ('Could not load ' + f.split('/').pop())); return; }
         // Otherwise surface as a dismissible runtime banner (non-fatal). Skip
         // cross-origin script errors (no message, can't act on) and network
         // noise (shown inline by the app already).
@@ -731,18 +735,19 @@
         if (isNetworkNoise(msg) || isBenignNoise(msg)) return;
         runtimeBanner(msg, '');
       });
-      // If the app never initialized (core script failed to parse/run), the
-      // sentinel global won't exist — flag it after load settles.
+      // If a core script failed to load, parse or run (e.g. a 404 for one
+      // js/*.js file), the sentinel won't be set — flag it after load settles.
       window.addEventListener('load', function () {
         setTimeout(function () {
-          if (typeof window.updateStatus !== 'function') onFatal('main.js did not initialize');
+          if (!window.lmCoreLoaded) onFatal('WebUI core scripts did not initialize');
           else { try { sessionStorage.removeItem('lm-eb-reloaded'); } catch (e) {} }
         }, 1500);
       });
     })();
     </script>
-    <!-- main.js + js/*.js are one app split into files; keep this order
-         (core/tests/webui_src.py lists the same order). -->
+    <!-- main.js + js/*.js are one app split into files, loaded in this order.
+         Tests read this list (core/tests/webui_src.py); the last file sets
+         window.lmCoreLoaded for the error guard above. -->
     <script src="main.js?v=__WEBUI_VERSION__"></script>
     <script src="js/reports-alerts-security.js?v=__WEBUI_VERSION__"></script>
     <script src="js/settings.js?v=__WEBUI_VERSION__"></script>
