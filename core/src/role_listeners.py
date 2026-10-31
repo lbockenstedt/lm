@@ -59,6 +59,8 @@ DEPLOY_ROLES = frozenset({
     "ldap-server",
     "dns-server",
     "dhcp-server",
+    "zabbix-server",
+    "zbxproxy",
 })
 
 

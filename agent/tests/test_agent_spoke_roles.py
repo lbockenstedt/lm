@@ -44,6 +44,7 @@ def test_role_map_has_all_roles_with_correct_module_types():
         "statuspage": "statuspage",
         "proxy":      "proxy",
         "truenas":    "storage",
+        "zabbix":     "monitoring",
     }
     assert set(_ROLE_MAP.keys()) == set(expected.keys()), \
         f"missing/extra roles: {set(_ROLE_MAP.keys()) ^ set(expected.keys())}"
@@ -959,3 +960,12 @@ def test_role_connection_spoke_update_errors_when_repo_absent(tmp_path, monkeypa
     res = asyncio.run(conn.handle_system_command("SPOKE_UPDATE", {}))
     assert res["status"] == "ERROR"
     assert "nw" in res["message"]
+
+def test_zabbix_deploy_roles_append_quoted_flags():
+    from agent_spoke import GenericAgent, _DEPLOY_ROLES
+    agent = GenericAgent.__new__(GenericAgent)
+    cmd = agent._build_deploy_cmd("zbxproxy", _DEPLOY_ROLES["zbxproxy"],
+                                  {"server": "zbx.example.com", "proxy_name": "t1; rm -rf /"})
+    assert cmd[-1].endswith("--infra-only --server zbx.example.com --proxy-name 't1; rm -rf /'")
+    srv = agent._build_deploy_cmd("zabbix-server", _DEPLOY_ROLES["zabbix-server"], {})
+    assert srv[-1].endswith("--infra-only") and "install_zabbix_server.sh" in srv[-1]

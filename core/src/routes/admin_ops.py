@@ -235,6 +235,29 @@ def register(app, hub, ctx):
                        spoke_id, role)
         return {"status": "ok", "target": spoke_id, "role": role, "result": result}
 
+    @app.post("/admin/ops/load-role")
+    async def admin_ops_load_role(request: Request):
+        """Load role(s) on a generic agent via loopback (the counterpart of
+        unload-role) so deploy roles can be driven and watched from the hub.
+        Uses the same dispatch as the WebUI route. Body:
+        {"spoke_id": ..., "role": ..., "config": {...}} or {"spoke_id": ...,
+        "roles": [{"role": ..., "config": {...}}]}."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        spoke_id = (body or {}).get("spoke_id")
+        if not spoke_id or not ((body or {}).get("role") or (body or {}).get("roles")):
+            raise HTTPException(status_code=400, detail="spoke_id and role(s) are required")
+        if hub._primary_key(spoke_id) not in hub.active_connections:
+            raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        from routes.agents import _agent_role_preflight, _load_roles_impl
+        _agent_role_preflight(hub, spoke_id)
+        result = await _load_roles_impl(hub, spoke_id, body)
+        logger.warning("admin_ops: load-role driven via loopback for spoke=%s", spoke_id)
+        return {"status": "ok", "target": spoke_id, "result": result}
+
     @app.post("/admin/ops/uninstall-role")
     async def admin_ops_uninstall_role(request: Request):
         """Uninstall a deploy role from a generic agent via loopback.
