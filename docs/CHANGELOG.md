@@ -14,6 +14,9 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ### Cert Monitor
 
+- **Hourly checks near expiry.** While a cert expires within 24 hours (or has expired),
+  Cert Monitor re-checks every hour instead of daily, so a renewal stops the reminder
+  emails within the hour. See [cert-monitor.md](cert-monitor.md#schedule--storage).
 - **Mist / Central host list updates itself daily.** The built-in endpoint list is
   refreshed from Juniper's and Aruba's published endpoint pages before each daily check —
   new endpoints (e.g. Mist SRX log terminators, RadSec, New Central GB1/IN1/CN1) are added
