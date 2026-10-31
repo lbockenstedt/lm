@@ -8,8 +8,8 @@ Operator-chosen behaviour (see the WebUI panel):
   * ``apt-get dist-upgrade`` — everything: security, regular, and dependency
     transitions. (A Debian MAJOR release jump is a different operation that
     rewrites sources.list and is deliberately NOT behind this button.)
-  * NEVER auto-reboot. ``reboot_required`` is surfaced as a badge; rebooting is
-    a separate explicit action.
+  * A manual apply NEVER reboots. ``reboot_required`` is surfaced as a badge;
+    rebooting is a separate explicit action (or Auto-reboot, below).
   * Approve once, then ROLLING apply — one node at a time, each finishing before
     the next starts, so a bad update cannot take the fleet down simultaneously.
   * The HUB APPLIES LAST. Updating the hub restarts the very process serving the
@@ -25,13 +25,34 @@ own command types (``OS_UPDATE_APPLY_PACKAGES`` / ``OS_REBOOT``) and are only
 offered for nodes whose check reported the matching ``features`` — an older
 node never sees a request it would misread as "upgrade everything".
 
-Auto-patch (opt-in PER NODE, none by default): after each SCHEDULED check,
-the nodes an operator approved for auto-patching that have pending updates are
-deployed automatically through the same rolling, hub-last apply, audit-logged
-as actor "auto-patch". Security-only by default. Packages matching the
-operator's exclude list (names or globs, e.g. ``linux-image-*``) are never
-auto-installed. Still NEVER reboots. Manual checks and a run's own follow-up re-check never trigger it, so
-a node whose update keeps failing is retried once per schedule, not in a loop.
+Auto-patch (opt-in PER NODE, none by default) only runs inside the
+maintenance window (``window``: start/end "HH:MM" in a timezone, default
+01:00-05:00; start == end means any time). Once per window, as soon as it
+opens, the fleet is re-checked and the nodes an operator approved for
+auto-patching that have pending updates are deployed automatically through the
+same rolling, hub-last apply, audit-logged as actor "auto-patch". The run
+starts no new node after the window closes. Security-only by default. Packages
+matching the operator's exclude list (names or globs, e.g. ``linux-image-*``)
+are never auto-installed. The scheduled auto-check (every 6h by default) only
+detects updates; manual checks never patch, and a node whose update keeps
+failing is retried once per window, not in a loop.
+
+Auto-reboot (per node, only with auto-patch): ticked by default when a node is
+approved for auto-patch, and can be unticked per node. After an auto-patch run
+finishes, every auto-reboot node that installed something is rebooted through
+the same command as the Reboot button (``shutdown -r +1``), audit-logged as
+actor "auto-reboot". Spokes and agents are rebooted once they have all been
+patched and BEFORE the hub is patched (patching the hub can restart LM, which
+would lose any reboot still queued); the hub reboots last.
+
+A Proxmox host agent that reports cluster membership (``pve_cluster`` +
+the ``maintenance`` feature) is different: right after it is patched, and
+only if it needs a reboot, it is put into HA maintenance mode (its HA guests
+migrate to the other nodes; non-HA guests stay and are not critical), rebooted,
+and the run waits until it is back and no longer needs a reboot before
+clearing maintenance mode and moving on — so only one cluster node is ever
+down. If it doesn't come back in time it is left in maintenance mode and the
+rest of the run is stopped.
 
 Fixing access: a non-root node without the lm-os-update helper is "blocked".
 ``osu_fix_access`` relays a root/sudo login typed once in the WebUI to that
@@ -53,7 +74,9 @@ import fnmatch
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from cache_core import JsonCacheFile  # sibling leaf
 from os_cve import CVE_RE, FeedCache, match_node  # sibling leaf
@@ -74,6 +97,11 @@ _NEVER_PROBE_REASON = {
 _CHECK_TIMEOUT_S = 240.0
 _APPLY_TIMEOUT_S = 3700.0
 _REBOOT_TIMEOUT_S = 60.0
+# Auto-reboot of a clustered Proxmox node (see _osu_cluster_reboot).
+_MAINT_POLL_S = 15.0
+_MAINT_MIGRATE_TIMEOUT_S = 15 * 60.0
+_REBOOT_GRACE_S = 90.0          # shutdown -r +1, plus time to go down
+_REBOOT_RETURN_TIMEOUT_S = 20 * 60.0
 _FIX_ACCESS_TIMEOUT_S = 180.0
 _STATE_FILE = "os_updates.json"
 
@@ -85,11 +113,55 @@ _OSU_AUTOCHECK_CFG_KEY = "os_updates_check"
 _OSU_AUTOCHECK_DEFAULT_HOURS = 6.0
 
 # Auto-patch config lives in global_config["os_updates_autopatch"]:
-# {security_only, nodes: ["kind:id", ...], exclude: ["pkg-or-glob", ...]}.
+# {security_only, nodes: ["kind:id", ...], exclude: ["pkg-or-glob", ...],
+#  reboot_nodes: ["kind:id", ...], window: {start, end, tz}}.
 # Only listed nodes are auto-patched; excluded packages are never auto-installed.
+# reboot_nodes (always a subset of nodes) are rebooted after an auto-patch run.
 _OSU_AUTOPATCH_CFG_KEY = "os_updates_autopatch"
 _AUTOPATCH_ACTOR = "auto-patch"
+_AUTOREBOOT_ACTOR = "auto-reboot"
 _CVE_MAX_RESULTS = 200
+_DEFAULT_WINDOW = {"start": "01:00", "end": "05:00", "tz": "UTC"}
+_AUTOPATCH_TICK_S = 300.0
+
+
+def _parse_window(window: Any) -> Dict[str, str]:
+    """Validate ``{start, end, tz}`` ("HH:MM", "HH:MM", IANA zone name).
+    Raises ValueError on a bad value."""
+    w = {**_DEFAULT_WINDOW, **(window or {})}
+    for k in ("start", "end"):
+        datetime.strptime(str(w[k]), "%H:%M")
+    try:
+        ZoneInfo(str(w["tz"]))
+    except Exception as exc:  # noqa: BLE001 — ZoneInfoNotFoundError, ValueError, ...
+        raise ValueError(f"unknown timezone {w['tz']!r}") from exc
+    return {"start": str(w["start"]), "end": str(w["end"]), "tz": str(w["tz"])}
+
+
+def _read_window(window: Any) -> Dict[str, str]:
+    """Stored window, or the default if it is missing or no longer valid."""
+    try:
+        return _parse_window(window)
+    except ValueError:
+        return dict(_DEFAULT_WINDOW)
+
+
+def window_bounds(window: Dict[str, str], now: float) -> Optional[Tuple[float, float]]:
+    """``(opened_at, closes_at)`` of the maintenance window ``now`` falls in,
+    or None when outside it. Handles windows across midnight; start == end is
+    a 24h window (any time)."""
+    tz = ZoneInfo(window["tz"])
+    local = datetime.fromtimestamp(now, tz)
+    sh, sm = map(int, window["start"].split(":"))
+    eh, em = map(int, window["end"].split(":"))
+    length = timedelta(minutes=((eh * 60 + em) - (sh * 60 + sm)) % (24 * 60) or 24 * 60)
+    opened = local.replace(hour=sh, minute=sm, second=0, microsecond=0)
+    if opened > local:
+        opened -= timedelta(days=1)
+    closes = opened + length
+    if local >= closes:
+        return None
+    return opened.timestamp(), closes.timestamp()
 
 
 class HubOsUpdatesMixin:
@@ -234,6 +306,7 @@ class HubOsUpdatesMixin:
             "warnings": d.get("warnings") or [],
             "features": d.get("features") or [],
             "apply_blocker": d.get("apply_blocker") or "",
+            "pve_cluster": d.get("pve_cluster") or {},
             "checked_at": time.time(),
             # Popped by osu_check_fleet into st["inventory"]; never in the snapshot.
             "_inventory": {"os": d.get("os") or {}, "installed": d.get("installed")},
@@ -335,33 +408,50 @@ class HubOsUpdatesMixin:
             cfg = self.osu_autocheck_config()
             return (cfg["interval_hours"] * 3600.0) if cfg["enabled"] else 300.0
 
-        async def _check_then_autopatch():
+        async def _check():
             await self.osu_check_fleet(refresh=True)
-            await self.osu_autopatch()
 
-        await run_sync_loop(stagger=45, guard=_guard,
-                            body=_check_then_autopatch,
-                            delay=_delay,
+        await run_sync_loop(stagger=45, guard=_guard, body=_check, delay=_delay,
                             error_label="os-updates auto-check loop cycle failed")
+
+    async def run_os_updates_autopatch_loop(self):
+        """Every few minutes: when the maintenance window has opened and
+        auto-patch hasn't run in it yet, re-check the fleet (so it patches
+        what is pending now, not hours ago) and auto-patch."""
+        async def _tick():
+            if not self._osu_autopatch_skip_reason(time.time()):
+                await self.osu_check_fleet(refresh=True)
+                await self.osu_autopatch()
+
+        await run_sync_loop(stagger=90, body=_tick, delay=lambda: _AUTOPATCH_TICK_S,
+                            error_label="os-updates auto-patch loop cycle failed")
 
     # ── auto-patch (WebUI-configurable, off by default) ─────────────────────
     def osu_autopatch_config(self) -> Dict[str, Any]:
-        """``{security_only, nodes, exclude}`` — the node keys approved for
-        auto-patch and the package names/globs it must never install."""
+        """``{security_only, nodes, exclude, reboot_nodes}`` — the node keys
+        approved for auto-patch, the package names/globs it must never install,
+        and the auto-patch nodes that are rebooted after a run."""
         try:
             cfg = (self.state.system_state.get("global_config", {})
                    .get(_OSU_AUTOPATCH_CFG_KEY, {})) or {}
         except Exception:  # noqa: BLE001 — hub without state (tests)
             cfg = {}
+        nodes = sorted(str(k) for k in (cfg.get("nodes") or []))
         return {"security_only": bool(cfg.get("security_only", True)),
-                "nodes": sorted(str(k) for k in (cfg.get("nodes") or [])),
-                "exclude": sorted(str(p) for p in (cfg.get("exclude") or []))}
+                "nodes": nodes,
+                "exclude": sorted(str(p) for p in (cfg.get("exclude") or [])),
+                "reboot_nodes": sorted(set(str(k) for k in (cfg.get("reboot_nodes") or []))
+                                       & set(nodes)),
+                "window": _read_window(cfg.get("window"))}
 
     def _osu_save_autopatch(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         gc = self.state.system_state.setdefault("global_config", {})
+        nodes = set(cfg["nodes"])
         gc[_OSU_AUTOPATCH_CFG_KEY] = {"security_only": bool(cfg["security_only"]),
-                                      "nodes": sorted(set(cfg["nodes"])),
-                                      "exclude": sorted(set(cfg["exclude"]))}
+                                      "nodes": sorted(nodes),
+                                      "exclude": sorted(set(cfg["exclude"])),
+                                      "reboot_nodes": sorted(set(cfg["reboot_nodes"]) & nodes),
+                                      "window": _parse_window(cfg["window"])}
         self.state._mark_dirty()
         return self.osu_autopatch_config()
 
@@ -369,41 +459,79 @@ class HubOsUpdatesMixin:
         return self._osu_save_autopatch({**self.osu_autopatch_config(),
                                          "security_only": security_only})
 
+    def osu_set_autopatch_window(self, window: Dict[str, Any]) -> Dict[str, Any]:
+        """Set the maintenance window (ValueError on a bad time or timezone)."""
+        return self._osu_save_autopatch({**self.osu_autopatch_config(),
+                                         "window": _parse_window(window)})
+
     def osu_set_autopatch_exclude(self, patterns: List[str]) -> Dict[str, Any]:
         """Replace the never-auto-install list (package names or globs)."""
         exclude = [p.strip() for p in patterns if p and p.strip()]
         return self._osu_save_autopatch({**self.osu_autopatch_config(), "exclude": exclude})
 
     def osu_set_autopatch_node(self, node_key: str, enabled: bool) -> Dict[str, Any]:
-        """Approve (or withdraw) one node for auto-patching."""
+        """Approve (or withdraw) one node for auto-patching. Approving also
+        turns auto-reboot on for it (the default); withdrawing clears both."""
         cfg = self.osu_autopatch_config()
-        nodes = set(cfg["nodes"])
+        nodes, reboot = set(cfg["nodes"]), set(cfg["reboot_nodes"])
         if enabled:
+            if node_key not in nodes:
+                reboot.add(node_key)
             nodes.add(node_key)
         else:
             nodes.discard(node_key)
-        return self._osu_save_autopatch({**cfg, "nodes": list(nodes)})
+            reboot.discard(node_key)
+        return self._osu_save_autopatch({**cfg, "nodes": list(nodes), "reboot_nodes": list(reboot)})
+
+    def osu_set_autoreboot_node(self, node_key: str, enabled: bool) -> Dict[str, Any]:
+        """Turn auto-reboot on or off for one auto-patch node. A node that is
+        not approved for auto-patch can't auto-reboot (ValueError)."""
+        cfg = self.osu_autopatch_config()
+        if node_key not in cfg["nodes"]:
+            raise ValueError(f"{node_key}: approve it for auto-patch first")
+        reboot = set(cfg["reboot_nodes"])
+        if enabled:
+            reboot.add(node_key)
+        else:
+            reboot.discard(node_key)
+        return self._osu_save_autopatch({**cfg, "reboot_nodes": list(reboot)})
+
+    def _osu_autopatch_skip_reason(self, now: float) -> str:
+        """Why auto-patch must not start now ("" = go)."""
+        cfg = self.osu_autopatch_config()
+        if not cfg["nodes"]:
+            return "no nodes approved for auto-patch"
+        bounds = window_bounds(cfg["window"], now)
+        if bounds is None:
+            w = cfg["window"]
+            return f"outside the maintenance window ({w['start']}-{w['end']} {w['tz']})"
+        st = self._osu_state()
+        if float(st.get("autopatch_at") or 0.0) >= bounds[0]:
+            return "already ran in this maintenance window"
+        run = st.get("run")
+        if run and run.get("status") == "running":
+            return "an update run is already in progress"
+        return ""
 
     async def osu_autopatch(self) -> Dict[str, Any]:
         """Deploy what the last check found on the nodes approved for it.
 
-        Same rolling, hub-last, never-reboot apply an operator would approve;
-        only approved nodes that can actually be patched are picked, so one
-        blocked node doesn't stop the rest. At most once per auto-check
-        interval (persisted), so a hub restart — including one caused by
-        patching the hub — doesn't start another run right away.
+        Same rolling, hub-last apply an operator would approve, followed by a
+        reboot of the auto-reboot nodes that installed something; only
+        approved nodes that can actually be patched are picked, so one
+        blocked node doesn't stop the rest. Only inside the maintenance
+        window and at most once per window (persisted), so a hub restart —
+        including one caused by patching the hub — doesn't start another run.
         """
+        now = time.time()
+        reason = self._osu_autopatch_skip_reason(now)
+        if reason:
+            return {"status": "SKIPPED", "message": reason}
         cfg = self.osu_autopatch_config()
-        if not cfg["nodes"]:
-            return {"status": "SKIPPED", "message": "no nodes approved for auto-patch"}
         st = self._osu_state()
-        run = st.get("run")
-        if run and run.get("status") == "running":
-            return {"status": "SKIPPED", "message": "an update run is already in progress"}
-        interval_s = self.osu_autocheck_config()["interval_hours"] * 3600.0
-        # 0.9: the check loop's own timing jitter must not skip a whole cycle.
-        if time.time() - float(st.get("autopatch_at") or 0.0) < interval_s * 0.9:
-            return {"status": "SKIPPED", "message": "already ran this interval"}
+        st["autopatch_at"] = now
+        self._osu_save()
+        _opened, closes = window_bounds(cfg["window"], now)
         keys = []
         packages: Dict[str, List[str]] = {}
         approved = set(cfg["nodes"])
@@ -433,14 +561,14 @@ class HubOsUpdatesMixin:
             keys.append(key)
         if not keys:
             return {"status": "SKIPPED", "message": "nothing to patch"}
-        st["autopatch_at"] = time.time()
-        self._osu_save()
         logger.warning("OS-UPDATE: auto-patch found updates on %d node(s) (%s%s)",
                        len(keys), "security only" if cfg["security_only"] else "all updates",
                        f", excluding {', '.join(exclude)}" if exclude else "")
         res = await self.osu_apply_fleet(node_keys=keys, actor=_AUTOPATCH_ACTOR,
                                          packages=packages or None,
-                                         security_only=cfg["security_only"])
+                                         security_only=cfg["security_only"],
+                                         reboot_after=[k for k in keys if k in cfg["reboot_nodes"]],
+                                         until=closes)
         if res.get("status") == "ERROR":
             logger.warning("OS-UPDATE: auto-patch not started: %s", res.get("message"))
         return res
@@ -522,9 +650,11 @@ class HubOsUpdatesMixin:
                     "agent_id": t.get("agent_id", ""), "checked": False, "eligible": None, "unmanaged": False,
                     "unreachable": False, "reason": "not checked yet", "count": 0,
                 }
-        approved = set(self.osu_autopatch_config()["nodes"])
+        ap_cfg = self.osu_autopatch_config()
+        approved, reboot = set(ap_cfg["nodes"]), set(ap_cfg["reboot_nodes"])
         for key, n in merged.items():
             n["auto_patch"] = key in approved
+            n["auto_reboot"] = key in reboot
         nodes = sorted(merged.values(), key=lambda n: (n["kind"] != "hub", n["label"]))
         pending = [n for n in nodes if n.get("eligible") and n.get("count")
                    and not n.get("apply_blocker")]
@@ -630,6 +760,44 @@ class HubOsUpdatesMixin:
                       for c in feeds},
         }
 
+    def _osu_fleet_cves_sync(self) -> List[Dict[str, Any]]:
+        """Every CVE that affects at least one node right now, newest first:
+        ``[{cve, description, urgency, nodes}]`` (``nodes`` is a count). Feeds
+        the search box's suggestions. Matches each node's installed packages
+        against the feed entries for just those packages, and is cached until
+        the next check or feed refresh."""
+        st = self._osu_state()
+        inventory = dict(st.get("inventory") or {})
+        feeds = self._osu_feeds_for(inventory)
+        fc = self._osu_feed_cache()
+        stamp = (st.get("checked_at"), tuple((c, fc.fetched_at(c)) for c in feeds))
+        cached = getattr(self, "_osu_fleet_cves", None)
+        if cached and cached[0] == stamp:
+            return cached[1]
+        found: Dict[str, Dict[str, Any]] = {}
+        for key, inv in inventory.items():
+            os_info = inv.get("os") or {}
+            feed = feeds.get(os_info.get("codename") or "")
+            if feed is None or os_info.get("id") != "debian":
+                continue
+            installed = inv.get("installed") or []
+            # Same lookup rule as match_node: source package if the feed knows it.
+            keys = {row[2] if len(row) > 2 and row[2] in feed.by_package else row[0]
+                    for row in installed if len(row) >= 2}
+            entries = [feed.entry(ln) for k in keys for ln in feed.by_package.get(k, [])]
+            for f in match_node(feed, installed, entries)["affected"]:
+                r = found.setdefault(f["cve"], {"cve": f["cve"],
+                                                "description": feed.descriptions.get(f["cve"], "")[:160],
+                                                "urgency": f["urgency"], "nodes": set()})
+                r["nodes"].add(key)
+        out = [{**r, "nodes": len(r["nodes"])} for r in found.values()]
+        out.sort(key=lambda r: [-int(p) for p in r["cve"].split("-")[1:]])
+        self._osu_fleet_cves = (stamp, out)
+        return out
+
+    async def osu_fleet_cves(self) -> List[Dict[str, Any]]:
+        return await asyncio.to_thread(self._osu_fleet_cves_sync)
+
     async def osu_cve_search(self, query: str) -> Dict[str, Any]:
         """Which nodes run a package vulnerable to ``query`` — a CVE id, or a
         package-name fragment (e.g. ``php``) listing its open CVEs. Matches the
@@ -640,7 +808,9 @@ class HubOsUpdatesMixin:
     async def osu_apply_fleet(self, node_keys: Optional[List[str]] = None,
                               actor: str = "",
                               packages: Optional[Dict[str, List[str]]] = None,
-                              security_only: bool = False) -> Dict[str, Any]:
+                              security_only: bool = False,
+                              reboot_after: Optional[List[str]] = None,
+                              until: Optional[float] = None) -> Dict[str, Any]:
         """Approve-once, rolling apply. Returns immediately; progress via snapshot.
 
         Scope:
@@ -651,6 +821,10 @@ class HubOsUpdatesMixin:
           * ``security_only`` — for nodes without an explicit package list,
             upgrade only their pending security packages; nodes with none are
             left out.
+          * ``reboot_after`` — ``kind:id`` nodes to reboot after they installed
+            something (auto-reboot; see ``_osu_auto_reboot``).
+          * ``until`` — no node is started after this time (end of the
+            maintenance window); the rest are skipped.
         Everything requested is validated BEFORE anything runs, so a bad
         selection is refused outright rather than half-applied.
 
@@ -712,6 +886,8 @@ class HubOsUpdatesMixin:
             "status": "running", "started_at": time.time(), "actor": actor,
             "total": len(plan), "done": 0, "current": "", "cancel_requested": False,
             "security_only": bool(security_only),
+            "reboot_after": list(reboot_after or []),
+            "until": until,
             "items": [{"key": n["key"], "label": n["label"], "status": "queued",
                        "mode": "all" if n["apply_packages"] is None else "packages",
                        "packages": n["apply_packages"] or []} for n in plan],
@@ -737,8 +913,8 @@ class HubOsUpdatesMixin:
         return {"status": "SUCCESS", "message": "cancelling after the current node"}
 
     async def osu_reboot_node(self, node_key: str, actor: str = "") -> Dict[str, Any]:
-        """Explicit, operator-approved reboot of ONE node (``shutdown -r +1``).
-        Never part of an apply. Refused during a run and on nodes that haven't
+        """Explicit, operator-approved reboot of ONE node (``shutdown -r +1``) —
+        the Reboot button. Refused during a run and on nodes that haven't
         reported the ``reboot`` feature."""
         st = self._osu_state()
         run = st.get("run")
@@ -754,6 +930,11 @@ class HubOsUpdatesMixin:
         if "reboot" not in (n.get("features") or []):
             return {"status": "ERROR", "message": f"{n['label']}: needs an LM update "
                                                   "before it can be rebooted from here"}
+        return await self._osu_reboot(n, actor)
+
+    async def _osu_reboot(self, n: Dict[str, Any], actor: str) -> Dict[str, Any]:
+        """Send the reboot command to one node (no checks — see callers)."""
+        node_key = f"{n['kind']}:{n['id']}"
         logger.warning("OS-UPDATE: REBOOT of %s approved by %s", n["label"], actor or "?")
         try:
             if n["kind"] == "hub":
@@ -776,7 +957,7 @@ class HubOsUpdatesMixin:
         logger.warning("OS-UPDATE: reboot %s → %s (%s)", n["label"],
                        "scheduled" if ok else "FAILED", msg)
         if ok:
-            cached = st["nodes"].get(node_key)
+            cached = self._osu_state()["nodes"].get(node_key)
             if cached is not None:
                 cached["reboot_scheduled_at"] = time.time()
                 self._osu_save()
@@ -813,6 +994,12 @@ class HubOsUpdatesMixin:
                 if item:
                     item["status"] = "skipped"
                 continue
+            if run.get("until") and time.time() > run["until"]:
+                if item:
+                    item.update(status="skipped", message="maintenance window ended")
+                continue
+            if n["kind"] == "hub":
+                await self._osu_auto_reboot(run)
             run["current"] = n["label"]
             if item:
                 item["status"] = "applying"
@@ -835,16 +1022,116 @@ class HubOsUpdatesMixin:
             self._osu_save()
             logger.warning("OS-UPDATE: %s → %s (%s)", n["label"],
                            "ok" if ok else "FAILED", (d or {}).get("message", "") or "")
+            if (ok and item and key in (run.get("reboot_after") or [])
+                    and n.get("pve_cluster") and "maintenance" in (n.get("features") or [])):
+                if not item["reboot_required"]:
+                    item["auto_reboot"] = "not needed"
+                else:
+                    item["auto_reboot"], stop = await self._osu_cluster_reboot(n, run)
+                    if stop:
+                        run["cancel_requested"] = True
+                self._osu_save()
         run["status"] = "cancelled" if run.get("cancel_requested") else "finished"
         run["current"] = ""
         run["finished_at"] = time.time()
         self._osu_save()
+        await self._osu_auto_reboot(run)
         # Refresh so the panel reflects reality (and any new reboot_required)
         # without the operator having to hit Check again.
         try:
             await self.osu_check_fleet(refresh=False)
         except Exception:  # noqa: BLE001
             pass
+
+
+    async def _osu_maintenance(self, n: Dict[str, Any], action: str) -> Dict[str, Any]:
+        """HA maintenance mode on a Proxmox host agent: enable/disable/status."""
+        try:
+            return _unwrap(await self.request_response(
+                n["spoke_id"], "AGENT_OS_MAINTENANCE",
+                {"agent_id": n.get("agent_id") or n["id"], "action": action},
+                timeout=_REBOOT_TIMEOUT_S))
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "ERROR", "message": str(exc)}
+
+    async def _osu_cluster_reboot(self, n: Dict[str, Any],
+                                  run: Dict[str, Any]) -> "tuple[str, bool]":
+        """Maintenance mode -> wait for HA guests to leave -> reboot -> wait
+        until the node is back without a pending reboot -> maintenance off.
+        Returns ``(result text for the run item, stop the rest of the run)``."""
+        key, label = f"{n['kind']}:{n['id']}", n["label"]
+        run["current"] = f"{label} — entering maintenance mode"
+        self._osu_save()
+        logger.warning("OS-UPDATE: %s (Proxmox cluster %s) → maintenance mode before auto-reboot",
+                       label, (n.get("pve_cluster") or {}).get("name", "?"))
+        r = await self._osu_maintenance(n, "enable")
+        if r.get("status") != "SUCCESS":
+            return f"failed: maintenance mode: {r.get('message', '')}", False
+        deadline = time.time() + _MAINT_MIGRATE_TIMEOUT_S
+        guests = r.get("ha_guests") or []
+        while guests:
+            if time.time() > deadline:
+                await self._osu_maintenance(n, "disable")
+                return (f"failed: HA guests did not move off in time ({', '.join(guests)}) — "
+                        "not rebooted, maintenance mode cleared"), False
+            run["current"] = f"{label} — waiting for {len(guests)} HA guest(s) to migrate"
+            await asyncio.sleep(_MAINT_POLL_S)
+            r = await self._osu_maintenance(n, "status")
+            if r.get("status") == "SUCCESS":
+                guests = r.get("ha_guests") or []
+        res = await self._osu_reboot(n, _AUTOREBOOT_ACTOR)
+        if res.get("status") != "SUCCESS":
+            await self._osu_maintenance(n, "disable")
+            return f"failed: {res.get('message', '')} — maintenance mode cleared", False
+        run["current"] = f"{label} — rebooting"
+        self._osu_save()
+        await asyncio.sleep(_REBOOT_GRACE_S)
+        deadline = time.time() + _REBOOT_RETURN_TIMEOUT_S
+        while True:
+            target = next((t for t in self._osu_targets()
+                           if f"{t['kind']}:{t['id']}" == key), None)
+            if target is not None:
+                chk = await self._osu_check_one(target, False)
+                if chk.get("eligible") and not chk.get("reboot_required"):
+                    self._osu_state()["nodes"][key] = chk
+                    break
+            if time.time() > deadline:
+                logger.warning("OS-UPDATE: %s did not come back from its auto-reboot — "
+                               "left in maintenance mode, stopping the run", label)
+                return ("failed: did not come back within "
+                        f"{int(_REBOOT_RETURN_TIMEOUT_S // 60)} min — left in maintenance mode, "
+                        "rest of the run stopped"), True
+            await asyncio.sleep(_MAINT_POLL_S)
+        r = await self._osu_maintenance(n, "disable")
+        logger.warning("OS-UPDATE: %s back from auto-reboot; maintenance mode %s",
+                       label, "cleared" if r.get("status") == "SUCCESS" else "NOT cleared")
+        if r.get("status") != "SUCCESS":
+            return f"rebooted, but maintenance mode NOT cleared: {r.get('message', '')}", False
+        return "rebooted (cluster maintenance mode)", False
+
+    async def _osu_auto_reboot(self, run: Dict[str, Any]) -> None:
+        """Reboot the run's ``reboot_after`` nodes that are done and installed
+        something, each at most once. Called before the hub is patched and
+        again when the run ends, so the hub is always rebooted last. Skipped
+        if the run was cancelled. The result is kept on the run item as
+        ``auto_reboot`` so the panel can show it."""
+        if run.get("cancel_requested"):
+            return
+        wanted = set(run.get("reboot_after") or [])
+        nodes = {f"{n['kind']}:{n['id']}": n for n in self.osu_snapshot()["nodes"]}
+        for item in run["items"]:
+            if item["key"] not in wanted or item["status"] != "done" or item.get("auto_reboot"):
+                continue
+            if not (item.get("applied") or item.get("reboot_required")):
+                continue  # nothing was installed — no reason to reboot
+            n = nodes.get(item["key"])
+            if n is None or "reboot" not in (n.get("features") or []):
+                item["auto_reboot"] = "failed: node can't be rebooted from LM (needs an LM update)"
+            else:
+                res = await self._osu_reboot(n, _AUTOREBOOT_ACTOR)
+                item["auto_reboot"] = ("scheduled" if res.get("status") == "SUCCESS"
+                                       else f"failed: {res.get('message', '')}")
+            self._osu_save()
 
 
 def _unwrap(resp: Any) -> Dict[str, Any]:
