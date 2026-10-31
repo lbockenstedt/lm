@@ -56,6 +56,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from cache_core import JsonCacheFile  # sibling leaf
+from os_cve import CVE_RE, FeedCache, match_node  # sibling leaf
 from sync_loop import run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
@@ -88,6 +89,7 @@ _OSU_AUTOCHECK_DEFAULT_HOURS = 6.0
 # Only listed nodes are auto-patched; excluded packages are never auto-installed.
 _OSU_AUTOPATCH_CFG_KEY = "os_updates_autopatch"
 _AUTOPATCH_ACTOR = "auto-patch"
+_CVE_MAX_RESULTS = 200
 
 
 class HubOsUpdatesMixin:
@@ -128,6 +130,8 @@ class HubOsUpdatesMixin:
         st = self._osu_state()
         if isinstance(data.get("nodes"), dict):
             st["nodes"] = data["nodes"]
+        if isinstance(data.get("inventory"), dict):
+            st["inventory"] = data["inventory"]
         st["checked_at"] = float(data.get("checked_at") or 0.0)
         st["autopatch_at"] = float(data.get("autopatch_at") or 0.0)
         run = data.get("run")
@@ -231,6 +235,8 @@ class HubOsUpdatesMixin:
             "features": d.get("features") or [],
             "apply_blocker": d.get("apply_blocker") or "",
             "checked_at": time.time(),
+            # Popped by osu_check_fleet into st["inventory"]; never in the snapshot.
+            "_inventory": {"os": d.get("os") or {}, "installed": d.get("installed")},
         }
 
     async def osu_check_fleet(self, refresh: bool = True) -> Dict[str, Any]:
@@ -241,9 +247,21 @@ class HubOsUpdatesMixin:
             return_exceptions=True)
         nodes = [r for r in results if isinstance(r, dict)]
         st = self._osu_state()
+        inventory = st.setdefault("inventory", {})
+        for n in nodes:
+            key = f"{n['kind']}:{n['id']}"
+            inv = n.pop("_inventory", None)
+            if inv is None:
+                continue  # unreachable/unmanaged: keep the last inventory we had
+            if isinstance(inv.get("installed"), list):
+                inventory[key] = {**inv, "at": time.time()}
+            else:
+                inventory.pop(key, None)  # node too old to report one
         st["nodes"] = {f"{n['kind']}:{n['id']}": n for n in nodes}
         st["checked_at"] = time.time()
         self._osu_save()
+        # Warm the CVE feeds now so a lookup doesn't wait on a download.
+        await asyncio.to_thread(self._osu_feeds_for, inventory)
         return self.osu_snapshot()
 
     # ── auto-check schedule (WebUI-configurable) ────────────────────────────
@@ -527,6 +545,96 @@ class HubOsUpdatesMixin:
             },
             "run": st.get("run"),
         }
+
+    # ── CVE lookup: "who is affected by CVE-XXXX-YYYY?" ─────────────────────
+    def _osu_feed_cache(self) -> FeedCache:
+        fc = getattr(self, "_osu_cve_feeds", None)
+        if fc is None:
+            fc = FeedCache(getattr(self, "cache_dir", None))
+            self._osu_cve_feeds = fc
+        return fc
+
+    def _osu_feeds_for(self, inventory: Dict[str, Any]) -> Dict[str, Any]:
+        """Debian feed per release in use. Blocking (may download)."""
+        codenames = {(inv.get("os") or {}).get("codename", "")
+                     for inv in inventory.values()
+                     if (inv.get("os") or {}).get("id") == "debian"}
+        fc = self._osu_feed_cache()
+        return {c: f for c in sorted(codenames) if c and (f := fc.get(c)) is not None}
+
+    def _osu_cve_search_sync(self, query: str) -> Dict[str, Any]:
+        st = self._osu_state()
+        inventory = dict(st.get("inventory") or {})
+        feeds = self._osu_feeds_for(inventory)
+        fc = self._osu_feed_cache()
+        is_cve = bool(CVE_RE.match(query))
+        q = query.upper() if is_cve else query.lower()
+
+        results: Dict[str, Dict[str, Any]] = {}
+        unknown: List[Dict[str, str]] = []
+        nodes = st.get("nodes") or {}
+        labels = {k: n.get("label") or k for k, n in nodes.items()}
+        for key, n in nodes.items():
+            inv = inventory.get(key)
+            if not n.get("eligible"):
+                continue
+            os_info = (inv or {}).get("os") or {}
+            if inv is None:
+                reason = "node has not reported its installed packages (needs a newer LM)"
+            elif os_info.get("id") != "debian":
+                reason = f"not Debian ({os_info.get('id') or 'unknown OS'}) — no feed"
+            elif os_info.get("codename") not in feeds:
+                reason = f"no security feed for Debian {os_info.get('codename') or '?'}"
+            else:
+                continue
+            unknown.append({"node": key, "label": labels[key], "reason": reason})
+
+        for key, inv in inventory.items():
+            feed = feeds.get(((inv.get("os") or {}).get("codename")) or "")
+            if feed is None or ((inv.get("os") or {}).get("id")) != "debian":
+                continue
+            if is_cve:
+                lines = feed.by_cve.get(q, [])
+            else:
+                lines = [ln for pkg, pkg_lines in feed.by_package.items()
+                         if q in pkg for ln in pkg_lines]
+            entries = [feed.entry(ln) for ln in lines]
+            pending = [p.get("package") for p in (nodes.get(key) or {}).get("packages") or []]
+            found = match_node(feed, inv.get("installed") or [], entries, pending)
+            for state in ("affected", "patched") if is_cve else ("affected",):
+                for f in found[state]:
+                    r = results.setdefault(f["cve"], {
+                        "cve": f["cve"], "description": feed.descriptions.get(f["cve"], ""),
+                        "urgency": f["urgency"], "remote": f["remote"],
+                        "affected": [], "patched": []})
+                    r[state].append({"node": key, "label": labels.get(key, key),
+                                     "release": inv["os"]["codename"], **f})
+            if is_cve and lines and q not in results:
+                results[q] = {"cve": q, "description": feed.descriptions.get(q, ""),
+                              "urgency": entries[0]["urgency"], "remote": entries[0]["remote"],
+                              "affected": [], "patched": []}
+
+        ordered = sorted(results.values(), key=lambda r: (-len(r["affected"]), r["cve"]))
+        if not is_cve:
+            ordered = [r for r in ordered if r["affected"]]
+        truncated = len(ordered) > _CVE_MAX_RESULTS
+        known = any(q in f.descriptions for f in feeds.values()) if is_cve else bool(ordered)
+        return {
+            "query": q, "kind": "cve" if is_cve else "package", "known": known,
+            "results": ordered[:_CVE_MAX_RESULTS], "truncated": truncated,
+            "affected_nodes": len({a["node"] for r in ordered for a in r["affected"]}),
+            "checked_nodes": sum(1 for inv in inventory.values()
+                                 if (inv.get("os") or {}).get("codename") in feeds),
+            "unknown": unknown,
+            "feeds": {c: {"fetched_at": fc.fetched_at(c), "error": fc.errors.get(c, "")}
+                      for c in feeds},
+        }
+
+    async def osu_cve_search(self, query: str) -> Dict[str, Any]:
+        """Which nodes run a package vulnerable to ``query`` — a CVE id, or a
+        package-name fragment (e.g. ``php``) listing its open CVEs. Matches the
+        inventory from the last check; never probes the nodes."""
+        return await asyncio.to_thread(self._osu_cve_search_sync, query.strip())
 
     # ── rolling apply ────────────────────────────────────────────────────────
     async def osu_apply_fleet(self, node_keys: Optional[List[str]] = None,
