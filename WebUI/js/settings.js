@@ -633,18 +633,15 @@ function _renderOsUpdatesView(content) {
     content.innerHTML = `
         <div class="${card} space-y-4">
             <div class="flex items-center justify-between">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OS Updates ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OS Updates ${helpIcon('lm-hub', null, 'Hub help')} <span class="cursor-help normal-case font-normal text-slate-400" title="Operating-system package updates (apt dist-upgrade) for every spoke and agent. Global Admin only; every approval is audit-logged.
+• Deploy everything, only selected nodes/packages, or only security updates.
+• A manual deploy never reboots; a host that needs one gets a Reboot… button. Proxmox cluster nodes are the exception (below).
+• Auto-patch is approved per node and runs only in the maintenance window, minus packages under &quot;Never auto-install&quot;.
+• Auto-reboot (on by default for auto-patch nodes) reboots nodes that installed something once the run is done, hub last.
+• Proxmox cluster nodes reboot only when needed, in HA maintenance mode (guests move off first), one node at a time.
+• Nodes update one at a time; the hub goes last (this page restarts).
+• Separate from LM code updates.">ⓘ</span></h3>
                 <span id="osu-status" class="text-xs text-slate-400"></span>
-            </div>
-            <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-[11px] text-amber-800 leading-snug">
-                Operating-system package updates for every spoke and agent — <b>Global-Admin only, every approval is audit-logged</b>.
-                Deploys <code>apt dist-upgrade</code> (everything) — or only the nodes/packages you select, or only security updates.
-                A manual deploy <b>never reboots</b> — a host needing one is badged with a <b>Reboot…</b> button you use deliberately — except a <b>Proxmox cluster</b> node (below), which is always rebooted the safe way when its update needs it.
-                <b>Auto-patch</b> is approved <b>per node</b> (tick "Auto-patch" on a node) and only runs in the <b>maintenance window</b> below: once per window the fleet is re-checked and approved nodes get what was found, the same way — security updates only or all updates, minus any packages you list under "Never auto-install".
-                <b>Auto-reboot</b> (on by default for an auto-patch node — untick it to keep a node up) reboots each node that installed something once the run is done, hub last. No new node is started after the window closes; the auto-check only detects updates.
-                A node in a <b>Proxmox cluster</b> (manual deploy, auto-reboot or its Reboot… button) is only rebooted if it needs it, in <b>HA maintenance mode</b> (HA guests move to the other nodes first), and the run waits until it is back before taking maintenance off and moving on — one cluster node down at a time.
-                Nodes are updated <b>one at a time</b>, and the <b>hub goes last</b> (updating it restarts this page).
-                This is separate from LM code updates.
             </div>
             <div class="${osuFleetCls} flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
                 <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="osu-autocheck-enabled" class="w-4 h-4 text-green-600 rounded">Auto-check the fleet</label>
