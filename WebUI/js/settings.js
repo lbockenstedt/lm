@@ -715,6 +715,29 @@ function _renderOsUpdatesView(content) {
     osuLoadFleetCves();
 }
 
+// Footer "Pending Reboot" alert: during the maintenance window, lists the
+// nodes auto-reboot is about to restart (hover for the list). Admin only,
+// like the rest of OS Updates; refreshed every minute.
+async function osuRefreshRebootTray() {
+    const tray = document.getElementById('reboot-tray');
+    if (!tray) return;
+    let data = { nodes: [] };
+    if (typeof isAdmin === 'function' && isAdmin()) {
+        try { data = await apiJson('/api/os-updates/pending-reboots'); } catch (e) { /* keep hidden */ }
+    }
+    const nodes = data.in_window ? (data.nodes || []) : [];
+    tray.classList.toggle('hidden', !nodes.length);
+    tray.classList.toggle('flex', nodes.length > 0);
+    if (!nodes.length) return;
+    const w = data.window || {};
+    document.getElementById('reboot-tray-tooltip').innerHTML =
+        `<div class="font-bold mb-1">${nodes.length} system(s) will be rebooted</div>`
+        + nodes.map(n => `<div class="flex justify-between gap-4 py-0.5"><span>${escapeHtml(n.label)}</span><span class="opacity-60">${escapeHtml(n.note)}</span></div>`).join('')
+        + `<div class="opacity-60 mt-1">Maintenance window ${escapeHtml(w.start || '')}–${escapeHtml(w.end || '')} ${escapeHtml(w.tz || '')}</div>`;
+}
+setTimeout(osuRefreshRebootTray, 5000);
+setInterval(osuRefreshRebootTray, 60000);
+
 // Picking a suggestion looks it up straight away.
 window.osuCvePicked = function (value) {
     const opts = document.getElementById('osu-cve-list')?.options || [];

@@ -82,6 +82,13 @@ def register(app, hub, ctx):
                                 detail="enter a CVE id (CVE-2026-1234) or a package name")
         return await hub.osu_cve_search(q)
 
+    @app.get("/api/os-updates/pending-reboots")
+    async def os_updates_pending_reboots(request: Request):
+        """Nodes auto-reboot will restart in the current maintenance window
+        (footer "Pending Reboot" alert): ``{in_window, window, nodes}``."""
+        _require_admin(request)
+        return hub.osu_pending_reboots()
+
     @app.get("/api/os-updates/cves/fleet")
     async def os_updates_fleet_cves(request: Request):
         """CVEs that affect at least one node now (``[{cve, description,
