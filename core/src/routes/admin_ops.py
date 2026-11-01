@@ -350,13 +350,19 @@ def register(app, hub, ctx):
         except Exception:
             body = {}
         cmd = str((body or {}).get("command") or "ZBX_STATUS").upper()
-        if cmd not in ("ZBX_STATUS", "ZBX_SYNC", "ZBX_REBUILD"):
+        if cmd not in ("ZBX_STATUS", "ZBX_SYNC", "ZBX_REBUILD", "UPDATE_CONFIG"):
             raise HTTPException(status_code=400, detail="unsupported zabbix command")
         sid = hub.get_spoke_by_type("monitoring")
         if not sid:
             raise HTTPException(status_code=503, detail="no connected zabbix spoke")
         payload = {}
-        if cmd != "ZBX_STATUS":
+        if cmd == "UPDATE_CONFIG":
+            payload = dict((body or {}).get("config") or {})
+            # Persist so the hub re-pushes it on every reconnect/restart.
+            hub.state.update_global_config({"monitoring": payload})
+            await hub.push_config_to_spoke(sid)
+            return {"status": "ok", "spoke": sid, "result": "config stored and pushed"}
+        elif cmd != "ZBX_STATUS":
             devices = (body or {}).get("devices")
             if devices is None:
                 inv = (hub.state.system_state.get("global_config", {})
@@ -373,7 +379,7 @@ def register(app, hub, ctx):
             logger.exception("admin_ops: zbx %s failed", cmd)
             raise HTTPException(status_code=500, detail=str(e))
         logger.warning("admin_ops: zbx %s driven via loopback (%d devices)", cmd,
-                       len(payload.get("devices", [])))
+                       len(payload.get("devices", []) if cmd != "UPDATE_CONFIG" else []))
         return {"status": "ok", "spoke": sid, "result": res}
 
     @app.post("/admin/ops/set-cs-mode")
