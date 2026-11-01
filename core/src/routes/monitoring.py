@@ -13,7 +13,7 @@ async def inventory_devices(hub):
     import instance_vault
     inv = (hub.state.system_state.get("global_config", {}).get("nw_devices", []) or [])
     inv = await instance_vault.overlay_many(
-        [d for d in inv if isinstance(d, dict) and d.get("name") and d.get("address")],
+        hub, [d for d in inv if isinstance(d, dict) and d.get("name") and d.get("address")],
         "nw_devices")
     return [{"tenant": d.get("tenant") or d.get("tenant_id") or "default",
              "name": d.get("name"), "type": d.get("type") or d.get("model") or "",
