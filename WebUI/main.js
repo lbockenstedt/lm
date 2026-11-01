@@ -432,7 +432,7 @@ const MODULE_CLASSES = {
 // things DNS": the Unbound `dns` view (Overview/Records/Forwarders) plus an
 // External DNS subtab (internet-facing providers like HE.NET). Such products
 // have no standalone view — they always live under the `dns` view. See setView().
-const CLASS_PRIMARY_VIEW = { 'DNS': 'dns' };
+const CLASS_PRIMARY_VIEW = { 'DNS': 'dns', 'Monitoring': 'zabbix' };
 
 // Header module label: maps the active view/product to the nav class name shown
 // in the header (Logo | Lab Manager | <Module>). e.g. opnsense -> 'Firewalls',
