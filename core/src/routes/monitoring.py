@@ -28,7 +28,9 @@ async def inventory_devices(hub):
         val = s.get("value") or {}
         community = val.get("snmp_community") or val.get("community") or ""
         if community:
-            tenant_snmp.setdefault(s["bucket"], community)
+            # The Global Admin slot belongs to the admin ("default") tenant.
+            bucket = "default" if s["bucket"] == cred_vault.ADMIN_BUCKET else s["bucket"]
+            tenant_snmp.setdefault(bucket, community)
     for c in scan:
         if c.get("snmp_community"):
             tenant_snmp.setdefault(c.get("tenant_id") or "default", c["snmp_community"])
