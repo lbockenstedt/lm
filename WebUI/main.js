@@ -575,6 +575,7 @@ const PRODUCT_MAP = {
     'le': 'le',
     'console': 'console',
     'truenas': 'truenas',
+    'zabbix': 'zabbix',
 };
 
 // module_type -> nav product. A spoke's REGISTERED module_type is the
@@ -601,6 +602,7 @@ const MODULE_TYPE_PRODUCT = {
     console: 'console',
     directory: 'ldap',
     storage: 'truenas',
+    monitoring: 'zabbix',
 };
 
 // spoke_id prefix -> product, used ONLY as a fallback when a spoke's module_type
@@ -616,7 +618,7 @@ const _ID_PREFIX_PRODUCT = {
     pxmx: 'pxmx', opn: 'opnsense', opnsense: 'opnsense', pfsense: 'opnsense',
     cppm: 'cppm', ise: 'cppm', cs: 'cs', netbox: 'netbox', phpipam: 'netbox',
     dns: 'dns', dhcp: 'dhcp', nw: 'nw', le: 'le', truenas: 'truenas',
-    henet: 'henet',
+    henet: 'henet', zabbix: 'zabbix',
 };
 function _productFromIdPrefix(sid) {
     for (const [prefix, product] of Object.entries(_ID_PREFIX_PRODUCT)) {
@@ -2193,6 +2195,7 @@ const VIEW_SUBMENUS = {
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations', 'Diagnostics'],
     nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other', 'Topology', 'Scan'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
+    zabbix: ['Overview'],
 };
 
 // Two-tier horizontal nav: child tabs that appear in #top-nav-secondary under
@@ -4412,6 +4415,7 @@ const VIEW_LOADERS = {
     le:       (subMenu) => loadLEData(subMenu),
     console:  (subMenu) => loadConsoleData(subMenu),
     truenas:  (subMenu) => loadTruenasData(subMenu),
+    zabbix:   () => loadMonitoringData(),
     cs:       (subMenu) => loadCSData(subMenu, currentSubChild),
     setup:    (subMenu) => _renderSetupSection(subMenu),
     settings: (subMenu) => _renderSettingsSection(subMenu),
@@ -4667,6 +4671,11 @@ function _viewTemplate(viewId) {
     <div class="py-12 text-center text-slate-400 italic">Loading storage…</div>
   </div>
 </div>`;
+
+        case 'zabbix':
+            return `<div class="space-y-4"><div id="monitoring-container" class="${card}">
+    <div class="py-12 text-center text-slate-400 italic">Loading monitoring…</div>
+  </div></div>`;
 
         case 'mydevices':
             // Tenant-admin device management — same unified table as the admin

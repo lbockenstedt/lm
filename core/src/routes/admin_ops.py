@@ -365,20 +365,8 @@ def register(app, hub, ctx):
         elif cmd != "MON_STATUS":
             devices = (body or {}).get("devices")
             if devices is None:
-                import instance_vault
-                inv = (hub.state.system_state.get("global_config", {})
-                       .get("nw_devices", []) or [])
-                # Resolve each device's SNMP community from the credential vault
-                # (the reference the network scan stored for the credential that worked).
-                inv = await instance_vault.overlay_many(
-                    [d for d in inv if isinstance(d, dict) and d.get("name") and d.get("address")],
-                    "nw_devices")
-                devices = [{"tenant": d.get("tenant") or d.get("tenant_id") or "default",
-                            "name": d.get("name"), "type": d.get("type") or d.get("model") or "",
-                            "ip": str(d.get("address") or "").split("/")[0],
-                            "snmp": bool(d.get("snmp_community")) or d.get("transport") == "snmp",
-                            "snmp_community": d.get("snmp_community") or ""}
-                           for d in inv]
+                from routes.monitoring import inventory_devices
+                devices = await inventory_devices(hub)
             payload = {"devices": devices, "dry_run": bool((body or {}).get("dry_run"))}
         try:
             res = await hub.request_response(sid, cmd, payload, timeout=300.0)
