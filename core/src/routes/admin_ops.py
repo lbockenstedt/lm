@@ -341,7 +341,7 @@ def register(app, hub, ctx):
     @app.post("/admin/ops/monitoring")
     async def admin_ops_monitoring(request: Request):
         """Drive the monitoring spoke from a hub shell (status / sync / rebuild).
-        Body: {"command": "MON_STATUS"|"MON_SYNC"|"MON_REBUILD", "dry_run": bool,
+        Body: {"command": "MON_STATUS"|"MON_HOSTS"|"MON_SYNC"|"MON_REBUILD", "dry_run": bool,
         "devices": [...]?}. Without ``devices`` the list is built from the hub's
         nw_devices inventory ({tenant, name, type, ip, snmp})."""
         _guard(request)
@@ -350,7 +350,7 @@ def register(app, hub, ctx):
         except Exception:
             body = {}
         cmd = str((body or {}).get("command") or "MON_STATUS").upper()
-        if cmd not in ("MON_STATUS", "MON_SYNC", "MON_REBUILD", "UPDATE_CONFIG"):
+        if cmd not in ("MON_STATUS", "MON_HOSTS", "MON_SYNC", "MON_REBUILD", "UPDATE_CONFIG"):
             raise HTTPException(status_code=400, detail="unsupported monitoring command")
         sid = hub.get_spoke_by_type("monitoring")
         if not sid:
