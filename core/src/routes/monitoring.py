@@ -62,6 +62,22 @@ async def inventory_devices(hub):
     return out
 
 
+def vault_snmp_scan_sets(hub, tenant):
+    """Scan credential sets for every hub-mode vault secret of type "snmp" in the
+    tenant's bucket and the Global Admin slot, so a scan tries each community."""
+    import cred_vault
+    gc = hub.state.system_state.get("global_config", {})
+    out = []
+    for bucket, secrets in ((gc.get("cred_vault", {}) or {}).get("secrets", {}) or {}).items():
+        if bucket not in (tenant, cred_vault.ADMIN_BUCKET):
+            continue
+        for name, meta in (secrets or {}).items():
+            if isinstance(meta, dict) and meta.get("type") == "snmp" and meta.get("mode") == "hub":
+                out.append({"id": f"snmp:{bucket}:{name}", "name": name, "tenant_id": tenant,
+                            "username": "", "vault_credential": {"bucket": bucket, "name": name}})
+    return out
+
+
 async def verify_credentials(hub, tenant="default", apply=False):
     """Probe every known device of ``tenant`` with BOTH its SSH vault login and the
     SNMP community (vault "snmp" secrets) on the nw spoke that owns it, and report
@@ -80,13 +96,7 @@ async def verify_credentials(hub, tenant="default", apply=False):
             seen.add((ref["bucket"], ref["name"]))
             sets.append({"id": f"ssh:{ref['bucket']}:{ref['name']}", "name": ref["name"],
                          "tenant_id": tenant, "username": "", "vault_credential": ref})
-    for bucket, secrets in ((gc.get("cred_vault", {}) or {}).get("secrets", {}) or {}).items():
-        if bucket not in (tenant, cred_vault.ADMIN_BUCKET):
-            continue
-        for name, meta in (secrets or {}).items():
-            if isinstance(meta, dict) and meta.get("type") == "snmp" and meta.get("mode") == "hub":
-                sets.append({"id": f"snmp:{bucket}:{name}", "name": name, "tenant_id": tenant,
-                             "username": "", "vault_credential": {"bucket": bucket, "name": name}})
+    sets += vault_snmp_scan_sets(hub, tenant)
     resolved = await instance_vault.overlay_many(hub, sets, "nw_scan_credentials")
     creds = [{"id": c["id"], "name": c["name"], "username": c.get("username") or "",
               "password": c.get("password") or "",
