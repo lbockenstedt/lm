@@ -12,6 +12,13 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-10-26
 
+### Firewalls (OPNsense)
+
+- **Network impairment tab.** Firewalls → Impairment adds latency and packet
+  loss for a host or subnet (both directions, download or upload), driven
+  entirely from LM. Needs the `os-netimpair` plugin on the firewall. See
+  [opnsense.md](opnsense.md).
+
 ### Credential Vault
 
 - **"API key + secret" secret type.** Store a firewall's API key and secret (e.g.
