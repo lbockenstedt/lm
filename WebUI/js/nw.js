@@ -1655,14 +1655,37 @@ async function loadMonitoringData() {
     }
     const st = await r.json();
     const res = st.result || st;
-    const rows = Object.entries(res).filter(([, v]) => typeof v !== 'object' || v === null)
-        .map(([k, v]) => `<tr><td class="px-4 py-2 text-xs font-semibold text-slate-500">${escapeHtml(k)}</td><td class="px-4 py-2 text-xs font-mono text-slate-700">${escapeHtml(String(v))}</td></tr>`).join('');
+    let hosts = [];
+    try {
+        const hr = await fetch('/api/monitoring/hosts');
+        if (hr.ok) { const hj = await hr.json(); hosts = (hj.result || hj).hosts || []; }
+    } catch (e) { /* summary still renders */ }
+    const tenant = (typeof currentTenant !== 'undefined' && currentTenant) ? currentTenant : null;
+    const shown = tenant ? hosts.filter(h => h.tenant === tenant) : hosts;
+    const sevName = ['Not classified', 'Information', 'Warning', 'Average', 'High', 'Disaster'];
+    const availCls = {available: 'bg-emerald-100 text-emerald-700', unavailable: 'bg-red-100 text-red-700', unknown: 'bg-slate-100 text-slate-500'};
+    const up = shown.filter(h => h.availability === 'available').length;
+    const down = shown.filter(h => h.availability === 'unavailable').length;
+    const probs = shown.reduce((n, h) => n + (h.problem_count || 0), 0);
+    const tile = (label, val, cls) => `<div class="rounded border border-slate-200 px-4 py-3"><div class="text-[10px] uppercase tracking-wider text-slate-400">${label}</div><div class="text-2xl font-semibold ${cls || 'text-slate-700'}">${val}</div></div>`;
+    const hostRows = shown.map(h => `<tr class="border-t border-slate-100">
+        <td class="px-3 py-2 text-xs font-medium text-slate-700">${escapeHtml(h.name)}</td>
+        <td class="px-3 py-2 text-xs text-slate-500">${escapeHtml(h.tenant)}</td>
+        <td class="px-3 py-2 text-xs font-mono text-slate-500">${escapeHtml(h.ip)}</td>
+        <td class="px-3 py-2 text-xs text-slate-500">${h.method}</td>
+        <td class="px-3 py-2 text-xs"><span class="px-2 py-0.5 rounded ${availCls[h.availability] || availCls.unknown}" title="${escapeHtml(h.error || '')}">${h.availability}${h.enabled ? '' : ' (disabled)'}</span></td>
+        <td class="px-3 py-2 text-xs text-slate-600">${(h.problems || []).map(p => `<div>${escapeHtml(sevName[p.severity] || '')}: ${escapeHtml(p.name)}</div>`).join('') || '<span class="text-slate-300">none</span>'}</td>
+    </tr>`).join('');
+    const table = shown.length
+        ? `<table class="w-full text-left mt-4"><thead><tr class="text-[10px] uppercase tracking-wider text-slate-400"><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Address</th><th class="px-3 py-2">Method</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Problems</th></tr></thead><tbody>${hostRows}</tbody></table>`
+        : `<div class="py-8 text-center text-slate-400 italic">No monitored devices${tenant ? ` for tenant "${escapeHtml(tenant)}"` : ''}.</div>`;
+    const info = `<div class="mt-4 text-[11px] text-slate-400">Zabbix ${escapeHtml(String(res.version || '?'))} · ${escapeHtml(String(res.managed_hosts ?? '?'))} managed hosts</div>`;
     const buttons = isAdmin() ? `<div class="flex gap-3 mt-4">
         <button onclick="monitoringAction('sync', true)" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">Dry-run sync</button>
         <button onclick="monitoringAction('sync', false)" class="text-xs px-3 py-1.5 rounded bg-[#01A982] text-white hover:opacity-90">Sync now</button>
         <button onclick="if (confirm('Rebuild monitoring entirely from the LM inventory?')) monitoringAction('rebuild', false)" class="text-xs px-3 py-1.5 rounded border border-red-300 text-red-600 hover:bg-red-50">Rebuild</button>
     </div><pre id="monitoring-result" class="mt-3 text-[11px] text-slate-600 whitespace-pre-wrap"></pre>` : '';
-    container.innerHTML = `<table class="w-full text-left"><tbody>${rows}</tbody></table>${buttons}`;
+    container.innerHTML = `<div class="grid grid-cols-4 gap-3">${tile('Devices', shown.length)}${tile('Available', up, 'text-emerald-600')}${tile('Unavailable', down, down ? 'text-red-600' : '')}${tile('Open problems', probs, probs ? 'text-amber-600' : '')}</div>${table}${info}${buttons}`;
 }
 
 async function monitoringAction(action, dryRun) {

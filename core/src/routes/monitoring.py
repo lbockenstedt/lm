@@ -131,6 +131,10 @@ def register(app, hub, ctx):
     async def monitoring_status(request: Request):
         return await _relay(_admin_spoke(request), "MON_STATUS")
 
+    @app.get("/api/monitoring/hosts")
+    async def monitoring_hosts(request: Request):
+        return await _relay(_admin_spoke(request), "MON_HOSTS")
+
     @app.post("/api/monitoring/sync")
     async def monitoring_sync(request: Request):
         sid = _admin_spoke(request)
