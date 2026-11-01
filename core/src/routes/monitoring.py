@@ -4,6 +4,8 @@ The monitoring spoke is vendor-neutral (module_type "monitoring"); these routes
 only relay MON_STATUS / MON_SYNC / MON_REBUILD to it. Tenants never see the
 backend — the LM WebUI is the only front end.
 """
+import re
+
 from api import HTTPException, Request, logger
 
 
@@ -161,6 +163,13 @@ async def verify_credentials(hub, tenant="default", apply=False):
     return {"tenant": tenant, "credentials_tried": [c["id"] for c in creds], "devices": report}
 
 
+
+def monitoring_server_address(hub):
+    """The Zabbix server address (host[:port]) proxies dial out to; admin-configured."""
+    gc = hub.state.system_state.get("global_config", {}) or {}
+    return str(gc.get("monitoring_server") or "").strip()
+
+
 def register(app, hub, ctx):
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
@@ -188,6 +197,28 @@ def register(app, hub, ctx):
     @app.get("/api/monitoring/hosts")
     async def monitoring_hosts(request: Request):
         return await _relay(_admin_spoke(request), "MON_HOSTS")
+
+    @app.get("/api/monitoring/config")
+    async def monitoring_config_get(request: Request):
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        return {"server": monitoring_server_address(hub)}
+
+    @app.put("/api/monitoring/config")
+    async def monitoring_config_put(request: Request):
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        body = await _payload(request)
+        server = str(body.get("server") or "").strip()
+        if server and not re.fullmatch(r"[A-Za-z0-9.\-]+(:\d{1,5})?", server):
+            raise HTTPException(status_code=400, detail="server must be host or host:port")
+        gc = hub.state.system_state.setdefault("global_config", {})
+        gc["monitoring_server"] = server
+        hub.state._mark_dirty()
+        logger.info("monitoring: proxy server address set to %r", server)
+        return {"server": server}
 
     @app.post("/api/monitoring/sync")
     async def monitoring_sync(request: Request):
