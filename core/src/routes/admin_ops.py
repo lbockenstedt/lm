@@ -338,6 +338,44 @@ def register(app, hub, ctx):
         out["hub_recorded_roles"] = hub.agent_assigned_roles(spoke_id)
         return out
 
+    @app.post("/admin/ops/zbx")
+    async def admin_ops_zbx(request: Request):
+        """Drive the Zabbix spoke from a hub shell (status / sync / rebuild).
+        Body: {"command": "ZBX_STATUS"|"ZBX_SYNC"|"ZBX_REBUILD", "dry_run": bool,
+        "devices": [...]?}. Without ``devices`` the list is built from the hub's
+        nw_devices inventory ({tenant, name, type, ip, snmp})."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        cmd = str((body or {}).get("command") or "ZBX_STATUS").upper()
+        if cmd not in ("ZBX_STATUS", "ZBX_SYNC", "ZBX_REBUILD"):
+            raise HTTPException(status_code=400, detail="unsupported zabbix command")
+        sid = hub.get_spoke_by_type("monitoring")
+        if not sid:
+            raise HTTPException(status_code=503, detail="no connected zabbix spoke")
+        payload = {}
+        if cmd != "ZBX_STATUS":
+            devices = (body or {}).get("devices")
+            if devices is None:
+                inv = (hub.state.system_state.get("global_config", {})
+                       .get("nw_devices", []) or [])
+                devices = [{"tenant": d.get("tenant") or d.get("tenant_id") or "default",
+                            "name": d.get("name"), "type": d.get("type") or d.get("model") or "",
+                            "ip": str(d.get("address") or "").split("/")[0],
+                            "snmp": bool(d.get("snmp_community"))}
+                           for d in inv if isinstance(d, dict) and d.get("name") and d.get("address")]
+            payload = {"devices": devices, "dry_run": bool((body or {}).get("dry_run"))}
+        try:
+            res = await hub.request_response(sid, cmd, payload, timeout=300.0)
+        except Exception as e:
+            logger.exception("admin_ops: zbx %s failed", cmd)
+            raise HTTPException(status_code=500, detail=str(e))
+        logger.warning("admin_ops: zbx %s driven via loopback (%d devices)", cmd,
+                       len(payload.get("devices", [])))
+        return {"status": "ok", "spoke": sid, "result": res}
+
     @app.post("/admin/ops/set-cs-mode")
     async def admin_ops_set_cs_mode(request: Request):
         """Turn a pxmx node's **Client Simulation mode** on/off via loopback,
