@@ -2002,8 +2002,11 @@ def register(app, hub, ctx):
             hub, tenant_id, ip_sources,
             data.get("subnets") or saved.get("subnets") or [],
             data.get("targets") or [], _NW_SCAN_MAX_TOTAL)
-        logger.info("nw scan tenant=%s targets=%d sources=%s creds=%d",
-                    tenant_id, len(targets), per_source, len(chosen))
+        logger.info("nw scan tenant=%s targets=%d sources=%s creds=%d cred_ids=%s",
+                    tenant_id, len(targets), per_source, len(chosen),
+                    [c.get("id") for c in chosen])
+        logger.info("nw scan tenant=%s candidate targets (first 60): %s", tenant_id,
+                    sorted(str(t) for t in targets)[:60])
         if not targets:
             return {"status": "ok", "message": "No candidate IPs found for this tenant "
                     "(no DNS/DHCP/NAC rows and no NetBox prefixes tagged to it). Add "
@@ -2088,9 +2091,17 @@ def register(app, hub, ctx):
         discovery_only = not push_creds
         dry_run = dry_run or discovery_only
         added, preview = [], []
+        logger.info("nw scan tenant=%s result: scanned=%s identified=%d reachable-unidentified=%d dry_run=%s",
+                    tenant_id, scan["scanned"], len(identified), len(reachable), dry_run)
+        for dev in reachable:
+            logger.info("nw scan tenant=%s UNIDENTIFIED %s ports=%s detail=%s", tenant_id,
+                        dev.get("address"), dev.get("open_ports") or dev.get("ports"),
+                        {k: dev.get(k) for k in ("reason", "error", "banner", "ssh_error") if dev.get(k)})
         for dev in identified:
             addr = str(dev.get("address", "")).strip()
             if not addr or addr in known:
+                logger.info("nw scan tenant=%s SKIP %s (%s): already in fleet", tenant_id, addr,
+                            dev.get("hostname"))
                 continue
             cred_set = by_cred.get(dev.get("credential_id")) or (chosen[0] if chosen else {})
             entry = {
@@ -2102,6 +2113,8 @@ def register(app, hub, ctx):
                 "credential_id": dev.get("credential_id"),
             }
             if dev.get("object_type") not in _SCAN_OBJECT_TYPES:
+                logger.info("nw scan tenant=%s SKIP %s (%s): object_type %r not auto-addable",
+                            tenant_id, addr, dev.get("hostname"), dev.get("object_type"))
                 continue
             if dry_run:
                 preview.append(entry)

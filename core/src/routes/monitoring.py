@@ -21,7 +21,7 @@ async def inventory_devices(hub):
     scan = await instance_vault.overlay_many(
         hub, [c for c in (gc.get("nw_scan_credentials", []) or []) if isinstance(c, dict)],
         "nw_scan_credentials")
-    tenant_snmp = {}
+    tenant_snmp, by_ref = {}, {}
     # A vault secret of type "snmp" in the tenant's bucket is the primary source.
     import cred_vault
     for s in await cred_vault.automation_list_by_type(hub, "snmp"):
@@ -29,15 +29,24 @@ async def inventory_devices(hub):
         community = val.get("snmp_community") or val.get("community") or ""
         if community:
             tenant_snmp.setdefault(s["bucket"], community)
+            by_ref[f"snmp:{s['bucket']}:{s['name']}"] = community
     logger.info("monitoring: snmp vault buckets=%s", sorted(tenant_snmp))
     for c in scan:
         if c.get("snmp_community"):
             tenant_snmp.setdefault(c.get("tenant_id") or "default", c["snmp_community"])
     out = []
-    for d in inv:
+    names = {str(d.get("name")).casefold() for d in inv}
+    # LLDP neighbours that are not scanned devices (e.g. TOR switches) are
+    # monitored too once verify_credentials found them answering SNMP.
+    extra = [n for n in (gc.get("nw_monitor_neighbors", []) or [])
+             if isinstance(n, dict) and n.get("name") and n.get("address")
+             and str(n["name"]).casefold() not in names]
+    for d in list(inv) + extra:
         tenant = d.get("tenant") or d.get("tenant_id") or "default"
-        # Tenant bucket first, then the Global Admin slot as the shared default.
-        community = (d.get("snmp_community") or tenant_snmp.get(tenant)
+        # The credential the scan verified, then the tenant bucket, then the
+        # Global Admin slot as the shared default.
+        community = (d.get("snmp_community") or by_ref.get(d.get("snmp_secret") or "")
+                     or tenant_snmp.get(tenant)
                      or tenant_snmp.get(cred_vault.ADMIN_BUCKET, ""))
         out.append({"tenant": tenant, "name": d.get("name"),
                     "type": d.get("type") or d.get("object_type") or d.get("model") or "",
@@ -60,6 +69,7 @@ async def verify_credentials(hub, tenant="default", apply=False):
     on the device (``snmp_ok``) so the Zabbix sync only enables SNMP where it answers."""
     import instance_vault
     import cred_vault
+    import access
     gc = hub.state.system_state.get("global_config", {})
     devices = [d for d in (gc.get("nw_devices", []) or []) if isinstance(d, dict)
                and d.get("address") and (d.get("tenant_id") or "default") == tenant]
@@ -85,11 +95,33 @@ async def verify_credentials(hub, tenant="default", apply=False):
     by_spoke = {}
     for d in devices:
         by_spoke.setdefault(d.get("spoke_id"), []).append(d)
+    known = {str(d["address"]).split("/")[0] for d in devices}
+    known_names = {str(d.get("name")).casefold() for d in devices}
+    neighbours = {}  # address -> {name, spoke_id}
+    for d in devices:
+        if not d.get("id") or not d.get("spoke_id"):
+            continue
+        try:
+            res = await hub.request_response(
+                d["spoke_id"], "NW_GET_LLDP_NEIGHBORS",
+                {"device_id": d["id"], "tenant": tenant}, timeout=30.0)
+            rows = access.unwrap_spoke(res)
+            rows = rows.get("data", rows) if isinstance(rows, dict) else rows
+        except Exception as e:
+            logger.info("monitoring: lldp for %s failed: %s", d.get("name"), e)
+            continue
+        for r in rows or []:
+            ip = str((r or {}).get("remote_mgmt_ip") or "").split("/")[0]
+            name = str((r or {}).get("remote_name") or "").strip()
+            if (ip and name and ip not in known and name.casefold() not in known_names
+                    and "." not in name):
+                neighbours.setdefault(ip, {"name": name, "spoke_id": d["spoke_id"]})
     report = []
     for spoke_id, devs in by_spoke.items():
+        extra_ips = sorted(ip for ip, n in neighbours.items() if n["spoke_id"] == spoke_id)
         res = await hub.request_response(
             spoke_id, "NW_SCAN",
-            {"targets": sorted({d["address"] for d in devs}), "credentials": creds,
+            {"targets": sorted({d["address"] for d in devs} | set(extra_ips)), "credentials": creds,
              "options": {"try_snmp": True, "use_nmap": False, "crawl": False},
              "tenant": tenant}, timeout=300.0)
         res = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
@@ -102,7 +134,19 @@ async def verify_credentials(hub, tenant="default", apply=False):
                            "snmp_ok": r.get("snmp_ok"), "snmp_secret": r.get("snmp_credential_id")})
             if apply and r.get("snmp_ok") is not None:
                 d["snmp_ok"] = bool(r["snmp_ok"])
+                d["snmp_secret"] = r.get("snmp_credential_id") if r["snmp_ok"] else None
+        for ip in extra_ips:
+            r = found.get(ip) or {}
+            report.append({"name": neighbours[ip]["name"], "address": ip, "neighbour": True,
+                           "reachable": bool(r.get("reachable")), "snmp_ok": r.get("snmp_ok"),
+                           "snmp_secret": r.get("snmp_credential_id")})
     if apply:
+        keep = [n for n in (gc.get("nw_monitor_neighbors", []) or [])
+                if n.get("tenant_id") != tenant]
+        keep += [{"tenant_id": tenant, "name": x["name"], "address": x["address"],
+                  "type": "switch", "snmp_ok": x["snmp_ok"], "snmp_secret": x["snmp_secret"]}
+                 for x in report if x.get("neighbour") and x["snmp_ok"]]
+        gc["nw_monitor_neighbors"] = keep
         hub.state._mark_dirty()
     return {"tenant": tenant, "credentials_tried": [c["id"] for c in creds], "devices": report}
 
