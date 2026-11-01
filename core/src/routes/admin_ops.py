@@ -338,10 +338,10 @@ def register(app, hub, ctx):
         out["hub_recorded_roles"] = hub.agent_assigned_roles(spoke_id)
         return out
 
-    @app.post("/admin/ops/zbx")
-    async def admin_ops_zbx(request: Request):
-        """Drive the Zabbix spoke from a hub shell (status / sync / rebuild).
-        Body: {"command": "ZBX_STATUS"|"ZBX_SYNC"|"ZBX_REBUILD", "dry_run": bool,
+    @app.post("/admin/ops/monitoring")
+    async def admin_ops_monitoring(request: Request):
+        """Drive the monitoring spoke from a hub shell (status / sync / rebuild).
+        Body: {"command": "MON_STATUS"|"MON_SYNC"|"MON_REBUILD", "dry_run": bool,
         "devices": [...]?}. Without ``devices`` the list is built from the hub's
         nw_devices inventory ({tenant, name, type, ip, snmp})."""
         _guard(request)
@@ -349,12 +349,12 @@ def register(app, hub, ctx):
             body = await request.json()
         except Exception:
             body = {}
-        cmd = str((body or {}).get("command") or "ZBX_STATUS").upper()
-        if cmd not in ("ZBX_STATUS", "ZBX_SYNC", "ZBX_REBUILD", "UPDATE_CONFIG"):
-            raise HTTPException(status_code=400, detail="unsupported zabbix command")
+        cmd = str((body or {}).get("command") or "MON_STATUS").upper()
+        if cmd not in ("MON_STATUS", "MON_SYNC", "MON_REBUILD", "UPDATE_CONFIG"):
+            raise HTTPException(status_code=400, detail="unsupported monitoring command")
         sid = hub.get_spoke_by_type("monitoring")
         if not sid:
-            raise HTTPException(status_code=503, detail="no connected zabbix spoke")
+            raise HTTPException(status_code=503, detail="no connected monitoring spoke")
         payload = {}
         if cmd == "UPDATE_CONFIG":
             payload = dict((body or {}).get("config") or {})
@@ -362,7 +362,7 @@ def register(app, hub, ctx):
             hub.state.update_global_config({"monitoring": payload})
             await hub.push_config_to_spoke(sid)
             return {"status": "ok", "spoke": sid, "result": "config stored and pushed"}
-        elif cmd != "ZBX_STATUS":
+        elif cmd != "MON_STATUS":
             devices = (body or {}).get("devices")
             if devices is None:
                 inv = (hub.state.system_state.get("global_config", {})
@@ -376,9 +376,9 @@ def register(app, hub, ctx):
         try:
             res = await hub.request_response(sid, cmd, payload, timeout=300.0)
         except Exception as e:
-            logger.exception("admin_ops: zbx %s failed", cmd)
+            logger.exception("admin_ops: monitoring %s failed", cmd)
             raise HTTPException(status_code=500, detail=str(e))
-        logger.warning("admin_ops: zbx %s driven via loopback (%d devices)", cmd,
+        logger.warning("admin_ops: monitoring %s driven via loopback (%d devices)", cmd,
                        len(payload.get("devices", []) if cmd != "UPDATE_CONFIG" else []))
         return {"status": "ok", "spoke": sid, "result": res}
 
