@@ -42,9 +42,65 @@ async def inventory_devices(hub):
         out.append({"tenant": tenant, "name": d.get("name"),
                     "type": d.get("type") or d.get("object_type") or d.get("model") or "",
                     "ip": str(d.get("address") or "").split("/")[0],
-                    "snmp": bool(community) or d.get("transport") == "snmp",
+                    # Only a device that failed an SNMP probe is held back.
+                    "snmp": (bool(community) or d.get("transport") == "snmp")
+                    and d.get("snmp_ok") is not False,
                     "snmp_community": community})
     return out
+
+
+async def verify_credentials(hub, tenant="default", apply=False):
+    """Probe every known device of ``tenant`` with BOTH its SSH vault login and the
+    SNMP community (vault "snmp" secrets) on the nw spoke that owns it, and report
+    which credential worked per device. With ``apply`` the SNMP outcome is stored
+    on the device (``snmp_ok``) so the Zabbix sync only enables SNMP where it answers."""
+    import instance_vault
+    import cred_vault
+    gc = hub.state.system_state.get("global_config", {})
+    devices = [d for d in (gc.get("nw_devices", []) or []) if isinstance(d, dict)
+               and d.get("address") and (d.get("tenant_id") or "default") == tenant]
+    sets, seen = [], set()
+    for d in devices:
+        ref = d.get("vault_credential")
+        if ref and (ref["bucket"], ref["name"]) not in seen:
+            seen.add((ref["bucket"], ref["name"]))
+            sets.append({"id": f"ssh:{ref['bucket']}:{ref['name']}", "name": ref["name"],
+                         "tenant_id": tenant, "username": "", "vault_credential": ref})
+    for bucket, secrets in ((gc.get("cred_vault", {}) or {}).get("secrets", {}) or {}).items():
+        if bucket not in (tenant, cred_vault.ADMIN_BUCKET):
+            continue
+        for name, meta in (secrets or {}).items():
+            if isinstance(meta, dict) and meta.get("type") == "snmp" and meta.get("mode") == "hub":
+                sets.append({"id": f"snmp:{bucket}:{name}", "name": name, "tenant_id": tenant,
+                             "username": "", "vault_credential": {"bucket": bucket, "name": name}})
+    resolved = await instance_vault.overlay_many(hub, sets, "nw_scan_credentials")
+    creds = [{"id": c["id"], "name": c["name"], "username": c.get("username") or "",
+              "password": c.get("password") or "",
+              "enable_secret": c.get("enable_secret") or "",
+              "snmp_community": c.get("snmp_community") or ""} for c in resolved]
+    by_spoke = {}
+    for d in devices:
+        by_spoke.setdefault(d.get("spoke_id"), []).append(d)
+    report = []
+    for spoke_id, devs in by_spoke.items():
+        res = await hub.request_response(
+            spoke_id, "NW_SCAN",
+            {"targets": sorted({d["address"] for d in devs}), "credentials": creds,
+             "options": {"try_snmp": True, "use_nmap": False, "crawl": False},
+             "tenant": tenant}, timeout=300.0)
+        res = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+        found = {r["address"]: r for r in (res.get("identified") or []) + (res.get("reachable") or [])}
+        for d in devs:
+            r = found.get(d["address"]) or {}
+            report.append({"name": d["name"], "address": d["address"],
+                           "reachable": bool(r.get("reachable")),
+                           "ssh": r.get("credential") if r.get("method") == "ssh" else None,
+                           "snmp_ok": r.get("snmp_ok"), "snmp_secret": r.get("snmp_credential_id")})
+            if apply and r.get("snmp_ok") is not None:
+                d["snmp_ok"] = bool(r["snmp_ok"])
+    if apply:
+        hub.state._mark_dirty()
+    return {"tenant": tenant, "credentials_tried": [c["id"] for c in creds], "devices": report}
 
 
 def register(app, hub, ctx):
