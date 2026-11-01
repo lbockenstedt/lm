@@ -2155,6 +2155,26 @@ def register(app, hub, ctx):
             hub.state._mark_dirty()
             await _nw_push_fleet(hub, spoke_id)
 
+        # Hosts that answered SNMP but aren't an auto-addable platform (e.g. TOR
+        # switches) are still monitorable: hand them to the monitoring sync.
+        snmp_only = [d for d in reachable if d.get("snmp_ok") and d.get("snmp_credential_id")
+                     and str(d.get("address") or "").strip() not in known]
+        if snmp_only:
+            mine = {str(n.get("address")): n for n in (gc.get("nw_monitor_neighbors") or [])
+                    if isinstance(n, dict) and n.get("tenant_id") == tenant_id}
+            for d in snmp_only:
+                addr = str(d["address"]).strip()
+                mine[addr] = {"tenant_id": tenant_id, "name": d.get("hostname") or addr,
+                              "address": addr, "type": "switch", "snmp_ok": True,
+                              "snmp_secret": d["snmp_credential_id"]}
+            gc["nw_monitor_neighbors"] = [n for n in (gc.get("nw_monitor_neighbors") or [])
+                                          if not (isinstance(n, dict) and n.get("tenant_id") == tenant_id)
+                                          ] + list(mine.values())
+            hub.state.system_state["global_config"] = gc
+            hub.state._mark_dirty()
+            logger.info("nw scan tenant=%s monitor-only SNMP hosts: %s", tenant_id,
+                        [(d["address"], d.get("hostname")) for d in snmp_only])
+
         # Also backfill any device on THIS spoke that was auto-added by a scan
         # before the hostname never got read (display name still == its raw
         # address — the "source" discovery devices never named because the
