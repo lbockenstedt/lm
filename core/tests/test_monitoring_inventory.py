@@ -63,3 +63,18 @@ def test_vault_snmp_secret_applies_to_tenant_devices(monkeypatch):
     a, b = asyncio.run(monitoring.inventory_devices(hub))
     assert a["snmp_community"] == "vaulted" and a["snmp"]
     assert not b["snmp"]
+
+
+def test_admin_slot_snmp_secret_applies_to_default_tenant(monkeypatch):
+    async def fake_overlay_many(hub, records, storage_key):
+        return records
+
+    async def snmp_secrets(hub, sec_type, buckets=None):
+        return [{"bucket": cred_vault.ADMIN_BUCKET, "name": "SNMP", "value": {"snmp_community": "adm"}}]
+
+    monkeypatch.setattr(cred_vault, "automation_list_by_type", snmp_secrets)
+    monkeypatch.setattr(instance_vault, "overlay_many", fake_overlay_many)
+    hub = SimpleNamespace(state=SimpleNamespace(system_state={"global_config": {
+        "nw_devices": [{"name": "a", "address": "10.0.0.1", "tenant_id": "default"}]}}))
+    (a,) = asyncio.run(monitoring.inventory_devices(hub))
+    assert a["snmp_community"] == "adm"
