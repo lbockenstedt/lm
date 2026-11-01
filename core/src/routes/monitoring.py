@@ -45,7 +45,11 @@ async def inventory_devices(hub):
                     # Only a device that failed an SNMP probe is held back.
                     "snmp": (bool(community) or d.get("transport") == "snmp")
                     and d.get("snmp_ok") is not False,
-                    "snmp_community": community})
+                    "snmp_community": community, "_ok": d.get("snmp_ok")})
+    # The sync keeps the first address per device name: prefer one that answered SNMP.
+    out.sort(key=lambda x: 0 if x["_ok"] is True else (2 if x["_ok"] is False else 1))
+    for x in out:
+        x.pop("_ok")
     return out
 
 
