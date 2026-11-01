@@ -109,3 +109,16 @@ def test_verify_credentials_reports_ssh_and_snmp_and_gates_failed_snmp(monkeypat
     assert a["ssh"] == "ssh" and a["snmp_ok"] is True and b["snmp_ok"] is False
     devs = hub.state.system_state["global_config"]["nw_devices"]
     assert devs[0]["snmp_ok"] is True and devs[1]["snmp_ok"] is False
+
+
+def test_zbxproxy_load_config_uses_monitoring_server_setting():
+    import pytest
+    from types import SimpleNamespace
+    from routes.agents import _zbxproxy_load_config
+    from api import HTTPException
+    hub = SimpleNamespace(state=SimpleNamespace(system_state={"global_config": {}}))
+    with pytest.raises(HTTPException):
+        _zbxproxy_load_config(hub, {})
+    hub.state.system_state["global_config"]["monitoring_server"] = "zbx.example.com:10051"
+    assert _zbxproxy_load_config(hub, {})["server"] == "zbx.example.com:10051"
+    assert _zbxproxy_load_config(hub, {"server": "x"})["server"] == "x"

@@ -95,6 +95,19 @@ async def _guard_listener_conflicts(hub, spoke_id, requested):
                 detail=_listener_conflict_message(spoke_id, cand, clash))
 
 
+def _zbxproxy_load_config(hub, cfg):
+    """Fill the proxy's Zabbix server from the Monitoring page setting."""
+    from routes.monitoring import monitoring_server_address
+    cfg = dict(cfg or {})
+    if not cfg.get("server"):
+        server = monitoring_server_address(hub)
+        if not server:
+            raise HTTPException(status_code=400, detail="Monitoring server address is not set: "
+                                "enter it on the Monitoring page before installing a proxy")
+        cfg["server"] = server
+    return cfg
+
+
 async def _load_roles_impl(hub, spoke_id, data):
     """Core LOAD_ROLE dispatch shared by the admin + tenant role routes. Accepts
     either a batch (``{"roles": [...]}`` loaded sequentially) or a single
@@ -117,9 +130,11 @@ async def _load_roles_impl(hub, spoke_id, data):
                 results.append({"role": None, "status": "ERROR",
                                 "message": "role is required"})
                 continue
-            if rname == "ldap-server":
-                rcfg = await _ldap_server_load_config(hub, spoke_id, rcfg)
             try:
+                if rname == "ldap-server":
+                    rcfg = await _ldap_server_load_config(hub, spoke_id, rcfg)
+                elif rname == "zbxproxy":
+                    rcfg = _zbxproxy_load_config(hub, rcfg)
                 res = await hub.request_response(spoke_id, "LOAD_ROLE",
                                                  {"role": rname, "config": rcfg,
                                                   **({"force": True} if rforce else {})},
@@ -144,6 +159,8 @@ async def _load_roles_impl(hub, spoke_id, data):
         raise HTTPException(status_code=400, detail="role is required")
     if role == "ldap-server":
         config = await _ldap_server_load_config(hub, spoke_id, config)
+    elif role == "zbxproxy":
+        config = _zbxproxy_load_config(hub, config)
     # LOAD_ROLE on the multi-role agent shallow-clones the role's sibling repo on
     # first load — a network git clone that routinely exceeds the 5s default.
     result = await hub.request_response(spoke_id, "LOAD_ROLE",
