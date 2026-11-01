@@ -1,0 +1,1291 @@
+{
+ "version": 1,
+ "_doc": "Cert Expiry Monitor endpoint catalog. 'hosts' is the baseline list; 'sources' are vendor pages re-read daily (pattern finds hosts, labels name region/role). Add a vendor by adding entries here - no code change. A host with 'deprecated': 'YYYY-MM-DD' is shown but never alerted on, and dropped 30 days after that date.",
+ "hosts": [
+  {
+   "host": "manage.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 01",
+   "role": "Portal"
+  },
+  {
+   "host": "api.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 01",
+   "role": "API"
+  },
+  {
+   "host": "api-ws.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 01",
+   "role": "API WebSocket"
+  },
+  {
+   "host": "portal.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 01",
+   "role": "Guest portal"
+  },
+  {
+   "host": "ztp.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 01",
+   "role": "ZTP"
+  },
+  {
+   "host": "manage.gc1.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 02",
+   "role": "Portal"
+  },
+  {
+   "host": "api.gc1.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 02",
+   "role": "API"
+  },
+  {
+   "host": "api-ws.gc1.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 02",
+   "role": "API WebSocket"
+  },
+  {
+   "host": "portal.gc1.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 02",
+   "role": "Guest portal"
+  },
+  {
+   "host": "ep-terminator.gc1.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 02",
+   "role": "Device terminator"
+  },
+  {
+   "host": "jma-terminator.gc1.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 02",
+   "role": "Junos agent terminator"
+  },
+  {
+   "host": "ztp.gc1.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 02",
+   "role": "ZTP"
+  },
+  {
+   "host": "manage.ac2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 03",
+   "role": "Portal"
+  },
+  {
+   "host": "api.ac2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 03",
+   "role": "API"
+  },
+  {
+   "host": "api-ws.ac2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 03",
+   "role": "API WebSocket"
+  },
+  {
+   "host": "portal.ac2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 03",
+   "role": "Guest portal"
+  },
+  {
+   "host": "ep-terminator.ac2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 03",
+   "role": "Device terminator"
+  },
+  {
+   "host": "jma-terminator.ac2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 03",
+   "role": "Junos agent terminator"
+  },
+  {
+   "host": "ztp.ac2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 03",
+   "role": "ZTP"
+  },
+  {
+   "host": "manage.gc2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 04",
+   "role": "Portal"
+  },
+  {
+   "host": "api.gc2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 04",
+   "role": "API"
+  },
+  {
+   "host": "api-ws.gc2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 04",
+   "role": "API WebSocket"
+  },
+  {
+   "host": "portal.gc2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 04",
+   "role": "Guest portal"
+  },
+  {
+   "host": "ep-terminator.gc2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 04",
+   "role": "Device terminator"
+  },
+  {
+   "host": "jma-terminator.gc2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 04",
+   "role": "Junos agent terminator"
+  },
+  {
+   "host": "ztp.gc2.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 04",
+   "role": "ZTP"
+  },
+  {
+   "host": "manage.gc4.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 05",
+   "role": "Portal"
+  },
+  {
+   "host": "api.gc4.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 05",
+   "role": "API"
+  },
+  {
+   "host": "api-ws.gc4.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 05",
+   "role": "API WebSocket"
+  },
+  {
+   "host": "portal.gc4.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 05",
+   "role": "Guest portal"
+  },
+  {
+   "host": "ep-terminator.gc4.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 05",
+   "role": "Device terminator"
+  },
+  {
+   "host": "jma-terminator.gc4.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 05",
+   "role": "Junos agent terminator"
+  },
+  {
+   "host": "ztp.gc4.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 05",
+   "role": "ZTP"
+  },
+  {
+   "host": "manage.gc5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 06",
+   "role": "Portal"
+  },
+  {
+   "host": "api.gc5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 06",
+   "role": "API"
+  },
+  {
+   "host": "api-ws.gc5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 06",
+   "role": "API WebSocket"
+  },
+  {
+   "host": "portal.gc5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 06",
+   "role": "Guest portal"
+  },
+  {
+   "host": "ep-terminator.gc5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 06",
+   "role": "Device terminator"
+  },
+  {
+   "host": "jma-terminator.gc5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 06",
+   "role": "Junos agent terminator"
+  },
+  {
+   "host": "ztp.gc5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 06",
+   "role": "ZTP"
+  },
+  {
+   "host": "manage.gc6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 07",
+   "role": "Portal"
+  },
+  {
+   "host": "api.gc6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 07",
+   "role": "API"
+  },
+  {
+   "host": "api-ws.gc6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 07",
+   "role": "API WebSocket"
+  },
+  {
+   "host": "portal.gc6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 07",
+   "role": "Guest portal"
+  },
+  {
+   "host": "ep-terminator.gc6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 07",
+   "role": "Device terminator"
+  },
+  {
+   "host": "jma-terminator.gc6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 07",
+   "role": "Junos agent terminator"
+  },
+  {
+   "host": "ztp.gc6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 07",
+   "role": "ZTP"
+  },
+  {
+   "host": "manage.gc7.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 08",
+   "role": "Portal"
+  },
+  {
+   "host": "api.gc7.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 08",
+   "role": "API"
+  },
+  {
+   "host": "api-ws.gc7.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 08",
+   "role": "API WebSocket"
+  },
+  {
+   "host": "portal.gc7.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 08",
+   "role": "Guest portal"
+  },
+  {
+   "host": "ep-terminator.gc7.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 08",
+   "role": "Device terminator"
+  },
+  {
+   "host": "jma-terminator.gc7.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 08",
+   "role": "Junos agent terminator"
+  },
+  {
+   "host": "ztp.gc7.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global 08",
+   "role": "ZTP"
+  },
+  {
+   "host": "manage.eu.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 01",
+   "role": "Portal"
+  },
+  {
+   "host": "api.eu.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 01",
+   "role": "API"
+  },
+  {
+   "host": "api-ws.eu.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 01",
+   "role": "API WebSocket"
+  },
+  {
+   "host": "portal.eu.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 01",
+   "role": "Guest portal"
+  },
+  {
+   "host": "ep-terminator.eu.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 01",
+   "role": "Device terminator"
+  },
+  {
+   "host": "jma-terminator.eu.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 01",
+   "role": "Junos agent terminator"
+  },
+  {
+   "host": "ztp.eu.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 01",
+   "role": "ZTP"
+  },
+  {
+   "host": "manage.gc3.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 02",
+   "role": "Portal"
+  },
+  {
+   "host": "api.gc3.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 02",
+   "role": "API"
+  },
+  {
+   "host": "api-ws.gc3.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 02",
+   "role": "API WebSocket"
+  },
+  {
+   "host": "portal.gc3.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 02",
+   "role": "Guest portal"
+  },
+  {
+   "host": "ep-terminator.gc3.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 02",
+   "role": "Device terminator"
+  },
+  {
+   "host": "jma-terminator.gc3.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 02",
+   "role": "Junos agent terminator"
+  },
+  {
+   "host": "ztp.gc3.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 02",
+   "role": "ZTP"
+  },
+  {
+   "host": "manage.ac6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 03",
+   "role": "Portal"
+  },
+  {
+   "host": "api.ac6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 03",
+   "role": "API"
+  },
+  {
+   "host": "api-ws.ac6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 03",
+   "role": "API WebSocket"
+  },
+  {
+   "host": "portal.ac6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 03",
+   "role": "Guest portal"
+  },
+  {
+   "host": "ep-terminator.ac6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 03",
+   "role": "Device terminator"
+  },
+  {
+   "host": "jma-terminator.ac6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 03",
+   "role": "Junos agent terminator"
+  },
+  {
+   "host": "ztp.ac6.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "EMEA 03",
+   "role": "ZTP"
+  },
+  {
+   "host": "manage.ac5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "APAC 01",
+   "role": "Portal"
+  },
+  {
+   "host": "api.ac5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "APAC 01",
+   "role": "API"
+  },
+  {
+   "host": "api-ws.ac5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "APAC 01",
+   "role": "API WebSocket"
+  },
+  {
+   "host": "portal.ac5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "APAC 01",
+   "role": "Guest portal"
+  },
+  {
+   "host": "ep-terminator.ac5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "APAC 01",
+   "role": "Device terminator"
+  },
+  {
+   "host": "jma-terminator.ac5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "APAC 01",
+   "role": "Junos agent terminator"
+  },
+  {
+   "host": "ztp.ac5.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "APAC 01",
+   "role": "ZTP"
+  },
+  {
+   "host": "ep-terminator.mistsys.net",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global",
+   "role": "Device terminator"
+  },
+  {
+   "host": "jma-terminator.mistsys.net",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global",
+   "role": "Junos agent terminator"
+  },
+  {
+   "host": "redirect.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global",
+   "role": "Device redirect"
+  },
+  {
+   "host": "www.mist.com",
+   "port": 443,
+   "service": "Juniper Mist",
+   "region": "Global",
+   "role": "Website"
+  },
+  {
+   "host": "portal.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-1",
+   "role": "Portal"
+  },
+  {
+   "host": "app1-apigw.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-1",
+   "role": "API gateway"
+  },
+  {
+   "host": "app.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "app1.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "app1-h2.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "portal-prod2.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-2",
+   "role": "Portal"
+  },
+  {
+   "host": "apigw-prod2.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-2",
+   "role": "API gateway"
+  },
+  {
+   "host": "app-prod2.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-2",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "device-prod2.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-2",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "device-prod2-h2.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-2",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "portal-us-east-1.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-East-1",
+   "role": "Portal"
+  },
+  {
+   "host": "apigw-us-east-1.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-East-1",
+   "role": "API gateway"
+  },
+  {
+   "host": "portal-uswest4.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-West-4",
+   "role": "Portal"
+  },
+  {
+   "host": "apigw-uswest4.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-West-4",
+   "role": "API gateway"
+  },
+  {
+   "host": "app-uswest4.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-West-4",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "device-uswest4.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-West-4",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "device-uswest4-h2.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-West-4",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "portal-uswest5.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-West-5",
+   "role": "Portal"
+  },
+  {
+   "host": "apigw-uswest5.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-West-5",
+   "role": "API gateway"
+  },
+  {
+   "host": "app-uswest5.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-West-5",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "device-uswest5.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "US-West-5",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "portal-eu.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "EU-1",
+   "role": "Portal"
+  },
+  {
+   "host": "eu-apigw.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "EU-1",
+   "role": "API gateway"
+  },
+  {
+   "host": "app2-eu.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "EU-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "device-eu.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "EU-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "device-eu-h2.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "EU-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "portal-eucentral2.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "EU-Central-2",
+   "role": "Portal"
+  },
+  {
+   "host": "apigw-eucentral2.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "EU-Central-2",
+   "role": "API gateway"
+  },
+  {
+   "host": "app-eucentral2.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "EU-Central-2",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "device-eucentral2.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "EU-Central-2",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "portal-eucentral3.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "EU-Central-3",
+   "role": "Portal"
+  },
+  {
+   "host": "apigw-eucentral3.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "EU-Central-3",
+   "role": "API gateway"
+  },
+  {
+   "host": "app-eucentral3.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "EU-Central-3",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "device-eucentral3.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "EU-Central-3",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "portal-ca.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "Canada-1",
+   "role": "Portal"
+  },
+  {
+   "host": "apigw-ca.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "Canada-1",
+   "role": "API gateway"
+  },
+  {
+   "host": "app-ca.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "Canada-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "device-ca.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "Canada-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "portal-apac.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "APAC-1",
+   "role": "Portal"
+  },
+  {
+   "host": "api-ap.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "APAC-1",
+   "role": "API gateway"
+  },
+  {
+   "host": "app1-ap.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "APAC-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "app2-ap.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "APAC-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "portal-apaceast.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "APAC-East-1",
+   "role": "Portal"
+  },
+  {
+   "host": "apigw-apaceast.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "APAC-East-1",
+   "role": "API gateway"
+  },
+  {
+   "host": "app-apaceast.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "APAC-East-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "device-apaceast.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "APAC-East-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "portal-apacsouth.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "APAC-South-1",
+   "role": "Portal"
+  },
+  {
+   "host": "apigw-apacsouth.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "APAC-South-1",
+   "role": "API gateway"
+  },
+  {
+   "host": "app-apacsouth.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "APAC-South-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "device-apacsouth.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "APAC-South-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "portal-uaenorth1.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "UAE-North-1",
+   "role": "Portal"
+  },
+  {
+   "host": "apigw-uaenorth1.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "UAE-North-1",
+   "role": "API gateway"
+  },
+  {
+   "host": "app-uaenorth1.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "UAE-North-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "device-uaenorth1.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "UAE-North-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "portal.central.arubanetworks.com.cn",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "China-1",
+   "role": "Portal"
+  },
+  {
+   "host": "apigw.central.arubanetworks.com.cn",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "China-1",
+   "role": "API gateway"
+  },
+  {
+   "host": "app.central.arubanetworks.com.cn",
+   "port": 443,
+   "service": "Aruba Central",
+   "region": "China-1",
+   "role": "Device connectivity"
+  },
+  {
+   "host": "us1.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "US1",
+   "role": "API gateway"
+  },
+  {
+   "host": "us2.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "US2",
+   "role": "API gateway"
+  },
+  {
+   "host": "us4.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "US4",
+   "role": "API gateway"
+  },
+  {
+   "host": "us5.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "US5",
+   "role": "API gateway"
+  },
+  {
+   "host": "us6.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "US6",
+   "role": "API gateway"
+  },
+  {
+   "host": "de1.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "DE1",
+   "role": "API gateway"
+  },
+  {
+   "host": "de2.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "DE2",
+   "role": "API gateway"
+  },
+  {
+   "host": "de3.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "DE3",
+   "role": "API gateway"
+  },
+  {
+   "host": "ca1.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "CA1",
+   "role": "API gateway"
+  },
+  {
+   "host": "gb1.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "GB1",
+   "role": "API gateway"
+  },
+  {
+   "host": "in1.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "IN1",
+   "role": "API gateway"
+  },
+  {
+   "host": "jp1.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "JP1",
+   "role": "API gateway"
+  },
+  {
+   "host": "au1.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "AU1",
+   "role": "API gateway"
+  },
+  {
+   "host": "ae1.api.central.arubanetworks.com",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "AE1",
+   "role": "API gateway"
+  },
+  {
+   "host": "cn1.api.central.arubanetworks.com.cn",
+   "port": 443,
+   "service": "Aruba Central (New Central)",
+   "region": "CN1",
+   "role": "API gateway"
+  },
+  {
+   "host": "common.cloud.hpe.com",
+   "port": 443,
+   "service": "HPE GreenLake / Aruba",
+   "region": "Global",
+   "role": "GreenLake portal"
+  },
+  {
+   "host": "sso.common.cloud.hpe.com",
+   "port": 443,
+   "service": "HPE GreenLake / Aruba",
+   "region": "Global",
+   "role": "GreenLake SSO"
+  },
+  {
+   "host": "global.api.greenlake.hpe.com",
+   "port": 443,
+   "service": "HPE GreenLake / Aruba",
+   "region": "Global",
+   "role": "GreenLake API"
+  },
+  {
+   "host": "auth.hpe.com",
+   "port": 443,
+   "service": "HPE GreenLake / Aruba",
+   "region": "Global",
+   "role": "HPE auth"
+  },
+  {
+   "host": "activate.arubanetworks.com",
+   "port": 443,
+   "service": "HPE GreenLake / Aruba",
+   "region": "Global",
+   "role": "Activate (ZTP)"
+  },
+  {
+   "host": "device.arubanetworks.com",
+   "port": 443,
+   "service": "HPE GreenLake / Aruba",
+   "region": "Global",
+   "role": "Device provisioning"
+  }
+ ],
+ "sources": [
+  {
+   "id": "mist",
+   "service": "Juniper Mist",
+   "role": null,
+   "url": "https://www.juniper.net/documentation/us/en/software/mist/mist-management/topics/ref/firewall-ports-to-open.html",
+   "pattern": "{host}\\.(?:mist\\.com|mistsys\\.net)",
+   "skip_ports": [
+    2200
+   ],
+   "labels": [
+    {
+     "re": "^([^.]+)\\.(.+)\\.(?:mist\\.com|mistsys\\.net)$",
+     "role": "{1}",
+     "role_map": {
+      "manage": "Portal",
+      "api": "API",
+      "api-ws": "API WebSocket",
+      "portal": "Guest portal",
+      "ep-terminator": "Device terminator",
+      "jma-terminator": "Junos agent terminator",
+      "ztp": "ZTP",
+      "srx-log-terminator": "SRX log terminator",
+      "radsec": "Access Assurance RadSec",
+      "radsec-eu": "Access Assurance RadSec",
+      "redirect": "Device redirect",
+      "support-portal": "Support portal"
+     },
+     "region": "{2}",
+     "region_map": {
+      "gc1": "Global 02",
+      "ac2": "Global 03",
+      "gc2": "Global 04",
+      "gc4": "Global 05",
+      "gc5": "Global 06",
+      "gc6": "Global 07",
+      "gc7": "Global 08",
+      "eu": "EMEA 01",
+      "gc3": "EMEA 02",
+      "ac6": "EMEA 03",
+      "ac5": "APAC 01"
+     }
+    },
+    {
+     "re": "^([^.]+)\\.mist\\.com$",
+     "role": "{1}",
+     "role_map": {
+      "manage": "Portal",
+      "api": "API",
+      "api-ws": "API WebSocket",
+      "portal": "Guest portal",
+      "ep-terminator": "Device terminator",
+      "jma-terminator": "Junos agent terminator",
+      "ztp": "ZTP",
+      "srx-log-terminator": "SRX log terminator",
+      "radsec": "Access Assurance RadSec",
+      "radsec-eu": "Access Assurance RadSec",
+      "redirect": "Device redirect",
+      "support-portal": "Support portal"
+     },
+     "region": "Global",
+     "region_if_role_known": "Global 01"
+    },
+    {
+     "re": "^([^.]+)\\.mistsys\\.net$",
+     "role": "{1}",
+     "role_map": {
+      "manage": "Portal",
+      "api": "API",
+      "api-ws": "API WebSocket",
+      "portal": "Guest portal",
+      "ep-terminator": "Device terminator",
+      "jma-terminator": "Junos agent terminator",
+      "ztp": "ZTP",
+      "srx-log-terminator": "SRX log terminator",
+      "radsec": "Access Assurance RadSec",
+      "radsec-eu": "Access Assurance RadSec",
+      "redirect": "Device redirect",
+      "support-portal": "Support portal"
+     },
+     "region": "Global"
+    }
+   ]
+  },
+  {
+   "id": "central-apigw",
+   "service": "Aruba Central",
+   "role": "API gateway",
+   "url": "https://developer.arubanetworks.com/aruba-central/docs/api-oauth-access-token",
+   "pattern": "{host}\\.central\\.arubanetworks\\.com(?:\\.cn)?",
+   "keep": "apigw|^api-",
+   "labels": [
+    {
+     "re": "\\.cn$",
+     "region": "China-1",
+     "role": "API gateway"
+    },
+    {
+     "re": "^([^.]+)\\.central\\.arubanetworks\\.com$",
+     "region": "{1}",
+     "region_map": {
+      "app1-apigw": "US-1",
+      "apigw-prod2": "US-2",
+      "apigw-us-east-1": "US-East-1",
+      "apigw-uswest4": "US-West-4",
+      "apigw-uswest5": "US-West-5",
+      "eu-apigw": "EU-1",
+      "apigw-eucentral2": "EU-Central-2",
+      "apigw-eucentral3": "EU-Central-3",
+      "apigw-ca": "Canada-1",
+      "api-ap": "APAC-1",
+      "apigw-apaceast": "APAC-East-1",
+      "apigw-apacsouth": "APAC-South-1",
+      "apigw-uaenorth1": "UAE-North-1"
+     },
+     "region_strip": [
+      "apigw"
+     ],
+     "role": "API gateway"
+    }
+   ]
+  },
+  {
+   "id": "new-central",
+   "service": "Aruba Central (New Central)",
+   "role": null,
+   "url": "https://developer.arubanetworks.com/new-central/docs/getting-started-with-rest-apis",
+   "pattern": "[a-z0-9]+\\.api\\.central\\.arubanetworks\\.com(?:\\.cn)?",
+   "labels": [
+    {
+     "re": "^([^.]+)\\.api\\.",
+     "region": "{1}",
+     "role": "API gateway"
+    }
+   ]
+  }
+ ]
+}

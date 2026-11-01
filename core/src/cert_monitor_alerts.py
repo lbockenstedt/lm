@@ -175,7 +175,7 @@ def evaluate_rule(rule: Dict[str, Any], results: List[Dict[str, Any]],
     prev = set(prev_bad or [])
     breached, recovered, bad_now = [], [], set()
     for r in results or []:
-        if r.get("ignored") or not _in_scope(rule, r):
+        if r.get("ignored") or r.get("deprecated") or not _in_scope(rule, r):
             continue
         k = item_key(r)
         verdict = is_bad(rule, r)
@@ -211,7 +211,7 @@ def due_reminders(rule: Dict[str, Any], results: List[Dict[str, Any]], prev_bad:
     prev = set(prev_bad or [])
     due = []
     for r in results or []:
-        if r.get("ignored") or not _in_scope(rule, r) or not is_bad(rule, r):
+        if r.get("ignored") or r.get("deprecated") or not _in_scope(rule, r) or not is_bad(rule, r):
             continue
         k = item_key(r)
         if k not in prev:
@@ -412,7 +412,7 @@ async def _send(hub, rule, subj, text, html) -> bool:
 async def send_test(hub, rule: Dict[str, Any], results: List[Dict[str, Any]]) -> bool:
     """Test send: the rule's current matches, in the rule's format. No state change."""
     matches = [r for r in results or []
-               if not r.get("ignored") and _in_scope(rule, r) and is_bad(rule, r)]
+               if not r.get("ignored") or r.get("deprecated") and _in_scope(rule, r) and is_bad(rule, r)]
     subj, text, html = build_email(rule, matches, [], test=True)
     return await _send(hub, rule, subj, text, html)
 
