@@ -1723,6 +1723,7 @@ function _cvAddSecretModal(preset) {
           <option value="login"${sel(pType, 'login')}>Login (username + password)</option>
           <option value="apikey"${(pType === 'apikey' || pType === 'token') ? ' selected' : ''}>API key / token (single secret)</option>
           <option value="apipair"${sel(pType, 'apipair')}>API key + secret (e.g. OPNsense)</option>
+          <option value="snmp"${sel(pType, 'snmp')}>SNMP community (network monitoring)</option>
           <option value="dns"${sel(pType, 'dns')}>DNS</option>
           ${(editing && pType === 'henet') ? `<option value="henet" selected>HE.NET DDNS key (Hurricane Electric public DNS)</option>` : ``}
           <option value="generic"${sel(pType, 'generic')}>Generic (key + value)</option>
@@ -1791,6 +1792,15 @@ function _cvRenderAddFields() {
         // unattended when it pushes the connection, so automation-readable is forced.
         el.innerHTML = f('cv-f-api-key', 'API key') + f('cv-f-api-secret', 'API secret', 'password')
             + `<p class="text-[11px] text-slate-400 mt-1">Pick this secret under <b>Credential Vault</b> when adding the firewall.</p>`;
+        const modeSel = document.getElementById('cv-add-mode');
+        if (modeSel) { modeSel.value = 'hub'; modeSel.disabled = true; }
+        return;
+    }
+    else if (t === 'snmp') {
+        // The tenant's SNMPv2c community: the Monitoring module (Zabbix) reads it
+        // unattended to poll that tenant's devices, so automation-readable is forced.
+        el.innerHTML = f('cv-f-snmp', 'SNMP community string', 'password')
+            + `<p class="text-[11px] text-slate-400 mt-1">Applied to every device in this bucket's tenant that has no community of its own.</p>`;
         const modeSel = document.getElementById('cv-add-mode');
         if (modeSel) { modeSel.value = 'hub'; modeSel.disabled = true; }
         return;
@@ -1882,6 +1892,7 @@ function _cvCollectAddValue() {
         ? { client_id: v('cv-f-client-id'), client_secret: v('cv-f-client-secret') }
         : { username: v('cv-f-username'), password: v('cv-f-password') };
     if (t === 'apikey' || t === 'token') return { apikey: v('cv-f-apikey') };
+    if (t === 'snmp') return { snmp_community: v('cv-f-snmp') };
     if (t === 'apipair') return { api_key: v('cv-f-api-key').trim(), api_secret: v('cv-f-api-secret') };
     if (t === 'dns') {
         const p = document.getElementById('cv-f-dns-provider')?.value || '';

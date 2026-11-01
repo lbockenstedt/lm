@@ -12,15 +12,36 @@ async def inventory_devices(hub):
     from the credential vault (the credential the network scan found to work)."""
     import instance_vault
     inv = (hub.state.system_state.get("global_config", {}).get("nw_devices", []) or [])
+    gc = hub.state.system_state.get("global_config", {})
     inv = await instance_vault.overlay_many(
         hub, [d for d in inv if isinstance(d, dict) and d.get("name") and d.get("address")],
         "nw_devices")
-    return [{"tenant": d.get("tenant") or d.get("tenant_id") or "default",
-             "name": d.get("name"), "type": d.get("type") or d.get("model") or "",
-             "ip": str(d.get("address") or "").split("/")[0],
-             "snmp": bool(d.get("snmp_community")) or d.get("transport") == "snmp",
-             "snmp_community": d.get("snmp_community") or ""}
-            for d in inv]
+    # Scanned devices are found over SSH and carry no community; fall back to
+    # the SNMP community of their tenant's scan credential set.
+    scan = await instance_vault.overlay_many(
+        hub, [c for c in (gc.get("nw_scan_credentials", []) or []) if isinstance(c, dict)],
+        "nw_scan_credentials")
+    tenant_snmp = {}
+    # A vault secret of type "snmp" in the tenant's bucket is the primary source.
+    import cred_vault
+    for s in await cred_vault.automation_list_by_type(hub, "snmp"):
+        val = s.get("value") or {}
+        community = val.get("snmp_community") or val.get("community") or ""
+        if community:
+            tenant_snmp.setdefault(s["bucket"], community)
+    for c in scan:
+        if c.get("snmp_community"):
+            tenant_snmp.setdefault(c.get("tenant_id") or "default", c["snmp_community"])
+    out = []
+    for d in inv:
+        tenant = d.get("tenant") or d.get("tenant_id") or "default"
+        community = d.get("snmp_community") or tenant_snmp.get(tenant, "")
+        out.append({"tenant": tenant, "name": d.get("name"),
+                    "type": d.get("type") or d.get("object_type") or d.get("model") or "",
+                    "ip": str(d.get("address") or "").split("/")[0],
+                    "snmp": bool(community) or d.get("transport") == "snmp",
+                    "snmp_community": community})
+    return out
 
 
 def register(app, hub, ctx):
