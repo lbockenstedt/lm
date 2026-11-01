@@ -394,6 +394,38 @@ def register(app, hub, ctx):
             logger.exception("admin_ops: nw-verify failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/admin/ops/nw-neighbors")
+    async def admin_ops_nw_neighbors(request: Request):
+        """Live LLDP neighbours of a tenant's devices (what the topology map is
+        drawn from). Body: {"tenant": "default"}."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        tenant = str((body or {}).get("tenant") or "default")
+        import access
+        gc = hub.state.system_state.get("global_config", {})
+        out = {}
+        for d in gc.get("nw_devices", []) or []:
+            if not isinstance(d, dict) or (d.get("tenant_id") or "default") != tenant \
+                    or not d.get("id") or not d.get("spoke_id"):
+                continue
+            try:
+                res = await hub.request_response(
+                    d["spoke_id"], "NW_GET_LLDP_NEIGHBORS",
+                    {"device_id": d["id"], "tenant": tenant}, timeout=30.0)
+                rows = access.unwrap_spoke(res)
+                rows = rows.get("data", rows) if isinstance(rows, dict) else rows
+                out[f"{d.get('name')}@{d.get('address')}"] = [
+                    {k: r.get(k) for k in r if k in (
+                        "remote_name", "remote_system_name", "system_name", "name",
+                        "remote_ip", "mgmt_ip", "management_ip", "address", "remote_port", "port")}
+                    for r in (rows or []) if isinstance(r, dict)][:60]
+            except Exception as e:
+                out[f"{d.get('name')}@{d.get('address')}"] = f"error: {e}"
+        return out
+
     @app.post("/admin/ops/set-cs-mode")
     async def admin_ops_set_cs_mode(request: Request):
         """Turn a pxmx node's **Client Simulation mode** on/off via loopback,
