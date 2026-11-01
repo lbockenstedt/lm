@@ -332,9 +332,39 @@ def test_refresh_sources_add_remove_and_swap(tmp_path):
     # unreachable sources keep the seed and record the error
     assert data["new-central"]["error"] and "hosts" not in data["new-central"]
     live = cm.builtin_hosts(str(tmp_path))
-    live_mist = {h["host"] for h in live if h["service"] == "Juniper Mist"}
-    assert live_mist == set(hosts)
-    assert len(live) == len(cm.BUILTIN_HOSTS) - len(seed_mist) + 60
+    mist_live = [h for h in live if h["service"] == "Juniper Mist"]
+    # hosts the page stopped listing stay, flagged deprecated; current ones are not
+    assert {h["host"] for h in mist_live if not h.get("deprecated")} == set(hosts)
+    assert {h["host"] for h in mist_live if h.get("deprecated")} == {h["host"] for h in seed_mist}
+    assert len(live) == len(cm.BUILTIN_HOSTS) - len(seed_mist) + 60 + len(seed_mist)
+
+
+def test_deprecated_hosts_are_not_alerted_or_counted_and_expire():
+    import datetime as dt
+    import cert_monitor_alerts as ca
+    row = {"host": "old.mist.com", "port": 443, "status": "red", "days_left": 3,
+           "service": "Juniper Mist", "deprecated": True}
+    breached, _, bad = ca.evaluate_rule({"trigger": "expiring", "threshold_days": 30}, [row], [])
+    assert breached == [] and bad == []
+    assert cm.active_results([row]) == [] and cm.count_statuses([row])["red"] == 0
+    live = {**row, "host": "live.mist.com", "deprecated": False}
+    assert ca.evaluate_rule({"trigger": "expiring", "threshold_days": 30}, [live], [])[0] == [live]
+    now = dt.datetime.now(dt.timezone.utc)
+    assert cm._past_keep_window((now - dt.timedelta(days=31)).isoformat())
+    assert not cm._past_keep_window(now.isoformat())
+
+
+def test_catalog_is_data_driven(tmp_path):
+    import json
+    p = tmp_path / "cat.json"
+    p.write_text(json.dumps({"hosts": [{"host": "a.example.com", "port": 443, "service": "X", "region": "", "role": "r"}],
+                             "sources": [{"id": "x", "service": "X", "role": None, "url": "https://e/x",
+                                          "pattern": "{host}\\.example\\.com",
+                                          "labels": [{"re": "^([^.]+)\\.", "region": "{1}", "role": "Svc"}]}]}))
+    cat = cm.load_catalog(str(p))
+    assert cat["hosts"][0]["host"] == "a.example.com"
+    got = cm.parse_source(cat["sources"][0], "see b.example.com")
+    assert got == [{"host": "b.example.com", "port": 443, "service": "X", "region": "B", "role": "Svc"}]
 
 
 def test_refresh_sources_keeps_list_when_page_shrinks(tmp_path):

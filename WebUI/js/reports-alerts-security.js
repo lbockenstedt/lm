@@ -401,7 +401,9 @@ async function loadCertMonData() {
         return `<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-slate-300 text-slate-700">n/a</span>`;
     };
     // Ignored certs keep their real status pill, muted and tagged "(ignored)".
-    const statusCell = (r) => r.ignored
+    const statusCell = (r) => r.deprecated
+        ? `<span class="opacity-50">${pill(r)}</span><div class="text-[10px] font-semibold text-slate-500 mt-0.5" title="No longer published by the vendor${r.deprecated_at && r.deprecated_at !== 'manual' ? ' since ' + escapeHtml(String(r.deprecated_at).slice(0, 10)) : ''}; not alerted on and dropped after 30 days">(deprecated)</div>`
+        : r.ignored
         ? `<span class="opacity-50">${pill(r)}</span><div class="text-[10px] font-semibold text-slate-500 mt-0.5" title="${escapeHtml(['Ignored', r.ignored_by && 'by ' + r.ignored_by, r.ignored_at && new Date(r.ignored_at).toLocaleString()].filter(Boolean).join(' '))}">(ignored)</div>`
         : pill(r);
     const filt = (window._certMonFilter || '').toLowerCase();
@@ -425,7 +427,7 @@ async function loadCertMonData() {
     el.innerHTML = `
       <div class="${card}">
         <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
-          <div class="text-xs text-slate-500">Last check: <b>${escapeHtml(lastRun)}</b>${d.duration_s != null ? ` (${d.duration_s}s)` : ''} · Next: <b>${escapeHtml(nextRun)}</b> · ${(d.results || []).length} hosts${c.ignored ? ` (${c.ignored} ignored — not counted)` : ''}${d.running ? ' · <span class="text-[#01A982] font-semibold animate-pulse">checking…</span>' : ''}</div>
+          <div class="text-xs text-slate-500">Last check: <b>${escapeHtml(lastRun)}</b>${d.duration_s != null ? ` (${d.duration_s}s)` : ''} · Next: <b>${escapeHtml(nextRun)}</b> · ${(d.results || []).length} hosts${c.ignored ? ` (${c.ignored} ignored — not counted)` : ''}${c.deprecated ? ` (${c.deprecated} deprecated — not counted)` : ''}${d.running ? ' · <span class="text-[#01A982] font-semibold animate-pulse">checking…</span>' : ''}</div>
           <div class="flex items-center gap-2">
             <input id="certmon-filter" type="text" placeholder="Filter…" value="${escapeHtml(window._certMonFilter || '')}" oninput="window._certMonFilter=this.value; clearTimeout(window._certMonFt); window._certMonFt=setTimeout(loadCertMonData, 250)" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-xs outline-none focus:ring-2 focus:ring-green-500">
             <button onclick="certMonRunNow(this)" class="text-xs bg-[#01A982] hover:bg-[#008f6e] text-white px-3 py-1 rounded-md font-medium" ${d.running ? 'disabled' : ''}>Check now</button>
@@ -450,7 +452,7 @@ async function loadCertMonData() {
       </div>
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Custom hosts</h3>
-        <p class="text-xs text-slate-400 mb-2">Extra endpoints to monitor, one per line (<span class="font-mono">host</span> or <span class="font-mono">host:port</span>). The ${(d.builtin_hosts || []).length} built-in Aruba Central / GreenLake / Mist endpoints are always included${(cfg.disabled_builtin || []).length ? ` (${cfg.disabled_builtin.length} disabled)` : ''}.</p>
+        <p class="text-xs text-slate-400 mb-2">Extra endpoints to monitor, one per line (<span class="font-mono">host</span> or <span class="font-mono">host:port</span>). The ${(d.builtin_hosts || []).length} endpoints from the shipped catalog (kept current by the daily source refresh) are always included${(cfg.disabled_builtin || []).length ? ` (${cfg.disabled_builtin.length} disabled)` : ''}.</p>
         <textarea id="certmon-custom" rows="4" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500">${escapeHtml((cfg.custom_hosts || []).join('\n'))}</textarea>
         <div class="flex justify-end mt-2"><button onclick="certMonSaveCustom(this)" class="text-xs px-3 py-1 rounded-md bg-green-600 text-white hover:bg-green-700">Save</button></div>
       </div>
