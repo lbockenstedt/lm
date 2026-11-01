@@ -232,7 +232,6 @@ _LDAP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/ldap/main/
 # dns/dhcp installers live IN the lm repo (in-repo modules), so their deploy-role
 # installer URL is the lm raw path (not a sibling repo like netbox/ldap).
 _ZBX_SERVER_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbix/main/install_zabbix_server.sh"
-_ZBX_DEFAULT_SERVER = "20.118.170.129:10051"  # LM-ZBX; override with LM_ZABBIX_SERVER
 _ZBX_PROXY_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbix/main/install_zbxproxy.sh"
 _DNS_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dns/install_dns.sh"
 _DHCP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dhcp/install_dhcp.sh"
@@ -1178,9 +1177,8 @@ class GenericAgent(BaseSpoke):
                               ("tls_key", "tls-key"))}[role_name]
         config = dict(config)
         if role_name == "zbxproxy" and not config.get("server"):
-            # The WebUI loads the role without config; default to the monitoring server.
-            config["server"] = os.environ.get("LM_ZABBIX_SERVER", _ZBX_DEFAULT_SERVER)
-            logger.info("zbxproxy: no server in LOAD_ROLE config, defaulting to %s", config["server"])
+            logger.error("zbxproxy: LOAD_ROLE config has no 'server'; the hub should supply it "
+                         "from the Monitoring page setting")
         return "".join(" --" + flag + " " + shlex.quote(str(config[key]))
                        for key, flag in flags if config.get(key))
 
