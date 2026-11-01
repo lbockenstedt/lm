@@ -13,7 +13,7 @@ Firewall management + discovery spoke. Translates hub commands into OPNsense RES
 
 ## What it does
 
-This module lets an end user manage an OPNsense firewall from the Lab Manager WebUI without touching the firewall's own web GUI. In the WebUI it appears as a **Firewalls** entry in the main nav (per-tenant) with sub-tabs for **Firewall Rules**, **NAT Policies**, **DNS Records**, **Aliases**, **DHCP Leases**, and **Interfaces**; firewalls themselves are added/edited under **Setup → Firewalls**.
+This module lets an end user manage an OPNsense firewall from the Lab Manager WebUI without touching the firewall's own web GUI. In the WebUI it appears as a **Firewalls** entry in the main nav (per-tenant) with sub-tabs for **Firewall Rules**, **NAT Policies**, **DNS Records**, **Aliases**, **Impairment**, **DHCP Leases**, and **Interfaces**; firewalls themselves are added/edited under **Setup → Firewalls**.
 
 Day to day, it is used to: check whether the firewall is reachable and healthy, browse or edit filter rules and NAT policies, manage aliases (named, reusable groups of hosts/networks referenced by rules), add DNS host overrides, and look up DHCP leases or ARP entries for a device. It also quietly discovers devices from the firewall's DHCP leases and ARP table and hands them to NetBox so they show up in the IPAM inventory automatically.
 
@@ -47,6 +47,7 @@ OPNsense REST over HTTPS at `https://{host}:{port}` (`OpnsenseEngine`). Default 
 - Aliases: `OPNSENSE_ADD/DEL/EDIT/UPDATE_ALIAS`. Categories resolved to UUIDs (see below).
 - NAT: `OPNSENSE_ADD/DEL/EDIT_NAT_RULE` (`nat_type` `d_nat`/`source_nat`/`one_to_one`/`nat_1to1` alias).
 - DNS: `OPNSENSE_ADD/DEL/EDIT_DNS_RECORD` (Unbound host overrides).
+- Impairment: `OPNSENSE_GET/ADD/EDIT/DEL_IMPAIRMENT` (`src/impairments.py`) — latency/packet loss for a host or subnet via the `os-netimpair` plugin. Always live (not cached).
 - `OPNSENSE_INSTALL_CERT` — hub-brokered cert distribution: applies `fullchain`+`privkey` via `/api/trust/cert/add` or `set/{uuid}`. `privkey` masked.
 
 ## Key files
@@ -82,6 +83,7 @@ OPNsense REST over HTTPS at `https://{host}:{port}` (`OpnsenseEngine`). Default 
 - **Add or edit an alias.** Firewalls → Aliases → add/edit. Give it a **Name**, a **Type** (host/network/etc.), the **Content** (the hosts/networks/values), and optionally a **Category** — type the category by its **name** (e.g. a tenant name), not a UUID; the spoke resolves the name to OPNsense's internal category UUID for you. If you mistype a category name that doesn't exist on the firewall, it's silently dropped rather than erroring — double-check the alias afterward if a category doesn't stick.
 - **Add or edit a firewall rule.** Firewalls → Firewall Rules → add/edit; the rule is written and applied (reconfigured) on save, so it's live immediately.
 - **Add a DNS override.** Firewalls → DNS Records → add: **Hostname**, **Domain**, **IP**, optional description. This creates an Unbound host override on the firewall — it does not touch the separate `dns`/`dhcp` modules if this lab also runs those.
+- **Add latency or packet loss for a host or subnet.** Firewalls → Impairment → + Add Impairment: **Host or Subnet** (`10.0.0.5` or `10.0.0.0/24`), the **Interface** it sits on (`lan`, `opt1`…), **Latency (ms)**, **Packet Loss (%)**, **Direction** (Both / Download = to the target / Upload = from the target) and **Enabled**. Requires the `os-netimpair` plugin on the firewall (see the opnsense repo `plugin/netimpair/README.md`) and an API key with the *Firewall: Shaper* and *Firewall: Shaper: Impairment* privileges; without the plugin the tab says so. LM creates one Traffic Shaper pipe (10 Gbit/s, so it never limits bandwidth) and one shaper rule per direction plus a netimpair entry, all tagged `lm-impair:<id>:<down|up>` in their description, then applies the shaper. Latency is one-way per direction, so **Both** adds it twice to the round trip. A failed add is rolled back; an edit builds the new version before removing the old one. On a shared firewall a tenant can only target addresses inside its own subnets. Don't edit the `lm-impair` objects by hand in the OPNsense GUI — delete and re-add from LM instead.
 - **Install a certificate on the firewall.** Certificates are managed from the `le` (Let's Encrypt) Certificate Management page, not from the Firewalls page directly — issue/renew the cert there and use its distribution/targets flow to push it to this firewall; this module only receives and applies the material. See [le.md](le.md).
 - **Look up a device.** Firewalls → DHCP Leases (or ARP/Interfaces) to browse live data, or use the global device search to find a device by IP/MAC/hostname across all discovery sources at once.
 

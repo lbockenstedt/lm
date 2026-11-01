@@ -18,6 +18,7 @@ FW_READ_CMDS = {
     "nat": "OPNSENSE_GET_NAT_POLICIES",
     "dns": "OPNSENSE_GET_DNS_RECORDS",
     "aliases": "OPNSENSE_GET_ALIASES",
+    "impair": "OPNSENSE_GET_IMPAIRMENTS",
 }
 
 
@@ -46,9 +47,10 @@ def fw_cache_job(hub, firewall_id: str, endpoint: str) -> CacheJob:
         # A spoke ERROR (e.g. OPNsense < 26.1 with no NAT MVC API, or an API
         # key lacking the module scope) must surface rather than be cached as
         # an empty list.
-        if isinstance(result, dict) and result.get("status") == "ERROR":
+        reply = result.get("payload", result) if isinstance(result, dict) else result
+        if isinstance(reply, dict) and reply.get("status") == "ERROR":
             raise HTTPException(status_code=502,
-                                detail=result.get("message", "Firewall spoke error"))
+                                detail=reply.get("message", "Firewall spoke error"))
         if isinstance(result, dict):
             if "data" in result:
                 return result["data"]
@@ -146,7 +148,8 @@ def register(app, hub, ctx):
         if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             return None
         cmd = {"rules": "OPNSENSE_GET_ALL_RULES", "nat": "OPNSENSE_GET_NAT_POLICIES",
-               "dns": "OPNSENSE_GET_DNS_RECORDS", "aliases": "OPNSENSE_GET_ALIASES"}.get(endpoint)
+               "dns": "OPNSENSE_GET_DNS_RECORDS", "aliases": "OPNSENSE_GET_ALIASES",
+               "impair": "OPNSENSE_GET_IMPAIRMENTS"}.get(endpoint)
         if not cmd:
             return None
         try:
@@ -367,6 +370,51 @@ def register(app, hub, ctx):
         data = await request.json()
         await _authz_fw_write(request, firewall_id, "dns", payload=data, uuid=record_id)
         return await _fw_write(hub, firewall_id, "OPNSENSE_EDIT_DNS_RECORD", {"uuid": record_id, **data}, "dns")
+
+    # ── Network impairment (latency / loss for a host or subnet) ─────────────
+    async def _impair_authz(request, firewall_id, payload=None, uuid=None):
+        """Usual firewall write check, plus: on a SHARED firewall the target
+        must lie INSIDE one of the caller's prefixes (the generic check only
+        needs an overlap, which would let a tenant impair a whole /8)."""
+        import ipaddress
+        await _authz_fw_write(request, firewall_id, "impair", payload=payload, uuid=uuid)
+        _fw, scope = _authz_firewall(request, firewall_id, write=True)
+        if scope != "constrained" or payload is None:
+            return
+        try:
+            target = ipaddress.ip_network(str(payload.get("target", "")).strip(), strict=False)
+            owned = [ipaddress.ip_network(p, strict=False)
+                     for p in await access.resolve_owned_prefixes(app.state.hub, _session_user(request))]
+            inside = any(target.version == n.version and target.subnet_of(n) for n in owned)
+        except ValueError:
+            inside = False
+        if not inside:
+            raise HTTPException(status_code=403,
+                                detail="On shared infrastructure the target must be inside your tenant's subnets")
+
+    async def _impair_write(firewall_id, command, data):
+        result = await _fw_write(app.state.hub, firewall_id, command, data, "impair")
+        reply = result.get("payload", result) if isinstance(result, dict) else result
+        if isinstance(reply, dict) and reply.get("status") == "ERROR":
+            raise HTTPException(status_code=400, detail=reply.get("message", "Firewall spoke error"))
+        return result
+
+    @app.post("/api/firewall/{firewall_id}/impair")
+    async def add_impairment(firewall_id: str, request: Request):
+        data = await request.json()
+        await _impair_authz(request, firewall_id, payload=data)
+        return await _impair_write(firewall_id, "OPNSENSE_ADD_IMPAIRMENT", data)
+
+    @app.put("/api/firewall/{firewall_id}/impair/{impair_id}")
+    async def edit_impairment(firewall_id: str, impair_id: str, request: Request):
+        data = await request.json()
+        await _impair_authz(request, firewall_id, payload=data, uuid=impair_id)
+        return await _impair_write(firewall_id, "OPNSENSE_EDIT_IMPAIRMENT", {**data, "uuid": impair_id})
+
+    @app.delete("/api/firewall/{firewall_id}/impair/{impair_id}")
+    async def delete_impairment(firewall_id: str, impair_id: str, request: Request):
+        await _impair_authz(request, firewall_id, uuid=impair_id)
+        return await _impair_write(firewall_id, "OPNSENSE_DEL_IMPAIRMENT", {"uuid": impair_id})
 
     @app.post("/setup/firewalls")
     async def add_firewall(request: Request):

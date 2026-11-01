@@ -85,6 +85,7 @@ _FW_FILTER_SPEC = {
     "interfaces": ("fields", ["ip", "ipaddr"]),
     "dhcp":       ("fields", ["ip", "address"]),
     "aliases":    ("fields", ["content"]),
+    "impair":     ("fields", ["target"]),
 }
 
 # OPNsense endpoints that participate in category-based tenant attribution.

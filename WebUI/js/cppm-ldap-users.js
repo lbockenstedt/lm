@@ -287,6 +287,7 @@ async function deleteOpnsenseItem(fwId, subMenu, itemId) {
     else if (subMenu === 'NAT Policies') url = `/api/firewall/${fwId}/nat/${encodeURIComponent(itemId)}`;
     else if (subMenu === 'DNS Records') url = `/api/firewall/${fwId}/dns/${encodeURIComponent(itemId)}`;
     else if (subMenu === 'Aliases') url = `/api/firewall/${fwId}/aliases/${encodeURIComponent(itemId)}`;
+    else if (subMenu === 'Impairment') url = `/api/firewall/${fwId}/impair/${encodeURIComponent(itemId)}`;
     else return;
     try {
         const r = await fetch(url + _taTenantQuery(), { method: 'DELETE' });
@@ -295,6 +296,33 @@ async function deleteOpnsenseItem(fwId, subMenu, itemId) {
     } catch (e) {
         showToast('Error deleting: ' + e.message, 'error');
     }
+}
+
+// Network impairment form (Impairment tab): latency / packet loss for one host
+// or subnet, applied on the firewall by the os-netimpair plugin. Shared by the
+// add and edit modals; ``item`` is the row being edited (or {} for a new one).
+function _impairFields(item, input, label) {
+    const v = k => (item[k] !== undefined && item[k] !== null ? String(item[k]) : '').replace(/"/g, '&quot;');
+    const dir = item.direction || 'both';
+    const opt = (val, text) => `<option value="${val}" ${dir === val ? 'selected' : ''}>${text}</option>`;
+    return `
+        <div class="grid grid-cols-2 gap-4">
+            <div class="space-y-1"><label class="${label}">Host or Subnet</label><input type="text" id="add-opn-target" value="${v('target')}" placeholder="10.0.0.5 or 10.0.0.0/24" class="${input}" title="IP address or CIDR subnet whose traffic is impaired"></div>
+            <div class="space-y-1"><label class="${label}">Interface</label><input type="text" id="add-opn-iface" value="${v('interface') || 'lan'}" placeholder="lan" class="${input}" title="OPNsense interface the host or subnet sits on (e.g. lan, opt1)"></div>
+            <div class="space-y-1"><label class="${label}">Latency (ms)</label><input type="number" min="0" max="10000" id="add-opn-delay" value="${v('delay') || '0'}" class="${input}" title="Added one-way delay in milliseconds (0-10000). With direction Both, the round trip gets it twice."></div>
+            <div class="space-y-1"><label class="${label}">Packet Loss (%)</label><input type="number" min="0" max="100" step="0.1" id="add-opn-loss" value="${v('loss') || '0'}" class="${input}" title="Percentage of packets dropped (0-100), per direction"></div>
+            <div class="space-y-1"><label class="${label}">Direction</label><select id="add-opn-direction" class="${input}" title="Download = traffic to the host/subnet, Upload = traffic from it">${opt('both', 'Both')}${opt('download', 'Download (to target)')}${opt('upload', 'Upload (from target)')}</select></div>
+            <div class="space-y-1"><label class="${label}">Enabled</label><select id="add-opn-enabled" class="${input}" title="Disable to keep the entry but stop impairing"><option value="1">Yes</option><option value="0" ${item.enabled === false ? 'selected' : ''}>No</option></select></div>
+        </div>
+        <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" value="${v('description')}" placeholder="Optional description" class="${input}" title="Optional description"></div>
+        <p class="text-xs text-slate-500">Needs the os-netimpair plugin on the firewall. LM creates a Traffic Shaper pipe and rule per direction (tagged lm-impair) and applies them.</p>`;
+}
+
+function _impairBody(g) {
+    return { target: g('add-opn-target'), interface: g('add-opn-iface') || 'lan',
+             direction: g('add-opn-direction') || 'both', delay: g('add-opn-delay') || '0',
+             loss: g('add-opn-loss') || '0', enabled: g('add-opn-enabled') || '1',
+             description: g('add-opn-desc') };
 }
 
 function showOpnsenseAddModal(subMenu) {
@@ -354,6 +382,9 @@ function showOpnsenseAddModal(subMenu) {
                 <div class="space-y-1 col-span-2"><label class="${label}">IP Address</label><input type="text" id="add-opn-ip" placeholder="192.168.1.100" class="${input}" title="IPv4 or IPv6 address"></div>
             </div>
             <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" placeholder="Optional description" class="${input}" title="Optional description"></div>`;
+        submitFn = `submitOpnsenseAdd('${subMenu}')`;
+    } else if (subMenu === 'Impairment') {
+        fields = _impairFields({}, input, label);
         submitFn = `submitOpnsenseAdd('${subMenu}')`;
     }
 
@@ -419,6 +450,10 @@ async function submitOpnsenseAdd(subMenu) {
             url = `/api/firewall/${fwId}/dns`;
             body = { hostname: g('add-opn-hostname'), domain: g('add-opn-domain'), ip: g('add-opn-ip'), description: g('add-opn-desc') };
             if (!body.hostname || !body.ip) { showToast('Hostname and IP are required.', 'error'); return; }
+        } else if (subMenu === 'Impairment') {
+            url = `/api/firewall/${fwId}/impair`;
+            body = _impairBody(g);
+            if (!body.target) { showToast('Host or subnet is required.', 'error'); return; }
         } else return;
 
         const r = await fetch(url + _taTenantQuery(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -484,6 +519,8 @@ function showOpnsenseEditModal(fwId, subMenu, itemIdx) {
                 <div class="space-y-1 col-span-2"><label class="${label}">IP Address</label><input type="text" id="add-opn-ip" value="${v('ip')}" class="${input}"></div>
             </div>
             <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" value="${v('description')}" class="${input}"></div>`;
+    } else if (subMenu === 'Impairment') {
+        fields = _impairFields(item, input, label);
     } else return;
 
     const modal = document.createElement('div');
@@ -546,6 +583,10 @@ async function submitOpnsenseEdit(fwId, subMenu, itemId) {
             url = `/api/firewall/${fwId}/dns/${encodedId}`;
             body = { hostname: g('add-opn-hostname'), domain: g('add-opn-domain'), ip: g('add-opn-ip'), description: g('add-opn-desc') };
             if (!body.hostname || !body.ip) { showToast('Hostname and IP are required.', 'error'); return; }
+        } else if (subMenu === 'Impairment') {
+            url = `/api/firewall/${fwId}/impair/${encodedId}`;
+            body = _impairBody(g);
+            if (!body.target) { showToast('Host or subnet is required.', 'error'); return; }
         } else return;
 
         const r = await fetch(url + _taTenantQuery(), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
