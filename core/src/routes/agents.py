@@ -130,11 +130,11 @@ async def _load_roles_impl(hub, spoke_id, data):
                 results.append({"role": None, "status": "ERROR",
                                 "message": "role is required"})
                 continue
-            if rname == "ldap-server":
-                rcfg = await _ldap_server_load_config(hub, spoke_id, rcfg)
-            elif rname == "zbxproxy":
-                rcfg = _zbxproxy_load_config(hub, rcfg)
             try:
+                if rname == "ldap-server":
+                    rcfg = await _ldap_server_load_config(hub, spoke_id, rcfg)
+                elif rname == "zbxproxy":
+                    rcfg = _zbxproxy_load_config(hub, rcfg)
                 res = await hub.request_response(spoke_id, "LOAD_ROLE",
                                                  {"role": rname, "config": rcfg,
                                                   **({"force": True} if rforce else {})},
