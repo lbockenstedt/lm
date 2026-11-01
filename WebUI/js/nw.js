@@ -1672,7 +1672,13 @@ async function _renderMonitoring(container) {
     ]);
     const proxyServer = (cr && cr.ok) ? ((await cr.json()).server || '') : '';
     if (!sr || !sr.ok) {
-        container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Monitoring unavailable${sr ? ` (HTTP ${sr.status})` : ''}.</div>`;
+        const knob = (admin && cr && cr.ok) ? `<div class="mt-4 flex items-center gap-2">
+        <label class="text-xs text-slate-500" for="monitoring-server">Monitoring server (proxies connect here)</label>
+        <input id="monitoring-server" value="${escapeHtml(proxyServer)}" placeholder="zabbix.example.com:10051" class="text-xs px-2 py-1 border border-slate-300 rounded w-72 font-mono">
+        <button onclick="saveMonitoringServer()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">Save</button>
+        <span id="monitoring-server-msg" class="text-[11px] text-slate-400"></span>
+    </div>` : '';
+        container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Monitoring unavailable${sr ? ` (HTTP ${sr.status})` : ''}.</div>${knob}`;
         return;
     }
     const res = _monData(await sr.json());
@@ -1698,7 +1704,7 @@ async function _renderMonitoring(container) {
         ? `<table class="w-full text-left mt-4"><thead><tr class="text-[10px] uppercase tracking-wider text-slate-400"><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Address</th><th class="px-3 py-2">Method</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Problems</th></tr></thead><tbody>${hostRows}</tbody></table>`
         : `<div class="py-8 text-center text-slate-400 italic">No monitored devices${tenant ? ` for tenant "${escapeHtml(tenant)}"` : ''}.</div>`;
     const info = `<div class="mt-4 text-[11px] text-slate-400">Zabbix ${escapeHtml(String(res.version || '?'))} · ${escapeHtml(String(res.managed_hosts ?? '?'))} managed hosts</div>`;
-    const serverKnob = admin ? `<div class="mt-4 flex items-center gap-2">
+    const serverKnob = (admin && cr && cr.ok) ? `<div class="mt-4 flex items-center gap-2">
         <label class="text-xs text-slate-500" for="monitoring-server">Monitoring server (proxies connect here)</label>
         <input id="monitoring-server" value="${escapeHtml(proxyServer)}" placeholder="zabbix.example.com:10051" class="text-xs px-2 py-1 border border-slate-300 rounded w-72 font-mono">
         <button onclick="saveMonitoringServer()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">Save</button>
