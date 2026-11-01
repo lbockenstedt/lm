@@ -276,6 +276,7 @@ _PUSH_CONFIG_MODULE_KEY = {
     "nw":         "nw",
     "certificates": "le",
     "storage":    "truenas",
+    "monitoring": "monitoring",
 }
 
 # spoke_id substring → push_config branch tag. NOTE: the prefix-fallback loop
