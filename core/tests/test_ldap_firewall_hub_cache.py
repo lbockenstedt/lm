@@ -217,3 +217,42 @@ def test_firewall_write_refresh_is_exact_to_that_firewall():
     asyncio.run(go())
     assert hub.warm_get("fw_rules", "fw-1") == [{"uuid": "r1"}, {"uuid": "r2"}]
     assert hub.warm_get("fw_rules", "fw-10") == [{"uuid": "r10"}]
+
+
+# ═════════════════════════ firewall: network impairment ══════════════════════
+
+def test_impairment_spoke_error_is_shown_and_read_is_cached():
+    hub, _ = _fw_hub()
+    hub.replies[("sp-1", "OPNSENSE_ADD_IMPAIRMENT")] = lambda p: {
+        "status": "ERROR", "message": "The os-netimpair plugin is not installed"}
+    hub.replies[("sp-1", "OPNSENSE_GET_IMPAIRMENTS")] = lambda p: {
+        "status": "SUCCESS", "data": [{"uuid": "i1", "target": "10.0.0.5"}]}
+    c = _fw_client(hub, _ADMIN)
+    r = c.post("/api/firewall/fw-1/impair", json={"target": "10.0.0.5", "delay": 50})
+    assert r.status_code == 400 and "os-netimpair" in r.json()["detail"]
+    assert c.get("/api/firewall/fw-1/impair").json()[0]["uuid"] == "i1"
+
+
+def test_impairment_on_shared_firewall_must_be_inside_tenant_subnet():
+    import access
+    hub, _ = _fw_hub()
+    hub.replies[("sp-1", "OPNSENSE_ADD_IMPAIRMENT")] = lambda p: {"status": "SUCCESS", "uuid": "i2"}
+    tenant = {"user": {"tenant_id": "t1"}}
+    saved = (access.write_scope, access.resolve_owned_prefixes, access.fw_rule_in_tenant_scope)
+
+    async def owned(hub_, sess):
+        return ["10.1.0.0/24"]
+
+    async def overlaps(*a):
+        return True
+    access.write_scope = lambda sess, tid: "constrained"
+    access.resolve_owned_prefixes = owned
+    access.fw_rule_in_tenant_scope = overlaps
+    try:
+        c = _fw_client(hub, tenant)
+        assert c.post("/api/firewall/fw-1/impair", json={"target": "10.0.0.0/8"}).status_code == 403
+        assert c.post("/api/firewall/fw-1/impair", json={"target": "10.2.0.5"}).status_code == 403
+        assert c.post("/api/firewall/fw-1/impair", json={"target": "10.1.0.5"}).status_code == 200
+    finally:
+        access.write_scope, access.resolve_owned_prefixes, access.fw_rule_in_tenant_scope = saved
+    assert [cmd for _, cmd, _ in hub.calls] == ["OPNSENSE_ADD_IMPAIRMENT"]

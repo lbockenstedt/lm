@@ -14,6 +14,7 @@ this extracts the real decision region from the source and executes it against
 fakes — the same pattern the automerge tests use.
 """
 import re
+import logging
 import textwrap
 import uuid
 from pathlib import Path
@@ -44,6 +45,9 @@ def _run(identified, *, push_creds, dry_run_req=True, auto_add=False):
         "tenant_id": "tenant-lrb",
         "spoke_id": "nw-lrb",
         "uuid": uuid,
+        "logger": logging.getLogger("test"),
+        "reachable": [],
+        "scan": {"scanned": 0},
         "_SCAN_OBJECT_TYPES": _SCAN_OBJECT_TYPES,
     }
     exec(_decision_source(), ns)

@@ -394,6 +394,28 @@ def register(app, hub, ctx):
             logger.exception("admin_ops: nw-verify failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/admin/ops/nw-scan")
+    async def admin_ops_nw_scan(request: Request):
+        """Run the tenant's saved-config network scan (preview only unless the
+        saved config has auto_add). Body: {"tenant": "default"}. Detail is in the
+        hub log ("nw scan tenant=..." lines)."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        tenant = str((body or {}).get("tenant") or "default")
+        try:
+            res = await hub.run_nw_scheduled_scan(tenant)
+        except Exception as e:
+            logger.exception("admin_ops: nw-scan failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        return {k: (res.get(k) if not isinstance(res.get(k), list) else
+                    [{kk: x.get(kk) for kk in ("address", "hostname", "object_type", "method")}
+                     for x in res[k] if isinstance(x, dict)])
+                for k in ("status", "message", "reason", "targets", "sources", "scanned",
+                          "identified", "reachable", "added", "preview", "dry_run")}
+
     @app.post("/admin/ops/nw-neighbors")
     async def admin_ops_nw_neighbors(request: Request):
         """Live LLDP neighbours of a tenant's devices (what the topology map is
@@ -418,10 +440,9 @@ def register(app, hub, ctx):
                 rows = access.unwrap_spoke(res)
                 rows = rows.get("data", rows) if isinstance(rows, dict) else rows
                 out[f"{d.get('name')}@{d.get('address')}"] = [
-                    {k: r.get(k) for k in r if k in (
-                        "remote_name", "remote_system_name", "system_name", "name",
-                        "remote_ip", "mgmt_ip", "management_ip", "address", "remote_port", "port")}
-                    for r in (rows or []) if isinstance(r, dict)][:60]
+                    {k: str(v)[:80] for k, v in r.items()}
+                    for r in (rows or []) if isinstance(r, dict)
+                    and "tor" in str(r.get("remote_name", "")).lower()][:6]
             except Exception as e:
                 out[f"{d.get('name')}@{d.get('address')}"] = f"error: {e}"
         return out
