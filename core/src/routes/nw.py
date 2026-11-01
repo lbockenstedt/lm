@@ -1974,6 +1974,14 @@ def register(app, hub, ctx):
         if not system and not _is_admin(sess):
             chosen = [c for c in chosen
                       if access.spoke_visible_to_session(sess, c.get("tenant_id", ""))]
+        # The vault's SNMP communities ride along with every scan, so devices that
+        # take no SSH login (e.g. a TOR switch) are still identified over SNMP and
+        # the winning community is recorded.
+        if saved.get("try_snmp", True):
+            from routes.monitoring import vault_snmp_scan_sets
+            have = {c.get("id") for c in chosen}
+            chosen = chosen + [c for c in vault_snmp_scan_sets(hub, tenant_id)
+                               if c["id"] not in have]
         if not chosen:
             # Credentials are OPTIONAL. With none selected the scan still runs
             # as a DISCOVERY-ONLY pass: every candidate IP is TCP-probed for
@@ -2005,8 +2013,8 @@ def register(app, hub, ctx):
         logger.info("nw scan tenant=%s targets=%d sources=%s creds=%d cred_ids=%s",
                     tenant_id, len(targets), per_source, len(chosen),
                     [c.get("id") for c in chosen])
-        logger.info("nw scan tenant=%s candidate targets (first 60): %s", tenant_id,
-                    sorted(str(t) for t in targets)[:60])
+        logger.info("nw scan tenant=%s candidate targets (%d): %s", tenant_id, len(targets),
+                    " ".join(sorted(str(t) for t in targets)))
         if not targets:
             return {"status": "ok", "message": "No candidate IPs found for this tenant "
                     "(no DNS/DHCP/NAC rows and no NetBox prefixes tagged to it). Add "
