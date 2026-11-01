@@ -210,7 +210,12 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="Admin access required")
-        body = await _payload(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
         server = str(body.get("server") or "").strip()
         if server and not re.fullmatch(r"[A-Za-z0-9.\-]+(:\d{1,5})?", server):
             raise HTTPException(status_code=400, detail="server must be host or host:port")
