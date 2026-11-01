@@ -358,6 +358,8 @@ def _foreign_deploy_role_reply(role_name: str, action: str) -> dict:
 _DEPLOY_ROLE_UNITS = {
     "dns-server": ("unbound",),
     "dhcp-server": ("kea-dhcp4-server", "kea-ctrl-agent"),
+    "zabbix-server": ("zabbix-server",),
+    "zbxproxy": ("zabbix-proxy",),
 }
 
 # Units a cluster deploy ALSO leaves behind. They are stopped on unload but are
@@ -397,6 +399,17 @@ _DEPLOY_ROLE_PURGE = {
         "unit_files": ("lm-dhcp-worker.service", "kea-ha-agent.service"),
         "paths": ("/etc/kea", "/var/lib/kea", "/run/kea",
                   "/etc/lm-dhcp-worker", "/var/log/kea"),
+    },
+    # The monitoring database is deliberately left in place on server uninstall.
+    "zabbix-server": {
+        "packages": ("zabbix-server-pgsql", "zabbix-frontend-php", "zabbix-nginx-conf"),
+        "unit_files": (),
+        "paths": ("/etc/zabbix/web", "/etc/zabbix/zabbix_server.conf"),
+    },
+    "zbxproxy": {
+        "packages": ("zabbix-proxy-sqlite3",),
+        "unit_files": (),
+        "paths": ("/etc/zabbix/zabbix_proxy.conf", "/var/lib/zabbix/zabbix_proxy.db"),
     },
 }
 
