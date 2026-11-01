@@ -232,7 +232,7 @@ _LDAP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/ldap/main/
 # dns/dhcp installers live IN the lm repo (in-repo modules), so their deploy-role
 # installer URL is the lm raw path (not a sibling repo like netbox/ldap).
 _ZBX_SERVER_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbix/main/install_zabbix_server.sh"
-_ZBX_DEFAULT_SERVER = "20.118.170.129:10051"  # LM-ZBX; override with LM_ZABBIX_SERVER
+_ZBX_DEFAULT_SERVER = "zabbix.ext.orange-tme.com:10051"  # LM-ZBX; override with LM_ZABBIX_SERVER
 _ZBX_PROXY_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbix/main/install_zbxproxy.sh"
 _DNS_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dns/install_dns.sh"
 _DHCP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dhcp/install_dhcp.sh"
