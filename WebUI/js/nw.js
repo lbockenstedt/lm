@@ -1647,19 +1647,34 @@ async function loadMonitoringData() {
     if (!container) return;
     const actions = document.getElementById('top-nav-actions');
     if (actions) actions.innerHTML = '';
-    let r;
-    try { r = await fetch('/api/monitoring/status'); } catch (e) { r = null; }
-    if (!r || !r.ok) {
-        container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Monitoring unavailable${r ? ` (HTTP ${r.status})` : ''}.</div>`;
+    try {
+        await _renderMonitoring(container);
+    } catch (e) {
+        console.error('monitoring render failed', e);
+        container.innerHTML = `<div class="py-12 text-center text-red-600 italic">Monitoring failed to load: ${escapeHtml(String(e && e.message || e))}</div>`;
+    }
+}
+
+// The hub relays the spoke's full response envelope; accept it or a bare payload.
+function _monData(j) {
+    let d = j && (j.result || j);
+    if (d && d.payload) d = d.payload;
+    if (d && d.data) d = d.data;
+    return d || {};
+}
+
+async function _renderMonitoring(container) {
+    const [sr, hr] = await Promise.all([
+        fetch('/api/monitoring/status').catch(() => null),
+        fetch('/api/monitoring/hosts').catch(() => null)
+    ]);
+    if (!sr || !sr.ok) {
+        container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Monitoring unavailable${sr ? ` (HTTP ${sr.status})` : ''}.</div>`;
         return;
     }
-    const st = await r.json();
-    const res = st.result || st;
+    const res = _monData(await sr.json());
     let hosts = [];
-    try {
-        const hr = await fetch('/api/monitoring/hosts');
-        if (hr.ok) { const hj = await hr.json(); hosts = (hj.result || hj).hosts || []; }
-    } catch (e) { /* summary still renders */ }
+    if (hr && hr.ok) hosts = _monData(await hr.json()).hosts || [];
     const tenant = (typeof currentTenant !== 'undefined' && currentTenant) ? currentTenant : null;
     const shown = tenant ? hosts.filter(h => h.tenant === tenant) : hosts;
     const sevName = ['Not classified', 'Information', 'Warning', 'Average', 'High', 'Disaster'];
