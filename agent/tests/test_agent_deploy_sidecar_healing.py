@@ -190,3 +190,11 @@ def test_active_deploy_roles_survives_a_heal_that_raises(monkeypatch):
     active = _active_deploy_roles(["dhcp-server"])
 
     assert active == ["dhcp-server"]
+
+
+def test_zbxproxy_defaults_server_and_redacts_secrets():
+    import agent_spoke as a
+    assert "--server 20.118.170.129:10051" in a.GenericAgent._zabbix_install_args("zbxproxy", {})
+    assert "--server 1.2.3.4" in a.GenericAgent._zabbix_install_args("zbxproxy", {"server": "1.2.3.4"})
+    out = a._redact_cmd(["bash", "-c", "x --infra-only --db-pass hunter2 --server s"])
+    assert "hunter2" not in out and "***" in out

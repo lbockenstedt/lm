@@ -232,6 +232,7 @@ _LDAP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/ldap/main/
 # dns/dhcp installers live IN the lm repo (in-repo modules), so their deploy-role
 # installer URL is the lm raw path (not a sibling repo like netbox/ldap).
 _ZBX_SERVER_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbix/main/install_zabbix_server.sh"
+_ZBX_DEFAULT_SERVER = "20.118.170.129:10051"  # LM-ZBX; override with LM_ZABBIX_SERVER
 _ZBX_PROXY_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbix/main/install_zbxproxy.sh"
 _DNS_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dns/install_dns.sh"
 _DHCP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dhcp/install_dhcp.sh"
@@ -299,6 +300,61 @@ _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
         "module_type": "agent",
     },
 }
+
+_SECRET_FLAGS = ("--db-pass", "--admin-password", "--tls-key", "--password")
+
+
+def _redact_cmd(cmd: list) -> str:
+    """Command line for logs with secret flag values masked."""
+    out = []
+    for part in cmd:
+        toks = shlex.split(part) if isinstance(part, str) and "--" in part else None
+        if toks:
+            masked = [("***" if i and toks[i - 1] in _SECRET_FLAGS else t) for i, t in enumerate(toks)]
+            part = " ".join(shlex.quote(t) for t in masked)
+        out.append(str(part))
+    return " ".join(out)
+
+
+def _deploy_host_facts() -> str:
+    """OS / arch / disk facts that commonly explain an installer failure."""
+    facts = {}
+    try:
+        for line in Path("/etc/os-release").read_text().splitlines():
+            k, _, v = line.partition("=")
+            if k in ("ID", "ID_LIKE", "VERSION_ID"):
+                facts[k] = v.strip('"')
+    except OSError:
+        pass
+    facts["arch"] = os.uname().machine
+    try:
+        facts["free_gb"] = round(shutil.disk_usage("/").free / 1e9, 1)
+    except OSError:
+        pass
+    return json.dumps(facts)
+
+
+def _tcp_check(host: str, port: int, timeout: float = 5.0) -> str:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return f"{host}:{port} reachable"
+    except OSError as e:
+        return f"{host}:{port} UNREACHABLE ({e})"
+
+
+def _zbxproxy_preflight(cmd: list) -> list:
+    """Connectivity the proxy installer needs: the Zabbix repo and the server's trapper port."""
+    lines = [_tcp_check("repo.zabbix.com", 443), _tcp_check("raw.githubusercontent.com", 443)]
+    joined = " ".join(str(c) for c in cmd)
+    toks = shlex.split(joined) if "--server" in joined else []
+    if "--server" in toks:
+        target = toks[toks.index("--server") + 1]
+        host, _, port = target.partition(":")
+        lines.append(_tcp_check(host, int(port or 10051)))
+    else:
+        lines.append("no --server in command (proxy config missing the Zabbix server address)")
+    return lines
+
 
 _DEPLOY_ROLE_MARKERS = {
     "ab": "/etc/systemd/system/ab.service",
@@ -1120,6 +1176,11 @@ class GenericAgent(BaseSpoke):
                  "zbxproxy": (("server", "server"), ("proxy_name", "proxy-name"),
                               ("tls_ca", "tls-ca"), ("tls_cert", "tls-cert"),
                               ("tls_key", "tls-key"))}[role_name]
+        config = dict(config)
+        if role_name == "zbxproxy" and not config.get("server"):
+            # The WebUI loads the role without config; default to the monitoring server.
+            config["server"] = os.environ.get("LM_ZABBIX_SERVER", _ZBX_DEFAULT_SERVER)
+            logger.info("zbxproxy: no server in LOAD_ROLE config, defaulting to %s", config["server"])
         return "".join(" --" + flag + " " + shlex.quote(str(config[key]))
                        for key, flag in flags if config.get(key))
 
@@ -1254,8 +1315,18 @@ class GenericAgent(BaseSpoke):
         keyed by ``role_name`` in ``_deploy_status_by_role`` so concurrent
         deploy roles (e.g. dns-server + dhcp-server) never clobber each other.
         """
-        self._deploy_status_by_role[role_name] = {"state": "running", "role": role_name}
+        started = time.time()
+        log_path = f"/var/log/lm/deploy-{role_name}.log"
+        self._deploy_status_by_role[role_name] = {"state": "running", "role": role_name,
+                                                  "started": started, "log_path": log_path}
         logger.info("Starting background deployment of role '%s'…", role_name)
+        # Telemetry: what is being run and on what, so a failure is diagnosable
+        # from the agent log alone.
+        logger.info("deploy[%s] cmd: %s", role_name, _redact_cmd(cmd))
+        logger.info("deploy[%s] host: %s", role_name, await asyncio.to_thread(_deploy_host_facts))
+        if role_name == "zbxproxy":
+            for line in await asyncio.to_thread(_zbxproxy_preflight, cmd):
+                logger.info("deploy[%s] preflight: %s", role_name, line)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -1264,23 +1335,34 @@ class GenericAgent(BaseSpoke):
             )
             stdout, _ = await proc.communicate()
             rc = proc.returncode
-            tail = (stdout or b"").decode(errors="replace")[-2000:]
+            full = (stdout or b"").decode(errors="replace")
+            tail = full[-6000:]
+            duration = round(time.time() - started, 1)
+            try:
+                os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                with open(log_path, "w") as fh:
+                    fh.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} rc={rc} duration={duration}s\n{full}")
+            except OSError as e:
+                logger.warning("deploy[%s] could not write %s: %s", role_name, log_path, e)
             if rc == 0:
-                logger.info("Deployment of '%s' completed successfully.", role_name)
+                logger.info("Deployment of '%s' completed successfully in %ss.", role_name, duration)
                 self._deploy_status_by_role[role_name] = {"state": "completed", "role": role_name,
-                                       "returncode": rc, "tail": tail}
+                                       "returncode": rc, "tail": tail, "duration": duration,
+                                       "log_path": log_path}
             else:
                 # Dump the install script's own output to the log — without this
                 # a failed deploy only recorded "rc=N" and the real cause (DNS,
                 # apt, postgres, gunicorn…) lived only in _deploy_status["tail"],
                 # which is lost the moment the agent reloads on a SPOKE_UPDATE.
-                logger.error("Deployment of '%s' failed (rc=%s). Install output (last 2KB):\n%s",
-                             role_name, rc, tail or "<no output captured>")
+                logger.error("Deployment of '%s' failed (rc=%s, %ss). Full log: %s. Install output (last 6KB):\n%s",
+                             role_name, rc, duration, log_path, tail or "<no output captured>")
                 self._deploy_status_by_role[role_name] = {"state": "failed", "role": role_name,
-                                       "returncode": rc, "tail": tail}
+                                       "returncode": rc, "tail": tail, "duration": duration,
+                                       "log_path": log_path}
         except Exception as e:
-            logger.error("Deployment of '%s' raised: %s", role_name, e)
-            self._deploy_status_by_role[role_name] = {"state": "error", "role": role_name, "error": str(e)}
+            logger.exception("Deployment of '%s' raised: %s", role_name, e)
+            self._deploy_status_by_role[role_name] = {"state": "error", "role": role_name, "error": str(e),
+                                                      "log_path": log_path}
         finally:
             self._deploy_tasks.pop(role_name, None)
 
