@@ -413,7 +413,7 @@ def register(app, hub, ctx):
         return {k: (res.get(k) if not isinstance(res.get(k), list) else
                     [{kk: x.get(kk) for kk in ("address", "hostname", "object_type", "method")}
                      for x in res[k] if isinstance(x, dict)])
-                for k in ("status", "message", "targets", "sources", "scanned",
+                for k in ("status", "message", "reason", "targets", "sources", "scanned",
                           "identified", "reachable", "added", "preview", "dry_run")}
 
     @app.post("/admin/ops/nw-neighbors")
