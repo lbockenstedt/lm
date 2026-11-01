@@ -3821,7 +3821,7 @@ async function loadOpnsenseManagement() {
     // menu strip (far-right #top-nav-actions) rather than the page body. The
     // target firewall is resolved inside the modal (auto-select when only one is
     // configured, a picker otherwise).
-    const writable = ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases'];
+    const writable = ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'Impairment'];
     const actions = document.getElementById('top-nav-actions');
     if (actions) {
         if (writable.includes(subMenu) && canEdit()) {
@@ -3840,6 +3840,7 @@ async function loadOpnsenseManagement() {
             if (sm === 'NAT Policies') return 'nat';
             if (sm === 'DNS Records') return 'dns';
             if (sm === 'Aliases') return 'aliases';
+            if (sm === 'Impairment') return 'impair';
             return null;
         };
         const suffix = suffixFor(subMenu);
@@ -3885,6 +3886,10 @@ async function loadOpnsenseManagement() {
         });
 
         if (items.length === 0) {
+            if (subMenu === 'Impairment' && !errors.length) {
+                container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No impairments. Use "+ Add Impairment" to add latency or packet loss for a host or subnet (needs the os-netimpair plugin on the firewall).</div>`;
+                return;
+            }
             // Distinguish "legitimately empty" from "the spoke returned an error"
             // — the latter carries a real reason (version/permissions) the user
             // needs to see, not a bare "No <things> found."
@@ -3901,6 +3906,14 @@ async function loadOpnsenseManagement() {
         else if (subMenu === 'NAT Policies') keys = ['firewall', 'type', 'protocol', 'source', 'external_ip', 'external_port', 'internal_ip', 'internal_port', 'description'];
         else if (subMenu === 'DNS Records') keys = ['firewall', 'hostname', 'ip', 'type', 'ttl', 'description'];
         else if (subMenu === 'Aliases') keys = ['firewall', 'name', 'type', 'content', 'category', 'description'];
+        else if (subMenu === 'Impairment') {
+            keys = ['firewall', 'target', 'interface', 'direction', 'latency', 'packet_loss', 'state', 'description'];
+            items.forEach(it => {
+                it.latency = `${it.delay} ms`;
+                it.packet_loss = `${it.loss} %`;
+                it.state = !it.complete ? 'incomplete' : (it.enabled ? 'active' : 'disabled');
+            });
+        }
         else keys = ['firewall', ...Object.keys(items[0] || {}).filter(k => k !== 'id' && !k.toLowerCase().includes('hit') && k !== 'firewall' && !k.startsWith('_'))];
 
         const hiddenRules = JSON.parse(localStorage.getItem('lm_hidden_firewall_rules') || '[]');
