@@ -377,6 +377,23 @@ def register(app, hub, ctx):
                        len(payload.get("devices", []) if cmd != "UPDATE_CONFIG" else []))
         return {"status": "ok", "spoke": sid, "result": res}
 
+    @app.post("/admin/ops/nw-verify")
+    async def admin_ops_nw_verify(request: Request):
+        """Probe a tenant's known devices with SSH and SNMP credentials from the
+        vault. Body: {"tenant": "default", "apply": bool}."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        from routes.monitoring import verify_credentials
+        try:
+            return await verify_credentials(hub, str((body or {}).get("tenant") or "default"),
+                                            bool((body or {}).get("apply")))
+        except Exception as e:
+            logger.exception("admin_ops: nw-verify failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.post("/admin/ops/set-cs-mode")
     async def admin_ops_set_cs_mode(request: Request):
         """Turn a pxmx node's **Client Simulation mode** on/off via loopback,
