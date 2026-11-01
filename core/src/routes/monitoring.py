@@ -28,16 +28,17 @@ async def inventory_devices(hub):
         val = s.get("value") or {}
         community = val.get("snmp_community") or val.get("community") or ""
         if community:
-            # The Global Admin slot belongs to the admin ("default") tenant.
-            bucket = "default" if s["bucket"] == cred_vault.ADMIN_BUCKET else s["bucket"]
-            tenant_snmp.setdefault(bucket, community)
+            tenant_snmp.setdefault(s["bucket"], community)
+    logger.info("monitoring: snmp vault buckets=%s", sorted(tenant_snmp))
     for c in scan:
         if c.get("snmp_community"):
             tenant_snmp.setdefault(c.get("tenant_id") or "default", c["snmp_community"])
     out = []
     for d in inv:
         tenant = d.get("tenant") or d.get("tenant_id") or "default"
-        community = d.get("snmp_community") or tenant_snmp.get(tenant, "")
+        # Tenant bucket first, then the Global Admin slot as the shared default.
+        community = (d.get("snmp_community") or tenant_snmp.get(tenant)
+                     or tenant_snmp.get(cred_vault.ADMIN_BUCKET, ""))
         out.append({"tenant": tenant, "name": d.get("name"),
                     "type": d.get("type") or d.get("object_type") or d.get("model") or "",
                     "ip": str(d.get("address") or "").split("/")[0],
