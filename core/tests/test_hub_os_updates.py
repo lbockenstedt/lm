@@ -894,3 +894,78 @@ def test_pending_reboots_follows_the_running_run():
                                          {"key": "spoke:s2", "status": "queued"}]}
     got = hub.osu_pending_reboots()
     assert got["in_window"] and [n["key"] for n in got["nodes"]] == ["spoke:s2"]
+
+
+# ── pre-patch VM snapshots ────────────────────────────────────────────────────
+
+class _VmHub(_RecordingHub):
+    """A spoke that runs in Proxmox VM 101 on pve1; its agent is the PVE host."""
+    fail_snapshot = False
+
+    def warm_get(self, ns, key):
+        return {"vms": [{"unique_id": "C/pve1/101", "name": "spoke1", "vmid": 101,
+                         "node": "pve1", "type": "qemu", "ips": []}]}
+
+    def get_hypervisor_spoke(self):
+        return "spoke-1"
+
+    async def request_response(self, target, cmd, data, timeout=None):
+        if cmd == "PXMX_VM_ACTION" and data["action"] == "snapshot" and self.fail_snapshot:
+            self.sent.append((target, cmd, dict(data)))
+            return {"payload": {"data": {"status": "ERROR", "message": "storage full"}}}
+        return await super().request_response(target, cmd, data, timeout)
+
+
+def _vm_hub():
+    hub = _checked_hub()
+    vm_hub = _VmHub(connections=hub.active_connections, agent_info=hub.agent_info,
+                    module_metadata={"spoke-1": {"display_name": "Spoke One", "hostname": "spoke1",
+                                                 "module_type": "hypervisor"}},
+                    responses=hub._responses)
+    return vm_hub
+
+
+@pytest.mark.asyncio
+async def test_nodes_are_linked_to_their_vm_and_pve_hosts_are_bare_metal():
+    hub = _vm_hub()
+    nodes = {n["kind"]: n for n in hub.osu_snapshot()["nodes"]}
+    assert nodes["spoke"]["vm"]["vmid"] == 101
+    assert nodes["agent"]["vm"] is None and "bare metal" in nodes["agent"]["vm_note"]
+
+
+@pytest.mark.asyncio
+async def test_vm_is_snapshotted_right_before_it_is_patched():
+    hub = _vm_hub()
+    await hub.osu_check_fleet(refresh=False)
+    hub.sent.clear()
+    await hub.osu_apply_fleet(node_keys=["spoke:spoke-1"])
+    await _drain()
+    cmds = [(s[1], s[2].get("action")) for s in hub.sent]
+    assert cmds.index(("PXMX_VM_ACTION", "snapshot")) < cmds.index(("OS_UPDATE_APPLY", None))
+    item = hub._osu_state()["run"]["items"][0]
+    assert item["status"] == "done" and item["snapshot"].startswith("lm-prepatch-")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_snapshot_means_the_node_is_not_patched():
+    hub = _vm_hub()
+    hub.fail_snapshot = True
+    await hub.osu_check_fleet(refresh=False)
+    hub.sent.clear()
+    await hub.osu_apply_fleet(node_keys=["spoke:spoke-1"])
+    await _drain()
+    assert not [s for s in hub.sent if s[1] == "OS_UPDATE_APPLY"]
+    item = hub._osu_state()["run"]["items"][0]
+    assert item["status"] == "failed" and "storage full" in item["message"]
+
+
+@pytest.mark.asyncio
+async def test_no_snapshot_when_turned_off():
+    hub = _vm_hub()
+    hub.osu_set_snapshot_config(False, 2)
+    await hub.osu_check_fleet(refresh=False)
+    hub.sent.clear()
+    await hub.osu_apply_fleet(node_keys=["spoke:spoke-1"])
+    await _drain()
+    assert not [s for s in hub.sent if s[1] == "PXMX_VM_ACTION"]
+    assert ("spoke-1", "OS_UPDATE_APPLY", {}) in hub.sent

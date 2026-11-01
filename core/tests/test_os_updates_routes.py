@@ -46,6 +46,15 @@ class _FakeHub:
         return {**self._snapshot, "nodes": [n for n in self._snapshot["nodes"]
                                             if f"{n['kind']}:{n['id']}" in only]}
 
+    def osu_snapshot_config(self):
+        return dict(getattr(self, "_snap_cfg", {"enabled": True, "keep": 2}))
+
+    def osu_set_snapshot_config(self, enabled, keep):
+        if not 1 <= int(keep) <= 20:
+            raise ValueError("keep must be between 1 and 20")
+        self._snap_cfg = {"enabled": bool(enabled), "keep": int(keep)}
+        return self.osu_snapshot_config()
+
     def osu_tenant_node_keys(self, tenants):
         return {"spoke:mine"} if "t1" in tenants else set()
 
@@ -201,11 +210,13 @@ def test_autopatch_per_node_roundtrip():
     c, hub = _client()
     assert c.get("/api/os-updates/auto-patch").json() == {"security_only": True, "nodes": [],
                                                           "exclude": [], "reboot_nodes": [],
-                                                          "window": None}
+                                                          "window": None,
+                                                          "snapshot": {"enabled": True, "keep": 2}}
     c.post("/api/os-updates/auto-patch", json={"node": "spoke:s1", "enabled": True})
     r = c.post("/api/os-updates/auto-patch", json={"security_only": False})
     assert r.json() == {"security_only": False, "nodes": ["spoke:s1"], "exclude": [],
-                        "reboot_nodes": ["spoke:s1"], "window": None}
+                        "reboot_nodes": ["spoke:s1"], "window": None,
+                        "snapshot": {"enabled": True, "keep": 2}}
     r = c.post("/api/os-updates/auto-patch", json={"node": "spoke:s1", "auto_reboot": False})
     assert r.json()["nodes"] == ["spoke:s1"] and r.json()["reboot_nodes"] == []
     assert c.post("/api/os-updates/auto-patch",
@@ -220,6 +231,17 @@ def test_autopatch_per_node_roundtrip():
     assert c.post("/api/os-updates/auto-patch", json={"window": w}).json()["window"] == w
     for bad in ("x", {"start": "9am"}, {"tz": "Nowhere/Land"}):
         assert c.post("/api/os-updates/auto-patch", json={"window": bad}).status_code == 400
+
+
+def test_prepatch_snapshot_setting_is_global_admin_only():
+    c, _ = _client()
+    r = c.post("/api/os-updates/auto-patch", json={"snapshot": {"enabled": False, "keep": 4}})
+    assert r.json()["snapshot"] == {"enabled": False, "keep": 4}
+    assert c.post("/api/os-updates/auto-patch",
+                  json={"snapshot": {"keep": 0}}).status_code == 400
+    c, _ = _tenant_client()
+    assert c.post("/api/os-updates/auto-patch",
+                  json={"snapshot": {"enabled": False}}).status_code == 403
 
 
 def test_fix_access_requires_a_password_and_relays_it():

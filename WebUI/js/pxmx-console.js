@@ -483,11 +483,123 @@ async function renderPxmxSettings(container) {
           <p class="text-[11px] text-slate-400 mb-3">Checked VMs cannot be deleted from anywhere — the list is enforced globally across all tenants. Managed by Global Admin.</p>
           <div class="max-h-64 overflow-y-auto border border-slate-200 rounded-md divide-y divide-slate-50">${protectRows}</div>
         </div>` : ''}
+        ${isAdmin() ? `<div class="hpe-card rounded-lg p-5 shadow-sm" id="pxmx-snap-schedules"></div>` : ''}
         <div class="flex justify-end items-center gap-3">
           <button onclick="savePxmxSettings()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold" title="Save hypervisor backup and console settings">Save</button>
           <span id="pxmx-settings-status" class="text-xs text-slate-400"></span>
         </div>
       </div>`;
+    if (isAdmin()) pxmxLoadSnapSchedules();
+}
+
+// ── VM snapshot schedules (Global Admin) ─────────────────────────────────────
+// Shared hub service (/api/vm-snapshots): snapshot picked VMs, or every VM with
+// a tag / in a pool, every N hours, keeping the last K. Saved separately from
+// the Save button below.
+async function pxmxLoadSnapSchedules(editId) {
+    const box = document.getElementById('pxmx-snap-schedules');
+    if (!box) return;
+    let d;
+    try { d = await apiJson('/api/vm-snapshots/schedules'); }
+    catch (e) { box.innerHTML = `<p class="text-sm text-red-600">Could not load snapshot schedules: ${escapeHtml(String(e.message || e))}</p>`; return; }
+    window._pxmxSnapData = d;
+    const btn = 'text-[11px] font-bold border border-slate-300 rounded px-2 py-0.5 hover:bg-slate-100';
+    const rows = d.schedules.map(s => {
+        const targets = [
+            s.vms.length ? `${s.vms.length} VM(s)` : '',
+            s.tags.length ? 'tags: ' + s.tags.join(', ') : '',
+            s.pools.length ? 'pools: ' + s.pools.join(', ') : '',
+        ].filter(Boolean).join(' · ');
+        const r = s.last_result;
+        const last = s.running ? '<span class="text-blue-600">running…</span>'
+            : !r ? '<span class="text-slate-400">never run</span>'
+            : `<span class="${r.errors.length ? 'text-red-600' : 'text-emerald-700'}" title="${escapeHtml(r.errors.join('\n'))}">${escapeHtml(new Date(r.at * 1000).toLocaleString())}: ${r.ok} ok${r.failed ? `, ${r.failed} failed` : ''}${r.errors.length && !r.failed ? ' — ' + escapeHtml(r.errors[0]) : ''}</span>`;
+        const id = escapeHtml(JSON.stringify(s.id));
+        return `<tr class="border-b border-slate-50 text-xs">
+          <td class="px-3 py-2 font-medium text-slate-700">${escapeHtml(s.name)}${s.enabled ? '' : ' <span class="text-slate-400">(paused)</span>'}</td>
+          <td class="px-3 py-2 text-slate-600">${escapeHtml(targets)} <span class="text-slate-400">= ${s.vm_count} VM(s)</span></td>
+          <td class="px-3 py-2 text-slate-600">every ${s.every_hours}h · keep ${s.keep}</td>
+          <td class="px-3 py-2">${last}</td>
+          <td class="px-3 py-2 whitespace-nowrap text-right">
+            <button class="${btn}" onclick="pxmxRunSnapSchedule(${id})" ${s.running ? 'disabled' : ''}>Run now</button>
+            <button class="${btn}" onclick="pxmxLoadSnapSchedules(${id})">Edit</button>
+            <button class="${btn} text-red-700" onclick="pxmxDeleteSnapSchedule(${id})">Delete</button>
+          </td></tr>`;
+    }).join('') || '<tr><td colspan="5" class="px-3 py-3 text-xs text-slate-400 italic">No schedules yet.</td></tr>';
+    box.innerHTML = `
+      <div class="flex items-center justify-between mb-3">
+        <p class="text-sm font-bold text-[#263040]">Snapshot schedules <span class="cursor-help font-normal text-slate-400" title="Snapshots the chosen VMs — and every VM carrying a chosen Proxmox tag or in a chosen pool — every N hours, deleting the oldest of that schedule's snapshots beyond Keep. Checked every 5 minutes; VMs are snapshotted one at a time. Deleting a schedule keeps its snapshots. Global Admin only.">ⓘ</span></p>
+        <button class="${btn}" onclick="pxmxLoadSnapSchedules('new')">+ Add schedule</button>
+      </div>
+      <div class="overflow-x-auto"><table class="w-full"><tbody>${rows}</tbody></table></div>
+      ${editId ? _pxmxSnapForm(d, d.schedules.find(s => s.id === editId)) : ''}`;
+}
+
+function _pxmxSnapForm(d, s) {
+    s = s || { id: '', name: '', enabled: true, vms: [], tags: [], pools: [], every_hours: 24, keep: 7 };
+    const inp = 'border border-slate-200 rounded-md px-3 py-1.5 text-sm w-full';
+    const lbl = 'block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1';
+    const boxes = (cls, items, picked, label) => items.length
+        ? items.map(v => `<label class="flex items-center gap-2 px-3 py-1 text-xs text-slate-700 hover:bg-slate-50 cursor-pointer"><input type="checkbox" class="${cls} rounded" value="${escapeHtml(label ? v.unique_id : v)}" ${picked.includes(label ? v.unique_id : v) ? 'checked' : ''}/>${label ? label(v) : escapeHtml(v)}</label>`).join('')
+        : '<div class="px-3 py-2 text-xs text-slate-400 italic">none</div>';
+    const vmLabel = v => `<span class="font-medium">${escapeHtml(v.name || '—')}</span> <span class="text-slate-400 font-mono">VMID ${escapeHtml(String(v.vmid))} · ${escapeHtml(v.node || '')}</span>`;
+    return `
+      <div class="mt-4 border border-slate-200 rounded-md p-4 space-y-3 bg-slate-50" id="pxmx-snap-form" data-id="${escapeHtml(s.id)}">
+        <p class="text-xs font-bold text-slate-600">${s.id ? 'Edit schedule' : 'New schedule'}</p>
+        <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
+          <div class="sm:col-span-2"><label class="${lbl}">Name</label><input id="snap-name" class="${inp}" value="${escapeHtml(s.name)}"/></div>
+          <div><label class="${lbl}">Every (hours)</label><input id="snap-every" type="number" min="1" max="8760" class="${inp}" value="${s.every_hours}"/></div>
+          <div><label class="${lbl}">Keep last</label><input id="snap-keep" type="number" min="1" max="100" class="${inp}" value="${s.keep}"/></div>
+        </div>
+        <label class="flex items-center gap-2 text-sm text-slate-700"><input id="snap-enabled" type="checkbox" class="rounded" ${s.enabled ? 'checked' : ''}/> Enabled</label>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="sm:col-span-2"><label class="${lbl}">VMs</label><div class="max-h-56 overflow-y-auto border border-slate-200 rounded-md bg-white">${boxes('snap-vm', d.vms, s.vms, vmLabel)}</div></div>
+          <div class="space-y-3">
+            <div><label class="${lbl}" title="Every VM with one of these Proxmox tags, including VMs added later">Tags</label><div class="max-h-24 overflow-y-auto border border-slate-200 rounded-md bg-white">${boxes('snap-tag', d.tags, s.tags)}</div></div>
+            <div><label class="${lbl}" title="Every VM in one of these Proxmox pools, including VMs added later">Pools</label><div class="max-h-24 overflow-y-auto border border-slate-200 rounded-md bg-white">${boxes('snap-pool', d.pools, s.pools)}</div></div>
+          </div>
+        </div>
+        <div class="flex justify-end gap-2">
+          <button class="text-sm border border-slate-300 rounded-md px-4 py-1.5" onclick="pxmxLoadSnapSchedules()">Cancel</button>
+          <button class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-1.5 rounded-md text-sm font-bold" onclick="pxmxSaveSnapSchedule()">Save schedule</button>
+        </div>
+      </div>`;
+}
+
+async function pxmxSaveSnapSchedule() {
+    const form = document.getElementById('pxmx-snap-form');
+    const picked = cls => Array.from(form.querySelectorAll('.' + cls)).filter(cb => cb.checked).map(cb => cb.value);
+    const body = {
+        name: document.getElementById('snap-name').value.trim(),
+        enabled: document.getElementById('snap-enabled').checked,
+        every_hours: parseFloat(document.getElementById('snap-every').value),
+        keep: parseInt(document.getElementById('snap-keep').value, 10),
+        vms: picked('snap-vm'), tags: picked('snap-tag'), pools: picked('snap-pool'),
+    };
+    const id = form.dataset.id;
+    try {
+        await apiJson('/api/vm-snapshots/schedules' + (id ? '/' + encodeURIComponent(id) : ''),
+            { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) });
+        showToast('Snapshot schedule saved', 'success');
+        pxmxLoadSnapSchedules();
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+}
+
+async function pxmxRunSnapSchedule(id) {
+    try {
+        await apiJson(`/api/vm-snapshots/schedules/${encodeURIComponent(id)}/run`, { method: 'POST' });
+        showToast('Snapshotting started — the result shows under Last run', 'success');
+        pxmxLoadSnapSchedules();
+        setTimeout(() => pxmxLoadSnapSchedules(), 15000);
+    } catch (e) { showToast('Run failed: ' + (e.message || e), 'error'); }
+}
+
+async function pxmxDeleteSnapSchedule(id) {
+    if (!confirm('Delete this snapshot schedule? Snapshots it already took are kept.')) return;
+    try {
+        await apiJson(`/api/vm-snapshots/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        pxmxLoadSnapSchedules();
+    } catch (e) { showToast('Delete failed: ' + (e.message || e), 'error'); }
 }
 
 async function savePxmxSettings() {

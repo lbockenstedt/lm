@@ -161,6 +161,7 @@ def register(app, hub, ctx):
         return _scoped_cfg(hub.osu_autopatch_config(), only)
 
     def _scoped_cfg(cfg, only):
+        cfg = {**cfg, "snapshot": hub.osu_snapshot_config()}
         if only is None:
             return cfg
         return {**cfg, "nodes": [k for k in cfg["nodes"] if k in only],
@@ -175,6 +176,8 @@ def register(app, hub, ctx):
         auto-reboot on/off for an auto-patch node (approving a node turns it on).
         ``{"window": {"start": "01:00", "end": "05:00", "tz": "America/Chicago"}}``
         sets the maintenance window auto-patch (and auto-reboot) runs in.
+        ``{"snapshot": {"enabled": bool, "keep": 2}}`` turns pre-patch VM
+        snapshots (manual and auto-patch) on/off and sets how many to keep.
         A Tenant Admin may only set ``node`` toggles for their own nodes."""
         sess, only = _require_access(request)
         try:
@@ -182,7 +185,7 @@ def register(app, hub, ctx):
         except Exception:  # noqa: BLE001
             body = {}
         body = body or {}
-        if only is not None and any(f in body for f in ("security_only", "exclude", "window")):
+        if only is not None and any(f in body for f in ("security_only", "exclude", "window", "snapshot")):
             raise HTTPException(status_code=403,
                                 detail="fleet-wide auto-patch settings are Global Admin only")
         actor = _who(sess)
@@ -206,6 +209,16 @@ def register(app, hub, ctx):
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=f"bad maintenance window: {exc}")
             logger.warning("[os-updates] auto-patch window=%s set by %s", cfg["window"], actor)
+        if "snapshot" in body:
+            snap = body["snapshot"]
+            if not isinstance(snap, dict):
+                raise HTTPException(status_code=400, detail="'snapshot' must be {enabled, keep}")
+            try:
+                sc = hub.osu_set_snapshot_config(bool(snap.get("enabled", True)), snap.get("keep", 2))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            logger.warning("[os-updates] pre-patch snapshots enabled=%s keep=%d set by %s",
+                           sc["enabled"], sc["keep"], actor)
         key = body.get("node")
         if key is not None:
             if not isinstance(key, str) or not key:
