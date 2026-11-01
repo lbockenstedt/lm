@@ -1640,3 +1640,38 @@ function closeNwConfigModal() {
     const modal = document.getElementById('nw-config-modal');
     if (modal) modal.remove();
 }
+
+// ── Monitoring (vendor-neutral; backed by the monitoring spoke) ──────────────
+async function loadMonitoringData() {
+    const container = document.getElementById('monitoring-container');
+    if (!container) return;
+    const actions = document.getElementById('top-nav-actions');
+    if (actions) actions.innerHTML = '';
+    let r;
+    try { r = await fetch('/api/monitoring/status'); } catch (e) { r = null; }
+    if (!r || !r.ok) {
+        container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Monitoring unavailable${r ? ` (HTTP ${r.status})` : ''}.</div>`;
+        return;
+    }
+    const st = await r.json();
+    const res = st.result || st;
+    const rows = Object.entries(res).filter(([, v]) => typeof v !== 'object' || v === null)
+        .map(([k, v]) => `<tr><td class="px-4 py-2 text-xs font-semibold text-slate-500">${escapeHtml(k)}</td><td class="px-4 py-2 text-xs font-mono text-slate-700">${escapeHtml(String(v))}</td></tr>`).join('');
+    const buttons = isAdmin() ? `<div class="flex gap-3 mt-4">
+        <button onclick="monitoringAction('sync', true)" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">Dry-run sync</button>
+        <button onclick="monitoringAction('sync', false)" class="text-xs px-3 py-1.5 rounded bg-[#01A982] text-white hover:opacity-90">Sync now</button>
+        <button onclick="if (confirm('Rebuild monitoring entirely from the LM inventory?')) monitoringAction('rebuild', false)" class="text-xs px-3 py-1.5 rounded border border-red-300 text-red-600 hover:bg-red-50">Rebuild</button>
+    </div><pre id="monitoring-result" class="mt-3 text-[11px] text-slate-600 whitespace-pre-wrap"></pre>` : '';
+    container.innerHTML = `<table class="w-full text-left"><tbody>${rows}</tbody></table>${buttons}`;
+}
+
+async function monitoringAction(action, dryRun) {
+    const out = document.getElementById('monitoring-result');
+    if (out) out.textContent = 'Working…';
+    const r = await fetch(`/api/monitoring/${action}`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({dry_run: dryRun})
+    });
+    const text = await r.text();
+    if (out) out.textContent = text.slice(0, 4000);
+}

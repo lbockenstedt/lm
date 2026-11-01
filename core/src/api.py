@@ -2032,13 +2032,14 @@ def create_app(hub):
     from routes import (
         setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, sim_assistant, request_assistant, exec as exec_routes, os_updates as os_updates_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, oci_nsg as oci_nsg_routes, cloud_nac as cloud_nac_routes, nac_users as nac_users_routes, key_vault as key_vault_routes, oci_vault as oci_vault_routes, cred_vault as cred_vault_routes, notifications as notifications_routes, collab, truenas, onboarding, test_feed as test_feed_routes,
     hub_watchdog as hub_watchdog_routes, hub_tls_verify as hub_tls_verify_routes, netbox_sso as netbox_sso_routes, security as security_routes, client_debug as client_debug_routes, admin_ops as admin_ops_routes,
-    cert_monitor as cert_monitor_routes,
+    cert_monitor as cert_monitor_routes, monitoring as monitoring_routes,
     )
     security_routes.register(app, hub, ctx)
     setup.register(app, hub, ctx)
     firewall.register(app, hub, ctx)
     nw.register(app, hub, ctx)
     truenas.register(app, hub, ctx)
+    monitoring_routes.register(app, hub, ctx)
     tenant_devices.register(app, hub, ctx)
     onboarding.register(app, hub, ctx)
     cppm.register(app, hub, ctx)
