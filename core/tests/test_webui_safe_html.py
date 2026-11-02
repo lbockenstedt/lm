@@ -1,8 +1,8 @@
 """safeHtml / rawHtml (WebUI/js/core/safe-html.js), run under node.
 
 safeHtml is the WebUI's escaping template tag (docs/webui.md, "How to write
-markup"). OS Updates is the first view written with it; a hostile CVE record
-must render as text, never as markup.
+markup"). Hostile data on the OS Updates page itself is covered in the browser
+by test_webui_os_updates_view.py.
 """
 import json
 import shutil
@@ -16,7 +16,6 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(not NODE, reason="node not installed")
 
 SAFE_HTML = (WEBUI / "js" / "core" / "safe-html.js").as_uri()
-OS_UPDATES = (WEBUI / "js" / "views" / "os-updates.js").as_uri()
 
 
 def _run(js):
@@ -48,26 +47,3 @@ def test_values_are_escaped_and_nesting_is_not_reescaped():
     assert out["empty"] == "[0]"
     assert out["raw"] == "<hr>"
     assert out["inString"] == "x<b>&lt;</b>y"
-
-
-def test_os_updates_cve_panel_escapes_hostile_data():
-    evil = '<img src=x onerror=alert(1)>'
-    data = {
-        "feeds": {"trixie": {"fetched_at": 0, "error": evil}}, "query": evil, "kind": "package",
-        "affected_nodes": 1, "checked_nodes": 2,
-        "results": [{"cve": "CVE-1", "urgency": evil, "description": evil, "affected": [
-            {"node": "agent:a", "label": evil, "release": "trixie", "package": evil,
-             "version": evil, "binaries": [evil], "update_pending": True}], "patched": []}],
-        "unknown": [{"label": evil, "reason": evil}],
-    }
-    # The page module's load-time side effects need a browser; stub them.
-    out = _run(f"""
-        globalThis.lmViews = {{}};
-        globalThis.setTimeout = globalThis.setInterval = () => 0;
-        const {{ _osuCveHtml }} = await import({json.dumps(OS_UPDATES)});
-        console.log(JSON.stringify(String(_osuCveHtml({json.dumps(data)}))));""")
-    assert "<img" not in out
-    assert out.count("&lt;img src=x onerror=alert(1)&gt;") >= 7
-    assert "1 of 2 checked node(s) affected" in out
-    assert "update pending" in out
-

@@ -136,11 +136,17 @@ Phase 6 htm is bound to `phtml`, so no name clash.
   from script-src in the CSP (core/src/api.py) once index.html's inline
   <script> blocks are moved to files too.
 
-## Phase 6 - Preact + htm (item 1)
+## Phase 6 - Preact + htm (item 1) [done for the OS Updates CVE lookup]
 - Vendor assets/preact+htm standalone (~5 KB), bind `phtml = htm.bind(h)`.
 - Use for new views and the most interactive existing ones; createView's
   state/setState/actions maps 1:1 to useState/handlers, so a migration is a
   mechanical port, not a redesign. createView stays for simple views.
+- Done: assets/preact-htm.module.js (htm 3.1.1 preact/standalone, unmodified;
+  ES module). The OS Updates "Who is affected?" lookup is a component
+  (CveLookup: form, fleet suggestions, result) imported as
+  `{ html as phtml, render, useState, useEffect }`; _osuCveView and its three
+  actions are gone. Hostile data is checked in the browser
+  (test_webui_os_updates_view.py) since phtml builds DOM, not strings.
 
 ## AB continuous UI walker (todo, after 0b)
 Run the webui_walk.py walk continuously from AB against the live hub and

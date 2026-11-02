@@ -31,7 +31,7 @@ Same as the hub: `https://<hub>` (443) or `http://<hub>:443` (no-cert). WS: `/ws
 - `main.js` + `js/*.js` (~37k lines together) — one app split into ordered classic scripts (`index.html` loads `main.js` first, then `js/*.js`; they share globals, so only load-time code is order-sensitive). `main.js` keeps the core: view router (`setView`/`setSubView`, `VIEW_LOADERS`, `VIEW_LABEL`, `VIEW_SUBMENUS`, `VIEW_CHILDREN`). Views: `dashboard`, `setup`, `settings`, `logs`, `ldap`, `cppm`, `cs`, `dhcp`, `dns`, `le`, `netbox`, `nw`, `opnsense`, `pxmx`. `AGENT_ROLES` map mirrors the agent-spoke `_ROLE_MAP`. HTTP via `fetch`/`setupFetch`/`csFetch` (cookie auth, same-origin). Newer pages are ES modules in `js/views/` (`<script type="module">`, loaded after the classic scripts) that import `js/core/*`; classic code opens them through the `lmViews` registry in `main.js` (e.g. `lmViews.osupdates(el)` for OS Updates), not window globals. VNC WS: `wss://${hubHost}` (443 implicit) or `ws://${hubHost}:443` fallback (no-cert) → `/ws/console/${session_id}?token=…`.
 - `sim-views.js` (~3.5k lines) — Client-Sim operator UI; `connectCSWebSocket()` → `new WebSocket(`${proto}//${location.host}/sim/ws`)` for telemetry; reconnect logic; VNC placeholders over `/sim/ws/console/{sessionId}`.
 - `update_handler.js` — update UI wiring.
-- `assets/html2canvas.min.js` — bundled.
+- `assets/` — vendored libraries: `html2canvas.min.js`, `idiomorph.min.js` (DOM morphing for views), `preact-htm.module.js` (Preact + htm for components).
 
 ## Notable behaviors & gotchas
 
@@ -51,7 +51,8 @@ Same as the hub: `https://<hub>` (443) or `http://<hub>:443` (no-cert). WS: `/ws
 - The result works anywhere a string does (`el.innerHTML = safeHtml`...``, `openModal(id, body)`).
 - A part of a page that re-renders (polling, toggles) should be a view: `createView({ el, state, render })` (`js/core/view.js`) returns `{ state, setState, refresh }`; `render(state)` returns `safeHtml`, and a refresh morphs the DOM (idiomorph, `assets/idiomorph.min.js`) instead of replacing it, so focus, scroll and open `<details>` survive. Give repeated rows an `id` so they match up.
 - Wire events with `delegate(root, actions)` (`js/core/view.js`), not inline `onclick=` and `window.fn` globals: `<button data-action="reboot" data-node="${key}">` calls `actions.reboot(el, event)` (click, or change on inputs/selects); `data-input` fires on every keystroke and `<form data-submit="search">` on Enter.
-- `core/tests/test_webui_ratchets.py` caps `escapeHtml(`, inline `on*=` handlers and `window.X =` globals — the counts may only go down. OS Updates (`js/settings.js`) is the reference view.
+- For an interactive part with its own state (a search box with results, a wizard), a Preact component is simpler: `import { html as phtml, render, useState, useEffect } from '../../assets/preact-htm.module.js'` (Preact + htm, vendored). Write `` phtml`<div class=${cls} onClick=${fn}>${text}</div>` ``; values are always text, and events are plain props, so no `data-action` is needed. Mount it with `` render(phtml`<${MyThing} />`, el) ``. Example: `CveLookup` in `js/views/os-updates.js`.
+- `core/tests/test_webui_ratchets.py` caps `escapeHtml(`, inline `on*=` handlers and `window.X =` globals — the counts may only go down. OS Updates (`js/views/os-updates.js`) is the reference view.
 
 ## How it works
 

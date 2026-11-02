@@ -30,13 +30,18 @@ NODES = {
     }],
 }
 
+# Hostile text in every field the CVE panel shows.
 CVES = {
-    "feeds": {"bookworm": {"fetched_at": 1700000000}}, "query": "php", "kind": "package",
+    "feeds": {"bookworm": {"fetched_at": 1700000000, "error": EVIL}}, "query": "php", "kind": "package",
     "affected_nodes": 1, "checked_nodes": 1,
-    "results": [{"cve": "CVE-2026-1", "description": EVIL, "affected": [
-        {"node": "agent:a1", "label": "web-01", "release": "bookworm", "package": "php8.2",
-         "version": "1", "binaries": ["php8.2"], "update_pending": True}], "patched": []}],
+    "results": [{"cve": "CVE-2026-1", "urgency": EVIL, "description": EVIL, "affected": [
+        {"node": "agent:a1", "label": "web-01", "release": EVIL, "package": EVIL,
+         "version": EVIL, "binaries": ["php8.2"], "update_pending": True}],
+        "patched": [{"node": "agent:b", "label": EVIL, "release": "bookworm", "package": "php8.2",
+                     "version": "2", "binaries": ["php8.2"]}]}],
+    "unknown": [{"label": EVIL, "reason": EVIL}],
 }
+FLEET = [{"cve": "CVE-2026-1", "nodes": 1, "urgency": "high", "description": EVIL}]
 
 
 def test_os_updates_list_survives_polling(hub_url_and_session):  # noqa: F811
@@ -61,6 +66,8 @@ def test_os_updates_list_survives_polling(hub_url_and_session):  # noqa: F811
             page.route("**/api/os-updates/check", nodes)
             page.route("**/api/os-updates/cves?*", lambda r: r.fulfill(
                 content_type="application/json", body=json.dumps(CVES)))
+            page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
+                content_type="application/json", body=json.dumps(FLEET)))
             page.goto(base + "/")
             # Login init ends with installClickFeedback(); setView('dashboard');
             # open OS Updates only after that.
@@ -74,10 +81,19 @@ def test_os_updates_list_survives_polling(hub_url_and_session):  # noqa: F811
             assert page.locator("#osu-apply-selected").inner_text() == "Deploy selected (1)"
             assert details.evaluate("d => d.open")
 
+            # CVE lookup (a Preact component): suggestions come from the
+            # fleet list; hostile data renders as text, never as markup.
+            page.wait_for_selector("#osu-cve-list option[value='CVE-2026-1']", state="attached")
             page.fill("#osu-cve-q", "php")
             page.click("text=Look up")
             page.wait_for_selector("#osu-cve-body >> text=CVE-2026-1")
-            assert EVIL in page.locator("#osu-cve-body").inner_text()
+            body = page.locator("#osu-cve-body")
+            assert body.inner_text().count(EVIL) >= 6
+            assert body.locator("img").count() == 0
+            assert "web-01 debian " in body.inner_text()
+            # Picking a suggestion looks it up straight away.
+            page.fill("#osu-cve-q", "CVE-2026-1")
+            page.wait_for_selector("#osu-cve-body >> text=1 of 1 checked node(s) affected")
             page.click("text=Select fixes (1)")
             assert page.get_by_label("php8.2").is_checked()
             assert page.locator("#osu-apply-selected").inner_text() == "Deploy selected (1)"

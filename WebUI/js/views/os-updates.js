@@ -4,6 +4,7 @@
 // the parts that re-render, delegate() for every button and field.
 import { safeHtml, rawHtml } from '../core/safe-html.js';
 import { createView, delegate } from '../core/view.js';
+import { html as phtml, render, useState, useEffect } from '../../assets/preact-htm.module.js';
 
 // ── OS Updates (left-nav view, Global-Admin) ────────────────────────────────
 // Fleet OS package updates. The HUB is the module: it collects pending-update
@@ -27,9 +28,6 @@ const _osuActions = {
     applySelected: () => osuApplySelected(),
     apply: () => osuApply(),
     cancel: () => osuCancel(),
-    cveSearch: () => osuCveSearch(),
-    cvePicked: el => osuCvePicked(el.value),
-    cveSelectFixes: () => osuCveSelectFixes(),
     toggleNode: el => osuToggleNode(el.dataset.node, el.checked),
     togglePkg: el => osuTogglePkg(el.dataset.node, el.dataset.pkg, el.checked),
     reboot: el => osuReboot(el.dataset.node),
@@ -115,24 +113,14 @@ function renderOsUpdatesView(content) {
                 <button id="osu-cancel" data-action="cancel" class="${btnSecCls} hidden">Cancel run</button>
                 <span id="osu-run" class="text-xs text-slate-500"></span>
             </div>
-            <div class="border border-slate-200 rounded-md px-3 py-2 bg-slate-50 space-y-2">
-                <form data-submit="cveSearch" class="flex flex-wrap items-end gap-3">
-                    <div class="space-y-1 flex-1 min-w-[16rem]">
-                        <label class="${labelCls}" title="Matches each node's installed packages (reported at the last check) against Debian's security tracker">Who is affected? — CVE id or package</label>
-                        <input type="text" id="osu-cve-q" list="osu-cve-list" autocomplete="off" class="${inputCls}" placeholder="e.g. CVE-2026-1234 or php" data-input="cvePicked">
-                        <datalist id="osu-cve-list"></datalist>
-                    </div>
-                    <button type="submit" class="${btnSecCls}">Look up</button>
-                </form>
-                <div id="osu-cve-body"></div>
-            </div>
+            <div id="osu-cve" class="border border-slate-200 rounded-md px-3 py-2 bg-slate-50 space-y-2"></div>
             <div id="osu-body"><p class="text-xs text-slate-400 italic">Loading…</p></div>
         </div>`;
     delegate(content, _osuActions);
     osuLoad();
     osuLoadAutoCheck();
     osuLoadAutoPatch();
-    osuLoadFleetCves();
+    render(phtml`<${CveLookup} />`, document.getElementById('osu-cve'));
 }
 
 // Footer "Pending Reboot" alert: during the maintenance window, lists the
@@ -158,25 +146,7 @@ async function osuRefreshRebootTray() {
 setTimeout(osuRefreshRebootTray, 5000);
 setInterval(osuRefreshRebootTray, 60000);
 
-// Picking a suggestion looks it up straight away.
-function osuCvePicked(value) {
-    const opts = document.getElementById('osu-cve-list')?.options || [];
-    if (Array.from(opts).some(o => o.value === value)) osuCveSearch();
-}
 
-// Suggestions for the who-is-affected box: only the CVEs that affect at least
-// one node, shown with their description so the right id is easy to pick.
-async function osuLoadFleetCves() {
-    try {
-        const cves = await apiJson('/api/os-updates/cves/fleet');
-        const list = document.getElementById('osu-cve-list');
-        if (!list) return;
-        list.innerHTML = safeHtml`${cves.map(c => safeHtml`<option value="${c.cve}" label="${
-            `${c.urgency ? c.urgency + ' · ' : ''}${c.nodes} node(s) · ${c.description}`}"></option>`)}`;
-        const q = document.getElementById('osu-cve-q');
-        if (q) q.title = `${cves.length} CVE(s) affect the fleet — start typing to pick one`;
-    } catch (e) { /* best-effort — typing an id still works */ }
-}
 
 async function osuLoadAutoPatch() {
     try {
@@ -358,14 +328,9 @@ async function osuCheck() {
 // leave a full dist-upgrade selected.
 const _osuSel = { nodes: new Set(), pkgs: {} };
 
-// The node list and the CVE lookup result are views (js/core/view.js): a
-// re-render morphs the page, so open package lists stay open while polling.
+// The node list is a view (js/core/view.js): a re-render morphs the page, so
+// open package lists stay open while polling.
 const _osuView = createView({ el: 'osu-body', state: { data: {} }, render: _osuBodyHtml });
-const _osuCveView = createView({ el: 'osu-cve-body', state: { data: null, loading: false, error: '' }, render: s =>
-    s.loading ? safeHtml`<p class="text-xs text-slate-400 italic">Looking up…</p>`
-        : s.error ? safeHtml`<p class="text-xs text-red-600">${s.error}</p>`
-        : s.data ? _osuCveHtml(s.data) : '' });
-
 function _osuNode(key) { return (_osuView.state.data.nodes || []).find(x => `${x.kind}:${x.id}` === key); }
 
 function _osuSelectedKeys() { return [...new Set([..._osuSel.nodes, ...Object.keys(_osuSel.pkgs)])]; }
@@ -385,19 +350,6 @@ function osuTogglePkg(key, pkg, on) {
     _osuRender(_osuView.state.data);
 }
 
-// CVE lookup: which nodes run a package vulnerable to a CVE (or, for a package
-// name, that package's open CVEs). Served from the last check's inventory.
-async function osuCveSearch() {
-    const q = (document.getElementById('osu-cve-q')?.value || '').trim();
-    if (!q) return;
-    _osuCveView.setState({ loading: true, error: '' });
-    try {
-        _osuCveView.setState({ loading: false, data: await apiJson('/api/os-updates/cves?q=' + encodeURIComponent(q)) });
-    } catch (e) {
-        _osuCveView.setState({ loading: false, data: null, error: e.message || String(e) });
-    }
-}
-
 // Pending upgrades on each affected node that belong to the vulnerable packages.
 function _osuCveFixes(d) {
     const nodes = {};
@@ -410,8 +362,8 @@ function _osuCveFixes(d) {
     return picks;
 }
 
-function osuCveSelectFixes() {
-    const picks = _osuCveFixes(_osuCveView.state.data || {});
+function osuCveSelectFixes(d) {
+    const picks = _osuCveFixes(d);
     picks.forEach(([key, pkg]) => {
         (_osuSel.pkgs[key] || (_osuSel.pkgs[key] = new Set())).add(pkg);
         _osuSel.nodes.delete(key);
@@ -420,53 +372,110 @@ function osuCveSelectFixes() {
     showToast(`${picks.length} package update(s) selected — review, then "Deploy selected".`, 'success');
 }
 
-function _osuCveHtml(d) {
-    const note = (cls, text) => safeHtml`<p class="text-xs ${cls}">${text}</p>`;
-    const parts = [];
+// "Who is affected?" — a Preact component (React-lite phase 6). Search a CVE
+// id or a package name; the hub answers from the last check's installed
+// packages and Debian's security tracker. phtml`` escapes every value.
+function CveLookup() {
+    const [q, setQ] = useState('');
+    const [fleet, setFleet] = useState([]);
+    const [result, setResult] = useState({ data: null, loading: false, error: '' });
+
+    // Suggestions: only the CVEs that affect at least one node.
+    useEffect(() => { apiJson('/api/os-updates/cves/fleet').then(setFleet, () => {}); }, []);
+
+    async function search(query) {
+        query = query.trim();
+        if (!query) return;
+        setResult({ data: null, loading: true, error: '' });
+        try {
+            setResult({ data: await apiJson('/api/os-updates/cves?q=' + encodeURIComponent(query)), loading: false, error: '' });
+        } catch (e) {
+            setResult({ data: null, loading: false, error: e.message || String(e) });
+        }
+    }
+
+    function typed(value) {
+        setQ(value);
+        if (fleet.some(c => c.cve === value)) search(value);  // picked a suggestion
+    }
+
+    const { inputCls, labelCls, btnSecCls } = _SETUP_CLS;
+    return phtml`
+        <form class="flex flex-wrap items-end gap-3" onSubmit=${e => { e.preventDefault(); search(q); }}>
+            <div class="space-y-1 flex-1 min-w-[16rem]">
+                <label class=${labelCls} title="Matches each node's installed packages (reported at the last check) against Debian's security tracker">Who is affected? — CVE id or package</label>
+                <input type="text" id="osu-cve-q" list="osu-cve-list" autocomplete="off" class=${inputCls}
+                    placeholder="e.g. CVE-2026-1234 or php" value=${q} onInput=${e => typed(e.target.value)}
+                    title=${fleet.length ? `${fleet.length} CVE(s) affect the fleet — start typing to pick one` : ''} />
+                <datalist id="osu-cve-list">
+                    ${fleet.map(c => phtml`<option value=${c.cve} label=${`${c.urgency ? c.urgency + ' · ' : ''}${c.nodes} node(s) · ${c.description}`} />`)}
+                </datalist>
+            </div>
+            <button type="submit" class=${btnSecCls}>Look up</button>
+        </form>
+        <div id="osu-cve-body">
+            ${result.loading ? phtml`<p class="text-xs text-slate-400 italic">Looking up…</p>`
+                : result.error ? phtml`<p class="text-xs text-red-600">${result.error}</p>`
+                : result.data ? phtml`<${CveResult} d=${result.data} />` : null}
+        </div>`;
+}
+
+function Badge({ text, color, title }) {
+    return phtml`<span class="text-[10px] font-bold ${_OSU_BADGE_CLS[color]} border rounded-full px-2 py-0.5" title=${title || ''}>${text}</span>`;
+}
+
+function CveNodeRow({ a, patched }) {
+    const status = patched ? phtml`<${Badge} text="patched" color="emerald" />`
+        : a.update_pending ? phtml`<${Badge} text="update pending" color="amber" title="An update for this package is waiting — deploy it from this page" />`
+        : a.fix_available ? phtml`<${Badge} text="fixed in Debian — not yet installable here" color="amber" title='Run "Check for updates"; the node may lack the security repo' />`
+        : phtml`<${Badge} text="no fix yet" color="red" title="Debian has not released a fix for this release" />`;
+    return phtml`<div class="flex flex-wrap items-center justify-between gap-2 py-0.5">
+        <span><b class="text-slate-700">${a.label}</b> <span class="text-slate-400">debian ${a.release}</span> — ${a.package} <span class="text-slate-400">${a.version} (${a.binaries.join(', ')})</span></span>
+        ${status}</div>`;
+}
+
+function CveCard({ r }) {
+    const flags = [r.urgency ? `${r.urgency} urgency` : '', r.remote ? 'remote' : ''].filter(Boolean).join(' · ');
+    const patched = r.patched || [];
+    return phtml`<div class="border border-slate-200 rounded-md p-2 bg-white text-[11px]">
+        <div class="flex flex-wrap items-center gap-2">
+            <a href=${'https://security-tracker.debian.org/tracker/' + encodeURIComponent(r.cve)} target="_blank" rel="noopener" class="font-bold text-slate-700 underline">${r.cve}</a>
+            <span class="text-slate-400">${flags}</span>
+            ${r.affected.length ? phtml`<${Badge} text=${`${r.affected.length} affected`} color="red" />` : phtml`<${Badge} text="no node affected" color="emerald" />`}
+        </div>
+        <div class="text-slate-500 mt-0.5">${r.description || ''}</div>
+        ${r.affected.map(a => phtml`<${CveNodeRow} a=${a} />`)}
+        ${patched.length ? phtml`<details class="mt-1"><summary class="cursor-pointer text-[11px] text-slate-400">${patched.length} node(s) have the package and are patched</summary>
+            ${patched.map(a => phtml`<${CveNodeRow} a=${a} patched />`)}</details>` : null}
+    </div>`;
+}
+
+function CveResult({ d }) {
+    const note = (cls, text) => phtml`<p class="text-xs ${cls}">${text}</p>`;
+    let body;
     if (!Object.keys(d.feeds || {}).length) {
-        parts.push(note('text-amber-700', 'No Debian security data yet — run "Check for updates" so nodes report their installed packages and the hub fetches the tracker feed.'));
+        body = note('text-amber-700', 'No Debian security data yet — run "Check for updates" so nodes report their installed packages and the hub fetches the tracker feed.');
     } else if (d.kind === 'cve' && !d.known) {
-        parts.push(note('text-slate-500', `${d.query} is not in Debian's security tracker for the release(s) in this fleet — it may not affect Debian packages, or not be published yet.`));
+        body = note('text-slate-500', `${d.query} is not in Debian's security tracker for the release(s) in this fleet — it may not affect Debian packages, or not be published yet.`);
     } else if (!(d.results || []).length) {
-        parts.push(note('text-slate-500', `No open CVEs match "${d.query}" on any checked node.`));
+        body = note('text-slate-500', `No open CVEs match "${d.query}" on any checked node.`);
     } else {
         const fixes = _osuCveFixes(d).length;
-        parts.push(safeHtml`<div class="flex flex-wrap items-center gap-2 text-xs">
-            <b class="${d.affected_nodes ? 'text-red-700' : 'text-emerald-700'}">${d.affected_nodes} of ${d.checked_nodes} checked node(s) affected</b>
-            ${fixes ? safeHtml`<button data-action="cveSelectFixes" class="text-[10px] font-bold text-emerald-800 border border-emerald-300 rounded px-2 py-0.5 hover:bg-emerald-50" title="Pick the pending updates of the vulnerable packages on affected nodes">Select fixes (${fixes})</button>` : ''}
-            ${d.truncated ? safeHtml`<span class="text-slate-400">showing the first 200 CVEs — narrow the search</span>` : ''}</div>`);
-        parts.push(d.results.map(r => {
-            const flags = [r.urgency ? `${r.urgency} urgency` : '', r.remote ? 'remote' : ''].filter(Boolean).join(' · ');
-            const row = (a, patched) => {
-                const status = patched ? _osuBadge('patched', 'emerald')
-                    : a.update_pending ? _osuBadge('update pending', 'amber', 'An update for this package is waiting — deploy it from this page')
-                    : a.fix_available ? _osuBadge('fixed in Debian — not yet installable here', 'amber', 'Run "Check for updates"; the node may lack the security repo')
-                    : _osuBadge('no fix yet', 'red', 'Debian has not released a fix for this release');
-                return safeHtml`<div class="flex flex-wrap items-center justify-between gap-2 py-0.5">
-                    <span><b class="text-slate-700">${a.label}</b> <span class="text-slate-400">debian ${a.release}</span>
-                    — ${a.package} <span class="text-slate-400">${a.version}</span>
-                    <span class="text-slate-400">(${a.binaries.join(', ')})</span></span>${status}</div>`;
-            };
-            const patched = (r.patched || []).length
-                ? safeHtml`<details class="mt-1"><summary class="cursor-pointer text-[11px] text-slate-400">${r.patched.length} node(s) have the package and are patched</summary>${r.patched.map(a => row(a, true))}</details>` : '';
-            return safeHtml`<div class="border border-slate-200 rounded-md p-2 bg-white text-[11px]">
-                <div class="flex flex-wrap items-center gap-2">
-                    <a href="https://security-tracker.debian.org/tracker/${encodeURIComponent(r.cve)}" target="_blank" rel="noopener" class="font-bold text-slate-700 underline">${r.cve}</a>
-                    <span class="text-slate-400">${flags}</span>
-                    ${r.affected.length ? _osuBadge(`${r.affected.length} affected`, 'red') : _osuBadge('no node affected', 'emerald')}
-                </div>
-                <div class="text-slate-500 mt-0.5">${r.description || ''}</div>
-                ${r.affected.map(a => row(a, false))}${patched}</div>`;
-        }));
+        body = phtml`<div class="flex flex-wrap items-center gap-2 text-xs">
+                <b class=${d.affected_nodes ? 'text-red-700' : 'text-emerald-700'}>${d.affected_nodes} of ${d.checked_nodes} checked node(s) affected</b>
+                ${fixes ? phtml`<button type="button" onClick=${() => osuCveSelectFixes(d)} class="text-[10px] font-bold text-emerald-800 border border-emerald-300 rounded px-2 py-0.5 hover:bg-emerald-50" title="Pick the pending updates of the vulnerable packages on affected nodes">Select fixes (${fixes})</button>` : null}
+                ${d.truncated ? phtml`<span class="text-slate-400">showing the first 200 CVEs — narrow the search</span>` : null}</div>
+            ${d.results.map(r => phtml`<${CveCard} r=${r} />`)}`;
     }
-    if ((d.unknown || []).length) {
-        parts.push(safeHtml`<details><summary class="cursor-pointer text-[11px] text-amber-700">${d.unknown.length} node(s) could not be assessed</summary>
-            ${d.unknown.map(u => safeHtml`<div class="text-[11px] text-slate-500"><b>${u.label}</b> — ${u.reason}</div>`)}</details>`);
-    }
+    const unknown = d.unknown || [];
     const feeds = Object.entries(d.feeds || {}).map(([c, f]) =>
         `${c}${f.fetched_at ? ' ' + new Date(f.fetched_at * 1000).toLocaleString() : ''}${f.error ? ' (refresh failed: ' + f.error + ')' : ''}`).join(', ');
-    parts.push(safeHtml`<p class="text-[10px] text-slate-400">Installed packages as of the last check · Debian security tracker data: ${feeds || 'none available'}</p>`);
-    return safeHtml`<div class="space-y-2">${parts}</div>`;
+    return phtml`<div class="space-y-2">
+        ${body}
+        ${unknown.length ? phtml`<details><summary class="cursor-pointer text-[11px] text-amber-700">${unknown.length} node(s) could not be assessed</summary>
+            ${unknown.map(u => phtml`<div class="text-[11px] text-slate-500"><b>${u.label}</b> — ${u.reason}</div>`)}</details>` : null}
+        <p class="text-[10px] text-slate-400">Installed packages as of the last check · Debian security tracker data: ${feeds || 'none available'}</p>
+    </div>`;
 }
 
 async function _osuDeploy(body, summary) {
@@ -658,4 +667,3 @@ function _osuBodyHtml({ data: d }) {
 
 lmViews.osupdates = renderOsUpdatesView;
 
-export { _osuCveHtml };  // for core/tests/test_webui_safe_html.py
