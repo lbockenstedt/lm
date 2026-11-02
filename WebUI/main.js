@@ -4527,7 +4527,7 @@ function renderTopNav(viewId) {
     // Uniform sub-nav tab styling across every view (Setup / System / Logs / …)
     // so they all match: tighter horizontal padding + normal letter-spacing so
     // the many-tab views (Logs) fit without a per-view special case.
-    const _tabCls = 'px-1.5 py-1 text-xs uppercase tracking-normal';
+    const _tabCls = 'px-1.5 py-1 text-xs uppercase tracking-normal whitespace-nowrap';
     topNav.innerHTML = subMenus.map((menu, i) => {
         const label = SUBMENU_LABELS[menu] || menu;
         return `<div class="sub-nav-item ${i === 0 ? 'active' : ''} ${_tabCls} cursor-pointer select-none" data-submenu="${menu}" onclick="setSubView('${menu}')">${label}</div>`;
@@ -4805,7 +4805,7 @@ function _viewTemplate(viewId) {
 
         case 'settings':
             return `<div class="space-y-6">
-  <div id="settings-content"></div>
+  <div id="settings-content" class="space-y-4"></div>
 </div>`;
 
         case 'logs':
