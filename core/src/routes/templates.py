@@ -442,8 +442,8 @@ def register(app, hub, ctx):
 
     def _resolve_target_agent(host_id):
         """Reverse-lookup ``hub.agent_info`` for the connected agent whose
-        hostname matches ``host_id`` (case-insensitive, short-name tolerant —
-        same shape as ``template_repo.latest_complete_for_host``). Returns the
+        hostname matches ``host_id`` (case-insensitive, short-name tolerant).
+        Returns the
         ``agent_id`` (key into agent_info / agent_config) or None. The fleet rows
         key on the agent's reported OS hostname, which can differ from the
         Proxmox cluster node name recorded on a backup — so we resolve via the

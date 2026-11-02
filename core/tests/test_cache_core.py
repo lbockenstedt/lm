@@ -89,18 +89,16 @@ def test_the_restarting_spoke_window_is_badged_not_errored(pol):
     now = 1_000_000.0
     for secs in (5, 20, 60, 119, 300, 3600):
         fetched = now - secs
-        assert pol.is_expired(fetched, now=now) is False, secs
-        assert pol.is_usable(fetched, now=now) is True, secs
+        assert pol.classify(fetched, now=now) != EXPIRED, secs
+        assert pol.classify(fetched, now=now) not in (MISSING, EXPIRED), secs
 
 
 def test_only_expired_may_error(pol):
     now = 1_000_000.0
-    assert pol.is_expired(now - 86401, now=now) is True
-    assert pol.is_usable(now - 86401, now=now) is False
+    assert pol.classify(now - 86401, now=now) == EXPIRED
     # ...and MISSING is the other non-usable state, but it is not "expired":
     # there is nothing to serve, which is a different message to the user.
-    assert pol.is_usable(None, now=now) is False
-    assert pol.is_expired(None, now=now) is False
+    assert pol.classify(None, now=now) == MISSING
 
 
 def test_is_stale_covers_stale_and_expired_only(pol):
@@ -118,15 +116,6 @@ def test_refresh_state_is_not_badged(pol):
     now = 1_000_000.0
     assert pol.classify(now - 45, now=now) == REFRESH
     assert pol.is_stale(now - 45, now=now) is False
-    assert pol.should_refresh(now - 45, now=now) is True
-
-
-def test_should_refresh_is_everything_but_fresh(pol):
-    now = 1_000_000.0
-    assert pol.should_refresh(now - 5, now=now) is False
-    for secs in (45, 200, 90000):
-        assert pol.should_refresh(now - secs, now=now) is True
-    assert pol.should_refresh(None, now=now) is True      # never fetched
 
 
 def test_now_defaults_to_wall_clock(pol):

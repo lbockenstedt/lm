@@ -108,10 +108,10 @@ def test_signed_headers_signature_verifies_against_the_public_key(rsa_keypair, m
     monkeypatch.setattr(oci_nsg._oci_auth, "_key_cache", {})  # avoid cross-test key-path collisions
     cfg = _cfg_for(key_path)
     body = json.dumps({"a": 1}, separators=(",", ":")).encode()
-    headers = oci_nsg._signed_headers(cfg, "POST",
+    headers = oci_nsg._oci_auth.signed_headers(cfg, "POST",
                                       "https://iaas.us-ashburn-1.oraclecloud.com/20160918/foo", body)
 
-    # Reconstruct the exact signing string the way _signed_headers built it,
+    # Reconstruct the exact signing string the way signed_headers built it,
     # then verify the returned Authorization signature independently.
     signed_order = ["(request-target)", "date", "host", "content-length", "content-type", "x-content-sha256"]
     parts = {
@@ -140,7 +140,7 @@ def test_signed_headers_omits_body_headers_for_get(rsa_keypair, monkeypatch):
     _, key_path = rsa_keypair
     monkeypatch.setattr(oci_nsg._oci_auth, "_key_cache", {})
     cfg = _cfg_for(key_path)
-    headers = oci_nsg._signed_headers(cfg, "GET",
+    headers = oci_nsg._oci_auth.signed_headers(cfg, "GET",
                                       "https://iaas.us-ashburn-1.oraclecloud.com/20160918/foo", None)
     assert "content-length" not in headers
     assert "x-content-sha256" not in headers
@@ -149,8 +149,8 @@ def test_signed_headers_omits_body_headers_for_get(rsa_keypair, monkeypatch):
 
 def test_signed_headers_raises_when_auth_config_incomplete():
     cfg = oci_nsg.OciConfig({"tenancy_ocid": "t"})  # missing user/fingerprint/key/region
-    with pytest.raises(oci_nsg.OciNsgError):
-        oci_nsg._signed_headers(cfg, "GET", "https://iaas.us-ashburn-1.oraclecloud.com/20160918/foo", None)
+    with pytest.raises(oci_nsg._oci_auth.OciAuthError):
+        oci_nsg._oci_auth.signed_headers(cfg, "GET", "https://iaas.us-ashburn-1.oraclecloud.com/20160918/foo", None)
 
 
 # ── NSG reconciliation (mocked OCI API) ──────────────────────────────────────

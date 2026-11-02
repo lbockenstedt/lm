@@ -205,8 +205,3 @@ class TruenasCacheMixin:
         if not entry:
             return 0.0
         return float(entry.get("fetched_at", 0.0) or 0.0)
-
-    def truenas_cache_fleet_state(self) -> str:
-        """Shared staleness verdict for the fleet snapshot (``cache_core``
-        vocabulary: fresh/refresh/stale/expired/missing)."""
-        return self.truenas_policy.classify(self.truenas_cache_fleet_fetched_at())
