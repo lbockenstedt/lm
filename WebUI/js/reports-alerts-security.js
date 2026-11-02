@@ -1220,6 +1220,9 @@ function initView(viewId, subView) {
         case 'dhcp':
             loadDHCPData(subView || 'Overview');
             break;
+        case 'zabbix':
+            loadMonitoringData();
+            break;
         case 'nw':
             loadNwData(subView || 'Overview');
             break;
