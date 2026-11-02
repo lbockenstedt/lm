@@ -2141,26 +2141,10 @@ def register(app, hub, ctx):
 
         gc = hub.state.system_state.get("global_config", {})
         devices = gc.get("nw_devices", []) or []
-        # LLDP crawling can reach past the targets, and earlier scans had no
-        # tenant check: drop this tenant's scan-found entries that NetBox
-        # assigns to another tenant, and never add such an address below.
-        mine = [d for d in devices if isinstance(d, dict) and d.get("source") == "scanned"
-                and access.same_tenant(d.get("tenant_id"), tenant_id)]
-        neighbors = [n for n in (gc.get("nw_monitor_neighbors") or [])
-                     if isinstance(n, dict) and access.same_tenant(n.get("tenant_id"), tenant_id)]
+        # LLDP crawling can reach past the targets: never add an address NetBox
+        # assigns to another tenant.
         foreign = await access.foreign_tenant_ips(hub, tenant_id, {
-            str(d.get("address") or "").strip()
-            for d in identified + reachable + mine + neighbors})
-        stale = [d for d in mine + neighbors if str(d.get("address") or "").strip() in foreign]
-        if stale:
-            ids = {id(d) for d in stale}
-            devices = [d for d in devices if id(d) not in ids]
-            gc["nw_devices"] = devices
-            gc["nw_monitor_neighbors"] = [n for n in (gc.get("nw_monitor_neighbors") or [])
-                                          if id(n) not in ids]
-            hub.state._mark_dirty()
-            logger.warning("nw scan tenant=%s removed %d entries owned by another tenant: %s",
-                           tenant_id, len(stale), sorted({d.get("address") for d in stale}))
+            str(d.get("address") or "").strip() for d in identified + reachable})
         identified = [d for d in identified if str(d.get("address") or "").strip() not in foreign]
         reachable = [d for d in reachable if str(d.get("address") or "").strip() not in foreign]
 
@@ -2232,12 +2216,11 @@ def register(app, hub, ctx):
             known.add(addr)
             added.append(new_dev)
 
-        if added or stale:
+        if added:
             gc["nw_devices"] = devices
             hub.state.system_state["global_config"] = gc
             hub.state._mark_dirty()
-            for sid in {spoke_id} | {d.get("spoke_id") for d in stale if d.get("spoke_id")}:
-                await _nw_push_fleet(hub, sid)
+            await _nw_push_fleet(hub, spoke_id)
 
         # Hosts that answered SNMP but aren't an auto-addable platform (e.g. TOR
         # switches) are still monitorable: hand them to the monitoring sync.
