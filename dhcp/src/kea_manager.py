@@ -1,9 +1,11 @@
 import base64
 import copy
+import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
-import requests
+import urllib.error
+import urllib.request
 import ipaddress
 import os
 import pwd
@@ -457,12 +459,6 @@ class KeaManager:
 
     def __init__(self, ca_url: str = "http://localhost:8001"):
         self.ca_url = ca_url.rstrip("/")
-        # One keep-alive Session reused across every RPC (sync() alone can fire
-        # a config-get + config-set + config-write + subnet4-list in quick
-        # succession). A fresh connection per call paid a TCP+HTTP handshake
-        # every time; the shared Session holds the keep-alive connection so
-        # back-to-back RPCs reuse it.
-        self._session = requests.Session()
 
     # ── Kea Control Agent RPC ─────────────────────────────────────────
 
@@ -479,10 +475,11 @@ class KeaManager:
         payload = {"command": command, "service": [service]}
         if args is not None:
             payload["arguments"] = args
+        req = urllib.request.Request(self.ca_url, data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"})
         try:
-            r = self._session.post(self.ca_url, json=payload, timeout=10)
-            r.raise_for_status()
-            result = r.json()
+            with urllib.request.urlopen(req, timeout=10) as r:
+                result = json.loads(r.read())
             if isinstance(result, list):
                 result = result[0]
             code = result.get("result", 0)
@@ -497,7 +494,7 @@ class KeaManager:
             if code not in (0, 3):
                 raise RuntimeError(result.get("text", "Kea error"))
             return result
-        except requests.RequestException as e:
+        except (urllib.error.URLError, OSError, ValueError) as e:
             raise RuntimeError(f"Kea CA unreachable: {e}")
 
     # ── Subnet (scope) management ─────────────────────────────────────

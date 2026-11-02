@@ -355,7 +355,7 @@ python3 -m venv venv
 [[ -f requirements.txt ]] && ./venv/bin/pip install -r requirements.txt -q
 # The agent imports /opt/lm/core (BaseControlPlane, frame_crypto, dep_guard, …),
 # so the agent venv needs core's deps too — NOT just agent/requirements.txt
-# (requests, websockets). A core change that adds an import (e.g. frame_crypto →
+# (websockets). A core change that adds an import (e.g. frame_crypto →
 # cryptography) otherwise crashes the agent on the next venv reinstall because
 # the runtime dep_guard only reads the agent's own requirements.txt. Install
 # core/requirements.txt here so a fresh agent venv has every transitive core dep.
@@ -378,7 +378,7 @@ stage_role() {
     local ROLE_REPO="" ROLE_CLONE_DIR="" ROLE_REQ="" ROLE_APT=""
     case "$role" in
         dns)        ROLE_REQ="$INSTALL_DIR/dns/requirements.txt" ;;
-        henet)      ROLE_REQ="$INSTALL_DIR/henet/requirements.txt" ;;   # in-repo (websockets/dotenv); manages HE.NET public DNS, no local server
+        henet)      ROLE_REQ="$INSTALL_DIR/henet/requirements.txt" ;;   # in-repo (websockets); manages HE.NET public DNS, no local server
         dhcp)       ROLE_REQ="$INSTALL_DIR/dhcp/requirements.txt" ;;
         console)    ROLE_REQ="$INSTALL_DIR/console/requirements.txt" ;;   # in-repo (pyserial); agent runs as root so /dev/tty* needs no dialout
         statuspage) ROLE_REQ="$INSTALL_DIR/statuspage/requirements.txt" ;;   # in-repo (fastapi/uvicorn); serves the public status page on its own port
