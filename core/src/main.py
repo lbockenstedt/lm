@@ -9565,18 +9565,6 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     if sid == module or sid.startswith(module + "-"))
         return sids
 
-    def _sentinel_module_commit(self, module):
-        """Best-effort short commit SHA for a sentinel module's spoke, from the
-        opportunistic self.spoke_commits capture (populated whenever a spoke's
-        COMMAND_RESULT happens to carry a commit_sha field — see the
-        version-capture site in the frame-dispatch loop). '' if not yet known
-        (older spokes that don't report commit_sha, or none connected)."""
-        for sid in self._sentinel_module_sids(module):
-            sha = self.spoke_commits.get(self._primary_key(sid))
-            if sha:
-                return sha[:8]
-        return ""
-
     @staticmethod
     def _error_lines(lines):
         """Error-level lines only — the cheap pre-gate before spending an LLM call."""

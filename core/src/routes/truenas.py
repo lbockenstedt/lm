@@ -6,7 +6,7 @@ per-tenant appliance CRUD (each record tenant-stamped + spoke_id-bound), and a
 poll-now endpoint that folds the rich poll into the cache twin.
 """
 from api import (
-    HTTPException, Request, _hub_msg, _unwrap_spoke, access, get_spoke_or_503,
+    HTTPException, Request, _hub_msg, _unwrap_spoke, access,
     logger, uuid,
 )
 
@@ -36,10 +36,6 @@ def register(app, hub, ctx):
             cfg["tenant_id"] = hub.state.get_spoke_tenant(spoke_id) or ""
         elif spoke_id and not cfg.get("tenant_id"):
             cfg["tenant_id"] = hub.state.get_spoke_tenant(spoke_id) or ""
-
-    def _get_truenas_spoke(hub):
-        """The connected truenas spoke id, or raise 503 (single-instance resolver)."""
-        return get_spoke_or_503(hub, "storage", "TrueNAS")
 
     def _truenas_appliances_for_spoke(hub, spoke_id: str):
         """The appliance slice a spoke should receive (bound-to-it, else unbound)."""

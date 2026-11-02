@@ -1331,9 +1331,6 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             return {}
         return _reduce_spoke_producing_counts(results)
 
-    def _ceil(x: float) -> int:
-        return sim_quota.ceil_to_int(x)
-
     def _adaptive_step(st: dict, q: dict, firing, now: float,
                        applied_op: Optional[int] = None,
                        applied_floor: Optional[int] = None,

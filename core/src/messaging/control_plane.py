@@ -640,12 +640,6 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         self._updater_thread.start()
         logger.info("Updater worker thread launched.")
 
-    def stop_updater_worker(self) -> None:
-        """Signal the updater thread to stop and join it (5s timeout)."""
-        self._updater_stop.set()
-        if self._updater_thread:
-            self._updater_thread.join(timeout=5.0)
-
     # ------------------------------------------------------------------
     # Log relay to hub
     # ------------------------------------------------------------------
@@ -3132,13 +3126,6 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         if not self.signer:
             return None
         return self.signer.sign(msg)
-
-    def _verify_signature(self, msg):
-        if not self.secret or not self.signer:
-            # If we don't have a secret yet, we can't verify signatures.
-            # In the bootstrap phase, we allow this so heartbeats can pass.
-            return True
-        return self.signer.verify(msg)
 
     def _encode_frame(self, msg) -> str:
         """Serialize + sign ``msg`` into the wire form ``<sig>.<body>`` (body

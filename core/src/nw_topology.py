@@ -277,22 +277,6 @@ class TopologyBuilder:
         if SOURCE_RANK.get(source, 99) < SOURCE_RANK.get(existing["source"], 99):
             self._edges[key] = edge
 
-    def has_link_on_port(self, node_id: str, port: str) -> bool:
-        """Whether a trusted (non-inferred) link already occupies this port.
-
-        MAC inference must not second-guess LLDP: if a port already has an LLDP
-        or declared link, a single MAC learned there is that same neighbour, not
-        an extra device hanging off it.
-        """
-        port = _s(port)
-        for edge in self._edges.values():
-            if edge["source"] == "mac":
-                continue
-            if (edge["a"] == node_id and edge["a_port"] == port) or \
-               (edge["b"] == node_id and edge["b_port"] == port):
-                return True
-        return False
-
     def add_trunk(self, node_id: str, port: str, count: int) -> None:
         self._trunks.append({"node": node_id, "port": _s(port), "mac_count": count})
 

@@ -178,9 +178,6 @@ PARTIAL = "PARTIAL"
 FAILED = "ERROR"
 
 
-class ClusterMemberError(Exception):
-    """A named cluster member is not currently connected."""
-
 
 def normalize_members(raw: Iterable[Any]) -> List[Dict[str, str]]:
     """Normalize operator-supplied member config into ``[{id, host, role}]``.
@@ -263,10 +260,6 @@ class ClusterCoordinator:
         cp = self._get_cp()
         connected = getattr(cp, "connected_agents", None) or {}
         return [m["id"] for m in self.members if m["id"] in connected]
-
-    def missing_ids(self) -> List[str]:
-        connected = set(self.connected_ids())
-        return [m["id"] for m in self.members if m["id"] not in connected]
 
     def member_links(self) -> List[Dict[str, Any]]:
         """Per-member transport view: declared config + live connection facts."""

@@ -771,9 +771,6 @@ class StateManager:
             return 0
         return tenant.get("quotas", {}).get(resource_type, 0)
 
-    def set_quota(self, tenant_id: str, resource_type: str, limit: int):
-        self.update_tenant(tenant_id, {"quotas": {resource_type: limit}})
-
     def assign_user_to_tenant(self, user_id: str, tenant_id: str):
         """Assigns a user to a specific tenant. Users can belong to multiple tenants."""
         users = self.system_state.setdefault("users", {})
@@ -869,11 +866,3 @@ class StateManager:
                 f"and reconciled admin flags across all admin users"
             )
         return changed
-
-    def check_quota(self, tenant_id: str, resource_type: str, requested_amount: int) -> bool:
-        current_usage = sum(
-            1 for res in self.system_state.get("resources", {}).values()
-            if res.get("tenant_id") == tenant_id and res.get("metadata", {}).get("type") == resource_type
-        )
-        limit = self.get_quota(tenant_id, resource_type)
-        return (current_usage + requested_amount) <= limit
