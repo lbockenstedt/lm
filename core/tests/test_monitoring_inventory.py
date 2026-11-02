@@ -122,3 +122,20 @@ def test_zbxproxy_load_config_uses_monitoring_server_setting():
     hub.state.system_state["global_config"]["monitoring_server"] = "zbx.example.com:10051"
     assert _zbxproxy_load_config(hub, {})["server"] == "zbx.example.com:10051"
     assert _zbxproxy_load_config(hub, {"server": "x"})["server"] == "x"
+    assert _zbxproxy_load_config(hub, {})["proxy_name"] == "lm-default"
+    assert _zbxproxy_load_config(hub, {"proxy_name": "mine"})["proxy_name"] == "mine"
+
+
+def test_monitoring_hosts_are_tenant_scoped_and_problems_flattened():
+    from routes import monitoring as m
+    hosts = [
+        {"name": "a", "tenant": "t1", "problems": [{"name": "p1", "severity": 2, "clock": 5}]},
+        {"name": "b", "tenant": "t2", "problems": [{"name": "p2", "severity": 5, "clock": 1}]},
+    ]
+    user = {"user": {"tenants": ["t1"]}}
+    assert [h["name"] for h in m.scope_monitoring_hosts(hosts, None, user, False)] == ["a"]
+    assert m.scope_monitoring_hosts(hosts, "t2", user, False) == []
+    assert [h["name"] for h in m.scope_monitoring_hosts(hosts, "t2", user, True)] == ["b"]
+    assert len(m.scope_monitoring_hosts(hosts, "default", {}, True)) == 2
+    assert m.scope_monitoring_hosts(hosts, None, {"user": {}}, False) == []
+    assert [p["name"] for p in m.monitoring_problem_list(hosts)] == ["p2", "p1"]

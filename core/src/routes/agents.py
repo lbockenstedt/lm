@@ -1,4 +1,5 @@
 """Generic-agent provision + agent command/load-role routes."""
+import re
 from api import (
     HTTPException, Request, logger,
 )
@@ -95,15 +96,40 @@ async def _guard_listener_conflicts(hub, spoke_id, requested):
                 detail=_listener_conflict_message(spoke_id, cand, clash))
 
 
-def _zbxproxy_load_config(hub, cfg):
-    """Fill the proxy's Zabbix server from the Monitoring page setting."""
+def _zbxproxy_tenant(hub, spoke_id):
+    try:
+        return hub.state.get_spoke_tenant(hub._primary_key(spoke_id)) or "default"
+    except Exception:  # noqa: BLE001
+        return "default"
+
+
+async def _zbxproxy_register(hub, cfg):
+    """Create the proxy in Zabbix so the server accepts it. Best effort: the
+    next install or a manual registration covers a monitoring spoke that is down."""
+    name = cfg.get("proxy_name")
+    sid = hub.get_spoke_by_type("monitoring")
+    if not (name and sid):
+        logger.warning("zbxproxy: not registered in Zabbix (name=%r, monitoring spoke=%s)", name, bool(sid))
+        return
+    try:
+        await hub.request_response(sid, "MON_PROXY_REGISTER", {"name": name}, timeout=60.0)
+    except Exception:  # noqa: BLE001
+        logger.exception("zbxproxy: registering proxy %r in Zabbix failed", name)
+
+
+def _zbxproxy_load_config(hub, cfg, spoke_id=None):
+    """Fill the proxy's Zabbix server from the System → Monitoring setting and
+    name it ``lm-<tenant>`` (the name the monitoring sync maps tenant hosts to)."""
     from routes.monitoring import monitoring_server_address
     cfg = dict(cfg or {})
+    if not cfg.get("proxy_name"):
+        tenant = re.sub(r"[^A-Za-z0-9._-]+", "-", _zbxproxy_tenant(hub, spoke_id))
+        cfg["proxy_name"] = f"lm-{tenant}"
     if not cfg.get("server"):
         server = monitoring_server_address(hub)
         if not server:
             raise HTTPException(status_code=400, detail="Monitoring server address is not set: "
-                                "enter it on the Monitoring page before installing a proxy")
+                                "enter it under System → Monitoring before installing a proxy")
         cfg["server"] = server
     return cfg
 
@@ -134,7 +160,7 @@ async def _load_roles_impl(hub, spoke_id, data):
                 if rname == "ldap-server":
                     rcfg = await _ldap_server_load_config(hub, spoke_id, rcfg)
                 elif rname == "zbxproxy":
-                    rcfg = _zbxproxy_load_config(hub, rcfg)
+                    rcfg = _zbxproxy_load_config(hub, rcfg, spoke_id)
                 res = await hub.request_response(spoke_id, "LOAD_ROLE",
                                                  {"role": rname, "config": rcfg,
                                                   **({"force": True} if rforce else {})},
@@ -145,6 +171,8 @@ async def _load_roles_impl(hub, spoke_id, data):
                     hub.spoke_module_types[hub._primary_key(spoke_id)] = pl["module_type"]
                     logger.info("Agent %s morphed to module_type %s",
                                 spoke_id, pl["module_type"])
+                if rname == "zbxproxy" and isinstance(pl, dict) and pl.get("status") == "SUCCESS":
+                    await _zbxproxy_register(hub, rcfg)
                 if rname == "ldap-server" and isinstance(pl, dict) and pl.get("status") == "SUCCESS":
                     await _auto_request_ldap_server_cert(hub, spoke_id, rcfg)
                 results.append({"role": rname,
@@ -160,7 +188,7 @@ async def _load_roles_impl(hub, spoke_id, data):
     if role == "ldap-server":
         config = await _ldap_server_load_config(hub, spoke_id, config)
     elif role == "zbxproxy":
-        config = _zbxproxy_load_config(hub, config)
+        config = _zbxproxy_load_config(hub, config, spoke_id)
     # LOAD_ROLE on the multi-role agent shallow-clones the role's sibling repo on
     # first load — a network git clone that routinely exceeds the 5s default.
     result = await hub.request_response(spoke_id, "LOAD_ROLE",
@@ -184,6 +212,8 @@ async def _load_roles_impl(hub, spoke_id, data):
                             spoke_id, sub_id, payload.get("module_type"))
         if role == "ldap-server":
             await _auto_request_ldap_server_cert(hub, spoke_id, config)
+        if role == "zbxproxy":
+            await _zbxproxy_register(hub, config)
     return payload
 
 
