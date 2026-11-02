@@ -2182,7 +2182,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Cloud', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons', 'Diagnostics'],
+    settings: ['General', 'User Access', 'Cloud', 'Tenant Config', 'Sync', 'Monitoring', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons', 'Diagnostics'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-console', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
     setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'Test Data Feed'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'Impairment', 'DHCP Leases', 'Interfaces'],

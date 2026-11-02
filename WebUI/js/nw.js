@@ -1678,23 +1678,16 @@ function _monFetch(url, ms = 45000) {
 
 async function _renderMonitoring(container) {
     const admin = isAdmin();
-    const [sr, hr, cr] = await Promise.all([
+    const [sr, hr] = await Promise.all([
         admin ? _monFetch('/api/monitoring/status') : Promise.resolve(undefined),
         _monFetch('/api/monitoring/hosts' + _monTenantQuery()),
-        admin ? _monFetch('/api/monitoring/config') : Promise.resolve(null)
     ]);
-    const proxyServer = (cr && cr.ok) ? ((await cr.json()).server || '') : '';
-    if (!sr || !sr.ok) {
-        const knob = (admin && cr && cr.ok) ? `<div class="mt-4 flex items-center gap-2">
-        <label class="text-xs text-slate-500" for="monitoring-server">Monitoring server (proxies connect here)</label>
-        <input id="monitoring-server" value="${escapeHtml(proxyServer)}" placeholder="zabbix.example.com:10051" class="text-xs px-2 py-1 border border-slate-300 rounded w-72 font-mono">
-        <button onclick="saveMonitoringServer()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">Save</button>
-        <span id="monitoring-server-msg" class="text-[11px] text-slate-400"></span>
-    </div>` : '';
-        container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Monitoring unavailable${sr ? ` (HTTP ${sr.status})` : ' (no response — monitoring spoke offline or timed out)'}.</div>${knob}`;
+    const probe = admin ? sr : hr;
+    if (!probe || !probe.ok) {
+        container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Monitoring unavailable${probe ? ` (HTTP ${probe.status})` : ' (no response — monitoring spoke offline or timed out)'}.</div>`;
         return;
     }
-    const res = _monData(await sr.json());
+    const res = (admin && sr && sr.ok) ? _monData(await sr.json()) : {};
     let hosts = [];
     if (hr && hr.ok) hosts = _monData(await hr.json()).hosts || [];
     const tenant = (typeof currentTenant !== 'undefined' && currentTenant) ? currentTenant : null;
@@ -1730,13 +1723,7 @@ async function _renderMonitoring(container) {
     const problemsTable = `<h3 class="mt-6 text-sm font-semibold text-slate-700">Open problems (${allProbs.length})</h3>` + (allProbs.length
         ? `<div class="max-h-96 overflow-y-auto"><table class="w-full text-left mt-2"><thead class="sticky top-0 bg-white"><tr class="text-[10px] uppercase tracking-wider text-slate-400"><th class="px-3 py-2">Severity</th><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Problem</th><th class="px-3 py-2">Since</th></tr></thead><tbody>${probRows}</tbody></table></div>`
         : `<div class="py-4 text-slate-400 italic text-sm">No open problems.</div>`);
-    const serverKnob = (admin && cr && cr.ok) ? `<div class="mt-4 flex items-center gap-2">
-        <label class="text-xs text-slate-500" for="monitoring-server">Monitoring server (proxies connect here)</label>
-        <input id="monitoring-server" value="${escapeHtml(proxyServer)}" placeholder="zabbix.example.com:10051" class="text-xs px-2 py-1 border border-slate-300 rounded w-72 font-mono">
-        <button onclick="saveMonitoringServer()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">Save</button>
-        <span id="monitoring-server-msg" class="text-[11px] text-slate-400"></span>
-    </div>` : '';
-    const buttons = admin ? `${serverKnob}<div class="flex gap-3 mt-4">
+    const buttons = admin ? `<div class="flex gap-3 mt-4">
         <button onclick="monitoringAction('sync', true)" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">Dry-run sync</button>
         <button onclick="monitoringAction('sync', false)" class="text-xs px-3 py-1.5 rounded bg-[#01A982] text-white hover:opacity-90">Sync now</button>
         <button onclick="if (confirm('Rebuild monitoring entirely from the LM inventory?')) monitoringAction('rebuild', false)" class="text-xs px-3 py-1.5 rounded border border-red-300 text-red-600 hover:bg-red-50">Rebuild</button>

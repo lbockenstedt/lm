@@ -122,6 +122,8 @@ def test_zbxproxy_load_config_uses_monitoring_server_setting():
     hub.state.system_state["global_config"]["monitoring_server"] = "zbx.example.com:10051"
     assert _zbxproxy_load_config(hub, {})["server"] == "zbx.example.com:10051"
     assert _zbxproxy_load_config(hub, {"server": "x"})["server"] == "x"
+    assert _zbxproxy_load_config(hub, {})["proxy_name"] == "lm-default"
+    assert _zbxproxy_load_config(hub, {"proxy_name": "mine"})["proxy_name"] == "mine"
 
 
 def test_monitoring_hosts_are_tenant_scoped_and_problems_flattened():
