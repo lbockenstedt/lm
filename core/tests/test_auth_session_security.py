@@ -381,6 +381,15 @@ def test_static_asset_keeps_its_own_cache_control(tmp_path):
         assert "no-store" not in cc
 
 
+def test_unversioned_static_asset_is_revalidated(tmp_path):
+    # ES modules import js/core/* without ?v=; those must never be served stale
+    # next to a freshly deployed (versioned) view module.
+    c, hub = _build({}, tmp_path)
+    r = c.get("/js/core/view.js")
+    assert r.status_code == 200
+    assert r.headers.get("cache-control") == "no-cache"
+
+
 # ── 4. LM_CORS_ORIGINS (no wildcard+credentials) ─────────────────────────────
 
 def test_cors_default_reflects_no_origin(tmp_path):
