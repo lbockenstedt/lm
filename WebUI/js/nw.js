@@ -1663,12 +1663,19 @@ function _monData(j) {
     return d || {};
 }
 
+// Bounded fetch so a slow spoke shows an error instead of "Loading" forever.
+function _monFetch(url, ms = 45000) {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), ms);
+    return fetch(url, { signal: ac.signal }).catch(e => { console.warn('monitoring fetch failed', url, e); return null; }).finally(() => clearTimeout(t));
+}
+
 async function _renderMonitoring(container) {
     const admin = isAdmin();
     const [sr, hr, cr] = await Promise.all([
-        fetch('/api/monitoring/status').catch(() => null),
-        fetch('/api/monitoring/hosts').catch(() => null),
-        admin ? fetch('/api/monitoring/config').catch(() => null) : Promise.resolve(null)
+        _monFetch('/api/monitoring/status'),
+        _monFetch('/api/monitoring/hosts'),
+        admin ? _monFetch('/api/monitoring/config') : Promise.resolve(null)
     ]);
     const proxyServer = (cr && cr.ok) ? ((await cr.json()).server || '') : '';
     if (!sr || !sr.ok) {
@@ -1678,7 +1685,7 @@ async function _renderMonitoring(container) {
         <button onclick="saveMonitoringServer()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">Save</button>
         <span id="monitoring-server-msg" class="text-[11px] text-slate-400"></span>
     </div>` : '';
-        container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Monitoring unavailable${sr ? ` (HTTP ${sr.status})` : ''}.</div>${knob}`;
+        container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Monitoring unavailable${sr ? ` (HTTP ${sr.status})` : ' (no response — monitoring spoke offline or timed out)'}.</div>${knob}`;
         return;
     }
     const res = _monData(await sr.json());
