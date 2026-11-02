@@ -2182,11 +2182,13 @@ def create_app(hub):
                 # immutable — a new version is a new URL — so cache it hard and
                 # stop re-downloading ~2 MB of JS on every page load (the actual
                 # cause of the slow load: main.js was 1.3 MB, no-store, ~9s wire).
-                # An unversioned static request gets a short cache as a safety net.
+                # An unversioned request is revalidated every time: ES modules
+                # (js/views/*) import js/core/* without ?v=, and a cached old
+                # core file would break a freshly deployed view.
                 if request.query_params.get("v"):
                     response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
                 else:
-                    response.headers["Cache-Control"] = "public, max-age=300"
+                    response.headers["Cache-Control"] = "no-cache"
                 return response
 
             index_html_path = os.path.join(ui_path, "index.html")

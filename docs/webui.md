@@ -28,7 +28,7 @@ Same as the hub: `https://<hub>` (443) or `http://<hub>:443` (no-cert). WS: `/ws
 ## Key files
 
 - `index.html` (520 lines) — shell: login overlay (`#login-panel`), first-run `#setup-panel`, main nav (`#main-nav` `setView()`), top/secondary nav, viewport, cache status bar, footer status dots. Themes: `sw-theme` (HPE), `gl-theme` (Graylog), `cicada-theme`.
-- `main.js` + `js/*.js` (~37k lines together) — one app split into ordered classic scripts (`index.html` loads `main.js` first, then `js/*.js`; they share globals, so only load-time code is order-sensitive). `main.js` keeps the core: view router (`setView`/`setSubView`, `VIEW_LOADERS`, `VIEW_LABEL`, `VIEW_SUBMENUS`, `VIEW_CHILDREN`). Views: `dashboard`, `setup`, `settings`, `logs`, `ldap`, `cppm`, `cs`, `dhcp`, `dns`, `le`, `netbox`, `nw`, `opnsense`, `pxmx`. `AGENT_ROLES` map mirrors the agent-spoke `_ROLE_MAP`. HTTP via `fetch`/`setupFetch`/`csFetch` (cookie auth, same-origin). VNC WS: `wss://${hubHost}` (443 implicit) or `ws://${hubHost}:443` fallback (no-cert) → `/ws/console/${session_id}?token=…`.
+- `main.js` + `js/*.js` (~37k lines together) — one app split into ordered classic scripts (`index.html` loads `main.js` first, then `js/*.js`; they share globals, so only load-time code is order-sensitive). `main.js` keeps the core: view router (`setView`/`setSubView`, `VIEW_LOADERS`, `VIEW_LABEL`, `VIEW_SUBMENUS`, `VIEW_CHILDREN`). Views: `dashboard`, `setup`, `settings`, `logs`, `ldap`, `cppm`, `cs`, `dhcp`, `dns`, `le`, `netbox`, `nw`, `opnsense`, `pxmx`. `AGENT_ROLES` map mirrors the agent-spoke `_ROLE_MAP`. HTTP via `fetch`/`setupFetch`/`csFetch` (cookie auth, same-origin). Newer pages are ES modules in `js/views/` (`<script type="module">`, loaded after the classic scripts) that import `js/core/*`; classic code opens them through the `lmViews` registry in `main.js` (e.g. `lmViews.osupdates(el)` for OS Updates), not window globals. VNC WS: `wss://${hubHost}` (443 implicit) or `ws://${hubHost}:443` fallback (no-cert) → `/ws/console/${session_id}?token=…`.
 - `sim-views.js` (~3.5k lines) — Client-Sim operator UI; `connectCSWebSocket()` → `new WebSocket(`${proto}//${location.host}/sim/ws`)` for telemetry; reconnect logic; VNC placeholders over `/sim/ws/console/{sessionId}`.
 - `update_handler.js` — update UI wiring.
 - `assets/html2canvas.min.js` — bundled.
@@ -44,6 +44,7 @@ Same as the hub: `https://<hub>` (443) or `http://<hub>:443` (no-cert). WS: `/ws
 
 ## How to write markup
 
+- Write a new page as an ES module in `js/views/` (see `js/views/os-updates.js`): `import { safeHtml, rawHtml } from '../core/safe-html.js'` and `import { createView, delegate } from '../core/view.js'`, register its entry point on `lmViews`, and add a `<script type="module">` tag at the end of `index.html`.
 - Build HTML with the `safeHtml` tagged template (`js/core/safe-html.js`): every `${value}` is HTML-escaped, so server data can't inject markup. Don't call `escapeHtml()` inside it (that double-escapes).
 - Nested `safeHtml` results and arrays (`${rows.map(r => safeHtml`<li>${r.name}</li>`)}`) are inserted as-is — no `.join('')`. `null`/`undefined`/`false` render nothing; `0` renders `0`.
 - Trusted markup (e.g. `helpIcon()` output) must be wrapped in `rawHtml(...)` — grep-able, so every opt-out is reviewable.

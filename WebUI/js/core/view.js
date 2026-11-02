@@ -1,3 +1,5 @@
+// ES module: import { createView, delegate } from '../core/view.js';
+//
 // createView: a piece of the page drawn from state. render(state) returns
 // markup (normally safeHtml); every refresh morphs the element to it with
 // idiomorph instead of replacing innerHTML, so focus, scroll, and the user's
@@ -10,7 +12,7 @@
 // `el` is an element id (looked up on every refresh, since a view's container
 // is re-created when its page is re-opened) or an element.
 
-function morphHtml(el, markup) {
+export function morphHtml(el, markup) {
     if (!window.Idiomorph) { el.innerHTML = markup; return; }
     Idiomorph.morph(el, markup, {
         morphStyle: 'innerHTML',
@@ -23,7 +25,7 @@ function morphHtml(el, markup) {
     });
 }
 
-function createView({ el, state = {}, render }) {
+export function createView({ el, state = {}, render }) {
     const view = {
         state,
         setState(patch) {
@@ -48,7 +50,7 @@ function createView({ el, state = {}, render }) {
 // the same root just swaps the actions (a page re-render keeps one listener).
 const _FORM_FIELDS = new Set(['INPUT', 'SELECT', 'TEXTAREA']);
 
-function delegate(root, actions) {
+export function delegate(root, actions) {
     const bound = !!root._lmActions;
     root._lmActions = actions;
     if (bound) return;
@@ -66,5 +68,3 @@ function delegate(root, actions) {
     on('input', 'data-input', () => true);
     on('submit', 'data-submit', () => true);
 }
-
-if (typeof module !== 'undefined') module.exports = { createView, morphHtml, delegate };

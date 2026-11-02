@@ -119,12 +119,22 @@ Phase 6 htm is bound to `phtml`, so no name clash.
 - core/tests/test_webui_ratchets.py: escapeHtml(, on*= handlers and
   window.X = counts may only go down.
 
-## Phase 5 - ES modules (item 6, part B)
-- Then drop 'unsafe-inline' from script-src in the CSP (core/src/api.py)
-  once index.html's inline <script> blocks are moved to files too.
+## Phase 5 - ES modules (item 6, part B) [done for OS Updates]
 - Only when a file has no inline handlers / window.* consumers left: switch it
   to import/export and <script type="module">.
 - Remaining cross-file globals become explicit imports. Last file to flip: core.
+- Done: OS Updates moved out of settings.js into js/views/os-updates.js
+  (module); js/core/safe-html.js and view.js are modules it imports. Classic
+  code reaches a module page through one registry, `lmViews` (main.js):
+  the module sets lmViews.osupdates, setView calls it -- no window globals.
+  Module code still reads classic globals (apiJson, showToast, openModal...)
+  by name; those become imports when their own files flip.
+- Cache: modules import js/core/* without ?v=, so serve_ui now sends
+  unversioned files `Cache-Control: no-cache` (was max-age=300) -- a stale
+  core file can't sit next to a newly deployed view.
+- Still to do (needs every inline handler gone first): drop 'unsafe-inline'
+  from script-src in the CSP (core/src/api.py) once index.html's inline
+  <script> blocks are moved to files too.
 
 ## Phase 6 - Preact + htm (item 1)
 - Vendor assets/preact+htm standalone (~5 KB), bind `phtml = htm.bind(h)`.

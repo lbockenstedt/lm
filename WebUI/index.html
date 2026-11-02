@@ -568,7 +568,7 @@
             </div>
             <div class="flex items-center gap-3">
                 <div id="footer-console-slot" class="flex items-center gap-2"></div>
-                <!-- Auto-reboot alert (settings.js osuRefreshRebootTray): only shown in the
+                <!-- Auto-reboot alert (js/views/os-updates.js osuRefreshRebootTray): only shown in the
                      maintenance window while nodes are about to be rebooted. -->
                 <div id="reboot-tray" class="hidden items-center gap-1.5 group relative cursor-pointer" onclick="setView('osupdates')">
                     <div class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></div>
@@ -756,8 +756,6 @@
          Tests read this list (core/tests/webui_src.py); the last file sets
          window.lmCoreLoaded for the error guard above. -->
     <script src="assets/idiomorph.min.js?v=0.8.0"></script>
-    <script src="js/core/safe-html.js?v=__WEBUI_VERSION__"></script>
-    <script src="js/core/view.js?v=__WEBUI_VERSION__"></script>
     <script src="main.js?v=__WEBUI_VERSION__"></script>
     <script src="js/reports-alerts-security.js?v=__WEBUI_VERSION__"></script>
     <script src="js/settings.js?v=__WEBUI_VERSION__"></script>
@@ -775,5 +773,7 @@
     <script src="sim-views.js?v=__WEBUI_VERSION__"></script>
     <script src="update_handler.js?v=__WEBUI_VERSION__"></script>
     <script src="help.js?v=__WEBUI_VERSION__"></script>
+    <!-- ES modules (js/views/); they import js/core/* themselves. -->
+    <script type="module" src="js/views/os-updates.js?v=__WEBUI_VERSION__"></script>
 </body>
 </html>

@@ -1,4 +1,5 @@
-// Safe HTML templates (docs/webui.md, "How to write markup").
+// Safe HTML templates (docs/webui.md, "How to write markup"). ES module:
+//   import { safeHtml, rawHtml } from '../core/safe-html.js';
 //
 //   el.innerHTML = safeHtml`<b>${user.name}</b>`;
 //
@@ -10,7 +11,7 @@
 // and old string templates unchanged. Server data can't create a SafeHtml,
 // so it can't bypass escaping.
 
-class SafeHtml {
+export class SafeHtml {
     constructor(markup) { this.markup = markup; }
     toString() { return this.markup; }
 }
@@ -28,7 +29,7 @@ function _safeHtmlPart(value) {
     return _safeHtmlEscape(value);
 }
 
-function safeHtml(strings, ...values) {
+export function safeHtml(strings, ...values) {
     let out = strings[0];
     values.forEach((value, i) => { out += _safeHtmlPart(value) + strings[i + 1]; });
     return new SafeHtml(out);
@@ -36,8 +37,6 @@ function safeHtml(strings, ...values) {
 
 // Trusted markup only (static strings, helpIcon() output). Grep for rawHtml
 // to review every place escaping is skipped.
-function rawHtml(markup) {
+export function rawHtml(markup) {
     return new SafeHtml(markup === null || markup === undefined ? '' : String(markup));
 }
-
-if (typeof module !== 'undefined') module.exports = { safeHtml, rawHtml, SafeHtml };

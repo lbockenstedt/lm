@@ -15,17 +15,19 @@ from webui_src import WEBUI
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(not NODE, reason="node not installed")
 
-SAFE_HTML = WEBUI / "js" / "core" / "safe-html.js"
-SETTINGS = WEBUI / "js" / "settings.js"
+SAFE_HTML = (WEBUI / "js" / "core" / "safe-html.js").as_uri()
+OS_UPDATES = (WEBUI / "js" / "views" / "os-updates.js").as_uri()
 
 
 def _run(js):
-    out = subprocess.run([NODE, "-e", js], capture_output=True, text=True, check=True)
+    """Run an ES-module snippet under node; it prints one JSON value."""
+    out = subprocess.run([NODE, "--input-type=module", "-e", js],
+                         capture_output=True, text=True, check=True)
     return json.loads(out.stdout)
 
 
 def _with_helper(body):
-    return SAFE_HTML.read_text(encoding="utf-8") + "\n" + body
+    return f"import {{ safeHtml, rawHtml }} from {json.dumps(SAFE_HTML)};\n" + body
 
 
 def test_values_are_escaped_and_nesting_is_not_reescaped():
@@ -48,19 +50,7 @@ def test_values_are_escaped_and_nesting_is_not_reescaped():
     assert out["inString"] == "x<b>&lt;</b>y"
 
 
-def _top_level(src, start):
-    """The source of the top-level statement starting at ``start``, up to the
-    next line that is a lone closing brace (or the end of a one-line const)."""
-    i = src.index(start)
-    if start.startswith("const "):
-        return src[i:src.index(";\n", i) + 2]
-    return src[i:src.index("\n}\n", i) + 3]
-
-
 def test_os_updates_cve_panel_escapes_hostile_data():
-    src = SETTINGS.read_text(encoding="utf-8")
-    parts = [_top_level(src, s) for s in (
-        "const _OSU_BADGE_CLS", "const _osuBadge", "function _osuCveFixes", "function _osuCveHtml")]
     evil = '<img src=x onerror=alert(1)>'
     data = {
         "feeds": {"trixie": {"fetched_at": 0, "error": evil}}, "query": evil, "kind": "package",
@@ -70,9 +60,12 @@ def test_os_updates_cve_panel_escapes_hostile_data():
              "version": evil, "binaries": [evil], "update_pending": True}], "patched": []}],
         "unknown": [{"label": evil, "reason": evil}],
     }
-    out = _run(_with_helper(
-        "const window = {}; const _osuView = { state: { data: {} } };\n" + "\n".join(parts)
-        + f"\nconsole.log(JSON.stringify(String(_osuCveHtml({json.dumps(data)}))));"))
+    # The page module's load-time side effects need a browser; stub them.
+    out = _run(f"""
+        globalThis.lmViews = {{}};
+        globalThis.setTimeout = globalThis.setInterval = () => 0;
+        const {{ _osuCveHtml }} = await import({json.dumps(OS_UPDATES)});
+        console.log(JSON.stringify(String(_osuCveHtml({json.dumps(data)}))));""")
     assert "<img" not in out
     assert out.count("&lt;img src=x onerror=alert(1)&gt;") >= 7
     assert "1 of 2 checked node(s) affected" in out

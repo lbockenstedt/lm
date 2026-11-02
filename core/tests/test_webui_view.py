@@ -1,7 +1,10 @@
-"""createView (WebUI/js/core/view.js) in headless Chromium: a refresh morphs
-the DOM instead of replacing it, so what the user did to the page survives the
-5-second OS Updates poll (docs/webui-react-lite-plan.md, Phase 3)."""
+"""createView and delegate (WebUI/js/core/view.js) in headless Chromium.
+
+A refresh morphs the DOM instead of replacing it, so what the user did to the
+page survives the 5-second OS Updates poll; delegate wires data-action markup
+(docs/webui-react-lite-plan.md, Phases 3-4)."""
 import os
+from urllib.parse import urlparse
 
 import pytest
 
@@ -13,13 +16,31 @@ else:
     sync_api = pytest.importorskip("playwright.sync_api")
 
 
+def _open(browser, body):
+    """A page at a fake origin that serves WebUI/ files, with ``body`` as its
+    HTML and the core modules' exports on window."""
+    page = browser.new_page()
+
+    def serve(route):
+        path = urlparse(route.request.url).path.lstrip("/")
+        if path:
+            route.fulfill(path=str(WEBUI / path))
+        else:
+            route.fulfill(content_type="text/html", body=body)
+
+    page.route("http://lm.test/**", serve)
+    page.goto("http://lm.test/")
+    page.add_script_tag(url="/assets/idiomorph.min.js")
+    page.evaluate("""async () => {
+        Object.assign(window, await import('/js/core/safe-html.js'), await import('/js/core/view.js'));
+    }""")
+    return page
+
+
 def test_refresh_keeps_dom_nodes_and_open_details():
     with sync_api.sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page()
-        page.set_content('<div id="box"></div>')
-        for f in ("assets/idiomorph.min.js", "js/core/safe-html.js", "js/core/view.js"):
-            page.add_script_tag(content=(WEBUI / f).read_text(encoding="utf-8"))
+        page = _open(browser, '<div id="box"></div>')
         out = page.evaluate("""() => {
             const v = createView({ el: 'box', state: { n: 1, name: '<b>x</b>' }, render: s => safeHtml`
                 <details id="d"><summary>${s.n} item(s)</summary><input id="i"></details>
@@ -42,13 +63,11 @@ def test_refresh_keeps_dom_nodes_and_open_details():
 def test_delegate_dispatches_data_actions():
     with sync_api.sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page()
-        page.set_content("""<div id="root">
+        page = _open(browser, """<div id="root">
             <button data-action="press" data-id="7"><b>Go</b></button>
             <label><input type="checkbox" data-action="tick" data-id="8"> tick</label>
             <form data-submit="search"><input id="q" data-input="typed"></form>
         </div><button id="outside" data-action="press" data-id="9">x</button>""")
-        page.add_script_tag(content=(WEBUI / "js/core/view.js").read_text(encoding="utf-8"))
         page.evaluate("""() => {
             window.calls = [];
             const actions = {
@@ -69,4 +88,4 @@ def test_delegate_dispatches_data_actions():
         url = page.url
         browser.close()
     assert calls == ["press 7", "tick 8 true", "typed php", "search"]
-    assert url == "about:blank"  # submit was prevented
+    assert url == "http://lm.test/"  # submit was prevented

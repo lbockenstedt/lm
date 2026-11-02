@@ -58,6 +58,7 @@ def test_os_updates_list_survives_polling(hub_url_and_session):  # noqa: F811
                 route.fulfill(content_type="application/json", body=json.dumps(data))
 
             page.route("**/api/os-updates", nodes)
+            page.route("**/api/os-updates/check", nodes)
             page.route("**/api/os-updates/cves?*", lambda r: r.fulfill(
                 content_type="application/json", body=json.dumps(CVES)))
             page.goto(base + "/")
@@ -91,7 +92,7 @@ def test_os_updates_list_survives_polling(hub_url_and_session):  # noqa: F811
 
             # A running roll polls every 5 s; the open list survives each poll.
             data["run"] = {"status": "running", "done": 0, "total": 1, "current": "web-01", "items": []}
-            page.evaluate("osuLoad()")
+            page.click("text=Check for updates")
             first = len(polls)
             page.wait_for_timeout(5600)
             assert len(polls) > first, "page did not poll"
