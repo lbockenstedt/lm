@@ -65,7 +65,7 @@ def test_vault_snmp_secret_applies_to_tenant_devices(monkeypatch):
     assert not b["snmp"]
 
 
-def test_admin_slot_snmp_secret_is_the_global_default(monkeypatch):
+def test_admin_slot_snmp_secret_is_only_the_default_tenants(monkeypatch):
     async def fake_overlay_many(hub, records, storage_key):
         return records
 
@@ -75,9 +75,11 @@ def test_admin_slot_snmp_secret_is_the_global_default(monkeypatch):
     monkeypatch.setattr(cred_vault, "automation_list_by_type", snmp_secrets)
     monkeypatch.setattr(instance_vault, "overlay_many", fake_overlay_many)
     hub = SimpleNamespace(state=SimpleNamespace(system_state={"global_config": {
-        "nw_devices": [{"name": "a", "address": "10.0.0.1", "tenant_id": "other"}]}}))
-    (a,) = asyncio.run(monitoring.inventory_devices(hub))
-    assert a["snmp_community"] == "adm"
+        "nw_devices": [{"name": "a", "address": "10.0.0.1", "tenant_id": "other"},
+                       {"name": "b", "address": "10.0.0.2", "tenant_id": "default"}]}}))
+    a, b = asyncio.run(monitoring.inventory_devices(hub))
+    assert a["snmp_community"] == "" and not a["snmp"]
+    assert b["snmp_community"] == "adm" and b["snmp"]
 
 
 def test_verify_credentials_reports_ssh_and_snmp_and_gates_failed_snmp(monkeypatch):
