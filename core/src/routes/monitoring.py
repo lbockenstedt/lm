@@ -203,25 +203,71 @@ def monitoring_problem_list(hosts):
 MONITORING_SYNC_INTERVAL = 300.0
 
 
-async def run_monitoring_sync_loop(hub, interval=MONITORING_SYNC_INTERVAL):
+def monitoring_sync_config(hub):
+    gc = hub.state.system_state.get("global_config", {}) or {}
+    cfg = gc.get("monitoring_sync") or {}
+    try:
+        minutes = max(1, int(cfg.get("interval_minutes") or MONITORING_SYNC_INTERVAL // 60))
+    except (TypeError, ValueError):
+        minutes = int(MONITORING_SYNC_INTERVAL // 60)
+    return {"enabled": cfg.get("enabled") is not False, "interval_minutes": minutes}
+
+
+def record_monitoring_sync(hub, res=None, error=None, trigger="scheduled"):
+    """Remember the last sync outcome so the System > Sync card can show it."""
+    import time
+    data = {}
+    if isinstance(res, dict):
+        data = res.get("payload", {}).get("data", res)
+        data = data if isinstance(data, dict) else {}
+    errors = data.get("errors") or []
+    status = "error" if (error or errors) else "success"
+    gc = hub.state.system_state.setdefault("global_config", {})
+    gc["monitoring_sync_status"] = {
+        "ts": time.time(), "status": status, "trigger": trigger,
+        "created": data.get("created", 0), "refreshed": data.get("refreshed", 0),
+        "disabled": data.get("disabled", 0), "deleted": data.get("deleted", 0),
+        "errors": len(errors) + (1 if error else 0),
+        "message": str(error or (errors[0] if errors else ""))[:300]}
+    hub.state._mark_dirty()
+
+
+async def run_monitoring_sync_once(hub, trigger="scheduled"):
+    sid = hub.get_spoke_by_type("monitoring")
+    if not sid:
+        return None
+    try:
+        res = await hub.request_response(
+            sid, "MON_SYNC", {"devices": await inventory_devices(hub), "dry_run": False},
+            timeout=300.0)
+    except Exception as e:  # noqa: BLE001
+        record_monitoring_sync(hub, error=e, trigger=trigger)
+        raise
+    record_monitoring_sync(hub, res=res, trigger=trigger)
+    return res
+
+
+async def run_monitoring_sync_loop(hub):
     """Keep Zabbix converged with the LM inventory (the source of truth) without
-    anyone pressing Sync. Skips quietly while the monitoring spoke is offline."""
+    anyone pressing Sync. Honours System > Sync settings; skips quietly while the
+    monitoring spoke is offline."""
     import asyncio
+    import time
     await asyncio.sleep(120)
+    last = 0.0
     while True:
         try:
-            sid = hub.get_spoke_by_type("monitoring")
-            if sid:
-                res = await hub.request_response(
-                    sid, "MON_SYNC",
-                    {"devices": await inventory_devices(hub), "dry_run": False},
-                    timeout=300.0)
-                logger.info("monitoring: scheduled sync done: %s", str(res)[:300])
+            cfg = monitoring_sync_config(hub)
+            if cfg["enabled"] and time.time() - last >= cfg["interval_minutes"] * 60:
+                last = time.time()
+                res = await run_monitoring_sync_once(hub)
+                if res is not None:
+                    logger.info("monitoring: scheduled sync done: %s", str(res)[:300])
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 — never kill the loop
             logger.warning("monitoring: scheduled sync failed: %s", e)
-        await asyncio.sleep(interval)
+        await asyncio.sleep(30)
 
 
 def register(app, hub, ctx):
@@ -304,7 +350,39 @@ def register(app, hub, ctx):
     @app.post("/api/monitoring/sync")
     async def monitoring_sync(request: Request):
         sid = _admin_spoke(request)
-        return await _relay(sid, "MON_SYNC", await _payload(request))
+        payload = await _payload(request)
+        res = await _relay(sid, "MON_SYNC", payload)
+        if not payload.get("dry_run"):
+            record_monitoring_sync(hub, res=res, trigger="manual")
+        return res
+
+    @app.get("/api/monitoring/sync-config")
+    async def monitoring_sync_config_get(request: Request):
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        return {**monitoring_sync_config(hub), "status": gc.get("monitoring_sync_status")}
+
+    @app.put("/api/monitoring/sync-config")
+    async def monitoring_sync_config_put(request: Request):
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        try:
+            minutes = max(1, min(1440, int(body.get("interval_minutes") or 5)))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="interval_minutes must be a number")
+        gc = hub.state.system_state.setdefault("global_config", {})
+        gc["monitoring_sync"] = {"enabled": bool(body.get("enabled", True)),
+                                 "interval_minutes": minutes}
+        hub.state._mark_dirty()
+        return monitoring_sync_config(hub)
 
     @app.post("/api/monitoring/rebuild")
     async def monitoring_rebuild(request: Request):
