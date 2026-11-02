@@ -159,7 +159,7 @@ def _load_ca():
     return ca_key, ca_cert
 
 
-def _sign_leaf(public_key, common_name: str, sans=None, days: int = 397) -> str:
+def _sign_leaf(public_key, common_name: str, sans=None, days: int = 397, server_auth: bool = False) -> str:
     """Sign a ``clientAuth`` leaf for ``public_key`` with the hub CA and return the
     fullchain PEM (leaf + CA). Subject/SANs are chosen by the HUB, never taken from
     the requester."""
@@ -185,7 +185,11 @@ def _sign_leaf(public_key, common_name: str, sans=None, days: int = 397) -> str:
             data_encipherment=False, key_agreement=False, key_cert_sign=False,
             crl_sign=False, encipher_only=False, decipher_only=False), critical=True)
         # THE point of this whole module: the clientAuth EKU LE won't issue.
-        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
+        # server_auth adds serverAuth for peers that are both ends of a TLS link
+        # (Zabbix server/proxy/agent), which OpenSSL otherwise rejects.
+        .add_extension(x509.ExtendedKeyUsage(
+            [ExtendedKeyUsageOID.CLIENT_AUTH] + ([ExtendedKeyUsageOID.SERVER_AUTH] if server_auth else [])),
+            critical=False)
         .add_extension(x509.SubjectAlternativeName([x509.DNSName(n) for n in san_names]), critical=False)
         .add_extension(x509.SubjectKeyIdentifier.from_public_key(public_key), critical=False)
     )
@@ -212,7 +216,23 @@ def issue_client_cert(common_name: str, sans=None, days: int = 397):
     return fullchain, key_pem
 
 
-def sign_csr(csr_pem: str, common_name: str, sans=None, days: int = 397) -> str:
+def issue_service_cert(common_name: str, sans=None, days: int = 397):
+    """Client+server leaf and its key for a service that is both ends of a TLS
+    link. Returns ``(leaf_pem, key_pem, ca_pem)``. The key is minted on the hub
+    and shipped over the authenticated hub channel, like the legacy client path."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    fullchain = _sign_leaf(key.public_key(), common_name, sans=sans, days=days, server_auth=True)
+    marker = "-----BEGIN CERTIFICATE-----"
+    leaf, ca = fullchain.split(marker)[1:3]
+    key_pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                serialization.NoEncryption()).decode()
+    return marker + leaf, key_pem, marker + ca
+
+
+def sign_csr(csr_pem: str, common_name: str, sans=None, days: int = 397, server_auth: bool = False) -> str:
     """Sign a spoke-generated CSR (the private key never leaves the spoke).
 
     The CSR's own subject/SANs are IGNORED — only its public key is used, and the
@@ -237,7 +257,7 @@ def sign_csr(csr_pem: str, common_name: str, sans=None, days: int = 397) -> str:
             raise ValueError("CSR EC key too small (<256)")
     else:
         raise ValueError("CSR key type not supported (EC P-256+ or RSA 2048+)")
-    return _sign_leaf(pub, common_name, sans=sans, days=days)
+    return _sign_leaf(pub, common_name, sans=sans, days=days, server_auth=server_auth)
 
 
 def _ca_certs():

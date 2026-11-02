@@ -1249,3 +1249,45 @@ def test_status_heartbeat_refreshes_last_seen(monkeypatch, tmp_path):
     # the heartbeat must bump last_seen back to ~now → the session counts again
     assert api_mod._sessions[token]["last_seen"] > aged
     assert api_mod._active_user_count() == 1
+
+
+# ── Read-only (probe) accounts ───────────────────────────────────────────────
+
+_RO_PERMS = {"role": "admin", "admin": True, "read_only": True}
+
+
+def test_read_only_admin_can_read_admin_views(tmp_path):
+    c, hub = _build(tmp_path=tmp_path)
+    token = _mint_session(hub, uid="probe", perms=_RO_PERMS)
+    r = c.get("/admin/sessions", cookies={"lm_session": token})
+    assert r.status_code == 200
+
+
+def test_read_only_writes_rejected_and_logged(tmp_path, caplog):
+    c, hub = _build(tmp_path=tmp_path)
+    token = _mint_session(hub, uid="probe", perms=_RO_PERMS)
+    other = _mint_session(hub, uid="admin")
+    sid = api_mod._sessions[other]["sid"]
+    with caplog.at_level("WARNING"):
+        r = c.delete(f"/admin/sessions/{sid}", cookies={"lm_session": token})
+        r2 = c.post("/setup/users", json={"user_id": "x"}, cookies={"lm_session": token})
+    assert r.status_code == 403 and r2.status_code == 403
+    assert other in api_mod._sessions
+    assert "probe" not in hub.state.system_state.get("users", {})
+    assert "[read-only] BLOCKED user=probe DELETE" in caplog.text
+
+
+def test_read_only_can_log_out(tmp_path):
+    c, hub = _build(tmp_path=tmp_path)
+    token = _mint_session(hub, uid="probe", perms=_RO_PERMS)
+    r = c.post("/auth/logout", cookies={"lm_session": token})
+    assert r.status_code == 200
+    assert token not in api_mod._sessions
+
+
+def test_read_only_flag_survives_login(tmp_path):
+    user = _admin_user(password="probe-pw-1234")
+    user["permissions"]["read_only"] = True
+    c, hub = _build(users={"probe": user}, tmp_path=tmp_path)
+    r = c.post("/auth/login", json={"username": "probe", "password": "probe-pw-1234"})
+    assert r.status_code == 200 and r.json()["permissions"]["read_only"] is True
