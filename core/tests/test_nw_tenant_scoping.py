@@ -199,7 +199,7 @@ _ARP_ACME = [{"ip": "10.0.0.5", "mac": "aa:bb:cc:dd:ee:01", "interface": "1"},
              {"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:02", "interface": "2"}]
 
 
-def _build(monkeypatch, tmp_path, shared=False):
+def _build(monkeypatch, tmp_path, shared=False, gc_extra=None):
     """Construct the FakeHub + a minimal FastAPI app with the nw routes
     registered directly (bypassing ``create_app``, which mounts 3.10+-only
     simulations routes). ``shared=True`` registers a shared tenant (so shared
@@ -224,7 +224,7 @@ def _build(monkeypatch, tmp_path, shared=False):
         tenant_state["tenants"]["shared"] = {"shared": True,
                                              "netbox_tenant_slug": "shared"}
     system_state = {
-        "global_config": {"nw_devices": nw_devices},
+        "global_config": {"nw_devices": nw_devices, **(gc_extra or {})},
         "module_metadata": metadata,
         "subnet_filter_modules": {"nw": True},   # enable the nw subnet filter
     }
@@ -611,8 +611,11 @@ def test_tenant_config_get_tenant_admin_own_tenant(monkeypatch, tmp_path):
     body = r.json()
     assert body["tenant_id"] == "acme"
     assert "scan" in body and "poll" in body and "scan_schedule" in body
-    # No override yet → schedule off, poll knobs not overridden.
-    assert body["scan_schedule"]["enabled"] is False
+    # No override yet → acme has its own nw spoke, so it is scheduled to
+    # discover + add automatically; poll knobs not overridden.
+    assert body["scan_schedule"] == {"enabled": True, "interval_seconds": 21600,
+                                     "dry_run": False, "auto": True}
+    assert body["scan"]["auto_add"] is True
     assert body["poll"]["overridden"] == {
         "default_interval": False, "jitter_frac": False,
         "max_per_tick": False, "max_concurrency": False}
@@ -708,3 +711,28 @@ def test_list_offline_marks_rows_unknown(monkeypatch, tmp_path):
     # The shared cache is untouched (rows still carry their real reachability).
     cached = hub.nw_cache_get_fleet()["devices"]["data"]
     assert any(d.get("reachable") is True for d in cached)
+
+
+def test_scan_schedule_off_without_own_spoke_and_explicit_opt_out(monkeypatch, tmp_path):
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+    _noop_push(hub)
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.get("/api/nw/tenant-config?tenant=othercorp-nospoke", cookies={"lm_session": tok})
+    assert r.json()["scan_schedule"]["enabled"] is False
+    r = c.post("/api/nw/tenant-config", cookies={"lm_session": tok},
+               json={"tenant": "acme", "scan_schedule": {"enabled": False}})
+    assert r.json()["scan_schedule"]["enabled"] is False
+    assert r.json()["scan_schedule"]["auto"] is False
+
+
+def test_migration_clears_old_preview_defaults(monkeypatch, tmp_path):
+    c, hub = _build(monkeypatch, tmp_path, gc_extra={
+        "nw_scan": {"auto_add": False},
+        "nw_tenant_cfg": {"acme": {"scan_schedule": {"enabled": True, "interval_seconds": 3600,
+                                                     "dry_run": True},
+                                   "scan": {"auto_add": False}}}})
+    gc = hub.state.system_state["global_config"]
+    assert gc["nw_scan_autodiscover_v1"] is True
+    assert "auto_add" not in gc["nw_scan"]
+    assert gc["nw_tenant_cfg"]["acme"]["scan_schedule"] == {"enabled": True, "interval_seconds": 3600}
+    assert "auto_add" not in gc["nw_tenant_cfg"]["acme"]["scan"]
