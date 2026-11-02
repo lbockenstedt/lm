@@ -254,6 +254,8 @@ def resolve_nw_scan_spoke(hub, tenant_id, requested_spoke_id, shared_tenant_id):
 # at once. Anything over the per-request batch size (``max_targets``) is split.
 _NW_SCAN_MAX_TOTAL = 32768
 _NW_SCAN_PARALLEL_BATCHES = 3
+# Recurring-scan cadence a tenant gets automatically once it has its own nw spoke.
+_NW_SCAN_DEFAULT_INTERVAL = 21600
 # Hosts probed per sweep tick (a tick runs every few minutes per tenant).
 _NW_SWEEP_BATCH = 256
 
@@ -1630,7 +1632,7 @@ def register(app, hub, ctx):
                     cfg[k] = v
         cfg.setdefault("enabled", False)
         cfg.setdefault("crawl", False)
-        cfg.setdefault("auto_add", False)
+        cfg.setdefault("auto_add", True)
         cfg.setdefault("credential_ids", [])
         cfg.setdefault("ip_sources", ["netbox"])
         cfg.setdefault("tcp_ports", [22, 443, 80, 23])
@@ -1666,7 +1668,7 @@ def register(app, hub, ctx):
         clean = {
             "enabled": bool(cfg.get("enabled", False)),
             "crawl": bool(cfg.get("crawl", False)),
-            "auto_add": bool(cfg.get("auto_add", False)),
+            "auto_add": bool(cfg.get("auto_add", True)),
             "try_snmp": bool(cfg.get("try_snmp", True)),
             "use_nmap": bool(cfg.get("use_nmap", False)),
             "credential_ids": [str(x) for x in (cfg.get("credential_ids") or []) if str(x).strip()],
@@ -1699,17 +1701,66 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail="No tenant resolved")
         return tid
 
+    def _tenant_owned_scan_sets(hub, tenant_id):
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        owned = access.tenant_scope_ids(tenant_id)
+        sets = [c for c in (gc.get("nw_scan_credentials") or []) if isinstance(c, dict)]
+        return ([c for c in sets if owned is not None and access.in_tenant_scope(c.get("tenant_id"), owned)]
+                + _vault_scan_sets(hub, tenant_id))
+
+    def _tenant_has_own_nw_spoke(hub, tenant_id):
+        return any(c.get("scope") == "own"
+                   for c in nw_scan_spoke_choices(hub, tenant_id, None))
+
     def _nw_scan_schedule(hub, tenant_id):
         """Per-tenant recurring-scan schedule from ``nw_tenant_cfg`` with defaults.
-        ``interval_seconds`` 0/absent = off; ``dry_run`` true = preview only (no
-        auto-add) even when the scan config allows adding."""
+
+        LM discovers and integrates automatically: a tenant with its own nw
+        spoke is scheduled (every ``_NW_SCAN_DEFAULT_INTERVAL``) and adds what it
+        finds unless the tenant explicitly saved otherwise. ``interval_seconds``
+        0 = off; ``dry_run`` true = preview only (opt-in)."""
         gc = hub.state.system_state.get("global_config", {}) or {}
         sc = (((gc.get("nw_tenant_cfg") or {}).get(tenant_id) or {}).get("scan_schedule") or {})
+        auto = "enabled" not in sc
+        enabled = _tenant_has_own_nw_spoke(hub, tenant_id) if auto else bool(sc["enabled"])
+        iv = sc.get("interval_seconds")
+        interval = int(iv or 0) if iv is not None else (_NW_SCAN_DEFAULT_INTERVAL if enabled else 0)
         return {
-            "enabled": bool(sc.get("enabled", False)),
-            "interval_seconds": int(sc.get("interval_seconds") or 0),
-            "dry_run": bool(sc.get("dry_run", True)),
+            "enabled": enabled,
+            "interval_seconds": interval,
+            "dry_run": bool(sc.get("dry_run", False)),
+            "auto": auto,
         }
+
+    def _migrate_nw_scan_autodiscover(hub):
+        """One-time: scans used to default to preview-only, so the stored
+        ``dry_run: true`` / ``auto_add: false`` values are old defaults, not
+        choices. Drop them so every tenant inherits the auto-add default."""
+        gc = hub.state.system_state.get("global_config")
+        if not isinstance(gc, dict) or gc.get("nw_scan_autodiscover_v1"):
+            return
+        changed = []
+        if (gc.get("nw_scan") or {}).get("auto_add") is False:
+            gc["nw_scan"].pop("auto_add", None)
+            changed.append("global")
+        for tid, cur in (gc.get("nw_tenant_cfg") or {}).items():
+            if not isinstance(cur, dict):
+                continue
+            if (cur.get("scan_schedule") or {}).get("dry_run") is True:
+                cur["scan_schedule"].pop("dry_run", None)
+                changed.append(f"{tid}:dry_run")
+            if (cur.get("scan") or {}).get("auto_add") is False:
+                cur["scan"].pop("auto_add", None)
+                changed.append(f"{tid}:auto_add")
+        gc["nw_scan_autodiscover_v1"] = True
+        hub.state._mark_dirty()
+        logger.info("nw scan auto-discover migration: cleared preview/auto-add-off defaults %s",
+                    changed or "(none)")
+
+    try:
+        _migrate_nw_scan_autodiscover(hub)
+    except Exception as e:  # noqa: BLE001 - never block route registration
+        logger.warning("nw scan auto-discover migration failed: %s", e)
 
     @app.get("/api/nw/tenant-config")
     async def get_nw_tenant_config(request: Request):
@@ -1783,8 +1834,8 @@ def register(app, hub, ctx):
                 "tenant_name": (all_t.get(tid, {}) or {}).get("name") or tid,
                 "enabled": bool(sched.get("enabled")),
                 "interval_seconds": int(sched.get("interval_seconds") or 0),
-                "dry_run": bool(sched.get("dry_run", True)),
-                "auto_add": bool(cfg.get("auto_add", False)),
+                "dry_run": bool(sched.get("dry_run", False)),
+                "auto_add": bool(cfg.get("auto_add", True)),
                 "ip_sources": list(cfg.get("ip_sources") or []),
                 "max_targets": int(cfg.get("max_targets") or 0),
                 "spoke_id": spoke_id,
@@ -1792,9 +1843,9 @@ def register(app, hub, ctx):
                     spoke_id and hub._primary_key(spoke_id) in hub.active_connections),
                 "credential_names": [
                     (by_id.get(cid, {}) or {}).get("name") or cid for cid in cred_ids],
-                # No credential sets selected → the scheduled run is a
+                # No set selected and none owned → the scheduled run is a
                 # discovery-only pass (reachability + open ports, no auto-add).
-                "discovery_only": not cred_ids,
+                "discovery_only": not cred_ids and not _tenant_owned_scan_sets(hub, tid),
                 "last_run_at": rt.get("last_run_at"),
                 "next_due_at": rt.get("next_due_at"),
                 "last_status": rt.get("last_status"),
@@ -1951,7 +2002,11 @@ def register(app, hub, ctx):
         cred_ids = [str(x) for x in (data.get("credential_ids") or saved.get("credential_ids") or [])]
         all_sets = (hub.state.system_state.get("global_config", {}) or {}).get("nw_scan_credentials", []) or []
         all_sets = list(all_sets) + _vault_scan_sets(hub, tenant_id)
-        chosen = [c for c in all_sets if isinstance(c, dict) and c.get("id") in set(cred_ids)]
+        # No sets picked → try every set the tenant owns (scoped below), so a
+        # new tenant's scans identify + add devices without manual setup.
+        use_all = not cred_ids
+        chosen = [c for c in all_sets if isinstance(c, dict)
+                  and (use_all or c.get("id") in set(cred_ids))]
         # Tenant-owned (or shared) credentials only — for every caller. On the
         # ADMIN (``default``) scope the admin's OWN sets are the unassigned /
         # ``default``-tagged ones, matching what the scan tab lists for default,
@@ -2087,8 +2142,8 @@ def register(app, hub, ctx):
                  and (d.get("tenant_id", "") in (tenant_id, access.shared_tenant_id()))}
         by_cred = {c.get("id"): c for c in chosen}
 
-        dry_run = bool(data.get("dry_run", True)) or not bool(
-            data.get("auto_add", saved.get("auto_add", False)))
+        dry_run = bool(data.get("dry_run", False)) or not bool(
+            data.get("auto_add", saved.get("auto_add", True)))
         # A credential-free pass is preview-only, as documented. Scan credentials
         # are optional now, and the spoke turns nmap service detection on when
         # none are supplied — nmap CAN classify a host into a manageable
@@ -2216,8 +2271,8 @@ def register(app, hub, ctx):
         instead of the tenant's IP sources) and override ``dry_run``."""
         saved = _nw_scan_config(hub, tenant_id)
         sched = _nw_scan_schedule(hub, tenant_id)
-        data = {"dry_run": bool(sched.get("dry_run", True)) if dry_run is None else bool(dry_run),
-                "auto_add": bool(saved.get("auto_add", False))}
+        data = {"dry_run": bool(sched.get("dry_run", False)) if dry_run is None else bool(dry_run),
+                "auto_add": bool(saved.get("auto_add", True))}
         if targets:
             data["targets"] = list(targets)
             data["ip_sources"] = ["explicit"]  # no aggregated sources, targets only
@@ -2347,8 +2402,8 @@ def register(app, hub, ctx):
 
         Body (all optional; falls back to the saved ``nw_scan`` config):
           ``tenant``, ``credential_ids``, ``ip_sources``, ``subnets`` (CIDRs),
-          ``targets`` (explicit IPs), ``crawl``, ``dry_run`` (default true —
-          preview only), ``spoke_id``.
+          ``targets`` (explicit IPs), ``crawl``, ``dry_run`` (default false —
+          identified devices are added; true = preview only), ``spoke_id``.
 
         Tenant-scoped: a tenant-admin scans only their own tenant (targets are
         aggregated from that tenant's inventory + they may only add devices bound

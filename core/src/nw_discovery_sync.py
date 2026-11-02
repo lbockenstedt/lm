@@ -1313,11 +1313,13 @@ class NwDiscoverySyncMixin:
     async def run_nw_scan_schedule_loop(self):
         """Drive per-tenant recurring network scans.
 
-        Each tenant may enable a schedule (``nw_tenant_cfg[tenant].scan_schedule``
-        with its own ``interval_seconds`` ≥ 1h, set from the tenant's Network →
-        Scan tab). This loop checks every 5 min and runs a tenant's scan once its
-        interval has elapsed. A tenant's FIRST scan is deferred one full interval
-        after enable/boot (anti-stampede). The scan itself is executed by
+        A tenant with its own nw spoke is scheduled automatically (6h, adding
+        what it finds); the tenant may change or disable it from Network → Scan
+        (``nw_tenant_cfg[tenant].scan_schedule``, ``interval_seconds`` ≥ 1h).
+        This loop checks every 5 min and runs a tenant's scan once its interval
+        has elapsed. The last run time is persisted (``nw_scan_last_run``) so a
+        hub restart resumes the cadence instead of re-scanning; a tenant that
+        has never been scanned runs ~10 min after first sight. The scan itself is executed by
         ``hub.run_nw_scheduled_scan`` (wired up in ``routes/nw.py`` at route
         registration) so the credential/target/auto-add pipeline is shared with
         the interactive scan — this loop only decides *when*.
@@ -1331,6 +1333,7 @@ class NwDiscoverySyncMixin:
         runtime: Dict[str, Dict[str, Any]] = {}
         self.nw_scan_runtime = runtime
         CHECK_INTERVAL = 300
+        FIRST_SCAN_DELAY = 600
         while True:
             try:
                 runner = getattr(self, "run_nw_scheduled_scan", None)
@@ -1349,15 +1352,26 @@ class NwDiscoverySyncMixin:
                             runtime.pop(tid, None)
                             continue
                         interval = int(sc["interval_seconds"])
+                        gc = self.state.system_state.setdefault("global_config", {})
+                        persisted = gc.setdefault("nw_scan_last_run", {})
                         if tid not in last_run:
-                            last_run[tid] = now  # first sight → defer one interval
-                            runtime[tid] = {"last_run_at": None, "last_status": None,
+                            # Resume the persisted cadence across hub restarts; a
+                            # tenant that has never been scanned runs shortly.
+                            prev = persisted.get(tid)
+                            if prev:
+                                elapsed = max(0.0, time.time() - float(prev))
+                            else:
+                                elapsed = max(0, interval - FIRST_SCAN_DELAY)
+                            last_run[tid] = now - elapsed
+                            runtime[tid] = {"last_run_at": prev or None, "last_status": None,
                                             "last_added": 0, "last_error": "",
-                                            "next_due_at": time.time() + interval}
+                                            "next_due_at": time.time() + max(0.0, interval - elapsed)}
                             continue
                         if (now - last_run[tid]) < interval:
                             continue
                         last_run[tid] = now
+                        persisted[tid] = time.time()
+                        self.state._mark_dirty()
                         rt = runtime.setdefault(tid, {})
                         rt["last_run_at"] = time.time()
                         rt["next_due_at"] = time.time() + interval
