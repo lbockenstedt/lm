@@ -1,6 +1,8 @@
 """Service-level diagnostics for the embedded Unbound and Kea role managers."""
 
 import importlib.util
+import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +19,12 @@ def _load(name, relative):
 
 dns_manager = _load("lm_dns_diag_manager", "dns/src/unbound_manager.py")
 dhcp_manager = _load("lm_dhcp_diag_manager", "dhcp/src/kea_manager.py")
+
+
+def _fake_kea(monkeypatch, reply):
+    """Make every Kea control-agent POST return ``reply``."""
+    body = io.BytesIO(json.dumps(reply).encode())
+    monkeypatch.setattr(dhcp_manager.urllib.request, "urlopen", lambda *a, **k: body)
 
 
 def _result(ok=True, output="", error=""):
@@ -363,14 +371,7 @@ def test_rpc_treats_kea_empty_result_code_as_success_not_error(monkeypatch):
     """
     mgr = dhcp_manager.KeaManager()
 
-    class FakeResponse:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return {"result": 3, "text": "0 IPv4 lease(s) found."}
-
-    monkeypatch.setattr(mgr._session, "post", lambda *a, **k: FakeResponse())
+    _fake_kea(monkeypatch, {"result": 3, "text": "0 IPv4 lease(s) found."})
 
     result = mgr._rpc("dhcp4", "lease4-get-all", {"subnets": [1]})
 
@@ -380,14 +381,7 @@ def test_rpc_treats_kea_empty_result_code_as_success_not_error(monkeypatch):
 def test_rpc_still_raises_on_real_kea_error(monkeypatch):
     mgr = dhcp_manager.KeaManager()
 
-    class FakeResponse:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return {"result": 1, "text": "unsupported command"}
-
-    monkeypatch.setattr(mgr._session, "post", lambda *a, **k: FakeResponse())
+    _fake_kea(monkeypatch, {"result": 1, "text": "unsupported command"})
 
     try:
         mgr._rpc("dhcp4", "bogus-command")

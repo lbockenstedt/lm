@@ -10,6 +10,8 @@ dhcp repo (c25b292 / 6874afa).
 """
 
 import asyncio
+import io
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -79,16 +81,16 @@ def _mgr():
     return kea_manager.KeaManager("http://localhost:8001")
 
 
-def test_rpc_full_returns_whole_response_and_rpc_only_arguments():
+def test_rpc_full_returns_whole_response_and_rpc_only_arguments(monkeypatch):
     mgr = _mgr()
-    resp = MagicMock()
-    resp.json.return_value = [{"result": 3, "text": "not found"}]
-    mgr._session = MagicMock()
-    mgr._session.post.return_value = resp
+    reply = []
+    monkeypatch.setattr(kea_manager.urllib.request, "urlopen",
+                        lambda *a, **k: io.BytesIO(json.dumps(reply).encode()))
+    reply[:] = [{"result": 3, "text": "not found"}]
     assert mgr._rpc_full("dhcp6", "lease6-del", {}) == {"result": 3, "text": "not found"}
-    resp.json.return_value = [{"result": 0, "arguments": {"a": 1}}]
+    reply[:] = [{"result": 0, "arguments": {"a": 1}}]
     assert mgr._rpc("dhcp6", "x") == {"a": 1}
-    resp.json.return_value = [{"result": 1, "text": "boom"}]
+    reply[:] = [{"result": 1, "text": "boom"}]
     with pytest.raises(RuntimeError, match="boom"):
         mgr._rpc_full("dhcp6", "x")
 
