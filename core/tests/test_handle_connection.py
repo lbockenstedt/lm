@@ -11,6 +11,7 @@ Defaults (``BASE``) describe an uneventful connect of an approved spoke
 import hashlib
 import hmac
 import json
+import types
 
 import pytest
 
@@ -308,6 +309,17 @@ def test_capabilities_are_recorded_and_cleared():
     assert run.hub.spoke_mtls_csr_capable["spk"] is True
     run2 = connect(pre=lambda hub: hub.netbox_server_agents.add("other"))
     assert run2.hub.netbox_server_agents == {"other"}
+
+
+def test_zabbix_server_capability_recorded_and_cleared():
+    hub = types.SimpleNamespace(netbox_server_agents=set(), ldap_server_agents=set(),
+                                zabbix_server_agents=set(), spoke_enc_capable={},
+                                spoke_mtls_csr_capable={})
+    rec = main_mod.LabManagerHub._record_spoke_capabilities
+    rec(hub, "zbx", main_mod._SpokeHello.from_auth_frame({**AUTH, "zabbix_server": True}))
+    assert hub.zabbix_server_agents == {"zbx"}
+    rec(hub, "zbx", main_mod._SpokeHello.from_auth_frame(AUTH))
+    assert hub.zabbix_server_agents == set()
 
 
 def test_module_type_logged_only_when_new():

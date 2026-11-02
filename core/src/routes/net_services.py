@@ -3159,7 +3159,8 @@ def register(app, hub, ctx):
             dict(hub.spoke_module_types), hub.active_connections,
             module_names, hub.CERT_CAPABLE_MODULES, agents,
             netbox_server_agents=set(getattr(hub, "netbox_server_agents", set())),
-            ldap_server_agents=set(getattr(hub, "ldap_server_agents", set())))
+            ldap_server_agents=set(getattr(hub, "ldap_server_agents", set())),
+            zabbix_server_agents=set(getattr(hub, "zabbix_server_agents", set())))
         sess = _session_user(request)
         if sess and not _is_admin(sess):
             mine = set(_lca.user_tenants(sess)) | {_lca.current_tenant(sess)}
@@ -3183,6 +3184,7 @@ def register(app, hub, ctx):
         module_names = hub.state.system_state.get("module_names", {}) or {}
         module_metadata = hub.state.system_state.get("module_metadata", {}) or {}
         nb_servers = set(getattr(hub, "netbox_server_agents", set()))
+        zbx_servers = set(getattr(hub, "zabbix_server_agents", set()))
 
         def _mt(sid):
             return (hub.spoke_module_types.get(hub._primary_key(sid))
@@ -3196,8 +3198,14 @@ def register(app, hub, ctx):
             connected = hub._primary_key(sid) in hub.active_connections
             label = module_names.get(sid, sid) or sid
             is_nb_server = hub._primary_key(sid) in nb_servers
-            eff_mt = "netbox-server" if (is_nb_server and mt not in capable) else mt
-            eff_capable = (mt in capable) or is_nb_server
+            is_zbx_server = hub._primary_key(sid) in zbx_servers
+            eff_mt = mt
+            if mt not in capable:
+                if is_nb_server:
+                    eff_mt = "netbox-server"
+                elif is_zbx_server:
+                    eff_mt = "zabbix-server"
+            eff_capable = (mt in capable) or is_nb_server or is_zbx_server
             entry = {"spoke_id": sid, "module_type": eff_mt or mt or "—",
                      "label": label, "connected": connected}
             if not connected:
