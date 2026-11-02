@@ -1143,7 +1143,6 @@ async function securityBlock() {
         { ip, reason: (document.getElementById('sec-mb-reason').value || '').trim(), permanent: document.getElementById('sec-mb-perm').checked }, `Blocked ${ip}`);
     loadSecurityData();
 }
-async function securityUnblock(ip, forgive = true) { await _securityReq('/api/security/unblock', 'POST', { ip, forgive }, forgive ? `Unblocked ${ip}` : `Unblocked ${ip} (strike kept)`); loadSecurityData(); }
 async function securityForgive(ip) {
     await _securityReq('/api/security/forgive', 'POST', { ip }, `Cleared strikes for ${ip}`);
     loadSecurityData();
