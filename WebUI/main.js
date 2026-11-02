@@ -4411,6 +4411,12 @@ async function setView(viewId) {
 // (loadCSData, defined in sim-views.js) takes (subMenu, currentSubChild);
 // the child is resolved above via _csDefaultChild. opnsense is wrapped because
 // loadOpnsenseManagement() takes no argument (it reads the currentSubView global).
+// Pages written as ES modules (js/views/*.js) register their entry point here,
+// e.g. lmViews.osupdates = renderOsUpdatesView; classic code calls them
+// through it. Modules run after these classic scripts, before the user can
+// navigate.
+const lmViews = {};
+
 const VIEW_LOADERS = {
     // dashboard has real per-tenant content (summary tiles + infra status), so it
     // needs a loader too. A tenant switch re-renders through setSubView (not
