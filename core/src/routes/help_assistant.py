@@ -12,6 +12,7 @@ otherwise. Routes live under ``/api/help/*`` so the access-control middleware
 gates them (valid session required) like every other ``/api/`` route.
 """
 from api import HTTPException, Request, logger, os, json, asyncio, access
+from routes.console_llm_identify import find_ab
 
 from . import frontmatter, github_source
 
@@ -135,18 +136,6 @@ def register(app, hub, ctx):
     _SRC_MAX_MATCHES = 14
     _SRC_MAX_FILES = 6000
     _SRC_SNIPPET_CTX = 4              # lines of context above/below a hit
-
-    def _ab_agent():
-        """The connected ab agent's spoke_id, or None. ab registers
-        as spoke_id 'ab' (config HUB_AGENT_ID); match that, else any
-        connected id containing 'ab'."""
-        conns = getattr(hub, "active_connections", {}) or {}
-        if hub._primary_key("ab") in conns:
-            return "ab"
-        for sid in conns:
-            if "ab" in str(sid).lower():
-                return sid
-        return None
 
     # ── doc corpus (RAG-lite) ────────────────────────────────────────────────
     def _load_docs():
@@ -696,11 +685,11 @@ def register(app, hub, ctx):
     @app.get("/api/help/available")
     async def help_available():
         """Whether the LLM help assistant is usable (ab connected)."""
-        return {"available": _ab_agent() is not None}
+        return {"available": find_ab(hub) is not None}
 
     @app.post("/api/help/ask")
     async def help_ask(request: Request):
-        agent = _ab_agent()
+        agent = find_ab(hub)
         if not agent:
             raise HTTPException(status_code=409,
                                 detail="Help assistant unavailable — the AppBuilder LLM "

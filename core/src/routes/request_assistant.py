@@ -21,6 +21,7 @@ import asyncio
 import time
 
 from api import HTTPException, Request, logger
+from routes.console_llm_identify import find_ab
 
 from routes.setup_admin import store_bug_report
 
@@ -28,15 +29,6 @@ from routes.setup_admin import store_bug_report
 def register(app, hub, ctx):
     _caps = {"ts": 0.0, "agent": None, "sessions": False, "reason": ""}
     _submit_locks: dict = {}
-
-    def _ab_agent():
-        conns = getattr(hub, "active_connections", {}) or {}
-        if hub._primary_key("ab") in conns:
-            return "ab"
-        for sid in conns:
-            if "ab" in str(sid).lower():
-                return sid
-        return None
 
     async def _capability(agent):
         now = time.time()
@@ -79,7 +71,7 @@ def register(app, hub, ctx):
                 "auth_type": str(u.get("auth_type") or ""), "ip": str(sess.get("client_ip") or "")}
 
     async def _relay(cmd, data, timeout=20.0):
-        agent = _ab_agent()
+        agent = find_ab(hub)
         if not agent:
             raise HTTPException(status_code=409, detail="Request assistant unavailable — "
                                                         "the AppBuilder agent is not connected.")
@@ -119,7 +111,7 @@ def register(app, hub, ctx):
     async def request_assistant_available(request: Request):
         """Whether the guided (interactive) bug/feature capture is usable. When
         sessions is false the WebUI shows the one-shot form."""
-        agent = _ab_agent()
+        agent = find_ab(hub)
         if agent is None:
             return {"available": False, "sessions": False,
                     "sessions_reason": "AppBuilder agent is not connected"}
