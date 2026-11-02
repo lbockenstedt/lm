@@ -423,7 +423,7 @@ const MODULE_CLASSES = {
     'Simulations': ['cs'],
     'Certificates': ['le'],
     'Storage': ['truenas'],
-    'Monitoring': ['zabbix', 'zabbix-server', 'zbxproxy'],
+    'Monitoring': ['zabbix', 'zabbix-server', 'zbxproxy', 'zbxagent'],
     'Console': ['console']
 };
 
@@ -514,6 +514,7 @@ const AGENT_ROLES = {
     'le':         { name: 'Certificate Management (Let\'s Encrypt)', desc: 'Issues/renews prod Let\'s Encrypt certs via certbot (HTTP-01 / DNS-01) and serves them to the hub for distribution to target spokes (e.g. OPNsense). Installs certbot + DNS-01 plugins.', deploy: false },
     'console':    { name: 'Console Server', desc: 'Serial console access to attached hardware (USB adapters + on-board UART). Auto-detects baud, auto-identifies devices, and relays an xterm.js terminal through the hub.', deploy: false },
     'zabbix-server': { name: 'Monitoring Server', desc: 'Deploys the monitoring server (Zabbix 7.0) and web frontend on this host. Runs as its own service; does NOT create a spoke. Load "Monitoring" to feed it inventory.', deploy: true },
+    'zbxagent':   { name: 'Monitoring Agent', desc: 'Installs a Zabbix agent that reports to this tenant\'s Monitoring Proxy. The proxy address and host name are filled in automatically; install the proxy for the tenant first.', deploy: true },
     'zbxproxy':   { name: 'Monitoring Proxy', desc: 'Deploys an active monitoring proxy (Zabbix) that dials out to the monitoring server. One per tenant network. Runs as its own service; does NOT create a spoke.', deploy: true },
     'zabbix':     { name: 'Monitoring', desc: 'Syncs LM inventory into a multi-tenant monitoring server (Zabbix) — hosts are created, refreshed, disabled after 7 days unseen and deleted 30 days later. Back-end only; tenants see results in the LM WebUI.', deploy: false },
     'truenas':    { name: 'Storage (TrueNAS)', desc: 'Polls and manages TrueNAS appliances over the official WebSocket JSON-RPC client — pools, datasets, shares (SMB/NFS), disks, alerts, services, capacity; gated management actions (create/delete datasets, create shares, take snapshots, run scrubs). Reports health + capacity and syncs into NetBox.', deploy: false },

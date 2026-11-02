@@ -1046,7 +1046,8 @@ async function showAddUserModal() {
                 </div>
                 <div class="grid grid-cols-6 gap-3">
                     ${tadm ? '' : `<div><label class="text-xs text-slate-500 uppercase font-bold" title="System-wide admin (all tenants + system config)">Global Admin</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-admin" onchange="document.getElementById('perm-tenant_admin').checked = false" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold" title="Tenant-level admin (admin within assigned tenants only)">Admin (tenant)</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-tenant_admin" onchange="document.getElementById('perm-admin').checked = false" class="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"></div></div>`}
+                    <div><label class="text-xs text-slate-500 uppercase font-bold" title="Tenant-level admin (admin within assigned tenants only)">Admin (tenant)</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-tenant_admin" onchange="document.getElementById('perm-admin').checked = false" class="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"></div></div>
+                    <div><label class="text-xs text-slate-500 uppercase font-bold" title="Read-only: can view everything its role allows, but every change is rejected by the hub (for automated UI checks such as the AB walker)">Read-only</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-read_only" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>`}
                     <div><label class="text-xs text-slate-500 uppercase font-bold">View</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Edit</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-edit" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Hypervisor</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-pxmx" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
@@ -1097,6 +1098,7 @@ async function saveUser() {
     const permissions = {
         admin: tadm ? false : document.getElementById('perm-admin')?.checked,
         tenant_admin: tadm ? false : document.getElementById('perm-tenant_admin')?.checked,
+        read_only: tadm ? false : !!document.getElementById('perm-read_only')?.checked,
         view: document.getElementById('perm-view').checked,
         edit: document.getElementById('perm-edit').checked,
         pxmx: document.getElementById('perm-pxmx').checked,
@@ -1181,7 +1183,8 @@ async function editUser(userId) {
         // Tenant Admins may only edit module rights — hide the Global Admin /
         // tenant Admin tier checkboxes (the backend rejects them anyway).
         const permFields = [
-            ...(tadm ? [] : [{id: 'admin', label: 'Global Admin'}, {id: 'tenant_admin', label: 'Admin (tenant)'}]),
+            ...(tadm ? [] : [{id: 'admin', label: 'Global Admin'}, {id: 'tenant_admin', label: 'Admin (tenant)'},
+                {id: 'read_only', label: 'Read-only', title: 'Read-only: can view everything its role allows, but every change is rejected by the hub (for automated UI checks such as the AB walker)'}]),
             {id: 'view', label: 'View'},
             {id: 'edit', label: 'Edit'},
             {id: 'pxmx', label: 'Hypervisor'},
@@ -1213,7 +1216,7 @@ async function editUser(userId) {
                     : '';
             return `
             <div class="space-y-2">
-                <label class="text-xs text-slate-500 uppercase font-bold">${p.label}</label>
+                <label class="text-xs text-slate-500 uppercase font-bold" title="${p.title || ''}">${p.label}</label>
                 <div class="flex items-center gap-2 py-2">
                     <input type="checkbox" id="edit-perm-${p.id}" ${isChecked ? 'checked' : ''} ${onchange} class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
                 </div>
@@ -1278,6 +1281,7 @@ async function saveUserEdits(userId) {
         const permissions = {
             admin: tadm ? false : document.getElementById('edit-perm-admin')?.checked,
             tenant_admin: tadm ? false : document.getElementById('edit-perm-tenant_admin')?.checked,
+            read_only: tadm ? false : !!document.getElementById('edit-perm-read_only')?.checked,
             view: document.getElementById('edit-perm-view').checked,
             edit: document.getElementById('edit-perm-edit').checked,
             pxmx: document.getElementById('edit-perm-pxmx').checked,

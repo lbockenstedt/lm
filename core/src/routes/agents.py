@@ -134,6 +134,58 @@ def _zbxproxy_load_config(hub, cfg, spoke_id=None):
     return cfg
 
 
+async def _zbxagent_load_config(hub, cfg, spoke_id):
+    """Point a monitoring agent at the local proxy: find the zbxproxy agent in the
+    same tenant, ask it for its LAN address, and name the Zabbix host
+    ``<tenant>--<hostname>`` so the registered host record matches. An explicit
+    ``proxy`` in the config wins (used when the proxy can't be discovered)."""
+    cfg = dict(cfg or {})
+    tenant = re.sub(r"[^A-Za-z0-9._-]+", "-", _zbxproxy_tenant(hub, spoke_id))
+    cfg["tenant"] = tenant
+    if not cfg.get("hostname"):
+        try:
+            res = await hub.request_response(spoke_id, "GET_PRIMARY_IP", {}, timeout=15.0)
+            info = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+            host = (info or {}).get("hostname")
+        except Exception:  # noqa: BLE001
+            host = None
+        if not host:
+            raise HTTPException(status_code=502, detail="Could not read this node's hostname for the monitoring agent")
+        cfg["hostname"] = f"{tenant}--{host}"
+    if cfg.get("proxy"):
+        return cfg
+    for pk, roles in list(hub._agent_roles_store().items()):
+        if "zbxproxy" not in (roles or []) or hub.state.get_spoke_tenant(pk) != _zbxproxy_tenant(hub, spoke_id):
+            continue
+        try:
+            res = await hub.request_response(pk, "GET_PRIMARY_IP", {}, timeout=15.0)
+        except Exception:  # noqa: BLE001
+            logger.warning("zbxagent: proxy node %s did not answer GET_PRIMARY_IP", pk)
+            continue
+        info = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+        if isinstance(info, dict) and info.get("ip"):
+            cfg["proxy"] = f"{info['ip']}:10051"
+            logger.info("zbxagent: tenant %s proxy resolved to %s (node %s)", tenant, cfg["proxy"], pk)
+            return cfg
+    raise HTTPException(status_code=400, detail=f"No online Monitoring Proxy found in tenant '{tenant}': "
+                        "install the Monitoring Proxy for this tenant first")
+
+
+async def _zbxagent_register(hub, cfg):
+    """Create the agent's host in Zabbix (best effort, same as the proxy)."""
+    sid = hub.get_spoke_by_type("monitoring")
+    tenant, _, host = str(cfg.get("hostname") or "").partition("--")
+    if not (sid and host):
+        logger.warning("zbxagent: host not registered in Zabbix (hostname=%r, monitoring spoke=%s)",
+                       cfg.get("hostname"), bool(sid))
+        return
+    try:
+        await hub.request_response(sid, "MON_AGENT_REGISTER",
+                                   {"tenant": tenant, "hostname": host}, timeout=60.0)
+    except Exception:  # noqa: BLE001
+        logger.exception("zbxagent: registering host %r in Zabbix failed", cfg.get("hostname"))
+
+
 async def _load_roles_impl(hub, spoke_id, data):
     """Core LOAD_ROLE dispatch shared by the admin + tenant role routes. Accepts
     either a batch (``{"roles": [...]}`` loaded sequentially) or a single
@@ -161,6 +213,8 @@ async def _load_roles_impl(hub, spoke_id, data):
                     rcfg = await _ldap_server_load_config(hub, spoke_id, rcfg)
                 elif rname == "zbxproxy":
                     rcfg = _zbxproxy_load_config(hub, rcfg, spoke_id)
+                elif rname == "zbxagent":
+                    rcfg = await _zbxagent_load_config(hub, rcfg, spoke_id)
                 res = await hub.request_response(spoke_id, "LOAD_ROLE",
                                                  {"role": rname, "config": rcfg,
                                                   **({"force": True} if rforce else {})},
@@ -173,6 +227,8 @@ async def _load_roles_impl(hub, spoke_id, data):
                                 spoke_id, pl["module_type"])
                 if rname == "zbxproxy" and isinstance(pl, dict) and pl.get("status") == "SUCCESS":
                     await _zbxproxy_register(hub, rcfg)
+                if rname == "zbxagent" and isinstance(pl, dict) and pl.get("status") == "SUCCESS":
+                    await _zbxagent_register(hub, rcfg)
                 if rname == "ldap-server" and isinstance(pl, dict) and pl.get("status") == "SUCCESS":
                     await _auto_request_ldap_server_cert(hub, spoke_id, rcfg)
                 results.append({"role": rname,
@@ -189,6 +245,8 @@ async def _load_roles_impl(hub, spoke_id, data):
         config = await _ldap_server_load_config(hub, spoke_id, config)
     elif role == "zbxproxy":
         config = _zbxproxy_load_config(hub, config, spoke_id)
+    elif role == "zbxagent":
+        config = await _zbxagent_load_config(hub, config, spoke_id)
     # LOAD_ROLE on the multi-role agent shallow-clones the role's sibling repo on
     # first load — a network git clone that routinely exceeds the 5s default.
     result = await hub.request_response(spoke_id, "LOAD_ROLE",
@@ -214,6 +272,8 @@ async def _load_roles_impl(hub, spoke_id, data):
             await _auto_request_ldap_server_cert(hub, spoke_id, config)
         if role == "zbxproxy":
             await _zbxproxy_register(hub, config)
+        if role == "zbxagent":
+            await _zbxagent_register(hub, config)
     return payload
 
 
