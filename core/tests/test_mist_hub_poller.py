@@ -1,9 +1,7 @@
 """Hub-side Juniper Mist poller for CENTRALIZED processing mode (Mist Phase 3).
 
-Central and Mist are separate products; ``mist_hub_poller`` MIRRORS
-``central_hub_poller`` without importing it. Covers:
-  - the mirror invariant (no central_hub_poller import; mist + check_eval used),
-  - the Mist-owned client-count thresholds + worst-status helper,
+Covers:
+  - the client-count thresholds + worst-status helper,
   - ``MistClientCountTracker`` (no_data / drop / persist round-trip),
   - ``MistCheckHealthHistory`` (record → daily summary + success_stats),
   - ``MistCheckPollWindow`` (verdict rule + tenant forget),
@@ -12,57 +10,33 @@ Central and Mist are separate products; ``mist_hub_poller`` MIRRORS
     ``hardware_alerts``, and records the alert catalog tagged ``source="mist"``,
   - ``_poll_once`` prunes tenants that left centralized mode / cleared creds.
 """
-import ast
 import time
 
 import simulations.mist_hub_poller as mhp
 from simulations.mist_hub_poller import (
     MistCheckHealthHistory, MistCheckPollWindow, MistClientCountTracker,
-    MistHubPoller, _classify_poll_status, _mist_cc_thresholds, _mist_cc_worst,
+    MistHubPoller, _classify_poll_status, _cc_thresholds, _cc_worst,
 )
 
 
 # ── mirror invariant (separate product, not shared) ─────────────────────────
 
-def _imports(path):
-    tree = ast.parse(open(path).read())
-    mods = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            mods.add(node.module)
-        elif isinstance(node, ast.Import):
-            for n in node.names:
-                mods.add(n.name)
-    return mods
-
-
-def test_mist_hub_poller_does_not_import_central():
-    import os
-    here = os.path.dirname(mhp.__file__)
-    mods = _imports(os.path.join(here, "mist_hub_poller.py"))
-    assert not any("central_hub_poller" in m for m in mods), \
-        "mist_hub_poller must mirror, not import, central_hub_poller"
-    # It DOES use the Mist client + the shared generic check matcher.
-    assert "mist" in mods or any(m.endswith(".mist") for m in mods)
-    assert any("check_eval" in m for m in mods)
-
-
 # ── thresholds + worst-status ───────────────────────────────────────────────
 
 def test_thresholds_defaults_and_clamp():
-    t = _mist_cc_thresholds({})
+    t = _cc_thresholds({})
     assert t["warn_pct"] == 20.0 and t["error_pct"] == 50.0
     assert t["die_off_frac"] == 0.2 and t["min_peak"] == 5
     # error below warn is coerced up to warn so red never trips before amber.
-    t2 = _mist_cc_thresholds({"cc_thresholds": {"warn_pct": 30, "error_pct": 10}})
+    t2 = _cc_thresholds({"cc_thresholds": {"warn_pct": 30, "error_pct": 10}})
     assert t2["warn_pct"] == 30.0 and t2["error_pct"] == 30.0
 
 
 def test_cc_worst_severity():
-    assert _mist_cc_worst("error", "warning", "ok") == "error"
-    assert _mist_cc_worst("ok", "warning") == "warning"
-    assert _mist_cc_worst("no_data") == "no_data"
-    assert _mist_cc_worst() == "ok"
+    assert _cc_worst("error", "warning", "ok") == "error"
+    assert _cc_worst("ok", "warning") == "warning"
+    assert _cc_worst("no_data") == "no_data"
+    assert _cc_worst() == "ok"
 
 
 # ── MistClientCountTracker ──────────────────────────────────────────────────

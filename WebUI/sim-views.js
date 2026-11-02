@@ -4673,11 +4673,6 @@ function _csPrefixId(source, bareOrPrefixed) {
     return (source === 'mist' ? 'Mist:' : 'Central:') + b;
 }
 
-function csSimQuotaSelect(selected, items, placeholder) {
-    return `<option value="">${csEscape(placeholder)}</option>` +
-        items.map(it => `<option value="${csEscape(it)}" ${it === selected ? 'selected' : ''}>${csEscape(it)}</option>`).join('');
-}
-
 // Site options driven by the Site Links (Config → Sites): each option shows
 // the link NAME but its VALUE is the link's wsite — the single key the engine
 // routes on (pxmx server assignment, SSID cell, quota site all match on it). A
@@ -12667,21 +12662,6 @@ const _CS_CAUSE_STYLE = {
     low:     'border-slate-200 bg-slate-50 text-slate-600',
     unknown: 'border-slate-200 bg-slate-50 text-slate-500',
 };
-
-// uhubctl verdict badge — the answer to "can we take the power-cycle path?".
-// Three distinct states: supported (PPPS hub present), installed-but-no-PPPS
-// (the common on-board-controller case), and not installed.
-function csUhubctlBadge(u) {
-    if (!u || typeof u !== 'object') return '<span class="text-[10px] text-slate-400">uhubctl: unknown</span>';
-    if (u.supported) {
-        const hubs = (u.ppps_hubs || []).map(h => h.hub).join(', ');
-        return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700" title="${csEscape('PPPS-capable hub(s): ' + hubs + '. Power-cycle with: uhubctl -a cycle')}">uhubctl ✓ ${csEscape(String((u.ppps_hubs || []).length))} PPPS hub(s)</span>`;
-    }
-    if (u.installed) {
-        return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700" title="${csEscape(u.error || 'no per-port-power-switching hub found')}">uhubctl installed · no PPPS hub</span>`;
-    }
-    return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500" title="${csEscape((u.error || 'not installed') + ' — install: ' + (u.install_hint || 'apt-get install -y uhubctl'))}">uhubctl not installed</span>`;
-}
 
 function _csDongleDiagHost(h) {
     const px = h.proxmox || {};

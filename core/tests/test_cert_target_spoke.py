@@ -154,3 +154,11 @@ def test_unknown_agent_identifier_falls_back_to_all_nodes_resolution():
         agent_info={"other-agent": {"spoke_id": "cs-spoke-1"}})
     # 'pxmx-agent-7' isn't indexed, but cs-spoke-1 has an indexed agent.
     assert LabManagerHub._cert_target_spoke(hub, "hypervisor", "pxmx-agent-7") == "cs-spoke-1"
+
+def test_zabbix_server_target_routes_to_advertising_agent():
+    hub = _FakeHub(module_types={"LM-ZBX": "agent"}, active={"LM-ZBX", "other"}, agent_info={})
+    hub.zabbix_server_agents = {"LM-ZBX"}
+    assert LabManagerHub._cert_target_spoke(hub, "zabbix-server", "LM-ZBX") == "LM-ZBX"
+    assert LabManagerHub._cert_target_spoke(hub, "zabbix-server", "") == "LM-ZBX"
+    hub.active_connections = {"other"}
+    assert LabManagerHub._cert_target_spoke(hub, "zabbix-server", "LM-ZBX") is None

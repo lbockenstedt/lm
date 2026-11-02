@@ -125,13 +125,6 @@ function _ddBar(pct, label) {
     </div>`;
 }
 
-// Humanize an uptime in seconds → "3d 4h 12m".
-function _ddUptime(sec) {
-    sec = Number(sec) || 0;
-    const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
-    return (d ? `${d}d ` : '') + (h || d ? `${h}h ` : '') + `${m}m`;
-}
-
 // ─── Clustered DNS / HA DHCP panels ────────────────────────────────────────
 // Rendered inside the existing DNS + DHCP Diagnostics tabs whenever the module
 // reports a multi-host deployment. A single-host module sends no `cluster`

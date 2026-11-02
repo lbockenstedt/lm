@@ -25,6 +25,29 @@ _NETBOX_INSTALL_CERT_HELPER = "/usr/local/bin/lm-netbox-install-cert"
 # handler + AgentControlPlane._extra_auth_fields advertising "ldap_server").
 _LDAP_INSTALL_CERT_HELPER = "/usr/local/bin/lm-ldap-install-cert"
 
+# Zabbix web frontend (zabbix-server deploy role): nginx vhost written by
+# zabbix/install_zabbix_server.sh. Server binary + vhost present marks this host
+# as the Monitoring web UI cert target (AgentControlPlane._extra_auth_fields
+# advertises "zabbix_server"). The agent is root, so the cert is swapped
+# in-process — no helper script.
+_ZABBIX_SERVER_BIN = "/usr/sbin/zabbix_server"
+_ZABBIX_NGINX_CONF = "/etc/zabbix/nginx.conf"
+_ZABBIX_WEB_CERT = "/etc/zabbix/tls/web.crt"
+_ZABBIX_WEB_KEY = "/etc/zabbix/tls/web.key"
+
+
+def is_zabbix_web_host() -> bool:
+    return os.path.exists(_ZABBIX_SERVER_BIN) and os.path.exists(_ZABBIX_NGINX_CONF)
+
+
+def _zabbix_nginx_cert_paths(conf_text: str):
+    """(cert, key) paths from the Zabbix nginx vhost, or (None, None) when the
+    vhost doesn't terminate TLS."""
+    import re as _re
+    crt = _re.search(r"^\s*ssl_certificate\s+([^;\s]+)\s*;", conf_text, _re.M)
+    key = _re.search(r"^\s*ssl_certificate_key\s+([^;\s]+)\s*;", conf_text, _re.M)
+    return (crt.group(1) if crt else None, key.group(1) if key else None)
+
 # NetBox app layout on a netbox-server host (deployed by netbox/install.sh
 # --infra-only). Used by the NETBOX_APPLY_SSO handler to apply Entra SSO live
 # (the agent runs as root here) without a full installer re-run.
@@ -1557,6 +1580,89 @@ class GenericAgent(BaseSpoke):
                     try: os.unlink(p)
                     except OSError: pass
 
+    async def _install_zabbix_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Install an LE cert on the Zabbix web frontend's nginx. The agent is
+        root: validate the pair, back up the current files, write the new ones
+        (keeping owner/group/mode), ``nginx -t`` (roll back on failure), then
+        reload nginx."""
+        domain = data.get("domain", "") or ""
+        fullchain = data.get("fullchain", "") or ""
+        privkey = data.get("privkey", "") or ""
+        if not fullchain or not privkey:
+            return {"status": "ERROR", "message": "missing cert material"}
+        if "BEGIN CERTIFICATE" not in fullchain or "PRIVATE KEY" not in privkey:
+            return {"status": "ERROR", "message": "fullchain/privkey not PEM"}
+        if not is_zabbix_web_host():
+            return {"status": "ERROR",
+                    "message": (f"{_ZABBIX_NGINX_CONF} missing — is this the Monitoring "
+                                "server host? (re-load the zabbix-server role)")}
+        try:
+            conf = Path(_ZABBIX_NGINX_CONF).read_text()
+        except OSError as e:
+            return {"status": "ERROR", "message": f"cannot read {_ZABBIX_NGINX_CONF}: {e}"}
+        crt_path, key_path = _zabbix_nginx_cert_paths(conf)
+        if not crt_path or not key_path:
+            return {"status": "ERROR",
+                    "message": (f"{_ZABBIX_NGINX_CONF} has no ssl_certificate — the web UI "
+                                "is HTTP-only (re-load zabbix-server with self_signed)")}
+        tmpdir = tempfile.mkdtemp(prefix="lm-zbxcert-")
+        try:
+            tc, tk = os.path.join(tmpdir, "c.pem"), os.path.join(tmpdir, "k.pem")
+            Path(tc).write_text(fullchain); Path(tk).write_text(privkey)
+            os.chmod(tk, 0o600)
+            try:
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(tc, tk)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[cert] %s → zabbix-server: FAILED — validation: %s", domain, e)
+                return {"status": "ERROR", "message": f"cert validation failed: {e}"}
+
+            def _swap(path, content, default_mode):
+                st = os.stat(path) if os.path.exists(path) else None
+                if st:
+                    shutil.copy2(path, path + ".lm-bak")
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                tmp = path + ".lm-new"
+                Path(tmp).write_text(content)
+                os.chmod(tmp, (st.st_mode & 0o777) if st else default_mode)
+                if st:
+                    os.chown(tmp, st.st_uid, st.st_gid)
+                os.replace(tmp, path)
+                return st is not None
+
+            def _restore():
+                for pth in (crt_path, key_path):
+                    if os.path.exists(pth + ".lm-bak"):
+                        os.replace(pth + ".lm-bak", pth)
+
+            had_crt = _swap(crt_path, fullchain, 0o644)
+            had_key = _swap(key_path, privkey, 0o640)
+            test = await asyncio.to_thread(
+                subprocess.run, ["nginx", "-t"], capture_output=True, text=True, timeout=30)
+            if test.returncode != 0:
+                if had_crt and had_key:
+                    _restore()
+                msg = (test.stderr or test.stdout or "nginx -t failed").strip()[-400:]
+                logger.warning("[cert] %s → zabbix-server: FAILED — nginx -t: %s (rolled back)",
+                               domain, msg)
+                return {"status": "ERROR", "message": f"nginx -t failed (rolled back): {msg}"}
+            rl = await asyncio.to_thread(
+                subprocess.run, ["systemctl", "reload", "nginx"],
+                capture_output=True, text=True, timeout=30)
+            if rl.returncode != 0:
+                msg = (rl.stderr or rl.stdout or "reload failed").strip()[-400:]
+                logger.warning("[cert] %s → zabbix-server: FAILED — nginx reload: %s", domain, msg)
+                return {"status": "ERROR", "message": f"nginx reload failed: {msg}"}
+            logger.info("[cert] %s → zabbix-server: installed %s and reloaded nginx",
+                        domain, crt_path)
+            return {"status": "SUCCESS",
+                    "message": f"installed on Zabbix web UI ({crt_path}); nginx reloaded"}
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[cert] %s → zabbix-server: FAILED", domain)
+            return {"status": "ERROR", "message": f"install failed: {e}"}
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def _render_netbox_sso_block(self, d: Dict[str, Any], cert_files: Optional[tuple] = None) -> str:
         """Build the sentinel-delimited SSO block for configuration.py (same
         sentinels as netbox/install.sh's LMSSOCFG helper, so either writer
@@ -1880,6 +1986,8 @@ class GenericAgent(BaseSpoke):
             # files to the root helper that atomically swaps + reloads the service.
             if (data or {}).get("module_type") == "ldap-server":
                 return await self._install_ldap_cert(data)
+            if (data or {}).get("module_type") == "zabbix-server":
+                return await self._install_zabbix_cert(data)
             return await self._install_netbox_cert(data)
 
         if cmd == "NETBOX_TEST_SSO":

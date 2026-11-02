@@ -934,3 +934,13 @@ def test_target_owner_tenant_pin_still_wins_over_stamped_spoke_id():
     t = {"module_type": "hypervisor", "identifier": "node-z",
          "agent_id": "node-z", "spoke_id": "pxmx-1"}
     assert cd.target_owner_tenant(t, _st, _as, lambda aid: "acme") == "acme"
+
+
+def test_available_targets_lists_connected_zabbix_server_agents():
+    out = cd.build_available_targets({"LM-ZBX": "agent", "gone": "agent"}, {"LM-ZBX"},
+                                     {"LM-ZBX": "LM-ZBX"}, cd.CERT_CAPABLE_MODULES, [],
+                                     zabbix_server_agents={"LM-ZBX", "gone"})
+    zbx = [t for t in out if t["module_type"] == "zabbix-server"]
+    assert zbx == [{"module_type": "zabbix-server", "identifier": "LM-ZBX",
+                    "label": "Monitoring Server (Zabbix UI) — LM-ZBX", "spoke_id": "LM-ZBX"}]
+    assert "zabbix-server" in cd.CERT_CAPABLE_MODULES

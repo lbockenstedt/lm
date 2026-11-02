@@ -107,16 +107,19 @@ def test_discovery_sources_excludes_disconnected_sources_in_auto_mode():
 
 # ── MAC normalization (sync) ────────────────────────────────────────────────
 
+from access import norm_mac  # noqa: E402
+
+
 def test_norm_mac_canonicalizes_separators():
-    assert FwDiscoverySyncMixin._fw_norm_mac("AA-BB-CC-DD-EE-05") == "aa:bb:cc:dd:ee:05"
-    assert FwDiscoverySyncMixin._fw_norm_mac("aabbccddeeff") == "aa:bb:cc:dd:ee:ff"
-    assert FwDiscoverySyncMixin._fw_norm_mac("AA.BB.CC.DD.EE.05") == "aa:bb:cc:dd:ee:05"
+    assert norm_mac("AA-BB-CC-DD-EE-05") == "aa:bb:cc:dd:ee:05"
+    assert norm_mac("aabbccddeeff") == "aa:bb:cc:dd:ee:ff"
+    assert norm_mac("AA.BB.CC.DD.EE.05") == "aa:bb:cc:dd:ee:05"
 
 
 def test_norm_mac_drops_unknown_and_blank():
-    assert FwDiscoverySyncMixin._fw_norm_mac("unknown") == ""
-    assert FwDiscoverySyncMixin._fw_norm_mac("") == ""
-    assert FwDiscoverySyncMixin._fw_norm_mac(None) == ""
+    assert norm_mac("unknown") == ""
+    assert norm_mac("") == ""
+    assert norm_mac(None) == ""
 
 
 # ── firewall spoke resolution (sync) ────────────────────────────────────────
