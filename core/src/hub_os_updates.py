@@ -83,6 +83,7 @@ import asyncio
 import fnmatch
 import logging
 import os
+import re
 import socket
 import time
 from datetime import datetime, timedelta
@@ -379,6 +380,7 @@ class HubOsUpdatesMixin:
         self._osu_save()
         # Warm the CVE feeds now so a lookup doesn't wait on a download.
         await asyncio.to_thread(self._osu_feeds_for, inventory)
+        asyncio.ensure_future(self.osu_warm_cache())
         return self.osu_snapshot()
 
     # ── auto-check schedule (WebUI-configurable) ────────────────────────────
@@ -437,6 +439,20 @@ class HubOsUpdatesMixin:
         self.state._mark_dirty()
         return self.osu_autocheck_config()
 
+    async def osu_warm_cache(self) -> None:
+        """Rebuild the derived, in-memory views (CVE feeds parsed from their disk
+        copy + the fleet CVE list) from the persisted check results, so the page
+        is instant after a hub restart instead of waiting for the next check.
+        Best-effort: never raises."""
+        try:
+            await asyncio.sleep(5)
+            n = len(await self.osu_fleet_cves(None))
+            logger.info("os-updates: cache warmed from %s (%d affecting CVE(s))", _STATE_FILE, n)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning("os-updates: cache warm skipped: %s", e)
+
     async def run_os_updates_check_loop(self):
         """Periodically re-probe the whole fleet (the scheduled twin of the
         "Check for updates" button), per the configured interval (default
@@ -455,6 +471,7 @@ class HubOsUpdatesMixin:
         async def _check():
             await self.osu_check_fleet(refresh=True)
 
+        asyncio.ensure_future(self.osu_warm_cache())
         await run_sync_loop(stagger=45, guard=_guard, body=_check, delay=_delay,
                             error_label="os-updates auto-check loop cycle failed")
 
@@ -995,7 +1012,10 @@ class HubOsUpdatesMixin:
                                                 "urgency": f["urgency"], "nodes": set()})
                 r["nodes"].add(key)
         out = list(found.values())
-        out.sort(key=lambda r: [-int(p) for p in r["cve"].split("-")[1:]])
+        # Feed names also include non-numeric ids (e.g. TEMP-0000000-096B8D): rank
+        # those after the real CVE-YYYY-NNNN ids instead of failing the list.
+        out.sort(key=lambda r: ([-int(p) for p in r["cve"].split("-")[1:3]]
+                                if re.fullmatch(r"CVE-\d+-\d+", r["cve"]) else [1]))
         return out
 
     async def osu_fleet_cves(self, only: "Optional[set[str]]" = None) -> List[Dict[str, Any]]:

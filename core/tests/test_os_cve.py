@@ -138,3 +138,13 @@ def test_installed_packages_parses_dpkg_query(monkeypatch):
     monkeypatch.setattr(os_update, "_run", lambda argv, t: _R())
     assert os_update.installed_packages() == [
         ["php8.4-cli", "8.4.5-1", "php8.4", "8.4.5-1"], ["vim", "2:9.1-1"]]
+
+
+def test_fleet_cves_tolerates_non_cve_feed_ids(tmp_path, monkeypatch):
+    feed = zlib.compress("\n".join([
+        "VERSION 1", "CVE-2026-0001,,PHP heap overflow", "TEMP-0000000-096B8D,,odd id", "",
+        "php8.4,0, HRF,8.4.10-1,8.4.5-1~deb13u2", "php8.4,1, L ,8.4.10-1,", "", ""]).encode())
+    monkeypatch.setitem(globals(), "FEED", feed)
+    hub = _cve_hub(tmp_path)
+    assert [r["cve"] for r in asyncio.run(hub.osu_fleet_cves())] == [
+        "CVE-2026-0001", "TEMP-0000000-096B8D"]
