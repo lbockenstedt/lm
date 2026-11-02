@@ -136,6 +136,7 @@ def test_monitoring_hosts_are_tenant_scoped_and_problems_flattened():
     assert [h["name"] for h in m.scope_monitoring_hosts(hosts, None, user, False)] == ["a"]
     assert m.scope_monitoring_hosts(hosts, "t2", user, False) == []
     assert [h["name"] for h in m.scope_monitoring_hosts(hosts, "t2", user, True)] == ["b"]
-    assert len(m.scope_monitoring_hosts(hosts, "default", {}, True)) == 2
+    assert m.scope_monitoring_hosts(hosts, "default", {}, True) == []
+    assert len(m.scope_monitoring_hosts(hosts, None, {}, True)) == 2
     assert m.scope_monitoring_hosts(hosts, None, {"user": {}}, False) == []
     assert [p["name"] for p in m.monitoring_problem_list(hosts)] == ["p2", "p1"]
