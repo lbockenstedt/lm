@@ -1723,10 +1723,9 @@ async function _renderMonitoring(container) {
     const problemsTable = `<h3 class="mt-6 text-sm font-semibold text-slate-700">Open problems (${allProbs.length})</h3>` + (allProbs.length
         ? `<div class="max-h-96 overflow-y-auto"><table class="w-full text-left mt-2"><thead class="sticky top-0 bg-white"><tr class="text-[10px] uppercase tracking-wider text-slate-400"><th class="px-3 py-2">Severity</th><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Problem</th><th class="px-3 py-2">Since</th></tr></thead><tbody>${probRows}</tbody></table></div>`
         : `<div class="py-4 text-slate-400 italic text-sm">No open problems.</div>`);
-    const buttons = admin ? `<div class="flex gap-3 mt-4">
-        <button onclick="monitoringAction('sync', true)" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">Dry-run sync</button>
+    const buttons = admin ? `<div class="flex items-center gap-3 mt-4">
+        <span class="text-xs text-slate-400">Monitoring syncs with the inventory automatically every 5 minutes.</span>
         <button onclick="monitoringAction('sync', false)" class="text-xs px-3 py-1.5 rounded bg-[#01A982] text-white hover:opacity-90">Sync now</button>
-        <button onclick="if (confirm('Rebuild monitoring entirely from the LM inventory?')) monitoringAction('rebuild', false)" class="text-xs px-3 py-1.5 rounded border border-red-300 text-red-600 hover:bg-red-50">Rebuild</button>
     </div><pre id="monitoring-result" class="mt-3 text-[11px] text-slate-600 whitespace-pre-wrap"></pre>` : '';
     container.innerHTML = `<div class="grid grid-cols-4 gap-3">${tile('Devices', shown.length)}${tile('Available', up, 'text-emerald-600')}${tile('Unavailable', down, down ? 'text-red-600' : '')}${tile('Open problems', probs, probs ? 'text-amber-600' : '')}</div>${table}${problemsTable}${info}${buttons}`;
 }
