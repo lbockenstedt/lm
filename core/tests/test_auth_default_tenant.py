@@ -83,3 +83,28 @@ def test_login_returns_the_default_tenant(tmp_path):
     c, hub = _client(tmp_path, {"admin": {**_admin_user(), "default_tenant": "acme"}})
     r = c.post("/auth/login", json={"username": "admin", "password": "pass1234"})
     assert r.status_code == 200 and r.json()["default_tenant"] == "acme"
+
+
+def _encrypt_login(c, password):
+    import base64
+    import json
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    k = c.get("/auth/login/key").json()
+    pub = serialization.load_der_public_key(base64.b64decode(k["spki"]))
+    ct = pub.encrypt(json.dumps({"p": password, "n": k["nonce"]}).encode(),
+                     padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
+    return {"username": "admin", "key_id": k["key_id"], "password_enc": base64.b64encode(ct).decode()}
+
+
+def test_encrypted_login_succeeds_once_and_cannot_be_replayed(tmp_path):
+    c, _hub = _client(tmp_path, {"admin": _admin_user()})
+    body = _encrypt_login(c, "pass1234")
+    assert "password" not in body
+    assert c.post("/auth/login", json=body).status_code == 200
+    assert c.post("/auth/login", json=body).status_code == 400
+
+
+def test_encrypted_login_with_wrong_password_is_refused(tmp_path):
+    c, _hub = _client(tmp_path, {"admin": _admin_user()})
+    assert c.post("/auth/login", json=_encrypt_login(c, "nope")).status_code == 401

@@ -1549,6 +1549,23 @@ function doOidcLogin() {
     window.location.href = '/auth/oidc/login';
 }
 
+// The password is RSA-OAEP encrypted with a one-time hub key so it never shows
+// in clear text in the browser's network log. Returns the request body, or a
+// plain body when WebCrypto is unavailable (non-secure context).
+async function _loginBody(username, password) {
+    if (!window.crypto?.subtle) return { username, password };
+    const kr = await fetch('/auth/login/key', { credentials: 'same-origin', cache: 'no-store' });
+    if (!kr.ok) throw new Error('login key unavailable');
+    const k = await kr.json();
+    const spki = Uint8Array.from(atob(k.spki), (ch) => ch.charCodeAt(0));
+    const pub = await crypto.subtle.importKey('spki', spki, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
+    const plain = new TextEncoder().encode(JSON.stringify({ p: password, n: k.nonce }));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, pub, plain));
+    let bin = '';
+    ct.forEach((b) => { bin += String.fromCharCode(b); });
+    return { username, key_id: k.key_id, password_enc: btoa(bin) };
+}
+
 async function doLogin() {
     const username = (document.getElementById('login-username')?.value || '').trim();
     const password = document.getElementById('login-password')?.value || '';
@@ -1564,7 +1581,7 @@ async function doLogin() {
         const r = await fetch('/auth/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, password }),
+            body: JSON.stringify(await _loginBody(username, password)),
             credentials: 'same-origin',
         });
         if (!r.ok) {
@@ -1573,6 +1590,8 @@ async function doLogin() {
             return;
         }
         currentUser = await r.json();
+        const pwEl = document.getElementById('login-password');
+        if (pwEl) pwEl.value = '';
         document.getElementById('login-overlay')?.classList.add('hidden');
         _initApp();
     } catch (e) {
