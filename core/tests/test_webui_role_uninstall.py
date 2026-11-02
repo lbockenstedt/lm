@@ -98,7 +98,7 @@ def test_the_confirmation_names_the_blocking_module(tmp_path=None):
     assert "moduleLabel" in preamble
     assert "unloaded first" in fn
     # The unblocked wording must still be the plain one.
-    assert "Uninstall \"${roleLabel}\" from ${spokeId}? " in fn
+    assert "Uninstall \"${roleLabel}\" from ${_spokeLabelFor(spokeId)}? " in fn
 
 
 def test_uninstall_is_not_offered_during_an_in_flight_deploy():
