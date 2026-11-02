@@ -53,6 +53,60 @@ from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
 
+_IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def nw_hardware_primaries(devices: List[Dict[str, Any]],
+                          identity: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+    """Map every nw device id → the id of the row that represents its physical
+    box. Discovery adds a switch once per SVI address it answers on; those rows
+    are the SAME hardware and must yield ONE NetBox device / ONE Zabbix host.
+
+    Grouped within a tenant by chassis serial, else by short hostname (domain
+    suffix dropped) + object type — names are reconciled to the box hostname
+    each poll. A serial-less row only joins a name group whose serial doesn't
+    contradict it. Base MAC is deliberately NOT a key: VSX peers can present a
+    shared system MAC yet are two boxes that must stay separate (their chassis
+    serials and hostnames differ). The primary is the first configured row that
+    has poll data (stable across cycles), else the first row."""
+    def _t(d):
+        return str(d.get("tenant_id") or d.get("tenant") or "default").casefold()
+
+    def _serial(did):
+        return str((identity.get(did) or {}).get("serial") or "").strip().casefold()
+
+    def _name(d):
+        n = str(d.get("name") or "").strip().casefold()
+        return n if _IP_RE.match(n) else n.split(".")[0]
+
+    groups: List[List[Dict[str, Any]]] = []
+    by_key: Dict[str, List[Dict[str, Any]]] = {}
+    for d in devices or []:
+        if not isinstance(d, dict) or not d.get("id"):
+            continue
+        did = str(d["id"])
+        sk = f"{_t(d)}|s|{_serial(did)}" if _serial(did) else ""
+        nk = f"{_t(d)}|n|{str(d.get('object_type') or '').casefold()}|{_name(d)}" if _name(d) else ""
+        g = by_key.get(sk) if sk else None
+        if g is None and nk and nk in by_key:
+            cand = by_key[nk]
+            if not (_serial(did) and any(_serial(str(m["id"])) and _serial(str(m["id"])) != _serial(did)
+                                         for m in cand)):
+                g = cand
+        if g is None:
+            g = []
+            groups.append(g)
+        g.append(d)
+        for k in (sk, nk):
+            if k and k not in by_key:
+                by_key[k] = g
+    out: Dict[str, str] = {}
+    for g in groups:
+        primary = next((m for m in g if identity.get(str(m["id"]))), g[0])
+        for m in g:
+            out[str(m["id"])] = str(primary["id"])
+    return out
+
 
 class NwDiscoverySyncMixin:
     """Pulls the ARP table from every device on every connected nw spoke,
@@ -116,6 +170,28 @@ class NwDiscoverySyncMixin:
         """Resolve the configured nw source registry entry (falls back to "nw")."""
         name = str(self._nw_discovery_cfg().get("source", "nw")).strip().lower()
         return self.NW_DISCOVERY_SOURCES.get(name) or self.NW_DISCOVERY_SOURCES["nw"]
+
+    def _nw_identity_cache(self) -> Dict[str, Dict[str, Any]]:
+        """{device id: cached info datums} from the warm per-device cache."""
+        out: Dict[str, Dict[str, Any]] = {}
+        getter = getattr(self, "nw_cache_get_device", None)
+        for d in (self.state.system_state.get("global_config", {})
+                  .get("nw_devices", []) or []):
+            if not isinstance(d, dict) or not d.get("id") or not callable(getter):
+                continue
+            env = getter(str(d["id"]), "info")
+            info = env.get("data") if isinstance(env, dict) else None
+            if isinstance(info, dict) and info:
+                out[str(d["id"])] = info
+        return out
+
+    def nw_hardware_primary_of(self, device_id: str) -> str:
+        """The id of the row representing this device's physical box (itself
+        when it is the primary or has no duplicates)."""
+        devices = (self.state.system_state.get("global_config", {})
+                   .get("nw_devices", []) or [])
+        return nw_hardware_primaries(devices, self._nw_identity_cache()).get(
+            str(device_id), str(device_id))
 
     def _nw_spokes(self) -> List[str]:
         """Connected nw spoke ids to pull from this cycle."""
@@ -635,6 +711,17 @@ class NwDiscoverySyncMixin:
         errors: List[str] = []
         device_info = device_info or {}
         device_id = str(device_cfg.get("id", "") or device_cfg.get("name", ""))
+
+        # The same box discovered at another address: only its primary row
+        # writes the NetBox device, so one switch is one NetBox record with a
+        # stable primary IP (not one per SVI, re-pointed every poll).
+        primary = self.nw_hardware_primary_of(device_id)
+        if primary != device_id:
+            logger.debug("nw device push %s (%s): same hardware as %s — skipped",
+                         device_id, device_cfg.get("name"), primary)
+            return {"status": "SKIPPED", "pushed": 0, "errors": 0, "skipped": 1,
+                    "deleted": 0, "interfaces_total": 0,
+                    "message": f"same hardware as {primary}"}, errors, ""
 
         # Attribute tenant by the device's mgmt-address prefix containment.
         tenant_slug = ""
