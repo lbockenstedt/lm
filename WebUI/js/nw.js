@@ -1663,6 +1663,12 @@ function _monData(j) {
     return d || {};
 }
 
+// The tenant picker narrows the list server-side too; admin "default" means all.
+function _monTenantQuery() {
+    const t = (typeof currentTenant !== 'undefined' && currentTenant) ? currentTenant : '';
+    return (t && t !== 'default') ? '?tenant=' + encodeURIComponent(t) : '';
+}
+
 // Bounded fetch so a slow spoke shows an error instead of "Loading" forever.
 function _monFetch(url, ms = 45000) {
     const ac = new AbortController();
@@ -1673,8 +1679,8 @@ function _monFetch(url, ms = 45000) {
 async function _renderMonitoring(container) {
     const admin = isAdmin();
     const [sr, hr, cr] = await Promise.all([
-        _monFetch('/api/monitoring/status'),
-        _monFetch('/api/monitoring/hosts'),
+        admin ? _monFetch('/api/monitoring/status') : Promise.resolve(undefined),
+        _monFetch('/api/monitoring/hosts' + _monTenantQuery()),
         admin ? _monFetch('/api/monitoring/config') : Promise.resolve(null)
     ]);
     const proxyServer = (cr && cr.ok) ? ((await cr.json()).server || '') : '';
@@ -1692,12 +1698,12 @@ async function _renderMonitoring(container) {
     let hosts = [];
     if (hr && hr.ok) hosts = _monData(await hr.json()).hosts || [];
     const tenant = (typeof currentTenant !== 'undefined' && currentTenant) ? currentTenant : null;
-    const shown = tenant ? hosts.filter(h => h.tenant === tenant) : hosts;
+    const shown = (tenant && tenant !== 'default') ? hosts.filter(h => h.tenant === tenant) : hosts;
     const sevName = ['Not classified', 'Information', 'Warning', 'Average', 'High', 'Disaster'];
     const availCls = {available: 'bg-emerald-100 text-emerald-700', unavailable: 'bg-red-100 text-red-700', unknown: 'bg-slate-100 text-slate-500'};
     const up = shown.filter(h => h.availability === 'available').length;
     const down = shown.filter(h => h.availability === 'unavailable').length;
-    const probs = shown.reduce((n, h) => n + (h.problem_count || 0), 0);
+    const probs = shown.reduce((n, h) => n + (h.problem_count || (h.problems || []).length), 0);
     const tile = (label, val, cls) => `<div class="rounded border border-slate-200 px-4 py-3"><div class="text-[10px] uppercase tracking-wider text-slate-400">${label}</div><div class="text-2xl font-semibold ${cls || 'text-slate-700'}">${val}</div></div>`;
     const hostRows = shown.map(h => `<tr class="border-t border-slate-100">
         <td class="px-3 py-2 text-xs font-medium text-slate-700">${escapeHtml(h.name)}</td>
@@ -1710,7 +1716,20 @@ async function _renderMonitoring(container) {
     const table = shown.length
         ? `<table class="w-full text-left mt-4"><thead><tr class="text-[10px] uppercase tracking-wider text-slate-400"><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Address</th><th class="px-3 py-2">Method</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Problems</th></tr></thead><tbody>${hostRows}</tbody></table>`
         : `<div class="py-8 text-center text-slate-400 italic">No monitored devices${tenant ? ` for tenant "${escapeHtml(tenant)}"` : ''}.</div>`;
-    const info = `<div class="mt-4 text-[11px] text-slate-400">Zabbix ${escapeHtml(String(res.version || '?'))} · ${escapeHtml(String(res.managed_hosts ?? '?'))} managed hosts</div>`;
+    const info = admin ? `<div class="mt-4 text-[11px] text-slate-400">Zabbix ${escapeHtml(String(res.version || '?'))} · ${escapeHtml(String(res.managed_hosts ?? '?'))} managed hosts</div>` : '';
+    const sevCls = ['bg-slate-100 text-slate-600', 'bg-sky-100 text-sky-700', 'bg-yellow-100 text-yellow-800', 'bg-amber-100 text-amber-800', 'bg-orange-100 text-orange-800', 'bg-red-100 text-red-700'];
+    const allProbs = shown.flatMap(h => (h.problems || []).map(p => ({...p, host: h.name, tenant: h.tenant})))
+        .sort((a, b) => (b.severity - a.severity) || (b.clock - a.clock));
+    const probRows = allProbs.map(p => `<tr class="border-t border-slate-100">
+        <td class="px-3 py-2 text-xs"><span class="px-2 py-0.5 rounded ${sevCls[p.severity] || sevCls[0]}">${escapeHtml(sevName[p.severity] || '')}</span></td>
+        <td class="px-3 py-2 text-xs font-medium text-slate-700">${escapeHtml(p.host)}</td>
+        <td class="px-3 py-2 text-xs text-slate-500">${escapeHtml(p.tenant)}</td>
+        <td class="px-3 py-2 text-xs text-slate-600">${escapeHtml(p.name)}</td>
+        <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">${p.clock ? new Date(p.clock * 1000).toLocaleString() : ''}</td>
+    </tr>`).join('');
+    const problemsTable = `<h3 class="mt-6 text-sm font-semibold text-slate-700">Open problems (${allProbs.length})</h3>` + (allProbs.length
+        ? `<div class="max-h-96 overflow-y-auto"><table class="w-full text-left mt-2"><thead class="sticky top-0 bg-white"><tr class="text-[10px] uppercase tracking-wider text-slate-400"><th class="px-3 py-2">Severity</th><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Problem</th><th class="px-3 py-2">Since</th></tr></thead><tbody>${probRows}</tbody></table></div>`
+        : `<div class="py-4 text-slate-400 italic text-sm">No open problems.</div>`);
     const serverKnob = (admin && cr && cr.ok) ? `<div class="mt-4 flex items-center gap-2">
         <label class="text-xs text-slate-500" for="monitoring-server">Monitoring server (proxies connect here)</label>
         <input id="monitoring-server" value="${escapeHtml(proxyServer)}" placeholder="zabbix.example.com:10051" class="text-xs px-2 py-1 border border-slate-300 rounded w-72 font-mono">
@@ -1722,7 +1741,7 @@ async function _renderMonitoring(container) {
         <button onclick="monitoringAction('sync', false)" class="text-xs px-3 py-1.5 rounded bg-[#01A982] text-white hover:opacity-90">Sync now</button>
         <button onclick="if (confirm('Rebuild monitoring entirely from the LM inventory?')) monitoringAction('rebuild', false)" class="text-xs px-3 py-1.5 rounded border border-red-300 text-red-600 hover:bg-red-50">Rebuild</button>
     </div><pre id="monitoring-result" class="mt-3 text-[11px] text-slate-600 whitespace-pre-wrap"></pre>` : '';
-    container.innerHTML = `<div class="grid grid-cols-4 gap-3">${tile('Devices', shown.length)}${tile('Available', up, 'text-emerald-600')}${tile('Unavailable', down, down ? 'text-red-600' : '')}${tile('Open problems', probs, probs ? 'text-amber-600' : '')}</div>${table}${info}${buttons}`;
+    container.innerHTML = `<div class="grid grid-cols-4 gap-3">${tile('Devices', shown.length)}${tile('Available', up, 'text-emerald-600')}${tile('Unavailable', down, down ? 'text-red-600' : '')}${tile('Open problems', probs, probs ? 'text-amber-600' : '')}</div>${table}${problemsTable}${info}${buttons}`;
 }
 
 async function saveMonitoringServer() {
