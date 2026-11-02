@@ -27,7 +27,7 @@ _SCAN_OBJECT_TYPES = {"switch", "router", "firewall"}
 def _decision_source() -> str:
     src = NW_ROUTES.read_text(encoding="utf-8")
     start = src.index('        dry_run = bool(data.get("dry_run", False))')
-    end = src.index("        if added:", start)
+    end = src.index("        if added or stale:", start)
     return textwrap.dedent(src[start:end])
 
 
