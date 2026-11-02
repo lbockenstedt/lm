@@ -2046,6 +2046,24 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Inventory → Monitoring Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <button id="mon-sync-run-btn" onclick="runMonitoringSyncNow()" class="${btnCls}">Sync now</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Keeps the monitoring engine (Zabbix) converged with the LM network-device inventory, the source of truth: creates and refreshes hosts per tenant, assigns each tenant's proxy, and disables or removes devices that left the inventory.</p>
+                <div class="flex flex-wrap items-end gap-4">
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="mon-sync-enabled" class="w-4 h-4 text-green-600 rounded" checked>Enable scheduled sync</label>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Interval (minutes)</label>
+                        <input type="number" id="mon-sync-interval" min="1" max="1440" value="5" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                </div>
+                <div class="mt-4">
+                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync</div>
+                    <div id="mon-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                </div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Console → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <span class="text-xs text-slate-400">Event-driven</span>
                 </div>
@@ -2233,6 +2251,7 @@ function _renderSetupSyncTile(content) {
     loadNwDiscoverySources();
     loadNwDiscoveryConfig();
     loadNwDiscoveryStatus();
+    loadMonitoringSync();
     loadConsoleNetboxSync();
     loadConsoleNetboxStatus();
     loadStalenessSweepConfig();
@@ -2262,6 +2281,7 @@ function _syncSaveFnFor(el) {
     if (id.startsWith('vm-sync-'))          return saveVmSyncConfig;
     if (id.startsWith('fw-sync-'))          return saveFwDiscoveryConfig;
     if (id.startsWith('nw-sync-'))          return saveNwDiscoveryConfig;
+    if (id.startsWith('mon-sync-'))         return saveMonitoringSync;
     if (id.startsWith('console-sync-'))     return saveConsoleNetboxSync;
     if (id.startsWith('staleness-sweep-'))  return saveStalenessSweepConfig;
     if (id.startsWith('spoke-alert-'))      return saveSpokeAlertConfig;
