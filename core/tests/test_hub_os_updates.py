@@ -179,6 +179,40 @@ async def test_mixed_fleet_some_checked_some_not():
     assert snap["totals"]["not_checked"] == 1
 
 
+def test_targets_skip_appliance_spokes():
+    hub = _FakeHub(
+        connections={"nw-1": object(), "fw-1": object(), "px-1": object()},
+        module_metadata={"nw-1": {"module_type": "nw"}, "fw-1": {"module_type": "firewall"},
+                         "px-1": {"module_type": "pxmx"}})
+    assert [t["id"] for t in hub._osu_targets()] == ["px-1", "hub"]
+
+
+@pytest.mark.asyncio
+async def test_error_envelope_is_unreachable_not_unmanaged():
+    hub = _FakeHub(
+        connections={"spoke-1": object()},
+        responses={"spoke-1": {"status": "ERROR", "message": "Timed out waiting for spoke response"}})
+    await hub.osu_check_fleet(refresh=False)
+    node = next(n for n in hub.osu_snapshot()["nodes"] if n["kind"] == "spoke")
+    assert node["unreachable"] is True
+    assert "Timed out" in node["reason"]
+
+
+@pytest.mark.asyncio
+async def test_unmanaged_nodes_are_hidden_and_counted():
+    hub = _FakeHub(
+        connections={"spoke-1": object(), "spoke-2": object()},
+        responses={"spoke-1": {"eligible": False, "reason": "not Debian"},
+                   "spoke-2": {"eligible": True, "count": 1}})
+    await hub.osu_check_fleet(refresh=False)
+    snap = hub.osu_snapshot()
+    ids = {n["id"] for n in snap["nodes"]}
+    assert "spoke-1" not in ids and "spoke-2" in ids
+    # hub (test host, ineligible) + spoke-1
+    assert snap["totals"]["unmanaged"] == 2
+    assert hub.osu_snapshot(only={"spoke:spoke-2"})["totals"]["unmanaged"] == 0
+
+
 # ── auto-check schedule (WebUI-configurable) ────────────────────────────────
 
 def test_autocheck_config_defaults_enabled_six_hours_when_unset():
