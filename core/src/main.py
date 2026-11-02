@@ -11109,8 +11109,6 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         log_health_task = asyncio.create_task(self.run_log_health_loop())
         alert_engine_task = asyncio.create_task(run_alert_loop(self))
         tenant_sync_task = asyncio.create_task(self.run_tenant_sync_loop())
-        from routes.monitoring import run_monitoring_sync_loop
-        monitoring_sync_task = asyncio.create_task(run_monitoring_sync_loop(self))
         # NetBox → CPPM endpoint sync: pulls each tenant's endpoints from the
         # NetBox spoke and pushes them to the CPPM (ClearPass) spoke so
         # ClearPass Device Inventory is populated with tenant-tagged endpoints.

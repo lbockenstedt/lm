@@ -232,6 +232,12 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="Monitoring spoke not connected")
         return sid
 
+    async def _start_sync_loop():
+        import asyncio
+        asyncio.create_task(run_monitoring_sync_loop(hub))
+
+    app.router.on_startup.append(_start_sync_loop)
+
     async def _relay(sid, command, payload=None):
         try:
             return await hub.request_response(sid, command, payload or {}, timeout=300.0)
