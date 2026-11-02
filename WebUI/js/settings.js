@@ -26,12 +26,6 @@ function _renderSettingsSection(subMenu) {
         return;
     }
 
-    // Monitoring: the one server address every Monitoring Proxy install dials.
-    if (subMenu === 'Monitoring') {
-        _renderSettingsMonitoringTile(content);
-        return;
-    }
-
     // Self-Backup: scheduled hub-state backup (local rotated archive + optional
     // SSH copy). Global-Admin-only (the /setup/backup/* routes are admin-gated
     // server-side). _renderSetupSelfBackupTile renders into the passed
@@ -873,23 +867,14 @@ function _renderSetupUserAccessTile(content) {
 // Backing routes: /setup/endpoint-sync/{sources,status,run} and
 // /setup/vm-sync/{sources,status,run}, plus the shared /setup/config
 // schedule read/write (core/src/api.py get_endpoint_sync_* / vm_sync_*).
-// ── System → Monitoring tile ──────────────────────────────────────────
-async function _renderSettingsMonitoringTile(content) {
-    if (!isAdmin()) { content.innerHTML = '<div class="py-12 text-center text-slate-400 italic">Global Admin only.</div>'; return; }
-    content.innerHTML = '<div class="py-12 text-center text-slate-400 italic">Loading…</div>';
-    let server = '';
+// System → General "Monitoring Server" card: the one server address every
+// Monitoring Proxy install dials. Auto-saves on change (saveMonitoringServer, nw.js).
+async function loadMonitoringServerField() {
     try {
         const r = await fetch('/api/monitoring/config');
-        if (r.ok) server = (await r.json()).server || '';
+        const el = document.getElementById('monitoring-server');
+        if (r.ok && el) el.value = (await r.json()).server || '';
     } catch (e) { console.warn('monitoring config load failed', e); }
-    content.innerHTML = `<div class="hpe-card rounded-lg shadow-sm overflow-hidden"><div class="p-6 space-y-3">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Monitoring server</h3>
-        <p class="text-xs text-slate-400">The DNS name (and port) of the monitoring server. It is pushed to every Monitoring Proxy installed from an agent, which connects out to it. Use a DNS name, not an IP.</p>
-        <div class="flex items-center gap-2">
-            <input id="monitoring-server" value="${escapeHtml(server)}" placeholder="zabbix.example.com:10051" class="text-sm px-3 py-1.5 border border-slate-300 rounded w-96 font-mono">
-            <button onclick="saveMonitoringServer()" class="text-xs px-3 py-1.5 rounded bg-[#01A982] text-white hover:opacity-90">Save</button>
-            <span id="monitoring-server-msg" class="text-[11px] text-slate-400"></span>
-        </div></div></div>`;
 }
 
 // ── Setup → Self-Backup tile ──────────────────────────────────────────
@@ -3568,9 +3553,19 @@ function _renderSetupGeneralTile(content) {
                 Enable Cert Expiry Monitor
             </label>
         </div>` : '';
+    const monitoringCard = (currentView === 'settings' && isAdmin()) ? `
+        <div class="${card}">
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Monitoring Server</h3>
+            <p class="text-xs text-slate-400">The DNS name (and port) of the monitoring server. It is pushed to every Monitoring Proxy installed from an agent, which connects out to it. Use a DNS name, not an IP.</p>
+            <div class="flex items-center gap-3">
+                <input id="monitoring-server" type="text" placeholder="zabbix.example.com:10051" class="${inputCls} max-w-md font-mono">
+                <span id="monitoring-server-msg" class="text-xs text-slate-400"></span>
+            </div>
+        </div>` : '';
     content.innerHTML = `
         ${subnetFilterCard}
         ${certMonCard}
+        ${monitoringCard}
         <div class="${card}">
             <div class="flex justify-between items-center">
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Data Cache ${helpIcon('lm-hub', null, 'Hub help')}</h3>
@@ -3660,6 +3655,7 @@ function _renderSetupGeneralTile(content) {
     loadRepoSyncConfig();
     if (currentView === 'settings') loadSubnetFilterToggles();
     if (certMonCard) loadCertMonToggle();
+    if (monitoringCard) loadMonitoringServerField();
     // Auto-save on change (no per-card Save buttons). The Data Cache card is
     // read-only status (no inputs), so it has no save handler.
     _attachAutoSave(content, _generalSaveFnFor, 'generalAutoSave');
@@ -3674,6 +3670,7 @@ function _generalSaveFnFor(el) {
     if (id.startsWith('toast-'))          return saveToastConfig;
     if (id.startsWith('relay-timeout-'))  return saveRelayTimeouts;
     if (id.startsWith('appearance-'))     return saveAppearance;
+    if (id === 'monitoring-server')       return saveMonitoringServer;
     return null;
 }
 
