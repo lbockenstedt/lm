@@ -1663,10 +1663,10 @@ function _monData(j) {
     return d || {};
 }
 
-// The tenant picker narrows the list server-side too; admin "default" means all.
+// The tenant picker narrows the list server-side too (ADMIN/Default is its own tenant).
 function _monTenantQuery() {
     const t = (typeof currentTenant !== 'undefined' && currentTenant) ? currentTenant : '';
-    return (t && t !== 'default') ? '?tenant=' + encodeURIComponent(t) : '';
+    return t ? '?tenant=' + encodeURIComponent(t) : '';
 }
 
 // Bounded fetch so a slow spoke shows an error instead of "Loading" forever.
@@ -1691,7 +1691,7 @@ async function _renderMonitoring(container) {
     let hosts = [];
     if (hr && hr.ok) hosts = _monData(await hr.json()).hosts || [];
     const tenant = (typeof currentTenant !== 'undefined' && currentTenant) ? currentTenant : null;
-    const shown = (tenant && tenant !== 'default') ? hosts.filter(h => h.tenant === tenant) : hosts;
+    const shown = tenant ? hosts.filter(h => h.tenant === tenant) : hosts;
     const sevName = ['Not classified', 'Information', 'Warning', 'Average', 'High', 'Disaster'];
     const availCls = {available: 'bg-emerald-100 text-emerald-700', unavailable: 'bg-red-100 text-red-700', unknown: 'bg-slate-100 text-slate-500'};
     const up = shown.filter(h => h.availability === 'available').length;
