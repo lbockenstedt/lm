@@ -1452,6 +1452,55 @@ async function saveNwDiscoveryConfig() {
     }
 }
 
+// Inventory → Monitoring sync (System → Sync). Config + last result live on the
+// hub (global_config.monitoring_sync / monitoring_sync_status).
+async function loadMonitoringSync() {
+    const wrap = document.getElementById('mon-sync-status');
+    if (!wrap) return;
+    let d;
+    try { d = await apiJson('/api/monitoring/sync-config'); }
+    catch (e) { wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${escapeHtml(e.message)}</p>`; return; }
+    const chk = document.getElementById('mon-sync-enabled');
+    if (chk) chk.checked = d.enabled !== false;
+    const iv = document.getElementById('mon-sync-interval');
+    if (iv) iv.value = d.interval_minutes || 5;
+    const st = d.status;
+    if (!st) { wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet.</p>'; return; }
+    const pill = st.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700';
+    wrap.innerHTML = `<div class="border border-slate-200 rounded-md p-3">
+        <div class="flex items-center justify-between mb-1">
+            <span class="text-sm font-bold text-slate-700">All tenants <span class="text-xs text-slate-400">(${escapeHtml(st.trigger || '')})</span></span>
+            <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${escapeHtml(st.status || '—')}</span>
+        </div>
+        <p class="text-xs text-slate-500">created ${Number(st.created) || 0} · refreshed ${Number(st.refreshed) || 0} · disabled ${Number(st.disabled) || 0} · deleted ${Number(st.deleted) || 0} · errors ${Number(st.errors) || 0} <span class="text-slate-400">· last ${fmtDate(st.ts)}</span></p>
+        ${st.message ? `<p class="text-xs text-slate-400 mt-1">${escapeHtml(st.message)}</p>` : ''}
+    </div>`;
+}
+
+async function saveMonitoringSync() {
+    const enabled = !!document.getElementById('mon-sync-enabled')?.checked;
+    const interval_minutes = Math.max(1, parseInt(document.getElementById('mon-sync-interval')?.value, 10) || 5);
+    try {
+        await apiJson('/api/monitoring/sync-config', {method: 'PUT', body: JSON.stringify({enabled, interval_minutes})});
+        showToast('Monitoring sync schedule saved.', 'success');
+    } catch (e) { showToast('Error saving schedule: ' + e.message, 'error'); }
+}
+
+async function runMonitoringSyncNow() {
+    const btn = document.getElementById('mon-sync-run-btn');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+    try {
+        await apiJson('/api/monitoring/sync', {method: 'POST', body: JSON.stringify({})});
+        showToast('Monitoring sync complete.', 'success');
+        await loadMonitoringSync();
+    } catch (e) {
+        showToast('Sync failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = orig; }
+    }
+}
+
 // Console → IPAM device sync (System → Sync). Event-driven (no schedule): each
 // Console auto-identify pushes the device to NetBox. Config lives in
 // global_config.console_netbox_device_sync (enabled default true).
