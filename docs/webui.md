@@ -28,10 +28,10 @@ Same as the hub: `https://<hub>` (443) or `http://<hub>:443` (no-cert). WS: `/ws
 ## Key files
 
 - `index.html` (520 lines) — shell: login overlay (`#login-panel`), first-run `#setup-panel`, main nav (`#main-nav` `setView()`), top/secondary nav, viewport, cache status bar, footer status dots. Themes: `sw-theme` (HPE), `gl-theme` (Graylog), `cicada-theme`.
-- `main.js` + `js/*.js` (~37k lines together) — one app split into ordered classic scripts (`index.html` loads `main.js` first, then `js/*.js`; they share globals, so only load-time code is order-sensitive). `main.js` keeps the core: view router (`setView`/`setSubView`, `VIEW_LOADERS`, `VIEW_LABEL`, `VIEW_SUBMENUS`, `VIEW_CHILDREN`). Views: `dashboard`, `setup`, `settings`, `logs`, `ldap`, `cppm`, `cs`, `dhcp`, `dns`, `le`, `netbox`, `nw`, `opnsense`, `pxmx`. `AGENT_ROLES` map mirrors the agent-spoke `_ROLE_MAP`. HTTP via `fetch`/`setupFetch`/`csFetch` (cookie auth, same-origin). VNC WS: `wss://${hubHost}` (443 implicit) or `ws://${hubHost}:443` fallback (no-cert) → `/ws/console/${session_id}?token=…`.
+- `main.js` + `js/*.js` (~37k lines together) — one app split into ordered classic scripts (`index.html` loads `main.js` first, then `js/*.js`; they share globals, so only load-time code is order-sensitive). `main.js` keeps the core: view router (`setView`/`setSubView`, `VIEW_LOADERS`, `VIEW_LABEL`, `VIEW_SUBMENUS`, `VIEW_CHILDREN`). Views: `dashboard`, `setup`, `settings`, `logs`, `ldap`, `cppm`, `cs`, `dhcp`, `dns`, `le`, `netbox`, `nw`, `opnsense`, `pxmx`. `AGENT_ROLES` map mirrors the agent-spoke `_ROLE_MAP`. HTTP via `fetch`/`setupFetch`/`csFetch` (cookie auth, same-origin). Newer pages are ES modules in `js/views/` (`<script type="module">`, loaded after the classic scripts) that import `js/core/*`; classic code opens them through the `lmViews` registry in `main.js` (e.g. `lmViews.osupdates(el)` for OS Updates), not window globals. VNC WS: `wss://${hubHost}` (443 implicit) or `ws://${hubHost}:443` fallback (no-cert) → `/ws/console/${session_id}?token=…`.
 - `sim-views.js` (~3.5k lines) — Client-Sim operator UI; `connectCSWebSocket()` → `new WebSocket(`${proto}//${location.host}/sim/ws`)` for telemetry; reconnect logic; VNC placeholders over `/sim/ws/console/{sessionId}`.
 - `update_handler.js` — update UI wiring.
-- `assets/html2canvas.min.js` — bundled.
+- `assets/` — vendored libraries: `html2canvas.min.js`, `idiomorph.min.js` (DOM morphing for views), `preact-htm.module.js` (Preact + htm for components).
 
 ## Notable behaviors & gotchas
 
@@ -41,6 +41,18 @@ Same as the hub: `https://<hub>` (443) or `http://<hub>:443` (no-cert). WS: `/ws
 - **Browser smoke test** — CI walks every view, sub-view and child tab in headless Chromium against the real hub app (`core/tests/test_webui_browser_smoke.py`, walk in `core/tests/webui_walk.py`) and fails on any uncaught JS error. A new view should be reachable through `setView`/`setSubView` so the walk covers it. Run locally after `pip install playwright && python -m playwright install chromium`.
 - **In-app Help drawer** — the WebUI ships a Help drawer (the "?" button / inline ⓘ icons, `help.js`) that renders these canonical `lm/docs/*.md` files **verbatim** as tooltips/panels. The docs in `lm/docs/` ARE the in-app help content — so keep them accurate; a docs edit is a UI-copy edit.
 - **Click feedback** — `installClickFeedback()` wires a single capture-phase click listener that pops a short "Loading …" toast (bottom-right, just above the footer) the instant any button / `role="button"` / `.nav-item` is clicked, before the (sometimes slow) handler runs, so a slow load can't read as an unresponsive click. It's de-duplicated (repeat clicks on the same control refresh one toast, never stack). Dismiss/copy/reveal/toggle affordances and disabled controls are skipped; opt any control out with `data-no-loading`, override its label with `data-loading-label`, or disable the feature at runtime with `window.LM_CLICK_FEEDBACK = false`.
+
+## How to write markup
+
+- Write a new page as an ES module in `js/views/` (see `js/views/os-updates.js`): `import { safeHtml, rawHtml } from '../core/safe-html.js'` and `import { createView, delegate } from '../core/view.js'`, register its entry point on `lmViews`, and add a `<script type="module">` tag at the end of `index.html`.
+- Build HTML with the `safeHtml` tagged template (`js/core/safe-html.js`): every `${value}` is HTML-escaped, so server data can't inject markup. Don't call `escapeHtml()` inside it (that double-escapes).
+- Nested `safeHtml` results and arrays (`${rows.map(r => safeHtml`<li>${r.name}</li>`)}`) are inserted as-is — no `.join('')`. `null`/`undefined`/`false` render nothing; `0` renders `0`.
+- Trusted markup (e.g. `helpIcon()` output) must be wrapped in `rawHtml(...)` — grep-able, so every opt-out is reviewable.
+- The result works anywhere a string does (`el.innerHTML = safeHtml`...``, `openModal(id, body)`).
+- A part of a page that re-renders (polling, toggles) should be a view: `createView({ el, state, render })` (`js/core/view.js`) returns `{ state, setState, refresh }`; `render(state)` returns `safeHtml`, and a refresh morphs the DOM (idiomorph, `assets/idiomorph.min.js`) instead of replacing it, so focus, scroll and open `<details>` survive. Give repeated rows an `id` so they match up.
+- Wire events with `delegate(root, actions)` (`js/core/view.js`), not inline `onclick=` and `window.fn` globals: `<button data-action="reboot" data-node="${key}">` calls `actions.reboot(el, event)` (click, or change on inputs/selects); `data-input` fires on every keystroke and `<form data-submit="search">` on Enter.
+- For an interactive part with its own state (a search box with results, a wizard), a Preact component is simpler: `import { html as phtml, render, useState, useEffect } from '../../assets/preact-htm.module.js'` (Preact + htm, vendored). Write `` phtml`<div class=${cls} onClick=${fn}>${text}</div>` ``; values are always text, and events are plain props, so no `data-action` is needed. Mount it with `` render(phtml`<${MyThing} />`, el) ``. Example: `CveLookup` in `js/views/os-updates.js`.
+- `core/tests/test_webui_ratchets.py` caps `escapeHtml(`, inline `on*=` handlers and `window.X =` globals — the counts may only go down. OS Updates (`js/views/os-updates.js`) is the reference view.
 
 ## How it works
 

@@ -46,11 +46,12 @@ done earlier is redone later.
   errors and the same 1465 global functions.
 - Later (optional): regroup functions by view inside js/ (moves only).
 
-## Phase 2 - Safe templating (item 5)
+## Phase 2 - Safe templating (item 5) [done]
 One PR: helper + tests + OS Updates pilot. Other views convert later, when
 Phase 3 touches them anyway (no separate mass rewrite).
 
-Helper - new WebUI/js/safe-html.js, loaded BEFORE main.js (~30 lines):
+Helper - new WebUI/js/core/safe-html.js (subfolder, so the split-parts
+test doesn't treat it as a main.js part), loaded BEFORE main.js (~30 lines):
 - `safeHtml` tagged template: every `${value}` is HTML-escaped (same rules
   as escapeHtml) unless it is already a SafeHtml result.
 - Arrays are flattened, so `${rows.map(r => safeHtml`...`)}` needs no .join('').
@@ -67,8 +68,8 @@ Pitfalls handled in the pilot:
 - `.join('')` on SafeHtml items gives a plain string, which would then be
   double-escaped -> drop .join('') inside safeHtml (arrays are flattened).
 - escapeHtml(x) inside safeHtml double-escapes -> remove those calls.
-- onclick="fn('${x}')" JS-string args: escJsAttr already HTML-escapes, so it
-  is wrapped as rawHtml(escJsAttr(x)) via a tiny `jsArg(x)` helper. (Goes
+- onclick="fn(${JSON.stringify(x)})" JS-string args: safeHtml escapes the
+  JSON for the attribute, the browser unescapes it back to valid JS. (Goes
   away in Phase 4 when inline handlers become data-action.)
 - Shared helpers that return markup (helpIcon, _osuBadge) return rawHtml(...)
   so callers in both old and new templates work.
@@ -93,33 +94,59 @@ Risk: low (new code + one view). Rework later: none - Phase 3 render
 functions return safeHtml, createView does String(result) before morphing.
 Phase 6 htm is bound to `phtml`, so no name clash.
 
-## Phase 3 - Views + DOM diffing (items 3 + 2 together)
+## Phase 3 - Views + DOM diffing (items 3 + 2 together) [done]
 - js/core/view.js: `createView({el, state, render})` -> `{state, setState, refresh}`.
   render returns `safeHtml` (Phase 2); update applies via vendored idiomorph
   (assets/idiomorph.min.js) instead of innerHTML.
 - Diffing lives inside createView only, so it is written once.
 - Migrate views one at a time (start: OS Updates, which already has
   _osuRender/_osuData and hand-rolled _osuOpen preservation -> delete that).
+- Done: OS Updates node list (_osuView) and CVE lookup (_osuCveView). Open
+  <details> survive via an idiomorph beforeAttributeUpdated hook; rows carry
+  ids for stable matching. Tests: test_webui_view.py (morph keeps nodes and
+  open state), test_webui_os_updates_view.py (real page, mocked API: picks,
+  CVE "Select fixes", hostile CVE text, open list survives the 5 s poll).
 
-## Phase 4 - Event delegation (item 4)
-- createView gets `actions: { name(ev, el) {...} }`; one listener on the view
-  root dispatches `data-action="name"` (+ data-* args).
+## Phase 4 - Event delegation (item 4) [done]
+- `delegate(root, actions)` in js/core/view.js (separate from createView, so a
+  page wires once at its root and its views stay plain): data-action (click,
+  or change on form fields), data-input, data-submit (<form>, prevents the
+  navigation); calls actions[name](el, event), args in data-*.
 - Per migrated view: onclick="foo(1)" -> data-action="foo" data-id="1";
-  remove the matching window.foo global. Track count of onclick= / window.* in a
-  test that may only go down.
+  remove the matching window.foo global.
+- Done: OS Updates (21 handlers, 19 window.osu* globals gone; one _osuActions
+  table; the Fix-access modal delegates on its own element).
+- core/tests/test_webui_ratchets.py: escapeHtml(, on*= handlers and
+  window.X = counts may only go down.
 
-## Phase 5 - ES modules (item 6, part B)
-- Then drop 'unsafe-inline' from script-src in the CSP (core/src/api.py)
-  once index.html's inline <script> blocks are moved to files too.
+## Phase 5 - ES modules (item 6, part B) [done for OS Updates]
 - Only when a file has no inline handlers / window.* consumers left: switch it
   to import/export and <script type="module">.
 - Remaining cross-file globals become explicit imports. Last file to flip: core.
+- Done: OS Updates moved out of settings.js into js/views/os-updates.js
+  (module); js/core/safe-html.js and view.js are modules it imports. Classic
+  code reaches a module page through one registry, `lmViews` (main.js):
+  the module sets lmViews.osupdates, setView calls it -- no window globals.
+  Module code still reads classic globals (apiJson, showToast, openModal...)
+  by name; those become imports when their own files flip.
+- Cache: modules import js/core/* without ?v=, so serve_ui now sends
+  unversioned files `Cache-Control: no-cache` (was max-age=300) -- a stale
+  core file can't sit next to a newly deployed view.
+- Still to do (needs every inline handler gone first): drop 'unsafe-inline'
+  from script-src in the CSP (core/src/api.py) once index.html's inline
+  <script> blocks are moved to files too.
 
-## Phase 6 - Preact + htm (item 1)
+## Phase 6 - Preact + htm (item 1) [done for the OS Updates CVE lookup]
 - Vendor assets/preact+htm standalone (~5 KB), bind `phtml = htm.bind(h)`.
 - Use for new views and the most interactive existing ones; createView's
   state/setState/actions maps 1:1 to useState/handlers, so a migration is a
   mechanical port, not a redesign. createView stays for simple views.
+- Done: assets/preact-htm.module.js (htm 3.1.1 preact/standalone, unmodified;
+  ES module). The OS Updates "Who is affected?" lookup is a component
+  (CveLookup: form, fleet suggestions, result) imported as
+  `{ html as phtml, render, useState, useEffect }`; _osuCveView and its three
+  actions are gone. Hostile data is checked in the browser
+  (test_webui_os_updates_view.py) since phtml builds DOM, not strings.
 
 ## AB continuous UI walker (todo, after 0b)
 Run the webui_walk.py walk continuously from AB against the live hub and

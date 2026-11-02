@@ -1239,7 +1239,7 @@ function initView(viewId, subView) {
             loadSecurityData();
             break;
         case 'osupdates':
-            _renderOsUpdatesView(document.getElementById('osupdates-content'));
+            lmViews.osupdates(document.getElementById('osupdates-content'));
             break;
         case 'reports':
             loadReportsData();
