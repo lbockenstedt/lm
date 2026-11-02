@@ -56,6 +56,14 @@ down. If it doesn't come back in time it is left in maintenance mode and the
 rest of the run is stopped. The same happens on a MANUAL deploy to a cluster
 node (a manual deploy otherwise never reboots) and for its Reboot button.
 
+Pre-patch VM snapshots: each node is linked to the Proxmox VM it runs in
+(matched by hostname, IP only to break a tie — see ``vm_snapshots.find_vm``);
+Proxmox hosts themselves are bare metal and never linked. With snapshots on
+(the default), a linked node's VM is snapshotted as ``lm-prepatch-<UTC time>``
+right before it is patched — manual deploy and auto-patch alike — and only the
+last ``keep`` (default 2) pre-patch snapshots are kept. If the snapshot fails
+the node is not patched. Settings: ``global_config["os_updates_snapshot"]``.
+
 Fixing access: a non-root node without the lm-os-update helper is "blocked".
 ``osu_fix_access`` relays a root/sudo login typed once in the WebUI to that
 node, which uses it to install the helper (``os_update.fix_access``). The
@@ -75,6 +83,7 @@ import asyncio
 import fnmatch
 import logging
 import os
+import socket
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -83,6 +92,7 @@ from zoneinfo import ZoneInfo
 from cache_core import JsonCacheFile  # sibling leaf
 from os_cve import CVE_RE, FeedCache, match_node  # sibling leaf
 from sync_loop import run_sync_loop  # sibling leaf
+import vm_snapshots  # sibling leaf
 
 logger = logging.getLogger("Hub")
 
@@ -128,6 +138,13 @@ _AUTOREBOOT_ACTOR = "auto-reboot"
 _CVE_MAX_RESULTS = 200
 _DEFAULT_WINDOW = {"start": "01:00", "end": "05:00", "tz": "UTC"}
 _AUTOPATCH_TICK_S = 300.0
+
+# Pre-patch VM snapshots: global_config["os_updates_snapshot"] = {enabled, keep}.
+# On by default; keep the last 2 pre-patch snapshots per VM.
+_OSU_SNAPSHOT_CFG_KEY = "os_updates_snapshot"
+_PREPATCH_PREFIX = "lm-prepatch-"
+# Spokes of these types run their agents on Proxmox hosts themselves.
+_PVE_HOST_SPOKE_TYPES = {"hypervisor", "simulation"}
 
 
 def _parse_window(window: Any) -> Dict[str, str]:
@@ -221,7 +238,7 @@ class HubOsUpdatesMixin:
                         item["status"] = "interrupted"
                         item["message"] = ("hub restarted while this node was "
                                            "updating — check it, then re-check")
-                    elif item.get("status") == "queued":
+                    elif item.get("status") in ("queued", "snapshotting"):
                         item["status"] = "skipped"
             st["run"] = run
         logger.info("os-updates: restored %d node result(s) from %s",
@@ -546,6 +563,78 @@ class HubOsUpdatesMixin:
             reboot.discard(node_key)
         return self._osu_save_autopatch({**cfg, "reboot_nodes": list(reboot)})
 
+    # ── pre-patch VM snapshots ───────────────────────────────────────────────
+    def osu_snapshot_config(self) -> Dict[str, Any]:
+        """``{enabled, keep}`` — snapshot each node's VM before patching it."""
+        try:
+            cfg = (self.state.system_state.get("global_config", {})
+                   .get(_OSU_SNAPSHOT_CFG_KEY, {})) or {}
+        except Exception:  # noqa: BLE001 — hub without state (tests)
+            cfg = {}
+        return {"enabled": bool(cfg.get("enabled", True)), "keep": int(cfg.get("keep", 2))}
+
+    def osu_set_snapshot_config(self, enabled: bool, keep: Any) -> Dict[str, Any]:
+        """ValueError unless 1 <= keep <= 20."""
+        try:
+            keep = int(keep)
+        except (TypeError, ValueError):
+            raise ValueError("keep must be a number") from None
+        if not 1 <= keep <= 20:
+            raise ValueError("keep must be between 1 and 20")
+        gc = self.state.system_state.setdefault("global_config", {})
+        gc[_OSU_SNAPSHOT_CFG_KEY] = {"enabled": bool(enabled), "keep": keep}
+        self.state._mark_dirty()
+        return self.osu_snapshot_config()
+
+    def _osu_vm_links(self, nodes: Dict[str, Dict[str, Any]]) -> None:
+        """Set ``vm`` (the Proxmox VM the node runs in) or ``vm_note`` (why
+        there is none) on each node, matched by hostname via vm_snapshots."""
+        vms = vm_snapshots.all_vms(self)
+        meta = (getattr(self, "state", None) and
+                self.state.system_state.get("module_metadata", {})) or {}
+        tele = getattr(self, "spoke_telemetry", {}) or {}
+        for n in nodes.values():
+            n["vm"], n["vm_note"] = None, ""
+            spoke_type = str((meta.get(n.get("spoke_id"), {}) or {}).get("module_type") or "")
+            if n.get("pve_cluster") or (n["kind"] == "agent" and spoke_type in _PVE_HOST_SPOKE_TYPES):
+                n["vm_note"] = "Proxmox host (bare metal)"
+                continue
+            if not vms:
+                n["vm_note"] = "VM list not loaded"
+                continue
+            names, ips = [n.get("label")], []
+            if n["kind"] == "spoke":
+                md = meta.get(n["id"], {}) or {}
+                names += [md.get("display_name"), md.get("name"), md.get("hostname")]
+                ips.append((tele.get(n["id"]) or {}).get("remote_ip"))
+            elif n["kind"] == "hub":
+                names.append(socket.gethostname())
+            vm, why = vm_snapshots.find_vm(self, names, ips, vms)
+            n["vm"], n["vm_note"] = (vm_snapshots.vm_ref(vm) if vm else None), why
+
+    async def _osu_prepatch_snapshot(self, n: Dict[str, Any], run: Dict[str, Any],
+                                     item: Optional[Dict[str, Any]]) -> bool:
+        """Snapshot the node's VM before it is patched (when enabled and the
+        node is a known VM). False = the snapshot failed: don't patch it."""
+        cfg = self.osu_snapshot_config()
+        vm = n.get("vm")
+        if not cfg["enabled"] or not vm:
+            return True
+        run["current"] = f"{n['label']} — snapshotting VM {vm.get('name')}"
+        if item:
+            item["status"] = "snapshotting"
+        self._osu_save()
+        res = await vm_snapshots.take_snapshot(self, vm, _PREPATCH_PREFIX, cfg["keep"],
+                                               run.get("actor") or "os-updates")
+        if res.get("status") != "SUCCESS":
+            if item:
+                item.update(status="failed", message="pre-patch snapshot failed — not patched: "
+                                                     + res.get("message", ""))
+            return False
+        if item:
+            item["snapshot"] = res["snapshot"]
+        return True
+
     def _osu_autopatch_skip_reason(self, now: float) -> str:
         """Why auto-patch must not start now ("" = go)."""
         cfg = self.osu_autopatch_config()
@@ -749,6 +838,7 @@ class HubOsUpdatesMixin:
         for key, n in merged.items():
             n["auto_patch"] = key in approved
             n["auto_reboot"] = key in reboot
+        self._osu_vm_links(merged)
         if only is not None:
             merged = {k: n for k, n in merged.items() if k in only}
         nodes = sorted(merged.values(), key=lambda n: (n["kind"] != "hub", n["label"]))
@@ -1141,6 +1231,12 @@ class HubOsUpdatesMixin:
                 continue
             if n["kind"] == "hub":
                 await self._osu_auto_reboot(run)
+            if not await self._osu_prepatch_snapshot(n, run, item):
+                run["done"] += 1
+                self._osu_save()
+                logger.warning("OS-UPDATE: %s → not patched (pre-patch snapshot failed)",
+                               n["label"])
+                continue
             run["current"] = n["label"]
             if item:
                 item["status"] = "applying"

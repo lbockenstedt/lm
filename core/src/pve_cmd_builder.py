@@ -660,6 +660,28 @@ def vm_destroy_cmd(vmid: Any, kind: str) -> str:
     return f"{bin_} destroy {vid} --purge"
 
 
+def list_snapshots_cmd(node: str, vmid: Any, kind: str) -> str:
+    """``pvesh get /nodes/<node>/<qemu|lxc>/<vmid>/snapshot`` — the VM's
+    snapshots (works from any node in the cluster)."""
+    return pvesh_get(f"/nodes/{node}/{'lxc' if kind == 'lxc' else 'qemu'}/{int(vmid)}/snapshot")
+
+
+def parse_snapshots(run_response: Any) -> List[Dict[str, Any]]:
+    """``[{name, snaptime, description}]``, oldest first. Drops the synthetic
+    ``current`` entry (the live state, not a snapshot)."""
+    out = [{"name": str(s.get("name")), "snaptime": int(s.get("snaptime") or 0),
+            "description": str(s.get("description") or "").strip()}
+           for s in _parse_json_list(run_response)
+           if isinstance(s, dict) and s.get("name") and s.get("name") != "current"]
+    return sorted(out, key=lambda s: s["snaptime"])
+
+
+def delete_snapshot_cmd(vmid: Any, kind: str, name: str) -> str:
+    """``qm``/``pct delsnapshot <vmid> <name>`` (run on the VM's own node)."""
+    bin_ = "pct" if kind == "lxc" else "qm"
+    return f"{bin_} delsnapshot {int(vmid)} {shlex.quote(name)}"
+
+
 def pvesm_status_cmd(storage: str) -> str:
     """``pvesm status --storage <storage>`` — backup-storage validation. The
     backup action fails fast with a clear message if the storage isn't
