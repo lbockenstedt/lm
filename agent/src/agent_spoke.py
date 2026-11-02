@@ -1182,16 +1182,37 @@ class GenericAgent(BaseSpoke):
         return cmd
 
     @staticmethod
+    def _write_zabbix_tls(config: dict) -> dict:
+        """Persist hub-issued PEMs under /etc/zabbix/tls (so the key never appears
+        on a command line) and point the installer flags at the files."""
+        pems = {"tls_ca": config.pop("tls_ca_pem", None), "tls_cert": config.pop("tls_cert_pem", None),
+                "tls_key": config.pop("tls_key_pem", None)}
+        if not all(pems.values()):
+            return config
+        d = Path("/etc/zabbix/tls")
+        d.mkdir(parents=True, exist_ok=True)
+        for key, pem in pems.items():
+            path = d / f"lm-{key[4:]}.pem"
+            path.write_text(pem)
+            path.chmod(0o600 if key == "tls_key" else 0o644)
+            config[key] = str(path)
+        return config
+
+    @staticmethod
     def _zabbix_install_args(role_name: str, config: dict) -> str:
         """Project LOAD_ROLE config into zabbix installer flags (shlex-quoted)."""
         flags = {"zabbix-server": (("db_host", "db-host"), ("db_port", "db-port"),
                                    ("db_name", "db-name"), ("db_user", "db-user"),
-                                   ("db_pass", "db-pass"), ("server_name", "server-name")),
+                                   ("db_pass", "db-pass"), ("server_name", "server-name"),
+                                   ("tls_ca", "tls-ca"), ("tls_cert", "tls-cert"),
+                                   ("tls_key", "tls-key")),
                  "zbxproxy": (("server", "server"), ("proxy_name", "proxy-name"),
                               ("tls_ca", "tls-ca"), ("tls_cert", "tls-cert"),
                               ("tls_key", "tls-key")),
-                 "zbxagent": (("proxy", "proxy"), ("hostname", "hostname"))}[role_name]
-        config = dict(config)
+                 "zbxagent": (("proxy", "proxy"), ("hostname", "hostname"),
+                              ("tls_ca", "tls-ca"), ("tls_cert", "tls-cert"),
+                              ("tls_key", "tls-key"))}[role_name]
+        config = GenericAgent._write_zabbix_tls(dict(config))
         if role_name == "zbxproxy" and not config.get("server"):
             logger.error("zbxproxy: LOAD_ROLE config has no 'server'; the hub should supply it "
                          "from the Monitoring page setting")

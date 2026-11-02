@@ -103,6 +103,18 @@ def _zbxproxy_tenant(hub, spoke_id):
         return "default"
 
 
+def _monitoring_tls(hub, cfg, common_name):
+    """Add a hub-CA client+server cert for ``common_name`` to a monitoring role's
+    config so the proxy/agent link is mTLS. Off when System → Monitoring TLS is
+    disabled (``global_config.monitoring_tls == False``)."""
+    if hub.state.system_state.get("global_config", {}).get("monitoring_tls") is False:
+        return cfg
+    from security import mtls_ca
+    leaf, key, ca = mtls_ca.issue_service_cert(common_name)
+    return {**cfg, "tls_cert_pem": leaf, "tls_key_pem": key, "tls_ca_pem": ca,
+            "tls_subject": common_name}
+
+
 async def _zbxproxy_register(hub, cfg):
     """Create the proxy in Zabbix so the server accepts it. Best effort: the
     next install or a manual registration covers a monitoring spoke that is down."""
@@ -112,7 +124,8 @@ async def _zbxproxy_register(hub, cfg):
         logger.warning("zbxproxy: not registered in Zabbix (name=%r, monitoring spoke=%s)", name, bool(sid))
         return
     try:
-        await hub.request_response(sid, "MON_PROXY_REGISTER", {"name": name}, timeout=60.0)
+        await hub.request_response(sid, "MON_PROXY_REGISTER",
+                                   {"name": name, "tls_subject": cfg.get("tls_subject")}, timeout=60.0)
     except Exception:  # noqa: BLE001
         logger.exception("zbxproxy: registering proxy %r in Zabbix failed", name)
 
@@ -131,7 +144,7 @@ def _zbxproxy_load_config(hub, cfg, spoke_id=None):
             raise HTTPException(status_code=400, detail="Monitoring server address is not set: "
                                 "enter it under System → Monitoring before installing a proxy")
         cfg["server"] = server
-    return cfg
+    return _monitoring_tls(hub, cfg, cfg["proxy_name"]) if not cfg.get("tls_cert_pem") else cfg
 
 
 async def _zbxagent_load_config(hub, cfg, spoke_id):
@@ -152,8 +165,12 @@ async def _zbxagent_load_config(hub, cfg, spoke_id):
         if not host:
             raise HTTPException(status_code=502, detail="Could not read this node's hostname for the monitoring agent")
         cfg["hostname"] = f"{tenant}--{host}"
-    if cfg.get("proxy"):
-        return cfg
+    if not cfg.get("proxy"):
+        cfg = await _zbxagent_find_proxy(hub, cfg, spoke_id, tenant)
+    return _monitoring_tls(hub, cfg, cfg["hostname"]) if not cfg.get("tls_cert_pem") else cfg
+
+
+async def _zbxagent_find_proxy(hub, cfg, spoke_id, tenant):
     for pk, roles in list(hub._agent_roles_store().items()):
         if "zbxproxy" not in (roles or []) or hub.state.get_spoke_tenant(pk) != _zbxproxy_tenant(hub, spoke_id):
             continue
@@ -181,7 +198,8 @@ async def _zbxagent_register(hub, cfg):
         return
     try:
         await hub.request_response(sid, "MON_AGENT_REGISTER",
-                                   {"tenant": tenant, "hostname": host}, timeout=60.0)
+                                   {"tenant": tenant, "hostname": host,
+                                    "tls_subject": cfg.get("tls_subject")}, timeout=60.0)
     except Exception:  # noqa: BLE001
         logger.exception("zbxagent: registering host %r in Zabbix failed", cfg.get("hostname"))
 
@@ -211,6 +229,8 @@ async def _load_roles_impl(hub, spoke_id, data):
             try:
                 if rname == "ldap-server":
                     rcfg = await _ldap_server_load_config(hub, spoke_id, rcfg)
+                elif rname == "zabbix-server":
+                    rcfg = _monitoring_tls(hub, dict(rcfg or {}), "zabbix-server")
                 elif rname == "zbxproxy":
                     rcfg = _zbxproxy_load_config(hub, rcfg, spoke_id)
                 elif rname == "zbxagent":
@@ -243,6 +263,8 @@ async def _load_roles_impl(hub, spoke_id, data):
         raise HTTPException(status_code=400, detail="role is required")
     if role == "ldap-server":
         config = await _ldap_server_load_config(hub, spoke_id, config)
+    elif role == "zabbix-server":
+        config = _monitoring_tls(hub, dict(config or {}), "zabbix-server")
     elif role == "zbxproxy":
         config = _zbxproxy_load_config(hub, config, spoke_id)
     elif role == "zbxagent":
