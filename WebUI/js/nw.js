@@ -141,6 +141,7 @@ function _nwDetailHtml() {
             ${metaRow('Type', escapeHtml(typeLabel))}
             ${metaRow('Transport', escapeHtml(transport))}
             ${metaRow('Address', escapeHtml(dev.address || '—'))}
+            ${(dev._addresses || []).length > 1 ? metaRow('Also seen at', dev._addresses.filter(a => a !== dev.address).map(a => escapeHtml(a)).join('<br>')) : ''}
             ${idRow('Hostname', dev.hostname)}
             ${idRow('Model', dev.model)}
             ${idRow('Serial (SN)', dev.serial)}
@@ -201,6 +202,74 @@ async function _nwLoadDetailTab(tab) {
 // into a device lazy-loads its per-resource detail (see nwOpenDevice). ?tenant=
 // scopes the server-side subnet filter to the selected tenant (incl. admins via
 // the switcher); without it admins bypass the filter (see access.filter_nw).
+// The same physical box is often discovered at several addresses (every SVI /
+// VLAN interface of a core switch answers SSH/SNMP), producing one row per IP.
+// Collapse rows that are the same hardware, within a tenant: identical serial,
+// else identical base MAC, else (no hardware identity yet) identical
+// name/hostname + object type — names are reconciled to the box hostname each
+// poll. A serial-less row joins an existing group by name only when it doesn't
+// contradict that group's MAC. The primary row (opened on click, used by Poll /
+// Configure) is a reachable member when there is one.
+function _nwCollapse(items) {
+    const norm = v => String(v || '').trim().toLowerCase();
+    const isUp = it => it.reachable === true || it.reachable === 'up';
+    const groups = [];
+    const byKey = new Map();
+    const keyOf = (it, kind) => {
+        const t = norm(it.tenant_id);
+        if (kind === 'serial') return norm(it.serial) && `${t}|s|${norm(it.serial)}`;
+        if (kind === 'mac') return norm(it.mac) && `${t}|m|${norm(it.mac)}`;
+        return norm(it.name || it.hostname) && `${t}|n|${norm(it.object_type)}|${norm(it.name || it.hostname)}`;
+    };
+    const add = (g, it) => {
+        g.members.push(it);
+        ['serial', 'mac', 'name'].forEach(k => { const key = keyOf(it, k); if (key && !byKey.has(key)) byKey.set(key, g); });
+    };
+    for (const it of items || []) {
+        let g = (keyOf(it, 'serial') && byKey.get(keyOf(it, 'serial')))
+            || (keyOf(it, 'mac') && byKey.get(keyOf(it, 'mac')));
+        if (!g) {
+            const byName = keyOf(it, 'name') && byKey.get(keyOf(it, 'name'));
+            // Don't merge two boxes that merely share a name but report
+            // different hardware identities.
+            const clash = byName && byName.members.some(m =>
+                (norm(it.serial) && norm(m.serial) && norm(m.serial) !== norm(it.serial)) ||
+                (norm(it.mac) && norm(m.mac) && norm(m.mac) !== norm(it.mac)));
+            if (byName && !clash) g = byName;
+        }
+        if (!g) { g = { members: [] }; groups.push(g); }
+        add(g, it);
+    }
+    return groups.map(g => {
+        const m = g.members;
+        const primary = m.find(isUp) || m[0];
+        const pick = k => (primary[k] || (m.find(x => x[k]) || {})[k] || '');
+        const anyUp = m.some(isUp);
+        const anyKnown = m.some(x => x.reachable === false || x.reachable === 'down');
+        return Object.assign({}, primary, {
+            serial: pick('serial'), mac: pick('mac'), model: pick('model'),
+            reachable: anyUp ? true : (anyKnown ? false : primary.reachable),
+            _addresses: [...new Set(m.map(x => x.address).filter(Boolean))],
+            _members: m,
+        });
+    });
+}
+
+// Address cell for a collapsed row: the primary address plus an expandable
+// "+N more" list of the other addresses the same box answered on.
+function _nwAddressCell(it) {
+    const addrs = it._addresses || (it.address ? [it.address] : []);
+    if (addrs.length <= 1) return escapeHtml(addrs[0] || '—');
+    const others = addrs.filter(a => a !== it.address);
+    return `${escapeHtml(it.address || addrs[0])}<details class="mt-0.5" onclick="event.stopPropagation()">
+        <summary class="cursor-pointer text-[10px] text-[#01A982] font-sans font-semibold select-none" title="This device was discovered at ${addrs.length} addresses — shown once">+${others.length} more</summary>
+        <div class="text-[10px] text-slate-500 leading-4">${others.map(a => escapeHtml(a)).join('<br>')}</div></details>`;
+}
+
+function _nwSerialCell(it) {
+    return it.serial ? `<span class="font-mono">${escapeHtml(String(it.serial))}</span>` : '<span class="text-slate-300">—</span>';
+}
+
 async function loadNwData(category) {
     const container = document.getElementById('nw-table-container');
     if (!container) return;
@@ -260,6 +329,7 @@ async function loadNwData(category) {
             return;
         }
         items = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
+        items = _nwCollapse(items);
     } catch (err) {
         console.error(`[Network] Error in loadNwData:`, err);
         container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading devices: ${escapeHtml(err.message)}</div>`;
@@ -337,15 +407,16 @@ function _renderNwOverview(devices, counts) {
                 ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
                 : '<span class="text-slate-400 text-xs">—</span>';
         return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer" title="View device details">
-            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${(it.serial || it.mac) ? `<div class="text-[10px] font-mono font-normal text-slate-400 mt-0.5">${it.serial ? 'SN ' + escapeHtml(String(it.serial)) : ''}${(it.serial && it.mac) ? ' · ' : ''}${it.mac ? escapeHtml(String(it.mac)) : ''}</div>` : ''}</td>
+            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${it.mac ? `<div class="text-[10px] font-mono font-normal text-slate-400 mt-0.5">${escapeHtml(String(it.mac))}</div>` : ''}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(category)}</td>
-            <td class="px-4 py-3 text-slate-600 font-mono text-xs">${escapeHtml(it.address || '—')}</td>
+            <td class="px-4 py-3 text-slate-600 text-xs">${_nwSerialCell(it)}</td>
+            <td class="px-4 py-3 text-slate-600 font-mono text-xs">${_nwAddressCell(it)}</td>
             <td class="px-4 py-3">${rcell}</td>
             <td class="px-4 py-3 text-right"><span class="text-slate-300">›</span></td>
         </tr>`;
     }).join('');
-    const headers = ['device', 'type', 'category', 'address', 'reachable']
+    const headers = ['device', 'type', 'category', 'serial', 'address', 'reachable']
         .map(k => `<th class="px-4 py-3">${k.toUpperCase()}</th>`).join('');
 
     container.innerHTML = `
@@ -1339,7 +1410,7 @@ function _renderNwDeviceList(category, devices, counts) {
             `<div class="py-12 text-center text-slate-400 italic">${hint}</div>`;
         return;
     }
-    const keys = ['device', 'object_type', 'transport', 'address', 'reachable'];
+    const keys = ['device', 'object_type', 'transport', 'serial', 'address', 'reachable'];
     const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace(/_/g, ' ')}</th>`).join('');
     const rows = devices.map(it => {
         const typeLabel = _NW_OBJECT_TYPES[it.object_type] || it.object_type || '—';
@@ -1357,10 +1428,11 @@ function _renderNwDeviceList(category, devices, counts) {
               `<button onclick="event.stopPropagation();showNwConfigModal('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium" title="Configure device connection parameters">Configure</button>`
             : '';
         return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer" title="View device details">
-            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${(it.serial || it.mac) ? `<div class="text-[10px] font-mono font-normal text-slate-400 mt-0.5">${it.serial ? 'SN ' + escapeHtml(String(it.serial)) : ''}${(it.serial && it.mac) ? ' · ' : ''}${it.mac ? escapeHtml(String(it.mac)) : ''}</div>` : ''}</td>
+            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${it.mac ? `<div class="text-[10px] font-mono font-normal text-slate-400 mt-0.5">${escapeHtml(String(it.mac))}</div>` : ''}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(transport)}</td>
-            <td class="px-4 py-3 text-slate-600 font-mono text-xs">${escapeHtml(it.address || '—')}</td>
+            <td class="px-4 py-3 text-slate-600 text-xs">${_nwSerialCell(it)}</td>
+            <td class="px-4 py-3 text-slate-600 font-mono text-xs">${_nwAddressCell(it)}</td>
             <td class="px-4 py-3">${rcell}</td>
             <td class="px-4 py-3 text-right whitespace-nowrap">${cfg}<span class="text-slate-300 ml-2">›</span></td>
         </tr>`;
