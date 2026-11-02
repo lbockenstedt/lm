@@ -874,13 +874,13 @@ async function approveAgent(agentId, knownSpokeId) {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
         });
         const d = await res.json();
-        if (res.ok) { showToast(`Agent '${agentId}' approved`, 'success'); _reloadActiveMgmtView(); }
+        if (res.ok) { showToast(`Agent '${_spokeLabelFor(agentId)}' approved`, 'success'); _reloadActiveMgmtView(); }
         else showToast(d.detail || 'Approval failed', 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 async function revokeAgent(agentId) {
-    if (!await showConfirmToast(`Disconnect agent '${agentId}'? It will auto-reconnect and require re-approval.`)) return;
+    if (!await showConfirmToast(`Disconnect agent '${_spokeLabelFor(agentId)}'? It will auto-reconnect and require re-approval.`)) return;
     try {
         const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}/revoke`, {
             method: 'POST', credentials: 'same-origin',
@@ -936,7 +936,7 @@ async function openAgentConfigModal(agentId, currentLabel) {
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="text-xs text-slate-400 font-mono mb-2">ID: ${agentId}</div>
+                <div class="text-xs text-slate-400 font-mono mb-2">${_spokeLabelFor(agentId)}</div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Display Name</label>
                     <input type="text" id="agent-cfg-display-name" value="${safeName}" placeholder="${agentId}" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -1051,7 +1051,7 @@ async function openAgentAssignModal(agentId, currentTenantId) {
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="text-xs text-slate-400 font-mono mb-2">Agent: ${agentId}</div>
+                <div class="text-xs text-slate-400 font-mono mb-2">${_spokeLabelFor(agentId)}</div>
                 <input type="hidden" id="agent-assign-dn" value="${safeDn}">
                 <input type="hidden" id="agent-assign-cs" value="${csEnabled ? '1' : '0'}">
                 <p class="text-[11px] text-slate-400">Binds this Proxmox node agent to a tenant so its telemetry appears in that tenant's VM Server. The agent's display name and Client-Simulation setting are preserved.</p>
@@ -1130,7 +1130,7 @@ async function openSpokeAssignModal(spokeId, currentTenantId, noun = 'Spoke') {
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="text-xs text-slate-400 font-mono mb-2">${noun}: ${spokeId}</div>
+                <div class="text-xs text-slate-400 font-mono mb-2">${noun}: ${_spokeLabelFor(spokeId)}</div>
                 <p class="text-[11px] text-slate-400">Approving (re-approving) this ${noun.toLowerCase()} with a tenant binds it so its telemetry appears in that tenant's VM Server. Idempotent — the session secret is preserved.</p>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Tenant</label>
@@ -1186,7 +1186,7 @@ async function deleteSpoke(spokeId, label) {
 }
 
 async function deleteAgent(agentId) {
-    if (!await showConfirmToast(`Force delete agent '${agentId}'?\n\nThis disconnects it if connected and clears its hub-side ` +
+    if (!await showConfirmToast(`Force delete agent '${_spokeLabelFor(agentId)}'?\n\nThis disconnects it if connected and clears its hub-side ` +
                  `state (config, display name, heartbeat, approval). Works even if its parent spoke is offline. ` +
                  `It will need re-approval to reconnect. This cannot be undone — prefer Decommission (reversible) ` +
                  `unless you mean to wipe it.`)) return;
@@ -1228,7 +1228,7 @@ async function restoreSpoke(spokeId, label) {
 }
 
 async function decommissionAgent(agentId) {
-    if (!await showConfirmToast(`Decommission agent '${agentId}'?\n\nThis RETIRES it (keeps the record, badged grey) — ` +
+    if (!await showConfirmToast(`Decommission agent '${_spokeLabelFor(agentId)}'?\n\nThis RETIRES it (keeps the record, badged grey) — ` +
                  `reversible with Restore. Use Force Delete to remove it entirely.`)) return;
     try {
         const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}/decommission`, {
@@ -1241,7 +1241,7 @@ async function decommissionAgent(agentId) {
 }
 
 async function restoreAgent(agentId) {
-    if (!await showConfirmToast(`Restore agent '${agentId}' from decommission?`)) return;
+    if (!await showConfirmToast(`Restore agent '${_spokeLabelFor(agentId)}' from decommission?`)) return;
     try {
         const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}/restore`, {
             method: 'POST', credentials: 'same-origin',
@@ -1282,7 +1282,7 @@ async function openSpokeMetadataModal(spokeId, currentName, approved) {
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="text-xs text-slate-400 font-mono mb-4">ID: ${spokeId}</div>
+                <div class="text-xs text-slate-400 font-mono mb-4">${_spokeLabelFor(spokeId)}</div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Display Name</label>
                     <input type="text" id="meta-display-name" value="${safeName}" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -1398,13 +1398,13 @@ async function unapproveSpoke(spokeId) {
 }
 
 async function resetSpokeSecret(spokeId) {
-    if (!await showConfirmToast(`Are you sure you want to reset the secret for ${spokeId}? This will wipe all stored keys and force the spoke to re-onboard using a new first-secret.`)) {
+    if (!await showConfirmToast(`Are you sure you want to reset the secret for ${_spokeLabelFor(spokeId)}? This will wipe all stored keys and force the spoke to re-onboard using a new first-secret.`)) {
         return;
     }
     try {
         await apiJson(`/setup/spokes/${encodeURIComponent(spokeId)}/reset-secret`, { method: 'POST' });
 
-        showToast(`Secret for ${spokeId} has been reset. Restart the agent install or trigger a new handshake.`, 'success');
+        showToast(`Secret for ${_spokeLabelFor(spokeId)} has been reset. Restart the agent install or trigger a new handshake.`, 'success');
         _reloadActiveMgmtView();
     } catch (err) {
         showToast('Error resetting secret: ' + err.message, 'error');
@@ -3157,7 +3157,7 @@ async function loadModuleLogs(module, isRefresh = false) {
             container.innerHTML = Object.entries(logs).map(([agentId, agentLogs]) => `
                 <div class="mb-6">
                     <div class="px-4 py-2 bg-slate-100 border-b border-slate-200 text-xs font-bold text-slate-500 uppercase tracking-widest flex justify-between">
-                        <span>Agent: ${agentId}</span>
+                        <span>Agent: ${_spokeLabelFor(agentId)}</span>
                         <span class="opacity-60">Count: ${agentLogs.length}</span>
                     </div>
                     <div class="divide-y divide-slate-100">
@@ -3291,6 +3291,7 @@ async function loadApprovedSpokes() {
         // tenant-admins read only the spokes they may bind to via the
         // session-scoped /tenant/devices/spokes (same row shape).
         const data = await apiJson(isAdmin() ? '/setup/pending_spokes' : '/tenant/devices/spokes');
+        (data.spokes || []).forEach(s => { if (typeof _spokeName === 'function') _spokeName(s); });
         return (data.spokes || []).filter(s => s.approved);
     } catch (err) {
         console.error('Error loading approved spokes:', err);
@@ -3365,11 +3366,11 @@ async function clearDeployStatus(spokeId, role) {
 // netbox-server role (via the agent's NETBOX_RESET_ADMIN_PASSWORD command).
 async function resetNetboxAdmin(spokeId) {
     const pw = await showPromptToast(
-        `New NetBox admin password for ${spokeId}:`,
+        `New NetBox admin password for ${_spokeLabelFor(spokeId)}:`,
         { type: 'password', placeholder: 'new admin password', confirmLabel: 'Reset' });
     if (pw === null) return;                 // cancelled
     if (!pw || pw.length < 4) { showToast('Password must be at least 4 characters.', 'error'); return; }
-    showToast(`Resetting NetBox admin password on ${spokeId}…`, 'info');
+    showToast(`Resetting NetBox admin password on ${_spokeLabelFor(spokeId)}…`, 'info');
     try {
         const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/command`, {
             method: 'POST',
@@ -3388,6 +3389,7 @@ async function resetNetboxAdmin(spokeId) {
 }
 
 async function showLoadRoleModal(spokeId) {
+    if (!(window._spokeNameCache||{})[spokeId]) { try { await loadApprovedSpokes(); } catch (_e) { /* label is best-effort */ } }
     const existing = document.getElementById('load-role-modal');
     if (existing) existing.remove();
 
@@ -3399,7 +3401,7 @@ async function showLoadRoleModal(spokeId) {
             <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center shrink-0">
                 <div>
                     <h3 class="text-lg font-bold text-[#263040]">Load Role</h3>
-                    <p class="text-xs text-slate-500 mt-0.5 font-mono">${spokeId}</p>
+                    <p class="text-xs text-slate-500 mt-0.5 font-mono">${_spokeLabelFor(spokeId)}</p>
                 </div>
                 <button onclick="document.getElementById('load-role-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
@@ -3480,8 +3482,10 @@ async function showLoadRoleModal(spokeId) {
     }).join('');
     list.innerHTML = rows || '<p class="text-xs text-slate-400 italic col-span-3">All available roles are already loaded.</p>';
     const loadedControls = document.getElementById('loaded-role-controls');
+    // Deploy roles that own a background service (stop = Unload, purge = Uninstall).
+    const SERVICE_DEPLOY_ROLES = ['dns-server', 'dhcp-server', 'zabbix-server', 'zbxproxy'];
     const stoppableServers = [...activeDeployRoleIds]
-        .filter(id => (id === 'dns-server' || id === 'dhcp-server')
+        .filter(id => SERVICE_DEPLOY_ROLES.includes(id)
             && !(roleState.deploy?.state === 'running' && roleState.deploy?.role === id));
     // Servers whose package is still on disk. A role that was unloaded is
     // STOPPED but still installed, so it drops out of activeDeployRoleIds and
@@ -3490,7 +3494,7 @@ async function showLoadRoleModal(spokeId) {
     // too, which is the only action that clears the installed marker.
     const installedDeployRoleIds = new Set(roleState.installed_deploy_roles || []);
     const uninstallableServers = [...installedDeployRoleIds]
-        .filter(id => (id === 'dns-server' || id === 'dhcp-server')
+        .filter(id => SERVICE_DEPLOY_ROLES.includes(id)
             && !(roleState.deploy?.state === 'running' && roleState.deploy?.role === id));
     const loadedControlIds = [...new Set([
         ...(active || []).map(item => item.role),
@@ -3502,7 +3506,7 @@ async function showLoadRoleModal(spokeId) {
         loadedControls.innerHTML = `
             <p class="text-xs font-semibold text-slate-600 mb-2">Loaded roles and server services</p>
             <div class="flex flex-wrap gap-2">${loadedControlIds.map(id => {
-                const isServer = id.endsWith('-server');
+                const isServer = SERVICE_DEPLOY_ROLES.includes(id);
                 const moduleLoaded = isServer && loadedRoleIds.has(id.replace(/-server$/, ''));
                 const running = activeDeployRoleIds.has(id);
                 const installed = installedDeployRoleIds.has(id);
@@ -3672,7 +3676,7 @@ async function loadRole(spokeId) {
     }
     document.getElementById('load-role-modal')?.remove();
     const anyFailed = results.some(r => r.startsWith('✗'));
-    showToast(`Role activation on ${spokeId}:\n${results.join('\n')}`, anyFailed ? 'error' : 'success');
+    showToast(`Role activation on ${_spokeLabelFor(spokeId)}:\n${results.join('\n')}`, anyFailed ? 'error' : 'success');
     // Refresh whichever view is showing this spoke: the Global-Admin Spokes &
     // Agents table (Active Role column) or a tenant-admin's My Devices list.
     if (currentView === 'setup') loadSpokesAndAgents();
@@ -3680,6 +3684,7 @@ async function loadRole(spokeId) {
 }
 
 async function uninstallRole(spokeId, role, blockingModule) {
+    if (!(window._spokeNameCache||{})[spokeId]) { try { await loadApprovedSpokes(); } catch (_e) { /* label is best-effort */ } }
     const roleLabel = AGENT_ROLES[role]?.name || role;
     // The agent refuses to purge a server while its management sub-spoke is
     // still loaded (that would leave both in an undefined state). That guard
@@ -3690,8 +3695,8 @@ async function uninstallRole(spokeId, role, blockingModule) {
         ? (AGENT_ROLES[blockingModule]?.name || blockingModule) : '';
     const preamble = blockingModule
         ? `"${roleLabel}" is still being managed by the "${moduleLabel}" role, which has to be `
-          + `unloaded first.\n\nUnload "${moduleLabel}" AND uninstall "${roleLabel}" from ${spokeId}? `
-        : `Uninstall "${roleLabel}" from ${spokeId}? `;
+          + `unloaded first.\n\nUnload "${moduleLabel}" AND uninstall "${roleLabel}" from ${_spokeLabelFor(spokeId)}? `
+        : `Uninstall "${roleLabel}" from ${_spokeLabelFor(spokeId)}? `;
     if (!await showConfirmToast(
         preamble + `The service will be stopped and its ` +
         `packages, configuration and data will be PERMANENTLY REMOVED from the host. ` +
@@ -3713,7 +3718,7 @@ async function uninstallRole(spokeId, role, blockingModule) {
             // Abort the whole operation if the unload fails — going ahead would
             // only hit the agent-side guard and would have unloaded the module
             // for nothing.
-            showToast(`Unloading "${moduleLabel}" from ${spokeId}...`, 'info');
+            showToast(`Unloading "${moduleLabel}" from ${_spokeLabelFor(spokeId)}...`, 'info');
             const ures = _admin
                 ? await _post(`/api/agent/${encodeURIComponent(spokeId)}/command`,
                     { command: 'UNLOAD_ROLE', data: { role: blockingModule } })
@@ -3728,7 +3733,7 @@ async function uninstallRole(spokeId, role, blockingModule) {
                 return;
             }
         }
-        showToast(`Uninstalling "${roleLabel}" from ${spokeId} - this can take a few minutes...`, 'info');
+        showToast(`Uninstalling "${roleLabel}" from ${_spokeLabelFor(spokeId)} - this can take a few minutes...`, 'info');
         // Global Admin uses the arbitrary-command relay; a tenant-admin uses the
         // ownership-checked, role-only route.
         const res = _admin
@@ -3739,11 +3744,11 @@ async function uninstallRole(spokeId, role, blockingModule) {
         const data = await res.json();
         const payload = data.payload?.data || data.payload || data;
         if (res.ok && (data.status === 'SUCCESS' || payload?.status === 'SUCCESS')) {
-            showToast(payload?.message || `"${roleLabel}" uninstalled from ${spokeId}`, 'success');
+            showToast(payload?.message || `"${roleLabel}" uninstalled from ${_spokeLabelFor(spokeId)}`, 'success');
             _refresh();
         } else {
             const msg = res.status === 503
-                ? `${spokeId} is not connected — reconnect the agent to manage its roles.`
+                ? `${_spokeLabelFor(spokeId)} is not connected — reconnect the agent to manage its roles.`
                 : (payload?.message || data.detail || data.message || JSON.stringify(data));
             showToast('Failed to uninstall role: ' + msg, 'error');
             _refresh();
@@ -3754,11 +3759,12 @@ async function uninstallRole(spokeId, role, blockingModule) {
 }
 
 async function unloadRole(spokeId, role) {
+    if (!(window._spokeNameCache||{})[spokeId]) { try { await loadApprovedSpokes(); } catch (_e) { /* label is best-effort */ } }
     const roleLabel = AGENT_ROLES[role]?.name || role;
     const impact = AGENT_ROLES[role]?.deploy
         ? 'The server service will be stopped and disabled, but its package and configuration will remain installed.'
         : 'Its sub-spoke will disconnect.';
-    if (!await showConfirmToast(`Unload role "${roleLabel}" from ${spokeId}? ${impact}`)) return;
+    if (!await showConfirmToast(`Unload role "${roleLabel}" from ${_spokeLabelFor(spokeId)}? ${impact}`)) return;
     // Only reopen the Load Role modal if the unload was triggered from inside it
     // (not from the per-role Unload action on a Spokes row).
     const modalOpen = !!document.getElementById('load-role-modal');
@@ -3779,13 +3785,13 @@ async function unloadRole(spokeId, role) {
               });
         const data = await res.json();
         if (res.ok && (data.status === 'SUCCESS' || data.payload?.status === 'SUCCESS')) {
-            showToast(`Role "${roleLabel}" unloaded from ${spokeId}`, 'success');
+            showToast(`Role "${roleLabel}" unloaded from ${_spokeLabelFor(spokeId)}`, 'success');
             if (currentView === 'setup') loadSpokesAndAgents();
             if (typeof loadMyDeviceSpokes === 'function' && document.getElementById('my-spokes-list')) loadMyDeviceSpokes();
             if (modalOpen) showLoadRoleModal(spokeId);
         } else {
             const msg = res.status === 503
-                ? `${spokeId} is not connected — reconnect the agent to manage its roles.`
+                ? `${_spokeLabelFor(spokeId)} is not connected — reconnect the agent to manage its roles.`
                 : (data.detail || data.message || JSON.stringify(data));
             showToast('Failed to unload role: ' + msg, 'error');
         }

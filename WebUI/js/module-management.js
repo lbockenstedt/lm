@@ -715,7 +715,7 @@ ${schemaBtnHtml}
                     ? spokes.find(s => s.spoke_id === editItem.spoke_id) : null;
                 activeEl.textContent = activeSpoke
                     ? `Currently active on: ${_spokeName(activeSpoke)}`
-                    : (editItem && editItem.spoke_id ? `Currently active on: ${editItem.spoke_id}` : '');
+                    : (editItem && editItem.spoke_id ? `Currently active on: ${_spokeLabelFor(editItem.spoke_id)}` : '');
             }
         }
     });
