@@ -1503,6 +1503,8 @@ async function _initApp() {
             chip.classList.add('flex');
         }
 
+        _renderImpersonationBanner();
+
         const savedTheme = localStorage.getItem('lm_theme') || 'default';
         setTheme(savedTheme);
 
@@ -1543,6 +1545,58 @@ async function refreshOidcButton() {
         // Hub unreachable / older build without the endpoint → hide the button.
         wrap.classList.add('hidden');
     }
+}
+
+// ── Impersonation (Global Admin acts as another user) ──
+function _renderImpersonationBanner() {
+    document.getElementById('impersonation-banner')?.remove();
+    const imp = currentUser?.impersonator;
+    if (!imp) return;
+    const who = currentUser.display_name || currentUser.user_id;
+    const bar = document.createElement('div');
+    bar.id = 'impersonation-banner';
+    bar.className = 'fixed top-0 left-1/2 -translate-x-1/2 z-[100] mt-1 flex items-center gap-3 px-4 py-1.5 rounded-b-lg bg-amber-500 text-white text-xs font-bold shadow-lg';
+    const label = document.createElement('span');
+    label.textContent = `Impersonating ${who} (signed in as ${imp.display_name || imp.user_id})`;
+    const stop = document.createElement('button');
+    stop.className = 'px-2 py-0.5 rounded bg-white text-amber-700 hover:bg-amber-50 uppercase tracking-wider text-[10px]';
+    stop.textContent = 'Stop impersonating';
+    stop.addEventListener('click', stopImpersonation);
+    bar.append(label, stop);
+    document.body.appendChild(bar);
+}
+
+async function _switchIdentity(url, body) {
+    const r = await fetch(url, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+    // The tenant view belongs to the previous identity; start fresh.
+    localStorage.removeItem('lm_tenant');
+    window.location.reload();
+}
+
+// Users table "Impersonate" buttons carry data-impersonate (URI-encoded id).
+document.addEventListener('click', (ev) => {
+    const btn = ev.target.closest?.('[data-impersonate]');
+    if (btn) startImpersonation(decodeURIComponent(btn.dataset.impersonate));
+});
+
+async function startImpersonation(userId) {
+    if (!userId) return;
+    const ok = await showConfirmToast(`Impersonate ${userId}? You will see LabManager with their permissions and tenants until you click Stop impersonating.`,
+        { confirmLabel: 'Impersonate', danger: false });
+    if (!ok) return;
+    try { await _switchIdentity('/auth/impersonate', { user_id: userId }); }
+    catch (e) { showToast(`Impersonation failed: ${e.message}`, 'error'); }
+}
+
+async function stopImpersonation() {
+    try { await _switchIdentity('/auth/impersonate/stop'); }
+    catch (e) { showToast(`Could not stop impersonating: ${e.message}`, 'error'); }
 }
 
 function doOidcLogin() {
