@@ -89,6 +89,7 @@ import re
 import ssl
 import asyncio
 import base64
+import functools
 import json
 import time
 import uuid
@@ -312,6 +313,21 @@ from api_login_ratelimit import (  # noqa: F401
     # functions mutate.
     _login_attempts, _login_ip_attempts,
 )
+
+
+async def persist_on_shutdown(hub):
+    """Graceful-shutdown flush: cache writes are debounced and state
+    mutations are dirty-flagged (60s persistence loop) — persist them all
+    now so a clean stop loses no coalesced writes."""
+    for name, flush in (("nw-cache", hub.nw_cache_flush_now),
+                        ("le-cache", hub.le_cache_flush_now),
+                        ("truenas-cache", hub.truenas_cache_flush_now),
+                        ("data-cache", hub.warm_cache_flush_now),
+                        ("state", hub.state._flush_if_dirty)):
+        try:
+            await flush()
+        except Exception as e:  # noqa: BLE001 — best-effort on the way out
+            logger.warning("shutdown %s flush failed: %s", name, e)
 
 
 def _load_trusted_proxies() -> tuple:
@@ -1076,28 +1092,11 @@ def create_app(hub):
     if hub.state.ensure_admin_lockout():
         hub.state.save_state()
 
-    async def _persist_on_shutdown():
-        """Graceful-shutdown flush: the nw cache write is debounced (~5s) and
-        state mutations are dirty-flagged (60s persistence loop) — persist
-        both now so a clean stop loses no coalesced writes."""
-        try:
-            await hub.nw_cache_flush_now()
-        except Exception as e:  # noqa: BLE001 — best-effort on the way out
-            logger.warning("shutdown nw-cache flush failed: %s", e)
-        try:
-            await hub.warm_cache_flush_now()
-        except Exception as e:  # noqa: BLE001
-            logger.warning("shutdown data-cache flush failed: %s", e)
-        try:
-            await hub.state._flush_if_dirty()
-        except Exception as e:  # noqa: BLE001
-            logger.warning("shutdown state flush failed: %s", e)
-
     # Register on the router's shutdown list directly: modern Starlette dropped
     # the app.add_event_handler("shutdown", ...) convenience method, but
     # router.on_shutdown (what that method appended to internally) is stable and
     # is still run by the default lifespan.
-    app.router.on_shutdown.append(_persist_on_shutdown)
+    app.router.on_shutdown.append(functools.partial(persist_on_shutdown, hub))
 
     def _cleanup_legacy_tenant_cache_shards():
         """One-time cleanup: the old per-tenant cache shards
