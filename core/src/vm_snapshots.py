@@ -14,8 +14,10 @@ used by every module that needs it:
     ``global_config["vm_snapshot_schedules"]`` and run by ``run_loop``.
 
 OS Updates uses ``find_vm`` + ``take_snapshot`` for its pre-patch snapshots.
-The VM list comes from the hub's warm cache (``pxmx_vms``, all-tenants scope),
-which the pxmx cache feed keeps fresh.
+The VM list comes from the hub's warm cache (``pxmx_vms``), which the pxmx
+cache feed keeps fresh for the all-tenants scope and for every tenant. Each
+schedule belongs to one tenant and only ever sees that tenant's VMs
+(``tenant_vms``, the same attribution as the Hypervisors page).
 """
 from __future__ import annotations
 
@@ -39,14 +41,42 @@ _running: set = set()
 
 
 # ── VM lookup ─────────────────────────────────────────────────────────────────
-def all_vms(hub) -> List[Dict[str, Any]]:
-    """Every VM/container the hub knows (all tenants), templates excluded."""
-    data = hub.warm_get("pxmx_vms", "_all_|agent=") if hasattr(hub, "warm_get") else None
+def all_vms(hub, scope: str = "_all_") -> List[Dict[str, Any]]:
+    """Every VM/container in one warm-cache scope (default: all tenants),
+    templates excluded."""
+    data = hub.warm_get("pxmx_vms", f"{scope}|agent=") if hasattr(hub, "warm_get") else None
     if isinstance(data, dict) and isinstance(data.get("data"), dict):
         data = data["data"]
     vms = data.get("vms") if isinstance(data, dict) else data
     return [vm for vm in (vms or []) if isinstance(vm, dict) and vm.get("vmid") is not None
             and not vm.get("template")]
+
+
+async def tenant_vms(hub, tenant: str) -> List[Dict[str, Any]]:
+    """The VMs a tenant sees on its Hypervisors page: its spokes / Proxmox tag
+    (the tenant's warm-cache entry), narrowed to its subnets when the
+    hypervisor subnet filter is on, plus every VM on a host pinned to it."""
+    if not tenant:
+        return all_vms(hub)
+    import access
+    vms = all_vms(hub, tenant)
+    if access.filter_enabled(hub, "hypervisor"):
+        prefixes = await access.resolve_prefixes_for_tenant(hub, tenant)
+        if prefixes:
+            vms = access.filter_hypervisor_vms(
+                vms, prefixes, template_pools=access._template_pools(hub),
+                tenant_tags=access._tenant_tag_set(hub, tenant))
+    pinned_hosts = set()
+    for apk, cfg in (hub.state.system_state.get("agent_config") or {}).items():
+        pin = str(((cfg or {}).get("client_simulation") or {}).get("tenant_id") or "")
+        if pin.strip().casefold() == tenant.strip().casefold():
+            pinned_hosts.add(str((hub.agent_info.get(apk) or {}).get("hostname") or ""))
+    pinned_hosts.discard("")
+    if pinned_hosts:
+        have = {vm.get("unique_id") for vm in vms}
+        vms = vms + [vm for vm in all_vms(hub) if vm.get("node") in pinned_hosts
+                     and vm.get("unique_id") not in have]
+    return vms
 
 
 def _short(name: Any) -> str:
@@ -167,12 +197,17 @@ def _store(hub) -> Dict[str, Dict[str, Any]]:
     return gc.setdefault(SCHEDULES_KEY, {})
 
 
-def list_schedules(hub) -> List[Dict[str, Any]]:
+def list_schedules(hub, tenant: Optional[str] = None) -> List[Dict[str, Any]]:
+    """All schedules, or one tenant's. A schedule made before schedules had a
+    tenant (``tenant`` "") covers all VMs and is listed for every tenant until
+    it is edited, which moves it to the tenant it was edited from."""
     try:
         store = hub.state.system_state.get("global_config", {}).get(SCHEDULES_KEY) or {}
     except Exception:  # noqa: BLE001 — hub without state (tests)
         store = {}
-    return sorted(store.values(), key=lambda s: s.get("name", "").lower())
+    out = [s for s in store.values()
+           if tenant is None or s.get("tenant", "") in ("", tenant)]
+    return sorted(out, key=lambda s: s.get("name", "").lower())
 
 
 def _clean_list(value: Any) -> List[str]:
@@ -181,14 +216,15 @@ def _clean_list(value: Any) -> List[str]:
     return sorted({str(v).strip() for v in value if str(v).strip()})
 
 
-def save_schedule(hub, body: Dict[str, Any], sid: str = "") -> Dict[str, Any]:
-    """Create (no ``sid``) or replace a schedule. ValueError on bad input.
+def save_schedule(hub, body: Dict[str, Any], sid: str = "", tenant: str = "") -> Dict[str, Any]:
+    """Create (no ``sid``) or replace a schedule of ``tenant``. ValueError on
+    bad input; KeyError for an unknown ``sid`` or one of another tenant.
 
     ``{name, enabled, vms: [unique_id], tags: [...], pools: [...],
     every_hours, keep}`` — a VM is included if it is listed, or carries one of
     the tags, or is in one of the pools."""
     store = _store(hub)
-    if sid and sid not in store:
+    if sid and (sid not in store or store[sid].get("tenant", "") not in ("", tenant)):
         raise KeyError(sid)
     name = str(body.get("name") or "").strip()
     if not name:
@@ -207,7 +243,7 @@ def save_schedule(hub, body: Dict[str, Any], sid: str = "") -> Dict[str, Any]:
         raise ValueError("pick at least one VM, tag or pool")
     old = store.get(sid, {})
     sid = sid or uuid.uuid4().hex[:6]
-    store[sid] = {"id": sid, "name": name, "enabled": bool(body.get("enabled", True)),
+    store[sid] = {"id": sid, "tenant": tenant, "name": name, "enabled": bool(body.get("enabled", True)),
                   **targets, "every_hours": every, "keep": keep,
                   "prefix": old.get("prefix") or f"lms-{sid}-",
                   "last_run": old.get("last_run", 0.0), "last_result": old.get("last_result")}
@@ -235,7 +271,7 @@ async def run_schedule(hub, sid: str, actor: str = "schedule") -> Dict[str, Any]
         raise KeyError(sid)
     if sid in _running:
         return {"status": "ERROR", "message": "this schedule is already running"}
-    known = all_vms(hub)
+    known = await tenant_vms(hub, sched.get("tenant", ""))
     if not known:
         return {"status": "ERROR", "message": "the VM list hasn't loaded yet"}
     vms = schedule_vms(sched, known)
