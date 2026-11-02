@@ -1057,7 +1057,7 @@ async function _renderNwScanTab() {
             <input type="checkbox" class="nwt-cred rounded border-slate-300 text-[#01A982] focus:ring-green-500" value="${escapeHtml(String(cr.id))}" ${selectedCreds.has(String(cr.id)) ? 'checked' : ''}>
             <span class="font-mono">${escapeHtml(cr.name || cr.id)}</span>${cr.username ? `<span class="text-slate-400">· ${escapeHtml(cr.username)}</span>` : ''}
           </label>`).join('')
-        : `<p class="text-xs text-slate-400 italic">No scan credential sets belong to this tenant (or the shared tenant). You can still run a <b>discovery-only</b> scan with none selected — it reports which hosts are reachable and what management ports they expose, but cannot identify or add devices. To identify devices, add a set in Setup → Network Devices → Scan Credentials, bind it to <b>this</b> tenant (or the shared tenant so every tenant can use it), and point it at a Credential Vault entry. Note a vault credential on its own is not enough — the scan uses the credential <em>set</em> that references it.</p>`;
+        : `<p class="text-xs text-slate-400 italic">No scan credential sets belong to this tenant (or the shared tenant). Scans run <b>discovery-only</b> until one exists — it reports which hosts are reachable and what management ports they expose, but cannot identify or add devices. To identify devices, add a set in Setup → Network Devices → Scan Credentials, bind it to <b>this</b> tenant (or the shared tenant so every tenant can use it), and point it at a Credential Vault entry. Note a vault credential on its own is not enough — the scan uses the credential <em>set</em> that references it.</p>`;
 
     const opt = (opts, cur) => opts.map(([v, l]) =>
         `<option value="${escapeHtml(v)}" ${String(cur) === v ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('');
@@ -1082,7 +1082,7 @@ async function _renderNwScanTab() {
     c.innerHTML = `<div class="space-y-5 max-w-4xl">
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-700 mb-1">Network Discovery Scan</h3>
-        <p class="text-xs text-slate-400 mb-4">Discover manageable devices on your network and (optionally) add them to your fleet. Scans run on your tenant's Network Devices spoke.</p>
+        <p class="text-xs text-slate-400 mb-4">Discover manageable devices on your network and add them to your fleet automatically. Scans run on your tenant's Network Devices spoke; with no credential set ticked, every set your tenant owns is tried.</p>
         <div class="mb-4">
           <p class="${lblCls}">Scan Agent</p>
           ${spokeRows}
@@ -1131,7 +1131,7 @@ async function _renderNwScanTab() {
 
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-700 mb-1">Recurring Scan Schedule</h3>
-        <p class="text-xs text-slate-400 mb-4">Automatically re-scan your network on a schedule. Preview-only runs report discoveries without adding them.</p>
+        <p class="text-xs text-slate-400 mb-4">On by default (every 6 hours) once your tenant has a Network Devices spoke; discovered devices are added automatically. Tick Preview only to report discoveries without adding them.</p>
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
           <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-sched-enabled" class="rounded border-slate-300 text-[#01A982]" ${chk(sched.enabled)}> Enable schedule</label>
           <div><label class="${lblCls}">Interval</label><select id="nwt-sched-interval" class="${selCls}">${opt(_NW_SCHED_INTERVALS, sched.interval_seconds || 0)}</select></div>
