@@ -101,6 +101,8 @@ logger = logging.getLogger("Hub")
 # reached over SNMP/CLI/REST — there is no host and no agent, so they are never
 # even probed; probing would just time out and look like a failure.
 _NEVER_PROBE_TYPES = {"nw", "firewall", "storage"}
+# How long a node that misses checks (disconnected) keeps its last result.
+_OSU_KEEP_OFFLINE_S = 7 * 86400
 _NEVER_PROBE_REASON = {
     "nw": "network device (switch/AP) — no host OS we manage; firmware is out of scope",
     "firewall": "OPNsense is FreeBSD and appliance-managed — update from its own UI",
@@ -262,6 +264,8 @@ class HubOsUpdatesMixin:
         for sid in list(conns.keys()):
             md = meta.get(sid, {}) or {}
             mtype = str(md.get("module_type") or md.get("type") or "").strip()
+            if mtype.lower() in _NEVER_PROBE_TYPES:
+                continue  # appliance-managed: no OS we can patch, so not listed
             label = (md.get("display_name") or md.get("name")
                      or md.get("hostname") or sid)
             out.append({"kind": "spoke", "id": sid, "spoke_id": sid,
@@ -336,6 +340,11 @@ class HubOsUpdatesMixin:
         if not isinstance(d, dict):
             return {**base, "eligible": None, "unreachable": True,
                     "reason": "malformed response", "count": 0}
+        if str(d.get("status") or "").upper() == "ERROR" and "eligible" not in d:
+            # A timed-out/draining spoke answers with an error envelope, not an
+            # exception: that node is unreachable, not unmanaged.
+            return {**base, "eligible": None, "unreachable": True,
+                    "reason": f"no answer: {d.get('message') or 'error'}", "count": 0}
         return {
             **base,
             "eligible": bool(d.get("eligible")),
@@ -374,9 +383,16 @@ class HubOsUpdatesMixin:
                 inventory[key] = {**inv, "at": time.time()}
             else:
                 inventory.pop(key, None)  # node too old to report one
-        st["nodes"] = {f"{n['kind']}:{n['id']}": n for n in nodes}
-        st["checked_at"] = time.time()
-        self._osu_enroll_new_nodes(list(st["nodes"]))
+        fresh = {f"{n['kind']}:{n['id']}": n for n in nodes}
+        # A node not connected right now (a check just after a hub restart,
+        # before the fleet reconnects) keeps its last result; the snapshot only
+        # shows live nodes, so it reappears with data once it reconnects.
+        now = time.time()
+        kept = {k: v for k, v in (st.get("nodes") or {}).items()
+                if k not in fresh and now - float(v.get("checked_at") or 0) < _OSU_KEEP_OFFLINE_S}
+        st["nodes"] = {**kept, **fresh}
+        st["checked_at"] = now
+        self._osu_enroll_new_nodes(list(fresh))
         self._osu_save()
         # Warm the CVE feeds now so a lookup doesn't wait on a download.
         await asyncio.to_thread(self._osu_feeds_for, inventory)
@@ -855,6 +871,15 @@ class HubOsUpdatesMixin:
         for key, n in merged.items():
             n["auto_patch"] = key in approved
             n["auto_reboot"] = key in reboot
+        # Nodes we cannot patch (appliances, unsupported OS) are left out of
+        # the panel entirely; only their count is reported.
+        hidden = [k for k, n in merged.items() if n.get("unmanaged") and not n.get("unreachable")]
+        if only is not None:
+            hidden_n = sum(1 for k in hidden if k in only)
+        else:
+            hidden_n = len(hidden)
+        for k in hidden:
+            merged.pop(k)
         self._osu_vm_links(merged)
         if only is not None:
             merged = {k: n for k, n in merged.items() if k in only}
@@ -870,7 +895,7 @@ class HubOsUpdatesMixin:
             "totals": {
                 "nodes": len(nodes),
                 "eligible": sum(1 for n in nodes if n.get("eligible")),
-                "unmanaged": sum(1 for n in nodes if n.get("unmanaged") and not n.get("unreachable")),
+                "unmanaged": hidden_n,
                 "unreachable": sum(1 for n in nodes if n.get("unreachable")),
                 "with_updates": len(pending),
                 "packages": sum(int(n.get("count") or 0) for n in nodes),

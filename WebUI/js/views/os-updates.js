@@ -13,8 +13,8 @@ import { html as phtml, render, useState, useEffect } from '../../assets/preact-
 // Rolling one node at a time, hub last; a manual deploy never reboots (see
 // hub_os_updates.py). Deploy everything, or only selected nodes / packages /
 // security updates; reboot is a separate per-node action, or Auto-reboot on an
-// auto-patch node. Ineligible nodes are listed as unmanaged WITH a reason rather than
-// hidden, so "up to date" is never confused with "not covered".
+// auto-patch node. Nodes LM cannot patch (appliances, unsupported OS) are left
+// out by the hub; the Nodes card shows how many were hidden.
 let _osuPoll = null;
 
 // Every button and field on the page; wired by delegate() (js/core/view.js).
@@ -40,10 +40,13 @@ function renderOsUpdatesView(content) {
     // Fleet-wide settings are Global Admin only; a Tenant Admin sees just their nodes.
     const osuFleetCls = isAdmin() ? '' : 'hidden';
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
+    const sub = 'border border-slate-200 rounded-md p-4 space-y-3';
+    const subTitle = 'text-xs font-bold text-slate-500 uppercase tracking-wider';
+    const h3 = 'text-sm font-bold text-slate-500 uppercase tracking-wider';
     content.innerHTML = safeHtml`
-        <div class="${card} space-y-4">
+        <div class="${card}">
             <div class="flex items-center justify-between">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OS Updates ${rawHtml(helpIcon('lm-hub', null, 'Hub help'))} <span class="cursor-help normal-case font-normal text-slate-400" title="Operating-system package updates (apt dist-upgrade) for every spoke and agent. Global Admin only; every approval is audit-logged.
+                <h3 class="${h3}">OS Updates ${rawHtml(helpIcon('lm-hub', null, 'Hub help'))} <span class="cursor-help normal-case font-normal text-slate-400" title="Operating-system package updates (apt dist-upgrade) for every spoke and agent. Global Admin only; every approval is audit-logged.
 • Deploy everything, only selected nodes/packages, or only security updates.
 • A manual deploy never reboots; a host that needs one gets a Reboot… button. Proxmox cluster nodes are the exception (below).
 • Auto-patch is approved per node and runs only in the maintenance window, minus packages under &quot;Never auto-install&quot;.
@@ -51,70 +54,78 @@ function renderOsUpdatesView(content) {
 • Proxmox cluster nodes reboot only when needed, in HA maintenance mode (guests move off first), one node at a time.
 • Nodes update one at a time; the hub goes last (this page restarts).
 • Separate from LM code updates.">ⓘ</span></h3>
-                <span id="osu-status" class="text-xs text-slate-400"></span>
+                <span class="flex items-center gap-3"><span id="osu-status" class="text-xs text-slate-400"></span><span id="osu-checked" class="text-xs text-slate-400"></span></span>
             </div>
-            <div class="${osuFleetCls} flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
-                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="osu-autocheck-enabled" class="w-4 h-4 text-green-600 rounded">Auto-check the fleet</label>
-                <div class="space-y-1">
-                    <label class="${labelCls}">Every</label>
-                    <div class="flex items-center gap-1">
-                        <input type="number" id="osu-autocheck-hours" min="1" step="1" value="6" class="${inputCls} w-20">
-                        <span class="text-xs text-slate-500">hour(s)</span>
-                    </div>
-                </div>
-                <button data-action="saveAutoCheck" class="${btnSecCls}">Save</button>
-                <span id="osu-autocheck-status" class="text-xs text-slate-400"></span>
-            </div>
-            <div class="${osuFleetCls} flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
-                <span class="text-sm text-slate-600 self-center">Auto-patch (approved nodes only):</span>
-                <div class="space-y-1">
-                    <label class="${labelCls}">Install</label>
-                    <select id="osu-autopatch-security" class="${inputCls} w-48" data-action="setAutoPatchSecurity">
-                        <option value="security">Security updates only</option>
-                        <option value="all">All updates</option>
-                    </select>
-                </div>
-                <div class="space-y-1 flex-1 min-w-[16rem]">
-                    <label class="${labelCls}" title="Package names or globs, comma-separated. Auto-patch never installs these; manual deploys are unaffected.">Never auto-install</label>
-                    <input type="text" id="osu-autopatch-exclude" class="${inputCls}" placeholder="e.g. linux-image-*, docker-ce, proxmox-*">
-                </div>
-                <button data-action="saveAutoPatchExclude" class="${btnSecCls}">Save</button>
-                <span id="osu-autopatch-count" class="text-xs text-slate-400 self-center"></span>
-            </div>
-            <div class="${osuFleetCls} flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
-                <span class="text-sm text-slate-600 self-center" title="Auto-patch and auto-reboot only run in this window (once per window). Same start and end = any time.">Maintenance window (off hours):</span>
-                <div class="space-y-1">
-                    <label class="${labelCls}">From</label>
-                    <input type="time" id="osu-window-start" class="${inputCls} w-32" value="01:00">
-                </div>
-                <div class="space-y-1">
-                    <label class="${labelCls}">To</label>
-                    <input type="time" id="osu-window-end" class="${inputCls} w-32" value="05:00">
-                </div>
-                <div class="space-y-1">
-                    <label class="${labelCls}">Timezone</label>
-                    <input type="text" id="osu-window-tz" class="${inputCls} w-48" placeholder="e.g. America/Chicago">
-                </div>
-                <button data-action="saveWindow" class="${btnSecCls}">Save</button>
-            </div>
-            <div class="${osuFleetCls} flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
-                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer self-center" title="Before patching a node that runs in a Proxmox VM, LM snapshots that VM (manual deploys and auto-patch). If the snapshot fails the node is not patched. Proxmox hosts themselves (bare metal) are patched without a snapshot."><input type="checkbox" id="osu-snap-enabled" class="w-4 h-4 text-green-600 rounded" checked>Snapshot VMs before patching</label>
-                <div class="space-y-1">
-                    <label class="${labelCls}" title="Older pre-patch snapshots (lm-prepatch-*) beyond this count are deleted">Keep</label>
-                    <input type="number" id="osu-snap-keep" min="1" max="20" step="1" value="2" class="${inputCls} w-20">
-                </div>
-                <button data-action="saveSnapshot" class="${btnSecCls}">Save</button>
-            </div>
+            <div id="osu-summary" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3"></div>
             <div class="flex flex-wrap items-center gap-2">
                 <button data-action="check" class="${btnSecCls}">↻ Check for updates</button>
                 <button id="osu-apply-selected" data-action="applySelected" class="${btnCls}" disabled>Deploy selected (0)</button>
                 <button id="osu-apply" data-action="apply" class="${btnSecCls}">Approve &amp; deploy all</button>
-                <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer" title="Nodes without picked packages get only their pending security updates"><input type="checkbox" id="osu-security-only" class="w-4 h-4 rounded">Security updates only</label>
+                <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer ml-1" title="Nodes without picked packages get only their pending security updates"><input type="checkbox" id="osu-security-only" class="w-4 h-4 rounded">Security updates only</label>
                 <button id="osu-cancel" data-action="cancel" class="${btnSecCls} hidden">Cancel run</button>
-                <span id="osu-run" class="text-xs text-slate-500"></span>
+                <span id="osu-run" class="text-xs text-slate-500 ml-auto"></span>
             </div>
-            <div id="osu-cve" class="border border-slate-200 rounded-md px-3 py-2 bg-slate-50 space-y-2"></div>
+        </div>
+        <div class="${card} mt-4">
+            <div class="flex items-center justify-between">
+                <h3 class="${h3}">Nodes</h3>
+                <span id="osu-hidden" class="text-xs text-slate-400"></span>
+            </div>
             <div id="osu-body"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+        </div>
+        <div class="${card} mt-4">
+            <h3 class="${h3}">Who is affected?</h3>
+            <div id="osu-cve" class="space-y-3"></div>
+        </div>
+        <div class="${card} mt-4 ${osuFleetCls}">
+            <h3 class="${h3}">Automation</h3>
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                <div class="${sub}">
+                    <div class="${subTitle}">Auto-check</div>
+                    <div class="flex flex-wrap items-center gap-3">
+                        <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="osu-autocheck-enabled" class="w-4 h-4 text-green-600 rounded">Check the fleet every</label>
+                        <input type="number" id="osu-autocheck-hours" min="1" step="1" value="6" class="${inputCls} w-20">
+                        <span class="text-xs text-slate-500">hour(s)</span>
+                        <span id="osu-autocheck-status" class="text-xs text-slate-400"></span>
+                        <button data-action="saveAutoCheck" class="${btnSecCls} ml-auto">Save</button>
+                    </div>
+                </div>
+                <div class="${sub}">
+                    <div class="${subTitle}" title="Auto-patch and auto-reboot only run in this window (once per window). Same start and end = any time.">Maintenance window</div>
+                    <div class="flex flex-wrap items-end gap-3">
+                        <div class="space-y-1"><label class="${labelCls}">From</label><input type="time" id="osu-window-start" class="${inputCls} w-32" value="01:00"></div>
+                        <div class="space-y-1"><label class="${labelCls}">To</label><input type="time" id="osu-window-end" class="${inputCls} w-32" value="05:00"></div>
+                        <div class="space-y-1 flex-1 min-w-[10rem]"><label class="${labelCls}">Timezone</label><input type="text" id="osu-window-tz" class="${inputCls}" placeholder="e.g. America/Chicago"></div>
+                        <button data-action="saveWindow" class="${btnSecCls}">Save</button>
+                    </div>
+                </div>
+                <div class="${sub}">
+                    <div class="flex items-center justify-between"><span class="${subTitle}">Auto-patch</span><span id="osu-autopatch-count" class="text-xs text-slate-400"></span></div>
+                    <p class="text-xs text-slate-400">Only nodes ticked <b>Auto-patch</b> in the Nodes list are patched, inside the maintenance window.</p>
+                    <div class="flex flex-wrap items-end gap-3">
+                        <div class="space-y-1">
+                            <label class="${labelCls}">Install</label>
+                            <select id="osu-autopatch-security" class="${inputCls} w-48" data-action="setAutoPatchSecurity">
+                                <option value="security">Security updates only</option>
+                                <option value="all">All updates</option>
+                            </select>
+                        </div>
+                        <div class="space-y-1 flex-1 min-w-[12rem]">
+                            <label class="${labelCls}" title="Package names or globs, comma-separated. Auto-patch never installs these; manual deploys are unaffected.">Never auto-install</label>
+                            <input type="text" id="osu-autopatch-exclude" class="${inputCls}" placeholder="e.g. linux-image-*, docker-ce, proxmox-*">
+                        </div>
+                        <button data-action="saveAutoPatchExclude" class="${btnSecCls}">Save</button>
+                    </div>
+                </div>
+                <div class="${sub}">
+                    <div class="${subTitle}">Pre-patch VM snapshots</div>
+                    <div class="flex flex-wrap items-center gap-3">
+                        <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer" title="Before patching a node that runs in a Proxmox VM, LM snapshots that VM (manual deploys and auto-patch). If the snapshot fails the node is not patched. Proxmox hosts themselves (bare metal) are patched without a snapshot."><input type="checkbox" id="osu-snap-enabled" class="w-4 h-4 text-green-600 rounded" checked>Snapshot VMs before patching, keep</label>
+                        <input type="number" id="osu-snap-keep" min="1" max="20" step="1" value="2" class="${inputCls} w-20" title="Older pre-patch snapshots (lm-prepatch-*) beyond this count are deleted">
+                        <button data-action="saveSnapshot" class="${btnSecCls} ml-auto">Save</button>
+                    </div>
+                </div>
+            </div>
         </div>`;
     delegate(content, _osuActions);
     osuLoad();
@@ -403,7 +414,7 @@ function CveLookup() {
     return phtml`
         <form class="flex flex-wrap items-end gap-3" onSubmit=${e => { e.preventDefault(); search(q); }}>
             <div class="space-y-1 flex-1 min-w-[16rem]">
-                <label class=${labelCls} title="Matches each node's installed packages (reported at the last check) against Debian's security tracker">Who is affected? — CVE id or package</label>
+                <label class=${labelCls} title="Matches each node's installed packages (reported at the last check) against Debian's security tracker">CVE id or package</label>
                 <input type="text" id="osu-cve-q" list="osu-cve-list" autocomplete="off" class=${inputCls}
                     placeholder="e.g. CVE-2026-1234 or php" value=${q} onInput=${e => typed(e.target.value)}
                     title=${fleet.length ? `${fleet.length} CVE(s) affect the fleet — start typing to pick one` : ''} />
@@ -582,26 +593,26 @@ function _osuRender(d) {
     const cancelBtn = document.getElementById('osu-cancel');
     if (cancelBtn) cancelBtn.classList.toggle('hidden', !busy);
     const apCount = document.getElementById('osu-autopatch-count');
-    if (apCount) { const k = (d.nodes || []).filter(n => n.auto_patch).length; apCount.textContent = k ? `${k} node(s) approved` : 'no nodes approved — tick "Auto-patch" on a node'; }
+    if (apCount) { const k = (d.nodes || []).filter(n => n.auto_patch).length; apCount.textContent = k ? `${k} node(s) approved` : 'no nodes approved'; }
+    const t = d.totals || {};
+    const tile = (label, val, cls) => safeHtml`<div class="rounded border border-slate-200 px-4 py-3"><div class="text-[10px] uppercase tracking-wider text-slate-400">${label}</div><div class="text-2xl font-semibold ${cls || 'text-slate-700'}">${val || 0}</div></div>`;
+    const sumEl = document.getElementById('osu-summary');
+    if (sumEl) sumEl.innerHTML = safeHtml`${tile('Nodes', t.nodes)}${tile('With updates', t.with_updates, t.with_updates && 'text-amber-600')}${tile('Packages', t.packages)}${tile('Security', t.security, t.security && 'text-red-600')}${tile('Need reboot', t.reboot_required, t.reboot_required && 'text-amber-600')}${tile('Unreachable', t.unreachable, t.unreachable && 'text-red-600')}`;
+    const notes = [];
+    if (t.blocked) notes.push(`${t.blocked} blocked`);
+    if (t.not_checked) notes.push(`${t.not_checked} not checked yet`);
+    if (t.unmanaged) notes.push(`${t.unmanaged} appliance/unsupported node(s) hidden`);
+    const hiddenEl = document.getElementById('osu-hidden');
+    if (hiddenEl) hiddenEl.textContent = notes.join(' · ');
+    const checkedEl = document.getElementById('osu-checked');
+    if (checkedEl) checkedEl.textContent = 'Last checked: ' + (d.checked_at ? new Date(d.checked_at * 1000).toLocaleString() : 'never');
     _osuView.refresh();
     if (busy && !_osuPoll) _osuStartPoll();
 }
 
 function _osuBodyHtml({ data: d }) {
-    const t = d.totals || {};
     const run = d.run;
     const busy = _osuBusy();
-    const chip = (label, val, cls) => safeHtml`<span class="inline-flex items-baseline gap-1 border rounded-full px-2.5 py-0.5 ${cls || 'bg-white border-slate-200'}"><b class="text-slate-700">${val}</b><span class="text-slate-500">${label}</span></span>`;
-    const summary = safeHtml`<div class="flex flex-wrap items-center gap-1.5 text-xs mb-3">
-        ${chip('nodes with updates', t.with_updates || 0, (t.with_updates ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'))}
-        ${chip('packages', t.packages || 0)}
-        ${chip('security', t.security || 0, (t.security ? 'bg-red-50 border-red-200' : 'bg-white border-slate-200'))}
-        ${chip('need reboot', t.reboot_required || 0, (t.reboot_required ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'))}
-        ${chip('blocked', t.blocked || 0, (t.blocked ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'))}
-        ${chip('unmanaged', t.unmanaged || 0)}
-        ${chip('unreachable', t.unreachable || 0, (t.unreachable ? 'bg-red-50 border-red-200' : 'bg-white border-slate-200'))}
-        ${chip('not checked yet', t.not_checked || 0, (t.not_checked ? 'bg-slate-100 border-slate-300' : 'bg-white border-slate-200'))}
-      </div>`;
     const rows = (d.nodes || []).map(n => {
         const key = `${n.kind}:${n.id}`;
         const feats = n.features || [];
@@ -615,7 +626,6 @@ function _osuBodyHtml({ data: d }) {
         else if (item && item.status === 'queued') state = _osuBadge('queued', 'slate');
         else if (item && item.status === 'done' && busy) state = _osuBadge('updated', 'emerald');
         else if (n.unreachable) state = _osuBadge('unreachable', 'red');
-        else if (n.unmanaged) state = _osuBadge('unmanaged', 'slate');
         else if (n.checked === false) state = _osuBadge('not checked yet', 'slate');
         else if (!n.count) state = _osuBadge('up to date', 'emerald');
         else state = _osuBadge(`${n.count} pending`, 'amber');
@@ -654,15 +664,21 @@ function _osuBodyHtml({ data: d }) {
         else if (item && item.status === 'done' && item.mode === 'packages') msg.push(safeHtml`<div class="text-[11px] text-slate-500 mt-1">upgraded ${(item.packages || []).join(', ')}</div>`);
         if (item && item.snapshot) msg.push(safeHtml`<div class="text-[11px] text-slate-500 mt-1">snapshot: ${item.snapshot}</div>`);
         if (item && item.auto_reboot) msg.push(safeHtml`<div class="text-[11px] ${item.auto_reboot.startsWith('failed') ? 'text-red-600' : 'text-slate-500'} mt-1">reboot: ${item.auto_reboot}</div>`);
-        return safeHtml`<div id="osu-node-${key}" class="border border-slate-200 rounded-md p-3 mb-2">
-            <div class="flex flex-wrap items-center justify-between gap-2">
-              <span class="flex items-center gap-2 text-xs font-bold text-slate-600">${nodeBox}${n.label} <span class="font-normal text-slate-400">${n.kind}${n.flavor ? ' · ' + n.flavor : ''}${n.pve_cluster && n.pve_cluster.name ? ' · PVE cluster ' + n.pve_cluster.name : ''}${_osuVmLabel(n)}</span></span>
-              <span class="flex flex-wrap items-center gap-2 justify-end">${autoBox}${rebootBox}${rebootBtn}${reboot}${state}</span>
-            </div>${detail}${blocker}${msg}</div>`;
+        const meta = [n.kind, n.flavor, n.pve_cluster && n.pve_cluster.name ? 'PVE cluster ' + n.pve_cluster.name : ''].filter(Boolean).join(' · ');
+        return safeHtml`<div id="osu-node-${key}" class="py-3 flex flex-wrap items-start gap-x-4 gap-y-2">
+            <div class="w-5 pt-0.5">${nodeBox}</div>
+            <div class="flex-1 min-w-[16rem]">
+                <div class="text-sm font-medium text-slate-700">${n.label}</div>
+                <div class="text-[11px] text-slate-400">${meta}${_osuVmLabel(n)}</div>
+                ${detail}${blocker}${msg}
+            </div>
+            <div class="flex flex-wrap items-center justify-end gap-1.5">${state}${reboot}${rebootBtn}</div>
+            <div class="flex flex-col gap-1 w-28">${autoBox}${rebootBox}</div>
+        </div>`;
     });
-    const when = d.checked_at ? new Date(d.checked_at * 1000).toLocaleString() : 'never';
-    return safeHtml`${summary}${rows.length ? rows : safeHtml`<p class="text-xs text-slate-400 italic">No nodes reporting.</p>`}
-        <p class="text-[11px] text-slate-400 mt-2">Last checked: ${when}</p>`;
+    return rows.length
+        ? safeHtml`<div class="divide-y divide-slate-100">${rows}</div>`
+        : safeHtml`<p class="text-xs text-slate-400 italic">No nodes reporting.</p>`;
 }
 
 lmViews.osupdates = renderOsUpdatesView;
