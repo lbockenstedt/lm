@@ -206,13 +206,6 @@ async def _request(cfg: OciConfig, client: httpx.AsyncClient, method: str, url: 
         raise OciVaultError(str(e)) from e
 
 
-def _request_sync(cfg: OciConfig, client: httpx.Client, method: str, url: str, *,
-                  json_body: Optional[dict] = None) -> httpx.Response:
-    try:
-        return _oci_auth.oci_request_sync(cfg, client, method, url, json_body=json_body)
-    except _oci_auth.OciAuthError as e:
-        raise OciVaultError(str(e)) from e
-
 
 # ── read ─────────────────────────────────────────────────────────────────────
 
@@ -241,33 +234,6 @@ async def get_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
     except Exception as e:  # noqa: BLE001
         raise OciVaultError(f"could not decode secret bundle content: {e}")
 
-
-def get_secret_sync(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
-                    http: Optional[httpx.Client] = None) -> Optional[str]:
-    """Synchronous variant of :func:`get_secret` — used by
-    ``security.credential_store``'s ``get_secret`` interface, which is
-    synchronous (called from both sync and async call sites across the hub).
-    Never raises: any failure logs a warning and returns ``None`` (matching
-    ``KeyVaultCredentialProvider``'s best-effort contract)."""
-    if not name:
-        return None
-    try:
-        _require(vcfg)
-        vault_id = str(vcfg.get("vault_id") or "").strip()
-        url = (f"{_secrets_base(cfg)}/secretbundles/actions/getByName"
-               f"?secretName={quote(name, safe='')}&vaultId={quote(vault_id, safe='')}")
-        with (http or httpx.Client(timeout=20.0)) as client:
-            resp = _request_sync(cfg, client, "POST", url)
-        if resp.status_code == 404:
-            return None
-        if resp.status_code != 200:
-            logger.warning("OCI Vault fetch of %r failed: HTTP %s — %s", name, resp.status_code, resp.text[:200])
-            return None
-        content = ((resp.json().get("secretBundleContent") or {}).get("content") or "")
-        return base64.b64decode(content).decode("utf-8") if content else None
-    except Exception as e:  # noqa: BLE001 — never raise from a credential provider
-        logger.warning("OCI Vault fetch of %r failed: %s", name, e)
-        return None
 
 
 # ── write (create-or-update) ─────────────────────────────────────────────────

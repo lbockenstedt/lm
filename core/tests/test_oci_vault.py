@@ -63,16 +63,12 @@ class _StubTransport(httpx.AsyncBaseTransport):
 
 @pytest.fixture(autouse=True)
 def _no_real_signing(monkeypatch):
-    """oci_vault always goes through oci_auth.oci_request(_sync); stub the
+    """oci_vault always goes through oci_auth.oci_request; stub the
     signing step so tests don't need a real RSA key, while still exercising
     the real request-shape logic in oci_vault.py itself."""
     async def _fake_oci_request(cfg, client, method, url, *, json_body=None):
         return await client.request(method, url, json=json_body)
     monkeypatch.setattr(oci_vault._oci_auth, "oci_request", _fake_oci_request)
-
-    def _fake_oci_request_sync(cfg, client, method, url, *, json_body=None):
-        return client.request(method, url, json=json_body)
-    monkeypatch.setattr(oci_vault._oci_auth, "oci_request_sync", _fake_oci_request_sync)
 
 
 def _client_for(responses):
@@ -111,15 +107,6 @@ async def test_get_secret_raises_on_other_error():
     client, _ = _client_for([{"status": 500, "text": "boom"}])
     with pytest.raises(oci_vault.OciVaultError):
         await oci_vault.get_secret(_cfg(), _vcfg(), "x", http=client)
-
-
-def test_get_secret_sync_never_raises_and_returns_none_on_failure():
-    """Best-effort contract for the future credential-provider integration —
-    matches KeyVaultCredentialProvider's synchronous get_secret contract."""
-    def _handler(request):
-        return httpx.Response(status_code=500, text="boom", request=request)
-    client = httpx.Client(transport=httpx.MockTransport(_handler))
-    assert oci_vault.get_secret_sync(_cfg(), _vcfg(), "x", http=client) is None
 
 
 @pytest.mark.asyncio

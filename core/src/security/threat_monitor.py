@@ -150,13 +150,6 @@ def validate_nsg_priorities(allow_priority: Any, block_priority: Any) -> tuple:
     return (True, "")
 
 
-def priority_conflict_warning(block_priority: Any, allow_priority: Any) -> str:
-    """Back-compatible alias for legacy callers (arg order is ``(block, allow)``).
-    Returns "" when the ordering is valid, else the violation message from
-    ``validate_nsg_priorities``."""
-    ok, message = validate_nsg_priorities(allow_priority, block_priority)
-    return "" if ok else message
-
 
 class ThreatMonitor:
     def __init__(self, hub) -> None:

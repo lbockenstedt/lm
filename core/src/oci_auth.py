@@ -548,19 +548,3 @@ async def oci_request(cfg: OciAuthConfig, client: httpx.AsyncClient, method: str
     except httpx.TransportError as e:
         raise OciAuthError(_transport_error_detail(url, e)) from e
 
-
-def oci_request_sync(cfg: OciAuthConfig, client: httpx.Client, method: str, url: str, *,
-                     json_body: Optional[dict] = None) -> httpx.Response:
-    """Issue ONE signed request on an already-open SYNC client. Used by the
-    ``security.credential_store`` provider, whose ``get_secret`` interface is
-    synchronous (called from both sync and async call sites across the hub).
-
-    Transport failures are wrapped the same way as :func:`oci_request`."""
-    body = _body_bytes(method, json_body)
-    headers = signed_headers(cfg, method, url, body)
-    try:
-        return client.request(method, url, headers=headers, content=body)
-    except httpx.HTTPStatusError:
-        raise
-    except httpx.TransportError as e:
-        raise OciAuthError(_transport_error_detail(url, e)) from e

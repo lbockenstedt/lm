@@ -3319,9 +3319,8 @@ def register(app, hub, ctx):
         """H1 debug: what the hub's mTLS client-verify path trusts, and whether it
         would ACCEPT each pinned AppBuilder cert. Surfaces (a) the LM_MTLS_CA chain in
         full, (b) the combined-bundle cert count + any same-subject collisions (the
-        real-vs-private 'ISRG Root X1' hazard), and (c) an openssl verify of every
-        pinned cert's live chain (pulled from the le spoke) against that bundle — so
-        an operator sees from the WebUI exactly why a cert is rejected. Admin-only."""
+        real-vs-private 'ISRG Root X1' hazard), and (c) whether a connected spoke is
+        presenting a verified cert for each pinned identity. Admin-only."""
         hub = app.state.hub
         sess = _session_user(request)
         if not sess or not _is_admin(sess):

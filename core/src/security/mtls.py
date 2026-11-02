@@ -402,46 +402,6 @@ def trust_diagnostics() -> dict:
     }
 
 
-def verify_chain(fullchain_pem: str):
-    """Verify a leaf+intermediates PEM against the hub's combined client-verify CA
-    — the EXACT trust the mTLS listener uses — via ``openssl verify``. Returns
-    ``(ok: bool, detail: str)`` so the UI can show whether the hub would accept a
-    given cert (e.g. the pinned AppBuilder cert) and, if not, openssl's reason."""
-    combined = server_client_ca_file()
-    if not combined or not os.path.exists(combined):
-        return False, "no client-verify CA configured (mTLS off or LM_MTLS_CA unset)"
-    import subprocess
-    end = "-----END CERTIFICATE-----"
-    blocks = [b + end + "\n" for b in fullchain_pem.split(end) if "BEGIN CERTIFICATE" in b]
-    if not blocks:
-        return False, "no certificate in input"
-    leaf_path = inter_path = None
-    try:
-        fd, leaf_path = tempfile.mkstemp(suffix=".pem")
-        with os.fdopen(fd, "w") as f:
-            f.write(blocks[0])
-        # -purpose sslclient: match what the TLS server actually enforces on a
-        # CLIENT cert (the clientAuth EKU). Plain `openssl verify` skips this, so a
-        # serverAuth-only cert would falsely pass here yet be rejected on the wire.
-        args = ["openssl", "verify", "-purpose", "sslclient", "-CAfile", combined]
-        if len(blocks) > 1:
-            fd2, inter_path = tempfile.mkstemp(suffix=".pem")
-            with os.fdopen(fd2, "w") as f:
-                f.write("".join(blocks[1:]))
-            args += ["-untrusted", inter_path]
-        args.append(leaf_path)
-        r = subprocess.run(args, capture_output=True, text=True, timeout=10)
-        return r.returncode == 0, (r.stdout + r.stderr).strip()[:400]
-    except Exception as e:  # noqa: BLE001
-        return False, f"verify error: {e}"
-    finally:
-        for p in (leaf_path, inter_path):
-            try:
-                if p:
-                    os.unlink(p)
-            except Exception:  # noqa: BLE001
-                pass
-
 
 def status() -> dict:
     """Introspection for the readiness check / UI: is mTLS on, and are the

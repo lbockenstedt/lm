@@ -260,9 +260,6 @@ class SearchIndexMixin:
         items = entry.get("items")
         return items if isinstance(items, list) else None
 
-    def search_leg_is_warm(self, cmd: str, scope_key: str) -> bool:
-        return self.search_index_leg_items(cmd, scope_key) is not None
-
     # ── background populate ───────────────────────────────────────────────────
     def _resolve_search_spokes(self, resolved: str, is_admin: bool
                                ) -> Dict[str, Optional[str]]:
