@@ -83,6 +83,7 @@ import asyncio
 import fnmatch
 import logging
 import os
+import re
 import socket
 import time
 from datetime import datetime, timedelta
@@ -1011,7 +1012,10 @@ class HubOsUpdatesMixin:
                                                 "urgency": f["urgency"], "nodes": set()})
                 r["nodes"].add(key)
         out = list(found.values())
-        out.sort(key=lambda r: [-int(p) for p in r["cve"].split("-")[1:]])
+        # Feed names also include non-numeric ids (e.g. TEMP-0000000-096B8D): rank
+        # those after the real CVE-YYYY-NNNN ids instead of failing the list.
+        out.sort(key=lambda r: ([-int(p) for p in r["cve"].split("-")[1:3]]
+                                if re.fullmatch(r"CVE-\d+-\d+", r["cve"]) else [1]))
         return out
 
     async def osu_fleet_cves(self, only: "Optional[set[str]]" = None) -> List[Dict[str, Any]]:
