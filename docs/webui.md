@@ -42,6 +42,14 @@ Same as the hub: `https://<hub>` (443) or `http://<hub>:443` (no-cert). WS: `/ws
 - **In-app Help drawer** — the WebUI ships a Help drawer (the "?" button / inline ⓘ icons, `help.js`) that renders these canonical `lm/docs/*.md` files **verbatim** as tooltips/panels. The docs in `lm/docs/` ARE the in-app help content — so keep them accurate; a docs edit is a UI-copy edit.
 - **Click feedback** — `installClickFeedback()` wires a single capture-phase click listener that pops a short "Loading …" toast (bottom-right, just above the footer) the instant any button / `role="button"` / `.nav-item` is clicked, before the (sometimes slow) handler runs, so a slow load can't read as an unresponsive click. It's de-duplicated (repeat clicks on the same control refresh one toast, never stack). Dismiss/copy/reveal/toggle affordances and disabled controls are skipped; opt any control out with `data-no-loading`, override its label with `data-loading-label`, or disable the feature at runtime with `window.LM_CLICK_FEEDBACK = false`.
 
+## How to write markup
+
+- Build HTML with the `safeHtml` tagged template (`js/core/safe-html.js`): every `${value}` is HTML-escaped, so server data can't inject markup. Don't call `escapeHtml()` inside it (that double-escapes).
+- Nested `safeHtml` results and arrays (`${rows.map(r => safeHtml`<li>${r.name}</li>`)}`) are inserted as-is — no `.join('')`. `null`/`undefined`/`false` render nothing; `0` renders `0`.
+- Trusted markup (e.g. `helpIcon()` output) must be wrapped in `rawHtml(...)` — grep-able, so every opt-out is reviewable.
+- The result works anywhere a string does (`el.innerHTML = safeHtml`...``, `openModal(id, body)`).
+- New code should not add `escapeHtml(` calls: `core/tests/test_webui_safe_html.py` caps the count and it may only go down. OS Updates (`js/settings.js`) is the reference view.
+
 ## How it works
 
 **View routing.** `main.js` maintains a small router (`setView`/`setSubView`, backed by `VIEW_LOADERS`/`VIEW_LABEL`/`VIEW_SUBMENUS`/`VIEW_CHILDREN`) that maps each nav click to a loader function. Each loader knows exactly which hub route(s) to call — e.g. the Spokes & Agents loader fans out to `GET /setup/pending_spokes` + `GET /api/pxmx/agents` + `GET /setup/diagnostics` and merges the results into one table. Adding a new hub route to the UI is mostly a matter of wiring a new (or extended) loader here.

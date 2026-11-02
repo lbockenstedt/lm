@@ -636,10 +636,10 @@ function _renderOsUpdatesView(content) {
     // Fleet-wide settings are Global Admin only; a Tenant Admin sees just their nodes.
     const osuFleetCls = isAdmin() ? '' : 'hidden';
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
-    content.innerHTML = `
+    content.innerHTML = safeHtml`
         <div class="${card} space-y-4">
             <div class="flex items-center justify-between">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OS Updates ${helpIcon('lm-hub', null, 'Hub help')} <span class="cursor-help normal-case font-normal text-slate-400" title="Operating-system package updates (apt dist-upgrade) for every spoke and agent. Global Admin only; every approval is audit-logged.
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OS Updates ${rawHtml(helpIcon('lm-hub', null, 'Hub help'))} <span class="cursor-help normal-case font-normal text-slate-400" title="Operating-system package updates (apt dist-upgrade) for every spoke and agent. Global Admin only; every approval is audit-logged.
 • Deploy everything, only selected nodes/packages, or only security updates.
 • A manual deploy never reboots; a host that needs one gets a Reboot… button. Proxmox cluster nodes are the exception (below).
 • Auto-patch is approved per node and runs only in the maintenance window, minus packages under &quot;Never auto-install&quot;.
@@ -743,10 +743,10 @@ async function osuRefreshRebootTray() {
     tray.classList.toggle('flex', nodes.length > 0);
     if (!nodes.length) return;
     const w = data.window || {};
-    document.getElementById('reboot-tray-tooltip').innerHTML =
-        `<div class="font-bold mb-1">${nodes.length} system(s) will be rebooted</div>`
-        + nodes.map(n => `<div class="flex justify-between gap-4 py-0.5"><span>${escapeHtml(n.label)}</span><span class="opacity-60">${escapeHtml(n.note)}</span></div>`).join('')
-        + `<div class="opacity-60 mt-1">Maintenance window ${escapeHtml(w.start || '')}–${escapeHtml(w.end || '')} ${escapeHtml(w.tz || '')}</div>`;
+    document.getElementById('reboot-tray-tooltip').innerHTML = safeHtml`
+        <div class="font-bold mb-1">${nodes.length} system(s) will be rebooted</div>
+        ${nodes.map(n => safeHtml`<div class="flex justify-between gap-4 py-0.5"><span>${n.label}</span><span class="opacity-60">${n.note}</span></div>`)}
+        <div class="opacity-60 mt-1">Maintenance window ${w.start}–${w.end} ${w.tz}</div>`;
 }
 setTimeout(osuRefreshRebootTray, 5000);
 setInterval(osuRefreshRebootTray, 60000);
@@ -764,8 +764,8 @@ async function osuLoadFleetCves() {
         const cves = await apiJson('/api/os-updates/cves/fleet');
         const list = document.getElementById('osu-cve-list');
         if (!list) return;
-        list.innerHTML = cves.map(c => `<option value="${escapeHtml(c.cve)}" label="${escapeHtml(
-            `${c.urgency ? c.urgency + ' · ' : ''}${c.nodes} node(s) · ${c.description}`)}"></option>`).join('');
+        list.innerHTML = safeHtml`${cves.map(c => safeHtml`<option value="${c.cve}" label="${
+            `${c.urgency ? c.urgency + ' · ' : ''}${c.nodes} node(s) · ${c.description}`}"></option>`)}`;
         const q = document.getElementById('osu-cve-q');
         if (q) q.title = `${cves.length} CVE(s) affect the fleet — start typing to pick one`;
     } catch (e) { /* best-effort — typing an id still works */ }
@@ -876,14 +876,14 @@ window.osuFixAccess = function (key) {
     const n = ((window._osuData || {}).nodes || []).find(x => `${x.kind}:${x.id}` === key);
     if (!n) return;
     const inp = 'w-full px-3 py-2 border border-slate-200 rounded-md text-sm';
-    openModal('osu-fix-modal', `
-      <h3 class="text-lg font-bold text-[#263040]">Fix update access — ${escapeHtml(n.label)}</h3>
+    openModal('osu-fix-modal', safeHtml`
+      <h3 class="text-lg font-bold text-[#263040]">Fix update access — ${n.label}</h3>
       <p class="text-sm text-slate-500">Enter the root password (or a user that can sudo) for this node, one time. It is used once to install LM's update helper and is <b>never stored</b>.</p>
       <input id="osu-fix-user" type="text" value="root" autocomplete="off" placeholder="username" class="${inp}">
       <input id="osu-fix-pw" type="password" autocomplete="off" placeholder="password" class="${inp}">
       <div class="flex justify-end gap-2 pt-2">
         <button onclick="document.getElementById('osu-fix-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-        <button id="osu-fix-go" onclick="osuDoFixAccess(${escapeHtml(JSON.stringify(key))})" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Fix access</button>
+        <button id="osu-fix-go" onclick="osuDoFixAccess(${JSON.stringify(key)})" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Fix access</button>
       </div>`, { backdropClose: true });
     document.getElementById('osu-fix-pw')?.focus();
 };
@@ -933,7 +933,7 @@ window.osuSaveAutoCheck = async function () {
 
 async function osuLoad() {
     try { _osuRender(await apiJson('/api/os-updates')); }
-    catch (e) { const b = document.getElementById('osu-body'); if (b) b.innerHTML = `<p class="text-xs text-red-500">${escapeHtml(String(e.message || e))}</p>`; }
+    catch (e) { const b = document.getElementById('osu-body'); if (b) b.innerHTML = safeHtml`<p class="text-xs text-red-500">${e.message || e}</p>`; }
 }
 
 window.osuCheck = async function () {
@@ -982,7 +982,7 @@ window.osuCveSearch = async function () {
         window._osuCve = d;
         out.innerHTML = _osuCveHtml(d);
     } catch (e) {
-        out.innerHTML = `<p class="text-xs text-red-600">${escapeHtml(e.message || String(e))}</p>`;
+        out.innerHTML = safeHtml`<p class="text-xs text-red-600">${e.message || e}</p>`;
     }
 };
 
@@ -1009,52 +1009,52 @@ window.osuCveSelectFixes = function () {
 };
 
 function _osuCveHtml(d) {
-    const note = (cls, text) => `<p class="text-xs ${cls}">${text}</p>`;
+    const note = (cls, text) => safeHtml`<p class="text-xs ${cls}">${text}</p>`;
     const parts = [];
     if (!Object.keys(d.feeds || {}).length) {
         parts.push(note('text-amber-700', 'No Debian security data yet — run "Check for updates" so nodes report their installed packages and the hub fetches the tracker feed.'));
     } else if (d.kind === 'cve' && !d.known) {
-        parts.push(note('text-slate-500', `${escapeHtml(d.query)} is not in Debian's security tracker for the release(s) in this fleet — it may not affect Debian packages, or not be published yet.`));
+        parts.push(note('text-slate-500', `${d.query} is not in Debian's security tracker for the release(s) in this fleet — it may not affect Debian packages, or not be published yet.`));
     } else if (!(d.results || []).length) {
-        parts.push(note('text-slate-500', `No open CVEs match "${escapeHtml(d.query)}" on any checked node.`));
+        parts.push(note('text-slate-500', `No open CVEs match "${d.query}" on any checked node.`));
     } else {
         const fixes = _osuCveFixes(d).length;
-        parts.push(`<div class="flex flex-wrap items-center gap-2 text-xs">
+        parts.push(safeHtml`<div class="flex flex-wrap items-center gap-2 text-xs">
             <b class="${d.affected_nodes ? 'text-red-700' : 'text-emerald-700'}">${d.affected_nodes} of ${d.checked_nodes} checked node(s) affected</b>
-            ${fixes ? `<button onclick="osuCveSelectFixes()" class="text-[10px] font-bold text-emerald-800 border border-emerald-300 rounded px-2 py-0.5 hover:bg-emerald-50" title="Pick the pending updates of the vulnerable packages on affected nodes">Select fixes (${fixes})</button>` : ''}
-            ${d.truncated ? '<span class="text-slate-400">showing the first 200 CVEs — narrow the search</span>' : ''}</div>`);
-        parts.push(...d.results.map(r => {
+            ${fixes ? safeHtml`<button onclick="osuCveSelectFixes()" class="text-[10px] font-bold text-emerald-800 border border-emerald-300 rounded px-2 py-0.5 hover:bg-emerald-50" title="Pick the pending updates of the vulnerable packages on affected nodes">Select fixes (${fixes})</button>` : ''}
+            ${d.truncated ? safeHtml`<span class="text-slate-400">showing the first 200 CVEs — narrow the search</span>` : ''}</div>`);
+        parts.push(d.results.map(r => {
             const flags = [r.urgency ? `${r.urgency} urgency` : '', r.remote ? 'remote' : ''].filter(Boolean).join(' · ');
             const row = (a, patched) => {
                 const status = patched ? _osuBadge('patched', 'emerald')
                     : a.update_pending ? _osuBadge('update pending', 'amber', 'An update for this package is waiting — deploy it from this page')
                     : a.fix_available ? _osuBadge('fixed in Debian — not yet installable here', 'amber', 'Run "Check for updates"; the node may lack the security repo')
                     : _osuBadge('no fix yet', 'red', 'Debian has not released a fix for this release');
-                return `<div class="flex flex-wrap items-center justify-between gap-2 py-0.5">
-                    <span><b class="text-slate-700">${escapeHtml(a.label)}</b> <span class="text-slate-400">debian ${escapeHtml(a.release)}</span>
-                    — ${escapeHtml(a.package)} <span class="text-slate-400">${escapeHtml(a.version)}</span>
-                    <span class="text-slate-400">(${escapeHtml(a.binaries.join(', '))})</span></span>${status}</div>`;
+                return safeHtml`<div class="flex flex-wrap items-center justify-between gap-2 py-0.5">
+                    <span><b class="text-slate-700">${a.label}</b> <span class="text-slate-400">debian ${a.release}</span>
+                    — ${a.package} <span class="text-slate-400">${a.version}</span>
+                    <span class="text-slate-400">(${a.binaries.join(', ')})</span></span>${status}</div>`;
             };
             const patched = (r.patched || []).length
-                ? `<details class="mt-1"><summary class="cursor-pointer text-[11px] text-slate-400">${r.patched.length} node(s) have the package and are patched</summary>${r.patched.map(a => row(a, true)).join('')}</details>` : '';
-            return `<div class="border border-slate-200 rounded-md p-2 bg-white text-[11px]">
+                ? safeHtml`<details class="mt-1"><summary class="cursor-pointer text-[11px] text-slate-400">${r.patched.length} node(s) have the package and are patched</summary>${r.patched.map(a => row(a, true))}</details>` : '';
+            return safeHtml`<div class="border border-slate-200 rounded-md p-2 bg-white text-[11px]">
                 <div class="flex flex-wrap items-center gap-2">
-                    <a href="https://security-tracker.debian.org/tracker/${encodeURIComponent(r.cve)}" target="_blank" rel="noopener" class="font-bold text-slate-700 underline">${escapeHtml(r.cve)}</a>
-                    <span class="text-slate-400">${escapeHtml(flags)}</span>
+                    <a href="https://security-tracker.debian.org/tracker/${encodeURIComponent(r.cve)}" target="_blank" rel="noopener" class="font-bold text-slate-700 underline">${r.cve}</a>
+                    <span class="text-slate-400">${flags}</span>
                     ${r.affected.length ? _osuBadge(`${r.affected.length} affected`, 'red') : _osuBadge('no node affected', 'emerald')}
                 </div>
-                <div class="text-slate-500 mt-0.5">${escapeHtml(r.description || '')}</div>
-                ${r.affected.map(a => row(a, false)).join('')}${patched}</div>`;
+                <div class="text-slate-500 mt-0.5">${r.description || ''}</div>
+                ${r.affected.map(a => row(a, false))}${patched}</div>`;
         }));
     }
     if ((d.unknown || []).length) {
-        parts.push(`<details><summary class="cursor-pointer text-[11px] text-amber-700">${d.unknown.length} node(s) could not be assessed</summary>
-            ${d.unknown.map(u => `<div class="text-[11px] text-slate-500"><b>${escapeHtml(u.label)}</b> — ${escapeHtml(u.reason)}</div>`).join('')}</details>`);
+        parts.push(safeHtml`<details><summary class="cursor-pointer text-[11px] text-amber-700">${d.unknown.length} node(s) could not be assessed</summary>
+            ${d.unknown.map(u => safeHtml`<div class="text-[11px] text-slate-500"><b>${u.label}</b> — ${u.reason}</div>`)}</details>`);
     }
     const feeds = Object.entries(d.feeds || {}).map(([c, f]) =>
-        `${escapeHtml(c)}${f.fetched_at ? ' ' + new Date(f.fetched_at * 1000).toLocaleString() : ''}${f.error ? ' (refresh failed: ' + escapeHtml(f.error) + ')' : ''}`).join(', ');
-    parts.push(`<p class="text-[10px] text-slate-400">Installed packages as of the last check · Debian security tracker data: ${feeds || 'none available'}</p>`);
-    return `<div class="space-y-2">${parts.join('')}</div>`;
+        `${c}${f.fetched_at ? ' ' + new Date(f.fetched_at * 1000).toLocaleString() : ''}${f.error ? ' (refresh failed: ' + f.error + ')' : ''}`).join(', ');
+    parts.push(safeHtml`<p class="text-[10px] text-slate-400">Installed packages as of the last check · Debian security tracker data: ${feeds || 'none available'}</p>`);
+    return safeHtml`<div class="space-y-2">${parts}</div>`;
 }
 
 async function _osuDeploy(body, summary) {
@@ -1133,11 +1133,11 @@ const _OSU_BADGE_CLS = {
     amber: 'text-amber-800 bg-amber-50 border-amber-200',
     slate: 'text-slate-500 bg-slate-100 border-slate-300',
 };
-const _osuBadge = (text, color, title) => `<span class="text-[10px] font-bold ${_OSU_BADGE_CLS[color]} border rounded-full px-2 py-0.5"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(text)}</span>`;
+const _osuBadge = (text, color, title) => safeHtml`<span class="text-[10px] font-bold ${_OSU_BADGE_CLS[color]} border rounded-full px-2 py-0.5" title="${title || ''}">${text}</span>`;
 
 function _osuVmLabel(n) {
-    if (n.vm) return ` · <span title="Snapshotted before patching">VM ${escapeHtml(n.vm.name)} (${escapeHtml(String(n.vm.vmid))}@${escapeHtml(n.vm.node)})</span>`;
-    return n.vm_note ? ` · <span title="Not snapshotted before patching">${escapeHtml(n.vm_note)}</span>` : '';
+    if (n.vm) return safeHtml` · <span title="Snapshotted before patching">VM ${n.vm.name} (${n.vm.vmid}@${n.vm.node})</span>`;
+    return n.vm_note ? safeHtml` · <span title="Not snapshotted before patching">${n.vm_note}</span>` : '';
 }
 
 function _osuRender(d) {
@@ -1161,8 +1161,8 @@ function _osuRender(d) {
     if (selBtn) { selBtn.disabled = busy || !nSel; selBtn.textContent = `Deploy selected (${nSel})`; }
     const cancelBtn = document.getElementById('osu-cancel');
     if (cancelBtn) cancelBtn.classList.toggle('hidden', !busy);
-    const chip = (label, val, cls) => `<span class="inline-flex items-baseline gap-1 border rounded-full px-2.5 py-0.5 ${cls || 'bg-white border-slate-200'}"><b class="text-slate-700">${escapeHtml(String(val))}</b><span class="text-slate-500">${escapeHtml(label)}</span></span>`;
-    const summary = `<div class="flex flex-wrap items-center gap-1.5 text-xs mb-3">
+    const chip = (label, val, cls) => safeHtml`<span class="inline-flex items-baseline gap-1 border rounded-full px-2.5 py-0.5 ${cls || 'bg-white border-slate-200'}"><b class="text-slate-700">${val}</b><span class="text-slate-500">${label}</span></span>`;
+    const summary = safeHtml`<div class="flex flex-wrap items-center gap-1.5 text-xs mb-3">
         ${chip('nodes with updates', t.with_updates || 0, (t.with_updates ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'))}
         ${chip('packages', t.packages || 0)}
         ${chip('security', t.security || 0, (t.security ? 'bg-red-50 border-red-200' : 'bg-white border-slate-200'))}
@@ -1174,7 +1174,7 @@ function _osuRender(d) {
       </div>`;
     const rows = (d.nodes || []).map(n => {
         const key = `${n.kind}:${n.id}`;
-        const jsKey = escapeHtml(JSON.stringify(key));
+        const jsKey = JSON.stringify(key);
         const feats = n.features || [];
         const item = run && (run.items || []).find(i => i.key === key);
         let state;
@@ -1194,48 +1194,48 @@ function _osuRender(d) {
         const reboot = scheduled ? _osuBadge('reboot scheduled', 'blue')
             : (n.reboot_required ? _osuBadge('reboot required', 'amber', 'A kernel/PVE update needs a reboot. Nothing reboots automatically — do it deliberately.') : '');
         const canReboot = n.eligible && n.reboot_required && !scheduled && feats.includes('reboot') && !busy;
-        const rebootBtn = canReboot ? `<button onclick="osuReboot(${jsKey})" class="text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Reboot…</button>` : '';
+        const rebootBtn = canReboot ? safeHtml`<button onclick="osuReboot(${jsKey})" class="text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Reboot…</button>` : '';
         const selectable = n.eligible && n.count && !n.apply_blocker && !busy;
         const nodeBox = selectable
-            ? `<input type="checkbox" class="w-4 h-4 rounded" ${_osuSel.nodes.has(key) ? 'checked' : ''} onchange="osuToggleNode(${jsKey}, this.checked)" title="Upgrade everything pending on this node">`
+            ? safeHtml`<input type="checkbox" class="w-4 h-4 rounded" ${_osuSel.nodes.has(key) ? 'checked' : ''} onchange="osuToggleNode(${jsKey}, this.checked)" title="Upgrade everything pending on this node">`
             : '';
         const canPick = selectable && feats.includes('packages');
         const picked = _osuSel.pkgs[key] || new Set();
         const pkgs = (n.packages || []).map(p => {
-            const label = `${escapeHtml(p.package)} <span class="text-slate-400">${escapeHtml(p.current)}→${escapeHtml(p.candidate)}</span>`;
+            const label = safeHtml`${p.package} <span class="text-slate-400">${p.current}→${p.candidate}</span>`;
             const cls = p.security ? 'text-red-700' : 'text-slate-500';
-            if (!canPick) return `<span class="inline-block mr-2 ${cls}">${label}</span>`;
-            return `<label class="inline-flex items-center gap-1 mr-3 ${cls} cursor-pointer"><input type="checkbox" class="w-3 h-3" ${picked.has(p.package) ? 'checked' : ''} onchange="osuTogglePkg(${jsKey}, ${escapeHtml(JSON.stringify(p.package))}, this.checked)">${label}</label>`;
-        }).join('');
+            if (!canPick) return safeHtml`<span class="inline-block mr-2 ${cls}">${label}</span>`;
+            return safeHtml`<label class="inline-flex items-center gap-1 mr-3 ${cls} cursor-pointer"><input type="checkbox" class="w-3 h-3" ${picked.has(p.package) ? 'checked' : ''} onchange="osuTogglePkg(${jsKey}, ${JSON.stringify(p.package)}, this.checked)">${label}</label>`;
+        });
         const pickNote = selectable && !feats.includes('packages')
-            ? '<div class="text-[10px] text-slate-400 mt-1">Update LM on this node to pick individual packages — it can only be updated whole.</div>' : '';
-        const pickHint = canPick ? `<div class="text-[10px] text-slate-400 mb-1">${picked.size ? `${picked.size} picked — only these will be upgraded on this node.` : 'Pick packages to upgrade only those, or tick the node to upgrade everything.'}</div>` : '';
+            ? safeHtml`<div class="text-[10px] text-slate-400 mt-1">Update LM on this node to pick individual packages — it can only be updated whole.</div>` : '';
+        const pickHint = canPick ? safeHtml`<div class="text-[10px] text-slate-400 mb-1">${picked.size ? `${picked.size} picked — only these will be upgraded on this node.` : 'Pick packages to upgrade only those, or tick the node to upgrade everything.'}</div>` : '';
         const detail = n.reason
-            ? `<div class="text-[11px] text-slate-500 mt-1">${escapeHtml(n.reason)}</div>`
-            : (n.count ? `<details class="mt-1" ${_osuOpen.has(key) ? 'open' : ''} ontoggle="osuToggleOpen(${jsKey}, this.open)"><summary class="cursor-pointer text-[11px] text-slate-400">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-[11px] mt-1 leading-relaxed">${pickHint}${pkgs}</div></details>${pickNote}` : '');
+            ? safeHtml`<div class="text-[11px] text-slate-500 mt-1">${n.reason}</div>`
+            : (n.count ? safeHtml`<details class="mt-1" ${_osuOpen.has(key) ? 'open' : ''} ontoggle="osuToggleOpen(${jsKey}, this.open)"><summary class="cursor-pointer text-[11px] text-slate-400">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-[11px] mt-1 leading-relaxed">${pickHint}${pkgs}</div></details>${pickNote}` : '');
         const fixBtn = n.apply_blocker && feats.includes('fix_access') && !busy
-            ? ` <button onclick="osuFixAccess(${jsKey})" class="ml-1 text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
+            ? safeHtml` <button onclick="osuFixAccess(${jsKey})" class="ml-1 text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
         const autoBox = n.eligible
-            ? `<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_patch ? 'text-emerald-700' : 'text-slate-400'} cursor-pointer" title="Install this node's updates automatically in the maintenance window"><input type="checkbox" class="w-3 h-3" ${n.auto_patch ? 'checked' : ''} onchange="osuToggleAutoPatch(${jsKey}, this.checked, this)">Auto-patch</label>` : '';
+            ? safeHtml`<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_patch ? 'text-emerald-700' : 'text-slate-400'} cursor-pointer" title="Install this node's updates automatically in the maintenance window"><input type="checkbox" class="w-3 h-3" ${n.auto_patch ? 'checked' : ''} onchange="osuToggleAutoPatch(${jsKey}, this.checked, this)">Auto-patch</label>` : '';
         const rebootBox = n.eligible && n.auto_patch
-            ? `<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_reboot ? 'text-emerald-700' : 'text-slate-400'} cursor-pointer" title="Reboot this node after auto-patch installs something"><input type="checkbox" class="w-3 h-3" ${n.auto_reboot ? 'checked' : ''} onchange="osuToggleAutoReboot(${jsKey}, this.checked, this)">Auto-reboot</label>` : '';
-        const blocker = n.apply_blocker ? `<div class="text-[11px] text-amber-700 mt-1">Can't apply: ${escapeHtml(n.apply_blocker)}${fixBtn}</div>` : '';
-        let msg = '';
-        if (item && item.message) msg = `<div class="text-[11px] ${item.status === 'done' ? 'text-slate-500' : 'text-red-600'} mt-1">${escapeHtml(item.message)}</div>`;
-        else if (item && item.status === 'done' && item.mode === 'packages') msg = `<div class="text-[11px] text-slate-500 mt-1">upgraded ${escapeHtml((item.packages || []).join(', '))}</div>`;
-        if (item && item.snapshot) msg += `<div class="text-[11px] text-slate-500 mt-1">snapshot: ${escapeHtml(item.snapshot)}</div>`;
-        if (item && item.auto_reboot) msg += `<div class="text-[11px] ${item.auto_reboot.startsWith('failed') ? 'text-red-600' : 'text-slate-500'} mt-1">reboot: ${escapeHtml(item.auto_reboot)}</div>`;
-        return `<div class="border border-slate-200 rounded-md p-3 mb-2">
+            ? safeHtml`<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_reboot ? 'text-emerald-700' : 'text-slate-400'} cursor-pointer" title="Reboot this node after auto-patch installs something"><input type="checkbox" class="w-3 h-3" ${n.auto_reboot ? 'checked' : ''} onchange="osuToggleAutoReboot(${jsKey}, this.checked, this)">Auto-reboot</label>` : '';
+        const blocker = n.apply_blocker ? safeHtml`<div class="text-[11px] text-amber-700 mt-1">Can't apply: ${n.apply_blocker}${fixBtn}</div>` : '';
+        const msg = [];
+        if (item && item.message) msg.push(safeHtml`<div class="text-[11px] ${item.status === 'done' ? 'text-slate-500' : 'text-red-600'} mt-1">${item.message}</div>`);
+        else if (item && item.status === 'done' && item.mode === 'packages') msg.push(safeHtml`<div class="text-[11px] text-slate-500 mt-1">upgraded ${(item.packages || []).join(', ')}</div>`);
+        if (item && item.snapshot) msg.push(safeHtml`<div class="text-[11px] text-slate-500 mt-1">snapshot: ${item.snapshot}</div>`);
+        if (item && item.auto_reboot) msg.push(safeHtml`<div class="text-[11px] ${item.auto_reboot.startsWith('failed') ? 'text-red-600' : 'text-slate-500'} mt-1">reboot: ${item.auto_reboot}</div>`);
+        return safeHtml`<div class="border border-slate-200 rounded-md p-3 mb-2">
             <div class="flex flex-wrap items-center justify-between gap-2">
-              <span class="flex items-center gap-2 text-xs font-bold text-slate-600">${nodeBox}${escapeHtml(n.label)} <span class="font-normal text-slate-400">${escapeHtml(n.kind)}${n.flavor ? ' · ' + escapeHtml(n.flavor) : ''}${n.pve_cluster && n.pve_cluster.name ? ' · PVE cluster ' + escapeHtml(n.pve_cluster.name) : ''}${_osuVmLabel(n)}</span></span>
+              <span class="flex items-center gap-2 text-xs font-bold text-slate-600">${nodeBox}${n.label} <span class="font-normal text-slate-400">${n.kind}${n.flavor ? ' · ' + n.flavor : ''}${n.pve_cluster && n.pve_cluster.name ? ' · PVE cluster ' + n.pve_cluster.name : ''}${_osuVmLabel(n)}</span></span>
               <span class="flex flex-wrap items-center gap-2 justify-end">${autoBox}${rebootBox}${rebootBtn}${reboot}${state}</span>
             </div>${detail}${blocker}${msg}</div>`;
-    }).join('');
+    });
     const apCount = document.getElementById('osu-autopatch-count');
     if (apCount) { const k = (d.nodes || []).filter(n => n.auto_patch).length; apCount.textContent = k ? `${k} node(s) approved` : 'no nodes approved — tick "Auto-patch" on a node'; }
     const when = d.checked_at ? new Date(d.checked_at * 1000).toLocaleString() : 'never';
-    body.innerHTML = summary + (rows || '<p class="text-xs text-slate-400 italic">No nodes reporting.</p>') +
-        `<p class="text-[11px] text-slate-400 mt-2">Last checked: ${escapeHtml(when)}</p>`;
+    body.innerHTML = safeHtml`${summary}${rows.length ? rows : safeHtml`<p class="text-xs text-slate-400 italic">No nodes reporting.</p>`}
+        <p class="text-[11px] text-slate-400 mt-2">Last checked: ${when}</p>`;
     if (busy && !_osuPoll) _osuStartPoll();
 }
 

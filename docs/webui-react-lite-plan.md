@@ -46,11 +46,12 @@ done earlier is redone later.
   errors and the same 1465 global functions.
 - Later (optional): regroup functions by view inside js/ (moves only).
 
-## Phase 2 - Safe templating (item 5)
+## Phase 2 - Safe templating (item 5) [done]
 One PR: helper + tests + OS Updates pilot. Other views convert later, when
 Phase 3 touches them anyway (no separate mass rewrite).
 
-Helper - new WebUI/js/safe-html.js, loaded BEFORE main.js (~30 lines):
+Helper - new WebUI/js/core/safe-html.js (subfolder, so the split-parts
+test doesn't treat it as a main.js part), loaded BEFORE main.js (~30 lines):
 - `safeHtml` tagged template: every `${value}` is HTML-escaped (same rules
   as escapeHtml) unless it is already a SafeHtml result.
 - Arrays are flattened, so `${rows.map(r => safeHtml`...`)}` needs no .join('').
@@ -67,8 +68,8 @@ Pitfalls handled in the pilot:
 - `.join('')` on SafeHtml items gives a plain string, which would then be
   double-escaped -> drop .join('') inside safeHtml (arrays are flattened).
 - escapeHtml(x) inside safeHtml double-escapes -> remove those calls.
-- onclick="fn('${x}')" JS-string args: escJsAttr already HTML-escapes, so it
-  is wrapped as rawHtml(escJsAttr(x)) via a tiny `jsArg(x)` helper. (Goes
+- onclick="fn(${JSON.stringify(x)})" JS-string args: safeHtml escapes the
+  JSON for the attribute, the browser unescapes it back to valid JS. (Goes
   away in Phase 4 when inline handlers become data-action.)
 - Shared helpers that return markup (helpIcon, _osuBadge) return rawHtml(...)
   so callers in both old and new templates work.
