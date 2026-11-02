@@ -105,7 +105,7 @@ def _zbxproxy_tenant(hub, spoke_id):
 
 def _monitoring_tls(hub, cfg, common_name):
     """Add a hub-CA client+server cert for ``common_name`` to a monitoring role's
-    config so the proxy/agent link is mTLS. Off when System → Monitoring TLS is
+    config so the proxy/agent link is mTLS. Off when System → General → Monitoring Server TLS is
     disabled (``global_config.monitoring_tls == False``)."""
     if hub.state.system_state.get("global_config", {}).get("monitoring_tls") is False:
         return cfg
@@ -131,7 +131,7 @@ async def _zbxproxy_register(hub, cfg):
 
 
 def _zbxproxy_load_config(hub, cfg, spoke_id=None):
-    """Fill the proxy's Zabbix server from the System → Monitoring setting and
+    """Fill the proxy's Zabbix server from the System → General → Monitoring Server setting and
     name it ``lm-<tenant>`` (the name the monitoring sync maps tenant hosts to)."""
     from routes.monitoring import monitoring_server_address
     cfg = dict(cfg or {})
@@ -142,7 +142,7 @@ def _zbxproxy_load_config(hub, cfg, spoke_id=None):
         server = monitoring_server_address(hub)
         if not server:
             raise HTTPException(status_code=400, detail="Monitoring server address is not set: "
-                                "enter it under System → Monitoring before installing a proxy")
+                                "enter it under System → General → Monitoring Server before installing a proxy")
         cfg["server"] = server
     return _monitoring_tls(hub, cfg, cfg["proxy_name"]) if not cfg.get("tls_cert_pem") else cfg
 
