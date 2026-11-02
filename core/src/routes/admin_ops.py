@@ -394,6 +394,28 @@ def register(app, hub, ctx):
             logger.exception("admin_ops: nw-verify failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/admin/ops/nw-poll")
+    async def admin_ops_nw_poll(request: Request):
+        """POLL NOW for one network device (same path as the WebUI button).
+        Body: {"device_id": "..."}. Returns status + device_info + errors."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        device_id = str((body or {}).get("device_id") or "")
+        if not device_id:
+            raise HTTPException(status_code=400, detail="device_id required")
+        try:
+            res = await hub.poll_nw_device(device_id)
+            if isinstance(res, dict):
+                await hub.nw_cache_set_poll(device_id, res)
+        except Exception as e:
+            logger.exception("admin_ops: nw-poll failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        return {k: (res or {}).get(k) for k in
+                ("status", "reachable", "device_info", "netbox_push", "errors", "message")}
+
     @app.post("/admin/ops/nw-scan")
     async def admin_ops_nw_scan(request: Request):
         """Run the tenant's saved-config network scan (preview only unless the
