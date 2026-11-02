@@ -7,6 +7,7 @@ from api import (
     get_netbox_spoke, get_tenant_scoping, logger, os, secrets, time,
 )
 from access import check_tenant_access, resolve_effective_permissions
+from security import login_crypto
 from security.credential_store import resolve_password_hash
 
 
@@ -33,6 +34,12 @@ def register(app, hub, ctx):
     _resolve_prefixes = ctx._resolve_prefixes
     _effective_tenant = ctx._effective_tenant
     _resolve_prefixes_for_tenant = ctx._resolve_prefixes_for_tenant
+
+    @app.get("/auth/login/key")
+    async def login_key():
+        """One-time RSA-OAEP key the login page encrypts the password with, so
+        the clear-text password never appears in the browser's network log."""
+        return JSONResponse(login_crypto.issue(), headers={"Cache-Control": "no-store"})
 
     @app.post("/auth/login")
     async def local_login(request: Request):
@@ -71,6 +78,12 @@ def register(app, hub, ctx):
                     detail="Too many login attempts. Try again later.",
                     headers={"Retry-After": str(retry_after)},
                 )
+            if data.get("password_enc"):
+                try:
+                    password = login_crypto.decrypt(data.get("key_id"), data.get("password_enc"))
+                except ValueError as exc:
+                    _login_fail(hub, lkey, ip, meta=_login_ev_meta(request, str(exc)))
+                    raise HTTPException(status_code=400, detail="Login expired, please try again")
             if not user_id or not password:
                 # Malformed, but still abuse — count it against the IP window so
                 # an empty-field flood fills the bucket and trips the throttle

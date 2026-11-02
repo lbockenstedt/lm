@@ -358,7 +358,8 @@ const CRUD_ROUTES = {
                               m2: 'PUT', p2: '/sim/api/superadmin/global-usb-vidpids',       api2: 'sim_put_global_usb_vidpids', sim: true },
 
     // ── Auth / lifecycle / search ──
-    doLogin:                { m: 'POST', p: '/auth/login',                                   api: 'local_login' },
+    doLogin:                { m: 'GET',  p: '/auth/login/key',                               api: 'login_key',
+                              m2: 'POST', p2: '/auth/login',                                 api2: 'local_login' },
     doLogout:               { m: 'POST', p: '/auth/logout',                                  api: 'auth_logout' },
     doSetup:                { m: 'POST', p: '/auth/setup',                                   api: 'first_run_setup',
                               m2: 'GET', p2: '/auth/me',                                     api2: 'auth_me' },
