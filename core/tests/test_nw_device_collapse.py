@@ -60,3 +60,62 @@ def test_different_serials_or_tenants_never_merge():
         _row(3, "DUP", "1.1.1.1", serial="S1", tenant_id="t2"),
     ])
     assert len(out) == 3
+
+
+def test_vsx_peers_sharing_a_system_mac_stay_two_rows():
+    out = _collapse([
+        _row(1, "CORE-SW1", "10.0.0.1", mac="02:00:00:00:00:01"),
+        _row(2, "CORE-SW2", "10.0.0.2", mac="02:00:00:00:00:01"),
+    ])
+    assert [r["id"] for r in out] == ["1", "2"]
+
+
+# ── hub side: one NetBox device / one Zabbix host per box ────────────────────
+
+from nw_discovery_sync import nw_hardware_primaries  # noqa: E402
+
+
+def _dev(i, name, addr, tenant="t1", otype="cx_switch"):
+    return {"id": str(i), "name": name, "address": addr, "tenant_id": tenant,
+            "object_type": otype}
+
+
+def test_hub_primaries_fold_aliases_but_keep_vsx_peers():
+    devs = [_dev(1, "CRSW1", "10.21.0.1"), _dev(2, "crsw1.example.com", "172.21.0.1"),
+            _dev(3, "CRSW2", "172.21.0.2"), _dev(4, "CRSW2", "172.21.0.10"),
+            _dev(5, "10.9.9.9", "10.9.9.9"), _dev(6, "CRSW1", "172.21.0.1", tenant="t2")]
+    ident = {"2": {"serial": "SG1"}, "5": {"serial": "SG1"},
+             "3": {"serial": "SG2"}, "4": {"serial": "SG2"}}
+    p = nw_hardware_primaries(devs, ident)
+    # Primary = first row with poll data; IP-named row joins by serial.
+    assert p["1"] == p["2"] == p["5"] == "2"
+    assert p["3"] == p["4"] == "3"        # VSX peer of CRSW1 stays separate
+    assert p["6"] == "6"                  # other tenant never merges
+
+
+def test_hub_primaries_same_name_conflicting_serials_stay_apart():
+    p = nw_hardware_primaries([_dev(1, "DUP", "1.1.1.1"), _dev(2, "DUP", "1.1.1.2")],
+                              {"1": {"serial": "A"}, "2": {"serial": "B"}})
+    assert p == {"1": "1", "2": "2"}
+
+
+@pytest.mark.asyncio
+async def test_alias_row_is_not_pushed_to_netbox():
+    from nw_discovery_sync import NwDiscoverySyncMixin
+
+    class _State:
+        system_state = {"global_config": {"nw_devices": [
+            _dev(1, "CRSW1", "172.21.0.1"), _dev(2, "CRSW1", "10.21.0.1")]}}
+
+    class _Hub(NwDiscoverySyncMixin):
+        state = _State()
+
+        def nw_cache_get_device(self, did, ep):
+            return {"data": {"serial": "SG1"}}
+
+        def get_spoke_by_type(self, t):
+            raise AssertionError("alias must not reach NetBox")
+
+    res, errors, _ = await _Hub().push_nw_device_inventory(
+        _dev(2, "CRSW1", "10.21.0.1"), {}, [])
+    assert res["status"] == "SKIPPED" and not errors
