@@ -685,11 +685,6 @@ def register(app, hub, ctx):
             logger.exception("%s relay failed", log_name or command)
             raise HTTPException(status_code=500, detail=str(e))
 
-    async def _discover_dns_workers(request: Request, tenant: str = None):
-        """Enroll connected agents that already have the DNS Server role."""
-        return await _discover_dns_workers_for_spoke(
-            _dns_spoke_for_request(request, tenant))
-
     async def _discover_dns_workers_for_spoke(dns_spoke: str):
         """Discovery/enrollment proper, against an ALREADY-RESOLVED dns spoke.
 
@@ -3768,11 +3763,6 @@ def register(app, hub, ctx):
                     status_code=403,
                     detail="that DHCP spoke belongs to another tenant")
         return requested
-
-    async def _discover_dhcp_workers(request: Request, tenant: str = None):
-        """Build the tenant's Kea HA pair from active DHCP Server roles."""
-        return await _discover_dhcp_workers_for_spoke(
-            _dhcp_spoke_for_request(request, tenant))
 
     async def _discover_dhcp_workers_for_spoke(dhcp_spoke: str):
         """Discovery/enrollment proper, against an ALREADY-RESOLVED dhcp spoke.

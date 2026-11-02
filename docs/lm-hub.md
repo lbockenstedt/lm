@@ -91,7 +91,7 @@ mTLS on the hub↔spoke↔agent legs is **opportunistic and permissive**: when e
 - **`access.py`** — tenant scoping + subnet/tenant filters (server-side isolation gate).
 - **`logging_setup.py`** — `configure_logging` / `set_log_level` (runtime DEBUG toggle).
 - **`dep_guard.py`** — `ensure_requirements` dep self-heal.
-- **`gateway/spoke_gateway.py::SpokeGateway`** (agent server :8767) + **`gateway/cs_bridge.py::CSBridgePoller`**.
+- **`gateway/cs_bridge.py::CSBridgePoller`**.
 - Sync mixins: `endpoint_sync.py`, `vm_sync.py`, `fw_discovery_sync.py`, `nw_discovery_sync.py`, `nw_cache.py`, `realtime_ipam_nac_sync.py`, `staleness_sweep.py`, `spoke_alert_sync.py`, `repo_sync.py`, `vmid_alloc.py`.
 
 ## Key files

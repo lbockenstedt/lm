@@ -15,9 +15,6 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from typing import Any, Dict, List, Tuple
 
 from .service import SimulationsService
@@ -226,37 +223,6 @@ def _stat(n: Any, label: str, color: str) -> str:
             f'<span style="font-size:18px;font-weight:bold;color:{color}">{_esc(n)}</span>'
             f'<span style="font-size:10px;text-transform:uppercase;color:#6b7280;display:block;margin-top:2px">{label}</span></span>')
 
-
-def send_report(notif: Dict[str, Any], recipients: List[str], subject: str, html: str) -> None:
-    """Send the report HTML via the tenant's SMTP (notifications config). Raises on
-    failure so the caller can log + retry next period."""
-    to_addrs = [a.strip() for a in (recipients or []) if a and a.strip()]
-    if not to_addrs:
-        raise ValueError("no recipients configured")
-    host = notif.get("smtp_host") or ""
-    if not host:
-        raise ValueError("SMTP not configured (Setup → Notifications)")
-    sender = notif.get("smtp_from") or notif.get("smtp_user") or "lm-report@localhost"
-    msg = MIMEMultipart("alternative")
-    msg["From"] = sender
-    msg["To"] = ", ".join(to_addrs)
-    msg["Subject"] = subject
-    msg.attach(MIMEText("Your mail client can't show HTML — view this report in the LM WebUI.", "plain"))
-    msg.attach(MIMEText(html, "html"))
-    port = int(notif.get("smtp_port", 587) or 587)
-    with smtplib.SMTP(host, port, timeout=20) as smtp:
-        smtp.ehlo()
-        if port != 25:
-            try:
-                smtp.starttls()
-                smtp.ehlo()
-            except smtplib.SMTPException:
-                pass
-        user, pwd = notif.get("smtp_user") or "", notif.get("smtp_password") or ""
-        if user and pwd:
-            smtp.login(user, pwd)
-        smtp.sendmail(sender, to_addrs, msg.as_string())
-    logger.info("email report sent to %s", to_addrs)
 
 
 def _period_key(now: datetime.datetime, freq: str) -> str:

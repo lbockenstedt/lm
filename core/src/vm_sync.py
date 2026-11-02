@@ -140,17 +140,6 @@ class VmSyncMixin:
                  ).strip().lower()
         return raw if raw in ("external", "netbox") else "external"
 
-    def _vm_scope_for_tenant(self, source_entry: Dict[str, str],
-                             tenant_id: str) -> str:
-        """The per-tenant hypervisor scope value for the active source ('' if unbound).
-
-        e.g. Proxmox → the tenant's proxmox_tag (sent as tag_filter to PXMX_LIST_VMS).
-        Which field is read is driven by the source entry's ``tenant_scope_field``
-        so the hub stays source-agnostic.
-        """
-        cfg = self.state.get_tenant(tenant_id) or {}
-        return str(cfg.get(source_entry.get("tenant_scope_field", "")) or "").strip()
-
     def _vm_sync_tenants(self) -> List[str]:
         """Tenant ids bound to the configured hypervisor source (have its scope field set)."""
         out: List[str] = []
@@ -239,15 +228,6 @@ class VmSyncMixin:
         if tslug is None:
             tslug = str(cfg.get("name") or "").strip() or None
         return tid, tslug
-
-    def _vm_sync_concurrency(self) -> int:
-        """Max tenants synced in parallel per cycle. Bounded so many tenants
-        don't stampede the hypervisor/netbox spokes. Clamp 1..8; default 4."""
-        try:
-            n = int(self._vm_sync_cfg().get("concurrency", 4))
-        except (TypeError, ValueError):
-            n = 4
-        return max(1, min(8, n))
 
     # Synthetic tenant-id key for the untagged/no-tenant bucket. Mirrors the
     # netbox spoke's NetBoxEngine._VM_SYNC_UNASSIGNED_KEY so per-tenant status
