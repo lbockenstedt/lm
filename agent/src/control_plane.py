@@ -825,13 +825,21 @@ class AgentControlPlane(BaseControlPlane):
         installer drops). The hub records it in ``ldap_server_agents`` and routes
         an LE cert for the LDAPS endpoint here (target ``ldap-server``). Emitted
         after a deploy + reconnect."""
+        out = {}
         try:
             from agent_spoke import _LDAP_INSTALL_CERT_HELPER
             if os.path.exists(_LDAP_INSTALL_CERT_HELPER):
-                return {"ldap_server": True}
+                out["ldap_server"] = True
         except Exception:  # noqa: BLE001
             pass
-        return {}
+        # Zabbix web frontend host → "zabbix-server" LE cert target.
+        try:
+            from agent_spoke import is_zabbix_web_host
+            if is_zabbix_web_host():
+                out["zabbix_server"] = True
+        except Exception:  # noqa: BLE001
+            pass
+        return out
 
     def __init__(self, spoke_id, secret, hub_secret="", hub_url="",
                  startup_roles: List[str] = None, startup_role: str = ""):

@@ -269,6 +269,15 @@ class SpokeRegistryMixin:
                 return identifier
             return next((sid for sid in self.ldap_server_agents
                          if sid in self.active_connections), None)
+        if module_type == "zabbix-server":
+            # Generic agent hosting the Zabbix web frontend (nginx); mirrors
+            # the ldap-server branch.
+            agents = getattr(self, "zabbix_server_agents", set())
+            if identifier and self._primary_key(identifier) in agents \
+                    and self._primary_key(identifier) in self.active_connections:
+                return identifier
+            return next((sid for sid in agents
+                         if sid in self.active_connections), None)
         if (identifier and self._primary_key(identifier) in self.active_connections
                 and self.spoke_module_types.get(self._primary_key(identifier)) == module_type):
             return identifier
@@ -719,6 +728,9 @@ class SpokeRegistryMixin:
                     if sid in self.active_connections]
         if module_type == "ldap-server":
             return [sid for sid in getattr(self, "ldap_server_agents", set())
+                    if sid in self.active_connections]
+        if module_type == "zabbix-server":
+            return [sid for sid in getattr(self, "zabbix_server_agents", set())
                     if sid in self.active_connections]
         # Legacy fallback: same prefix map as get_spoke_by_type. See
         # _MODULE_TYPE_PREFIX.

@@ -2333,22 +2333,6 @@ async function deleteConsoleLocalCredential(username) {
     } catch (e) { showToast('Delete failed: ' + e.message, 'error'); }
 }
 
-async function saveConsoleCredentials() {
-    const rows = Array.from(document.querySelectorAll('.console-cred-row'));
-    const credentials = rows.map(r => ({
-        username: r.querySelector('.console-cred-user').value.trim(),
-        password: r.querySelector('.console-cred-pass').value,
-    })).filter(c => c.username);
-    try {
-        const res = await fetch('/api/console/credentials', {
-            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ credentials }),
-        });
-        if (res.ok) { showToast('Credentials saved', 'success'); document.getElementById('console-creds-modal')?.remove(); }
-        else { const d = await res.json().catch(() => ({})); showToast(d.detail || 'Save failed', 'error'); }
-    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
-}
-
 async function _consoleLoadXterm() {
     if (_xtermMod) return _xtermMod;
     if (!document.getElementById('xterm-css')) {
@@ -3261,9 +3245,6 @@ function serialCloseAllConsoles() {
     if (modal) modal.remove();
     if (typeof currentView !== 'undefined' && currentView === 'console' && typeof loadConsoleData === 'function') loadConsoleData();
 }
-
-// Backward-compatible alias: older callers used a single-modal serial terminal.
-function closeConsoleTerminal() { serialCloseAllConsoles(); }
 
 function openConsoleSettingsModal(spokeId, portId) {
     const p = _consolePorts.find(x => x.port_id === portId && x.spoke_id === spokeId) || {};

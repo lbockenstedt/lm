@@ -678,6 +678,7 @@ const LE_MODULE_LABELS = {
     nac: 'nac (ClearPass)', directory: 'directory (LDAP)',
     simulation: 'simulation (Client Sim)', nw: 'nw (Network Devices)',
     statuspage: 'statuspage',
+    'zabbix-server': 'Monitoring Server (Zabbix UI)',
 };
 
 // ── LE target picker: drive both dropdowns from the live available list ──

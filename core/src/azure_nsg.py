@@ -25,6 +25,7 @@ import httpx
 
 from http_client import shared_client
 
+from oci_nsg import entries_to_ips, merge_live_prefixes  # noqa: F401 — same entry DB shape
 from security.oidc import OidcConfig, fetch_app_token
 
 logger = logging.getLogger("AzureNsg")
@@ -66,30 +67,6 @@ def normalize_entries(entries) -> List[Dict[str, str]]:
             idx[cidr] = len(out)
             out.append({"ip": cidr, "description": desc})
     return out
-
-
-def entries_to_ips(entries) -> List[str]:
-    """The CIDR list to push to Azure (the ip of each local entry)."""
-    return [e["ip"] for e in (entries or []) if isinstance(e, dict) and e.get("ip")]
-
-
-def merge_live_prefixes(entries: List[Dict[str, str]], live_prefixes) -> tuple:
-    """Fold the prefixes CURRENTLY on the Azure rule into the local DB: any live
-    IP not already tracked is added with an empty description (so existing NSG
-    entries are captured and can be annotated). Returns ``(merged, added_count)``."""
-    have = {e["ip"] for e in entries if e.get("ip")}
-    merged = list(entries)
-    added = 0
-    for p in (live_prefixes or []):
-        try:
-            cidr = str(ipaddress.ip_network(str(p).strip(), strict=False))
-        except ValueError:
-            continue
-        if cidr and cidr not in have:
-            have.add(cidr)
-            merged.append({"ip": cidr, "description": ""})
-            added += 1
-    return merged, added
 
 
 def normalize_prefixes(ips) -> List[str]:
