@@ -142,3 +142,14 @@ def test_monitoring_hosts_are_tenant_scoped_and_problems_flattened():
     assert len(m.scope_monitoring_hosts(hosts, None, {}, True)) == 2
     assert m.scope_monitoring_hosts(hosts, None, {"user": {}}, False) == []
     assert [p["name"] for p in m.monitoring_problem_list(hosts)] == ["p2", "p1"]
+
+
+def test_monitoring_sync_config_defaults_and_status_record():
+    hub = SimpleNamespace(state=SimpleNamespace(
+        system_state={"global_config": {}}, _mark_dirty=lambda: None))
+    assert monitoring.monitoring_sync_config(hub) == {"enabled": True, "interval_minutes": 5}
+    hub.state.system_state["global_config"]["monitoring_sync"] = {"enabled": False, "interval_minutes": 15}
+    assert monitoring.monitoring_sync_config(hub) == {"enabled": False, "interval_minutes": 15}
+    monitoring.record_monitoring_sync(hub, res={"payload": {"data": {"created": 2, "errors": ["x"]}}})
+    st = hub.state.system_state["global_config"]["monitoring_sync_status"]
+    assert st["status"] == "error" and st["created"] == 2 and st["errors"] == 1
