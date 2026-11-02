@@ -591,13 +591,6 @@ class ThreatMonitor:
         self._persist()
         return {"status": "SUCCESS", "entries": entries}
 
-    # Legacy aliases (private ``_never`` is retired; these now edit the shared list).
-    def add_never(self, cidr: str) -> Dict[str, Any]:
-        return self.add_trusted(cidr)
-
-    def remove_never(self, cidr: str) -> Dict[str, Any]:
-        return self.remove_trusted(cidr)
-
     def allow_priority(self) -> int:
         """The Azure NSG allow rule's priority (for Deny<Allow ordering checks)."""
         try:
@@ -687,12 +680,6 @@ class ThreatMonitor:
             asyncio.get_running_loop().create_task(self.reconcile_nsg())
         except RuntimeError:
             pass  # no loop (e.g. under sync test) — the sweep loop will catch up
-
-    def _schedule_allow_reconcile(self) -> None:
-        try:
-            asyncio.get_running_loop().create_task(self.reconcile_allow())
-        except RuntimeError:
-            pass  # no loop (e.g. under sync test)
 
     async def reconcile_allow(self) -> Dict[str, Any]:
         """Push the shared trusted list onto the ONE currently-ENABLED cloud

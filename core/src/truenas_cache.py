@@ -210,8 +210,3 @@ class TruenasCacheMixin:
         """Shared staleness verdict for the fleet snapshot (``cache_core``
         vocabulary: fresh/refresh/stale/expired/missing)."""
         return self.truenas_policy.classify(self.truenas_cache_fleet_fetched_at())
-
-    def truenas_cache_appliance_state(self, appliance_id: str) -> str:
-        """Shared staleness verdict for one appliance's cache entry."""
-        return self.truenas_policy.classify(
-            self.truenas_cache_appliance_fetched_at(appliance_id))

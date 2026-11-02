@@ -5,7 +5,7 @@ pre-exit flush helpers and the sync/asyncio uncaught-exception relays mixed into
 ``BaseControlPlane``. The relay queue + handler state stays in
 ``BaseControlPlane.__init__`` (``self._log_relay_queue`` / ``self._log_relay_handler``);
 these methods only reference that ``self`` state, so ``BaseControlPlane`` (and
-its subclasses AgentHostingControlPlane / SpokeGateway) inherit them unchanged.
+its subclass AgentHostingControlPlane) inherit them unchanged.
 No behavior change.
 """
 

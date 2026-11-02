@@ -1175,9 +1175,5 @@ class SessionManager:
                     "has_user": False, "writer": None, "baud": 0}
         return chan.snapshot()
 
-    def writer_of(self, port_id: str) -> Optional[str]:
-        chan = self._channels.get(port_id)
-        return chan.writer if chan else None
-
     def is_open(self, port_id: str) -> bool:
         return port_id in self._channels
