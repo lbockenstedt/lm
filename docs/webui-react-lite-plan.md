@@ -94,13 +94,18 @@ Risk: low (new code + one view). Rework later: none - Phase 3 render
 functions return safeHtml, createView does String(result) before morphing.
 Phase 6 htm is bound to `phtml`, so no name clash.
 
-## Phase 3 - Views + DOM diffing (items 3 + 2 together)
+## Phase 3 - Views + DOM diffing (items 3 + 2 together) [done]
 - js/core/view.js: `createView({el, state, render})` -> `{state, setState, refresh}`.
   render returns `safeHtml` (Phase 2); update applies via vendored idiomorph
   (assets/idiomorph.min.js) instead of innerHTML.
 - Diffing lives inside createView only, so it is written once.
 - Migrate views one at a time (start: OS Updates, which already has
   _osuRender/_osuData and hand-rolled _osuOpen preservation -> delete that).
+- Done: OS Updates node list (_osuView) and CVE lookup (_osuCveView). Open
+  <details> survive via an idiomorph beforeAttributeUpdated hook; rows carry
+  ids for stable matching. Tests: test_webui_view.py (morph keeps nodes and
+  open state), test_webui_os_updates_view.py (real page, mocked API: picks,
+  CVE "Select fixes", hostile CVE text, open list survives the 5 s poll).
 
 ## Phase 4 - Event delegation (item 4)
 - createView gets `actions: { name(ev, el) {...} }`; one listener on the view

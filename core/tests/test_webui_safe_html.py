@@ -72,7 +72,7 @@ def test_os_updates_cve_panel_escapes_hostile_data():
         "unknown": [{"label": evil, "reason": evil}],
     }
     out = _run(_with_helper(
-        "const window = {};\n" + "\n".join(parts)
+        "const window = {}; const _osuView = { state: { data: {} } };\n" + "\n".join(parts)
         + f"\nconsole.log(JSON.stringify(String(_osuCveHtml({json.dumps(data)}))));"))
     assert "<img" not in out
     assert out.count("&lt;img src=x onerror=alert(1)&gt;") >= 7

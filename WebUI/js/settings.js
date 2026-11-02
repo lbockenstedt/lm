@@ -846,7 +846,7 @@ window.osuSetAutoPatchSecurity = async function (on) {
 };
 
 window.osuToggleAutoPatch = async function (key, on, el) {
-    const n = ((window._osuData || {}).nodes || []).find(x => `${x.kind}:${x.id}` === key);
+    const n = _osuNode(key);
     const label = n ? n.label : key;
     const hubNote = n && n.kind === 'hub' ? '\n\nThis is the HUB — patching it restarts LM services, and Auto-reboot reboots it last.' : '';
     if (on && !confirm(`Approve ${label} for auto-patching?\n\nIn each maintenance window its pending updates are installed automatically, then the node is rebooted (Auto-reboot — untick it to keep the node up).${hubNote}`)) {
@@ -861,7 +861,7 @@ window.osuToggleAutoPatch = async function (key, on, el) {
 };
 
 window.osuToggleAutoReboot = async function (key, on, el) {
-    const n = ((window._osuData || {}).nodes || []).find(x => `${x.kind}:${x.id}` === key);
+    const n = _osuNode(key);
     const label = n ? n.label : key;
     try {
         await apiJson('/api/os-updates/auto-patch', { method: 'POST', body: JSON.stringify({ node: key, auto_reboot: on }) });
@@ -873,7 +873,7 @@ window.osuToggleAutoReboot = async function (key, on, el) {
 // One-time login for a node blocked by missing privileges. The password goes
 // to that node once to install its update helper; LM never stores it.
 window.osuFixAccess = function (key) {
-    const n = ((window._osuData || {}).nodes || []).find(x => `${x.kind}:${x.id}` === key);
+    const n = _osuNode(key);
     if (!n) return;
     const inp = 'w-full px-3 py-2 border border-slate-200 rounded-md text-sm';
     openModal('osu-fix-modal', safeHtml`
@@ -949,47 +949,51 @@ window.osuCheck = async function () {
 // package pick never selects the whole node — clearing the last pick must not
 // leave a full dist-upgrade selected.
 const _osuSel = { nodes: new Set(), pkgs: {} };
-const _osuOpen = new Set();
+
+// The node list and the CVE lookup result are views (js/core/view.js): a
+// re-render morphs the page, so open package lists stay open while polling.
+const _osuView = createView({ el: 'osu-body', state: { data: {} }, render: _osuBodyHtml });
+const _osuCveView = createView({ el: 'osu-cve-body', state: { data: null, loading: false, error: '' }, render: s =>
+    s.loading ? safeHtml`<p class="text-xs text-slate-400 italic">Looking up…</p>`
+        : s.error ? safeHtml`<p class="text-xs text-red-600">${s.error}</p>`
+        : s.data ? _osuCveHtml(s.data) : '' });
+
+function _osuNode(key) { return (_osuView.state.data.nodes || []).find(x => `${x.kind}:${x.id}` === key); }
 
 function _osuSelectedKeys() { return [...new Set([..._osuSel.nodes, ...Object.keys(_osuSel.pkgs)])]; }
 
-function _osuBusy() { const r = (window._osuData || {}).run; return !!(r && r.status === 'running'); }
+function _osuBusy() { const r = _osuView.state.data.run; return !!(r && r.status === 'running'); }
 
 window.osuToggleNode = function (key, on) {
     _osuSel.nodes[on ? 'add' : 'delete'](key);
     delete _osuSel.pkgs[key];
-    _osuRender(window._osuData || {});
+    _osuRender(_osuView.state.data);
 };
 
 window.osuTogglePkg = function (key, pkg, on) {
     const set = _osuSel.pkgs[key] || (_osuSel.pkgs[key] = new Set());
     if (on) { set.add(pkg); _osuSel.nodes.delete(key); } else set.delete(pkg);
     if (!set.size) delete _osuSel.pkgs[key];
-    _osuRender(window._osuData || {});
+    _osuRender(_osuView.state.data);
 };
-
-window.osuToggleOpen = function (key, open) { if (open) _osuOpen.add(key); else _osuOpen.delete(key); };
 
 // CVE lookup: which nodes run a package vulnerable to a CVE (or, for a package
 // name, that package's open CVEs). Served from the last check's inventory.
 window.osuCveSearch = async function () {
     const q = (document.getElementById('osu-cve-q')?.value || '').trim();
-    const out = document.getElementById('osu-cve-body');
-    if (!out || !q) return;
-    out.innerHTML = '<p class="text-xs text-slate-400 italic">Looking up…</p>';
+    if (!q) return;
+    _osuCveView.setState({ loading: true, error: '' });
     try {
-        const d = await apiJson('/api/os-updates/cves?q=' + encodeURIComponent(q));
-        window._osuCve = d;
-        out.innerHTML = _osuCveHtml(d);
+        _osuCveView.setState({ loading: false, data: await apiJson('/api/os-updates/cves?q=' + encodeURIComponent(q)) });
     } catch (e) {
-        out.innerHTML = safeHtml`<p class="text-xs text-red-600">${e.message || e}</p>`;
+        _osuCveView.setState({ loading: false, data: null, error: e.message || String(e) });
     }
 };
 
 // Pending upgrades on each affected node that belong to the vulnerable packages.
 function _osuCveFixes(d) {
     const nodes = {};
-    ((window._osuData || {}).nodes || []).forEach(n => { nodes[`${n.kind}:${n.id}`] = n; });
+    (_osuView.state.data.nodes || []).forEach(n => { nodes[`${n.kind}:${n.id}`] = n; });
     const picks = [];
     (d.results || []).forEach(r => r.affected.forEach(a => {
         const pending = new Set(((nodes[a.node] || {}).packages || []).map(p => p.package));
@@ -999,12 +1003,12 @@ function _osuCveFixes(d) {
 }
 
 window.osuCveSelectFixes = function () {
-    const picks = _osuCveFixes(window._osuCve || {});
+    const picks = _osuCveFixes(_osuCveView.state.data || {});
     picks.forEach(([key, pkg]) => {
         (_osuSel.pkgs[key] || (_osuSel.pkgs[key] = new Set())).add(pkg);
         _osuSel.nodes.delete(key);
     });
-    _osuRender(window._osuData || {});
+    _osuRender(_osuView.state.data);
     showToast(`${picks.length} package update(s) selected — review, then "Deploy selected".`, 'success');
 };
 
@@ -1074,7 +1078,7 @@ async function _osuDeploy(body, summary) {
 }
 
 window.osuApply = async function () {
-    const n = ((window._osuData || {}).totals || {}).with_updates || 0;
+    const n = (_osuView.state.data.totals || {}).with_updates || 0;
     if (!n) { showToast('No nodes have pending updates.', 'info'); return; }
     _osuDeploy({}, `All ${n} node(s) with pending updates.`);
 };
@@ -1082,7 +1086,7 @@ window.osuApply = async function () {
 window.osuApplySelected = async function () {
     const keys = _osuSelectedKeys();
     if (!keys.length) { showToast('Select at least one node or package.', 'info'); return; }
-    const labels = Object.fromEntries(((window._osuData || {}).nodes || []).map(n => [`${n.kind}:${n.id}`, n.label]));
+    const labels = Object.fromEntries((_osuView.state.data.nodes || []).map(n => [`${n.kind}:${n.id}`, n.label]));
     const packages = {};
     const lines = keys.map(k => {
         const picked = _osuSel.pkgs[k];
@@ -1100,7 +1104,7 @@ window.osuCancel = async function () {
 };
 
 window.osuReboot = async function (key) {
-    const n = ((window._osuData || {}).nodes || []).find(x => `${x.kind}:${x.id}` === key);
+    const n = _osuNode(key);
     if (!n) return;
     const warn = n.kind === 'hub' ? '\n\nThis is the HUB — the WebUI and every spoke connection drop until it is back.'
         : (n.flavor === 'proxmox' ? '\n\nThis is a Proxmox host — every VM on it goes down with it.' : '');
@@ -1140,11 +1144,10 @@ function _osuVmLabel(n) {
     return n.vm_note ? safeHtml` · <span title="Not snapshotted before patching">${n.vm_note}</span>` : '';
 }
 
+// New data from the hub: update the toolbar around the list, then the list.
 function _osuRender(d) {
-    window._osuData = d;
-    const body = document.getElementById('osu-body');
-    if (!body) return;
-    const t = d.totals || {};
+    _osuView.state.data = d;
+    if (!document.getElementById('osu-body')) return;
     const run = d.run;
     const busy = _osuBusy();
     const runEl = document.getElementById('osu-run');
@@ -1161,6 +1164,16 @@ function _osuRender(d) {
     if (selBtn) { selBtn.disabled = busy || !nSel; selBtn.textContent = `Deploy selected (${nSel})`; }
     const cancelBtn = document.getElementById('osu-cancel');
     if (cancelBtn) cancelBtn.classList.toggle('hidden', !busy);
+    const apCount = document.getElementById('osu-autopatch-count');
+    if (apCount) { const k = (d.nodes || []).filter(n => n.auto_patch).length; apCount.textContent = k ? `${k} node(s) approved` : 'no nodes approved — tick "Auto-patch" on a node'; }
+    _osuView.refresh();
+    if (busy && !_osuPoll) _osuStartPoll();
+}
+
+function _osuBodyHtml({ data: d }) {
+    const t = d.totals || {};
+    const run = d.run;
+    const busy = _osuBusy();
     const chip = (label, val, cls) => safeHtml`<span class="inline-flex items-baseline gap-1 border rounded-full px-2.5 py-0.5 ${cls || 'bg-white border-slate-200'}"><b class="text-slate-700">${val}</b><span class="text-slate-500">${label}</span></span>`;
     const summary = safeHtml`<div class="flex flex-wrap items-center gap-1.5 text-xs mb-3">
         ${chip('nodes with updates', t.with_updates || 0, (t.with_updates ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'))}
@@ -1212,7 +1225,7 @@ function _osuRender(d) {
         const pickHint = canPick ? safeHtml`<div class="text-[10px] text-slate-400 mb-1">${picked.size ? `${picked.size} picked — only these will be upgraded on this node.` : 'Pick packages to upgrade only those, or tick the node to upgrade everything.'}</div>` : '';
         const detail = n.reason
             ? safeHtml`<div class="text-[11px] text-slate-500 mt-1">${n.reason}</div>`
-            : (n.count ? safeHtml`<details class="mt-1" ${_osuOpen.has(key) ? 'open' : ''} ontoggle="osuToggleOpen(${jsKey}, this.open)"><summary class="cursor-pointer text-[11px] text-slate-400">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-[11px] mt-1 leading-relaxed">${pickHint}${pkgs}</div></details>${pickNote}` : '');
+            : (n.count ? safeHtml`<details class="mt-1"><summary class="cursor-pointer text-[11px] text-slate-400">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-[11px] mt-1 leading-relaxed">${pickHint}${pkgs}</div></details>${pickNote}` : '');
         const fixBtn = n.apply_blocker && feats.includes('fix_access') && !busy
             ? safeHtml` <button onclick="osuFixAccess(${jsKey})" class="ml-1 text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
         const autoBox = n.eligible
@@ -1225,18 +1238,15 @@ function _osuRender(d) {
         else if (item && item.status === 'done' && item.mode === 'packages') msg.push(safeHtml`<div class="text-[11px] text-slate-500 mt-1">upgraded ${(item.packages || []).join(', ')}</div>`);
         if (item && item.snapshot) msg.push(safeHtml`<div class="text-[11px] text-slate-500 mt-1">snapshot: ${item.snapshot}</div>`);
         if (item && item.auto_reboot) msg.push(safeHtml`<div class="text-[11px] ${item.auto_reboot.startsWith('failed') ? 'text-red-600' : 'text-slate-500'} mt-1">reboot: ${item.auto_reboot}</div>`);
-        return safeHtml`<div class="border border-slate-200 rounded-md p-3 mb-2">
+        return safeHtml`<div id="osu-node-${key}" class="border border-slate-200 rounded-md p-3 mb-2">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <span class="flex items-center gap-2 text-xs font-bold text-slate-600">${nodeBox}${n.label} <span class="font-normal text-slate-400">${n.kind}${n.flavor ? ' · ' + n.flavor : ''}${n.pve_cluster && n.pve_cluster.name ? ' · PVE cluster ' + n.pve_cluster.name : ''}${_osuVmLabel(n)}</span></span>
               <span class="flex flex-wrap items-center gap-2 justify-end">${autoBox}${rebootBox}${rebootBtn}${reboot}${state}</span>
             </div>${detail}${blocker}${msg}</div>`;
     });
-    const apCount = document.getElementById('osu-autopatch-count');
-    if (apCount) { const k = (d.nodes || []).filter(n => n.auto_patch).length; apCount.textContent = k ? `${k} node(s) approved` : 'no nodes approved — tick "Auto-patch" on a node'; }
     const when = d.checked_at ? new Date(d.checked_at * 1000).toLocaleString() : 'never';
-    body.innerHTML = safeHtml`${summary}${rows.length ? rows : safeHtml`<p class="text-xs text-slate-400 italic">No nodes reporting.</p>`}
+    return safeHtml`${summary}${rows.length ? rows : safeHtml`<p class="text-xs text-slate-400 italic">No nodes reporting.</p>`}
         <p class="text-[11px] text-slate-400 mt-2">Last checked: ${when}</p>`;
-    if (busy && !_osuPoll) _osuStartPoll();
 }
 
 function _renderSetupRemoteConsoleTile(content) {

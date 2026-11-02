@@ -48,6 +48,7 @@ Same as the hub: `https://<hub>` (443) or `http://<hub>:443` (no-cert). WS: `/ws
 - Nested `safeHtml` results and arrays (`${rows.map(r => safeHtml`<li>${r.name}</li>`)}`) are inserted as-is — no `.join('')`. `null`/`undefined`/`false` render nothing; `0` renders `0`.
 - Trusted markup (e.g. `helpIcon()` output) must be wrapped in `rawHtml(...)` — grep-able, so every opt-out is reviewable.
 - The result works anywhere a string does (`el.innerHTML = safeHtml`...``, `openModal(id, body)`).
+- A part of a page that re-renders (polling, toggles) should be a view: `createView({ el, state, render })` (`js/core/view.js`) returns `{ state, setState, refresh }`; `render(state)` returns `safeHtml`, and a refresh morphs the DOM (idiomorph, `assets/idiomorph.min.js`) instead of replacing it, so focus, scroll and open `<details>` survive. Give repeated rows an `id` so they match up.
 - New code should not add `escapeHtml(` calls: `core/tests/test_webui_safe_html.py` caps the count and it may only go down. OS Updates (`js/settings.js`) is the reference view.
 
 ## How it works
