@@ -9,9 +9,11 @@ validated against the system trust store. Results are written to
 ``$LM_STATE_DIR/cert_monitor.json``; the scheduler (routes/cert_monitor.py)
 runs a check at most once every 24h while the feature is enabled.
 
-The built-in Mist / Central host list is a hard-coded seed; once a day the
-parts the vendors publish (see SOURCES) are re-read and replace the seed's
-matching hosts, so new endpoints are added and retired ones dropped.
+The endpoint list is data: ``cert_monitor_catalog.json`` (baseline hosts plus
+the vendor pages to re-read). Once a day each source page is re-read and
+replaces the baseline's matching hosts, so new endpoints are added; ones a
+vendor stops listing are flagged deprecated (monitored for 30 days but never
+alerted on), then dropped.
 """
 import concurrent.futures
 import datetime as _dt
@@ -40,95 +42,45 @@ PROBE_TIMEOUT_S = 8.0
 MAX_WORKERS = 16
 MAX_CUSTOM_HOSTS = 200
 
-_MIST_REGIONS = [
-    ("", "Global 01"), ("gc1.", "Global 02"), ("ac2.", "Global 03"),
-    ("gc2.", "Global 04"), ("gc4.", "Global 05"), ("gc5.", "Global 06"),
-    ("gc6.", "Global 07"), ("gc7.", "Global 08"), ("eu.", "EMEA 01"),
-    ("gc3.", "EMEA 02"), ("ac6.", "EMEA 03"), ("ac5.", "APAC 01"),
-]
-_MIST_ROLES = [
-    ("manage", "Portal"), ("api", "API"), ("api-ws", "API WebSocket"),
-    ("portal", "Guest portal"), ("ep-terminator", "Device terminator"),
-    ("jma-terminator", "Junos agent terminator"), ("ztp", "ZTP"),
-]
-
-# (cluster, ui, api gateway, device endpoints...) — classic Aruba Central.
-_CENTRAL_CLUSTERS = [
-    ("US-1", "portal", "app1-apigw", ["app", "app1", "app1-h2"]),
-    ("US-2", "portal-prod2", "apigw-prod2",
-     ["app-prod2", "device-prod2", "device-prod2-h2"]),
-    ("US-East-1", "portal-us-east-1", "apigw-us-east-1", []),
-    ("US-West-4", "portal-uswest4", "apigw-uswest4",
-     ["app-uswest4", "device-uswest4", "device-uswest4-h2"]),
-    ("US-West-5", "portal-uswest5", "apigw-uswest5",
-     ["app-uswest5", "device-uswest5"]),
-    ("EU-1", "portal-eu", "eu-apigw", ["app2-eu", "device-eu", "device-eu-h2"]),
-    ("EU-Central-2", "portal-eucentral2", "apigw-eucentral2",
-     ["app-eucentral2", "device-eucentral2"]),
-    ("EU-Central-3", "portal-eucentral3", "apigw-eucentral3",
-     ["app-eucentral3", "device-eucentral3"]),
-    ("Canada-1", "portal-ca", "apigw-ca", ["app-ca", "device-ca"]),
-    ("APAC-1", "portal-apac", "api-ap", ["app1-ap", "app2-ap"]),
-    ("APAC-East-1", "portal-apaceast", "apigw-apaceast",
-     ["app-apaceast", "device-apaceast"]),
-    ("APAC-South-1", "portal-apacsouth", "apigw-apacsouth",
-     ["app-apacsouth", "device-apacsouth"]),
-    ("UAE-North-1", "portal-uaenorth1", "apigw-uaenorth1",
-     ["app-uaenorth1", "device-uaenorth1"]),
-]
-_NEW_CENTRAL_GATEWAYS = ["us1", "us2", "us4", "us5", "us6", "de1", "de2", "de3",
-                         "ca1", "gb1", "in1", "jp1", "au1", "ae1", "cn1"]
+CATALOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cert_monitor_catalog.json")
+DEPRECATED_KEEP_DAYS = 30
+_HOST_RE = r"[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*"
 
 
-def _build_builtin_hosts():
-    hosts = []
-    for prefix, region in _MIST_REGIONS:
-        for sub, role in _MIST_ROLES:
-            # Global 01 terminators live under mistsys.net (added below).
-            if not prefix and sub in ("ep-terminator", "jma-terminator"):
-                continue
-            hosts.append({"host": f"{sub}.{prefix}mist.com", "port": 443,
-                          "service": "Juniper Mist", "region": region,
-                          "role": role})
-    for h, role in (("ep-terminator.mistsys.net", "Device terminator"),
-                    ("jma-terminator.mistsys.net", "Junos agent terminator"),
-                    ("redirect.mist.com", "Device redirect"),
-                    ("www.mist.com", "Website")):
-        hosts.append({"host": h, "port": 443, "service": "Juniper Mist",
-                      "region": "Global", "role": role})
-
-    sfx = ".central.arubanetworks.com"
-    for cluster, ui, gw, devices in _CENTRAL_CLUSTERS:
-        hosts.append({"host": ui + sfx, "port": 443, "service": "Aruba Central",
-                      "region": cluster, "role": "Portal"})
-        hosts.append({"host": gw + sfx, "port": 443, "service": "Aruba Central",
-                      "region": cluster, "role": "API gateway"})
-        for d in devices:
-            hosts.append({"host": d + sfx, "port": 443,
-                          "service": "Aruba Central", "region": cluster,
-                          "role": "Device connectivity"})
-    for cn_sub, role in (("portal", "Portal"), ("apigw", "API gateway"),
-                         ("app", "Device connectivity")):
-        hosts.append({"host": f"{cn_sub}.central.arubanetworks.com.cn",
-                      "port": 443, "service": "Aruba Central",
-                      "region": "China-1", "role": role})
-    for r in _NEW_CENTRAL_GATEWAYS:
-        tld = ".com.cn" if r == "cn1" else ".com"
-        hosts.append({"host": f"{r}.api.central.arubanetworks{tld}", "port": 443,
-                      "service": "Aruba Central (New Central)",
-                      "region": r.upper(), "role": "API gateway"})
-    for h, role in (("common.cloud.hpe.com", "GreenLake portal"),
-                    ("sso.common.cloud.hpe.com", "GreenLake SSO"),
-                    ("global.api.greenlake.hpe.com", "GreenLake API"),
-                    ("auth.hpe.com", "HPE auth"),
-                    ("activate.arubanetworks.com", "Activate (ZTP)"),
-                    ("device.arubanetworks.com", "Device provisioning")):
-        hosts.append({"host": h, "port": 443, "service": "HPE GreenLake / Aruba",
-                      "region": "Global", "role": role})
-    return hosts
+def load_catalog(path=None):
+    """The shipped endpoint catalog: {"hosts": [...], "sources": [...]}. It is
+    data, not code: add a vendor or endpoint by editing the JSON."""
+    with open(path or CATALOG_FILE, "r", encoding="utf-8") as f:
+        cat = json.load(f)
+    sources = []
+    for src in cat.get("sources") or []:
+        src = dict(src)
+        src["pattern"] = src["pattern"].replace("{host}", _HOST_RE)
+        src["skip_ports"] = set(src.get("skip_ports") or ())
+        src.setdefault("role", None)
+        sources.append(src)
+    return {"hosts": [dict(h) for h in cat.get("hosts") or []], "sources": sources}
 
 
-BUILTIN_HOSTS = _build_builtin_hosts()
+_CATALOG = load_catalog()
+BUILTIN_HOSTS = _CATALOG["hosts"]
+SOURCES = _CATALOG["sources"]
+
+
+def _deprecated_since(h, now=None):
+    """Date a catalog/source host was deprecated, or None."""
+    return h.get("deprecated") or None
+
+
+def _past_keep_window(date_s, now=None):
+    try:
+        d = _dt.datetime.fromisoformat(str(date_s)[:19])
+    except ValueError:
+        return False
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=_dt.timezone.utc)
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    return (now - d).days >= DEPRECATED_KEEP_DAYS
 
 
 # ── host list auto-update ───────────────────────────────────────────────────
@@ -140,29 +92,7 @@ BUILTIN_HOSTS = _build_builtin_hosts()
 SOURCES_FILE = "cert_monitor_sources.json"
 SOURCE_REFRESH_S = 24 * 3600
 SOURCE_TIMEOUT_S = 20
-_HOST_RE = r"[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*"
-SOURCES = [
-    {"id": "mist", "service": "Juniper Mist", "role": None,
-     "url": "https://www.juniper.net/documentation/us/en/software/mist/"
-            "mist-management/topics/ref/firewall-ports-to-open.html",
-     "pattern": _HOST_RE + r"\.(?:mist\.com|mistsys\.net)",
-     # oc-term (TCP 2200) is Junos outbound SSH, not TLS.
-     "skip_ports": {2200}},
-    {"id": "central-apigw", "service": "Aruba Central", "role": "API gateway",
-     "url": "https://developer.arubanetworks.com/aruba-central/docs/api-oauth-access-token",
-     "pattern": _HOST_RE + r"\.central\.arubanetworks\.com(?:\.cn)?",
-     "keep": lambda h: "apigw" in h or h.startswith("api-")},
-    {"id": "new-central", "service": "Aruba Central (New Central)", "role": None,
-     "url": "https://developer.arubanetworks.com/new-central/docs/getting-started-with-rest-apis",
-     "pattern": r"[a-z0-9]+\.api\.central\.arubanetworks\.com(?:\.cn)?"},
-]
 _MIN_SOURCE_HOSTS = 3
-_MIST_REGION_BY_PREFIX = {p.rstrip("."): r for p, r in _MIST_REGIONS}
-_MIST_ROLE_BY_SUB = dict(_MIST_ROLES, **{
-    "srx-log-terminator": "SRX log terminator", "radsec": "Access Assurance RadSec",
-    "radsec-eu": "Access Assurance RadSec", "redirect": "Device redirect",
-    "support-portal": "Support portal"})
-_CENTRAL_CLUSTER_BY_GW = {gw: c for c, _ui, gw, _d in _CENTRAL_CLUSTERS}
 
 
 def _owned(src, h):
@@ -170,23 +100,28 @@ def _owned(src, h):
 
 
 def _label(src, host):
-    """→ (region, role) for a host found on a source page."""
-    if src["id"] == "mist":
-        sub, _, rest = host.partition(".")
-        inst = rest.rsplit(".", 2)[0] if rest.count(".") >= 2 else ""
-        role = _MIST_ROLE_BY_SUB.get(sub, sub)
-        if not inst:
-            region = "Global 01" if sub in _MIST_ROLE_BY_SUB and rest == "mist.com" else "Global"
-        else:
-            region = _MIST_REGION_BY_PREFIX.get(inst, inst.upper())
+    """→ (region, role) for a host found on a source page, from the source's
+    ``labels`` rules (first matching regex wins). Without a match the region is
+    the first DNS label upper-cased and the role is the source's."""
+    for rule in src.get("labels") or []:
+        m = re.search(rule["re"], host)
+        if not m:
+            continue
+        fill = lambda t: re.sub(r"\{(\d+)\}", lambda g: m.group(int(g.group(1))), t or "")
+        role_raw = fill(rule.get("role"))
+        role = (rule.get("role_map") or {}).get(role_raw, role_raw)
+        region = fill(rule.get("region"))
+        rmap = rule.get("region_map") or {}
+        if region in rmap:
+            region = rmap[region]
+        elif "{" in (rule.get("region") or ""):
+            for strip in rule.get("region_strip") or []:
+                region = region.replace(strip, "")
+            region = region.strip("-").upper()
+        if rule.get("region_if_role_known") and role_raw in (rule.get("role_map") or {}):
+            region = rule["region_if_role_known"]
         return region, role
-    first = host.split(".")[0]
-    if src["id"] == "central-apigw":
-        if host.endswith(".cn"):
-            return "China-1", "API gateway"
-        region = _CENTRAL_CLUSTER_BY_GW.get(first) or first.replace("apigw", "").strip("-").upper()
-        return region, "API gateway"
-    return first.upper(), "API gateway"
+    return host.split(".")[0].upper(), src.get("role") or ""
 
 
 def parse_source(src, page):
@@ -197,7 +132,8 @@ def parse_source(src, page):
                          r"(?:\s*\(tcp\s*(\d+)\))?", text):
         host, port = m.group(1), int(m.group(2) or 443)
         if (host.startswith(("internal", "www.")) or port in src.get("skip_ports", ())
-                or not src.get("keep", lambda h: True)(host) or (host, port) in seen):
+                or (src.get("keep") and not re.search(src["keep"], host))
+                or (host, port) in seen):
             continue
         seen.add((host, port))
         region, role = _label(src, host)
@@ -252,6 +188,14 @@ def refresh_sources(state_dir=None, fetch=_fetch, now=None):
         new_keys = {cert_key(h) for h in hosts}
         cur.update({"hosts": hosts, "updated_at": now, "error": "", "url": src["url"]})
         added, removed = sorted(new_keys - old_keys), sorted(old_keys - new_keys)
+        # A URL the vendor stopped listing is deprecated, not deleted: it stays
+        # visible (never alerted on) for DEPRECATED_KEEP_DAYS, then drops off.
+        dep = {k: v for k, v in (cur.get("deprecated") or {}).items() if k not in new_keys}
+        for h in old:
+            k = cert_key(h)
+            if k not in new_keys and k not in dep:
+                dep[k] = {**h, "deprecated": now}
+        cur["deprecated"] = {k: v for k, v in dep.items() if not _past_keep_window(v["deprecated"])}
         if added or removed:  # keep the last real change on show
             cur.update({"added": added, "removed": removed, "changed_at": now})
             logger.info("[certmon] host list source %s: +%d -%d (%s)", src["id"], len(added),
@@ -274,17 +218,25 @@ def sources_due(data, now=None):
 
 
 def builtin_hosts(state_dir=None):
-    """The seed list with each read source's hosts swapped in for the seed's."""
+    """The catalog's baseline list with each read source's hosts swapped in for
+    the baseline's. Hosts a source stopped listing, and catalog hosts carrying
+    a ``deprecated`` date, are kept flagged ``deprecated`` for 30 days."""
     data = load_sources(state_dir)
     live = [s for s in SOURCES if (data.get(s["id"]) or {}).get("hosts")]
     hosts = [dict(h) for h in BUILTIN_HOSTS if not any(_owned(s, h) for s in live)]
     have = {cert_key(h) for h in hosts}
     for s in live:
-        for h in data[s["id"]]["hosts"]:
+        for h in data[s["id"]]["hosts"] + list((data[s["id"]].get("deprecated") or {}).values()):
             if cert_key(h) not in have:
                 have.add(cert_key(h))
                 hosts.append(dict(h))
-    return hosts
+    out = []
+    for h in hosts:
+        since = _deprecated_since(h)
+        if since and _past_keep_window(since):
+            continue
+        out.append(h)
+    return out
 
 
 # ── config ──────────────────────────────────────────────────────────────────
@@ -328,15 +280,25 @@ def normalize_config(cfg):
     disabled = sorted({str(h).strip().lower()
                        for h in (cfg.get("disabled_builtin") or [])
                        if str(h).strip().lower() in builtin_names})
+    deprecated = []
+    for entry in cfg.get("deprecated_hosts") or []:
+        p = parse_host_entry(entry)
+        if p:
+            deprecated.append(f"{p[0]}:{p[1]}")
     return {"enabled": bool(cfg.get("enabled")),
             "custom_hosts": custom[:MAX_CUSTOM_HOSTS],
-            "disabled_builtin": disabled}
+            "disabled_builtin": disabled,
+            "deprecated_hosts": sorted(set(deprecated))}
 
 
 def effective_hosts(cfg):
     cfg = normalize_config(cfg)
     disabled = set(cfg["disabled_builtin"])
     hosts = [h for h in builtin_hosts() if h["host"] not in disabled]
+    manual = set(cfg["deprecated_hosts"])
+    for h in hosts:
+        if cert_key(h) in manual and not h.get("deprecated"):
+            h["deprecated"] = "manual"
     have = {(h["host"], h["port"]) for h in hosts}
     for entry in cfg["custom_hosts"]:
         host, port = parse_host_entry(entry)
@@ -344,7 +306,8 @@ def effective_hosts(cfg):
             continue
         have.add((host, port))
         hosts.append({"host": host, "port": port, "service": "Custom",
-                      "region": "", "role": "Custom"})
+                      "region": "", "role": "Custom",
+                      **({"deprecated": "manual"} if f"{host}:{port}" in manual else {})})
     return hosts
 
 
@@ -461,6 +424,9 @@ def _handshake(host, port, verify, timeout):
 def probe_host(entry, timeout=PROBE_TIMEOUT_S, now=None):
     host, port = entry["host"], int(entry.get("port") or 443)
     out = {k: entry.get(k, "") for k in ("host", "service", "region", "role")}
+    if entry.get("deprecated"):
+        out["deprecated"] = True
+        out["deprecated_at"] = str(entry["deprecated"])
     out.update({"port": port, "checked_at": _dt.datetime.now(
         _dt.timezone.utc).isoformat(timespec="seconds"),
         "trusted": False, "verify_error": "", "error": "", "tls_version": ""})
@@ -558,7 +524,7 @@ def apply_ignored(results, ignored):
 
 
 def active_results(results):
-    return [r for r in results or [] if not r.get("ignored")]
+    return [r for r in results or [] if not r.get("ignored") and not r.get("deprecated")]
 
 
 def count_statuses(results):
@@ -568,6 +534,9 @@ def count_statuses(results):
     for r in results or []:
         if r.get("ignored"):
             counts["ignored"] += 1
+            continue
+        if r.get("deprecated"):
+            counts["deprecated"] = counts.get("deprecated", 0) + 1
             continue
         s = r.get("status", "unknown")
         counts[s] = counts.get(s, 0) + 1
