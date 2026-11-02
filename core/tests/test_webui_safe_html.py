@@ -5,7 +5,6 @@ markup"). OS Updates is the first view written with it; a hostile CVE record
 must render as text, never as markup.
 """
 import json
-import re
 import shutil
 import subprocess
 
@@ -79,10 +78,3 @@ def test_os_updates_cve_panel_escapes_hostile_data():
     assert "1 of 2 checked node(s) affected" in out
     assert "update pending" in out
 
-
-def test_escape_html_calls_only_go_down():
-    """New markup uses safeHtml; this count may only shrink (lower it when a
-    view is converted)."""
-    count = sum(len(re.findall(r"\bescapeHtml\(", p.read_text(encoding="utf-8")))
-                for p in WEBUI.rglob("*.js") if "assets" not in p.parts)
-    assert count <= 1118

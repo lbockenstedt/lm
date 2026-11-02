@@ -37,3 +37,36 @@ def test_refresh_keeps_dom_nodes_and_open_details():
         }""")
         browser.close()
     assert out == {"sameInput": True, "open": True, "summary": "2 item(s)", "p": "&lt;b&gt;x&lt;/b&gt;"}
+
+
+def test_delegate_dispatches_data_actions():
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        page.set_content("""<div id="root">
+            <button data-action="press" data-id="7"><b>Go</b></button>
+            <label><input type="checkbox" data-action="tick" data-id="8"> tick</label>
+            <form data-submit="search"><input id="q" data-input="typed"></form>
+        </div><button id="outside" data-action="press" data-id="9">x</button>""")
+        page.add_script_tag(content=(WEBUI / "js/core/view.js").read_text(encoding="utf-8"))
+        page.evaluate("""() => {
+            window.calls = [];
+            const actions = {
+                press: el => calls.push('press ' + el.dataset.id),
+                tick: el => calls.push('tick ' + el.dataset.id + ' ' + el.checked),
+                typed: el => calls.push('typed ' + el.value),
+                search: () => calls.push('search'),
+            };
+            delegate(document.getElementById('root'), {});
+            delegate(document.getElementById('root'), actions);  // re-render swaps actions
+        }""")
+        page.click("text=Go")
+        page.click("text=tick")
+        page.fill("#q", "php")
+        page.press("#q", "Enter")
+        page.click("#outside")
+        calls = page.evaluate("calls")
+        url = page.url
+        browser.close()
+    assert calls == ["press 7", "tick 8 true", "typed php", "search"]
+    assert url == "about:blank"  # submit was prevented

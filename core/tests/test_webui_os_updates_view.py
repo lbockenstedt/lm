@@ -82,6 +82,13 @@ def test_os_updates_list_survives_polling(hub_url_and_session):  # noqa: F811
             assert page.locator("#osu-apply-selected").inner_text() == "Deploy selected (1)"
             assert not page.evaluate("window.__pwned")
 
+            # Declining the approval prompt leaves the node unapproved.
+            prompts = []
+            page.once("dialog", lambda d: (prompts.append(d.message), d.dismiss()))
+            page.get_by_label("Auto-patch").click()
+            assert prompts and prompts[0].startswith("Approve web-01 for auto-patching?")
+            assert not page.get_by_label("Auto-patch").is_checked()
+
             # A running roll polls every 5 s; the open list survives each poll.
             data["run"] = {"status": "running", "done": 0, "total": 1, "current": "web-01", "items": []}
             page.evaluate("osuLoad()")

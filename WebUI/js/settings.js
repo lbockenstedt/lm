@@ -632,6 +632,28 @@ function _onSaTenantFilterChange() {
 // hidden, so "up to date" is never confused with "not covered".
 let _osuPoll = null;
 
+// Every button and field on the page; wired by delegate() (js/core/view.js).
+const _osuActions = {
+    saveAutoCheck: () => osuSaveAutoCheck(),
+    setAutoPatchSecurity: el => osuSetAutoPatchSecurity(el.value === 'security'),
+    saveAutoPatchExclude: () => osuSaveAutoPatchExclude(),
+    saveWindow: () => osuSaveWindow(),
+    saveSnapshot: () => osuSaveSnapshot(),
+    check: () => osuCheck(),
+    applySelected: () => osuApplySelected(),
+    apply: () => osuApply(),
+    cancel: () => osuCancel(),
+    cveSearch: () => osuCveSearch(),
+    cvePicked: el => osuCvePicked(el.value),
+    cveSelectFixes: () => osuCveSelectFixes(),
+    toggleNode: el => osuToggleNode(el.dataset.node, el.checked),
+    togglePkg: el => osuTogglePkg(el.dataset.node, el.dataset.pkg, el.checked),
+    reboot: el => osuReboot(el.dataset.node),
+    fixAccess: el => osuFixAccess(el.dataset.node),
+    toggleAutoPatch: el => osuToggleAutoPatch(el.dataset.node, el.checked, el),
+    toggleAutoReboot: el => osuToggleAutoReboot(el.dataset.node, el.checked, el),
+};
+
 function _renderOsUpdatesView(content) {
     // Fleet-wide settings are Global Admin only; a Tenant Admin sees just their nodes.
     const osuFleetCls = isAdmin() ? '' : 'hidden';
@@ -658,14 +680,14 @@ function _renderOsUpdatesView(content) {
                         <span class="text-xs text-slate-500">hour(s)</span>
                     </div>
                 </div>
-                <button onclick="osuSaveAutoCheck()" class="${btnSecCls}">Save</button>
+                <button data-action="saveAutoCheck" class="${btnSecCls}">Save</button>
                 <span id="osu-autocheck-status" class="text-xs text-slate-400"></span>
             </div>
             <div class="${osuFleetCls} flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
                 <span class="text-sm text-slate-600 self-center">Auto-patch (approved nodes only):</span>
                 <div class="space-y-1">
                     <label class="${labelCls}">Install</label>
-                    <select id="osu-autopatch-security" class="${inputCls} w-48" onchange="osuSetAutoPatchSecurity(this.value === 'security')">
+                    <select id="osu-autopatch-security" class="${inputCls} w-48" data-action="setAutoPatchSecurity">
                         <option value="security">Security updates only</option>
                         <option value="all">All updates</option>
                     </select>
@@ -674,7 +696,7 @@ function _renderOsUpdatesView(content) {
                     <label class="${labelCls}" title="Package names or globs, comma-separated. Auto-patch never installs these; manual deploys are unaffected.">Never auto-install</label>
                     <input type="text" id="osu-autopatch-exclude" class="${inputCls}" placeholder="e.g. linux-image-*, docker-ce, proxmox-*">
                 </div>
-                <button onclick="osuSaveAutoPatchExclude()" class="${btnSecCls}">Save</button>
+                <button data-action="saveAutoPatchExclude" class="${btnSecCls}">Save</button>
                 <span id="osu-autopatch-count" class="text-xs text-slate-400 self-center"></span>
             </div>
             <div class="${osuFleetCls} flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
@@ -691,7 +713,7 @@ function _renderOsUpdatesView(content) {
                     <label class="${labelCls}">Timezone</label>
                     <input type="text" id="osu-window-tz" class="${inputCls} w-48" placeholder="e.g. America/Chicago">
                 </div>
-                <button onclick="osuSaveWindow()" class="${btnSecCls}">Save</button>
+                <button data-action="saveWindow" class="${btnSecCls}">Save</button>
             </div>
             <div class="${osuFleetCls} flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
                 <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer self-center" title="Before patching a node that runs in a Proxmox VM, LM snapshots that VM (manual deploys and auto-patch). If the snapshot fails the node is not patched. Proxmox hosts themselves (bare metal) are patched without a snapshot."><input type="checkbox" id="osu-snap-enabled" class="w-4 h-4 text-green-600 rounded" checked>Snapshot VMs before patching</label>
@@ -699,29 +721,30 @@ function _renderOsUpdatesView(content) {
                     <label class="${labelCls}" title="Older pre-patch snapshots (lm-prepatch-*) beyond this count are deleted">Keep</label>
                     <input type="number" id="osu-snap-keep" min="1" max="20" step="1" value="2" class="${inputCls} w-20">
                 </div>
-                <button onclick="osuSaveSnapshot()" class="${btnSecCls}">Save</button>
+                <button data-action="saveSnapshot" class="${btnSecCls}">Save</button>
             </div>
             <div class="flex flex-wrap items-center gap-2">
-                <button onclick="osuCheck()" class="${btnSecCls}">↻ Check for updates</button>
-                <button id="osu-apply-selected" onclick="osuApplySelected()" class="${btnCls}" disabled>Deploy selected (0)</button>
-                <button id="osu-apply" onclick="osuApply()" class="${btnSecCls}">Approve &amp; deploy all</button>
+                <button data-action="check" class="${btnSecCls}">↻ Check for updates</button>
+                <button id="osu-apply-selected" data-action="applySelected" class="${btnCls}" disabled>Deploy selected (0)</button>
+                <button id="osu-apply" data-action="apply" class="${btnSecCls}">Approve &amp; deploy all</button>
                 <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer" title="Nodes without picked packages get only their pending security updates"><input type="checkbox" id="osu-security-only" class="w-4 h-4 rounded">Security updates only</label>
-                <button id="osu-cancel" onclick="osuCancel()" class="${btnSecCls} hidden">Cancel run</button>
+                <button id="osu-cancel" data-action="cancel" class="${btnSecCls} hidden">Cancel run</button>
                 <span id="osu-run" class="text-xs text-slate-500"></span>
             </div>
             <div class="border border-slate-200 rounded-md px-3 py-2 bg-slate-50 space-y-2">
-                <div class="flex flex-wrap items-end gap-3">
+                <form data-submit="cveSearch" class="flex flex-wrap items-end gap-3">
                     <div class="space-y-1 flex-1 min-w-[16rem]">
                         <label class="${labelCls}" title="Matches each node's installed packages (reported at the last check) against Debian's security tracker">Who is affected? — CVE id or package</label>
-                        <input type="text" id="osu-cve-q" list="osu-cve-list" autocomplete="off" class="${inputCls}" placeholder="e.g. CVE-2026-1234 or php" onkeydown="if (event.key === 'Enter') osuCveSearch()" oninput="osuCvePicked(this.value)">
+                        <input type="text" id="osu-cve-q" list="osu-cve-list" autocomplete="off" class="${inputCls}" placeholder="e.g. CVE-2026-1234 or php" data-input="cvePicked">
                         <datalist id="osu-cve-list"></datalist>
                     </div>
-                    <button onclick="osuCveSearch()" class="${btnSecCls}">Look up</button>
-                </div>
+                    <button type="submit" class="${btnSecCls}">Look up</button>
+                </form>
                 <div id="osu-cve-body"></div>
             </div>
             <div id="osu-body"><p class="text-xs text-slate-400 italic">Loading…</p></div>
         </div>`;
+    delegate(content, _osuActions);
     osuLoad();
     osuLoadAutoCheck();
     osuLoadAutoPatch();
@@ -752,10 +775,10 @@ setTimeout(osuRefreshRebootTray, 5000);
 setInterval(osuRefreshRebootTray, 60000);
 
 // Picking a suggestion looks it up straight away.
-window.osuCvePicked = function (value) {
+function osuCvePicked(value) {
     const opts = document.getElementById('osu-cve-list')?.options || [];
     if (Array.from(opts).some(o => o.value === value)) osuCveSearch();
-};
+}
 
 // Suggestions for the who-is-affected box: only the CVEs that affect at least
 // one node, shown with their description so the right id is easy to pick.
@@ -787,7 +810,7 @@ function osuShowSnapshot(snap) {
     document.getElementById('osu-snap-keep').value = snap.keep;
 }
 
-window.osuSaveSnapshot = async function () {
+async function osuSaveSnapshot() {
     const snapshot = {
         enabled: document.getElementById('osu-snap-enabled').checked,
         keep: parseInt(document.getElementById('osu-snap-keep').value, 10),
@@ -799,7 +822,7 @@ window.osuSaveSnapshot = async function () {
             ? `VMs are snapshotted before patching (keeping ${cfg.snapshot.keep}).`
             : 'Pre-patch snapshots turned off.', 'success');
     } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
-};
+}
 
 function osuShowWindow(w) {
     if (!w) return;
@@ -808,7 +831,7 @@ function osuShowWindow(w) {
     document.getElementById('osu-window-tz').value = w.tz;
 }
 
-window.osuSaveWindow = async function () {
+async function osuSaveWindow() {
     const window_ = {
         start: document.getElementById('osu-window-start').value,
         end: document.getElementById('osu-window-end').value,
@@ -824,9 +847,9 @@ window.osuSaveWindow = async function () {
             ? `Auto-patch may run at any time (${w.tz}).`
             : `Auto-patch runs between ${w.start} and ${w.end} (${w.tz}).`, 'success');
     } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
-};
+}
 
-window.osuSaveAutoPatchExclude = async function () {
+async function osuSaveAutoPatchExclude() {
     const exclude = document.getElementById('osu-autopatch-exclude').value
         .split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
     try {
@@ -836,16 +859,16 @@ window.osuSaveAutoPatchExclude = async function () {
             ? `Auto-patch will never install: ${cfg.exclude.join(', ')}.`
             : 'Auto-patch exclusions cleared.', 'success');
     } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
-};
+}
 
-window.osuSetAutoPatchSecurity = async function (on) {
+async function osuSetAutoPatchSecurity(on) {
     try {
         await apiJson('/api/os-updates/auto-patch', { method: 'POST', body: JSON.stringify({ security_only: on }) });
         showToast(on ? 'Auto-patch: security updates only.' : 'Auto-patch: all updates.', 'success');
     } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
-};
+}
 
-window.osuToggleAutoPatch = async function (key, on, el) {
+async function osuToggleAutoPatch(key, on, el) {
     const n = _osuNode(key);
     const label = n ? n.label : key;
     const hubNote = n && n.kind === 'hub' ? '\n\nThis is the HUB — patching it restarts LM services, and Auto-reboot reboots it last.' : '';
@@ -858,9 +881,9 @@ window.osuToggleAutoPatch = async function (key, on, el) {
         showToast(`${label}: auto-patch ${on ? 'approved' : 'off'}.`, 'success');
         osuLoad();
     } catch (e) { if (el) el.checked = !on; showToast('Save failed: ' + (e.message || e), 'error'); }
-};
+}
 
-window.osuToggleAutoReboot = async function (key, on, el) {
+async function osuToggleAutoReboot(key, on, el) {
     const n = _osuNode(key);
     const label = n ? n.label : key;
     try {
@@ -868,27 +891,28 @@ window.osuToggleAutoReboot = async function (key, on, el) {
         showToast(`${label}: auto-reboot ${on ? 'on' : 'off'}.`, 'success');
         osuLoad();
     } catch (e) { if (el) el.checked = !on; showToast('Save failed: ' + (e.message || e), 'error'); }
-};
+}
 
 // One-time login for a node blocked by missing privileges. The password goes
 // to that node once to install its update helper; LM never stores it.
-window.osuFixAccess = function (key) {
+function osuFixAccess(key) {
     const n = _osuNode(key);
     if (!n) return;
     const inp = 'w-full px-3 py-2 border border-slate-200 rounded-md text-sm';
-    openModal('osu-fix-modal', safeHtml`
+    const modal = openModal('osu-fix-modal', safeHtml`
       <h3 class="text-lg font-bold text-[#263040]">Fix update access — ${n.label}</h3>
       <p class="text-sm text-slate-500">Enter the root password (or a user that can sudo) for this node, one time. It is used once to install LM's update helper and is <b>never stored</b>.</p>
       <input id="osu-fix-user" type="text" value="root" autocomplete="off" placeholder="username" class="${inp}">
       <input id="osu-fix-pw" type="password" autocomplete="off" placeholder="password" class="${inp}">
       <div class="flex justify-end gap-2 pt-2">
-        <button onclick="document.getElementById('osu-fix-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-        <button id="osu-fix-go" onclick="osuDoFixAccess(${JSON.stringify(key)})" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Fix access</button>
+        <button data-action="close" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button id="osu-fix-go" data-action="fix" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Fix access</button>
       </div>`, { backdropClose: true });
+    delegate(modal, { close: () => modal.remove(), fix: () => osuDoFixAccess(key) });
     document.getElementById('osu-fix-pw')?.focus();
-};
+}
 
-window.osuDoFixAccess = async function (key) {
+async function osuDoFixAccess(key) {
     const pwEl = document.getElementById('osu-fix-pw');
     const username = (document.getElementById('osu-fix-user')?.value || 'root').trim();
     const password = pwEl?.value || '';
@@ -905,7 +929,7 @@ window.osuDoFixAccess = async function (key) {
         if (btn) { btn.disabled = false; btn.textContent = 'Fix access'; }
         showToast('Fix failed: ' + (e.message || e), 'error');
     }
-};
+}
 
 async function osuLoadAutoCheck() {
     try {
@@ -917,7 +941,7 @@ async function osuLoadAutoCheck() {
     } catch (e) { /* best-effort — the manual Check button still works */ }
 }
 
-window.osuSaveAutoCheck = async function () {
+async function osuSaveAutoCheck() {
     const enabled = !!document.getElementById('osu-autocheck-enabled')?.checked;
     const hours = Math.max(1, parseInt(document.getElementById('osu-autocheck-hours')?.value, 10) || 6);
     const st = document.getElementById('osu-autocheck-status');
@@ -929,20 +953,20 @@ window.osuSaveAutoCheck = async function () {
         showToast(cfg.enabled ? `Auto-check enabled — every ${cfg.interval_hours}h.` : 'Auto-check disabled.', 'success');
         if (st) { st.textContent = 'saved'; setTimeout(() => { if (st) st.textContent = ''; }, 2000); }
     } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
-};
+}
 
 async function osuLoad() {
     try { _osuRender(await apiJson('/api/os-updates')); }
     catch (e) { const b = document.getElementById('osu-body'); if (b) b.innerHTML = safeHtml`<p class="text-xs text-red-500">${e.message || e}</p>`; }
 }
 
-window.osuCheck = async function () {
+async function osuCheck() {
     const st = document.getElementById('osu-status');
     if (st) st.textContent = 'checking every node…';
     try { _osuRender(await apiJson('/api/os-updates/check', { method: 'POST', body: JSON.stringify({ refresh: true }) })); showToast('Update check complete.', 'success'); }
     catch (e) { showToast('Check failed: ' + (e.message || e), 'error'); }
     finally { if (st) st.textContent = ''; }
-};
+}
 
 // Selection survives the 5s progress re-render: node keys picked whole, and
 // per-node package picks (a node with package picks applies only those). A
@@ -964,22 +988,22 @@ function _osuSelectedKeys() { return [...new Set([..._osuSel.nodes, ...Object.ke
 
 function _osuBusy() { const r = _osuView.state.data.run; return !!(r && r.status === 'running'); }
 
-window.osuToggleNode = function (key, on) {
+function osuToggleNode(key, on) {
     _osuSel.nodes[on ? 'add' : 'delete'](key);
     delete _osuSel.pkgs[key];
     _osuRender(_osuView.state.data);
-};
+}
 
-window.osuTogglePkg = function (key, pkg, on) {
+function osuTogglePkg(key, pkg, on) {
     const set = _osuSel.pkgs[key] || (_osuSel.pkgs[key] = new Set());
     if (on) { set.add(pkg); _osuSel.nodes.delete(key); } else set.delete(pkg);
     if (!set.size) delete _osuSel.pkgs[key];
     _osuRender(_osuView.state.data);
-};
+}
 
 // CVE lookup: which nodes run a package vulnerable to a CVE (or, for a package
 // name, that package's open CVEs). Served from the last check's inventory.
-window.osuCveSearch = async function () {
+async function osuCveSearch() {
     const q = (document.getElementById('osu-cve-q')?.value || '').trim();
     if (!q) return;
     _osuCveView.setState({ loading: true, error: '' });
@@ -988,7 +1012,7 @@ window.osuCveSearch = async function () {
     } catch (e) {
         _osuCveView.setState({ loading: false, data: null, error: e.message || String(e) });
     }
-};
+}
 
 // Pending upgrades on each affected node that belong to the vulnerable packages.
 function _osuCveFixes(d) {
@@ -1002,7 +1026,7 @@ function _osuCveFixes(d) {
     return picks;
 }
 
-window.osuCveSelectFixes = function () {
+function osuCveSelectFixes() {
     const picks = _osuCveFixes(_osuCveView.state.data || {});
     picks.forEach(([key, pkg]) => {
         (_osuSel.pkgs[key] || (_osuSel.pkgs[key] = new Set())).add(pkg);
@@ -1010,7 +1034,7 @@ window.osuCveSelectFixes = function () {
     });
     _osuRender(_osuView.state.data);
     showToast(`${picks.length} package update(s) selected — review, then "Deploy selected".`, 'success');
-};
+}
 
 function _osuCveHtml(d) {
     const note = (cls, text) => safeHtml`<p class="text-xs ${cls}">${text}</p>`;
@@ -1025,7 +1049,7 @@ function _osuCveHtml(d) {
         const fixes = _osuCveFixes(d).length;
         parts.push(safeHtml`<div class="flex flex-wrap items-center gap-2 text-xs">
             <b class="${d.affected_nodes ? 'text-red-700' : 'text-emerald-700'}">${d.affected_nodes} of ${d.checked_nodes} checked node(s) affected</b>
-            ${fixes ? safeHtml`<button onclick="osuCveSelectFixes()" class="text-[10px] font-bold text-emerald-800 border border-emerald-300 rounded px-2 py-0.5 hover:bg-emerald-50" title="Pick the pending updates of the vulnerable packages on affected nodes">Select fixes (${fixes})</button>` : ''}
+            ${fixes ? safeHtml`<button data-action="cveSelectFixes" class="text-[10px] font-bold text-emerald-800 border border-emerald-300 rounded px-2 py-0.5 hover:bg-emerald-50" title="Pick the pending updates of the vulnerable packages on affected nodes">Select fixes (${fixes})</button>` : ''}
             ${d.truncated ? safeHtml`<span class="text-slate-400">showing the first 200 CVEs — narrow the search</span>` : ''}</div>`);
         parts.push(d.results.map(r => {
             const flags = [r.urgency ? `${r.urgency} urgency` : '', r.remote ? 'remote' : ''].filter(Boolean).join(' · ');
@@ -1077,13 +1101,13 @@ async function _osuDeploy(body, summary) {
     } catch (e) { showToast('Apply failed: ' + (e.message || e), 'error'); }
 }
 
-window.osuApply = async function () {
+async function osuApply() {
     const n = (_osuView.state.data.totals || {}).with_updates || 0;
     if (!n) { showToast('No nodes have pending updates.', 'info'); return; }
     _osuDeploy({}, `All ${n} node(s) with pending updates.`);
-};
+}
 
-window.osuApplySelected = async function () {
+async function osuApplySelected() {
     const keys = _osuSelectedKeys();
     if (!keys.length) { showToast('Select at least one node or package.', 'info'); return; }
     const labels = Object.fromEntries((_osuView.state.data.nodes || []).map(n => [`${n.kind}:${n.id}`, n.label]));
@@ -1095,15 +1119,15 @@ window.osuApplySelected = async function () {
     });
     const nodes = keys.filter(k => !packages[k]);
     _osuDeploy({ nodes, packages }, lines.join('\n'));
-};
+}
 
-window.osuCancel = async function () {
+async function osuCancel() {
     if (!confirm('Cancel the update run?\n\nThe node currently updating will finish (apt cannot be safely interrupted); queued nodes are skipped.')) return;
     try { const r = await apiJson('/api/os-updates/cancel', { method: 'POST', body: '{}' }); showToast(r.message || 'Cancelling…', 'success'); }
     catch (e) { showToast('Cancel failed: ' + (e.message || e), 'error'); }
-};
+}
 
-window.osuReboot = async function (key) {
+async function osuReboot(key) {
     const n = _osuNode(key);
     if (!n) return;
     const warn = n.kind === 'hub' ? '\n\nThis is the HUB — the WebUI and every spoke connection drop until it is back.'
@@ -1114,7 +1138,7 @@ window.osuReboot = async function (key) {
         showToast(`${n.label}: ${r.message || 'reboot scheduled'}`, 'success');
         osuLoad();
     } catch (e) { showToast('Reboot failed: ' + (e.message || e), 'error'); }
-};
+}
 
 function _osuStartPoll() {
     if (_osuPoll) clearInterval(_osuPoll);
@@ -1187,7 +1211,6 @@ function _osuBodyHtml({ data: d }) {
       </div>`;
     const rows = (d.nodes || []).map(n => {
         const key = `${n.kind}:${n.id}`;
-        const jsKey = JSON.stringify(key);
         const feats = n.features || [];
         const item = run && (run.items || []).find(i => i.key === key);
         let state;
@@ -1207,10 +1230,10 @@ function _osuBodyHtml({ data: d }) {
         const reboot = scheduled ? _osuBadge('reboot scheduled', 'blue')
             : (n.reboot_required ? _osuBadge('reboot required', 'amber', 'A kernel/PVE update needs a reboot. Nothing reboots automatically — do it deliberately.') : '');
         const canReboot = n.eligible && n.reboot_required && !scheduled && feats.includes('reboot') && !busy;
-        const rebootBtn = canReboot ? safeHtml`<button onclick="osuReboot(${jsKey})" class="text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Reboot…</button>` : '';
+        const rebootBtn = canReboot ? safeHtml`<button data-action="reboot" data-node="${key}" class="text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Reboot…</button>` : '';
         const selectable = n.eligible && n.count && !n.apply_blocker && !busy;
         const nodeBox = selectable
-            ? safeHtml`<input type="checkbox" class="w-4 h-4 rounded" ${_osuSel.nodes.has(key) ? 'checked' : ''} onchange="osuToggleNode(${jsKey}, this.checked)" title="Upgrade everything pending on this node">`
+            ? safeHtml`<input type="checkbox" class="w-4 h-4 rounded" ${_osuSel.nodes.has(key) ? 'checked' : ''} data-action="toggleNode" data-node="${key}" title="Upgrade everything pending on this node">`
             : '';
         const canPick = selectable && feats.includes('packages');
         const picked = _osuSel.pkgs[key] || new Set();
@@ -1218,7 +1241,7 @@ function _osuBodyHtml({ data: d }) {
             const label = safeHtml`${p.package} <span class="text-slate-400">${p.current}→${p.candidate}</span>`;
             const cls = p.security ? 'text-red-700' : 'text-slate-500';
             if (!canPick) return safeHtml`<span class="inline-block mr-2 ${cls}">${label}</span>`;
-            return safeHtml`<label class="inline-flex items-center gap-1 mr-3 ${cls} cursor-pointer"><input type="checkbox" class="w-3 h-3" ${picked.has(p.package) ? 'checked' : ''} onchange="osuTogglePkg(${jsKey}, ${JSON.stringify(p.package)}, this.checked)">${label}</label>`;
+            return safeHtml`<label class="inline-flex items-center gap-1 mr-3 ${cls} cursor-pointer"><input type="checkbox" class="w-3 h-3" ${picked.has(p.package) ? 'checked' : ''} data-action="togglePkg" data-node="${key}" data-pkg="${p.package}">${label}</label>`;
         });
         const pickNote = selectable && !feats.includes('packages')
             ? safeHtml`<div class="text-[10px] text-slate-400 mt-1">Update LM on this node to pick individual packages — it can only be updated whole.</div>` : '';
@@ -1227,11 +1250,11 @@ function _osuBodyHtml({ data: d }) {
             ? safeHtml`<div class="text-[11px] text-slate-500 mt-1">${n.reason}</div>`
             : (n.count ? safeHtml`<details class="mt-1"><summary class="cursor-pointer text-[11px] text-slate-400">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-[11px] mt-1 leading-relaxed">${pickHint}${pkgs}</div></details>${pickNote}` : '');
         const fixBtn = n.apply_blocker && feats.includes('fix_access') && !busy
-            ? safeHtml` <button onclick="osuFixAccess(${jsKey})" class="ml-1 text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
+            ? safeHtml` <button data-action="fixAccess" data-node="${key}" class="ml-1 text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
         const autoBox = n.eligible
-            ? safeHtml`<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_patch ? 'text-emerald-700' : 'text-slate-400'} cursor-pointer" title="Install this node's updates automatically in the maintenance window"><input type="checkbox" class="w-3 h-3" ${n.auto_patch ? 'checked' : ''} onchange="osuToggleAutoPatch(${jsKey}, this.checked, this)">Auto-patch</label>` : '';
+            ? safeHtml`<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_patch ? 'text-emerald-700' : 'text-slate-400'} cursor-pointer" title="Install this node's updates automatically in the maintenance window"><input type="checkbox" class="w-3 h-3" ${n.auto_patch ? 'checked' : ''} data-action="toggleAutoPatch" data-node="${key}">Auto-patch</label>` : '';
         const rebootBox = n.eligible && n.auto_patch
-            ? safeHtml`<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_reboot ? 'text-emerald-700' : 'text-slate-400'} cursor-pointer" title="Reboot this node after auto-patch installs something"><input type="checkbox" class="w-3 h-3" ${n.auto_reboot ? 'checked' : ''} onchange="osuToggleAutoReboot(${jsKey}, this.checked, this)">Auto-reboot</label>` : '';
+            ? safeHtml`<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_reboot ? 'text-emerald-700' : 'text-slate-400'} cursor-pointer" title="Reboot this node after auto-patch installs something"><input type="checkbox" class="w-3 h-3" ${n.auto_reboot ? 'checked' : ''} data-action="toggleAutoReboot" data-node="${key}">Auto-reboot</label>` : '';
         const blocker = n.apply_blocker ? safeHtml`<div class="text-[11px] text-amber-700 mt-1">Can't apply: ${n.apply_blocker}${fixBtn}</div>` : '';
         const msg = [];
         if (item && item.message) msg.push(safeHtml`<div class="text-[11px] ${item.status === 'done' ? 'text-slate-500' : 'text-red-600'} mt-1">${item.message}</div>`);

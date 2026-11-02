@@ -107,12 +107,17 @@ Phase 6 htm is bound to `phtml`, so no name clash.
   open state), test_webui_os_updates_view.py (real page, mocked API: picks,
   CVE "Select fixes", hostile CVE text, open list survives the 5 s poll).
 
-## Phase 4 - Event delegation (item 4)
-- createView gets `actions: { name(ev, el) {...} }`; one listener on the view
-  root dispatches `data-action="name"` (+ data-* args).
+## Phase 4 - Event delegation (item 4) [done]
+- `delegate(root, actions)` in js/core/view.js (separate from createView, so a
+  page wires once at its root and its views stay plain): data-action (click,
+  or change on form fields), data-input, data-submit (<form>, prevents the
+  navigation); calls actions[name](el, event), args in data-*.
 - Per migrated view: onclick="foo(1)" -> data-action="foo" data-id="1";
-  remove the matching window.foo global. Track count of onclick= / window.* in a
-  test that may only go down.
+  remove the matching window.foo global.
+- Done: OS Updates (21 handlers, 19 window.osu* globals gone; one _osuActions
+  table; the Fix-access modal delegates on its own element).
+- core/tests/test_webui_ratchets.py: escapeHtml(, on*= handlers and
+  window.X = counts may only go down.
 
 ## Phase 5 - ES modules (item 6, part B)
 - Then drop 'unsafe-inline' from script-src in the CSP (core/src/api.py)

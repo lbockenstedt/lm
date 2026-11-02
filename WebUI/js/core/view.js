@@ -38,4 +38,33 @@ function createView({ el, state = {}, render }) {
     return view;
 }
 
-if (typeof module !== 'undefined') module.exports = { createView, morphHtml };
+// delegate: one set of listeners on a page root instead of inline on*=
+// handlers and window.* globals. Markup names the action; data-* carry args:
+//   <button data-action="reboot" data-node="${key}">       click
+//   <input type="checkbox" data-action="toggleNode" ...>    change (form fields)
+//   <input data-input="picked">                             every keystroke
+//   <form data-submit="search">                             submit (Enter)
+// Each action is called as actions[name](el, event). Calling delegate again on
+// the same root just swaps the actions (a page re-render keeps one listener).
+const _FORM_FIELDS = new Set(['INPUT', 'SELECT', 'TEXTAREA']);
+
+function delegate(root, actions) {
+    const bound = !!root._lmActions;
+    root._lmActions = actions;
+    if (bound) return;
+    const on = (type, attr, accept) => root.addEventListener(type, ev => {
+        const el = ev.target.closest(`[${attr}]`);
+        if (!el || !root.contains(el) || !accept(el)) return;
+        const name = el.getAttribute(attr);
+        const fn = root._lmActions[name];
+        if (!fn) { console.error(`delegate: no action "${name}"`); return; }
+        if (type === 'submit') ev.preventDefault();
+        fn(el, ev);
+    });
+    on('click', 'data-action', el => !_FORM_FIELDS.has(el.tagName));
+    on('change', 'data-action', el => _FORM_FIELDS.has(el.tagName));
+    on('input', 'data-input', () => true);
+    on('submit', 'data-submit', () => true);
+}
+
+if (typeof module !== 'undefined') module.exports = { createView, morphHtml, delegate };
