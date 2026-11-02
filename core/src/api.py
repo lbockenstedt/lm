@@ -1180,7 +1180,7 @@ def create_app(hub):
         # /auth/token/refresh (uses the refresh token itself) authenticate
         # internally, so the middleware lets them through. /auth/tokens (list)
         # and /auth/token/revoke stay session-gated (not listed here).
-        _PUBLIC = {"/auth/login", "/auth/me", "/auth/setup", "/status",
+        _PUBLIC = {"/auth/login", "/auth/login/key", "/auth/me", "/auth/setup", "/status",
                    "/auth/token", "/auth/token/refresh",
                    "/auth/oidc/login", "/auth/oidc/callback", "/auth/oidc/enabled",
                    "/sim/api/init", "/sim/api/health"}
