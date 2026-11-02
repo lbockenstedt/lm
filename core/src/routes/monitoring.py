@@ -170,6 +170,31 @@ def monitoring_server_address(hub):
     return str(gc.get("monitoring_server") or "").strip()
 
 
+def scope_monitoring_hosts(hosts, tenant, sess, is_admin):
+    """Hosts the session may see. Non-admins are bound to their own tenants;
+    ``tenant`` (the picker) can only narrow that set further."""
+    allowed = None if is_admin else set((sess or {}).get("user", {}).get("tenants") or [])
+    want = tenant if tenant and tenant != "default" else None
+    out = []
+    for h in hosts:
+        t = h.get("tenant") or "default"
+        if allowed is not None and t not in allowed:
+            continue
+        if want and t != want:
+            continue
+        out.append(h)
+    return out
+
+
+def monitoring_problem_list(hosts):
+    """Flat, severity-then-newest ordered list of every open problem."""
+    rows = [{"host": h.get("name"), "tenant": h.get("tenant"), "ip": h.get("ip"),
+             "name": p.get("name"), "severity": p.get("severity", 0), "clock": p.get("clock", 0)}
+            for h in hosts for p in (h.get("problems") or [])]
+    rows.sort(key=lambda r: (-int(r["severity"] or 0), -int(r["clock"] or 0)))
+    return rows
+
+
 def register(app, hub, ctx):
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
@@ -195,8 +220,24 @@ def register(app, hub, ctx):
         return await _relay(_admin_spoke(request), "MON_STATUS")
 
     @app.get("/api/monitoring/hosts")
-    async def monitoring_hosts(request: Request):
-        return await _relay(_admin_spoke(request), "MON_HOSTS")
+    async def monitoring_hosts(request: Request, tenant: str = None):
+        """Monitored hosts + open problems, tenant-scoped like the other pages:
+        a Global Admin sees every tenant (optionally narrowed with ``?tenant=``);
+        anyone else only the tenants on their own session (deny by default)."""
+        import access
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        sid = hub.get_spoke_by_type("monitoring")
+        if not sid:
+            raise HTTPException(status_code=503, detail="Monitoring spoke not connected")
+        res = await _relay(sid, "MON_HOSTS")
+        if _is_admin(sess) and not tenant:
+            return res
+        data = access.unwrap_spoke(res)
+        hosts = (data or {}).get("hosts") if isinstance(data, dict) else None
+        out = scope_monitoring_hosts(hosts or [], tenant, sess, _is_admin(sess))
+        return {"status": "ok", "hosts": out, "problems": monitoring_problem_list(out)}
 
     @app.get("/api/monitoring/config")
     async def monitoring_config_get(request: Request):
