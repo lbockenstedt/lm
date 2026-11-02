@@ -361,6 +361,8 @@ const CRUD_ROUTES = {
     doLogin:                { m: 'GET',  p: '/auth/login/key',                               api: 'login_key',
                               m2: 'POST', p2: '/auth/login',                                 api2: 'local_login' },
     doLogout:               { m: 'POST', p: '/auth/logout',                                  api: 'auth_logout' },
+    startImpersonation:     { m: 'POST', p: '/auth/impersonate',                             api: 'impersonate_start' },
+    stopImpersonation:      { m: 'POST', p: '/auth/impersonate/stop',                        api: 'impersonate_stop' },
     doSetup:                { m: 'POST', p: '/auth/setup',                                   api: 'first_run_setup',
                               m2: 'GET', p2: '/auth/me',                                     api2: 'auth_me' },
     handleSearch:           { m: 'GET',  p: '/api/search?q={q}',                             api: 'cross_system_search' },
