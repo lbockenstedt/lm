@@ -34,7 +34,6 @@ Audience: Hub developers.
 
 from __future__ import annotations
 
-import re
 import datetime as _dt
 import asyncio
 import logging
@@ -44,7 +43,7 @@ try:
     from access import attribute_by_prefix  # sibling leaf (no main/api back-import)
 except Exception:  # pragma: no cover - access always importable in-app
     attribute_by_prefix = None  # type: ignore
-from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import norm_mac, unwrap_spoke  # sibling leaf (no main/api back-import)
 from sync_loop import run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
@@ -121,19 +120,6 @@ class RealtimeIpamNacSyncMixin:
 
     # ── pull / attribute / push ─────────────────────────────────────────────
 
-    @staticmethod
-    def _rt_norm_mac(m: Any) -> str:
-        """Canonical lower-colon MAC (``aa:bb:cc:dd:ee:ff``) for dedup. '' for an
-        absent/unknown MAC — the netbox sink tolerates a blank mac but the hub
-        drops MAC-less sessions before the push (nothing to match/create by)."""
-        s = str(m or "").strip().lower()
-        if not s or s == "unknown":
-            return ""
-        hexd = re.sub(r"[^0-9a-f]", "", s)
-        if len(hexd) == 12:
-            return ":".join(hexd[i:i + 2] for i in range(0, 12, 2))
-        return s
-
     async def _rt_pull_sessions(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Pull recent Access Tracker sessions from the CPPM spoke.
 
@@ -162,7 +148,7 @@ class RealtimeIpamNacSyncMixin:
             for row in rows or []:
                 if not isinstance(row, dict):
                     continue
-                mac = self._rt_norm_mac(row.get("mac"))
+                mac = norm_mac(row.get("mac"))
                 if not mac:
                     continue  # MAC-less → nothing to match/create by
                 ip = str(row.get("ip") or "").strip().split("/")[0].strip()

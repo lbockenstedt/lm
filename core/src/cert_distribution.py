@@ -47,7 +47,7 @@ logger = logging.getLogger("le.distribution")
 # other nw families (aos_switch/ex_switch/gateway) return a clear ERROR from
 # the spoke (external-key / SSH-SFTP plumbing not yet built). Both are fast
 # REST targets → 120s install tier (no pvenode wait).
-CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "proxy", "ipam", "simulation", "nac", "nw", "netbox-server", "ldap-server", "ab"}
+CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "proxy", "ipam", "simulation", "nac", "nw", "netbox-server", "ldap-server", "zabbix-server", "ab"}
 
 
 async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
@@ -810,7 +810,8 @@ def build_available_targets(spoke_module_types: Dict[str, str],
                             capable: Set[str],
                             agents: List[Dict[str, Any]],
                             netbox_server_agents=None,
-                            ldap_server_agents=None) -> List[Dict[str, Any]]:
+                            ldap_server_agents=None,
+                            zabbix_server_agents=None) -> List[Dict[str, Any]]:
     """Build the click-to-add list of cert distribution targets from live hub
     state — the ``GET /api/le/targets/available`` payload. One entry per
     cert-capable CONNECTED spoke (by ``module_type``), EXCEPT agent-hosting
@@ -930,6 +931,14 @@ def build_available_targets(spoke_module_types: Dict[str, str],
         nm = names.get(sid, sid) or sid
         targets.append({"module_type": "ldap-server", "identifier": sid,
                         "label": f"ldap-server — {nm}", "spoke_id": sid})
+    # Zabbix (Monitoring) web UI: a generic agent that ran the zabbix-server
+    # deploy role; the agent swaps the nginx cert in place.
+    for sid in (zabbix_server_agents or []):
+        if sid not in active_connections:
+            continue
+        nm = names.get(sid, sid) or sid
+        targets.append({"module_type": "zabbix-server", "identifier": sid,
+                        "label": f"Monitoring Server (Zabbix UI) — {nm}", "spoke_id": sid})
     return targets
 
 

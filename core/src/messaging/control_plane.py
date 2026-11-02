@@ -34,34 +34,10 @@ except ImportError:  # imported off a stale path (messaging.* top-level, no repo
                                        encryption_enabled, is_encrypted, wrap, unwrap)  # type: ignore
 from cryptography.exceptions import InvalidTag
 
-try:  # shared helper (lm/core/src); falls back if imported off a stale path
-    from logging_setup import set_log_level, truncate_log_files
-except ImportError:
-    def set_log_level(enabled):
-        level = logging.DEBUG if enabled else logging.INFO
-        logging.getLogger().setLevel(level)
-        for name in list(logging.root.manager.loggerDict):
-            logging.getLogger(name).setLevel(level)
-        return level
-
-    def truncate_log_files(log_dir="/var/log/lm"):
-        truncated = []
-        try:
-            names = os.listdir(log_dir)
-        except Exception:
-            return truncated
-        for name in names:
-            if not name.endswith(".log"):
-                continue
-            path = os.path.join(log_dir, name)
-            try:
-                if os.path.isfile(path):
-                    with open(path, "w"):
-                        pass
-                    truncated.append(name)
-            except Exception:  # noqa: BLE001 — per-file best-effort
-                pass
-        return truncated
+try:
+    from ..logging_setup import set_log_level, truncate_log_files
+except ImportError:  # imported as top-level messaging.* (core/src on sys.path)
+    from logging_setup import set_log_level, truncate_log_files  # type: ignore
 
 # Serializes .env upserts across every in-process spoke (base agent + each
 # hosted role's control plane all share one .env). Combined with the atomic

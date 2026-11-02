@@ -186,6 +186,23 @@ def _dns_rescope_client_queries(data, prefixes):
     return out
 
 
+def _private_service_addresses(report):
+    addresses = []
+    for raw in report.get("service_addresses") or []:
+        try:
+            address = ipaddress.ip_address(str(raw).strip())
+        except ValueError:
+            continue
+        if (address.version == 4 and address.is_private
+                and not address.is_loopback
+                and not address.is_link_local
+                and not address.is_unspecified
+                and not address.is_multicast
+                and not address.is_reserved):
+            addresses.append(str(address))
+    return addresses
+
+
 def register(app, hub, ctx):
     """Register net_services routes on the Hub app."""
     _filter_session = ctx._filter_session
@@ -765,22 +782,6 @@ def register(app, hub, ctx):
                 logger.warning("DNS worker discovery could not inspect %s: %s",
                                sid, exc)
                 return sid, {}
-
-        def _private_service_addresses(report):
-            addresses = []
-            for raw in report.get("service_addresses") or []:
-                try:
-                    address = ipaddress.ip_address(str(raw).strip())
-                except ValueError:
-                    continue
-                if (address.version == 4 and address.is_private
-                        and not address.is_loopback
-                        and not address.is_link_local
-                        and not address.is_unspecified
-                        and not address.is_multicast
-                        and not address.is_reserved):
-                    addresses.append(str(address))
-            return addresses
 
         discovered = []
         role_reports = await asyncio.gather(*[_roles(sid) for sid in candidates])
@@ -3159,7 +3160,8 @@ def register(app, hub, ctx):
             dict(hub.spoke_module_types), hub.active_connections,
             module_names, hub.CERT_CAPABLE_MODULES, agents,
             netbox_server_agents=set(getattr(hub, "netbox_server_agents", set())),
-            ldap_server_agents=set(getattr(hub, "ldap_server_agents", set())))
+            ldap_server_agents=set(getattr(hub, "ldap_server_agents", set())),
+            zabbix_server_agents=set(getattr(hub, "zabbix_server_agents", set())))
         sess = _session_user(request)
         if sess and not _is_admin(sess):
             mine = set(_lca.user_tenants(sess)) | {_lca.current_tenant(sess)}
@@ -3183,6 +3185,7 @@ def register(app, hub, ctx):
         module_names = hub.state.system_state.get("module_names", {}) or {}
         module_metadata = hub.state.system_state.get("module_metadata", {}) or {}
         nb_servers = set(getattr(hub, "netbox_server_agents", set()))
+        zbx_servers = set(getattr(hub, "zabbix_server_agents", set()))
 
         def _mt(sid):
             return (hub.spoke_module_types.get(hub._primary_key(sid))
@@ -3196,8 +3199,14 @@ def register(app, hub, ctx):
             connected = hub._primary_key(sid) in hub.active_connections
             label = module_names.get(sid, sid) or sid
             is_nb_server = hub._primary_key(sid) in nb_servers
-            eff_mt = "netbox-server" if (is_nb_server and mt not in capable) else mt
-            eff_capable = (mt in capable) or is_nb_server
+            is_zbx_server = hub._primary_key(sid) in zbx_servers
+            eff_mt = mt
+            if mt not in capable:
+                if is_nb_server:
+                    eff_mt = "netbox-server"
+                elif is_zbx_server:
+                    eff_mt = "zabbix-server"
+            eff_capable = (mt in capable) or is_nb_server or is_zbx_server
             entry = {"spoke_id": sid, "module_type": eff_mt or mt or "—",
                      "label": label, "connected": connected}
             if not connected:
@@ -3787,22 +3796,6 @@ def register(app, hub, ctx):
         if dhcp_spoke == shared_spoke:
             dhcp_tenant = access.shared_tenant_id() or dhcp_tenant
 
-        def _private_addresses(report):
-            addresses = []
-            for raw in report.get("service_addresses") or []:
-                try:
-                    address = ipaddress.ip_address(str(raw).strip())
-                except ValueError:
-                    continue
-                if (address.version == 4 and address.is_private
-                        and not address.is_loopback
-                        and not address.is_link_local
-                        and not address.is_unspecified
-                        and not address.is_multicast
-                        and not address.is_reserved):
-                    addresses.append(str(address))
-            return addresses
-
         def _upsert_instance(sid, member_id, host):
             global_config = hub.state.system_state.setdefault("global_config", {})
             instances = global_config.setdefault("dhcp_instances", [])
@@ -3860,7 +3853,7 @@ def register(app, hub, ctx):
             report for sid, report in reports
             if hub._primary_key(sid) == hub._primary_key(parent_id)
         ), {})
-        coordinator_addresses = _private_addresses(parent_report)
+        coordinator_addresses = _private_service_addresses(parent_report)
         coordinator_host = (
             coordinator_addresses[0] if coordinator_addresses else "")
 
@@ -3897,7 +3890,7 @@ def register(app, hub, ctx):
                 item for item in (report.get("configured_workers") or [])
                 if isinstance(item, dict) and item.get("role") == "dhcp-server"
             ), {})
-            addresses = _private_addresses(report)
+            addresses = _private_service_addresses(report)
             if not addresses:
                 raise HTTPException(
                     status_code=502,

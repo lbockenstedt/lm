@@ -108,48 +108,12 @@ from hub_bug_store import HubBugStoreMixin
 from hub_spoke_registry import SpokeRegistryMixin
 from hub_statuspage import StatusPageMixin
 
-# Shared logging config (lm/core/src/logging_setup.py). Two-tier import +
-# inline fallback keep the hub booting even if /opt/lm/core is briefly stale
-# (same deploy-order class as the base_spoke import). Single source of truth
-# for format/level/destination across every hub/spoke/agent entrypoint.
+# Shared logging config (lm/core/src/logging_setup.py): one source of truth for
+# format/level/destination across every hub/spoke/agent entrypoint.
 try:
-    from logging_setup import configure_logging, set_log_level, truncate_log_files
+    from logging_setup import configure_logging, truncate_log_files
 except ImportError:
-    try:
-        from core.src.logging_setup import configure_logging, set_log_level, truncate_log_files
-    except ImportError:
-        import logging as _logging
-        _FMT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        _DFMT = '%Y-%m-%d %H:%M:%S'
-        def configure_logging(default_level=_logging.INFO, *, log_file=None, **_):
-            handlers = ([_logging.FileHandler(log_file), _logging.StreamHandler()]
-                        if log_file else None)
-            _logging.basicConfig(level=default_level, force=True,
-                                 format=_FMT, datefmt=_DFMT, handlers=handlers)
-        def set_log_level(enabled):
-            lvl = _logging.DEBUG if enabled else _logging.INFO
-            _logging.getLogger().setLevel(lvl)
-            for _n in list(_logging.root.manager.loggerDict):
-                _logging.getLogger(_n).setLevel(lvl)
-            return lvl
-        def truncate_log_files(log_dir="/var/log/lm"):
-            truncated = []
-            try:
-                names = os.listdir(log_dir)
-            except Exception:
-                return truncated
-            for name in names:
-                if not name.endswith(".log"):
-                    continue
-                path = os.path.join(log_dir, name)
-                try:
-                    if os.path.isfile(path):
-                        with open(path, "w"):
-                            pass
-                        truncated.append(name)
-                except Exception:  # noqa: BLE001
-                    pass
-            return truncated
+    from core.src.logging_setup import configure_logging, truncate_log_files
 
 configure_logging()
 logger = logging.getLogger("Hub")
@@ -509,6 +473,7 @@ class _SpokeHello:
     # ldap-server advertises it so the hub can route that cert to it.
     netbox_server: bool
     ldap_server: bool
+    zabbix_server: bool
     # H4 app-layer encryption: the spoke advertised ``enc="v1"`` AND the hub
     # has encryption enabled (LM_APP_ENCRYPTION=0 makes a new spoke behave
     # as legacy — the hub doesn't encrypt to it).
@@ -528,11 +493,12 @@ class _SpokeHello:
         parent_spoke_id = (auth_data.get("parent_spoke_id") or "").strip()
         netbox_server = bool(auth_data.get("netbox_server"))
         ldap_server = bool(auth_data.get("ldap_server"))
+        zabbix_server = bool(auth_data.get("zabbix_server"))
         enc_capable = bool(auth_data.get("enc") == ENC_MARKER) and encryption_enabled()
         mtls_csr_capable = bool(auth_data.get("mtls_csr"))
         return cls(spoke_id, secret, module_type, onboarding_psk, tenant_id_hint,
                    install_uuid, hostname, parent_spoke_id, netbox_server,
-                   ldap_server, enc_capable, mtls_csr_capable)
+                   ldap_server, zabbix_server, enc_capable, mtls_csr_capable)
 
 
 @dataclass
@@ -680,6 +646,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # LE cert lands on the actual LDAP (ldaps) host. Mirrors
         # netbox_server_agents.
         self.ldap_server_agents: set = set()
+
+        # Generic-agent hosts running the "zabbix-server" deploy role (Zabbix web
+        # frontend on nginx, agent runs as root). Advertised in the auth frame
+        # ("zabbix_server": true); offers + resolves a "zabbix-server" LE cert
+        # target so the Monitoring web UI gets a real certificate.
+        self.zabbix_server_agents: set = set()
 
         # --- System Diagnostics ---
         self.logs = deque(maxlen=500)
@@ -6167,7 +6139,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Recorded on every connect, authenticated or not (zero-touch too), and
         cleared when a capability is no longer advertised:
 
-        * netbox_server / ldap_server — the agent runs that deploy role, so
+        * netbox_server / ldap_server / zabbix_server — the agent runs that deploy role, so
           the hub can route that service's cert to it.
         * H4 encryption — a non-capable or kill-switched spoke records False
           and its outbound frames stay plaintext.
@@ -6181,6 +6153,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             self.ldap_server_agents.add(pk)
         else:
             self.ldap_server_agents.discard(pk)
+        if hello.zabbix_server:
+            if pk not in self.zabbix_server_agents:
+                logger.info("[cert] %s advertises zabbix-server (Monitoring web UI) "
+                            "cert-target capability", pk)
+            self.zabbix_server_agents.add(pk)
+        else:
+            self.zabbix_server_agents.discard(pk)
         self.spoke_enc_capable[pk] = hello.enc_capable
         self.spoke_mtls_csr_capable[pk] = hello.mtls_csr_capable
 
@@ -7160,6 +7139,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self.spoke_parent_map.pop(pk, None)
         self.netbox_server_agents.discard(pk)
         self.ldap_server_agents.discard(pk)
+        self.zabbix_server_agents.discard(pk)
         self.spoke_authenticated.pop(pk, None)
         self.spoke_enc_capable.pop(pk, None)
         # Drop the per-connection "never authenticated" diagnosis state so a
