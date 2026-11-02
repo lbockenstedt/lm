@@ -174,7 +174,7 @@ def scope_monitoring_hosts(hosts, tenant, sess, is_admin):
     """Hosts the session may see. Non-admins are bound to their own tenants;
     ``tenant`` (the picker) can only narrow that set further."""
     allowed = None if is_admin else set((sess or {}).get("user", {}).get("tenants") or [])
-    want = tenant if tenant and tenant != "default" else None
+    want = tenant or None
     out = []
     for h in hosts:
         t = h.get("tenant") or "default"
