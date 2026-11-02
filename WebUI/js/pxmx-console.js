@@ -464,7 +464,7 @@ async function renderPxmxSettings(container) {
         <div class="hpe-card rounded-lg p-5 shadow-sm">
           <p class="text-sm font-bold text-[#263040] mb-3">Snapshot</p>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div><label class="${lbl}">Keep last</label><input id="hv-snap-keep" type="number" min="0" value="${cfg.snapshot_keep ?? 5}" class="${inp}" title="Number of snapshots to retain"/></div>
+            <div><label class="${lbl}">Keep last</label><input id="hv-snap-keep" type="number" min="0" value="${cfg.snapshot_keep ?? 5}" class="${inp}" title="How many snapshots a new snapshot schedule keeps (the default Keep when you create one here or from a VM)"/></div>
             <div><label class="${lbl}">Name prefix</label><input id="hv-snap-prefix" type="text" value="${escapeHtml(cfg.snapshot_prefix || 'lm')}" class="${inp}" title="Prefix string for automated snapshot names"/></div>
           </div>
         </div>
@@ -522,6 +522,12 @@ function _pxmxSnapLastRun(s) {
     return `<span class="${r.errors.length ? 'text-red-600' : 'text-emerald-700'}" title="${escapeHtml(r.errors.join('\n'))}">${escapeHtml(new Date(r.at * 1000).toLocaleString())}: ${r.ok} ok${r.failed ? `, ${r.failed} failed` : ''}${r.errors.length && !r.failed ? ' — ' + escapeHtml(r.errors[0]) : ''}</span>`;
 }
 
+// Default Keep for a new schedule: Settings → Snapshot "Keep last".
+function _defaultSnapKeep(cfg) {
+    const keep = parseInt((cfg || {}).snapshot_keep ?? 5, 10);
+    return Math.min(100, Math.max(1, isNaN(keep) ? 5 : keep));
+}
+
 function _ownSchedule(schedules, uid) {
     return schedules.find(s => s.vms.length === 1 && s.vms[0] === uid && !s.tags.length && !s.pools.length);
 }
@@ -539,6 +545,7 @@ async function pxmxOpenVmSnapSchedule(uid) {
     catch (e) { box.innerHTML = `<p class="text-sm text-red-600">Could not load snapshot schedules: ${escapeHtml(String(e.message || e))}</p>`; return; }
     const tags = _vmTags(vm);
     const own = _ownSchedule(d.schedules, uid);
+    const keep = own ? own.keep : _defaultSnapKeep(await pxmxHvConfig(true));
     const via = s => [
         s.vms.includes(uid) ? 'this VM' : '',
         ...s.tags.filter(t => tags.includes(t)).map(t => 'tag ' + t),
@@ -559,7 +566,7 @@ async function pxmxOpenVmSnapSchedule(uid) {
       <div class="flex flex-wrap items-end gap-3">
         <label class="flex items-center gap-2 text-sm text-slate-700 self-center"><input id="vm-snap-enabled" type="checkbox" class="rounded" ${!own || own.enabled ? 'checked' : ''}/> Snapshot this VM</label>
         <div><label class="block text-[10px] font-bold text-slate-500 uppercase">Every (hours)</label><input id="vm-snap-every" type="number" min="1" max="8760" class="${inp}" value="${own ? own.every_hours : 24}"/></div>
-        <div><label class="block text-[10px] font-bold text-slate-500 uppercase">Keep last</label><input id="vm-snap-keep" type="number" min="1" max="100" class="${inp}" value="${own ? own.keep : 7}"/></div>
+        <div><label class="block text-[10px] font-bold text-slate-500 uppercase">Keep last</label><input id="vm-snap-keep" type="number" min="1" max="100" class="${inp}" value="${keep}"/></div>
         <button class="bg-[#01A982] hover:bg-[#018a6c] text-white px-3 py-1 rounded-md text-xs font-bold" onclick="pxmxSaveVmSnapSchedule(${escapeHtml(JSON.stringify(uid))})">${own ? 'Save' : 'Create schedule'}</button>
         ${own ? `<button class="${btn}" onclick="pxmxRunSnapSchedule(${sid})" ${own.running ? 'disabled' : ''}>Run now</button>
         <button class="${btn} text-red-700" onclick="pxmxDeleteSnapSchedule(${sid})">Delete</button>` : ''}
@@ -622,7 +629,7 @@ async function pxmxLoadSnapSchedules(editId) {
 }
 
 function _pxmxSnapForm(d, s) {
-    s = s || { id: '', name: '', enabled: true, vms: [], tags: [], pools: [], every_hours: 24, keep: 7 };
+    s = s || { id: '', name: '', enabled: true, vms: [], tags: [], pools: [], every_hours: 24, keep: _defaultSnapKeep(window._pxmxHvConfig) };
     const inp = 'border border-slate-200 rounded-md px-3 py-1.5 text-sm w-full';
     const lbl = 'block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1';
     const boxes = (cls, items, picked, label) => items.length
@@ -1188,7 +1195,7 @@ async function pxmxDeploySpokeSubmit(uniqueId) {
         if (r.ok && data && data.status === 'SUCCESS') {
             const startedMsg = data.started ? 'started — it will self-onboard shortly'
                 : (data.start_error ? `NOT started (${data.start_error}) — boot it manually` : 'left stopped');
-            showToast(`Deployed ${data.deployed_name} (VMID ${data.vmid}, spoke ${data.spoke_id}) — ${startedMsg}`, data.started || !start ? 'success' : 'error');
+            showToast(`Deployed ${data.deployed_name} (VMID ${data.vmid}, spoke ${_spokeLabelFor(data.spoke_id)}) — ${startedMsg}`, data.started || !start ? 'success' : 'error');
             const modal = document.getElementById('pxmx-deploy-modal');
             if (modal) modal.remove();
             setTimeout(() => loadPxmxData('Virtual Machines'), 1200);

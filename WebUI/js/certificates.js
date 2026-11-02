@@ -2017,7 +2017,7 @@ async function mtlsSetAutoProvision(enabled) {
 // The hub mints a clientAuth cert (public CAs can't) + delivers it; the spoke
 // restarts to present it, then shows mTLS ✓ here.
 async function mtlsProvision(spokeId) {
-    showToast(spokeId ? `Issuing mTLS cert for ${spokeId}…` : 'Issuing mTLS certs for all connected spokes…', 'info');
+    showToast(spokeId ? `Issuing mTLS cert for ${_spokeLabelFor(spokeId)}…` : 'Issuing mTLS certs for all connected spokes…', 'info');
     try {
         const { ok, data, detail } = await _spokeFetch('/api/mtls/reprovision', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2348,11 +2348,11 @@ window.srdDeleteSelected = srdDeleteSelected;
 // deleting a connected spoke would tear down a live one, and the whole point of
 // this card is to remove ghosts without that risk.
 async function deleteSpokeRegistration(spokeId) {
-    if (!confirm(`Delete spoke registration "${spokeId}"?\n\nOnly do this if the box is gone or was rebuilt. `
+    if (!confirm(`Delete spoke registration "${_spokeLabelFor(spokeId)}"?\n\nOnly do this if the box is gone or was rebuilt. `
                  + `If it is still running it will re-register on its next connect.`)) return;
     try {
         await apiJson(`/setup/spokes/${encodeURIComponent(spokeId)}`, { method: 'DELETE' });
-        showToast(`Deleted registration ${spokeId}`, 'success');
+        showToast(`Deleted registration ${_spokeLabelFor(spokeId)}`, 'success');
     } catch (e) {
         showToast(`Delete failed: ${e.message}`, 'error');
     }

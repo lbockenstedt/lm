@@ -3093,7 +3093,22 @@ function _spokeName(o) {
     const id = o.spoke_id || o.id || o.agent_id || '';
     const dn = o.display_name;
     const base = (dn && dn !== id) ? dn : (o.hostname || id);
-    return _nodeLabel(base, _tenantOf(o));
+    const label = _nodeLabel(base, _tenantOf(o));
+    if (id && label && label !== id) (window._spokeNameCache = window._spokeNameCache || {})[id] = label;
+    return label;
+}
+
+// Friendly label for a spoke/agent id in toasts/confirms (falls back to the id
+// until a list render has seen the node). Display only — never use for routing.
+function _spokeLabelFor(id) {
+    const hit = window._spokeNameCache && window._spokeNameCache[id];
+    if (hit) return hit;
+    // Cache miss: warm it in the background so the next message shows the name.
+    if (!window._spokeNamePrimed && typeof loadApprovedSpokes === 'function') {
+        window._spokeNamePrimed = true;
+        loadApprovedSpokes().catch(() => {}).finally(() => { setTimeout(() => { window._spokeNamePrimed = false; }, 30000); });
+    }
+    return id;
 }
 
 // Tenant of a spoke/agent object for display labelling. Spoke-kind rows carry
