@@ -46,7 +46,7 @@ def test_all_loaded_roles_have_an_unload_action():
     body = _show_load_role_modal()
     assert 'id="loaded-role-controls"' in body
     assert "...(active || []).map(item => item.role)" in body
-    assert "id === 'dns-server' || id === 'dhcp-server'" in body
+    assert "SERVICE_DEPLOY_ROLES.includes(id)" in body
     assert "unloadRole('${spokeId}','${id}')" in body
 
 

@@ -195,6 +195,30 @@ def monitoring_problem_list(hosts):
     return rows
 
 
+MONITORING_SYNC_INTERVAL = 300.0
+
+
+async def run_monitoring_sync_loop(hub, interval=MONITORING_SYNC_INTERVAL):
+    """Keep Zabbix converged with the LM inventory (the source of truth) without
+    anyone pressing Sync. Skips quietly while the monitoring spoke is offline."""
+    import asyncio
+    await asyncio.sleep(120)
+    while True:
+        try:
+            sid = hub.get_spoke_by_type("monitoring")
+            if sid:
+                res = await hub.request_response(
+                    sid, "MON_SYNC",
+                    {"devices": await inventory_devices(hub), "dry_run": False},
+                    timeout=300.0)
+                logger.info("monitoring: scheduled sync done: %s", str(res)[:300])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — never kill the loop
+            logger.warning("monitoring: scheduled sync failed: %s", e)
+        await asyncio.sleep(interval)
+
+
 def register(app, hub, ctx):
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
@@ -207,6 +231,12 @@ def register(app, hub, ctx):
         if not sid:
             raise HTTPException(status_code=503, detail="Monitoring spoke not connected")
         return sid
+
+    async def _start_sync_loop():
+        import asyncio
+        asyncio.create_task(run_monitoring_sync_loop(hub))
+
+    app.router.on_startup.append(_start_sync_loop)
 
     async def _relay(sid, command, payload=None):
         try:
