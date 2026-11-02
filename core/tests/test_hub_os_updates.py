@@ -160,6 +160,23 @@ async def test_disconnected_node_drops_out_of_snapshot_after_recheck():
 
 
 @pytest.mark.asyncio
+async def test_check_while_a_node_is_offline_keeps_its_last_result():
+    """A check right after a hub restart (fleet not reconnected yet) must not
+    wipe the cached results of the nodes that haven't come back."""
+    hub = _FakeHub(
+        connections={"spoke-1": object(), "spoke-2": object()},
+        responses={"spoke-1": {"eligible": True, "count": 2},
+                   "spoke-2": {"eligible": True, "count": 4}})
+    await hub.osu_check_fleet(refresh=False)
+    del hub.active_connections["spoke-2"]
+    await hub.osu_check_fleet(refresh=False)
+    assert "spoke:spoke-2" in hub._osu_state()["nodes"]
+    hub.active_connections["spoke-2"] = object()
+    by_id = {n["id"]: n for n in hub.osu_snapshot()["nodes"]}
+    assert by_id["spoke-2"]["count"] == 4
+
+
+@pytest.mark.asyncio
 async def test_mixed_fleet_some_checked_some_not():
     hub = _FakeHub(
         connections={"spoke-1": object(), "spoke-2": object()},

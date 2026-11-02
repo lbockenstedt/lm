@@ -101,6 +101,8 @@ logger = logging.getLogger("Hub")
 # reached over SNMP/CLI/REST — there is no host and no agent, so they are never
 # even probed; probing would just time out and look like a failure.
 _NEVER_PROBE_TYPES = {"nw", "firewall", "storage"}
+# How long a node that misses checks (disconnected) keeps its last result.
+_OSU_KEEP_OFFLINE_S = 7 * 86400
 _NEVER_PROBE_REASON = {
     "nw": "network device (switch/AP) — no host OS we manage; firmware is out of scope",
     "firewall": "OPNsense is FreeBSD and appliance-managed — update from its own UI",
@@ -381,9 +383,16 @@ class HubOsUpdatesMixin:
                 inventory[key] = {**inv, "at": time.time()}
             else:
                 inventory.pop(key, None)  # node too old to report one
-        st["nodes"] = {f"{n['kind']}:{n['id']}": n for n in nodes}
-        st["checked_at"] = time.time()
-        self._osu_enroll_new_nodes(list(st["nodes"]))
+        fresh = {f"{n['kind']}:{n['id']}": n for n in nodes}
+        # A node not connected right now (a check just after a hub restart,
+        # before the fleet reconnects) keeps its last result; the snapshot only
+        # shows live nodes, so it reappears with data once it reconnects.
+        now = time.time()
+        kept = {k: v for k, v in (st.get("nodes") or {}).items()
+                if k not in fresh and now - float(v.get("checked_at") or 0) < _OSU_KEEP_OFFLINE_S}
+        st["nodes"] = {**kept, **fresh}
+        st["checked_at"] = now
+        self._osu_enroll_new_nodes(list(fresh))
         self._osu_save()
         # Warm the CVE feeds now so a lookup doesn't wait on a download.
         await asyncio.to_thread(self._osu_feeds_for, inventory)
