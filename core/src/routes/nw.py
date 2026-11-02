@@ -2393,6 +2393,7 @@ def register(app, hub, ctx):
         return out
 
     hub.run_nw_scheduled_scan = _run_nw_scheduled_scan
+    hub.nw_push_fleet = lambda sid: _nw_push_fleet(hub, sid)
     hub.nw_scan_schedule_for_tenant = lambda tid: _nw_scan_schedule(hub, tid)
 
     @app.post("/setup/nw-scan/run")
