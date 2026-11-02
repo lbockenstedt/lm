@@ -396,7 +396,7 @@ def test_key_delivery_signed_with_prev_secret_verifies_on_spoke():
             "payload": {"type": "SPOKE_UPDATE_SESSION_KEY", "data": {"secret": new}}}
 
     # Hub signs the delivery with the PRE-rotation secret (the fix).
-    sig = km.sign_with_secret(prev, body)
+    sig = MessageSigner(prev).sign(body)
     frame = {**body, "signature": sig}
 
     # Spoke still holding the OLD secret verifies -> dispatches -> installs new.

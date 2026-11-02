@@ -180,32 +180,6 @@ def test_oci_request_wraps_transport_error(monkeypatch):
             oci_auth.oci_request(_cfg(), _Boom(), "GET", url))
 
 
-def test_oci_request_sync_wraps_transport_error(monkeypatch):
-    monkeypatch.setattr(oci_auth, "signed_headers", lambda *a, **k: {})
-
-    class _Boom:
-        def request(self, *a, **k):
-            raise httpx.ConnectError("[Errno -2] Name or service not known")
-
-    url = "https://iaas.us-ashburn-1.oraclecloud.com/20160918/x"
-    with pytest.raises(oci_auth.OciAuthError, match="could not reach OCI endpoint"):
-        oci_auth.oci_request_sync(_cfg(), _Boom(), "GET", url)
-
-
-def test_oci_request_sync_passes_through_a_normal_response(monkeypatch):
-    """The wrapper must not swallow ordinary responses (incl. HTTP errors,
-    which callers inspect via status_code)."""
-    monkeypatch.setattr(oci_auth, "signed_headers", lambda *a, **k: {})
-    sentinel = object()
-
-    class _Ok:
-        def request(self, *a, **k):
-            return sentinel
-
-    assert oci_auth.oci_request_sync(
-        _cfg(), _Ok(), "GET", "https://iaas.us-ashburn-1.oraclecloud.com/x") is sentinel
-
-
 def test_list_regions_shape_and_sorting():
     regions = oci_auth.list_regions()
     assert regions and all({"id", "label"} <= set(r) for r in regions)

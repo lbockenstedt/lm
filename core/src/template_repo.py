@@ -95,46 +95,6 @@ class TemplateRepo:
             return sorted((self._public(r) for r in self._index.values()),
                           key=lambda r: r.get("created_at") or "", reverse=True)
 
-    def latest_complete_for_spoke(self, spoke_id: str) -> Optional[Dict[str, Any]]:
-        """The newest COMPLETE template backup taken from ``spoke_id``'s host —
-        the "template for this server", used by the fleet multi-host refresh.
-        Returns the private view (has ids) or None."""
-        with self._lock:
-            cands = [r for r in self._index.values()
-                     if r.get("source_spoke") == spoke_id and r.get("status") == "complete"]
-            if not cands:
-                return None
-            cands.sort(key=lambda r: r.get("created_at") or "", reverse=True)
-            return dict(cands[0])
-
-    def latest_complete_for_host(self, host_id: str) -> Optional[Dict[str, Any]]:
-        """The newest COMPLETE template backup for a specific HOST — matched on the
-        per-host ``source_agent`` (agent id) or ``source_node`` (Proxmox node),
-        NOT ``source_spoke``. Several pxmx hosts share one cs spoke, so a
-        spoke-scoped lookup returns whichever host's template is newest (e.g. 04's
-        for a 02 selection). Keying on the agent/node makes the fleet refresh hit
-        the host the operator actually selected."""
-        hid = str(host_id or "").strip()
-        if not hid:
-            return None
-        hid_l = hid.lower()
-        hid_short = hid_l.split(".", 1)[0]  # tolerate FQDN vs short-name
-
-        def _match(val) -> bool:
-            v = str(val or "").strip().lower()
-            if not v:
-                return False
-            return v == hid_l or v.split(".", 1)[0] == hid_short
-
-        with self._lock:
-            cands = [r for r in self._index.values()
-                     if r.get("status") == "complete"
-                     and (_match(r.get("source_agent")) or _match(r.get("source_node")))]
-            if not cands:
-                return None
-            cands.sort(key=lambda r: r.get("created_at") or "", reverse=True)
-            return dict(cands[0])
-
     # ── lifecycle ───────────────────────────────────────────────────────────
     def create_pending(self, *, name: str, source_vmid: Any, source_node: str,
                         source_agent: str, source_spoke: str, created_by: str,
