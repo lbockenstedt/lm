@@ -19,6 +19,8 @@
          main.js so html2canvas is defined when fileBug() runs. -->
     <script src="assets/html2canvas.min.js?v=1.4.1"></script>
     <style>
+        .lm-desc { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+        .lm-desc.lm-desc-open { display: block; overflow: visible; }
         /* System font stack — matches the Client-Sim UI; no external font fetch
            (the hub often runs on a disconnected management network). */
         :root {
