@@ -16,7 +16,9 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 - **Snapshot schedules.** Hypervisors → Settings → Snapshot schedules snapshots
   picked VMs, or every VM with a Proxmox tag or in a pool, every N hours and
-  keeps the last K. See [pxmx.md](pxmx.md#how-to-use-it).
+  keeps the last K. Schedules are per tenant (only that tenant's VMs), and a
+  VM's detail view has a **🕒 Schedule…** button to see or set its schedule.
+  See [pxmx.md](pxmx.md#how-to-use-it).
 
 ### OS Updates
 

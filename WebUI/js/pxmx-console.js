@@ -379,6 +379,7 @@ function openVmDetail(uniqueId) {
             <button onclick="pxmxVmAction('${uid}','stop')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-600 hover:bg-red-700 text-white transition-colors" title="Gracefully shut down or force-stop this VM">■ Stop</button>
             <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors" title="Reboot this virtual machine">↺ Restart</button>
             <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors" title="Take an instantaneous snapshot of this VM">📷 Snapshot</button>
+            ${isAdmin() ? `<button onclick="pxmxOpenVmSnapSchedule('${uid}')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors" title="View or set how often this VM is snapshotted">🕒 Schedule…</button>` : ''}
             <button onclick="pxmxVmAction('${uid}','backup')" title="vzdump backup to the storage configured in Setup → Hypervisors" class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white transition-colors">💾 Backup</button>
             <button id="pxmx-backup-hub-btn" onclick="pxmxBackupToHub('${uid}')" title="vzdump this template and store a copy in the hub's Template Repo (Template Repo page). The archive is deleted from the chosen storage after streaming." class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300 transition-colors">⬆ Back up to Hub</button>
             <select id="pxmx-backup-hub-storage" title="vzdump storage target for THIS backup (file-based only — PBS excluded; vzdump-to-PBS isn't a single streamable file). The archive is deleted from here after it streams to the hub." class="px-2 py-1.5 rounded-md text-xs border border-slate-300 bg-white max-w-[12rem]"><option value="">loading storages…</option></select>
@@ -388,7 +389,8 @@ function openVmDetail(uniqueId) {
                 : `<button onclick="pxmxVmAction('${uid}','destroy')" title="Destroy this VM and its disks (--purge) — IRREVERSIBLE" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-800 hover:bg-red-900 text-white transition-colors">🗑 Delete</button>`}
             ${(() => { const tp = (window._pxmxTemplatePools||[]); return (vm.pool && tp.includes(String(vm.pool).toLowerCase())) ? `<button onclick="pxmxCloneVm('${uid}')" title="Clone this template to a new VM" class="px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button><button onclick="pxmxDeploySpoke('${uid}')" title="One-click spoke deploy: clone this golden spoke template, auto-name it CS-SVR-0N, and start it so it DHCPs and self-onboards" class="px-3 py-1.5 rounded-md text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors">🚀 Deploy Spoke</button>` : ''; })()}
             <span id="pxmx-vm-action-status" class="text-xs text-slate-400"></span>
-        </div>`;
+        </div>
+        <div id="pxmx-vm-snap-sched" class="hidden rounded-lg border border-slate-200 bg-white p-4 mb-4"></div>`;
     // Populate the "Back up to Hub" storage dropdown with this host's
     // file-based backup storages (PBS excluded). Default = the host's
     // configured backup_storage (per-host override, else global).
@@ -494,13 +496,100 @@ async function renderPxmxSettings(container) {
 
 // ── VM snapshot schedules (Global Admin) ─────────────────────────────────────
 // Shared hub service (/api/vm-snapshots): snapshot picked VMs, or every VM with
-// a tag / in a pool, every N hours, keeping the last K. Saved separately from
-// the Save button below.
+// a tag / in a pool, every N hours, keeping the last K. Schedules belong to the
+// tenant being viewed and only see that tenant's VMs. Managed here (Settings)
+// and per VM from the VM detail view (pxmxOpenVmSnapSchedule).
+function _snapUrl(path = '') {
+    return `/api/vm-snapshots/schedules${path}?tenant=${encodeURIComponent(currentTenant || '')}`;
+}
+
+// Refresh whichever schedule view is open (Settings list or a VM's panel).
+function _pxmxSnapRefresh() {
+    if (document.getElementById('pxmx-snap-schedules')) pxmxLoadSnapSchedules();
+    const vmBox = document.getElementById('pxmx-vm-snap-sched');
+    if (vmBox && vmBox.dataset.uid) pxmxOpenVmSnapSchedule(vmBox.dataset.uid);
+}
+
+function _vmTags(vm) {
+    const t = vm.tags || [];
+    return Array.isArray(t) ? t : String(t).split(/[;,\s]+/).filter(Boolean);
+}
+
+function _pxmxSnapLastRun(s) {
+    const r = s.last_result;
+    if (s.running) return '<span class="text-blue-600">running…</span>';
+    if (!r) return '<span class="text-slate-400">never run</span>';
+    return `<span class="${r.errors.length ? 'text-red-600' : 'text-emerald-700'}" title="${escapeHtml(r.errors.join('\n'))}">${escapeHtml(new Date(r.at * 1000).toLocaleString())}: ${r.ok} ok${r.failed ? `, ${r.failed} failed` : ''}${r.errors.length && !r.failed ? ' — ' + escapeHtml(r.errors[0]) : ''}</span>`;
+}
+
+function _ownSchedule(schedules, uid) {
+    return schedules.find(s => s.vms.length === 1 && s.vms[0] === uid && !s.tags.length && !s.pools.length);
+}
+
+// VM detail → "Schedule…": the schedules that snapshot this VM, and a quick
+// form for this VM's own schedule (one that targets just this VM).
+async function pxmxOpenVmSnapSchedule(uid) {
+    const box = document.getElementById('pxmx-vm-snap-sched');
+    const vm = (window._pxmxVms || []).find(v => v.unique_id === uid);
+    if (!box || !vm) return;
+    box.dataset.uid = uid;
+    box.classList.remove('hidden');
+    let d;
+    try { d = await apiJson(_snapUrl()); }
+    catch (e) { box.innerHTML = `<p class="text-sm text-red-600">Could not load snapshot schedules: ${escapeHtml(String(e.message || e))}</p>`; return; }
+    const tags = _vmTags(vm);
+    const own = _ownSchedule(d.schedules, uid);
+    const via = s => [
+        s.vms.includes(uid) ? 'this VM' : '',
+        ...s.tags.filter(t => tags.includes(t)).map(t => 'tag ' + t),
+        ...s.pools.filter(p => p === vm.pool).map(p => 'pool ' + p),
+    ].filter(Boolean);
+    const others = d.schedules.filter(s => s !== own && via(s).length);
+    const inScope = d.vms.some(v => v.unique_id === uid);
+    const btn = 'text-[11px] font-bold border border-slate-300 rounded px-2 py-0.5 hover:bg-slate-100';
+    const inp = 'border border-slate-200 rounded-md px-2 py-1 text-sm w-20';
+    const otherRows = others.map(s => `<li class="text-xs text-slate-600">${escapeHtml(s.name)}${s.enabled ? '' : ' (paused)'} — every ${s.every_hours}h, keep ${s.keep}, via ${escapeHtml(via(s).join(', '))} · ${_pxmxSnapLastRun(s)}</li>`).join('');
+    const sid = own ? escapeHtml(JSON.stringify(own.id)) : '';
+    box.innerHTML = `
+      <div class="flex items-center justify-between mb-2">
+        <p class="text-sm font-bold text-[#263040]">Snapshot schedule <span class="cursor-help font-normal text-slate-400" title="Snapshots this VM every N hours and deletes the oldest of this schedule's snapshots beyond Keep. Schedules that cover many VMs (by tag or pool) are managed in Hypervisors → Settings.">ⓘ</span></p>
+        <button class="text-slate-400 hover:text-slate-600 text-sm" onclick="document.getElementById('pxmx-vm-snap-sched').classList.add('hidden')" title="Close">✕</button>
+      </div>
+      ${inScope ? '' : '<p class="text-xs text-amber-700 mb-2">This VM is not in the current tenant\'s VM list, so a schedule here would not snapshot it.</p>'}
+      <div class="flex flex-wrap items-end gap-3">
+        <label class="flex items-center gap-2 text-sm text-slate-700 self-center"><input id="vm-snap-enabled" type="checkbox" class="rounded" ${!own || own.enabled ? 'checked' : ''}/> Snapshot this VM</label>
+        <div><label class="block text-[10px] font-bold text-slate-500 uppercase">Every (hours)</label><input id="vm-snap-every" type="number" min="1" max="8760" class="${inp}" value="${own ? own.every_hours : 24}"/></div>
+        <div><label class="block text-[10px] font-bold text-slate-500 uppercase">Keep last</label><input id="vm-snap-keep" type="number" min="1" max="100" class="${inp}" value="${own ? own.keep : 7}"/></div>
+        <button class="bg-[#01A982] hover:bg-[#018a6c] text-white px-3 py-1 rounded-md text-xs font-bold" onclick="pxmxSaveVmSnapSchedule(${escapeHtml(JSON.stringify(uid))})">${own ? 'Save' : 'Create schedule'}</button>
+        ${own ? `<button class="${btn}" onclick="pxmxRunSnapSchedule(${sid})" ${own.running ? 'disabled' : ''}>Run now</button>
+        <button class="${btn} text-red-700" onclick="pxmxDeleteSnapSchedule(${sid})">Delete</button>` : ''}
+      </div>
+      ${own ? `<p class="text-xs mt-2">Last run: ${_pxmxSnapLastRun(own)}</p>` : ''}
+      ${otherRows ? `<p class="text-xs font-bold text-slate-500 mt-3">Also covered by</p><ul class="list-disc pl-5 mt-1 space-y-0.5">${otherRows}</ul>` : ''}`;
+}
+
+async function pxmxSaveVmSnapSchedule(uid) {
+    const vm = (window._pxmxVms || []).find(v => v.unique_id === uid) || {};
+    const body = {
+        enabled: document.getElementById('vm-snap-enabled').checked,
+        every_hours: parseFloat(document.getElementById('vm-snap-every').value),
+        keep: parseInt(document.getElementById('vm-snap-keep').value, 10),
+        vms: [uid], tags: [], pools: [],
+    };
+    try {
+        const own = _ownSchedule((await apiJson(_snapUrl())).schedules, uid);
+        body.name = own ? own.name : `VM ${vm.name || vm.vmid}`;
+        await apiJson(_snapUrl(own ? '/' + encodeURIComponent(own.id) : ''),
+            { method: own ? 'PUT' : 'POST', body: JSON.stringify(body) });
+        showToast('Snapshot schedule saved', 'success');
+        pxmxOpenVmSnapSchedule(uid);
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+}
 async function pxmxLoadSnapSchedules(editId) {
     const box = document.getElementById('pxmx-snap-schedules');
     if (!box) return;
     let d;
-    try { d = await apiJson('/api/vm-snapshots/schedules'); }
+    try { d = await apiJson(_snapUrl()); }
     catch (e) { box.innerHTML = `<p class="text-sm text-red-600">Could not load snapshot schedules: ${escapeHtml(String(e.message || e))}</p>`; return; }
     window._pxmxSnapData = d;
     const btn = 'text-[11px] font-bold border border-slate-300 rounded px-2 py-0.5 hover:bg-slate-100';
@@ -510,10 +599,7 @@ async function pxmxLoadSnapSchedules(editId) {
             s.tags.length ? 'tags: ' + s.tags.join(', ') : '',
             s.pools.length ? 'pools: ' + s.pools.join(', ') : '',
         ].filter(Boolean).join(' · ');
-        const r = s.last_result;
-        const last = s.running ? '<span class="text-blue-600">running…</span>'
-            : !r ? '<span class="text-slate-400">never run</span>'
-            : `<span class="${r.errors.length ? 'text-red-600' : 'text-emerald-700'}" title="${escapeHtml(r.errors.join('\n'))}">${escapeHtml(new Date(r.at * 1000).toLocaleString())}: ${r.ok} ok${r.failed ? `, ${r.failed} failed` : ''}${r.errors.length && !r.failed ? ' — ' + escapeHtml(r.errors[0]) : ''}</span>`;
+        const last = _pxmxSnapLastRun(s);
         const id = escapeHtml(JSON.stringify(s.id));
         return `<tr class="border-b border-slate-50 text-xs">
           <td class="px-3 py-2 font-medium text-slate-700">${escapeHtml(s.name)}${s.enabled ? '' : ' <span class="text-slate-400">(paused)</span>'}</td>
@@ -578,7 +664,7 @@ async function pxmxSaveSnapSchedule() {
     };
     const id = form.dataset.id;
     try {
-        await apiJson('/api/vm-snapshots/schedules' + (id ? '/' + encodeURIComponent(id) : ''),
+        await apiJson(_snapUrl(id ? '/' + encodeURIComponent(id) : ''),
             { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) });
         showToast('Snapshot schedule saved', 'success');
         pxmxLoadSnapSchedules();
@@ -587,18 +673,18 @@ async function pxmxSaveSnapSchedule() {
 
 async function pxmxRunSnapSchedule(id) {
     try {
-        await apiJson(`/api/vm-snapshots/schedules/${encodeURIComponent(id)}/run`, { method: 'POST' });
+        await apiJson(_snapUrl(`/${encodeURIComponent(id)}/run`), { method: 'POST' });
         showToast('Snapshotting started — the result shows under Last run', 'success');
-        pxmxLoadSnapSchedules();
-        setTimeout(() => pxmxLoadSnapSchedules(), 15000);
+        _pxmxSnapRefresh();
+        setTimeout(_pxmxSnapRefresh, 15000);
     } catch (e) { showToast('Run failed: ' + (e.message || e), 'error'); }
 }
 
 async function pxmxDeleteSnapSchedule(id) {
     if (!confirm('Delete this snapshot schedule? Snapshots it already took are kept.')) return;
     try {
-        await apiJson(`/api/vm-snapshots/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' });
-        pxmxLoadSnapSchedules();
+        await apiJson(_snapUrl('/' + encodeURIComponent(id)), { method: 'DELETE' });
+        _pxmxSnapRefresh();
     } catch (e) { showToast('Delete failed: ' + (e.message || e), 'error'); }
 }
 
