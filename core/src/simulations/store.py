@@ -83,7 +83,7 @@ _DEFAULT_HYPERVISORS_CONFIG: Dict[str, Any] = {
     "backup_storage": "",          # Proxmox storage id for vzdump (per-host overridable)
     "backup_mode": "snapshot",     # snapshot | suspend | stop
     "backup_keep": 3,              # keep-last=N pruning (0 = no prune)
-    "snapshot_keep": 5,            # informational retention target for the UI
+    "snapshot_keep": 5,            # default Keep for new VM snapshot schedules (UI)
     "snapshot_prefix": "lm",       # auto-snapshot name prefix
     "confirm_destructive": True,   # confirm prompt before stop/restart/backup/snapshot-delete
     "per_host": {},                # {hostname: {backup_storage, backup_mode, backup_keep, ...}}
