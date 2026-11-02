@@ -26,6 +26,7 @@ from api import (
     HTTPException, Request, _hub_msg, access, logger, uuid,
 )
 from routes.nw import validate_nw_address
+from routes.setup import _module_type_for
 from routes.role_pool import PRODUCT_ROLE, ensure_role_loaded, maybe_unload_orphaned_role
 
 
@@ -161,27 +162,6 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=403, detail=f"You can only bind a {prod['kind']} to a spoke assigned to your tenant")
         return (hub.state.get_spoke_tenant(spoke_id) or "") if spoke_id else ""
 
-    # Offline-spoke module_type fallback (mirror setup.py get_all_spokes_status /
-    # _module_type_for): live registration wins, then the persisted metadata,
-    # then a spoke_id-prefix guess so a disconnected spoke still labels.
-    _PREFIX_MODULE = {
-        "pxmx": "hypervisor", "opn": "firewall", "cppm": "nac",
-        "cs": "simulation", "netbox": "ipam", "ldap": "directory",
-        "dns": "dns", "dhcp": "dhcp", "nw": "nw",
-    }
-
-    def _module_type_for(sid):
-        mt = hub.spoke_module_types.get(hub._primary_key(sid))
-        if mt:
-            return mt
-        meta = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
-        if meta.get("module_type"):
-            return meta["module_type"]
-        for prefix, fallback in _PREFIX_MODULE.items():
-            if sid == prefix or sid.startswith(prefix + "-"):
-                return fallback
-        return None
-
     @app.get("/tenant/devices/spokes", operation_id="tdev_bindable_spokes")
     async def _bindable_spokes(request: Request):
         """Approved spokes the caller may bind a device to — a tenant-admin's OWN
@@ -204,7 +184,7 @@ def register(app, hub, ctx):
                 "spoke_id": sid,
                 "display_name": names.get(sid, sid),
                 "approved": True,
-                "module_type": _module_type_for(sid),
+                "module_type": _module_type_for(hub, sid),
                 "tenant_id": hub.state.get_spoke_tenant(sid) or "",
                 # B4: mirror /setup/pending_spokes so the WebUI spoke dropdown +
                 # Spokes & Agents page share one guid-keyed shape (``spoke_id``

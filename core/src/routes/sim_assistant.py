@@ -53,6 +53,7 @@ import re
 import time
 
 from api import HTTPException, Request, logger, os
+from routes.console_llm_identify import find_ab
 
 # ── existing-sim source reading (read-only, hub-side tool loop) ─────────────
 # The hub has no local checkout of the `cs` repo (its code runs on
@@ -336,18 +337,6 @@ def register(app, hub, ctx):
         ) if os.path.isdir(d)),
         os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../docs")))
 
-    def _ab_agent():
-        """The connected ab agent's spoke_id, or None. Mirrors
-        help_assistant.py's _ab_agent — kept as its own small copy so this
-        route has no import-time dependency on help_assistant.py."""
-        conns = getattr(hub, "active_connections", {}) or {}
-        if hub._primary_key("ab") in conns:
-            return "ab"
-        for sid in conns:
-            if "ab" in str(sid).lower():
-                return sid
-        return None
-
     def _read_doc(name, cap=6000):
         try:
             with open(os.path.join(_DOCS_DIR, name + ".md"), encoding="utf-8") as f:
@@ -522,7 +511,7 @@ def register(app, hub, ctx):
                       "auth_type": str(u.get("auth_type") or ""), "ip": str(s.get("client_ip") or "")}
 
     async def _relay(cmd, data, timeout=20.0):
-        agent = _ab_agent()
+        agent = find_ab(hub)
         if not agent:
             raise HTTPException(status_code=409, detail="Simulation assistant unavailable — "
                                                         "the AppBuilder agent is not connected.")
@@ -561,7 +550,7 @@ def register(app, hub, ctx):
         interactive sessions; can_submit tells the UI whether this user may hand
         a finished spec straight to AppBuilder (Global Admin) or must file it
         for admin approval."""
-        agent = _ab_agent()
+        agent = find_ab(hub)
         if agent is None:
             return {"available": False, "sessions": False}
         sessions, reason = await _sessions_capability(agent)
@@ -617,7 +606,7 @@ def register(app, hub, ctx):
 
     @app.post("/api/sim-assistant/chat")
     async def sim_assistant_chat(request: Request):
-        agent = _ab_agent()
+        agent = find_ab(hub)
         if not agent:
             raise HTTPException(status_code=409,
                                 detail="Simulation assistant unavailable — the AppBuilder "

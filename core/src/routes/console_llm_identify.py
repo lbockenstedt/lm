@@ -154,8 +154,8 @@ def hub_llm_identify_enabled(hub=None) -> bool:
 
 
 def find_ab(hub) -> Optional[str]:
-    """The connected AppBuilder agent's spoke_id (the LLM relay), or None. Mirrors
-    help_assistant._ab_agent."""
+    """The connected AppBuilder agent's spoke_id (the LLM relay), or None. ab
+    registers as spoke_id 'ab'; else any connected id containing 'ab'."""
     conns = getattr(hub, "active_connections", {}) or {}
     try:
         if hub._primary_key("ab") in conns:
