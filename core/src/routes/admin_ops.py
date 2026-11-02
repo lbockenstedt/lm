@@ -419,8 +419,9 @@ def register(app, hub, ctx):
     @app.post("/admin/ops/nw-scan")
     async def admin_ops_nw_scan(request: Request):
         """Run the tenant's saved-config network scan (preview only unless the
-        saved config has auto_add). Body: {"tenant": "default"}. Detail is in the
-        hub log ("nw scan tenant=..." lines)."""
+        saved config has auto_add). Body: {"tenant": "default", optional
+        "targets": [ips] to scan only those, "dry_run": bool to override the
+        schedule's preview flag}. Detail is in the hub log ("nw scan tenant=...")."""
         _guard(request)
         try:
             body = await request.json()
@@ -428,7 +429,11 @@ def register(app, hub, ctx):
             body = {}
         tenant = str((body or {}).get("tenant") or "default")
         try:
-            res = await hub.run_nw_scheduled_scan(tenant)
+            targets = [str(t) for t in ((body or {}).get("targets") or []) if t]
+            dry_run = (body or {}).get("dry_run")
+            res = await hub.run_nw_scheduled_scan(
+                tenant, targets=targets or None,
+                dry_run=None if dry_run is None else bool(dry_run))
         except Exception as e:
             logger.exception("admin_ops: nw-scan failed")
             raise HTTPException(status_code=500, detail=str(e))
