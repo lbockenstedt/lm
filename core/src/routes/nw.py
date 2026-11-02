@@ -574,10 +574,6 @@ def register(app, hub, ctx):
         elif spoke_id and not cfg.get("tenant_id"):
             cfg["tenant_id"] = hub.state.get_spoke_tenant(spoke_id) or ""
 
-    def _get_nw_spoke(hub):
-        """The connected nw spoke id, or raise 503 (single-instance resolver)."""
-        return get_spoke_or_503(hub, "nw", "Network Devices")
-
     def _nw_devices_for_spoke(hub, spoke_id: str):
         """The device slice a spoke should receive (bound-to-it, else unbound)."""
         devices = (hub.state.system_state.get("global_config", {})

@@ -287,7 +287,3 @@ class NwCacheMixin:
         than comparing ages themselves, so "badge it" and "finally error" mean
         the same thing here as on every other page."""
         return self.nw_policy.classify(self.nw_cache_fleet_fetched_at())
-
-    def nw_cache_device_state(self, device_id: str) -> str:
-        """Shared staleness verdict for one device's cache entry."""
-        return self.nw_policy.classify(self.nw_cache_device_fetched_at(device_id))

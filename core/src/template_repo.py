@@ -107,17 +107,6 @@ class TemplateRepo:
             cands.sort(key=lambda r: r.get("created_at") or "", reverse=True)
             return dict(cands[0])
 
-    def complete_source_summary(self) -> list:
-        """[{id, name, source_node, source_agent, source_spoke}] for every COMPLETE
-        template — used to explain a fleet-refresh 'no template for this host' skip
-        (shows what host identifiers ARE stored so the match can be aligned)."""
-        with self._lock:
-            return [{"id": r.get("id"), "name": r.get("name"),
-                     "source_node": r.get("source_node"),
-                     "source_agent": r.get("source_agent"),
-                     "source_spoke": r.get("source_spoke")}
-                    for r in self._index.values() if r.get("status") == "complete"]
-
     def latest_complete_for_host(self, host_id: str) -> Optional[Dict[str, Any]]:
         """The newest COMPLETE template backup for a specific HOST — matched on the
         per-host ``source_agent`` (agent id) or ``source_node`` (Proxmox node),

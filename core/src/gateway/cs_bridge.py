@@ -361,10 +361,6 @@ class CSBridgePoller:
                 return key, store[key]
         return agent_id, {}
 
-    def _client_simulation(self, agent_id: str, hostname: str = None) -> Dict[str, Any]:
-        _key, entry = self._agent_config_entry(agent_id, hostname)
-        return entry.get("client_simulation") or {}
-
     def _migrate_agent_config_key(self, old_key: str, new_key: str) -> None:
         """Permanently re-key an ``agent_config`` entry from a hostname (or other
         stale id) to the runtime ``agent_id``, then persist. Load-time can't do
