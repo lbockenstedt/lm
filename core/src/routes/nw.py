@@ -820,8 +820,19 @@ def register(app, hub, ctx):
         # WITHOUT blocking on live SSH, then revalidate in the background when
         # it's aging and a spoke is up. ``?refresh=1`` forces a live fetch.
         force = _nw_truthy(request.query_params.get("refresh"))
-        predicate = (lambda r: _row_visible(r.get("tenant_id", "")))
-        cached = None if force else hub.nw_cache_get_fleet_filtered(predicate)
+        # Authoritative gate, the same for cached and live rows: only devices in
+        # the reader's visible hub config. A device removed from the config
+        # (or re-tenanted) vanishes at once, even from an older snapshot. When
+        # acting-as a tenant we gate even with no visible devices, so an empty
+        # scope yields an empty list rather than the unfiltered fleet.
+        gate_by_config = bool(visible_ids) or acting_tenant is not None
+
+        def _row_served(r):
+            if gate_by_config:
+                return r.get("id") in visible_ids
+            return _row_visible(r.get("tenant_id", ""))
+
+        cached = None if force else hub.nw_cache_get_fleet_filtered(_row_served)
         if cached is not None:
             out = dict(_overlay_names(dict(cached.get("devices") or {})))
             out["cached"] = True
@@ -876,13 +887,8 @@ def register(app, hub, ctx):
             except Exception as e:
                 logger.warning("nw_list_devices: spoke %s fetch failed: %s", sid, e)
 
-        # Authoritative gate: drop any row not in the reader's visible config
-        # set (defense-in-depth against a stale/leaky spoke). When acting-as a
-        # selected tenant we ALWAYS gate — even if the tenant has zero visible
-        # devices (empty ``visible_ids``) — so an empty scope yields an empty
-        # list rather than falling through to the unfiltered fleet.
-        if visible_ids or acting_tenant is not None:
-            merged = [r for r in merged if r.get("id") in visible_ids]
+        if gate_by_config:
+            merged = [r for r in merged if _row_served(r)]
 
         env = {"status": "SUCCESS", "data": merged,
                "message": f"{len(merged)} device(s)"}

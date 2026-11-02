@@ -10,6 +10,22 @@ first. This is a pointer index, not the source of truth — each entry links to
 the module doc that describes the behaviour in full. Internal refactors and
 CI/tooling changes are omitted unless they change what an operator sees.
 
+## Week of 2026-11-02
+
+### Users & access
+
+- **Impersonate user.** Settings → Users has an **Impersonate** button
+  (Global Admin only) on every other user. LabManager reloads with that user's
+  permissions and tenants, and an amber banner at the top shows who you are
+  acting as, with **Stop impersonating** to switch back. While impersonating
+  you cannot mint or revoke API tokens or start a second impersonation. Every
+  start and stop is logged on the hub as `IMPERSONATION start/stop` with the
+  admin, the target, and the source IP.
+- **Login password encrypted in the browser.** The local login page encrypts
+  the password with a one-time hub key (RSA-OAEP), so it no longer shows in
+  clear text in the browser's developer tools. A captured request cannot be
+  replayed. Scripts that send a plain password still work.
+
 ## Week of 2026-10-26
 
 ### Users & access

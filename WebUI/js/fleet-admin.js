@@ -1470,6 +1470,11 @@ async function loadUsers() {
                     ? `<span class="text-slate-300 text-xs italic select-none">Admin${lockIcon}</span>`
                     : `<button onclick="editUser('${userId}')" class="text-blue-400 hover:text-blue-600 text-xs font-bold mr-3">Edit</button>
                        <button onclick="deleteUser('${userId}')" class="text-red-400 hover:text-red-600 text-xs font-bold" title="Permanently delete this user account">Delete</button>`;
+            // Global Admins can sign in as any other user to see what they see.
+            const canImpersonate = isAdmin() && !currentUser?.impersonator && userId !== currentUser?.user_id;
+            const impersonateBtn = canImpersonate
+                ? `<button data-impersonate="${encodeURIComponent(userId)}" class="text-amber-500 hover:text-amber-700 text-xs font-bold mr-3" title="Act as this user with their permissions and tenants">Impersonate</button>`
+                : '';
 
             // Resolve a human label for directory (Entra/LDAP) users from the
             // stored name/email; local users have only their username → show it
@@ -1499,7 +1504,7 @@ async function loadUsers() {
                     <td class="px-4 py-3 text-center">${check('cs')}</td>
                     <td class="px-4 py-3 text-center">${check('console')}</td>
                     <td class="px-4 py-3 text-center">${check('console_write')}</td>
-                    <td class="px-4 py-3 text-right whitespace-nowrap">${actions}</td>
+                    <td class="px-4 py-3 text-right whitespace-nowrap">${impersonateBtn}${actions}</td>
                 </tr>
             `;
         }).join('');

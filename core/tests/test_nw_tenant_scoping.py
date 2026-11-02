@@ -736,3 +736,17 @@ def test_migration_clears_old_preview_defaults(monkeypatch, tmp_path):
     assert "auto_add" not in gc["nw_scan"]
     assert gc["nw_tenant_cfg"]["acme"]["scan_schedule"] == {"enabled": True, "interval_seconds": 3600}
     assert "auto_add" not in gc["nw_tenant_cfg"]["acme"]["scan"]
+
+
+def test_list_cache_drops_devices_removed_from_hub_config(monkeypatch, tmp_path):
+    """A cached fleet snapshot taken before a device was removed from the hub
+    config (e.g. a scan-added device of another tenant) must not keep serving
+    it: the cached path applies the same config gate as the live path."""
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+    ghost = {**_R_OTHER, "id": "ghost-sw"}
+    asyncio.get_event_loop().run_until_complete(
+        hub.nw_cache_set_fleet({"status": "SUCCESS", "data": [_R_ACME, _R_OTHER, ghost]}))
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.get("/api/nw/devices", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    assert {d["id"] for d in r.json()["data"]} == {"acme-sw", "other-sw"}
