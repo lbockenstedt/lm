@@ -936,7 +936,7 @@ async function openAgentConfigModal(agentId, currentLabel) {
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="text-xs text-slate-400 font-mono mb-2">ID: ${agentId}</div>
+                <div class="text-xs text-slate-400 font-mono mb-2">${_spokeLabelFor(agentId)}</div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Display Name</label>
                     <input type="text" id="agent-cfg-display-name" value="${safeName}" placeholder="${agentId}" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -1051,7 +1051,7 @@ async function openAgentAssignModal(agentId, currentTenantId) {
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="text-xs text-slate-400 font-mono mb-2">Agent: ${agentId}</div>
+                <div class="text-xs text-slate-400 font-mono mb-2">${_spokeLabelFor(agentId)}</div>
                 <input type="hidden" id="agent-assign-dn" value="${safeDn}">
                 <input type="hidden" id="agent-assign-cs" value="${csEnabled ? '1' : '0'}">
                 <p class="text-[11px] text-slate-400">Binds this Proxmox node agent to a tenant so its telemetry appears in that tenant's VM Server. The agent's display name and Client-Simulation setting are preserved.</p>
@@ -1130,7 +1130,7 @@ async function openSpokeAssignModal(spokeId, currentTenantId, noun = 'Spoke') {
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="text-xs text-slate-400 font-mono mb-2">${noun}: ${spokeId}</div>
+                <div class="text-xs text-slate-400 font-mono mb-2">${noun}: ${_spokeLabelFor(spokeId)}</div>
                 <p class="text-[11px] text-slate-400">Approving (re-approving) this ${noun.toLowerCase()} with a tenant binds it so its telemetry appears in that tenant's VM Server. Idempotent — the session secret is preserved.</p>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Tenant</label>
@@ -1282,7 +1282,7 @@ async function openSpokeMetadataModal(spokeId, currentName, approved) {
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="text-xs text-slate-400 font-mono mb-4">ID: ${spokeId}</div>
+                <div class="text-xs text-slate-400 font-mono mb-4">${_spokeLabelFor(spokeId)}</div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Display Name</label>
                     <input type="text" id="meta-display-name" value="${safeName}" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -3157,7 +3157,7 @@ async function loadModuleLogs(module, isRefresh = false) {
             container.innerHTML = Object.entries(logs).map(([agentId, agentLogs]) => `
                 <div class="mb-6">
                     <div class="px-4 py-2 bg-slate-100 border-b border-slate-200 text-xs font-bold text-slate-500 uppercase tracking-widest flex justify-between">
-                        <span>Agent: ${agentId}</span>
+                        <span>Agent: ${_spokeLabelFor(agentId)}</span>
                         <span class="opacity-60">Count: ${agentLogs.length}</span>
                     </div>
                     <div class="divide-y divide-slate-100">
@@ -3291,6 +3291,7 @@ async function loadApprovedSpokes() {
         // tenant-admins read only the spokes they may bind to via the
         // session-scoped /tenant/devices/spokes (same row shape).
         const data = await apiJson(isAdmin() ? '/setup/pending_spokes' : '/tenant/devices/spokes');
+        (data.spokes || []).forEach(s => { if (typeof _spokeName === 'function') _spokeName(s); });
         return (data.spokes || []).filter(s => s.approved);
     } catch (err) {
         console.error('Error loading approved spokes:', err);
@@ -3365,7 +3366,7 @@ async function clearDeployStatus(spokeId, role) {
 // netbox-server role (via the agent's NETBOX_RESET_ADMIN_PASSWORD command).
 async function resetNetboxAdmin(spokeId) {
     const pw = await showPromptToast(
-        `New NetBox admin password for ${spokeId}:`,
+        `New NetBox admin password for ${_spokeLabelFor(spokeId)}:`,
         { type: 'password', placeholder: 'new admin password', confirmLabel: 'Reset' });
     if (pw === null) return;                 // cancelled
     if (!pw || pw.length < 4) { showToast('Password must be at least 4 characters.', 'error'); return; }
@@ -3388,6 +3389,7 @@ async function resetNetboxAdmin(spokeId) {
 }
 
 async function showLoadRoleModal(spokeId) {
+    if (!(window._spokeNameCache||{})[spokeId]) { try { await loadApprovedSpokes(); } catch (_e) { /* label is best-effort */ } }
     const existing = document.getElementById('load-role-modal');
     if (existing) existing.remove();
 
@@ -3399,7 +3401,7 @@ async function showLoadRoleModal(spokeId) {
             <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center shrink-0">
                 <div>
                     <h3 class="text-lg font-bold text-[#263040]">Load Role</h3>
-                    <p class="text-xs text-slate-500 mt-0.5 font-mono">${spokeId}</p>
+                    <p class="text-xs text-slate-500 mt-0.5 font-mono">${_spokeLabelFor(spokeId)}</p>
                 </div>
                 <button onclick="document.getElementById('load-role-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
@@ -3682,6 +3684,7 @@ async function loadRole(spokeId) {
 }
 
 async function uninstallRole(spokeId, role, blockingModule) {
+    if (!(window._spokeNameCache||{})[spokeId]) { try { await loadApprovedSpokes(); } catch (_e) { /* label is best-effort */ } }
     const roleLabel = AGENT_ROLES[role]?.name || role;
     // The agent refuses to purge a server while its management sub-spoke is
     // still loaded (that would leave both in an undefined state). That guard
@@ -3745,7 +3748,7 @@ async function uninstallRole(spokeId, role, blockingModule) {
             _refresh();
         } else {
             const msg = res.status === 503
-                ? `${spokeId} is not connected — reconnect the agent to manage its roles.`
+                ? `${_spokeLabelFor(spokeId)} is not connected — reconnect the agent to manage its roles.`
                 : (payload?.message || data.detail || data.message || JSON.stringify(data));
             showToast('Failed to uninstall role: ' + msg, 'error');
             _refresh();
@@ -3756,6 +3759,7 @@ async function uninstallRole(spokeId, role, blockingModule) {
 }
 
 async function unloadRole(spokeId, role) {
+    if (!(window._spokeNameCache||{})[spokeId]) { try { await loadApprovedSpokes(); } catch (_e) { /* label is best-effort */ } }
     const roleLabel = AGENT_ROLES[role]?.name || role;
     const impact = AGENT_ROLES[role]?.deploy
         ? 'The server service will be stopped and disabled, but its package and configuration will remain installed.'
@@ -3787,7 +3791,7 @@ async function unloadRole(spokeId, role) {
             if (modalOpen) showLoadRoleModal(spokeId);
         } else {
             const msg = res.status === 503
-                ? `${spokeId} is not connected — reconnect the agent to manage its roles.`
+                ? `${_spokeLabelFor(spokeId)} is not connected — reconnect the agent to manage its roles.`
                 : (data.detail || data.message || JSON.stringify(data));
             showToast('Failed to unload role: ' + msg, 'error');
         }

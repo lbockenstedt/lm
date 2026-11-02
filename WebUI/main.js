@@ -3101,7 +3101,14 @@ function _spokeName(o) {
 // Friendly label for a spoke/agent id in toasts/confirms (falls back to the id
 // until a list render has seen the node). Display only — never use for routing.
 function _spokeLabelFor(id) {
-    return (window._spokeNameCache && window._spokeNameCache[id]) || id;
+    const hit = window._spokeNameCache && window._spokeNameCache[id];
+    if (hit) return hit;
+    // Cache miss: warm it in the background so the next message shows the name.
+    if (!window._spokeNamePrimed && typeof loadApprovedSpokes === 'function') {
+        window._spokeNamePrimed = true;
+        loadApprovedSpokes().catch(() => {}).finally(() => { setTimeout(() => { window._spokeNamePrimed = false; }, 30000); });
+    }
+    return id;
 }
 
 // Tenant of a spoke/agent object for display labelling. Spoke-kind rows carry
