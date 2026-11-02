@@ -15,6 +15,13 @@ async def inventory_devices(hub):
     import instance_vault
     inv = (hub.state.system_state.get("global_config", {}).get("nw_devices", []) or [])
     gc = hub.state.system_state.get("global_config", {})
+    # One host per physical box: drop rows that are the same hardware as
+    # another (a switch discovered at each of its SVI addresses).
+    if callable(getattr(hub, "_nw_identity_cache", None)):
+        from nw_discovery_sync import nw_hardware_primaries
+        prim = nw_hardware_primaries(inv, hub._nw_identity_cache())
+        inv = [d for d in inv if not isinstance(d, dict) or not d.get("id")
+               or prim.get(str(d["id"]), str(d["id"])) == str(d["id"])]
     inv = await instance_vault.overlay_many(
         hub, [d for d in inv if isinstance(d, dict) and d.get("name") and d.get("address")],
         "nw_devices")

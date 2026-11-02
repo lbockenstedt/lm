@@ -204,11 +204,12 @@ async function _nwLoadDetailTab(tab) {
 // the switcher); without it admins bypass the filter (see access.filter_nw).
 // The same physical box is often discovered at several addresses (every SVI /
 // VLAN interface of a core switch answers SSH/SNMP), producing one row per IP.
-// Collapse rows that are the same hardware, within a tenant: identical serial,
-// else identical base MAC, else (no hardware identity yet) identical
-// name/hostname + object type — names are reconciled to the box hostname each
-// poll. A serial-less row joins an existing group by name only when it doesn't
-// contradict that group's MAC. The primary row (opened on click, used by Poll /
+// Collapse rows that are the same hardware, within a tenant: identical chassis
+// serial, else (no serial yet) identical short hostname + object type — names
+// are reconciled to the box hostname each poll. Base MAC is NOT a key: VSX
+// peers can share a system MAC but are two boxes and stay two rows. A row only
+// joins a name group whose serial doesn't contradict its own (mirrors the hub's
+// nw_hardware_primaries, which keeps NetBox/Zabbix to one entry per box). The primary row (opened on click, used by Poll /
 // Configure) is a reachable member when there is one.
 function _nwCollapse(items) {
     const norm = v => String(v || '').trim().toLowerCase();
@@ -218,23 +219,22 @@ function _nwCollapse(items) {
     const keyOf = (it, kind) => {
         const t = norm(it.tenant_id);
         if (kind === 'serial') return norm(it.serial) && `${t}|s|${norm(it.serial)}`;
-        if (kind === 'mac') return norm(it.mac) && `${t}|m|${norm(it.mac)}`;
-        return norm(it.name || it.hostname) && `${t}|n|${norm(it.object_type)}|${norm(it.name || it.hostname)}`;
+        const n = norm(it.name || it.hostname);
+        const short = /^\d{1,3}(\.\d{1,3}){3}$/.test(n) ? n : n.split('.')[0];
+        return short && `${t}|n|${norm(it.object_type)}|${short}`;
     };
     const add = (g, it) => {
         g.members.push(it);
-        ['serial', 'mac', 'name'].forEach(k => { const key = keyOf(it, k); if (key && !byKey.has(key)) byKey.set(key, g); });
+        ['serial', 'name'].forEach(k => { const key = keyOf(it, k); if (key && !byKey.has(key)) byKey.set(key, g); });
     };
     for (const it of items || []) {
-        let g = (keyOf(it, 'serial') && byKey.get(keyOf(it, 'serial')))
-            || (keyOf(it, 'mac') && byKey.get(keyOf(it, 'mac')));
+        let g = keyOf(it, 'serial') && byKey.get(keyOf(it, 'serial'));
         if (!g) {
             const byName = keyOf(it, 'name') && byKey.get(keyOf(it, 'name'));
             // Don't merge two boxes that merely share a name but report
             // different hardware identities.
             const clash = byName && byName.members.some(m =>
-                (norm(it.serial) && norm(m.serial) && norm(m.serial) !== norm(it.serial)) ||
-                (norm(it.mac) && norm(m.mac) && norm(m.mac) !== norm(it.mac)));
+                norm(it.serial) && norm(m.serial) && norm(m.serial) !== norm(it.serial));
             if (byName && !clash) g = byName;
         }
         if (!g) { g = { members: [] }; groups.push(g); }
