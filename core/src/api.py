@@ -539,6 +539,15 @@ def _record_session(hub, user_data: dict, bind_ip: str = "") -> str:
     return token
 
 
+def _end_impersonation(sess: dict) -> None:
+    """Restore an impersonating session to the admin who started it."""
+    imp = sess.pop("impersonator", None) or {}
+    sess["user_id"] = imp.get("user_id")
+    sess["user"] = imp.get("user") or {}
+    sess.pop("prefixes", None)
+    sess.pop("prefixes_at", None)
+
+
 def _invalidate_user_sessions(hub, user_id) -> int:
     """Drop every live session for ``user_id`` and persist the revocation.
 
@@ -548,10 +557,18 @@ def _invalidate_user_sessions(hub, user_id) -> int:
     ``/auth/me`` or the 8h TTL). Returns the count dropped."""
     if not user_id:
         return 0
-    drop = [t for t, s in _sessions.items() if s.get("user_id") == user_id]
+    drop = [t for t, s in _sessions.items()
+            if (s.get("user_id") == user_id and not s.get("impersonator"))
+            or (s.get("impersonator") or {}).get("user_id") == user_id]
     for t in drop:
         _sessions.pop(t, None)
-    if drop:
+    # An admin impersonating this user falls back to their own identity rather
+    # than being logged out.
+    ended = [s for s in _sessions.values()
+             if s.get("user_id") == user_id and s.get("impersonator")]
+    for s in ended:
+        _end_impersonation(s)
+    if drop or ended:
         _save_sessions(hub)
         logger.info("Invalidated %d session(s) for user %s", len(drop), user_id)
     # Also drop the user's API tokens (bearer + refresh) so a demoted/deleted
@@ -620,6 +637,8 @@ def _save_sessions(hub) -> None:
                 "sid":      sess.get("sid") or secrets.token_hex(8),
                 "user":     sess.get("user", {}),
             }
+            if sess.get("impersonator"):
+                pruned[token]["impersonator"] = sess["impersonator"]
         path = _sessions_file(hub)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
@@ -661,6 +680,8 @@ def _load_sessions(hub) -> None:
                 "sid":      sess.get("sid") or secrets.token_hex(8),
                 "user":     sess.get("user", {}),
             }
+            if isinstance(sess.get("impersonator"), dict):
+                _sessions[token]["impersonator"] = sess["impersonator"]
         if _sessions:
             logger.info("Restored %d active session(s) from disk", len(_sessions))
     except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
@@ -1383,7 +1404,7 @@ def create_app(hub):
         # need a ticket minted by a POST, so blocking writes here covers them.
         if (access.is_read_only(sess)
                 and request.method not in ("GET", "HEAD", "OPTIONS")
-                and path != "/auth/logout"):
+                and path not in ("/auth/logout", "/auth/impersonate/stop")):
             logger.warning("[read-only] BLOCKED user=%s %s %s",
                            (sess or {}).get("user_id"), request.method, path)
             return JSONResponse(status_code=403,
