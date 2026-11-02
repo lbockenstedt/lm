@@ -206,6 +206,10 @@ def register(app, hub, ctx):
             if not isinstance(body["disabled_builtin"], list):
                 raise HTTPException(status_code=400, detail="disabled_builtin must be a list")
             cur["disabled_builtin"] = body["disabled_builtin"]
+        if "deprecated_hosts" in body:
+            if not isinstance(body["deprecated_hosts"], list):
+                raise HTTPException(status_code=400, detail="deprecated_hosts must be a list")
+            cur["deprecated_hosts"] = body["deprecated_hosts"]
         was_enabled = cur["enabled"]
         if "enabled" in body:
             cur["enabled"] = body["enabled"] is True or str(body["enabled"]).lower() in ("true", "1", "on", "yes")
