@@ -129,6 +129,8 @@ The pending reboot is visible in the WebUI: each freshly-cloned VM shows a blue 
 
 **Sync VMs to NetBox.** Sync happens automatically (interval or daily, configurable in System → Sync → Hypervisor) and immediately after any create/clone/lifecycle change from the WebUI. There's no separate "sync now" button to hunt for — editing a VM is enough to trigger it.
 
+**Schedule VM snapshots.** Hypervisors → Settings → *Snapshot schedules* (Global Admin). A schedule snapshots the VMs you pick, plus every VM carrying a chosen Proxmox tag or in a chosen pool (VMs added later are picked up), every N hours, and deletes that schedule's oldest snapshots (`lms-<id>-*`) beyond *Keep*. The hub checks every 5 minutes and snapshots one VM at a time on the VM's own node; *Run now* starts one immediately, and the last run's result (and any errors) shows in the list. Deleting a schedule keeps the snapshots it took. The work is done by the shared hub service `core/src/vm_snapshots.py` (API `/api/vm-snapshots/schedules`), which OS Updates also uses for its pre-patch snapshots; it drives the spoke's `PXMX_VM_ACTION` `snapshot`, `list_snapshots` and `delete_snapshot` actions.
+
 **Enable auto-provisioning.** You need both toggles on:
 1. Tenant-level `usb_auto_provision` toggle in the Simulations/Auto-Provisioning card.
 2. Per-agent `client_simulation.enabled` flag (pushed to the specific pxmx agent).
