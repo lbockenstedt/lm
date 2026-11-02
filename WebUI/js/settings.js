@@ -4,10 +4,26 @@
 // in order by index.html, so code that runs at load time may only use what
 // earlier files define. Functions may call anything once the page is up.
 
+// Long grey help paragraphs on System pages show two lines; click to expand.
+// Tiles render asynchronously, so watch the container instead of each tile.
+function _lmClampLongDescs(root) {
+    if (!root || root._lmClampObs) return;
+    const apply = () => root.querySelectorAll('p.text-xs.text-slate-400:not(.lm-desc), p.text-xs.text-slate-500:not(.lm-desc)').forEach(p => {
+        if (p.textContent.length < 220 || p.closest('table')) return;
+        p.classList.add('lm-desc');
+        p.title = 'Click to show more';
+        p.addEventListener('click', () => { p.classList.toggle('lm-desc-open'); p.title = p.classList.contains('lm-desc-open') ? '' : 'Click to show more'; });
+    });
+    root._lmClampObs = new MutationObserver(apply);
+    root._lmClampObs.observe(root, { childList: true, subtree: true });
+    apply();
+}
+
 function _renderSettingsSection(subMenu) {
     const content = document.getElementById('settings-content');
     if (!content) return;
     const card = 'hpe-card rounded-lg shadow-sm overflow-hidden';
+    _lmClampLongDescs(content);
 
     // General / User Access / Tenant Config moved here from Setup — reuse the
     // existing render branches (which target the passed container, so they
@@ -3540,9 +3556,9 @@ function _renderSetupGeneralTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     const subnetFilterCard = currentView === 'settings' ? `
         <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Tenant Subnet Filtering ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenant Subnet Filtering ${helpIcon('lm-hub', null, 'Hub help')}</h3>
             <p class="text-xs text-slate-500 mb-3">Filter each module's data by the tenant's NetBox prefixes, enforced server-side (a tenant cannot see another tenant's subnet data even via the API). Disable for modules that are scoped by tenant ID instead of subnet (e.g. Simulations).</p>
-            <div id="subnet-filter-toggles" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            <div id="subnet-filter-toggles" class="grid grid-cols-1 md:grid-cols-2 gap-x-10"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
         </div>` : '';
     const certMonCard = (currentView === 'settings' && isAdmin()) ? `
         <div class="${card}">
@@ -3563,19 +3579,46 @@ function _renderSetupGeneralTile(content) {
             </div>
         </div>` : '';
     content.innerHTML = `
+        <div class="space-y-4">
         ${subnetFilterCard}
-        ${certMonCard}
-        ${monitoringCard}
-        <div class="${card}">
-            <div class="flex justify-between items-center">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Data Cache ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+        <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+            ${monitoringCard}
+            ${certMonCard}
+            <div class="${card}">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Toast Messages ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <p class="text-xs text-slate-400">How long toast messages (success/error confirmations in the bottom/top-right corner) stay on screen before fading out. A visible dismiss (×) always closes one early regardless of this setting.</p>
                 <div class="flex items-center gap-3">
-                    <button onclick="refreshCacheNamespace()" class="${btnSecCls}" title="Refresh every cached module from the spokes now">Refresh now</button>
-                    <button onclick="purgeAllCaches()" class="${btnSecCls}" title="Drop all cached data; it is fetched again right away">Purge All</button>
+                    <label class="${labelCls}">Toast Duration (seconds)</label>
+                    <input type="number" id="toast-duration-input" min="1" max="300" value="10"
+                        class="w-20 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <span id="toast-duration-status" class="text-xs text-slate-400"></span>
                 </div>
             </div>
-            <div id="cache-status-rows" class="mt-3 text-sm">
-                <p class="py-4 text-center text-slate-400 italic text-xs">Loading…</p>
+            <div class="${card}">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Agent Relay Timeouts ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <p class="text-xs text-slate-400">How long a cs spoke waits for its hosted Proxmox agent to acknowledge a relayed command. Long ops (delete / reclone / snapshot / clone / provision) ack immediately and stream their result, but a busy (auto-prov cloning) or WAN-connected agent can be slow — raise the long-op window to avoid false "Agent response timeout" failures. Pushed to cs spokes on connect.</p>
+                <div class="flex flex-wrap items-end gap-3">
+                    <div class="space-y-1"><label class="${labelCls}">Long-op timeout (s)</label>
+                        <input type="number" id="relay-timeout-long" min="1" max="600" value="60" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                    <div class="space-y-1"><label class="${labelCls}">Fast timeout (s)</label>
+                        <input type="number" id="relay-timeout-fast" min="1" max="600" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                    <span id="relay-timeout-status" class="text-xs text-slate-400"></span>
+                </div>
+            </div>
+            <div class="${card}">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Appearance ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <p class="text-xs text-slate-400">Configure the header logo shown to the left of the title. Use <code>hpe-svg</code> for the built-in HPE mark, or any image URL/path.</p>
+                <div class="space-y-1">
+                    <label class="${labelCls}">Header logo URL / <code>hpe-svg</code></label>
+                    <input id="appearance-logo-url" type="text" class="${inputCls}" placeholder="hpe-svg">
+                </div>
+                <div class="flex items-center gap-2">
+                    <input id="appearance-show-logo" type="checkbox" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                    <label for="appearance-show-logo" class="text-sm text-slate-600">Show header logo</label>
+                </div>
+                <div class="flex justify-end items-center gap-3">
+                    <span id="appearance-status" class="text-xs text-slate-400"></span>
+                </div>
             </div>
         </div>
         <div class="${card}">
@@ -3612,40 +3655,17 @@ function _renderSetupGeneralTile(content) {
             </div>
         </div>
         <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Notifications ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-            <p class="text-xs text-slate-400">How long toast messages (success/error confirmations in the bottom/top-right corner) stay on screen before fading out. A visible dismiss (×) always closes one early regardless of this setting.</p>
-            <div class="flex items-center gap-3">
-                <label class="${labelCls}">Toast Duration (seconds)</label>
-                <input type="number" id="toast-duration-input" min="1" max="300" value="10"
-                    class="w-20 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                <span id="toast-duration-status" class="text-xs text-slate-400"></span>
+            <div class="flex justify-between items-center">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Data Cache ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <div class="flex items-center gap-3">
+                    <button onclick="refreshCacheNamespace()" class="${btnSecCls}" title="Refresh every cached module from the spokes now">Refresh now</button>
+                    <button onclick="purgeAllCaches()" class="${btnSecCls}" title="Drop all cached data; it is fetched again right away">Purge All</button>
+                </div>
+            </div>
+            <div id="cache-status-rows" class="mt-3 text-sm">
+                <p class="py-4 text-center text-slate-400 italic text-xs">Loading…</p>
             </div>
         </div>
-        <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Agent Relay Timeouts ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-            <p class="text-xs text-slate-400">How long a cs spoke waits for its hosted Proxmox agent to acknowledge a relayed command. Long ops (delete / reclone / snapshot / clone / provision) ack immediately and stream their result, but a busy (auto-prov cloning) or WAN-connected agent can be slow — raise the long-op window to avoid false "Agent response timeout" failures. Pushed to cs spokes on connect.</p>
-            <div class="flex flex-wrap items-end gap-3">
-                <div class="space-y-1"><label class="${labelCls}">Long-op timeout (s)</label>
-                    <input type="number" id="relay-timeout-long" min="1" max="600" value="60" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                <div class="space-y-1"><label class="${labelCls}">Fast timeout (s)</label>
-                    <input type="number" id="relay-timeout-fast" min="1" max="600" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                <span id="relay-timeout-status" class="text-xs text-slate-400"></span>
-            </div>
-        </div>
-        <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Appearance ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-            <p class="text-xs text-slate-400">Configure the header logo shown to the left of the title. Use <code>hpe-svg</code> for the built-in HPE mark, or any image URL/path.</p>
-            <div class="space-y-1">
-                <label class="${labelCls}">Header logo URL / <code>hpe-svg</code></label>
-                <input id="appearance-logo-url" type="text" class="${inputCls}" placeholder="hpe-svg">
-            </div>
-            <div class="flex items-center gap-2">
-                <input id="appearance-show-logo" type="checkbox" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
-                <label for="appearance-show-logo" class="text-sm text-slate-600">Show header logo</label>
-            </div>
-            <div class="flex justify-end items-center gap-3">
-                <span id="appearance-status" class="text-xs text-slate-400"></span>
-            </div>
         </div>`;
     loadSetupConfig();
     loadCacheStatus();
