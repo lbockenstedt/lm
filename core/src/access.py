@@ -903,6 +903,13 @@ def is_admin(sess) -> bool:
     return bool(p.get("admin") or p.get("role") == "admin")
 
 
+def is_read_only(sess) -> bool:
+    """True for a read-only (probe) account: it can view whatever its role
+    allows, but the HTTP middleware rejects every write it attempts."""
+    p = (sess or {}).get("user", {}).get("permissions", {})
+    return bool(p.get("read_only"))
+
+
 def is_tenant_admin(sess) -> bool:
     """True if this session belongs to a **tenant-level Admin**.
 

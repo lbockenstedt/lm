@@ -12,6 +12,14 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-10-26
 
+### Users & access
+
+- **Read-only accounts.** Settings → Users → Add/Edit User has a **Read-only**
+  checkbox (Global Admin only). The account sees everything its role allows,
+  but the hub rejects every change it attempts (403, logged as
+  `[read-only] BLOCKED`); it can still log out. Meant for automated UI checks
+  such as the AB walker — see [security-pentest.md](security-pentest.md).
+
 ### Hypervisors (Proxmox)
 
 - **Snapshot schedules.** Hypervisors → Settings → Snapshot schedules snapshots
