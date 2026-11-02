@@ -1473,7 +1473,7 @@ async function loadUsers() {
             // Global Admins can sign in as any other user to see what they see.
             const canImpersonate = isAdmin() && !currentUser?.impersonator && userId !== currentUser?.user_id;
             const impersonateBtn = canImpersonate
-                ? `<button data-uid="${escapeHtml(userId)}" onclick="startImpersonation(this.dataset.uid)" class="text-amber-500 hover:text-amber-700 text-xs font-bold mr-3" title="Act as this user with their permissions and tenants">Impersonate</button>`
+                ? `<button data-impersonate="${encodeURIComponent(userId)}" class="text-amber-500 hover:text-amber-700 text-xs font-bold mr-3" title="Act as this user with their permissions and tenants">Impersonate</button>`
                 : '';
 
             // Resolve a human label for directory (Entra/LDAP) users from the

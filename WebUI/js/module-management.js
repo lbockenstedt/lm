@@ -1556,8 +1556,13 @@ function _renderImpersonationBanner() {
     const bar = document.createElement('div');
     bar.id = 'impersonation-banner';
     bar.className = 'fixed top-0 left-1/2 -translate-x-1/2 z-[100] mt-1 flex items-center gap-3 px-4 py-1.5 rounded-b-lg bg-amber-500 text-white text-xs font-bold shadow-lg';
-    bar.innerHTML = `<span>Impersonating ${escapeHtml(who)} (signed in as ${escapeHtml(imp.display_name || imp.user_id)})</span>
-        <button onclick="stopImpersonation()" class="px-2 py-0.5 rounded bg-white text-amber-700 hover:bg-amber-50 uppercase tracking-wider text-[10px]">Stop impersonating</button>`;
+    const label = document.createElement('span');
+    label.textContent = `Impersonating ${who} (signed in as ${imp.display_name || imp.user_id})`;
+    const stop = document.createElement('button');
+    stop.className = 'px-2 py-0.5 rounded bg-white text-amber-700 hover:bg-amber-50 uppercase tracking-wider text-[10px]';
+    stop.textContent = 'Stop impersonating';
+    stop.addEventListener('click', stopImpersonation);
+    bar.append(label, stop);
     document.body.appendChild(bar);
 }
 
@@ -1573,6 +1578,12 @@ async function _switchIdentity(url, body) {
     localStorage.removeItem('lm_tenant');
     window.location.reload();
 }
+
+// Users table "Impersonate" buttons carry data-impersonate (URI-encoded id).
+document.addEventListener('click', (ev) => {
+    const btn = ev.target.closest?.('[data-impersonate]');
+    if (btn) startImpersonation(decodeURIComponent(btn.dataset.impersonate));
+});
 
 async function startImpersonation(userId) {
     if (!userId) return;
