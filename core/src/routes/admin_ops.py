@@ -416,10 +416,41 @@ def register(app, hub, ctx):
         return {k: (res or {}).get(k) for k in
                 ("status", "reachable", "device_info", "netbox_push", "errors", "message")}
 
+    @app.post("/admin/ops/nw-delete")
+    async def admin_ops_nw_delete(request: Request):
+        """Remove network devices from the LM fleet (same effect as the WebUI
+        delete). Body: {"device_ids": [...]}. NetBox/Zabbix records are left to
+        their own sync. Returns the removed names and re-pushed spokes."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        ids = {str(x) for x in ((body or {}).get("device_ids") or []) if x}
+        if not ids:
+            raise HTTPException(status_code=400, detail="device_ids required")
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        devices = gc.get("nw_devices", []) or []
+        victims = [d for d in devices if isinstance(d, dict) and d.get("id") in ids]
+        devices[:] = [d for d in devices if not (isinstance(d, dict) and d.get("id") in ids)]
+        hub.state._mark_dirty()
+        spokes = {d.get("spoke_id") for d in victims if d.get("spoke_id")}
+        pushed = []
+        for sid in spokes:
+            try:
+                if await hub.nw_push_fleet(sid):
+                    pushed.append(sid)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("admin_ops: nw-delete re-push %s failed: %s", sid, e)
+        logger.warning("admin_ops: nw-delete removed %s", [d.get("name") for d in victims])
+        return {"removed": [{"id": d.get("id"), "name": d.get("name"),
+                             "address": d.get("address")} for d in victims],
+                "pushed": pushed}
+
     @app.post("/admin/ops/nw-scan")
     async def admin_ops_nw_scan(request: Request):
-        """Run the tenant's saved-config network scan (preview only unless the
-        saved config has auto_add). Body: {"tenant": "default", optional
+        """Run the tenant's saved-config network scan (adds identified devices
+        unless the schedule is preview-only or auto_add is off). Body: {"tenant": "default", optional
         "targets": [ips] to scan only those, "dry_run": bool to override the
         schedule's preview flag}. Detail is in the hub log ("nw scan tenant=...")."""
         _guard(request)
