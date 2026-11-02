@@ -1195,7 +1195,7 @@ async function pxmxDeploySpokeSubmit(uniqueId) {
         if (r.ok && data && data.status === 'SUCCESS') {
             const startedMsg = data.started ? 'started — it will self-onboard shortly'
                 : (data.start_error ? `NOT started (${data.start_error}) — boot it manually` : 'left stopped');
-            showToast(`Deployed ${data.deployed_name} (VMID ${data.vmid}, spoke ${data.spoke_id}) — ${startedMsg}`, data.started || !start ? 'success' : 'error');
+            showToast(`Deployed ${data.deployed_name} (VMID ${data.vmid}, spoke ${_spokeLabelFor(data.spoke_id)}) — ${startedMsg}`, data.started || !start ? 'success' : 'error');
             const modal = document.getElementById('pxmx-deploy-modal');
             if (modal) modal.remove();
             setTimeout(() => loadPxmxData('Virtual Machines'), 1200);
