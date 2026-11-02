@@ -108,48 +108,12 @@ from hub_bug_store import HubBugStoreMixin
 from hub_spoke_registry import SpokeRegistryMixin
 from hub_statuspage import StatusPageMixin
 
-# Shared logging config (lm/core/src/logging_setup.py). Two-tier import +
-# inline fallback keep the hub booting even if /opt/lm/core is briefly stale
-# (same deploy-order class as the base_spoke import). Single source of truth
-# for format/level/destination across every hub/spoke/agent entrypoint.
+# Shared logging config (lm/core/src/logging_setup.py): one source of truth for
+# format/level/destination across every hub/spoke/agent entrypoint.
 try:
-    from logging_setup import configure_logging, set_log_level, truncate_log_files
+    from logging_setup import configure_logging, truncate_log_files
 except ImportError:
-    try:
-        from core.src.logging_setup import configure_logging, set_log_level, truncate_log_files
-    except ImportError:
-        import logging as _logging
-        _FMT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        _DFMT = '%Y-%m-%d %H:%M:%S'
-        def configure_logging(default_level=_logging.INFO, *, log_file=None, **_):
-            handlers = ([_logging.FileHandler(log_file), _logging.StreamHandler()]
-                        if log_file else None)
-            _logging.basicConfig(level=default_level, force=True,
-                                 format=_FMT, datefmt=_DFMT, handlers=handlers)
-        def set_log_level(enabled):
-            lvl = _logging.DEBUG if enabled else _logging.INFO
-            _logging.getLogger().setLevel(lvl)
-            for _n in list(_logging.root.manager.loggerDict):
-                _logging.getLogger(_n).setLevel(lvl)
-            return lvl
-        def truncate_log_files(log_dir="/var/log/lm"):
-            truncated = []
-            try:
-                names = os.listdir(log_dir)
-            except Exception:
-                return truncated
-            for name in names:
-                if not name.endswith(".log"):
-                    continue
-                path = os.path.join(log_dir, name)
-                try:
-                    if os.path.isfile(path):
-                        with open(path, "w"):
-                            pass
-                        truncated.append(name)
-                except Exception:  # noqa: BLE001
-                    pass
-            return truncated
+    from core.src.logging_setup import configure_logging, truncate_log_files
 
 configure_logging()
 logger = logging.getLogger("Hub")
