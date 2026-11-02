@@ -6190,6 +6190,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         else:
             self.ldap_server_agents.discard(pk)
         if hello.zabbix_server:
+            if pk not in self.zabbix_server_agents:
+                logger.info("[cert] %s advertises zabbix-server (Monitoring web UI) "
+                            "cert-target capability", pk)
             self.zabbix_server_agents.add(pk)
         else:
             self.zabbix_server_agents.discard(pk)
