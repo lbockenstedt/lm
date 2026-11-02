@@ -969,3 +969,58 @@ def test_zabbix_deploy_roles_append_quoted_flags():
     assert cmd[-1].endswith("--infra-only --server zbx.example.com --proxy-name 't1; rm -rf /'")
     srv = agent._build_deploy_cmd("zabbix-server", _DEPLOY_ROLES["zabbix-server"], {})
     assert srv[-1].endswith("--infra-only") and "install_zabbix_server.sh" in srv[-1]
+
+
+def _zbx_pem_pair(tmp_path):
+    import subprocess as sp
+    sp.run(["openssl", "req", "-x509", "-nodes", "-newkey", "rsa:2048", "-days", "1",
+            "-subj", "/CN=zabbix.test", "-keyout", str(tmp_path / "n.key"),
+            "-out", str(tmp_path / "n.crt")], check=True, capture_output=True)
+    return (tmp_path / "n.crt").read_text(), (tmp_path / "n.key").read_text()
+
+
+def _zbx_setup(tmp_path, monkeypatch, nginx_t_rc):
+    conf = tmp_path / "nginx.conf"
+    crt, key = tmp_path / "web.crt", tmp_path / "web.key"
+    conf.write_text(f"server {{\n        listen 443 ssl;\n        ssl_certificate {crt};\n"
+                    f"        ssl_certificate_key {key};\n}}\n")
+    crt.write_text("OLD-CRT"); key.write_text("OLD-KEY")
+    monkeypatch.setattr(agent_spoke, "_ZABBIX_NGINX_CONF", str(conf))
+    monkeypatch.setattr(agent_spoke, "is_zabbix_web_host", lambda: True)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        rc = nginx_t_rc if cmd[:2] == ["nginx", "-t"] else 0
+        return types.SimpleNamespace(returncode=rc, stdout="", stderr="bad cert" if rc else "")
+    monkeypatch.setattr(agent_spoke.subprocess, "run", fake_run)
+    return crt, key, calls
+
+
+def test_zabbix_cert_install_swaps_files_and_reloads_nginx(tmp_path, monkeypatch):
+    fc, pk = _zbx_pem_pair(tmp_path)
+    crt, key, calls = _zbx_setup(tmp_path, monkeypatch, 0)
+    agent = GenericAgent("agent-z", {})
+    res = asyncio.run(agent._install_zabbix_cert(
+        {"domain": "zabbix.test", "fullchain": fc, "privkey": pk, "module_type": "zabbix-server"}))
+    assert res["status"] == "SUCCESS", res
+    assert crt.read_text() == fc and key.read_text() == pk
+    assert ["systemctl", "reload", "nginx"] in calls
+
+
+def test_zabbix_cert_install_rolls_back_when_nginx_test_fails(tmp_path, monkeypatch):
+    fc, pk = _zbx_pem_pair(tmp_path)
+    crt, key, calls = _zbx_setup(tmp_path, monkeypatch, 1)
+    agent = GenericAgent("agent-z", {})
+    res = asyncio.run(agent._install_zabbix_cert(
+        {"domain": "zabbix.test", "fullchain": fc, "privkey": pk}))
+    assert res["status"] == "ERROR" and "rolled back" in res["message"]
+    assert crt.read_text() == "OLD-CRT" and key.read_text() == "OLD-KEY"
+    assert ["systemctl", "reload", "nginx"] not in calls
+
+
+def test_agent_advertises_zabbix_server_capability(monkeypatch):
+    monkeypatch.setattr(agent_spoke, "is_zabbix_web_host", lambda: True)
+    assert AgentControlPlane._extra_auth_fields(object()).get("zabbix_server") is True
+    monkeypatch.setattr(agent_spoke, "is_zabbix_web_host", lambda: False)
+    assert "zabbix_server" not in AgentControlPlane._extra_auth_fields(object())

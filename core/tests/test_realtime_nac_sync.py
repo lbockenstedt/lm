@@ -53,13 +53,6 @@ def test_interval_clamps_to_60_floor():
     assert m._rt_nac_interval() == 60.0   # default
 
 
-def test_norm_mac_canonicalizes_and_drops_unknown():
-    assert RealtimeIpamNacSyncMixin._rt_norm_mac("AA-BB-CC-DD-EE-05") == "aa:bb:cc:dd:ee:05"
-    assert RealtimeIpamNacSyncMixin._rt_norm_mac("aabbccddeeff") == "aa:bb:cc:dd:ee:ff"
-    assert RealtimeIpamNacSyncMixin._rt_norm_mac("") == ""
-    assert RealtimeIpamNacSyncMixin._rt_norm_mac("unknown") == ""
-
-
 # ── canned-relay hub (async) ─────────────────────────────────────────────────
 
 class _FakeSimulationsStore:

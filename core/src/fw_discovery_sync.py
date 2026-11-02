@@ -44,7 +44,6 @@ Audience: Hub developers.
 
 from __future__ import annotations
 
-import re
 import asyncio
 import datetime as _dt
 import logging
@@ -55,7 +54,7 @@ try:
 except Exception:  # pragma: no cover - access always importable in-app
     fetch_tenant_prefixes = None  # type: ignore
     attribute_by_prefix = None  # type: ignore
-from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import norm_mac, unwrap_spoke  # sibling leaf (no main/api back-import)
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
@@ -229,22 +228,6 @@ class FwDiscoverySyncMixin:
 
     # ── pull / attribute / push ─────────────────────────────────────────────
 
-    @staticmethod
-    def _fw_norm_mac(m: Any) -> str:
-        """Canonical lower-colon MAC (``aa:bb:cc:dd:ee:ff``) for dedup + payload.
-
-        '' for an absent/unknown MAC — the netbox sink tolerates a blank mac
-        (it keys device matching by IP). Non-hex garbage is returned stripped
-        lower so two spellings of the same MAC still dedup.
-        """
-        s = str(m or "").strip().lower()
-        if not s or s == "unknown":
-            return ""
-        hexd = re.sub(r"[^0-9a-f]", "", s)
-        if len(hexd) == 12:
-            return ":".join(hexd[i:i + 2] for i in range(0, 12, 2))
-        return s
-
     async def _fw_pull_discovered(self, source_entry: Dict[str, str]
                                   ) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
         """Pull DHCP leases + ARP from every connected spoke of ONE source, merge + dedup.
@@ -298,7 +281,7 @@ class FwDiscoverySyncMixin:
                     # ...nor on field names: Kea returns its native
                     # ip-address/hw-address rather than ip/mac.
                     ip = str(row.get("ip") or row.get("ip-address") or "").strip()
-                    mac = self._fw_norm_mac(row.get("mac") or row.get("hw-address"))
+                    mac = norm_mac(row.get("mac") or row.get("hw-address"))
                     hostname = str(row.get("hostname") or "").strip()
                     if hostname == "unknown":
                         hostname = ""
