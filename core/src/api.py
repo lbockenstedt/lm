@@ -1379,6 +1379,17 @@ def create_app(hub):
         if isinstance(sess, dict):
             sess["last_seen"] = time.time()
 
+        # Read-only (probe) accounts — e.g. the AB UI walker — see everything
+        # their role allows but may change nothing. Console/shell WebSockets
+        # need a ticket minted by a POST, so blocking writes here covers them.
+        if (access.is_read_only(sess)
+                and request.method not in ("GET", "HEAD", "OPTIONS")
+                and path != "/auth/logout"):
+            logger.warning("[read-only] BLOCKED user=%s %s %s",
+                           (sess or {}).get("user_id"), request.method, path)
+            return JSONResponse(status_code=403,
+                                content={"detail": "Read-only account — changes are not allowed"})
+
         # /setup/* and /admin/* are admin-only
         if path.startswith("/setup/") or path.startswith("/admin/"):
             if not _is_admin(sess):

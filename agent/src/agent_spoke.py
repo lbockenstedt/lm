@@ -233,6 +233,7 @@ _LDAP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/ldap/main/
 # installer URL is the lm raw path (not a sibling repo like netbox/ldap).
 _ZBX_SERVER_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbix/main/install_zabbix_server.sh"
 _ZBX_PROXY_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbix/main/install_zbxproxy.sh"
+_ZBX_AGENT_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbix/main/install_zbxagent.sh"
 _DNS_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dns/install_dns.sh"
 _DHCP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dhcp/install_dhcp.sh"
 
@@ -296,6 +297,12 @@ _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
     },
     "zbxproxy": {
         "cmd": _infra_install_cmd(_ZBX_PROXY_INSTALLER_URL),
+        "module_type": "agent",
+    },
+    # Active zabbix-agent2 that reports to the tenant's local proxy (the hub
+    # resolves the proxy address/name at load time).
+    "zbxagent": {
+        "cmd": _infra_install_cmd(_ZBX_AGENT_INSTALLER_URL),
         "module_type": "agent",
     },
 }
@@ -363,6 +370,8 @@ _DEPLOY_ROLE_MARKERS = {
     "dhcp-server": "/usr/sbin/kea-dhcp4",
     "zabbix-server": "/usr/sbin/zabbix_server",
     "zbxproxy": "/usr/sbin/zabbix_proxy",
+    # The proxy install also lays down zabbix-agent2, so key off the LM drop-in.
+    "zbxagent": "/etc/zabbix/zabbix_agent2.d/lm-agent.conf",
 }
 
 # The service binary alone is ambiguous for dhcp-server: the simulation role's
@@ -415,6 +424,7 @@ _DEPLOY_ROLE_UNITS = {
     "dhcp-server": ("kea-dhcp4-server", "kea-ctrl-agent"),
     "zabbix-server": ("zabbix-server",),
     "zbxproxy": ("zabbix-proxy",),
+    "zbxagent": ("zabbix-agent2",),
 }
 
 # Units a cluster deploy ALSO leaves behind. They are stopped on unload but are
@@ -465,6 +475,11 @@ _DEPLOY_ROLE_PURGE = {
         "packages": ("zabbix-proxy-sqlite3",),
         "unit_files": (),
         "paths": ("/etc/zabbix/zabbix_proxy.conf", "/var/lib/zabbix/zabbix_proxy.db"),
+    },
+    "zbxagent": {
+        "packages": ("zabbix-agent2",),
+        "unit_files": (),
+        "paths": ("/etc/zabbix/zabbix_agent2.d/lm-agent.conf",),
     },
 }
 
@@ -1160,22 +1175,44 @@ class GenericAgent(BaseSpoke):
             extra = self._service_worker_install_args(role_name, config or {})
             if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
                 cmd[-1] = cmd[-1] + extra
-        elif role_name in ("zabbix-server", "zbxproxy"):
+        elif role_name in ("zabbix-server", "zbxproxy", "zbxagent"):
             extra = self._zabbix_install_args(role_name, config or {})
             if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
                 cmd[-1] = cmd[-1] + extra
         return cmd
 
     @staticmethod
+    def _write_zabbix_tls(config: dict) -> dict:
+        """Persist hub-issued PEMs under /etc/zabbix/tls (so the key never appears
+        on a command line) and point the installer flags at the files."""
+        pems = {"tls_ca": config.pop("tls_ca_pem", None), "tls_cert": config.pop("tls_cert_pem", None),
+                "tls_key": config.pop("tls_key_pem", None)}
+        if not all(pems.values()):
+            return config
+        d = Path("/etc/zabbix/tls")
+        d.mkdir(parents=True, exist_ok=True)
+        for key, pem in pems.items():
+            path = d / f"lm-{key[4:]}.pem"
+            path.write_text(pem)
+            path.chmod(0o600 if key == "tls_key" else 0o644)
+            config[key] = str(path)
+        return config
+
+    @staticmethod
     def _zabbix_install_args(role_name: str, config: dict) -> str:
         """Project LOAD_ROLE config into zabbix installer flags (shlex-quoted)."""
         flags = {"zabbix-server": (("db_host", "db-host"), ("db_port", "db-port"),
                                    ("db_name", "db-name"), ("db_user", "db-user"),
-                                   ("db_pass", "db-pass"), ("server_name", "server-name")),
+                                   ("db_pass", "db-pass"), ("server_name", "server-name"),
+                                   ("tls_ca", "tls-ca"), ("tls_cert", "tls-cert"),
+                                   ("tls_key", "tls-key")),
                  "zbxproxy": (("server", "server"), ("proxy_name", "proxy-name"),
                               ("tls_ca", "tls-ca"), ("tls_cert", "tls-cert"),
+                              ("tls_key", "tls-key")),
+                 "zbxagent": (("proxy", "proxy"), ("hostname", "hostname"),
+                              ("tls_ca", "tls-ca"), ("tls_cert", "tls-cert"),
                               ("tls_key", "tls-key"))}[role_name]
-        config = dict(config)
+        config = GenericAgent._write_zabbix_tls(dict(config))
         if role_name == "zbxproxy" and not config.get("server"):
             logger.error("zbxproxy: LOAD_ROLE config has no 'server'; the hub should supply it "
                          "from the Monitoring page setting")
@@ -2060,6 +2097,19 @@ class GenericAgent(BaseSpoke):
                         "tail": tail}
             except Exception as e:
                 logger.error("NetBox admin password reset raised: %s", e)
+                return {"status": "ERROR", "message": str(e)}
+
+        if cmd == "GET_PRIMARY_IP":
+            # Address other hosts on this node's LAN reach it at (the hub uses it
+            # to point a tenant's monitoring agents at the local proxy).
+            def _primary_ip():
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+                    sk.connect(("192.0.2.1", 9))
+                    return sk.getsockname()[0]
+            try:
+                return {"status": "SUCCESS", "ip": await asyncio.to_thread(_primary_ip),
+                        "hostname": socket.gethostname().split(".")[0]}
+            except OSError as e:
                 return {"status": "ERROR", "message": str(e)}
 
         if cmd == "UNINSTALL_ROLE":

@@ -61,6 +61,7 @@ DEPLOY_ROLES = frozenset({
     "dhcp-server",
     "zabbix-server",
     "zbxproxy",
+    "zbxagent",
 })
 
 
