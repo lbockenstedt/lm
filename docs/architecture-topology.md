@@ -38,7 +38,6 @@ LM is a zero-trust hub/spoke/agent management mesh for a lab/DC lab. One **hub**
   - **ab** is an **agent-type WS client** of the hub (`module_type="agent"`), not a spoke — it consumes hub logs and can trigger spoke self-updates; it does not register a spoke module.
 - **Bridges:**
   - pxmx spoke bridges hub ↔ pxmx-agent (`pxmx/src/control_plane.py` `run_agent_server`).
-  - `core/src/gateway/spoke_gateway.py::SpokeGateway` bridges hub ↔ leaf agents on `0.0.0.0:8767` (legacy path).
   - `core/src/gateway/cs_bridge.py::CSBridgePoller` polls the cs spoke inbox for CS-enabled pxmx agents and relays `CS_COMMAND` down, acks terminal results, syncs USB config.
 - **Where the "brain" lives:** the Client-Sim VM auto-provisioning brain is the **pxmx agent** (`pxmx/agent/src/usb_provision.py:run_provision_loop`) — *not* the hub, *not* the cs spoke. The cs spoke is **relay-only** for Proxmox (it ingests telemetry and surfaces a `provision` diagnostic, but the gate/VMID-gap-audit/clone logic runs in the agent).
 

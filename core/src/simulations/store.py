@@ -733,15 +733,6 @@ class SimulationsStore:
                 out[tid] = dict(st)
         return out
 
-    # ── Hypervisor → NetBox VM-sync last-run status (Setup → IPAM) ──────────
-    # Per-tenant result of the most recent VM sync cycle (background loop or
-    # on-demand "Sync now"). Persisted so the UI still shows the last run after
-    # a hub restart. Shape: {status, pushed, errors, skipped, deleted, message,
-    # last_sync_ts, tenant_name, vms_total}.
-    async def get_vm_sync_status(self, tenant_id: str) -> Dict[str, Any]:
-        """Return the tenant's last VM-sync status (empty if never run)."""
-        return dict(self._data.get(tenant_id, {}).get("vm_sync", {}))
-
     async def set_vm_sync_status(self, tenant_id: str,
                                  status: Dict[str, Any]) -> None:
         """Replace the tenant's VM-sync status and persist."""
@@ -762,15 +753,6 @@ class SimulationsStore:
             if st:
                 out[tid] = dict(st)
         return out
-
-    # ── Firewall → NetBox device-discovery sync last-run status (Setup → Sync) ─
-    # Per-tenant result of the most recent firewall-discovery sync cycle
-    # (background loop or on-demand "Sync now"). Persisted so the UI still shows
-    # the last run after a hub restart. Shape: {status, pushed, errors, skipped,
-    # deleted, discovered_total, message, last_sync_ts, tenant_name}.
-    async def get_fw_discovery_sync_status(self, tenant_id: str) -> Dict[str, Any]:
-        """Return the tenant's last firewall-discovery-sync status (empty if never run)."""
-        return dict(self._data.get(tenant_id, {}).get("fw_discovery_sync", {}))
 
     async def set_fw_discovery_sync_status(self, tenant_id: str,
                                             status: Dict[str, Any]) -> None:
@@ -819,15 +801,6 @@ class SimulationsStore:
             tracked[source_label] = sorted(set(tenant_ids or []))
             await self._asave()
 
-    # ── Network Devices → NetBox device-discovery sync last-run status ────────
-    # Per-tenant result of the most recent nw-discovery sync cycle (background
-    # loop or on-demand "Sync now"). Persisted so the UI still shows the last
-    # run after a hub restart. Shape: {status, pushed, errors, skipped, deleted,
-    # discovered_total, message, last_sync_ts, tenant_name}.
-    async def get_nw_discovery_sync_status(self, tenant_id: str) -> Dict[str, Any]:
-        """Return the tenant's last nw-discovery-sync status (empty if never run)."""
-        return dict(self._data.get(tenant_id, {}).get("nw_discovery_sync", {}))
-
     async def set_nw_discovery_sync_status(self, tenant_id: str,
                                            status: Dict[str, Any]) -> None:
         """Replace the tenant's nw-discovery-sync status and persist."""
@@ -846,15 +819,6 @@ class SimulationsStore:
                 out[tid] = dict(st)
         return out
 
-    # ── TrueNAS → NetBox inventory-discovery sync last-run status ─────────────
-    # Per-tenant result of the most recent truenas-discovery sync cycle
-    # (background loop or on-demand "Sync now"). Persisted so the UI still shows
-    # the last run after a hub restart. Shape: {status, pushed, errors, skipped,
-    # deleted, discovered_total, message, last_sync_ts, tenant_name}.
-    async def get_truenas_discovery_sync_status(self, tenant_id: str) -> Dict[str, Any]:
-        """Return the tenant's last truenas-discovery-sync status (empty if never run)."""
-        return dict(self._data.get(tenant_id, {}).get("truenas_discovery_sync", {}))
-
     async def set_truenas_discovery_sync_status(self, tenant_id: str,
                                                 status: Dict[str, Any]) -> None:
         """Replace the tenant's truenas-discovery-sync status and persist."""
@@ -872,16 +836,6 @@ class SimulationsStore:
             if st:
                 out[tid] = dict(st)
         return out
-
-    # ── Realtime NAC → IPAM reverse sync last-run status (Setup → Sync) ───────
-    # Per-tenant result of the most recent realtime ClearPass Access Tracker →
-    # NetBox pull (background loop or on-demand "Sync now"). Persisted so the UI
-    # still shows the last run after a hub restart. Shape: {status, pushed,
-    # errors, skipped, deleted, sessions_total, message, last_sync_ts,
-    # tenant_name}.
-    async def get_realtime_nac_sync_status(self, tenant_id: str) -> Dict[str, Any]:
-        """Return the tenant's last realtime-NAC-sync status (empty if never run)."""
-        return dict(self._data.get(tenant_id, {}).get("realtime_nac_sync", {}))
 
     async def set_realtime_nac_sync_status(self, tenant_id: str,
                                            status: Dict[str, Any]) -> None:
@@ -982,11 +936,6 @@ class SimulationsStore:
         recipients:[...], last_sent} — the scheduled health-report config."""
         return dict(self._data.get(tenant_id, {}).get("email_report", {}))
 
-    async def set_email_report(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
-        async with self._lock:
-            self._tenant(tenant_id)["email_report"] = cfg or {}
-            await self._asave()
-
     # ── notifications (smtp / teams / email) ───────────────────────────────
     async def get_notifications(self, tenant_id: str) -> Dict[str, Any]:
         return dict(self._data.get(tenant_id, {}).get("notifications", {}))
@@ -1077,12 +1026,6 @@ class SimulationsStore:
     async def get_global_learned_pending(self) -> Dict[str, Any]:
         v = self._global().get("global_learned_pending")
         return dict(v) if isinstance(v, dict) else {}
-
-    async def set_global_learned_pending(self, mapping: Dict[str, Any]) -> None:
-        async with self._lock:
-            self._global()["global_learned_pending"] = (
-                dict(mapping) if isinstance(mapping, dict) else {})
-            await self._asave()
 
     # ── GLOBAL simulation sharing (stacking) + N/A hide (Setup → Simulations) ──
     # Platform-wide (all tenants) authoritative per-sim shareable/stackable map

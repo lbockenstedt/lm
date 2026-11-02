@@ -299,21 +299,6 @@ class TMClient:
             self.credential = cred
         return body
 
-    async def request_subscription(self, channel: str,
-                                   mode: str = "subscribe") -> Dict[str, Any]:
-        """Ask for a feed after enrolment, as modules are turned on.
-
-        Enrolment does not have to know every channel an install will ever
-        want; a tenant enabling the threat or simulation database later says so
-        here rather than re-enrolling, which would mean a second credential for
-        the same install.
-        """
-        body = await self._post("/v1/subscriptions",
-                                {"channel": channel, "mode": mode})
-        if body is None:
-            return {"status": "error", "channel": channel}
-        return body
-
     async def report(self, records: Sequence[Dict[str, Any]],
                      channel: str = CHANNEL_THREAT) -> Dict[str, Any]:
         """Publish observations, after filtering.

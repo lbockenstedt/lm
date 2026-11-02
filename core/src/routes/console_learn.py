@@ -143,7 +143,3 @@ def learn_identity(hub, sig: str, vendor: Optional[str],
     entries[sig] = _touch(entry)
     _save(hub)
 
-
-def all_entries(hub) -> Dict[str, Any]:
-    """A copy of the learned DB entries (for a diagnostics/admin view)."""
-    return dict(_db(hub).get("entries") or {})
