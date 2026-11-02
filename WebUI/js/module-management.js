@@ -1503,6 +1503,8 @@ async function _initApp() {
             chip.classList.add('flex');
         }
 
+        _renderImpersonationBanner();
+
         const savedTheme = localStorage.getItem('lm_theme') || 'default';
         setTheme(savedTheme);
 
@@ -1543,6 +1545,47 @@ async function refreshOidcButton() {
         // Hub unreachable / older build without the endpoint → hide the button.
         wrap.classList.add('hidden');
     }
+}
+
+// ── Impersonation (Global Admin acts as another user) ──
+function _renderImpersonationBanner() {
+    document.getElementById('impersonation-banner')?.remove();
+    const imp = currentUser?.impersonator;
+    if (!imp) return;
+    const who = currentUser.display_name || currentUser.user_id;
+    const bar = document.createElement('div');
+    bar.id = 'impersonation-banner';
+    bar.className = 'fixed top-0 left-1/2 -translate-x-1/2 z-[100] mt-1 flex items-center gap-3 px-4 py-1.5 rounded-b-lg bg-amber-500 text-white text-xs font-bold shadow-lg';
+    bar.innerHTML = `<span>Impersonating ${escapeHtml(who)} (signed in as ${escapeHtml(imp.display_name || imp.user_id)})</span>
+        <button onclick="stopImpersonation()" class="px-2 py-0.5 rounded bg-white text-amber-700 hover:bg-amber-50 uppercase tracking-wider text-[10px]">Stop impersonating</button>`;
+    document.body.appendChild(bar);
+}
+
+async function _switchIdentity(url, body) {
+    const r = await fetch(url, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+    // The tenant view belongs to the previous identity; start fresh.
+    localStorage.removeItem('lm_tenant');
+    window.location.reload();
+}
+
+async function startImpersonation(userId) {
+    if (!userId) return;
+    const ok = await showConfirmToast(`Impersonate ${userId}? You will see LabManager with their permissions and tenants until you click Stop impersonating.`,
+        { confirmLabel: 'Impersonate', danger: false });
+    if (!ok) return;
+    try { await _switchIdentity('/auth/impersonate', { user_id: userId }); }
+    catch (e) { showToast(`Impersonation failed: ${e.message}`, 'error'); }
+}
+
+async function stopImpersonation() {
+    try { await _switchIdentity('/auth/impersonate/stop'); }
+    catch (e) { showToast(`Could not stop impersonating: ${e.message}`, 'error'); }
 }
 
 function doOidcLogin() {

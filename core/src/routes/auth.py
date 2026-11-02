@@ -1,7 +1,7 @@
 """Auth routes: login, me, logout, first-run setup, session prefixes."""
 from api import (
     HTTPException, JSONResponse, Request, _SESSION_TTL, _client_ip,
-    _cookie_secure, _hash_password, _lockout_key, _login_check, _login_fail,
+    _cookie_secure, _end_impersonation, _hash_password, _lockout_key, _login_check, _login_fail,
     _login_success, _record_session, _save_sessions, _sessions,
     _verify_password, cache_kick_login,
     get_netbox_spoke, get_tenant_scoping, logger, os, secrets, time,
@@ -172,6 +172,8 @@ def register(app, hub, ctx):
             data = {}
         name = str(data.get("name") or "api token")[:64]
         sess = _session_user(request)
+        if sess and sess.get("impersonator"):
+            raise HTTPException(status_code=403, detail="Not allowed while impersonating a user")
         if sess and not sess.get("api_token"):   # a cookie session mints for itself
             user_id = sess.get("user_id")
             snap = sess.get("user") or {}
@@ -246,6 +248,8 @@ def register(app, hub, ctx):
         tid = str(data.get("id") or "").strip()
         if not tid:
             raise HTTPException(status_code=400, detail="token id required")
+        if sess.get("impersonator"):
+            raise HTTPException(status_code=403, detail="Not allowed while impersonating a user")
         ok = api_tokens.revoke(hub, sess.get("user_id"), tid)
         return {"status": "ok" if ok else "not_found"}
 
@@ -300,7 +304,13 @@ def register(app, hub, ctx):
         merged["default_tenant"] = _default_tenant(hub, live, merged)
         # Keep session in sync so middleware checks stay consistent
         sess["user"] = merged
-        return {"status": "ok", **merged}
+        out = {"status": "ok", **merged}
+        imp = sess.get("impersonator")
+        if imp:
+            out["impersonator"] = {"user_id": imp.get("user_id"),
+                                   "display_name": imp.get("display_name") or imp.get("user_id"),
+                                   "started": imp.get("started")}
+        return out
 
     @app.put("/auth/default-tenant")
     async def set_default_tenant(request: Request):
@@ -332,6 +342,75 @@ def register(app, hub, ctx):
         await hub.state.save_state_now()
         sess["user"]["default_tenant"] = tenant or None
         return {"status": "ok", "default_tenant": tenant or None}
+
+    @app.post("/auth/impersonate")
+    async def impersonate_start(request: Request):
+        """Global Admin only: switch the caller's session to act as another
+        registered user (``{"user_id": ...}``). The session takes the target's
+        effective permissions and tenants; the admin identity is kept under
+        ``impersonator`` so ``/auth/impersonate/stop`` can restore it."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or sess.get("api_token"):
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        if sess.get("impersonator"):
+            raise HTTPException(status_code=409, detail="Already impersonating; stop first")
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Global Admin access required")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        target = str((data or {}).get("user_id") or "").strip()
+        admin_id = sess.get("user_id") or sess["user"].get("user_id")
+        if not target:
+            raise HTTPException(status_code=400, detail="user_id required")
+        if target == admin_id:
+            raise HTTPException(status_code=400, detail="You cannot impersonate yourself")
+        record = hub.state.system_state.get("users", {}).get(target)
+        if not record:
+            raise HTTPException(status_code=404, detail=f"Unknown user '{target}'")
+        snap = _user_snapshot(hub, target, record)
+        snap["name"] = str(record.get("name") or "")
+        snap["email"] = str(record.get("email") or "")
+        snap["display_name"] = snap["name"] or snap["email"] or target
+        snap["default_tenant"] = _default_tenant(hub, record, snap)
+        admin_user = sess.get("user") or {}
+        sess["impersonator"] = {
+            "user_id": admin_id,
+            "display_name": admin_user.get("display_name") or admin_id,
+            "user": admin_user,
+            "started": time.time(),
+        }
+        sess["user_id"] = target
+        sess["user"] = snap
+        sess.pop("prefixes", None)
+        sess.pop("prefixes_at", None)
+        _save_sessions(hub)
+        logger.warning("IMPERSONATION start: admin=%s target=%s ip=%s sid=%s",
+                       admin_id, target, _client_ip(request), sess.get("sid"))
+        cache_kick_login(hub, snap)
+        return {"status": "ok", **snap,
+                "impersonator": {"user_id": admin_id,
+                                 "display_name": sess["impersonator"]["display_name"],
+                                 "started": sess["impersonator"]["started"]}}
+
+    @app.post("/auth/impersonate/stop")
+    async def impersonate_stop(request: Request):
+        """End an impersonation and restore the admin's own identity."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        imp = sess.get("impersonator")
+        if not imp:
+            raise HTTPException(status_code=400, detail="Not impersonating")
+        target = sess.get("user_id")
+        _end_impersonation(sess)
+        _save_sessions(hub)
+        logger.warning("IMPERSONATION stop: admin=%s target=%s ip=%s sid=%s",
+                       sess.get("user_id"), target, _client_ip(request), sess.get("sid"))
+        return {"status": "ok", "user_id": sess.get("user_id")}
 
     @app.post("/auth/logout")
     async def auth_logout(request: Request):
