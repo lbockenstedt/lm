@@ -687,6 +687,14 @@ function _renderOsUpdatesView(content) {
                 </div>
                 <button onclick="osuSaveWindow()" class="${btnSecCls}">Save</button>
             </div>
+            <div class="${osuFleetCls} flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
+                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer self-center" title="Before patching a node that runs in a Proxmox VM, LM snapshots that VM (manual deploys and auto-patch). If the snapshot fails the node is not patched. Proxmox hosts themselves (bare metal) are patched without a snapshot."><input type="checkbox" id="osu-snap-enabled" class="w-4 h-4 text-green-600 rounded" checked>Snapshot VMs before patching</label>
+                <div class="space-y-1">
+                    <label class="${labelCls}" title="Older pre-patch snapshots (lm-prepatch-*) beyond this count are deleted">Keep</label>
+                    <input type="number" id="osu-snap-keep" min="1" max="20" step="1" value="2" class="${inputCls} w-20">
+                </div>
+                <button onclick="osuSaveSnapshot()" class="${btnSecCls}">Save</button>
+            </div>
             <div class="flex flex-wrap items-center gap-2">
                 <button onclick="osuCheck()" class="${btnSecCls}">↻ Check for updates</button>
                 <button id="osu-apply-selected" onclick="osuApplySelected()" class="${btnCls}" disabled>Deploy selected (0)</button>
@@ -763,8 +771,29 @@ async function osuLoadAutoPatch() {
         document.getElementById('osu-autopatch-security').value = cfg.security_only !== false ? 'security' : 'all';
         document.getElementById('osu-autopatch-exclude').value = (cfg.exclude || []).join(', ');
         osuShowWindow(cfg.window);
+        osuShowSnapshot(cfg.snapshot);
     } catch (e) { /* best-effort */ }
 }
+
+function osuShowSnapshot(snap) {
+    if (!snap) return;
+    document.getElementById('osu-snap-enabled').checked = !!snap.enabled;
+    document.getElementById('osu-snap-keep').value = snap.keep;
+}
+
+window.osuSaveSnapshot = async function () {
+    const snapshot = {
+        enabled: document.getElementById('osu-snap-enabled').checked,
+        keep: parseInt(document.getElementById('osu-snap-keep').value, 10),
+    };
+    try {
+        const cfg = await apiJson('/api/os-updates/auto-patch', { method: 'POST', body: JSON.stringify({ snapshot }) });
+        osuShowSnapshot(cfg.snapshot);
+        showToast(cfg.snapshot.enabled
+            ? `VMs are snapshotted before patching (keeping ${cfg.snapshot.keep}).`
+            : 'Pre-patch snapshots turned off.', 'success');
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+};
 
 function osuShowWindow(w) {
     if (!w) return;
@@ -1100,6 +1129,11 @@ const _OSU_BADGE_CLS = {
 };
 const _osuBadge = (text, color, title) => `<span class="text-[10px] font-bold ${_OSU_BADGE_CLS[color]} border rounded-full px-2 py-0.5"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(text)}</span>`;
 
+function _osuVmLabel(n) {
+    if (n.vm) return ` · <span title="Snapshotted before patching">VM ${escapeHtml(n.vm.name)} (${escapeHtml(String(n.vm.vmid))}@${escapeHtml(n.vm.node)})</span>`;
+    return n.vm_note ? ` · <span title="Not snapshotted before patching">${escapeHtml(n.vm_note)}</span>` : '';
+}
+
 function _osuRender(d) {
     window._osuData = d;
     const body = document.getElementById('osu-body');
@@ -1138,7 +1172,8 @@ function _osuRender(d) {
         const feats = n.features || [];
         const item = run && (run.items || []).find(i => i.key === key);
         let state;
-        if (item && item.status === 'applying') state = _osuBadge('applying…', 'blue');
+        if (item && item.status === 'snapshotting') state = _osuBadge('snapshotting…', 'blue');
+        else if (item && item.status === 'applying') state = _osuBadge('applying…', 'blue');
         else if (item && item.status === 'rebooting') state = _osuBadge('rebooting…', 'blue');
         else if (item && item.status === 'failed') state = _osuBadge('failed', 'red');
         else if (item && item.status === 'interrupted') state = _osuBadge('interrupted', 'red');
@@ -1182,10 +1217,11 @@ function _osuRender(d) {
         let msg = '';
         if (item && item.message) msg = `<div class="text-[11px] ${item.status === 'done' ? 'text-slate-500' : 'text-red-600'} mt-1">${escapeHtml(item.message)}</div>`;
         else if (item && item.status === 'done' && item.mode === 'packages') msg = `<div class="text-[11px] text-slate-500 mt-1">upgraded ${escapeHtml((item.packages || []).join(', '))}</div>`;
+        if (item && item.snapshot) msg += `<div class="text-[11px] text-slate-500 mt-1">snapshot: ${escapeHtml(item.snapshot)}</div>`;
         if (item && item.auto_reboot) msg += `<div class="text-[11px] ${item.auto_reboot.startsWith('failed') ? 'text-red-600' : 'text-slate-500'} mt-1">reboot: ${escapeHtml(item.auto_reboot)}</div>`;
         return `<div class="border border-slate-200 rounded-md p-3 mb-2">
             <div class="flex flex-wrap items-center justify-between gap-2">
-              <span class="flex items-center gap-2 text-xs font-bold text-slate-600">${nodeBox}${escapeHtml(n.label)} <span class="font-normal text-slate-400">${escapeHtml(n.kind)}${n.flavor ? ' · ' + escapeHtml(n.flavor) : ''}${n.pve_cluster && n.pve_cluster.name ? ' · PVE cluster ' + escapeHtml(n.pve_cluster.name) : ''}</span></span>
+              <span class="flex items-center gap-2 text-xs font-bold text-slate-600">${nodeBox}${escapeHtml(n.label)} <span class="font-normal text-slate-400">${escapeHtml(n.kind)}${n.flavor ? ' · ' + escapeHtml(n.flavor) : ''}${n.pve_cluster && n.pve_cluster.name ? ' · PVE cluster ' + escapeHtml(n.pve_cluster.name) : ''}${_osuVmLabel(n)}</span></span>
               <span class="flex flex-wrap items-center gap-2 justify-end">${autoBox}${rebootBox}${rebootBtn}${reboot}${state}</span>
             </div>${detail}${blocker}${msg}</div>`;
     }).join('');

@@ -12,6 +12,20 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-10-26
 
+### Hypervisors (Proxmox)
+
+- **Snapshot schedules.** Hypervisors → Settings → Snapshot schedules snapshots
+  picked VMs, or every VM with a Proxmox tag or in a pool, every N hours and
+  keeps the last K. See [pxmx.md](pxmx.md#how-to-use-it).
+
+### OS Updates
+
+- **Snapshot before patching.** A node that runs in a Proxmox VM is snapshotted
+  (`lm-prepatch-*`, keep 2 by default) right before it is patched — manual
+  deploys and auto-patch. If the snapshot fails the node is not patched. Each
+  node shows the VM it was matched to; Proxmox hosts themselves are bare metal
+  and are patched without one. Toggle it under "Snapshot VMs before patching".
+
 ### Firewalls (OPNsense)
 
 - **Network impairment tab.** Firewalls → Impairment adds latency and packet

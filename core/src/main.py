@@ -76,6 +76,7 @@ from security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
 from cryptography.exceptions import InvalidTag
 from api import build_server, _refresh_module_all_tenants
 from hub_os_updates import HubOsUpdatesMixin
+import vm_snapshots
 from hub_mtls_enforcement import HubMtlsEnforcementMixin
 from update_pipeline import UpdatePipelineMixin
 from endpoint_sync import EndpointSyncMixin
@@ -11216,6 +11217,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Auto-patch only inside its maintenance window (default 01:00-05:00),
         # once per window. See run_os_updates_autopatch_loop.
         os_updates_autopatch_task = asyncio.create_task(self.run_os_updates_autopatch_loop())
+        # VM snapshot schedules (vm_snapshots.py; Hypervisors → Settings):
+        # snapshot chosen VMs / tags / pools every N hours, keeping the last K.
+        vm_snapshot_task = asyncio.create_task(vm_snapshots.run_loop(self))
         # Hub self-backup (SelfBackupMixin): on a schedule (backup_interval_hours)
         # takes a rotated, optionally Fernet-encrypted tarball of hub state +
         # the key/secret stores under <state_dir>/self-backup/, and optionally
