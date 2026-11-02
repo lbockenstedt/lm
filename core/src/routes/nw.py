@@ -2072,7 +2072,10 @@ def register(app, hub, ctx):
         # family. Always reported now — on a discovery-only (credential-free)
         # scan this IS the result, and even on a credentialed scan it is the
         # actionable "something is here that I can't manage yet" list.
-        reachable = [d for o in scans for d in (o.get("reachable") or [])]
+        # The spoke's ``reachable`` list includes identified hosts too; keep only
+        # the unclassified ones so they aren't logged/handled as UNIDENTIFIED.
+        reachable = [d for o in scans for d in (o.get("reachable") or [])
+                     if not d.get("object_type")]
         scan = {"scanned": sum(int(o.get("scanned") or 0) for o in scans)}
 
         # Existing addresses for this tenant (dedup) — an identified device that
@@ -2205,15 +2208,19 @@ def register(app, hub, ctx):
             "added": added,
         }
 
-    async def _run_nw_scheduled_scan(tenant_id):
+    async def _run_nw_scheduled_scan(tenant_id, targets=None, dry_run=None):
         """System-initiated recurring scan for one tenant (called by the hub's
         run_nw_scan_schedule_loop). Uses the tenant's saved scan config +
         schedule; ``dry_run`` honors the schedule's preview flag (else the scan
-        config's auto_add)."""
+        config's auto_add). Admin ops may pass explicit ``targets`` (scanned
+        instead of the tenant's IP sources) and override ``dry_run``."""
         saved = _nw_scan_config(hub, tenant_id)
         sched = _nw_scan_schedule(hub, tenant_id)
-        data = {"dry_run": bool(sched.get("dry_run", True)),
+        data = {"dry_run": bool(sched.get("dry_run", True)) if dry_run is None else bool(dry_run),
                 "auto_add": bool(saved.get("auto_add", False))}
+        if targets:
+            data["targets"] = list(targets)
+            data["ip_sources"] = ["explicit"]  # no aggregated sources, targets only
         return await _execute_nw_scan(tenant_id, saved, sess=None, data=data)
 
     # Expose the system scan executor + schedule reader to the hub so the
