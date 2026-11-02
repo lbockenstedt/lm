@@ -280,10 +280,3 @@ class NwCacheMixin:
         await self._nw_cache_file.flush_now()
 
     # ── staleness ─────────────────────────────────────────────────────────────
-
-    def nw_cache_fleet_state(self) -> str:
-        """Shared staleness verdict for the fleet snapshot (``cache_core``
-        vocabulary: fresh/refresh/stale/expired/missing). Routes use this rather
-        than comparing ages themselves, so "badge it" and "finally error" mean
-        the same thing here as on every other page."""
-        return self.nw_policy.classify(self.nw_cache_fleet_fetched_at())

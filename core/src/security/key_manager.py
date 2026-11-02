@@ -508,16 +508,6 @@ class KeyManager:
         key = self.keys.get(spoke_id)
         return key.secret if key else None
 
-    def sign_with_secret(self, secret: str, message_dict: Dict[str, Any]) -> str:
-        """Sign a message with an EXPLICIT secret instead of ``keys[spoke_id]``.
-
-        Used only for ``SPOKE_UPDATE_SESSION_KEY`` delivery: the push carries
-        the new session secret but must be signed with the PREVIOUS secret the
-        spoke still holds so it can verify and dispatch it. See
-        ``main.py send_to_spoke(signing_secret=...)``.
-        """
-        return MessageSigner(secret).sign(message_dict)
-
     def encode_frame(self, spoke_id: str, message_dict: Dict[str, Any]) -> str:
         """Serialize + sign ``message_dict`` into the wire form ``<sig>.<body>``
         using the spoke's current key. The receiver verifies the RECEIVED body

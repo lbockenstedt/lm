@@ -84,10 +84,10 @@ by tenant.
 
 ## Refresh flow (tenant or admin → restore to host, DESTRUCTIVE)
 
-**Refresh Template(s)** on **VM Server / VMs**: select one/some/all hosts and refresh
-each host's template from its latest stored backup. For each host the hub resolves
-the latest complete template by `source_spoke` (`latest_complete_for_spoke`), checks
-tenant ownership, mints a `_refresh_token`, and relays
+**Refresh Template(s)** on **VM Server / VMs** (`POST /tenant/templates/refresh-hosts`)
+is seed-and-distribute: one stored backup (the given `template_id`, default the newest
+complete template the caller owns) is restored onto every selected host. For each
+target host the hub checks tenant ownership, mints a `_refresh_token`, and relays
 `SPOKE_RELAY REFRESH_TEMPLATE {template_id, template_vmid, download_url, refresh_token}`.
 
 The agent runs the sequence (background task, reports each step via

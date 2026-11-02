@@ -1,10 +1,10 @@
 """Threat-monitor shared trusted-list unification (nsg-unify-blockcfg).
 
-Covers the three pure-logic changes:
+Covers the pure-logic changes:
   1. One-time ``_never`` → ``global_config['azure_nsg']['entries']`` migration
      (union + dedup by CIDR + normalize; existing descriptions preserved).
   2. ``_is_exempt`` honors the shared entries (a bare IP matches its /32 entry).
-  3. ``priority_conflict_warning`` (Deny priority must be < Allow priority).
+  3. ``validate_nsg_priorities`` (Deny priority must be < Allow priority).
 """
 import importlib.util
 import json
@@ -42,7 +42,6 @@ def _load_from_src(modname, relpath):
 _load_from_src("azure_nsg", "azure_nsg.py")
 _tm = _load_from_src("security.threat_monitor", os.path.join("security", "threat_monitor.py"))
 ThreatMonitor = _tm.ThreatMonitor
-priority_conflict_warning = _tm.priority_conflict_warning
 validate_nsg_priorities = _tm.validate_nsg_priorities
 
 
@@ -189,14 +188,6 @@ def test_validate_nsg_priorities_unparseable():
     assert ok is False and "integer" in msg
     ok, msg = validate_nsg_priorities(300, None)
     assert ok is False and "integer" in msg
-
-
-def test_priority_conflict_warning_backcompat_alias():
-    # Legacy arg order is (block, allow). "" when valid (allow < block < 1000).
-    assert priority_conflict_warning(400, 300) == ""      # deny=400, allow=300 — OK
-    assert priority_conflict_warning(300, 300) != ""      # equal — violation
-    assert priority_conflict_warning(200, 300) != ""      # deny < allow — violation (new rule)
-    assert priority_conflict_warning(1500, 300) != ""     # deny >= 1000 — violation
 
 
 def test_fresh_defaults_satisfy_invariant():
