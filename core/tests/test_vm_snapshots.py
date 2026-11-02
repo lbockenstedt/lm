@@ -23,7 +23,7 @@ _VMS = [
 
 class _State:
     def __init__(self):
-        self.system_state = {"global_config": {}}
+        self.system_state = {"global_config": {}, "subnet_filter_modules": {"hypervisor": False}}
 
     def _mark_dirty(self):
         pass
@@ -39,9 +39,13 @@ class _Hub:
         self.fail = set(fail)
         self.calls = []
 
+    # Tenant "t1" sees VM 101 through its spokes/tag; tenant "t2" sees nothing.
+    scoped = {"t1": [_VMS[0]], "t2": []}
+
     def warm_get(self, ns, key):
-        assert (ns, key) == ("pxmx_vms", "_all_|agent=")
-        return {"vms": self.vms}
+        assert ns == "pxmx_vms"
+        scope = key.split("|")[0]
+        return {"vms": self.vms if scope == "_all_" else self.scoped.get(scope, [])}
 
     def get_hypervisor_spoke(self):
         return "px"
@@ -189,3 +193,35 @@ def test_schedule_routes_are_global_admin_only():
     c, _ = _client(is_admin=False)
     assert c.get("/api/vm-snapshots/schedules").status_code == 403
     assert c.post("/api/vm-snapshots/schedules", json={}).status_code == 403
+
+
+# ── tenant scope ──────────────────────────────────────────────────────────────
+
+def test_tenant_vms_are_its_own_plus_every_vm_on_a_host_pinned_to_it():
+    hub = _Hub()
+    assert [vm["vmid"] for vm in _run(vm_snapshots.tenant_vms(hub, "t1"))] == [101]
+    hub.state.system_state["agent_config"] = {"g2": {"client_simulation": {"tenant_id": "T1"}}}
+    hub.agent_info["g2"]["hostname"] = "pve2"
+    assert sorted(vm["vmid"] for vm in _run(vm_snapshots.tenant_vms(hub, "t1"))) == [101, 102, 103]
+
+
+def test_a_schedule_only_snapshots_its_tenants_vms():
+    hub = _Hub()
+    s = vm_snapshots.save_schedule(hub, {"name": "all lab", "every_hours": 1, "keep": 1,
+                                         "vms": ["C/pve2/102"], "tags": ["lab"]}, tenant="t1")
+    res = _run(vm_snapshots.run_schedule(hub, s["id"]))
+    assert [r["vmid"] for r in res["results"]] == [101]
+
+
+def test_schedules_are_per_tenant_in_the_api():
+    c, _ = _client()
+    body = {"name": "Lab", "every_hours": 24, "keep": 3, "tags": ["lab"]}
+    sid = c.post("/api/vm-snapshots/schedules?tenant=t1", json=body).json()["id"]
+    t1 = c.get("/api/vm-snapshots/schedules?tenant=t1").json()
+    assert [s["id"] for s in t1["schedules"]] == [sid] and [v["vmid"] for v in t1["vms"]] == [101]
+    t2 = c.get("/api/vm-snapshots/schedules?tenant=t2").json()
+    assert t2["schedules"] == [] and t2["vms"] == []
+    assert c.put(f"/api/vm-snapshots/schedules/{sid}?tenant=t2", json=body).status_code == 404
+    assert c.post(f"/api/vm-snapshots/schedules/{sid}/run?tenant=t2").status_code == 404
+    assert c.delete(f"/api/vm-snapshots/schedules/{sid}?tenant=t2").status_code == 404
+    assert c.delete(f"/api/vm-snapshots/schedules/{sid}?tenant=t1").status_code == 200
