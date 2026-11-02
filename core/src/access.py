@@ -1699,22 +1699,9 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
         return _remember(_from_warm(), _PREFIX_FAIL_TTL)
 
 
-async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
-                             ) -> Tuple[Dict[str, List[Dict[str, Any]]], int]:
-    """Bucket records by tenant via IP prefix containment.
-
-    Builds the tenant→networks map once per call (concurrent prefix fetch via
-    ``fetch_tenant_prefixes``, bounded so hundreds of tenants don't stampede the
-    netbox spoke), then assigns each record to the first tenant whose prefix
-    contains its IP. Records with no IP, an unparseable IP, or an IP no tenant
-    owns are ``dropped`` (counted) — keeps NetBox tenant-authoritative, no
-    orphans. Returns ``({tenant_id: [records]}, dropped_count)``.
-
-    Extracted from ``FwDiscoverySyncMixin._fw_attribute`` so the firewall-
-    discovery sync and the realtime NAC→IPAM reverse sync share one attribution
-    path. ``records`` carry an ``ip`` field (anything else is opaque to this
-    helper); the caller normalizes MACs etc.
-    """
+async def _tenant_networks(hub) -> Dict[str, List[Any]]:
+    """{tenant_id: [ip_network]} from each tenant's NetBox prefixes (tenant
+    groups excluded; the built-in Admin tenant always included)."""
     tenants = (hub.state.tenant_state or {}).get("tenants", {}) or {}
     tids = [str(tid) for tid, c in tenants.items()
             if not (isinstance(c, dict) and c.get("is_tenant_group"))]
@@ -1748,6 +1735,27 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
         for tid, nets in await asyncio.gather(*(_nets_for(tid) for tid in tids)):
             nets_by_tid[tid] = nets
 
+    return nets_by_tid
+
+
+async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
+                             ) -> Tuple[Dict[str, List[Dict[str, Any]]], int]:
+    """Bucket records by tenant via IP prefix containment.
+
+    Builds the tenant→networks map once per call (concurrent prefix fetch via
+    ``fetch_tenant_prefixes``, bounded so hundreds of tenants don't stampede the
+    netbox spoke), then assigns each record to the first tenant whose prefix
+    contains its IP. Records with no IP, an unparseable IP, or an IP no tenant
+    owns are ``dropped`` (counted) — keeps NetBox tenant-authoritative, no
+    orphans. Returns ``({tenant_id: [records]}, dropped_count)``.
+
+    Extracted from ``FwDiscoverySyncMixin._fw_attribute`` so the firewall-
+    discovery sync and the realtime NAC→IPAM reverse sync share one attribution
+    path. ``records`` carry an ``ip`` field (anything else is opaque to this
+    helper); the caller normalizes MACs etc.
+    """
+    nets_by_tid = await _tenant_networks(hub)
+    tids = list(nets_by_tid)
     buckets: Dict[str, List[Dict[str, Any]]] = {}
     dropped = 0
     for rec in records:
@@ -1773,6 +1781,28 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
         else:
             dropped += 1
     return buckets, dropped
+
+
+async def foreign_tenant_ips(hub, tenant_id, ips) -> set:
+    """The ``ips`` NetBox assigns to a tenant other than ``tenant_id`` (most
+    specific prefix wins). Unowned IPs and IPs of the shared tenant are not
+    foreign. Empty when NetBox is unreachable."""
+    nets_by_tid = await _tenant_networks(hub)
+    mine = str(tenant_id or ADMIN_TENANT_ID)
+    foreign = set()
+    for ip in ips:
+        try:
+            addr = ipaddress.ip_address(str(ip).split("/")[0].strip())
+        except ValueError:
+            continue
+        best = None
+        for tid, nets in nets_by_tid.items():
+            for net in nets:
+                if addr in net and (best is None or net.prefixlen > best[1]):
+                    best = (tid, net.prefixlen)
+        if best and not same_tenant(best[0], mine) and not tenant_is_shared(best[0]):
+            foreign.add(str(ip))
+    return foreign
 
 
 async def resolve_prefixes(hub, sess) -> list:

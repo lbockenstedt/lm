@@ -110,3 +110,20 @@ async def test_attribute_by_prefix_does_not_duplicate_explicit_default_record():
     buckets, dropped = await attribute_by_prefix(hub, records)
     assert buckets[ADMIN_TENANT_ID] == [{"ip": "10.20.0.5"}]
     assert dropped == 0
+
+
+@pytest.mark.asyncio
+async def test_foreign_tenant_ips_uses_most_specific_owner():
+    hub = _FakeHub(
+        tenants={"lrb": {"netbox_tenant_slug": "lrb"},
+                 "ra": {"netbox_tenant_slug": "ra"},
+                 "central": {"netbox_tenant_slug": "central"},
+                 "group:x": {"is_tenant_group": True, "netbox_tenant_slug": "central"}},
+        prefixes_by_tenant={"default": ["172.21.0.0/16"], "lrb": ["172.16.0.0/23"],
+                            "ra": ["172.16.0.0/16"], "central": ["10.21.0.0/16"]})
+    ips = ["10.21.16.11", "172.16.1.1", "172.16.9.1", "172.21.0.33", "100.100.0.254", "bad"]
+    assert await access.foreign_tenant_ips(hub, ADMIN_TENANT_ID, ips) == {
+        "10.21.16.11", "172.16.1.1", "172.16.9.1"}
+    # lrb's /23 beats ra's /16; ra's other addresses stay foreign to lrb.
+    assert await access.foreign_tenant_ips(hub, "lrb", ips) == {
+        "10.21.16.11", "172.16.9.1", "172.21.0.33"}
