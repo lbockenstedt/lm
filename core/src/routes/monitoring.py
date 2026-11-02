@@ -45,11 +45,16 @@ async def inventory_devices(hub):
              and str(n["name"]).casefold() not in names]
     for d in list(inv) + extra:
         tenant = d.get("tenant") or d.get("tenant_id") or "default"
-        # The credential the scan verified, then the tenant bucket, then the
-        # Global Admin slot as the shared default.
-        community = (d.get("snmp_community") or by_ref.get(d.get("snmp_secret") or "")
+        # Credentials never cross tenants: the verified credential and the
+        # tenant bucket only count when they belong to this device's tenant.
+        # Only the Admin/Default tenant may use the Global Admin slot.
+        ref = d.get("snmp_secret") or ""
+        ref_bucket = ref.split(":")[1] if ref.startswith("snmp:") and ref.count(":") >= 2 else None
+        own = {tenant} | ({cred_vault.ADMIN_BUCKET} if tenant == "default" else set())
+        community = (d.get("snmp_community")
+                     or (by_ref.get(ref, "") if ref_bucket in own else "")
                      or tenant_snmp.get(tenant)
-                     or tenant_snmp.get(cred_vault.ADMIN_BUCKET, ""))
+                     or (tenant_snmp.get(cred_vault.ADMIN_BUCKET, "") if tenant == "default" else ""))
         out.append({"tenant": tenant, "name": d.get("name"),
                     "type": d.get("type") or d.get("object_type") or d.get("model") or "",
                     "ip": str(d.get("address") or "").split("/")[0],
@@ -71,7 +76,7 @@ def vault_snmp_scan_sets(hub, tenant):
     gc = hub.state.system_state.get("global_config", {})
     out = []
     for bucket, secrets in ((gc.get("cred_vault", {}) or {}).get("secrets", {}) or {}).items():
-        if bucket not in (tenant, cred_vault.ADMIN_BUCKET):
+        if bucket != tenant and not (tenant == "default" and bucket == cred_vault.ADMIN_BUCKET):
             continue
         for name, meta in (secrets or {}).items():
             if isinstance(meta, dict) and meta.get("type") == "snmp" and meta.get("mode") == "hub":
