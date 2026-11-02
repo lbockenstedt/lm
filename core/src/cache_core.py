@@ -259,14 +259,6 @@ class StalenessPolicy:
             return REFRESH
         return FRESH
 
-    def should_refresh(self, fetched_at, now=None) -> bool:
-        """
-        Should data be refreshed in background?
-
-        True for MISSING, REFRESH, STALE and EXPIRED.
-        """
-        return self.classify(fetched_at, now) != FRESH
-
     def is_stale(self, fetched_at, now=None) -> bool:
         """
         Is data stale (should be shown with badge)?
@@ -275,23 +267,6 @@ class StalenessPolicy:
         """
         c = self.classify(fetched_at, now)
         return c in (STALE, EXPIRED)
-
-    def is_expired(self, fetched_at, now=None) -> bool:
-        """
-        Is data expired (should surface an error)?
-
-        True only for EXPIRED.
-        """
-        return self.classify(fetched_at, now) == EXPIRED
-
-    def is_usable(self, fetched_at, now=None) -> bool:
-        """
-        Is data still usable?
-
-        True for anything except MISSING and EXPIRED.
-        """
-        c = self.classify(fetched_at, now)
-        return c not in (MISSING, EXPIRED)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

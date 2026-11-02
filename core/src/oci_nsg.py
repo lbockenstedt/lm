@@ -285,13 +285,6 @@ def _port_range(occfg: Dict[str, Any]) -> Dict[str, int]:
 # Shared with oci_vault.py — see oci_auth.py. Thin wrappers here just preserve
 # this module's existing OciNsgError type for callers/tests.
 
-def _signed_headers(cfg: OciConfig, method: str, url: str,
-                    body: Optional[bytes]) -> Dict[str, str]:
-    try:
-        return _oci_auth.signed_headers(cfg, method, url, body)
-    except _oci_auth.OciAuthError as e:
-        raise OciNsgError(str(e)) from e
-
 
 async def _oci_request(cfg: OciConfig, client: httpx.AsyncClient, method: str, url: str, *,
                        json_body: Optional[dict] = None) -> httpx.Response:

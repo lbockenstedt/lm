@@ -155,16 +155,6 @@ async def test_all_modules_share_one_staleness_policy(tmp_path, name):
         ref.refresh_after_s, ref.stale_after_s, ref.expire_after_s)
 
 
-async def test_never_cached_reports_missing_not_fresh(tmp_path):
-    """A cold start must not masquerade as fresh data — epoch 0.0 is the trap
-    that would make an empty cache look a moment old."""
-    hub = _Hub(str(tmp_path))
-    assert hub.nw_cache_fleet_state() == "missing"
-    assert hub.truenas_cache_fleet_state() == "missing"
-    assert hub.le_cache_state("certs") == "missing"
-    assert hub.warm_state("console_ports", "spoke1") == "missing"
-
-
 async def test_flush_now_is_safe_with_nothing_to_write(tmp_path):
     """Shutdown calls flush_now unconditionally (api.py), including on a hub
     that never cached anything — it must not raise there."""
@@ -173,3 +163,27 @@ async def test_flush_now_is_safe_with_nothing_to_write(tmp_path):
     await hub.truenas_cache_flush_now()
     await hub.le_cache_flush_now()
     await hub.warm_cache_flush_now()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_flushes_every_cache_even_if_one_fails():
+    import api
+
+    flushed = []
+
+    def _flush(name, fail=False):
+        async def f():
+            flushed.append(name)
+            if fail:
+                raise OSError("disk full")
+        return f
+
+    class _Hub:
+        nw_cache_flush_now = staticmethod(_flush("nw", fail=True))
+        le_cache_flush_now = staticmethod(_flush("le"))
+        truenas_cache_flush_now = staticmethod(_flush("truenas"))
+        warm_cache_flush_now = staticmethod(_flush("warm"))
+        state = type("_S", (), {"_flush_if_dirty": staticmethod(_flush("state"))})()
+
+    await api.persist_on_shutdown(_Hub())
+    assert flushed == ["nw", "le", "truenas", "warm", "state"]

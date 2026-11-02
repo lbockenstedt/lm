@@ -115,7 +115,7 @@ class _FakeHub(SearchIndexMixin):
 def test_leg_items_none_when_absent():
     hub = _FakeHub()
     assert hub.search_index_leg_items("NETBOX_SEARCH", "k1") is None
-    assert hub.search_leg_is_warm("NETBOX_SEARCH", "k1") is False
+    assert (hub.search_index_leg_items("NETBOX_SEARCH", "k1") is not None) is False
 
 
 def test_leg_items_fresh_then_stale():
@@ -124,7 +124,7 @@ def test_leg_items_fresh_then_stale():
     # fresh
     hub.warm_cache[ns] = {"k1": {"data": {"items": [{"name": "a"}], "at": time.time()}}}
     assert hub.search_index_leg_items("NETBOX_SEARCH", "k1") == [{"name": "a"}]
-    assert hub.search_leg_is_warm("NETBOX_SEARCH", "k1") is True
+    assert (hub.search_index_leg_items("NETBOX_SEARCH", "k1") is not None) is True
     # stale (older than TTL)
     hub.warm_cache[ns]["k1"]["data"]["at"] = time.time() - hub._search_index_ttl - 5
     assert hub.search_index_leg_items("NETBOX_SEARCH", "k1") is None
@@ -140,22 +140,22 @@ def test_populate_skips_empty_and_errors():
     # empty result set → not cached (leg stays on the live path)
     hub = _FakeHub(response={"payload": {"data": {"results": []}}})
     asyncio.run(hub._search_populate_leg("SEARCH_VMS", "spoke-h", "k1", {"q": ""}))
-    assert hub.search_leg_is_warm("SEARCH_VMS", "k1") is False
+    assert (hub.search_index_leg_items("SEARCH_VMS", "k1") is not None) is False
     # error envelope → not cached
     hub2 = _FakeHub(response={"payload": {"data": {"status": "ERROR", "message": "x"}}})
     asyncio.run(hub2._search_populate_leg("SEARCH_VMS", "spoke-h", "k1", {"q": ""}))
-    assert hub2.search_leg_is_warm("SEARCH_VMS", "k1") is False
+    assert (hub2.search_index_leg_items("SEARCH_VMS", "k1") is not None) is False
     # request_response raising → swallowed, not cached, no leg served
     hub3 = _FakeHub(response=RuntimeError("spoke down"))
     asyncio.run(hub3._search_populate_leg("SEARCH_VMS", "spoke-h", "k1", {"q": ""}))
-    assert hub3.search_leg_is_warm("SEARCH_VMS", "k1") is False
+    assert (hub3.search_index_leg_items("SEARCH_VMS", "k1") is not None) is False
 
 
 def test_populate_noop_without_spoke():
     hub = _FakeHub(response={"payload": {"data": {"results": [{"name": "x"}]}}})
     asyncio.run(hub._search_populate_leg("SEARCH_VMS", None, "k1", {"q": ""}))
     assert hub.requests == []  # never dialed
-    assert hub.search_leg_is_warm("SEARCH_VMS", "k1") is False
+    assert (hub.search_index_leg_items("SEARCH_VMS", "k1") is not None) is False
 
 
 def test_populate_caps_max_items(monkeypatch):

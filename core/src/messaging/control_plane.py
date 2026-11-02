@@ -3122,11 +3122,6 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         that survives an unbounded number of root-secret rotations."""
         self._persist_secret_to_env("LM_RECOVERY_PSK", new_psk)
 
-    def _sign(self, msg):
-        if not self.signer:
-            return None
-        return self.signer.sign(msg)
-
     def _encode_frame(self, msg) -> str:
         """Serialize + sign ``msg`` into the wire form ``<sig>.<body>`` (body
         serialized ONCE, signed over those exact bytes). Unsigned (empty sig)
