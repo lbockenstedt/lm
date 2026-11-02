@@ -3480,8 +3480,10 @@ async function showLoadRoleModal(spokeId) {
     }).join('');
     list.innerHTML = rows || '<p class="text-xs text-slate-400 italic col-span-3">All available roles are already loaded.</p>';
     const loadedControls = document.getElementById('loaded-role-controls');
+    // Deploy roles that own a background service (stop = Unload, purge = Uninstall).
+    const SERVICE_DEPLOY_ROLES = ['dns-server', 'dhcp-server', 'zabbix-server', 'zbxproxy'];
     const stoppableServers = [...activeDeployRoleIds]
-        .filter(id => (id === 'dns-server' || id === 'dhcp-server')
+        .filter(id => SERVICE_DEPLOY_ROLES.includes(id)
             && !(roleState.deploy?.state === 'running' && roleState.deploy?.role === id));
     // Servers whose package is still on disk. A role that was unloaded is
     // STOPPED but still installed, so it drops out of activeDeployRoleIds and
@@ -3490,7 +3492,7 @@ async function showLoadRoleModal(spokeId) {
     // too, which is the only action that clears the installed marker.
     const installedDeployRoleIds = new Set(roleState.installed_deploy_roles || []);
     const uninstallableServers = [...installedDeployRoleIds]
-        .filter(id => (id === 'dns-server' || id === 'dhcp-server')
+        .filter(id => SERVICE_DEPLOY_ROLES.includes(id)
             && !(roleState.deploy?.state === 'running' && roleState.deploy?.role === id));
     const loadedControlIds = [...new Set([
         ...(active || []).map(item => item.role),
@@ -3502,7 +3504,7 @@ async function showLoadRoleModal(spokeId) {
         loadedControls.innerHTML = `
             <p class="text-xs font-semibold text-slate-600 mb-2">Loaded roles and server services</p>
             <div class="flex flex-wrap gap-2">${loadedControlIds.map(id => {
-                const isServer = id.endsWith('-server');
+                const isServer = SERVICE_DEPLOY_ROLES.includes(id);
                 const moduleLoaded = isServer && loadedRoleIds.has(id.replace(/-server$/, ''));
                 const running = activeDeployRoleIds.has(id);
                 const installed = installedDeployRoleIds.has(id);
