@@ -75,3 +75,11 @@ def test_unusable_reply_is_not_recorded_and_is_asked_again(tmp_path):
     assert _get(hub) is None
     assert _get(hub)["model"] == "8325-48Y8C"
     assert hub.roles == ["final", "final"]       # catalog answers use the strongest model
+
+
+def test_legacy_null_record_without_an_explicit_unknown_is_asked_again(tmp_path):
+    device_specs._CACHE.clear()
+    (tmp_path / "device_specs.json").write_text(json.dumps(
+        {"models": {"cx_switch|jl635a": {"spec": None, "asked": 9e12}}}))
+    hub = _Hub(tmp_path, [json.dumps(_ANSWER)])
+    assert _get(hub)["model"] == "8325-48Y8C"
