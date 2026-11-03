@@ -22,6 +22,7 @@ from sync_loop import run_sync_loop  # sibling leaf
 from cert_distribution import (
     CERT_CAPABLE_MODULES as _CERT_CAPABLE_MODULES,
     _is_wildcard,
+    unwrap_spoke as _unwrap_spoke,
     distribute_cert_to_targets as _distribute_cert_to_targets,
     distribute_all_certs as _distribute_all_certs_impl,
     distribute_wildcard_to_all_spokes as _distribute_wildcard_to_all_spokes,
@@ -160,6 +161,34 @@ class HubCertDistributionMixin:
         if pushed_state:
             self._save_wildcard_push_state()
         self._stash_cert_device_reports(out)
+        return out
+
+    async def _redeploy_certs_to_target(self, module_type: str, spoke_id: str) -> list:
+        """Force-push every managed cert targeting ``module_type``/``spoke_id``
+        (identifier == the spoke, or empty = any spoke of that type). Used when
+        the device behind an existing target changes — e.g. a new/replaced
+        firewall is bound to an OPNsense spoke — because the le ledger still
+        records the old device as current and the sweep would skip it until
+        the next renewal. Targets are sent without their ledger hash, so
+        distribute_cert_to_targets never short-circuits."""
+        le_sid = self.get_spoke_by_type("certificates")
+        if not le_sid:
+            return []
+        ret = _unwrap_spoke(await self.request_response(le_sid, "LE_LIST_CERTS", {}, timeout=15.0))
+        if not (isinstance(ret, dict) and ret.get("status") == "SUCCESS"):
+            cert_log.warning("[cert] %s/%s re-deploy: LE_LIST_CERTS failed", module_type, spoke_id)
+            return []
+        inner = ret.get("data") if isinstance(ret.get("data"), dict) else ret
+        pk = self._primary_key(spoke_id)
+        out: list = []
+        for cert in inner.get("certs") or []:
+            for t in (cert or {}).get("targets") or []:
+                ident = (t or {}).get("identifier") or ""
+                if t.get("module_type") == module_type and (not ident or self._primary_key(ident) == pk):
+                    cert_log.info("[cert] %s → %s/%s: re-deploying (device changed)",
+                                  cert.get("domain"), module_type, ident or "*")
+                    out += await self._distribute_one_cert(
+                        le_sid, cert.get("domain"), [{"module_type": module_type, "identifier": ident}]) or []
         return out
 
     async def _distribute_all_certs(self, le_spoke_id: str) -> list:

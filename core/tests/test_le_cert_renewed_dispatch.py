@@ -137,3 +137,30 @@ def test_on_le_cert_renewed_install_failure_does_not_raise():
         hub, _LE, "example.com", [{"module_type": "firewall"}]))
     marks = [c for c in calls if c["cmd"] == "LE_MARK_DISTRIBUTED"]
     assert len(marks) == 1 and marks[0]["data"]["status"] == "ERROR"
+
+def test_redeploy_certs_to_target_forces_push_for_matching_firewall_targets():
+    """A new/replaced firewall on an existing target spoke gets every cert
+    targeting that spoke pushed (ledger hash dropped → never skipped)."""
+    import hub_cert_distribution as hcd
+
+    listed = {"payload": {"data": {"status": "SUCCESS", "data": {"certs": [
+        {"domain": "*.a.com", "targets": [
+            {"module_type": "firewall", "identifier": _FW, "last_pushed_hash": _H},
+            {"module_type": "nac", "identifier": "x"}]},
+        {"domain": "b.com", "targets": [{"module_type": "firewall", "identifier": "other"}]},
+    ]}}}}
+    rr, _ = _fake_rr({(_LE, "LE_LIST_CERTS"): listed})
+    pushed = []
+
+    class H:
+        request_response = staticmethod(rr)
+        get_spoke_by_type = staticmethod(lambda t: _LE)
+        _primary_key = staticmethod(lambda s: s)
+
+        async def _distribute_one_cert(self, le, domain, targets):
+            pushed.append((domain, targets))
+            return [{"domain": domain}]
+
+    out = _run(hcd.HubCertDistributionMixin._redeploy_certs_to_target(H(), "firewall", _FW))
+    assert pushed == [("*.a.com", [{"module_type": "firewall", "identifier": _FW}])]
+    assert out == [{"domain": "*.a.com"}]
