@@ -297,13 +297,26 @@ class HubOsUpdatesMixin:
 
     def osu_tenant_node_keys(self, tenants: "set[str]") -> "set[str]":
         """Node keys a tenant admin of ``tenants`` may see and patch: spokes
-        bound to one of those tenants, and the agents those spokes own. Never
-        the hub."""
+        bound to one of those tenants, and agents assigned to them. An agent's
+        own pinned tenant (agent_config → client_simulation.tenant_id, the
+        per-agent Tenant setting) wins over its owning spoke's tenant, so an
+        agent on a shared spoke still shows for its tenant. Never the hub."""
+        pk = getattr(self, "_primary_key", lambda k: k)
+        apk = getattr(self, "_agent_primary_key", lambda k: k)
+        agent_cfg = (self.state.system_state.get("agent_config", {}) or {})
+
+        def _spoke_tenant(sid):
+            return self.state.get_spoke_tenant(pk(sid)) or self.state.get_spoke_tenant(sid)
+
         keys = set()
         for t in self._osu_targets():
             if t["kind"] == "hub":
                 continue
-            if self.state.get_spoke_tenant(t["spoke_id"]) in tenants:
+            owner = ""
+            if t["kind"] == "agent":
+                ac = agent_cfg.get(apk(t["id"])) or agent_cfg.get(t["id"]) or {}
+                owner = str((ac.get("client_simulation") or {}).get("tenant_id") or "").strip()
+            if (owner or _spoke_tenant(t["spoke_id"])) in tenants:
                 keys.add(f"{t['kind']}:{t['id']}")
         return keys
 
