@@ -1806,7 +1806,8 @@ def register(app, hub, ctx):
     async def list_nw_scan_schedules(request: Request):
         """Every recurring network scan that is already set up, across the
         tenants the caller may see (a Global Admin sees all tenants; a
-        tenant-admin only their own). Answers "what scans are scheduled?"
+        tenant-admin only their own), narrowed to ``?tenant=`` when a tenant is
+        selected. Answers "what scans are scheduled?"
         without having to switch tenant context and read one card at a time.
 
         Each row carries the schedule (enabled / interval / dry-run), a summary
@@ -1825,6 +1826,9 @@ def register(app, hub, ctx):
             ids = list(all_t.keys())
         else:
             ids = [t for t in ((sess or {}).get("user", {}).get("tenants") or []) if t]
+        selected = str(request.query_params.get("tenant") or "").strip()
+        if selected:
+            ids = [t for t in ids if t == selected]
         runtime = getattr(hub, "nw_scan_runtime", {}) or {}
         gc = hub.state.system_state.get("global_config", {}) or {}
         all_sets = gc.get("nw_scan_credentials", []) or []
