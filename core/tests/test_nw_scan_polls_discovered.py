@@ -62,7 +62,7 @@ def test_one_failing_device_does_not_block_the_rest():
 
 def test_auto_add_branch_spawns_the_discovery_poll():
     src = NW_ROUTES.read_text(encoding="utf-8")
-    block = src[src.index("        if added:"):src.index('            "discovery_only": discovery_only,')]
+    block = src[src.index("        if added or alt_added:"):src.index('            "discovery_only": discovery_only,')]
     assert "_nw_push_fleet(hub, spoke_id)" in block
     assert "_nw_poll_discovered(hub, poll_ids)" in block
     assert block.index("_nw_push_fleet") < block.index("_nw_poll_discovered")

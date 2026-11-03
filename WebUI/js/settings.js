@@ -1844,7 +1844,10 @@ function _renderSetupModuleMgmtTile(content) {
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Managed Devices ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                    <button onclick="showAddDeviceModal()" class="${btnCls}">+ Add Device</button>
+                    <div class="flex gap-2">
+                        ${isAdmin() ? `<button onclick="mergeDuplicateDevices()" class="${btnSecCls}" title="Fold network devices found at several addresses (same serial / MAC) into one entry — the one NetBox and Zabbix use">Merge duplicates</button>` : ''}
+                        <button onclick="showAddDeviceModal()" class="${btnCls}">+ Add Device</button>
+                    </div>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Every managed module device in one place — firewalls, network devices, NAC, IPAM, directory, DNS, and DHCP instances. Click <strong>Add Device</strong> then choose the module type to attach.</p>
                 <div id="all-devices-tabs" class="mb-3"></div>
