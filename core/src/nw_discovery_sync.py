@@ -44,10 +44,11 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from access import attribute_by_prefix, norm_mac  # sibling leaf (no main/api back-import)
+    from access import attribute_by_prefix, norm_mac, nw_spoke_tenant  # sibling leaf (no main/api back-import)
 except Exception:  # pragma: no cover - access always importable in-app
     attribute_by_prefix = None  # type: ignore
     norm_mac = None  # type: ignore
+    nw_spoke_tenant = None  # type: ignore
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
@@ -260,6 +261,10 @@ class NwDiscoverySyncMixin:
             # Switch identity carried on every record so the NetBox device
             # records where the MAC was last seen.
             sw = {"source_switch_name": dname, "source_switch_ip": daddr}
+            # Tenant of the agent that saw the row: tenants overlap address
+            # space, so attribution prefers this tenant's VRF.
+            src_tid = str(device.get("tenant_id") or "").strip() or (
+                nw_spoke_tenant(self, sid) if nw_spoke_tenant else "")
             cmds = [se.get("arp_command", "NW_GET_ARP")]
             mac_cmd = se.get("mac_command")
             if mac_cmd:
@@ -292,6 +297,8 @@ class NwDiscoverySyncMixin:
                         rec.update(sw)
                         if port:
                             rec["source_switch_port"] = port
+                        if src_tid:
+                            rec["source_tenant_id"] = src_tid
                         raw.append(rec)
                 except Exception as e:
                     errors.append(f"{cmd}({dname}@{sid}): {e}")
@@ -302,15 +309,18 @@ class NwDiscoverySyncMixin:
                 fetches.append(_fetch(sid, device))
         await asyncio.gather(*fetches, return_exceptions=True)
 
-        # Merge + dedup: key by MAC (primary), else by ip:<ip>. Preserve the
-        # source-switch fields (fill from whichever sighting carried them) so a
-        # MAC-only sighting later enriched with an IP keeps its switch/port.
+        # Merge + dedup: key by MAC (primary), else by ip:<ip>, per discovering
+        # tenant — the same IP (or a VRRP/default-gateway MAC) in two tenants'
+        # VRFs is two devices. Preserve the source-switch fields (fill from
+        # whichever sighting carried them) so a MAC-only sighting later
+        # enriched with an IP keeps its switch/port.
         merged: Dict[str, Dict[str, str]] = {}
         for rec in raw:
             mac, ip = rec.get("mac", ""), rec.get("ip", "")
             key = mac if mac else (f"ip:{ip}" if ip else "")
             if not key:
                 continue
+            key = f"{rec.get('source_tenant_id', '')}|{key}"
             ex = merged.get(key)
             if ex is None:
                 merged[key] = dict(rec)
@@ -723,13 +733,18 @@ class NwDiscoverySyncMixin:
                     "deleted": 0, "interfaces_total": 0,
                     "message": f"same hardware as {primary}"}, errors, ""
 
-        # Attribute tenant by the device's mgmt-address prefix containment.
+        # Attribute tenant by the device's mgmt-address prefix containment,
+        # preferring the tenant the device (or its nw spoke) belongs to so an
+        # address that exists in several tenants' VRFs lands in its own.
         tenant_slug = ""
         if device_cfg.get("address") and attribute_by_prefix is not None:
             try:
+                src_tid = str(device_cfg.get("tenant_id") or "").strip() or (
+                    nw_spoke_tenant(self, device_cfg.get("spoke_id"))
+                    if nw_spoke_tenant and device_cfg.get("spoke_id") else "")
                 buckets, _dropped = await attribute_by_prefix(
                     self, [{"ip": str(device_cfg.get("address")), "mac": "",
-                            "hostname": ""}])
+                            "hostname": "", "source_tenant_id": src_tid}])
                 tid = next(iter(buckets), None)
                 if tid:
                     tcfg = self.state.get_tenant(tid) or {}

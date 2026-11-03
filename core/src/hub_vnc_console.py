@@ -371,9 +371,11 @@ class HubVncConsoleMixin:
                 "forcing %s (cross-tenant attribution refused)", spoke_id, claimed, base, base)
             return base
         # Shared / unassigned spoke with a differing claim: corroborate the claim
-        # against the claimed tenant's prefixes before honoring it.
+        # against the claimed tenant's prefixes before honoring it (the hint
+        # lets an address that overlaps another tenant's VRF still count).
         try:
-            buckets, _ = await access.attribute_by_prefix(self, [{"ip": device_ip or ""}])
+            buckets, _ = await access.attribute_by_prefix(
+                self, [{"ip": device_ip or "", "source_tenant_id": claimed}])
         except Exception:  # noqa: BLE001
             buckets = {}
         if device_ip and claimed in buckets:
