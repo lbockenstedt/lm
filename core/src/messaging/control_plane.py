@@ -95,7 +95,7 @@ _KEEPALIVE_CMDS = {
     # The newer/larger CPPM servers answer these slowly enough to blow the base
     # request_response timeout, so the nac agent must emit keepalives too.
     "CPPM_GET_NAC_STATUS", "CPPM_GET_SYSTEM_HEALTH", "CPPM_GET_ACCESS_TRACKER",
-    "CPPM_REFRESH_CACHE", "LIST_ENDPOINTS", "GET_LOGS", "CPPM_SYNC_ENDPOINTS",
+    "CPPM_REFRESH_CACHE", "LIST_ENDPOINTS", "GET_LOGS", "CPPM_SYNC_ENDPOINTS", "CPPM_SYNC_NADS",
     # Bulk IPAM / DNS / DHCP / firewall reads+syncs whose runtime scales with
     # the fleet size — same failure mode as the CPPM reads above. These already
     # carry generous fixed base timeouts (30–60s) at their call sites, but

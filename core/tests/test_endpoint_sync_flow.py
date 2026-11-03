@@ -218,3 +218,44 @@ async def test_operator_sync_passes_allow_mass_remove_to_cppm():
     await hub.sync_tenant_endpoints("acme", allow_mass_remove=True)
     cppm_call = [c for c in hub.request_log if c[1] == "CPPM_SYNC_ENDPOINTS"][0]
     assert cppm_call[2]["allow_mass_remove"] is True
+
+
+async def _nad_hub(monkeypatch, secrets, prefixes):
+    import access
+    import cred_vault
+
+    async def _list(hub, stype, buckets):
+        assert stype == "radius"
+        return [s for s in secrets if s["bucket"] in buckets]
+
+    async def _prefixes(hub, tid):
+        return prefixes
+
+    monkeypatch.setattr(cred_vault, "automation_list_by_type", _list)
+    monkeypatch.setattr(access, "fetch_tenant_prefixes", _prefixes)
+    return _SyncHub(responses={("cppm-spoke-1", "CPPM_SYNC_NADS"): {
+        "status": "SUCCESS", "created": 2, "updated": 0, "removed": 0}})
+
+
+@pytest.mark.asyncio
+async def test_nad_sync_sends_collapsed_subnets_and_tenant_secret(monkeypatch):
+    hub = await _nad_hub(
+        monkeypatch,
+        [{"bucket": "acme", "value": {"radius_secret": "r1", "tacacs_secret": "t1"}}],
+        ["10.1.0.0/16", "10.1.5.0/24", "192.168.1.0/24", "bogus"])
+    res = await hub.sync_tenant_nads("acme")
+    assert res["status"] == "SUCCESS"
+    (_, cmd, payload), = hub.request_log
+    assert cmd == "CPPM_SYNC_NADS"
+    assert payload["subnets"] == ["10.1.0.0/16", "192.168.1.0/24"]
+    assert payload["radius_secret"] == "r1" and payload["tacacs_secret"] == "t1"
+    assert payload["tenant_name"] == "Acme"
+
+
+@pytest.mark.asyncio
+async def test_nad_sync_skips_without_secret(monkeypatch):
+    hub = await _nad_hub(monkeypatch, [{"bucket": "other", "value": {"radius_secret": "x"}}],
+                         ["10.1.0.0/16"])
+    res = await hub.sync_tenant_nads("acme")
+    assert res["status"] == "skipped"
+    assert hub.request_log == []
