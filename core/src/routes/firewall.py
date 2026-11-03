@@ -1,4 +1,5 @@
 """Firewall (OPNsense) data + rule/alias/NAT/DNS CRUD routes."""
+import asyncio
 import access
 import instance_vault
 from api import (
@@ -76,6 +77,18 @@ def register(app, hub, ctx):
     _is_admin = ctx._is_admin
     _is_tenant_admin = ctx._is_tenant_admin
     _filter_fw = ctx._filter_fw
+
+    def _redeploy_certs_soon(hub, spoke_id):
+        """A firewall was added/re-pointed on ``spoke_id``: push its LE certs
+        (and let the spoke activate them on the WebGUI) once UPDATE_CONFIG has
+        landed, instead of waiting for the next renewal."""
+        async def _run():
+            await asyncio.sleep(5)
+            try:
+                await hub._redeploy_certs_to_target("firewall", spoke_id)
+            except Exception as e:  # noqa: BLE001 — hourly sweep / manual deploy remain
+                logger.warning("[cert] firewall/%s re-deploy after config change failed: %s", spoke_id, e)
+        asyncio.create_task(_run())
 
     def _authz_firewall(request, firewall_id, write=False):
         """Authorize + classify a firewall op by the firewall's OWNING tenant.
@@ -479,6 +492,7 @@ def register(app, hub, ctx):
                     push_fw = await instance_vault.overlay(hub, new_fw, "firewalls")
                     await hub.send_to_spoke(_hub_msg(new_spoke, "UPDATE_CONFIG", push_fw))
                     pushed = True
+                    _redeploy_certs_soon(hub, new_spoke)
                 except Exception as e:  # noqa: BLE001 — saved; reconnect re-push covers it
                     logger.warning("add_firewall: config push to %s failed: %s", new_spoke, e)
 
@@ -521,6 +535,8 @@ def register(app, hub, ctx):
                 push_fw = await instance_vault.overlay(hub, firewalls[fw_index], "firewalls")
                 msg = _hub_msg(spoke_id, "UPDATE_CONFIG", push_fw)
                 await hub.send_to_spoke(msg)
+                if {"host", "port", "api_key", "api_secret", "vault_credential", "credential_ref", "spoke_id"} & set(update_data):
+                    _redeploy_certs_soon(hub, spoke_id)
                 return {"status": "ok", "message": "Firewall configuration updated and pushed to spoke.", "pushed": True}
             else:
                 return {"status": "partial_success", "message": "Configuration saved, but associated spoke is not connected.", "pushed": False}
