@@ -51,7 +51,7 @@ logger = logging.getLogger("Hub")  # same name as main.py — shared log config
 _UPDATE_SOURCE_MODULE_KEY = {
     "hypervisor": "pxmx", "firewall": "opnsense", "nac": "cppm",
     "directory": "ldap", "ipam": "netbox", "simulation": "cs", "nw": "nw",
-    "certificates": "le",
+    "certificates": "le", "storage": "truenas", "monitoring": "zabbix",
 }
 
 # spoke_id substring → update_sources config key. "opn" → "opnsense" (the
@@ -152,6 +152,8 @@ _MODULE_REPO_DIR = {
     "simulation": "cs", "cs": "cs",
     "nw": "nw", "network": "nw",
     "certificates": "le", "le": "le",
+    "storage": "truenas", "truenas": "truenas",
+    "monitoring": "zabbix", "zabbix": "zabbix",
 }
 
 
