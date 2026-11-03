@@ -66,7 +66,7 @@ done
 # alone — stopping them would blackhole every client still pointed here.
 if [[ "$STAND_DOWN" == true ]]; then
     systemctl disable --now lm-dns-worker 2>/dev/null || true
-    rm -f /etc/lm-dns-worker/worker.env /var/lib/lm-dns-worker/applied.json
+    rm -f /etc/lm-dns-worker/worker.env /var/lib/lm-dns-worker/applied.json /var/lib/lm-dns-worker/stats_history.json
     systemctl daemon-reload 2>/dev/null || true
     echo "DNS cluster worker stopped; this resolver left the cluster."
     echo "Unbound and its records are untouched and still answering."
