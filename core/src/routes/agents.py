@@ -132,12 +132,15 @@ async def _zbxproxy_register(hub, cfg):
 
 def _zbxproxy_load_config(hub, cfg, spoke_id=None):
     """Fill the proxy's Zabbix server from the System → General → Monitoring Server setting and
-    name it ``lm-<tenant>`` (the name the monitoring sync maps tenant hosts to)."""
+    name it as the monitoring sync maps tenant hosts: the tenant's
+    ``monitoring.tenant_proxies`` entry, else ``lm-<tenant>``."""
     from routes.monitoring import monitoring_server_address
     cfg = dict(cfg or {})
     if not cfg.get("proxy_name"):
-        tenant = re.sub(r"[^A-Za-z0-9._-]+", "-", _zbxproxy_tenant(hub, spoke_id))
-        cfg["proxy_name"] = f"lm-{tenant}"
+        tenant = _zbxproxy_tenant(hub, spoke_id)
+        mapped = ((hub.state.system_state.get("global_config", {}).get("monitoring") or {})
+                  .get("tenant_proxies") or {}).get(tenant)
+        cfg["proxy_name"] = mapped or "lm-" + re.sub(r"[^A-Za-z0-9._-]+", "-", tenant)
     if not cfg.get("server"):
         server = monitoring_server_address(hub)
         if not server:
