@@ -15,7 +15,9 @@ CI/tooling changes are omitted unless they change what an operator sees.
 ### Users & access
 
 - **Impersonate user.** Settings → Users has an **Impersonate** button
-  (Global Admin only) on every other user. LabManager reloads with that user's
+  (Global Admin only) on every other user, and the header tenant picker has a
+  small **i** beside each tenant's star that lists that tenant's users to
+  impersonate. LabManager reloads with that user's
   permissions and tenants, and an amber banner at the top shows who you are
   acting as, with **Stop impersonating** to switch back. While impersonating
   you cannot mint or revoke API tokens or start a second impersonation. Every
