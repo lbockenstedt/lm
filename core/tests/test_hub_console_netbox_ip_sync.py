@@ -85,3 +85,13 @@ async def test_console_probe_falls_back_to_serial_for_the_name():
         "identity": {"hostname": "Password:", "serial": "SG12345"}})
     rec = hub.request_response.call_args[0][2]["devices"][0]
     assert rec["hostname"] == "SG12345"
+
+
+@pytest.mark.asyncio
+async def test_console_probe_sends_the_identified_device_class_as_role():
+    hub = _probe_hub()
+    await hub._handle_console_probe("spoke-1", {
+        "vendor": "Juniper",
+        "identity": {"hostname": "fw-01", "model": "SRX345", "type": "Firewall"}})
+    rec = hub.request_response.call_args[0][2]["devices"][0]
+    assert rec["model"] == "SRX345" and rec["role"] == "firewall"
