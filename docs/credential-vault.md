@@ -138,6 +138,11 @@ value.
   `console-auto-credentials` (`type=console`, `mode=hub`); `POST
   /api/console/credentials/to-vault` migrates existing creds into the vault
   (`console.py:1107-1136`). See [console.md](console.md).
+- **ClearPass Network Devices (RADIUS/TACACS)** — a `radius` secret
+  ("RADIUS / TACACS shared secret", fields `radius_secret` / `tacacs_secret`,
+  mode forced to hub) in a tenant's bucket makes the endpoint sync register
+  every tenant subnet as a ClearPass Network Device with those secrets
+  (`endpoint_sync.sync_tenant_nads`). See [cppm.md](cppm.md).
 - **Module connections (NAC / network devices / IPAM / firewalls)** — a saved
   connection instance may carry a `vault_credential` `{bucket, name}` reference
   instead of an inline secret. `core/src/instance_vault.py` (`SECRET_FIELDS`)

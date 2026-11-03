@@ -301,6 +301,53 @@ class EndpointSyncMixin:
         except RuntimeError:
             pass  # no running event loop — nothing to do
 
+    async def sync_tenant_nads(self, tenant_id: str) -> Dict[str, Any]:
+        """Register the tenant's subnets as ClearPass Network Devices (RADIUS/
+        TACACS clients) with the shared secrets from the tenant's ``radius``
+        vault secret. Subnets are the tenant's NetBox prefixes, collapsed to
+        the outermost ones. Skipped (not an error) when the tenant has no
+        secret or no prefixes. Best-effort; never raises."""
+        import ipaddress
+        import cred_vault
+        from access import fetch_tenant_prefixes
+        tenant_name = (self.state.get_tenant(tenant_id) or {}).get("name") or tenant_id
+        buckets = [tenant_id] + ([cred_vault.ADMIN_BUCKET] if tenant_id == "default" else [])
+        try:
+            found = await cred_vault.automation_list_by_type(self, "radius", buckets)
+            found.sort(key=lambda s: s["bucket"] != tenant_id)
+            secret = found[0]["value"] if found else {}
+            radius = str(secret.get("radius_secret") or "")
+            tacacs = str(secret.get("tacacs_secret") or "")
+            if not (radius or tacacs):
+                return {"status": "skipped", "message": "no RADIUS/TACACS secret in the tenant's vault bucket"}
+            nac = self.get_cppm_spoke_for_tenant(tenant_id) or self.get_cppm_spoke_for_shared()
+            if not nac or nac in self._nac_unconfigured_spokes:
+                return {"status": "skipped", "message": "CPPM spoke not connected"}
+            nets = []
+            for p in await fetch_tenant_prefixes(self, tenant_id):
+                try:
+                    nets.append(ipaddress.ip_network(str(p), strict=False))
+                except ValueError:
+                    pass
+            subnets = [str(n) for v in (4, 6)
+                       for n in ipaddress.collapse_addresses(x for x in nets if x.version == v)]
+            if not subnets:
+                return {"status": "skipped", "message": "tenant has no prefixes"}
+            rr = await self.request_response(nac, "CPPM_SYNC_NADS", {
+                "tenant_id": tenant_id, "tenant_name": tenant_name, "subnets": subnets,
+                "radius_secret": radius, "tacacs_secret": tacacs}, timeout=180.0)
+            rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
+        except Exception as e:  # noqa: BLE001
+            rd = {"status": "ERROR", "message": str(e)}
+        if str(rd.get("status") or "").upper() == "SUCCESS":
+            logger.info("nad sync tenant=%s(%s): created=%s updated=%s removed=%s",
+                        tenant_id, tenant_name, rd.get("created"), rd.get("updated"), rd.get("removed"))
+        else:
+            logger.warning("[sync-error] nad sync tenant=%s(%s) status=%s: %s %s", tenant_id,
+                           tenant_name, rd.get("status"), rd.get("message") or "",
+                           "; ".join(rd.get("error_details") or [])[:500])
+        return rd
+
     async def run_endpoint_sync_loop(self):
         """Periodically sync IPAM endpoints → CPPM per the configured schedule.
 
@@ -332,6 +379,7 @@ class EndpointSyncMixin:
                 async with sem:
                     try:
                         await self.sync_tenant_endpoints(tid)
+                        await self.sync_tenant_nads(tid)
                     except Exception as e:  # defense in depth — sync_tenant_endpoints already swallows, but never let one task kill the gather
                         logger.debug("endpoint sync gather tenant=%s: %s", tid, e)
 
