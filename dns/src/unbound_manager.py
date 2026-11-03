@@ -1135,10 +1135,10 @@ class UnboundManager:
         return {"t": round(now, 1), "up": int(n("time.up")), "c": c,
                 "types": {k: int(v) for k, v in (query_types or {}).items()}}
 
-    def _record_sample(self, snap: dict) -> None:
+    def _record_sample(self, snap: dict, force: bool = False) -> None:
         with self._stats_lock:
             hist = self._stats_history
-            if hist and snap["t"] - hist[-1]["t"] < STATS_MIN_SAMPLE_GAP_S:
+            if not force and hist and snap["t"] - hist[-1]["t"] < STATS_MIN_SAMPLE_GAP_S:
                 return
             hist.append(snap)
             now = snap["t"]
@@ -1251,13 +1251,14 @@ class UnboundManager:
                 threaded_types[m.group(1)] = threaded_types.get(m.group(1), 0) + int(v)
         return aggregate_types or threaded_types
 
-    def sample_stats(self) -> bool:
+    def sample_stats(self, force: bool = False) -> bool:
         """Take one counter snapshot for the windowed-stats history."""
         raw, err = self._read_counters()
         if raw is None:
             logger.debug("DNS stats sample skipped: %s", err)
             return False
-        self._record_sample(self._counter_snapshot(raw, self._query_types(raw), time.time()))
+        self._record_sample(self._counter_snapshot(raw, self._query_types(raw), time.time()),
+                            force=force)
         return True
 
     def start_stats_sampler(self, interval: int = STATS_SAMPLE_INTERVAL_S):
@@ -1827,7 +1828,16 @@ class UnboundManager:
 
         Previously swallowed the failure with a WARNING, so a conf write whose
         reload never happened still reported SUCCESS upstream. Callers need the
-        distinction: the file changed but the resolver did not."""
+        distinction: the file changed but the resolver did not.
+
+        A reload ZEROES Unbound's statistics counters, so when windowed-stats
+        history is being kept, snapshot them first: the queries since the last
+        periodic sample would otherwise be lost from every window."""
+        if self._stats_sampler is not None:
+            try:
+                self.sample_stats(force=True)
+            except Exception as e:  # noqa: BLE001 — never block a reload on stats
+                logger.debug("pre-reload stats sample failed: %s", e)
         try:
             subprocess.run(["unbound-control", "reload"], check=True, timeout=10)
             logger.info("Unbound reloaded")
