@@ -109,7 +109,7 @@ def _slug(v) -> str:
 
 def clean_spec(js: Any) -> Optional[Dict[str, Any]]:
     """Validate an LLM answer into a seed-catalog style spec, or None."""
-    if not isinstance(js, dict) or not js.get("identified"):
+    if not isinstance(js, dict) or js.get("identified") is False:
         return None
     mfr = str(js.get("manufacturer") or "").strip()[:60]
     model = str(js.get("model") or "").strip()[:80]
@@ -180,12 +180,19 @@ async def get_spec(hub, model: str, vendor: str = "",
         if not agent:
             return None
         try:
+            # A catalog answer is recorded for good, so use the most capable model.
             reply = await _ask_llm(hub, agent, _SYS_SPEC,
-                                   _question(model, vendor, interface_names), timeout=90.0)
+                                   _question(model, vendor, interface_names),
+                                   timeout=120.0, role="final")
         except Exception as e:  # noqa: BLE001
             logger.warning("device spec: LLM ask for %r failed: %s", model, e)
             return None
-        spec = clean_spec(_extract_json(reply))
+        answer = _extract_json(reply)
+        spec = clean_spec(answer)
+        if not spec and not (isinstance(answer, dict) and answer.get("identified") is False):
+            # Not an explicit "don't know": a bad reply, so don't hold off for a day.
+            logger.warning("device spec: unusable LLM reply for %r: %.300s", model, reply)
+            return None
         models[key] = {"spec": spec, "asked": time.time(), "reported_model": model}
         _save(hub)
         logger.info("device spec: %r -> %s", model,
