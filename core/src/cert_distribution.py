@@ -53,7 +53,9 @@ CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", 
 async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                                      capable: Set[str], le_spoke_id: str,
                                      domain: str, targets: List[Dict[str, Any]],
-                                     install_on_hub: Optional[Callable] = None
+                                     install_on_hub: Optional[Callable] = None,
+                                     device_tracker: Any = None,
+                                     target_payload: Optional[Callable] = None,
                                      ) -> List[Dict[str, Any]]:
     """Pull cert material for ``domain`` from the le spoke (``rr``) and push
     ``INSTALL_CERT`` to each target spoke (resolved by ``get_by_type``). Returns
@@ -114,8 +116,10 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
         entry: Dict[str, Any] = {"domain": domain, "module_type": mt, "identifier": ident}
         tgt_label = f"{mt}{('/' + ident) if ident else ''}"
         # Up-to-date target — skip the push (idempotent distribution).
+        _dev_changed = bool(device_tracker and device_tracker.changed(domain, t))
         if (t.get("last_pushed_hash") == material_hash
-                and t.get("last_status") == "SUCCESS" and material_hash):
+                and t.get("last_status") == "SUCCESS" and material_hash
+                and not _dev_changed):
             entry.update(status="SUCCESS", message="already up to date", skipped=True)
             logger.info("[cert] %s → %s: up to date (skipped)", domain, tgt_label)
             summary.append(entry)
@@ -124,7 +128,10 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
         # Not skipped → say WHY we're (re)pushing so a distribution loop is
         # visible in WebUI Logs → Certificates without SSHing to a node.
         _prev = t.get("last_status")
-        if _prev and _prev != "SUCCESS":
+        if _dev_changed:
+            logger.info("[cert] %s → %s: pushing — device behind the target changed since last push",
+                        domain, tgt_label)
+        elif _prev and _prev != "SUCCESS":
             logger.info("[cert] %s → %s: (re)pushing — previous push %s%s",
                         domain, tgt_label, _prev,
                         (": " + str(t.get("last_message"))) if t.get("last_message") else "")
@@ -179,11 +186,19 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                 # statuspage) stay at 120s — the timeout is just the upper
                 # bound, not the time they take.
                 install_timeout = 640.0 if mt in ("hypervisor", "simulation") else 120.0
-                res = await rr(target_sid, "INSTALL_CERT", {
+                payload = {
                     "domain": domain, "fullchain": fullchain,
                     "privkey": privkey, "chain": chain, "identifier": ident,
                     "module_type": mt,
-                }, timeout=install_timeout)
+                }
+                if target_payload is not None:
+                    # Per-target extras, e.g. every firewall bound to an
+                    # OPNsense spoke (``devices``) so each box gets the cert.
+                    try:
+                        payload.update(await target_payload(mt, ident, target_sid) or {})
+                    except Exception as e:  # noqa: BLE001 — fall back to the spoke default
+                        logger.warning("[cert] %s → %s: target payload failed: %s", domain, tgt_label, e)
+                res = await rr(target_sid, "INSTALL_CERT", payload, timeout=install_timeout)
                 rret = unwrap_spoke(res)
                 # Fleet spokes (nw) return a per-device breakdown — carry it so the
                 # hub can stash it for the drill-down report.
@@ -206,6 +221,8 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                                           else "INSTALL_CERT failed"))
                     logger.warning("[cert] %s → %s: FAILED — %s", domain, tgt_label, entry["message"])
 
+        if device_tracker and entry.get("status") == "SUCCESS":
+            device_tracker.record(domain, t)
         # Record the push on the le ledger (gates re-pushes + surfaces in UI).
         try:
             await rr(le_spoke_id, "LE_MARK_DISTRIBUTED", {
@@ -229,6 +246,8 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
                                mtls_auto_provision: bool = False,
                                get_primary_spokes: Optional[Callable] = None,
                                push: Optional[Callable] = None,
+                               device_tracker: Any = None,
+                               target_payload: Optional[Callable] = None,
                                ) -> List[Dict[str, Any]]:
     """Distribute every managed cert whose targets are stale. Skips the
     ``LE_GET_CERT`` pull entirely when every target of a cert is current.
@@ -293,7 +312,9 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
                                       "identifier": None, "status": "SKIPPED",
                                       "message": "no targets configured", "skipped": True})
         elif cur_hash and all(t.get("last_pushed_hash") == cur_hash
-                              and t.get("last_status") == "SUCCESS" for t in targets):
+                              and t.get("last_status") == "SUCCESS"
+                              and not (device_tracker and device_tracker.changed(domain, t))
+                              for t in targets):
             logger.info("[cert] %s: all %d target(s) current — skipping",
                          domain, len(targets))
             explicit_summary.append({"domain": domain, "module_type": None, "identifier": None,
@@ -303,7 +324,8 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
         else:
             explicit_summary = await distribute_cert_to_targets(
                 rr, get_by_type, capable, le_spoke_id, domain, targets,
-                install_on_hub=install_on_hub)
+                install_on_hub=install_on_hub, device_tracker=device_tracker,
+                target_payload=target_payload)
             for e in explicit_summary:
                 e["domain"] = domain
         aggregate.extend(explicit_summary)
@@ -1003,3 +1025,47 @@ def target_owner_tenant(target, spoke_tenant, agent_spoke, agent_tenant=None):
     if not sid:
         return ""
     return (spoke_tenant(sid) or "").strip()
+
+
+class TargetDeviceTracker:
+    """Detects when the DEVICE behind a cert target changed since the last
+    successful push. The le ledger keys targets by spoke, so a new/replaced/
+    re-addressed firewall behind an already-green spoke target would look
+    "current" and be skipped until the next renewal. ``device_key(module_type,
+    identifier)`` returns a stable fingerprint of the device(s) the target
+    installs onto (``None`` = not tracked for that type); ``store`` is a
+    persisted ``{"domain|mt|ident": key}`` dict. A target with no recorded key
+    is baselined (no push storm on first rollout)."""
+
+    def __init__(self, device_key: Callable, store: Dict[str, str],
+                 on_change: Optional[Callable] = None):
+        self._key = device_key
+        self._store = store
+        self._on_change = on_change
+
+    @staticmethod
+    def _k(domain: str, t: Dict[str, Any]) -> str:
+        return f"{domain}|{t.get('module_type')}|{t.get('identifier') or ''}"
+
+    def changed(self, domain: str, t: Dict[str, Any]) -> bool:
+        cur = self._key(t.get("module_type"), t.get("identifier") or "")
+        if cur is None:
+            return False
+        k = self._k(domain, t)
+        prev = self._store.get(k)
+        if prev is None:
+            self._store[k] = cur
+            if self._on_change:
+                self._on_change()
+            return False
+        return prev != cur
+
+    def record(self, domain: str, t: Dict[str, Any]) -> None:
+        cur = self._key(t.get("module_type"), t.get("identifier") or "")
+        if cur is None:
+            return
+        k = self._k(domain, t)
+        if self._store.get(k) != cur:
+            self._store[k] = cur
+            if self._on_change:
+                self._on_change()
