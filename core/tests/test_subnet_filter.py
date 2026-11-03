@@ -498,3 +498,42 @@ def test_filter_session_unowned_tenant_falls_back_to_session():
     req = _QSRequest("u", tenant="ra")  # not in user's [lrb, dxp]
     out = asyncio.run(filter_session(hub, sessions, req, _dxp_prefix_rows(), "netbox", ["prefix"]))
     assert out["prefixes"] == []  # filtered by lrb (fallback), dxp rows dropped
+
+
+class _VrfPrefixHub(_PrefixHub):
+    """Overlapping tenants: dxp owns broad containers, central a specific /24."""
+    _PREFIXES = {"dxp": ["10.0.0.0/8", "172.16.0.0/12"],
+                 "central": ["10.21.16.0/24"], "default": []}
+
+    async def request_response(self, spoke_id, command, payload, **kwargs):
+        return {"payload": {"data": {"prefixes": [
+            {"prefix": p} for p in self._PREFIXES.get(payload.get("tenant"), [])]}}}
+
+
+def _vrf_hub():
+    return _VrfPrefixHub(FakeState(system_state={}, tenants={
+        "dxp": {"netbox_tenant_slug": "dxp"},
+        "central": {"netbox_tenant_slug": "central"},
+    }))
+
+
+def test_shared_dhcp_scopes_go_to_their_most_specific_tenant():
+    # DXP's 10.0.0.0/8 overlaps central's scope on the shared Kea; the scope is
+    # central's, so DXP must not see it (it did: "DXP sees all scopes").
+    data = {"subnets": [{"subnet": "10.21.16.0/24"}, {"subnet": "10.99.0.0/24"}]}
+    req = _FakeRequest("admin-cookie")
+    sessions = {"admin-cookie": _admin_session()}
+    out = asyncio.run(filter_tenant(_vrf_hub(), sessions, req, data, "dhcp", ["subnet"],
+                                    explicit_tenant="dxp", shared_source=True))
+    assert out["subnets"] == [{"subnet": "10.99.0.0/24"}]
+    out = asyncio.run(filter_tenant(_vrf_hub(), sessions, req, data, "dhcp", ["subnet"],
+                                    explicit_tenant="central", shared_source=True))
+    assert out["subnets"] == [{"subnet": "10.21.16.0/24"}]
+
+
+def test_tenant_own_dhcp_server_keeps_overlap_matching():
+    # A tenant's own server only sees its own VRF: no ownership narrowing.
+    data = {"subnets": [{"subnet": "10.21.16.0/24"}]}
+    out = asyncio.run(filter_tenant(_vrf_hub(), {"a": _admin_session()}, _FakeRequest("a"),
+                                    data, "dhcp", ["subnet"], explicit_tenant="dxp"))
+    assert out["subnets"] == [{"subnet": "10.21.16.0/24"}]

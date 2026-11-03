@@ -3694,6 +3694,17 @@ def register(app, hub, ctx):
             resolved = hub.get_dhcp_spoke_for_shared()
         return spoke_or_503(resolved, "DHCP")
 
+    def _dhcp_shared(request: Request, tenant: str = None) -> bool:
+        """True when the selected tenant has no DHCP server of its own, so its
+        DHCP views read the shared Kea that holds every tenant's scopes."""
+        tid = _effective_tenant(request, tenant)
+        if not tid:
+            return False
+        instances = (hub.state.system_state.get("global_config", {}) or {}).get("dhcp_instances", []) or []
+        if any(isinstance(i, dict) and i.get("tenant_id") == tid for i in instances):
+            return False
+        return not hub.get_dhcp_spoke_for_tenant(tid)
+
     # Hub-side routing keys the merge fanout adds to each row. They must never
     # be relayed on to a spoke, which knows nothing about them.
     _DHCP_ROUTING_KEYS = ("spoke_id", "_spoke", "_tenant")
@@ -4181,7 +4192,8 @@ def register(app, hub, ctx):
         are combined across every spoke (tagged _tenant)."""
         logger.debug("relay GET /api/dhcp/subnets")
         data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_SUBNETS", {}, "subnets", "dhcp_list_subnets")
-        return await _filter_tenant(request, data, "dhcp", ["subnet"], tenant)
+        return await _filter_tenant(request, data, "dhcp", ["subnet"], tenant,
+                                    shared_source=_dhcp_shared(request, tenant))
 
     @app.get("/api/dhcp/leases")
     async def dhcp_list_leases(request: Request, subnet: str = None, tenant: str = None):
@@ -4190,7 +4202,8 @@ def register(app, hub, ctx):
         leases are combined across every spoke (tagged _tenant)."""
         logger.debug("relay %s %s subnet=%s", request.method, request.url.path, subnet)
         data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_LEASES", {"subnet": subnet}, "leases", "dhcp_list_leases")
-        return await _filter_tenant(request, data, "dhcp", ["ip", "address", "ip-address", "ip_address"], tenant)
+        return await _filter_tenant(request, data, "dhcp", ["ip", "address", "ip-address", "ip_address"], tenant,
+                                    shared_source=_dhcp_shared(request, tenant))
 
     @app.delete("/api/dhcp/lease")
     async def dhcp_delete_lease(request: Request, tenant: str = None):
@@ -4416,7 +4429,8 @@ def register(app, hub, ctx):
         reservations are combined across every spoke (tagged _tenant)."""
         logger.debug("relay GET /api/dhcp/reservations")
         data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_RES", {}, "reservations", "dhcp_list_reservations")
-        return await _filter_tenant(request, data, "dhcp", ["ip", "address", "ip-address", "ip_address"], tenant)
+        return await _filter_tenant(request, data, "dhcp", ["ip", "address", "ip-address", "ip_address"], tenant,
+                                    shared_source=_dhcp_shared(request, tenant))
 
     @app.put("/api/dhcp/reservation")
     async def dhcp_update_reservation(request: Request, tenant: str = None):
@@ -4700,7 +4714,8 @@ def register(app, hub, ctx):
         second, unfiltered copy of every subnet."""
         logger.debug("relay GET /api/dhcp/stats")
         data = await _cached_relay(_spoke_ref("dhcp", request, tenant), "DHCP_STATS", log_name="dhcp_stats")
-        filtered = await _filter_tenant(request, data, "dhcp", ["subnet"], tenant)
+        filtered = await _filter_tenant(request, data, "dhcp", ["subnet"], tenant,
+                                    shared_source=_dhcp_shared(request, tenant))
         return _dhcp_rescope_stats(data, filtered)
 
     @app.post("/api/dhcp/sync")
