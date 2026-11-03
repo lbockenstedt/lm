@@ -3319,9 +3319,22 @@ def register(app, hub, ctx):
                         detail=f"{tgt_label} is already assigned to the cert for "
                                f"'{c.get('domain')}'. A target can host only one cert — "
                                f"remove it there first.")
-        return await _relay_spoke(_get_le_spoke(hub), "LE_ADD_TARGET",
-                                  {"domain": domain, "target": body},
-                                  log_name="le_add_target")
+        le_sid = _get_le_spoke(hub)
+        result = await _relay_spoke(le_sid, "LE_ADD_TARGET",
+                                    {"domain": domain, "target": body},
+                                    log_name="le_add_target")
+        # Deploy to the new target now (background) rather than leaving it
+        # un-pushed until the next hourly distribution sweep.
+        target = {"module_type": mt, "identifier": ident}
+
+        async def _push_new_target():
+            try:
+                await hub._distribute_one_cert(le_sid, domain, [target])
+            except Exception as e:  # noqa: BLE001 — the hourly sweep retries
+                logger.warning("[cert] %s → %s: initial push after add failed: %s",
+                               domain, mt, e)
+        asyncio.create_task(_push_new_target())
+        return result
 
     @app.post("/api/le/certs/{domain}/ab")
     async def le_set_ab(domain: str, request: Request):
