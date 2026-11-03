@@ -206,3 +206,18 @@ async def test_nw_unrelated_spoke_gets_no_devices_not_someone_elses():
     await LabManagerHub.push_config_to_spoke(hub, "guid-other")
     data = _config_pushed(hub)
     assert data["devices"] == []
+
+
+# ── opn (firewalls): bound firewall must match across identity generations ──
+
+@pytest.mark.asyncio
+async def test_opn_firewall_matches_across_identity_generations():
+    """A firewall bound under the legacy spoke name must still be pushed to
+    the spoke connecting as its guid — not fall back to firewalls[0]."""
+    hub = _FakeHub({"firewalls": [
+        {"spoke_id": "other-fw", "model": "opnsense", "host": "10.0.0.1"},
+        {"spoke_id": "lm-agent-opnsense", "model": "opnsense", "host": "10.0.0.2"},
+    ]}, module_type="firewall", alias={"lm-agent-opnsense": "guid-fw"})
+    hub.spoke_module_types["guid-fw"] = "firewall"
+    await LabManagerHub.push_config_to_spoke(hub, "guid-fw")
+    assert _config_pushed(hub)["host"] == "10.0.0.2"

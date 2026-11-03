@@ -48,7 +48,7 @@ OPNsense REST over HTTPS at `https://{host}:{port}` (`OpnsenseEngine`). Default 
 - NAT: `OPNSENSE_ADD/DEL/EDIT_NAT_RULE` (`nat_type` `d_nat`/`source_nat`/`one_to_one`/`nat_1to1` alias).
 - DNS: `OPNSENSE_ADD/DEL/EDIT_DNS_RECORD` (Unbound host overrides).
 - Impairment: `OPNSENSE_GET/ADD/EDIT/DEL_IMPAIRMENT` (`src/impairments.py`) — latency/packet loss for a host or subnet via the `os-netimpair` plugin. Always live (not cached).
-- `OPNSENSE_INSTALL_CERT` — hub-brokered cert distribution: applies `fullchain`+`privkey` via `/api/trust/cert/add` or `set/{uuid}`. `privkey` masked.
+- `OPNSENSE_INSTALL_CERT` — hub-brokered cert distribution: applies `fullchain`+`privkey` via `/api/trust/cert/add` or `set/{uuid}`. `privkey` masked. OPNsense reports a rejected write as HTTP 200 `{"result":"failed","validations":{…}}`; that is returned as ERROR with the validation messages so the hub retries instead of recording a false SUCCESS. Existing cert/CA lookup searches by `searchPhrase`. The firewall must be configured (host + API key **and** secret) — otherwise the install fails with "No firewall configured"; the hub logs `[firewall] … is missing api_secret` on reconnect. Adding a cert target pushes to it immediately (no wait for the hourly sweep).
 
 ## Key files
 
