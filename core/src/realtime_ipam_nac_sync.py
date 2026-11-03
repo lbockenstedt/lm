@@ -43,7 +43,7 @@ try:
     from access import attribute_by_prefix  # sibling leaf (no main/api back-import)
 except Exception:  # pragma: no cover - access always importable in-app
     attribute_by_prefix = None  # type: ignore
-from access import norm_mac, unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import norm_mac, nw_spoke_tenant, unwrap_spoke  # sibling leaf (no main/api back-import)
 from sync_loop import run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
@@ -144,6 +144,9 @@ class RealtimeIpamNacSyncMixin:
                 errors.append(f"CPPM({nac}): {d.get('message', 'error')}")
                 return [], {"errors": errors, "total": 0}
             rows = (d.get("sessions") if isinstance(d, dict) else None) or []
+            # The CPPM spoke's tenant: framed IPs overlap across tenants'
+            # VRFs, so attribution prefers this tenant's prefixes.
+            nac_tid = nw_spoke_tenant(self, nac)
             out: List[Dict[str, Any]] = []
             for row in rows or []:
                 if not isinstance(row, dict):
@@ -172,6 +175,8 @@ class RealtimeIpamNacSyncMixin:
                     sess_rec["model"] = model
                 if manufacturer:
                     sess_rec["manufacturer"] = manufacturer
+                if nac_tid:
+                    sess_rec["source_tenant_id"] = nac_tid
                 out.append(sess_rec)
             info = {"errors": errors, "total": int(d.get("total", len(out)) or 0) if isinstance(d, dict) else len(out),
                     "window_start": (d.get("window_start") if isinstance(d, dict) else "") or "",
