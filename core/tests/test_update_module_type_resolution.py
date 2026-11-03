@@ -81,3 +81,17 @@ def test_standalone_firewall_spoke_still_resolves_to_opnsense():
     assert mtype == "firewall"
     assert hub._resolve_module_key("lm-opnsense-1", mtype,
                                    _UPDATE_SOURCE_PREFIX_MAP) == "opnsense"
+
+
+def test_every_agent_role_with_its_own_repo_resolves_to_that_repo():
+    # A role missing here never gets SPOKE_UPDATE: the zabbix spoke sat on
+    # Nov 1 code while main moved on ("unknown module type").
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "agent", "src"))
+    from agent_spoke import _ROLE_MAP
+    hub = _StubHub(live_types={}, persisted_types={})
+    for _path, _cls, mtype, repo_url in _ROLE_MAP.values():
+        if repo_url:
+            repo = repo_url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+            assert hub._resolve_module_key("x", mtype, {}) == repo, mtype
