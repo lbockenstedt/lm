@@ -11,6 +11,8 @@ import shutil
 import ipaddress
 import socket
 import struct
+import json
+import threading
 import time
 from collections import deque
 
@@ -83,14 +85,39 @@ CLIENT_QUERY_LIMIT = 1000
 RANGE_DAYS = {"day": 1, "week": 7, "month": 30}
 MAX_RETENTION_DAYS = 30
 
+# Windowed headline stats (hour/day/week/month). Unbound's counters are
+# lifetime totals since it last started, so the worker snapshots them every
+# STATS_SAMPLE_INTERVAL_S and a window is the delta between snapshots. Samples
+# older than STATS_FINE_RETENTION_S are thinned to one per STATS_COARSE_STEP_S;
+# nothing older than STATS_HISTORY_MAX_S is kept.
+STATS_SAMPLE_INTERVAL_S = 300
+STATS_MIN_SAMPLE_GAP_S = 60
+STATS_FINE_RETENTION_S = 26 * 3600
+STATS_COARSE_STEP_S = 3600
+STATS_HISTORY_MAX_S = 31 * 86400
+STATS_PERSIST_INTERVAL_S = 300
+_STATS_COUNTERS = {
+    "q": "total.num.queries",
+    "h": "total.num.cachehits",
+    "m": "total.num.cachemiss",
+    "r": "total.num.recursivereplies",
+    "p": "total.num.prefetch",
+}
+
 _QUERY_LOG_RE = re.compile(
     r"info:\s+(?P<ip>[0-9a-fA-F.:]+)\s+(?P<name>\S+?)\.?\s+(?P<type>\w+)\s+IN\s*$"
 )
 
 
 class UnboundManager:
-    def __init__(self, conf_path: str = LM_CONF):
+    def __init__(self, conf_path: str = LM_CONF, stats_history_path: str = None):
         self.conf_path = conf_path
+        # Counter snapshots for windowed stats: [{"t","up","c":{...},"types":{...}}]
+        self.stats_history_path = stats_history_path
+        self._stats_history = self._load_stats_history()
+        self._stats_lock = threading.Lock()
+        self._stats_persisted_at = 0.0
+        self._stats_sampler = None
         self.forwarders_path = os.path.join(
             os.path.dirname(self.conf_path), "lm-forwarders.conf")
         self.overrides_path = os.path.join(
@@ -958,7 +985,8 @@ class UnboundManager:
                 "top_names": top_names}
 
     def get_query_names(self, search: str = None, limit: int = TOP_NAMES_LIMIT,
-                         source_prefixes: list = None, range_days: int = None) -> list:
+                         source_prefixes: list = None, range_days: int = None,
+                         range_seconds: int = None) -> list:
         """Per-(name,type) query counters, sorted by count desc, each carrying
         its breakdown of source client IPs.
 
@@ -975,6 +1003,9 @@ class UnboundManager:
         (1/7/30 for the WebUI's day/week/month selector) sums only the
         trailing N days of buckets; omitted/None sums everything still
         retained (at most MAX_RETENTION_DAYS, enforced by _prune_query_counts).
+        ``range_seconds`` (hour/day) is an exact trailing window computed from
+        the timestamped query events when they still cover it, else it falls
+        back to the per-day buckets.
         """
         self._tail_query_log()
         needle = (search or "").strip().lower()
@@ -986,6 +1017,11 @@ class UnboundManager:
                     nets.append(ipaddress.ip_network(p, strict=False))
                 except ValueError:
                     continue
+        if range_seconds:
+            rows = self._query_names_from_events(needle, nets, range_seconds)
+            if rows is not None:
+                return rows[:limit] if limit else rows
+            range_days = range_days or max(1, -(-int(range_seconds) // 86400))
         cutoff_day = None
         if range_days:
             try:
@@ -1024,8 +1060,229 @@ class UnboundManager:
             rows = rows[:limit]
         return rows
 
+    def _query_names_from_events(self, needle: str, nets, range_seconds) -> list:
+        """Exact trailing-window per-(name,type) rows from ``_query_events``,
+        or None when the event ring no longer reaches back to the window start
+        (it is full and its oldest event is newer than the cutoff)."""
+        try:
+            cutoff = time.time() - int(range_seconds)
+        except (TypeError, ValueError):
+            return None
+        events = list(self._query_events)
+        if len(events) >= MAX_QUERY_EVENTS and events and events[0][0] > cutoff:
+            return None
+        grouped = {}
+        for ts, ip, name, rtype in events:
+            if ts < cutoff or (needle and needle not in name):
+                continue
+            if nets is not None:
+                try:
+                    addr = ipaddress.ip_address(ip)
+                except ValueError:
+                    continue
+                if not any(addr in n for n in nets):
+                    continue
+            g = grouped.setdefault(f"{name}|{rtype}",
+                                   {"name": name, "type": rtype, "count": 0, "sources": {}})
+            g["count"] += 1
+            g["sources"][ip] = g["sources"].get(ip, 0) + 1
+        rows = [{"name": g["name"], "type": g["type"], "count": g["count"],
+                 "sources": sorted(({"ip": ip, "count": c} for ip, c in g["sources"].items()),
+                                   key=lambda x: x["count"], reverse=True)}
+                for g in grouped.values()]
+        rows.sort(key=lambda r: r["count"], reverse=True)
+        return rows
+
+    # ── Windowed counter history ───────────────────────────────────────────
+
+    def _load_stats_history(self) -> list:
+        path = self.stats_history_path
+        if not path:
+            return []
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            samples = data.get("samples") if isinstance(data, dict) else None
+            return [s for s in samples or [] if isinstance(s, dict) and "t" in s and "c" in s]
+        except FileNotFoundError:
+            return []
+        except Exception as e:
+            logger.warning("DNS stats history %s unreadable, starting fresh: %s", path, e)
+            return []
+
+    def _persist_stats_history(self, now: float, force: bool = False) -> None:
+        path = self.stats_history_path
+        if not path or (not force and now - self._stats_persisted_at < STATS_PERSIST_INTERVAL_S):
+            return
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"samples": self._stats_history}, f, separators=(",", ":"))
+            os.replace(tmp, path)
+            self._stats_persisted_at = now
+        except Exception as e:
+            logger.warning("DNS stats history persist to %s failed: %s", path, e)
+
+    @staticmethod
+    def _counter_snapshot(raw: dict, query_types: dict, now: float) -> dict:
+        def n(key):
+            v = raw.get(key, 0)
+            return v if isinstance(v, (int, float)) else 0
+        c = {k: int(n(key)) for k, key in _STATS_COUNTERS.items()}
+        # Total recursion time, so a window's average can be re-derived.
+        c["rt"] = round(n("total.recursion.time.avg") * n("total.num.recursivereplies"), 4)
+        return {"t": round(now, 1), "up": int(n("time.up")), "c": c,
+                "types": {k: int(v) for k, v in (query_types or {}).items()}}
+
+    def _record_sample(self, snap: dict) -> None:
+        with self._stats_lock:
+            hist = self._stats_history
+            if hist and snap["t"] - hist[-1]["t"] < STATS_MIN_SAMPLE_GAP_S:
+                return
+            hist.append(snap)
+            now = snap["t"]
+            kept, last_coarse = [], None
+            for s in hist:
+                age = now - s["t"]
+                if age > STATS_HISTORY_MAX_S:
+                    continue
+                if age > STATS_FINE_RETENTION_S:
+                    slot = int(s["t"] // STATS_COARSE_STEP_S)
+                    if slot == last_coarse:
+                        continue
+                    last_coarse = slot
+                kept.append(s)
+            self._stats_history = kept
+            self._persist_stats_history(now)
+
+    @staticmethod
+    def _counter_delta(prev: dict, cur: dict) -> dict:
+        """Per-counter increase from ``prev`` to ``cur``. Unbound zeroes its
+        counters on restart, so a restart (uptime went backwards, or any
+        counter dropped) counts ``cur`` itself as the increase."""
+        restarted = cur.get("up", 0) < prev.get("up", 0) or any(
+            cur["c"].get(k, 0) < prev["c"].get(k, 0) for k in _STATS_COUNTERS)
+        out = {"c": {}, "types": {}}
+        for k in (*_STATS_COUNTERS, "rt"):
+            a, b = prev["c"].get(k, 0), cur["c"].get(k, 0)
+            out["c"][k] = b if restarted else max(0, b - a)
+        for t in set(prev.get("types") or {}) | set(cur.get("types") or {}):
+            a, b = (prev.get("types") or {}).get(t, 0), (cur.get("types") or {}).get(t, 0)
+            d = b if restarted else max(0, b - a)
+            if d:
+                out["types"][t] = d
+        return out
+
+    def _window_totals(self, current: dict, window_s: int) -> dict:
+        """Counter increases over the trailing ``window_s`` ending at
+        ``current`` (a live snapshot). Baseline is the newest sample at or
+        before the window start; if history doesn't reach that far but Unbound
+        itself started inside the window, its lifetime counters ARE the window.
+        Otherwise the window is ``partial`` (only ``covered_seconds`` known)."""
+        now = current["t"]
+        start = now - window_s
+        with self._stats_lock:
+            hist = [s for s in self._stats_history if s["t"] < now]
+        base_idx = None
+        for i, s in enumerate(hist):
+            if s["t"] <= start:
+                base_idx = i
+        zero = {"t": start, "up": 0, "c": {}, "types": {}}
+        partial = False
+        if base_idx is not None:
+            chain = hist[base_idx:]
+            covered = window_s
+        elif now - current.get("up", 0) >= start and (
+                not hist or hist[0]["t"] >= now - current.get("up", 0)):
+            chain = [zero] + hist
+            covered = window_s
+        elif hist:
+            chain = hist
+            covered = int(now - hist[0]["t"])
+            partial = True
+        else:
+            chain = [zero]
+            covered = min(window_s, int(current.get("up", 0)))
+            partial = covered < window_s
+            # No history at all: lifetime counters are the best available.
+        chain = chain + [current]
+        tot = {"c": {k: 0 for k in (*_STATS_COUNTERS, "rt")}, "types": {}}
+        for a, b in zip(chain, chain[1:]):
+            d = self._counter_delta(a, b)
+            for k, v in d["c"].items():
+                tot["c"][k] += v
+            for t, v in d["types"].items():
+                tot["types"][t] = tot["types"].get(t, 0) + v
+        tot["covered_seconds"] = covered
+        tot["partial"] = partial
+        return tot
+
+    def _read_counters(self):
+        """``(raw, error)`` from ``unbound-control stats_noreset``."""
+        try:
+            result = subprocess.run(["unbound-control", "stats_noreset"],
+                                    capture_output=True, text=True, timeout=8)
+        except Exception as e:
+            return None, str(e)
+        if result.returncode != 0:
+            return None, (result.stderr.strip() or "unbound-control failed")
+        raw = {}
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                try:
+                    raw[k.strip()] = float(v.strip())
+                except ValueError:
+                    raw[k.strip()] = v.strip()
+        return raw, None
+
+    @staticmethod
+    def _query_types(raw: dict) -> dict:
+        aggregate_types = {}
+        threaded_types = {}
+        for k, v in raw.items():
+            m = re.match(r"(?:total\.)?num\.query\.type\.([A-Za-z0-9_-]+)$", k)
+            if m and isinstance(v, (int, float)) and v:
+                aggregate_types[m.group(1)] = int(v)
+                continue
+            m = re.match(r"thread\d+\.num\.query\.type\.([A-Za-z0-9_-]+)$", k)
+            if m and isinstance(v, (int, float)) and v:
+                threaded_types[m.group(1)] = threaded_types.get(m.group(1), 0) + int(v)
+        return aggregate_types or threaded_types
+
+    def sample_stats(self) -> bool:
+        """Take one counter snapshot for the windowed-stats history."""
+        raw, err = self._read_counters()
+        if raw is None:
+            logger.debug("DNS stats sample skipped: %s", err)
+            return False
+        self._record_sample(self._counter_snapshot(raw, self._query_types(raw), time.time()))
+        return True
+
+    def start_stats_sampler(self, interval: int = STATS_SAMPLE_INTERVAL_S):
+        """Background daemon thread snapshotting counters every ``interval``
+        seconds so hour/day/week/month windows have baselines even when
+        nobody is viewing the DNS page. Idempotent."""
+        if self._stats_sampler and self._stats_sampler.is_alive():
+            return self._stats_sampler
+
+        def run():
+            while True:
+                try:
+                    self.sample_stats()
+                except Exception as e:  # noqa: BLE001 — never let the sampler die
+                    logger.warning("DNS stats sampler pass failed: %s", e)
+                time.sleep(interval)
+
+        self._stats_sampler = threading.Thread(target=run, name="dns-stats-sampler", daemon=True)
+        self._stats_sampler.start()
+        logger.info("DNS stats sampler started (every %ss, history=%s, %d samples loaded)",
+                    interval, self.stats_history_path or "memory", len(self._stats_history))
+        return self._stats_sampler
+
     def get_stats(self, search: str = None, source_prefixes: list = None,
-                  range_days: int = None) -> dict:
+                  range_days: int = None, range_seconds: int = None) -> dict:
         """Unbound query statistics via ``unbound-control stats_noreset``.
 
         Parses the flat ``key=value`` output into headline metrics (total
@@ -1041,10 +1298,12 @@ class UnboundManager:
         scopes it to only queries whose source IP falls in those CIDRs (used
         for per-tenant filtering — see ``get_query_names``).
 
-        ``range_days`` only narrows the ``query_names`` (per-destination)
-        breakdown — the ``global``/``query_types`` counters come straight
-        from unbound-control's own lifetime totals, which Unbound itself does
-        not bucket by day.
+        ``range_days``/``range_seconds`` select a trailing window: the
+        ``query_names`` breakdown is narrowed to it, and the headline
+        ``global``/``query_types`` counters become the INCREASE over it, from
+        the snapshot history (see ``_window_totals``); ``window`` describes
+        coverage. Without a range they are Unbound's lifetime totals. The
+        lifetime totals are always also returned under ``lifetime``.
         """
         reload_error = None
         logging_result = self._ensure_query_logging()
@@ -1057,78 +1316,68 @@ class UnboundManager:
             if not reload_error:
                 reload_error = logging_result.get("reason", "query logging setup failed")
 
+        window_s = None
+        try:
+            if range_seconds:
+                window_s = int(range_seconds)
+            elif range_days:
+                window_s = int(range_days) * 86400
+        except (TypeError, ValueError):
+            window_s = None
         query_names = self.get_query_names(search=search, source_prefixes=source_prefixes,
-                                            range_days=range_days)
+                                            range_days=range_days, range_seconds=window_s)
         # A restart in this same call may still be settling, so give
         # unbound-control one retry before reporting it as down.
         attempts = 2 if restarted else 1
         for attempt in range(attempts):
-            try:
-                result = subprocess.run(
-                    ["unbound-control", "stats_noreset"],
-                    capture_output=True, text=True, timeout=8,
-                )
-            except Exception as e:
-                if attempt + 1 < attempts:
-                    time.sleep(0.5)
-                    continue
-                logger.error("get_stats failed: %s", e)
-                return {"status": "ERROR", "message": str(e)}
-            if result.returncode == 0:
+            raw, err = self._read_counters()
+            if raw is not None:
                 break
             if attempt + 1 < attempts:
                 time.sleep(0.5)
                 continue
-            return {"status": "ERROR", "message": result.stderr.strip() or "unbound-control failed"}
-
-        raw = {}
-        for line in result.stdout.splitlines():
-            if "=" in line:
-                k, _, v = line.partition("=")
-                try:
-                    raw[k.strip()] = float(v.strip())
-                except ValueError:
-                    raw[k.strip()] = v.strip()
+            logger.error("get_stats failed: %s", err)
+            return {"status": "ERROR", "message": err}
 
         def n(key):
             v = raw.get(key, 0)
             return v if isinstance(v, (int, float)) else 0
 
-        hits   = n("total.num.cachehits")
-        misses = n("total.num.cachemiss")
-        total  = n("total.num.queries")
-        hit_ratio = round(hits / total * 100, 1) if total else 0.0
+        query_types = self._query_types(raw)
+        now = time.time()
+        snap = self._counter_snapshot(raw, query_types, now)
 
-        aggregate_types = {}
-        threaded_types = {}
-        for k, v in raw.items():
-            m = re.match(r"(?:total\.)?num\.query\.type\.([A-Za-z0-9_-]+)$", k)
-            if m and isinstance(v, (int, float)) and v:
-                aggregate_types[m.group(1)] = int(v)
-                continue
-            m = re.match(
-                r"thread\d+\.num\.query\.type\.([A-Za-z0-9_-]+)$", k)
-            if m and isinstance(v, (int, float)) and v:
-                threaded_types[m.group(1)] = (
-                    threaded_types.get(m.group(1), 0) + int(v))
-        query_types = aggregate_types or threaded_types
+        def headline(c, types):
+            total, hits = c.get("q", 0), c.get("h", 0)
+            rec = c.get("r", 0)
+            return {
+                "total_queries":      int(total),
+                "cache_hits":         int(hits),
+                "cache_misses":       int(c.get("m", 0)),
+                "cache_hit_ratio":    round(hits / total * 100, 1) if total else 0.0,
+                "num_recursive":      int(rec),
+                "recursion_time_avg": round(c.get("rt", 0) / rec, 4) if rec else 0.0,
+                "prefetch":           int(c.get("p", 0)),
+                "uptime_seconds":     int(n("time.up")),
+            }, dict(sorted(types.items(), key=lambda kv: kv[1], reverse=True))
 
+        lifetime, _ = headline(snap["c"], query_types)
+        lifetime["recursion_time_avg"] = round(n("total.recursion.time.avg"), 4)
         response = {
             "status": "SUCCESS",
-            "global": {
-                "total_queries":     int(total),
-                "cache_hits":        int(hits),
-                "cache_misses":      int(misses),
-                "cache_hit_ratio":   hit_ratio,
-                "num_recursive":     int(n("total.num.recursivereplies")),
-                "recursion_time_avg": round(n("total.recursion.time.avg"), 4),
-                "prefetch":          int(n("total.num.prefetch")),
-                "uptime_seconds":    int(n("time.up")),
-            },
+            "global": lifetime,
+            "lifetime": dict(lifetime),
             "query_types": query_types,
             "query_names": query_names,
             "query_names_tracked": len(self._query_counts),
         }
+        if window_s:
+            win = self._window_totals(snap, window_s)
+            response["global"], response["query_types"] = headline(win["c"], win["types"])
+            response["window"] = {"seconds": window_s,
+                                  "covered_seconds": win["covered_seconds"],
+                                  "partial": win["partial"]}
+        self._record_sample(snap)
         if reload_error:
             response["warning"] = reload_error
         return response

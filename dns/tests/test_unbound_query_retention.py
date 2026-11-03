@@ -96,7 +96,7 @@ def test_worker_stats_passes_range_days_through():
     calls = []
 
     class Mgr:
-        def get_stats(self, search=None, source_prefixes=None, range_days=None):
+        def get_stats(self, search=None, source_prefixes=None, range_days=None, range_seconds=None):
             calls.append((search, source_prefixes, range_days))
             return {"status": "SUCCESS"}
 

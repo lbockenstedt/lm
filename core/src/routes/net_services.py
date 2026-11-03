@@ -135,13 +135,16 @@ def _dns_scope_query_names(rows, nets):
     return out
 
 
-def _dns_rescope_stats(data, prefixes):
+def _dns_rescope_stats(data, prefixes, resolver_counters=None):
     """Tenant-scope a DNS_STATS envelope. ``prefixes`` None → unchanged (admin,
     no tenant selected). Otherwise ``query_names`` is filtered by source IP and
-    the server-wide headline counters — Unbound's lifetime totals for EVERY
-    tenant sharing the resolver — are replaced with ones derived from the
-    tenant's own rows (mirrors ``_dhcp_rescope_stats``). Cache/recursion
-    counters cannot be attributed to a client, so they are withheld (None)."""
+    the server-wide headline counters — Unbound's totals for EVERY tenant
+    sharing the resolver — are replaced with ones derived from the tenant's
+    own rows (mirrors ``_dhcp_rescope_stats``). Cache/recursion counters cannot
+    be attributed to a client, so they are withheld (None) unless
+    ``resolver_counters`` names why they may be shown resolver-wide:
+    ``"dedicated"`` (the resolver serves only this tenant) or ``"admin"`` (a
+    Global Admin, who may see every tenant's traffic anyway)."""
     if prefixes is None or not isinstance(data, dict):
         return data
     nets = _dns_prefix_nets(prefixes)
@@ -154,11 +157,16 @@ def _dns_rescope_stats(data, prefixes):
         t = r.get("type") or "?"
         types[t] = types.get(t, 0) + r["count"]
     out["query_types"] = dict(sorted(types.items(), key=lambda kv: kv[1], reverse=True))
+    g = data.get("global") if isinstance(data.get("global"), dict) else {}
+    keep = resolver_counters in ("dedicated", "admin")
     out["global"] = {
         "total_queries": sum(r["count"] for r in rows),
-        "cache_hits": None, "cache_misses": None, "cache_hit_ratio": None,
-        "num_recursive": None, "recursion_time_avg": None, "prefetch": None,
+        **{k: (g.get(k) if keep else None)
+           for k in ("cache_hits", "cache_misses", "cache_hit_ratio",
+                     "num_recursive", "recursion_time_avg", "prefetch")},
     }
+    if keep:
+        out["resolver_counters"] = resolver_counters
     out["tenant_scoped"] = True
     return out
 
@@ -1150,6 +1158,26 @@ def register(app, hub, ctx):
     # MAX_RETENTION_DAYS), so "month" is also the retention ceiling, not just
     # the widest selectable window.
     _DNS_STATS_RANGE_DAYS = {"day": 1, "week": 7, "month": 30}
+    _DNS_STATS_RANGE_SECONDS = {"hour": 3600, "day": 86400,
+                                "week": 7 * 86400, "month": 30 * 86400}
+
+    def _dns_resolver_counters(request: Request, tenant: str = None):
+        """Why resolver-wide cache/recursion counters may be shown in a
+        tenant-scoped stats view, or None to withhold them. A Global Admin
+        always may; otherwise only when the tenant's resolver is its OWN
+        (its ``dns_instances`` record or a dns spoke bound to it) rather than
+        the shared one other tenants also query."""
+        sess = _session_user(request)
+        if sess and _is_admin(sess):
+            return "admin"
+        tid = _effective_tenant(request, tenant)
+        if not tid or access.tenant_is_shared(tid):
+            return None
+        insts = (hub.state.system_state.get("global_config", {}) or {}).get("dns_instances", []) or []
+        inst = next((i for i in insts if isinstance(i, dict) and i.get("tenant_id") == tid), None)
+        if (inst or {}).get("spoke_id") or hub.get_dns_spoke_for_tenant(tid):
+            return "dedicated"
+        return None
 
     async def _dns_query_source_prefixes(request: Request, tenant: str = None):
         """Source-IP prefixes that scope DNS query telemetry for this request,
@@ -1184,12 +1212,12 @@ def register(app, hub, ctx):
         breakdown by substring match. ``host`` filters that same breakdown to
         only rows with at least one source whose resolved hostname (or, when
         unresolvable, raw IP) case-insensitively contains the substring.
-        ``range`` ("day"/"week"/"month") limits that same breakdown to the
-        trailing N days of query history the spoke has retained; an
-        unrecognized or omitted value leaves it unfiltered (i.e. the full
-        retained history, at most a month). The ``global``/``query_types``
-        counters are unaffected — they are unbound-control's own lifetime
-        totals and are not bucketed by day.
+        ``range`` ("hour"/"day"/"week"/"month") is a trailing window applied
+        to that breakdown AND to the ``global``/``query_types`` counters, which
+        resolvers compute as the increase over the window from periodic
+        counter snapshots (``window`` reports coverage). An unrecognized or
+        omitted value keeps the legacy behavior: full retained breakdown and
+        Unbound's lifetime counters.
 
         Each returned source is enriched with a best-effort ``host`` field —
         the DHCP lease hostname for that client IP if one exists, else the raw
@@ -1207,9 +1235,12 @@ def register(app, hub, ctx):
         payload = {}
         if search:
             payload["search"] = search
-        range_days = _DNS_STATS_RANGE_DAYS.get((range or "").strip().lower())
-        if range_days:
-            payload["range_days"] = range_days
+        rng = (range or "").strip().lower()
+        range_seconds = _DNS_STATS_RANGE_SECONDS.get(rng)
+        if range_seconds:
+            payload["range_seconds"] = range_seconds
+            # Pre-windowing resolvers only understand whole days.
+            payload["range_days"] = _DNS_STATS_RANGE_DAYS.get(rng, 1)
         if source_prefixes is not None:
             # Always sent once scoping applies — even `[]` (a tenant with no
             # configured prefixes), so the spoke fails CLOSED (no source rows)
@@ -1221,7 +1252,9 @@ def register(app, hub, ctx):
         )
         if isinstance(data, dict):
             # _cached_relay may hand back the shared warm-cache object.
-            data = _dns_rescope_stats(dict(data), source_prefixes)
+            data = _dns_rescope_stats(
+                dict(data), source_prefixes,
+                _dns_resolver_counters(request, tenant) if source_prefixes is not None else None)
         query_names = data.get("query_names") if isinstance(data, dict) else None
         if isinstance(query_names, list) and query_names:
             ip_to_host = await _dns_stats_ip_to_host(request, tenant)
