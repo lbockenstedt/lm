@@ -416,6 +416,17 @@ def register(app, hub, ctx):
         return {k: (res or {}).get(k) for k in
                 ("status", "reachable", "device_info", "netbox_push", "errors", "message")}
 
+    @app.post("/admin/ops/nw-dedupe")
+    async def admin_ops_nw_dedupe(request: Request):
+        """Merge network-device rows that are the same box (same path as Setup →
+        Module Management → Merge duplicates). Body {"apply": bool}; default dry run."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await hub.merge_nw_hardware_duplicates(bool((body or {}).get("apply")))
+
     @app.post("/admin/ops/nw-delete")
     async def admin_ops_nw_delete(request: Request):
         """Remove network devices from the LM fleet (same effect as the WebUI

@@ -533,7 +533,8 @@ const DEVICE_TYPES = {
         payloadKey: 'device',
         badgeLabel: 'Network',
         vaultPicker: true,
-        rowSummary: d => `${d.address || '—'}${d.port ? ':' + d.port : ''}`,
+        rowSummary: d => `${d.address || '—'}${d.port ? ':' + d.port : ''}`
+            + ((d.alt_addresses || []).length ? ` (+${d.alt_addresses.length} more: ${d.alt_addresses.join(', ')})` : ''),
         fields: [
             { id: 'object_type', label: 'Object Type', type: 'select', options: [['aos_switch','AOS Switch'],['cx_switch','CX Switch'],['ex_switch','EX Switch'],['gateway','Gateway']] },
             { id: 'transport', label: 'Transport', type: 'select', options: [['auto','Auto'],['ssh','SSH/CLI'],['rest','REST API'],['snmp','SNMP']] },
@@ -1190,6 +1191,29 @@ async function deleteDevice(typeKey, id) {
     if (!await showConfirmToast(`Delete this ${t.title.toLowerCase()} (${id})?`)) return;
     try {
         await apiJson(`${_devEndpoint(t)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        loadAllDevices();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+// Fold network-device rows that are one physical box (a switch found at each
+// of its SVI addresses) into the row NetBox and Zabbix use. Dry run first.
+async function mergeDuplicateDevices() {
+    const ep = DEVICE_TYPES.nw.endpoint + '/dedupe';
+    try {
+        const dry = await apiJson(ep, { method: 'POST', body: JSON.stringify({ apply: false }),
+                                        headers: { 'Content-Type': 'application/json' } });
+        const groups = (dry.groups || []).filter(g => g.merged.length);
+        const unconfirmed = (dry.groups || []).reduce((n, g) => n + g.unconfirmed.length, 0);
+        const note = unconfirmed ? ` ${unconfirmed} same-name entr${unconfirmed === 1 ? 'y is' : 'ies are'} kept until a poll confirms the serial.` : '';
+        if (!groups.length) { showToast('No confirmed duplicates.' + note, 'info'); return; }
+        const list = groups.map(g => `${g.primary.name}: ${g.merged.length + 1} → 1`).join(', ');
+        if (!await showConfirmToast(`Merge ${dry.removed} duplicate entr${dry.removed === 1 ? 'y' : 'ies'} (${list})? `
+            + `The extra addresses are kept on the remaining entry.${note}`)) return;
+        const res = await apiJson(ep, { method: 'POST', body: JSON.stringify({ apply: true }),
+                                        headers: { 'Content-Type': 'application/json' } });
+        showToast(`Merged ${res.removed} duplicate entr${res.removed === 1 ? 'y' : 'ies'}.`, 'success');
         loadAllDevices();
     } catch (e) {
         showToast('Error: ' + e.message, 'error');

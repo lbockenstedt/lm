@@ -119,3 +119,50 @@ async def test_alias_row_is_not_pushed_to_netbox():
     res, errors, _ = await _Hub().push_nw_device_inventory(
         _dev(2, "CRSW1", "10.21.0.1"), {}, [])
     assert res["status"] == "SKIPPED" and not errors
+
+
+@pytest.mark.asyncio
+async def test_merge_folds_confirmed_aliases_into_the_primary_row():
+    from nw_discovery_sync import NwDiscoverySyncMixin
+
+    devs = [_dev(1, "CRSW1", "172.21.0.11"), _dev(2, "CRSW1", "172.21.10.1"),
+            _dev(3, "MM-01.example.com", "10.0.0.170", otype="gateway"),
+            _dev(4, "MM-01", "10.0.0.171", otype="gateway"),
+            _dev(5, "TOR", "10.0.0.26", otype="aos_switch"),
+            _dev(6, "TOR", "10.0.0.35", otype="aos_switch")]
+    for d in devs:
+        d["spoke_id"] = "nw1"
+    ident = {"1": {"serial": "SG1"}, "2": {"serial": "SG1"},
+             "3": {"mac": "bc:24:11:00:00:01"}, "4": {"mac": "bc:24:11:00:00:01"},
+             "5": {"serial": "T1"}}      # row 6 never polled: name-only match
+
+    class _State:
+        system_state = {"global_config": {"nw_devices": devs}}
+        dirty = 0
+
+        def _mark_dirty(self):
+            self.dirty += 1
+
+    class _Hub(NwDiscoverySyncMixin):
+        state = _State()
+        pushed = []
+
+        def nw_cache_get_device(self, did, ep):
+            return {"data": ident[did]} if did in ident else None
+
+        async def nw_push_fleet(self, sid):
+            self.pushed.append(sid)
+            return True
+
+    hub = _Hub()
+    dry = await hub.merge_nw_hardware_duplicates()
+    assert dry["removed"] == 2 and len(hub.state.system_state["global_config"]["nw_devices"]) == 6
+
+    res = await hub.merge_nw_hardware_duplicates(apply=True)
+    left = {d["id"]: d for d in hub.state.system_state["global_config"]["nw_devices"]}
+    assert sorted(left) == ["1", "3", "5", "6"]
+    assert left["1"]["alt_addresses"] == ["172.21.10.1"]
+    assert left["3"]["alt_addresses"] == ["10.0.0.171"]
+    tor = next(g for g in res["groups"] if g["primary"]["id"] == "5")
+    assert tor["merged"] == [] and tor["unconfirmed"][0]["id"] == "6"
+    assert hub.pushed == ["nw1"]
