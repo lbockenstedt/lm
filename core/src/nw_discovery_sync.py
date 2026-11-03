@@ -50,6 +50,7 @@ except Exception:  # pragma: no cover - access always importable in-app
     norm_mac = None  # type: ignore
     nw_spoke_tenant = None  # type: ignore
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+from device_specs import get_spec as get_device_spec  # sibling leaf
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
@@ -772,6 +773,10 @@ class NwDiscoverySyncMixin:
                 "serial": str(device_info.get("serial", "") or ""),
                 "mac": base_mac,
                 "firmware": str(device_info.get("firmware", "") or ""),
+                "spec": await get_device_spec(
+                    self, str(device_info.get("model", "") or ""),
+                    str(device_cfg.get("object_type", "") or ""),
+                    [i.get("name") for i in interfaces or [] if isinstance(i, dict)]),
             },
             "interfaces": interfaces or [],
             "tenant_slug": tenant_slug,
