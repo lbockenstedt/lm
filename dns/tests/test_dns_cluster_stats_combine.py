@@ -45,6 +45,7 @@ class StatsTransport(FakeTransport):
         if command != "DNSW_STATS":
             return await super().fanout(command, data, timeout=timeout,
                                         member_ids=member_ids)
+        self.last_stats_payload = dict(data or {})
         targets = list(member_ids) if member_ids is not None else self.member_ids()
         results = {m: self.stats_by_member[m] for m in targets}
         ok = [m for m, r in results.items()
@@ -199,3 +200,23 @@ def test_a_malformed_reply_is_treated_as_a_non_reporting_member(tmp_path):
     out = _run(spoke.handle_command("DNS_STATS", {}))
     assert "svcs2" in out["member_errors"]
     assert out["global"]["total_queries"] == 7
+
+
+# --- windowed (hour/day/week/month) stats ----------------------------------
+
+def test_window_coverage_combines_and_flags_pre_windowing_members(tmp_path):
+    a = _ok(total_queries=40)
+    a["window"] = {"seconds": 3600, "covered_seconds": 3600, "partial": False}
+    b = _ok(total_queries=60)
+    b["window"] = {"seconds": 3600, "covered_seconds": 1800, "partial": True}
+    spoke = _two_nodes(tmp_path, a, b)
+    out = _run(spoke.handle_command("DNS_STATS", {"range_seconds": 3600, "range_days": 1}))
+    assert out["global"]["total_queries"] == 100
+    assert out["window"] == {"seconds": 3600, "covered_seconds": 1800,
+                             "partial": True, "unsupported_members": 0}
+    assert spoke._transport.last_stats_payload["range_seconds"] == 3600
+
+    legacy = _two_nodes(tmp_path, _ok(total_queries=1), a)
+    out = _run(legacy.handle_command("DNS_STATS", {"range_seconds": 3600}))
+    assert out["window"]["partial"] is True
+    assert out["window"]["unsupported_members"] == 1

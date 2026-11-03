@@ -12,6 +12,17 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-11-02
 
+### DNS
+
+- **Time-window picker on the DNS Overview.** Choose the last hour, day,
+  week or month. Total Queries, Cache Hit Ratio, Recursive Replies, Queries by
+  Type and Queries by Destination now cover that window instead of counting
+  since Unbound started. Each resolver snapshots its counters every 5 minutes,
+  so longer windows fill in as history builds up (the page says so).
+- **Cache Hit Ratio and Recursive Replies are back** when a tenant is
+  selected, for Global Admins and for tenants with their own resolver. On the
+  shared resolver they still show "—" for tenant users.
+
 ### Users & access
 
 - **Impersonate user.** Settings → Users has an **Impersonate** button

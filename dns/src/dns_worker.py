@@ -176,7 +176,8 @@ class DnsWorkerOps:
     def stats(self, data: Dict[str, Any]) -> Dict[str, Any]:
         d = data or {}
         return self.mgr.get_stats(search=d.get("search"), source_prefixes=d.get("source_prefixes"),
-                                  range_days=d.get("range_days"))
+                                  range_days=d.get("range_days"),
+                                  range_seconds=d.get("range_seconds"))
 
     def client_queries(self, data: Dict[str, Any]) -> Dict[str, Any]:
         d = data or {}
@@ -368,7 +369,10 @@ def build_worker(member_id: str, coordinator_url: str, secret: str,
         from core.src.messaging.service_cluster import ServiceWorkerClient
     except ImportError:
         from messaging.service_cluster import ServiceWorkerClient  # type: ignore
-    ops = DnsWorkerOps(UnboundManager(conf_path=conf_path), state_path=state_path)
+    mgr = UnboundManager(conf_path=conf_path, stats_history_path=os.path.join(
+        os.path.dirname(state_path) or ".", "stats_history.json"))
+    mgr.start_stats_sampler()
+    ops = DnsWorkerOps(mgr, state_path=state_path)
     # default_port drives the URL normalization, which REJECTS a plaintext
     # ws:// to a remote coordinator (the PSK rides in the handshake).
     return ServiceWorkerClient(member_id, coordinator_url, secret,
