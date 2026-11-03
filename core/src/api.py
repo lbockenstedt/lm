@@ -1445,9 +1445,14 @@ def create_app(hub):
         #                        signed-in user may use Ask AI.
         _ADMIN_API_PREFIXES = ("/api/agent/", "/api/generic/", "/api/pxmx/agents/",
                                "/api/cppm/probe", "/api/cppm/test-auth", "/cppm/refresh", "/cppm/health",
-                               "/api/exec", "/api/os-updates", "/api/test-feed")
+                               "/api/exec", "/api/test-feed")
         if any(path.startswith(p) for p in _ADMIN_API_PREFIXES):
             if not _is_admin(sess):
+                return JSONResponse(status_code=403, content={"detail": "Admin access required"})
+        # OS Updates: Global Admins see the whole fleet; Tenant Admins see (and
+        # patch) only their tenants' spokes/agents — scoped inside the routes.
+        if path.startswith("/api/os-updates"):
+            if not (_is_admin(sess) or _is_tenant_admin(sess)):
                 return JSONResponse(status_code=403, content={"detail": "Admin access required"})
 
         # /sim/api/* (the Simulations module) requires the ``cs`` right OR admin.
