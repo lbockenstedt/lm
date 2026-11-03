@@ -750,3 +750,14 @@ def test_list_cache_drops_devices_removed_from_hub_config(monkeypatch, tmp_path)
     r = c.get("/api/nw/devices", cookies={"lm_session": tok})
     assert r.status_code == 200, r.text
     assert {d["id"] for d in r.json()["data"]} == {"acme-sw", "other-sw"}
+
+
+def test_scan_schedules_narrow_to_selected_tenant(monkeypatch, tmp_path):
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    every = {s["tenant_id"] for s in c.get("/api/nw/scan-schedules",
+                                          cookies={"lm_session": tok}).json()["schedules"]}
+    assert {"acme", "othercorp"} <= every
+    r = c.get("/api/nw/scan-schedules?tenant=acme", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    assert [s["tenant_id"] for s in r.json()["schedules"]] == ["acme"]
