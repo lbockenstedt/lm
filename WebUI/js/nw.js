@@ -1155,7 +1155,7 @@ async function _renderNwScanTab() {
 
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-700 mb-1">Scheduled Scans Already Set Up</h3>
-        <p class="text-xs text-slate-400 mb-4">Every recurring scan configured across the tenants you can see — so you don't have to switch tenant and read one card at a time.</p>
+        <p class="text-xs text-slate-400 mb-4">Every recurring scan configured for the selected tenant — or, with no tenant selected, across the tenants you can see.</p>
         <div id="nwt-sched-list"><p class="text-xs text-slate-400 italic">Loading…</p></div>
       </div>
     </div>`;
@@ -1169,7 +1169,7 @@ async function _loadNwScanSchedules() {
     const el = document.getElementById('nwt-sched-list');
     if (!el) return;
     try {
-        const r = await setupFetch('/api/nw/scan-schedules');
+        const r = await setupFetch(`/api/nw/scan-schedules${currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : ''}`);
         if (!r.ok) { el.innerHTML = `<p class="text-xs text-amber-600 italic">Could not load scheduled scans (${r.status}).</p>`; return; }
         const d = await r.json();
         el.innerHTML = _nwScanSchedulesHtml(d);
