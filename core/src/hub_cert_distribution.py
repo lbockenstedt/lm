@@ -23,6 +23,7 @@ from cert_distribution import (
     CERT_CAPABLE_MODULES as _CERT_CAPABLE_MODULES,
     _is_wildcard,
     unwrap_spoke as _unwrap_spoke,
+    TargetDeviceTracker as _TargetDeviceTracker,
     distribute_cert_to_targets as _distribute_cert_to_targets,
     distribute_all_certs as _distribute_all_certs_impl,
     distribute_wildcard_to_all_spokes as _distribute_wildcard_to_all_spokes,
@@ -143,7 +144,10 @@ class HubCertDistributionMixin:
         explicit = await _distribute_cert_to_targets(
             self._inflight_rr(self.request_response), self._cert_target_spoke,
             self.CERT_CAPABLE_MODULES, le_spoke_id, domain, targets,
-            install_on_hub=self._install_cert_on_hub)
+            install_on_hub=self._install_cert_on_hub,
+            device_tracker=(self._cert_device_tracker()
+                            if hasattr(self, "_cert_device_tracker") else None),
+            target_payload=getattr(self, "_cert_target_payload", None))
         out = list(explicit or [])
         pushed_state = False
         if self._wildcard_all_spokes_enabled() and _is_wildcard(domain):
@@ -162,6 +166,48 @@ class HubCertDistributionMixin:
             self._save_wildcard_push_state()
         self._stash_cert_device_reports(out)
         return out
+
+    def _cert_target_device_key(self, module_type: str, identifier: str = ""):
+        """Fingerprint of the device(s) behind a cert target — today the
+        firewall(s) bound to an OPNsense spoke (sorted host:port). ``None`` for
+        types without a hub-side device record (not tracked)."""
+        if module_type != "firewall":
+            return None
+        sid = identifier or self._cert_target_spoke(module_type, identifier)
+        if not sid:
+            return None
+        return ",".join(sorted(f"{(f.get('host') or '').strip()}:{f.get('port') or ''}"
+                               for f in self._firewalls_for_spoke(sid)))
+
+    def _firewalls_for_spoke(self, spoke_id: str) -> list:
+        pk = self._primary_key(spoke_id)
+        gc = self.state.system_state.get("global_config", {}) or {}
+        return [f for f in (gc.get("firewalls") or [])
+                if isinstance(f, dict) and f.get("spoke_id") and f.get("host")
+                and self._primary_key(f["spoke_id"]) == pk]
+
+    async def _cert_target_payload(self, module_type: str, identifier: str, target_sid: str) -> dict:
+        """INSTALL_CERT extras: for a firewall target, EVERY firewall bound to
+        the spoke (vault-resolved creds) so each box — e.g. both HA members —
+        gets the cert directly. Empty dict = spoke uses its own connection."""
+        if module_type != "firewall":
+            return {}
+        import instance_vault
+        devices = []
+        for fw in self._firewalls_for_spoke(target_sid):
+            r = await instance_vault.overlay(self, fw, "firewalls")
+            devices.append({"name": r.get("name") or r.get("host"), "host": r.get("host"),
+                            "port": r.get("port"), "api_key": r.get("api_key"),
+                            "api_secret": r.get("api_secret")})
+        return {"devices": devices} if devices else {}
+
+    def _cert_device_tracker(self):
+        state = getattr(self, "state", None)
+        if state is None or not hasattr(self, "_cert_target_spoke"):
+            return None  # minimal/stub hubs: hash-only skip (previous behavior)
+        store = state.system_state.setdefault("cert_target_devices", {})
+        return _TargetDeviceTracker(self._cert_target_device_key, store,
+                                    on_change=state._mark_dirty)
 
     async def _redeploy_certs_to_target(self, module_type: str, spoke_id: str) -> list:
         """Force-push every managed cert targeting ``module_type``/``spoke_id``
@@ -207,7 +253,9 @@ class HubCertDistributionMixin:
             push_state=self._wildcard_push_state(),
             mtls_auto_provision=self._mtls_auto_provision_enabled(),
             get_primary_spokes=self._get_primary_spokes,
-            push=self.push_or_queue_to_spoke)
+            push=self.push_or_queue_to_spoke,
+            device_tracker=self._cert_device_tracker(),
+            target_payload=self._cert_target_payload)
         self._save_wildcard_push_state()
         self._stash_cert_device_reports(out)
         return out
