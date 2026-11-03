@@ -493,3 +493,56 @@ async def test_push_inventory_fills_missing_base_mac_from_lldp():
     await h.push_nw_device_inventory(cfg, {"mac": "11:22:33:44:55:66"}, [])
     sent = [p for _, c, p in h.request_log if c == "NETBOX_SYNC_NW_DEVICE"][-1]
     assert sent["device"]["mac"] == "11:22:33:44:55:66"
+
+
+# ── overlapping tenant address space (one VRF per tenant) ────────────────────
+
+class _OverlapHub(_SyncHub):
+    """RA and LRB both own 172.16.1.0/24 (separate VRFs), each with its own
+    nw spoke + switch that sees the same gateway IP and VRRP MAC."""
+
+    def __init__(self):
+        super().__init__(
+            tenants={"ra": {"name": "RA", "netbox_tenant_slug": "ra"},
+                     "lrb": {"name": "LRB", "netbox_tenant_slug": "lrb"}},
+            global_config={"nw_devices": [
+                {"id": "ra-sw", "name": "ra-sw", "address": "172.16.1.2",
+                 "spoke_id": "nw-ra", "tenant_id": "ra"},
+                {"id": "lrb-sw", "name": "lrb-sw", "address": "172.16.1.2",
+                 "spoke_id": "nw-lrb"}]},
+            nw_spokes=["nw-ra", "nw-lrb"])
+        self.state.system_state["module_metadata"] = {"nw-lrb": {"tenant_id": "lrb"}}
+
+    async def request_response(self, spoke_id, command, payload, timeout=30.0):
+        if command == "NETBOX_GET_PREFIXES":
+            pref = {"ra": ["172.16.1.0/24"], "lrb": ["172.16.1.0/24"]}.get(
+                payload.get("tenant"), [])
+            return {"payload": {"data": {"status": "SUCCESS",
+                                         "prefixes": [{"prefix": p} for p in pref]}}}
+        if command == "NW_GET_ARP":
+            return {"payload": {"data": {"status": "SUCCESS", "data": [
+                {"ip": "172.16.1.1", "mac": "00:00:5e:00:01:01", "interface": "vlan1"}]}}}
+        if command == "NETBOX_SYNC_DEVICES":
+            return await super().request_response(spoke_id, command, payload, timeout)
+        return {"payload": {"data": {"status": "SUCCESS", "data": []}}}
+
+
+@pytest.mark.asyncio
+async def test_overlapping_ip_lands_in_each_discovering_tenant():
+    h = _OverlapHub()
+    await h.run_nw_discovery_sync_all()
+    by_slug = {p["tenant_slug"]: p["devices"] for p in h.sync_payloads}
+    # Each agent's sighting goes to its own tenant (device tenant_id for RA,
+    # the spoke's tenant for LRB) — not both to whichever tenant came first.
+    assert [(d["ip"], d["source_switch_name"]) for d in by_slug["ra"]] == [("172.16.1.1", "ra-sw")]
+    assert [(d["ip"], d["source_switch_name"]) for d in by_slug["lrb"]] == [("172.16.1.1", "lrb-sw")]
+
+
+@pytest.mark.asyncio
+async def test_inventory_push_uses_device_tenant_for_overlapping_mgmt_ip():
+    h = _OverlapHub()
+    h._responses[("netbox-1", "NETBOX_SYNC_NW_DEVICE")] = {
+        "payload": {"data": {"status": "SUCCESS"}}}
+    cfg = h.state.system_state["global_config"]["nw_devices"][1]
+    _, _, slug = await h.push_nw_device_inventory(cfg, {}, [])
+    assert slug == "lrb"
