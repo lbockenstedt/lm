@@ -482,8 +482,11 @@ class DNSSpoke(BaseSpoke):
         }
 
     async def _cluster_stats(self, search: str = None, source_prefixes: list = None,
-                             range_days: int = None) -> Dict[str, Any]:
-        """Cluster stats: per-member counters plus the summed headline totals."""
+                             range_days: int = None,
+                             range_seconds: int = None) -> Dict[str, Any]:
+        """Cluster stats: per-member counters plus the summed headline totals.
+        With a range, each member's counters are already that window's
+        increase; the combined ``window`` is partial if any member's is."""
         payload = {}
         if search:
             payload["search"] = search
@@ -493,6 +496,8 @@ class DNSSpoke(BaseSpoke):
             payload["source_prefixes"] = source_prefixes
         if range_days:
             payload["range_days"] = range_days
+        if range_seconds:
+            payload["range_seconds"] = range_seconds
         fan = await self._transport.fanout("DNSW_STATS", payload, timeout=20.0)
         per_member: Dict[str, Any] = {}
         member_errors: Dict[str, str] = {}
@@ -552,7 +557,7 @@ class DNSSpoke(BaseSpoke):
              for (n, t), g in merged_names.items()),
             key=lambda r: r["count"], reverse=True,
         )
-        return {"status": "SUCCESS", "global": totals, "query_types": merged_types,
+        out = {"status": "SUCCESS", "global": totals, "query_types": merged_types,
                 "query_names": query_names, "cluster": True, "members": per_member,
                 # Totals are a SUM across resolvers. If one did not answer the
                 # headline numbers silently under-report, so say how many fed
@@ -560,6 +565,21 @@ class DNSSpoke(BaseSpoke):
                 "member_count": len(per_member),
                 "members_reporting": len(per_member) - len(member_errors),
                 "member_errors": member_errors}
+        window_s = range_seconds or (int(range_days) * 86400 if range_days else None)
+        if window_s:
+            ok = [r for r in per_member.values()
+                  if isinstance(r, dict) and r.get("status") == "SUCCESS"]
+            wins = [r["window"] for r in ok if isinstance(r.get("window"), dict)]
+            # A pre-windowing worker returns lifetime totals: flag it so the
+            # page does not present those as the selected window.
+            out["window"] = {
+                "seconds": window_s,
+                "covered_seconds": min((int(w.get("covered_seconds") or 0) for w in wins),
+                                       default=0),
+                "partial": len(wins) < len(ok) or any(w.get("partial") for w in wins),
+                "unsupported_members": len(ok) - len(wins),
+            }
+        return out
 
     async def _cluster_client_queries(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Merge every member's per-client query log, newest first."""
@@ -817,7 +837,8 @@ class DNSSpoke(BaseSpoke):
             if cmd == "DNS_STATS":
                 return await self._cluster_stats(search=data.get("search"),
                                                  source_prefixes=data.get("source_prefixes"),
-                                                 range_days=data.get("range_days"))
+                                                 range_days=data.get("range_days"),
+                                                 range_seconds=data.get("range_seconds"))
             if cmd == "DNS_CLIENT_QUERIES":
                 return await self._cluster_client_queries(data)
             if cmd == "DNS_FORWARDERS":

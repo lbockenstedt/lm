@@ -145,7 +145,9 @@ def test_admin_with_tenant_selected_is_scoped_even_with_dns_toggle_off():
     assert [s["ip"] for s in row["sources"]] == ["10.1.0.5"]
     assert row["count"] == 3
     assert d["global"]["total_queries"] == 3
-    assert d["global"]["cache_hit_ratio"] is None
+    # Global Admin: resolver-wide cache/recursion counters stay visible.
+    assert d["global"]["cache_hit_ratio"] == 50.0
+    assert d["resolver_counters"] == "admin"
     assert d["query_types"] == {"A": 3}
     assert "members" not in d and "query_names_tracked" not in d
     assert d["tenant_scoped"] is True
@@ -201,3 +203,29 @@ def test_client_queries_scoped_and_summary_rederived():
 def test_rescope_helpers_noop_when_unscoped():
     assert _dns_rescope_stats(STATS_REPLY, None) is STATS_REPLY
     assert _dns_rescope_client_queries(CLIENT_REPLY, None) is CLIENT_REPLY
+
+
+def test_tenant_on_shared_resolver_has_cache_counters_withheld():
+    c, hub = _build(admin=False, session_tenant="t-a", allowed=("t-a",))
+    hub.get_dns_spoke_for_tenant = lambda tid: None
+    d = c.get("/api/dns/stats").json()
+    assert d["global"]["cache_hit_ratio"] is None
+    assert d["global"]["num_recursive"] is None
+    assert "resolver_counters" not in d
+
+
+def test_tenant_on_its_own_resolver_sees_cache_counters():
+    c, hub = _build(admin=False, session_tenant="t-a", allowed=("t-a",))
+    d = c.get("/api/dns/stats").json()
+    assert d["global"]["cache_hit_ratio"] == 50.0
+    assert d["global"]["num_recursive"] == 4000
+    assert d["resolver_counters"] == "dedicated"
+
+
+@pytest.mark.parametrize("rng,seconds,days", [
+    ("hour", 3600, 1), ("day", 86400, 1), ("week", 604800, 7), ("month", 2592000, 30)])
+def test_range_is_sent_as_window_seconds_with_day_fallback(rng, seconds, days):
+    c, hub = _build(admin=True)
+    c.get("/api/dns/stats", params={"range": rng})
+    sent = _sent(hub, "DNS_STATS")
+    assert sent["range_seconds"] == seconds and sent["range_days"] == days
