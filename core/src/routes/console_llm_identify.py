@@ -236,14 +236,17 @@ def _unwrap(res) -> Dict[str, Any]:
     return {}
 
 
-async def _ask_llm(hub, agent, system: str, user: str, timeout: float = 90.0) -> str:
+async def _ask_llm(hub, agent, system: str, user: str, timeout: float = 90.0,
+                   role: Optional[str] = None) -> str:
     """One tool-free LLM turn via the AppBuilder HELP_ASK relay → assistant text.
-    The user content is scrubbed of site-sensitive data before it leaves the hub."""
-    res = await hub.request_response(
-        agent, "HELP_ASK",
-        {"messages": [{"role": "user", "content": scrub_for_llm(user)}],
-         "tools": None, "system": system},
-        timeout=timeout)
+    The user content is scrubbed of site-sensitive data before it leaves the hub.
+    ``role="final"`` asks AppBuilder for its most capable model (older agents
+    ignore it)."""
+    req = {"messages": [{"role": "user", "content": scrub_for_llm(user)}],
+           "tools": None, "system": system}
+    if role:
+        req["role"] = role
+    res = await hub.request_response(agent, "HELP_ASK", req, timeout=timeout)
     data = _unwrap(res)
     if not isinstance(data, dict) or data.get("status") != "SUCCESS":
         raise RuntimeError((data or {}).get("message") or "LLM relay error")
