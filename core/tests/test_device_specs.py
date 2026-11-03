@@ -27,6 +27,7 @@ class _Hub:
     async def request_response(self, target, cmd, payload, timeout=None):
         assert cmd == "HELP_ASK"
         self.asks.append(payload["messages"][0]["content"])
+        self.roles = getattr(self, "roles", []) + [payload.get("role")]
         return {"payload": {"data": {"status": "SUCCESS",
                                      "assistant": {"content": self.replies.pop(0)}}}}
 
@@ -66,3 +67,11 @@ def test_no_llm_connected_is_not_recorded(tmp_path):
     assert _get(hub) is None
     hub.active_connections = {"ab": object()}
     assert _get(hub)["model"] == "8325-48Y8C"
+
+
+def test_unusable_reply_is_not_recorded_and_is_asked_again(tmp_path):
+    device_specs._CACHE.clear()
+    hub = _Hub(tmp_path, ["Sorry, I am not sure.", json.dumps(_ANSWER)])
+    assert _get(hub) is None
+    assert _get(hub)["model"] == "8325-48Y8C"
+    assert hub.roles == ["final", "final"]       # catalog answers use the strongest model
