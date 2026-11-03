@@ -1983,8 +1983,10 @@ def create_app(hub):
     async def _gate_record(request, record, module, ip_fields):
         return await access.gate_record(hub, _sessions, request, record, module, ip_fields)
 
-    async def _filter_tenant(request, data, module, ip_fields, explicit_tenant=None):
-        return await access.filter_tenant(hub, _sessions, request, data, module, ip_fields, explicit_tenant)
+    async def _filter_tenant(request, data, module, ip_fields, explicit_tenant=None,
+                             shared_source=False):
+        return await access.filter_tenant(hub, _sessions, request, data, module, ip_fields,
+                                          explicit_tenant, shared_source)
 
     async def _gate_record_tenant(request, record, module, ip_fields, explicit_tenant=None):
         return await access.gate_record_tenant(hub, _sessions, request, record, module, ip_fields, explicit_tenant)
