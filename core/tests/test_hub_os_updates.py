@@ -1020,3 +1020,15 @@ async def test_no_snapshot_when_turned_off():
     await _drain()
     assert not [s for s in hub.sent if s[1] == "PXMX_VM_ACTION"]
     assert ("spoke-1", "OS_UPDATE_APPLY", {}) in hub.sent
+
+
+def test_tenant_node_keys_follow_an_agents_own_pinned_tenant():
+    hub = _FakeHub(
+        connections={"shared": object()},
+        agent_info={"a1": {"spoke_id": "shared", "hostname": "pve1"},
+                    "a2": {"spoke_id": "shared", "hostname": "pve2"}},
+        module_metadata={"shared": {"display_name": "shared"}})
+    hub.state.system_state["agent_config"] = {
+        "a1": {"client_simulation": {"tenant_id": "t1"}},
+        "a2": {"client_simulation": {"tenant_id": "t2"}}}
+    assert hub.osu_tenant_node_keys({"t1"}) == {"agent:a1"}
