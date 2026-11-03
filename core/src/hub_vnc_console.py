@@ -8,6 +8,8 @@ import re
 import time
 from typing import Any, Dict, Optional
 
+from device_specs import get_spec as get_device_spec
+
 logger = logging.getLogger("Console")
 
 # Words a console prompt parser can mistake for a hostname.
@@ -467,6 +469,15 @@ class HubVncConsoleMixin:
             device_rec["model"] = model
         if vendor:
             device_rec["manufacturer"] = vendor
+        # Recorded model spec (asked from the LLM once per model) gives the
+        # NetBox type its ports; its role, else the identified device class.
+        spec = await get_device_spec(self, model, vendor) if model else None
+        if spec:
+            device_rec["spec"] = spec
+        role = (spec or {}).get("role") or re.sub(
+            r"[^a-z0-9]+", "-", str(identity.get("type") or "").lower()).strip("-")
+        if role and role != "other":
+            device_rec["role"] = role
         payload = {
             "tenant_id": tenant_id, "tenant_slug": slug,
             "tenant_name": tenant_name,
