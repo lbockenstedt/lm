@@ -1480,7 +1480,7 @@ async function _initApp() {
                                 <span id="user-chip-tenant">${escapeHtml(chipLabel)}</span>
                                 <svg class="w-2.5 h-2.5 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"/></svg>
                             </button>
-                            <div id="tenant-picker-menu" class="hidden absolute top-full left-1/2 -translate-x-1/2 mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl z-50 min-w-[140px] max-h-[60vh] overflow-y-auto py-1">
+                            <div id="tenant-picker-menu" class="hidden absolute top-full left-1/2 -translate-x-1/2 mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl z-50 min-w-[200px] max-h-[60vh] overflow-y-auto py-1">
                                 ${pickerTenants.map(t => `
                                     <div class="flex items-center hover:bg-[#01A982] group">
                                     <button data-tid="${escapeHtml(t.id)}" onclick="viewAsTenant('${escapeHtml(t.id)}')" title="${t.isGroup ? escapeHtml('Tenant group — shows: ' + (t.members.join(', ') || 'no members')) : ''}" class="flex-1 text-left pl-3 pr-1 py-1.5 text-[11px] text-slate-200 group-hover:text-white transition-colors flex items-center justify-between gap-2 ${t.id===currentTenant?'font-bold text-[#01A982]':''}">
@@ -1493,6 +1493,7 @@ async function _initApp() {
                             </div>
                         </div>`;
                     _bindTenantPickerListeners();
+                    _appendImpersonationToPicker();
                 } else if (currentTenant && currentTenant !== 'default') {
                     wrap.innerHTML = `<span id="user-chip-tenant" class="px-2 py-0.5 rounded-full bg-[#01A982] text-white text-[10px] font-bold uppercase tracking-wider">${escapeHtml(chipLabel)}</span>`;
                 } else {
@@ -1564,6 +1565,72 @@ function _renderImpersonationBanner() {
     stop.addEventListener('click', stopImpersonation);
     bar.append(label, stop);
     document.body.appendChild(bar);
+}
+
+// Tenant picker: Global Admins get a small "i" (impersonate) button beside each
+// tenant's star that lists the tenant's users to impersonate. While
+// impersonating, a "Stop impersonating" item is shown instead.
+function _appendImpersonationToPicker() {
+    const menu = document.getElementById('tenant-picker-menu');
+    if (!menu) return;
+    if (currentUser?.impersonator) {
+        const stop = document.createElement('button');
+        stop.className = 'w-full text-left border-t border-slate-600 mt-1 px-3 py-1.5 text-[11px] text-amber-300 hover:bg-amber-500 hover:text-white';
+        stop.textContent = `Stop impersonating ${currentUser.display_name || currentUser.user_id}`;
+        stop.addEventListener('click', stopImpersonation);
+        menu.appendChild(stop);
+        return;
+    }
+    if (!isAdmin()) return;
+
+    let usersPromise = null;
+    const loadUsers = () => (usersPromise ||= fetch('/setup/users', { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(d => Object.entries(d.users || {})
+            .filter(([id]) => id !== currentUser?.user_id)
+            .map(([id, u]) => ({ id, label: u.name || u.email || id, tenants: u.tenants || [] }))
+            .sort((x, y) => x.label.localeCompare(y.label)))
+        .catch((e) => { console.error('impersonation user list failed', e); usersPromise = null; return []; }));
+
+    const note = (text) => {
+        const el = document.createElement('div');
+        el.className = 'px-4 py-1 text-[10px] italic text-slate-500';
+        el.textContent = text;
+        return el;
+    };
+
+    menu.querySelectorAll('button[data-tid]').forEach((tb) => {
+        const row = tb.parentElement;
+        const tid = tb.dataset.tid;
+        const pick = (window._lmTenantPicker || []).find(t => t.id === tid);
+        const scope = pick?.isGroup ? (pick.members || []) : [tid];
+        const info = document.createElement('button');
+        info.className = 'px-1.5 py-1.5 text-[11px] leading-none font-serif italic font-bold text-slate-500 hover:text-amber-300';
+        info.textContent = 'i';
+        info.title = 'Impersonate a user of this tenant';
+        info.setAttribute('aria-label', info.title);
+        const panel = document.createElement('div');
+        panel.className = 'hidden bg-slate-900/60 py-1';
+        row.after(panel);
+        info.addEventListener('click', async (ev) => {
+            ev.stopPropagation();  // must not switch tenant or close the menu
+            if (!panel.classList.toggle('hidden')) {
+                panel.replaceChildren(note('Loading users…'));
+                const users = (await loadUsers()).filter(u => u.tenants.some(t => scope.includes(t)));
+                panel.replaceChildren();
+                if (!users.length) { panel.appendChild(note('No users in this tenant')); return; }
+                users.forEach((u) => {
+                    const b = document.createElement('button');
+                    b.className = 'w-full text-left pl-5 pr-3 py-1 text-[11px] text-slate-300 hover:bg-amber-500 hover:text-white';
+                    b.textContent = u.label === u.id ? u.id : `${u.label} (${u.id})`;
+                    b.title = `Impersonate ${u.id}`;
+                    b.addEventListener('click', (e) => { e.stopPropagation(); closeTenantPicker(); startImpersonation(u.id); });
+                    panel.appendChild(b);
+                });
+            }
+        });
+        row.appendChild(info);
+    });
 }
 
 async function _switchIdentity(url, body) {
