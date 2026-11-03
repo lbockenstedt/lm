@@ -1738,16 +1738,39 @@ async def _tenant_networks(hub) -> Dict[str, List[Any]]:
     return nets_by_tid
 
 
+def _prefix_owner(addr, nets_by_tid: Dict[str, List[Any]], hint: str = "") -> Optional[str]:
+    """The tenant an address belongs to. Tenants overlap (one VRF each), so the
+    tenant that SAW the address (``hint`` — the discovering spoke/agent's
+    tenant) wins whenever one of its prefixes contains it. Otherwise the most
+    specific containing prefix wins. A hint from a dedicated tenant is strict:
+    its agent only sees its own VRF, so an address outside that tenant's
+    prefixes is unattributed rather than given to another tenant. Admin/shared
+    hints only break ties (their agents may see every tenant's space)."""
+    hint_tid = next((t for t in nets_by_tid if same_tenant(t, hint)), None) if hint else None
+    owners = [(net.prefixlen, tid) for tid, nets in nets_by_tid.items()
+              for net in nets or [] if addr in net]
+    if hint_tid and not tenant_is_shared(hint_tid) and not same_tenant(hint_tid, ADMIN_TENANT_ID):
+        return hint_tid if any(tid == hint_tid for _, tid in owners) else None
+    if not owners:
+        return None
+    best_len = max(plen for plen, _ in owners)
+    best = [tid for plen, tid in owners if plen == best_len]
+    return hint_tid if hint_tid in best else best[0]
+
+
 async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
                              ) -> Tuple[Dict[str, List[Dict[str, Any]]], int]:
     """Bucket records by tenant via IP prefix containment.
 
     Builds the tenant→networks map once per call (concurrent prefix fetch via
     ``fetch_tenant_prefixes``, bounded so hundreds of tenants don't stampede the
-    netbox spoke), then assigns each record to the first tenant whose prefix
-    contains its IP. Records with no IP, an unparseable IP, or an IP no tenant
-    owns are ``dropped`` (counted) — keeps NetBox tenant-authoritative, no
-    orphans. Returns ``({tenant_id: [records]}, dropped_count)``.
+    netbox spoke), then assigns each record to its owner (``_prefix_owner``):
+    the record's ``source_tenant_id`` (the tenant of the spoke/agent that
+    discovered it) when that tenant owns a containing prefix, else the most
+    specific containing prefix. Records with no IP, an unparseable IP, or an
+    IP no tenant owns are ``dropped`` (counted) — keeps NetBox
+    tenant-authoritative, no orphans. Returns ``({tenant_id: [records]},
+    dropped_count)``.
 
     Extracted from ``FwDiscoverySyncMixin._fw_attribute`` so the firewall-
     discovery sync and the realtime NAC→IPAM reverse sync share one attribution
@@ -1755,7 +1778,6 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
     helper); the caller normalizes MACs etc.
     """
     nets_by_tid = await _tenant_networks(hub)
-    tids = list(nets_by_tid)
     buckets: Dict[str, List[Dict[str, Any]]] = {}
     dropped = 0
     for rec in records:
@@ -1768,14 +1790,7 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
         except Exception:
             dropped += 1
             continue
-        matched: Optional[str] = None
-        for tid in tids:
-            for net in nets_by_tid.get(tid) or []:
-                if addr in net:
-                    matched = tid
-                    break
-            if matched:
-                break
+        matched = _prefix_owner(addr, nets_by_tid, str(rec.get("source_tenant_id") or ""))
         if matched:
             buckets.setdefault(matched, []).append(rec)
         else:
@@ -1785,7 +1800,8 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
 
 async def foreign_tenant_ips(hub, tenant_id, ips) -> set:
     """The ``ips`` NetBox assigns to a tenant other than ``tenant_id`` (most
-    specific prefix wins). Unowned IPs and IPs of the shared tenant are not
+    specific prefix wins; on a tie — the same prefix in two tenants' VRFs —
+    ``tenant_id`` keeps it). Unowned IPs and IPs of the shared tenant are not
     foreign. Empty when NetBox is unreachable."""
     nets_by_tid = await _tenant_networks(hub)
     mine = str(tenant_id or ADMIN_TENANT_ID)
@@ -1798,7 +1814,10 @@ async def foreign_tenant_ips(hub, tenant_id, ips) -> set:
         best = None
         for tid, nets in nets_by_tid.items():
             for net in nets:
-                if addr in net and (best is None or net.prefixlen > best[1]):
+                if addr not in net:
+                    continue
+                if (best is None or net.prefixlen > best[1]
+                        or (net.prefixlen == best[1] and same_tenant(tid, mine))):
                     best = (tid, net.prefixlen)
         if best and not same_tenant(best[0], mine) and not tenant_is_shared(best[0]):
             foreign.add(str(ip))

@@ -127,3 +127,50 @@ async def test_foreign_tenant_ips_uses_most_specific_owner():
     # lrb's /23 beats ra's /16; ra's other addresses stay foreign to lrb.
     assert await access.foreign_tenant_ips(hub, "lrb", ips) == {
         "10.21.16.11", "172.16.9.1", "172.21.0.33"}
+
+
+def _overlap_hub():
+    # The same 172.16.1.0/24 lives in both RA's and LRB's VRF.
+    return _FakeHub(
+        tenants={"lrb": {"netbox_tenant_slug": "lrb"},
+                 "ra": {"netbox_tenant_slug": "ra"}},
+        prefixes_by_tenant={"lrb": ["172.16.1.0/24"],
+                            "ra": ["172.16.1.0/24", "10.5.0.0/16"],
+                            "default": ["10.0.0.0/8"]})
+
+
+@pytest.mark.asyncio
+async def test_attribute_by_prefix_overlap_follows_discovering_tenant():
+    hub = _overlap_hub()
+    ra = {"ip": "172.16.1.10", "source_tenant_id": "ra"}
+    lrb = {"ip": "172.16.1.10", "source_tenant_id": "LRB"}
+    buckets, dropped = await attribute_by_prefix(hub, [ra, lrb])
+    assert buckets == {"ra": [ra], "lrb": [lrb]}
+    assert dropped == 0
+
+
+@pytest.mark.asyncio
+async def test_attribute_by_prefix_dedicated_hint_never_leaks_to_other_tenant():
+    hub = _overlap_hub()
+    # An LRB agent seeing an address only RA/Admin own is not given to them.
+    buckets, dropped = await attribute_by_prefix(
+        hub, [{"ip": "10.5.0.9", "source_tenant_id": "lrb"}])
+    assert buckets == {} and dropped == 1
+    # An Admin agent's hint only breaks ties; RA's /16 beats Admin's /8.
+    buckets, _ = await attribute_by_prefix(
+        hub, [{"ip": "10.5.0.9", "source_tenant_id": ADMIN_TENANT_ID}])
+    assert list(buckets) == ["ra"]
+
+
+@pytest.mark.asyncio
+async def test_attribute_by_prefix_without_hint_prefers_most_specific():
+    hub = _overlap_hub()
+    buckets, _ = await attribute_by_prefix(hub, [{"ip": "10.5.0.9"}])
+    assert list(buckets) == ["ra"]
+
+
+@pytest.mark.asyncio
+async def test_foreign_tenant_ips_tie_goes_to_asking_tenant():
+    hub = _overlap_hub()
+    assert await access.foreign_tenant_ips(hub, "ra", ["172.16.1.10"]) == set()
+    assert await access.foreign_tenant_ips(hub, "lrb", ["172.16.1.10"]) == set()

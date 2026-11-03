@@ -50,6 +50,8 @@ def test_is_allowed_contract():
     assert sentinel.is_allowed("vault.automation_get", "henet_sync")
     assert sentinel.is_allowed("vault.automation_get", "routes.console")
     assert not sentinel.is_allowed("vault.automation_get", "evil_module")
+    # The Zabbix sync's SNMP lookup (monitoring.inventory_devices) is legitimate.
+    assert sentinel.is_allowed("vault.automation_list_by_type", "routes.monitoring")
     # An un-contracted resource is not flagged (no policy → allow).
     assert sentinel.is_allowed("something.unlisted", "whoever")
 

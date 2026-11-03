@@ -238,7 +238,7 @@ Endpoints with nothing to show under the ADMIN scope return a clean, empty envel
 
 **How objects get attributed to a tenant** (per module, since each system tags differently):
 
-- **IPAM / NetBox** — by **prefix containment**: a record's IP is bucketed to the first tenant whose NetBox prefix contains it (`attribute_by_prefix`). The tenant's `netbox_tenant_slug` is the key.
+- **IPAM / NetBox** — by **prefix containment**: a record's IP is bucketed to a tenant whose NetBox prefix contains it (`attribute_by_prefix`). Tenants may overlap address space (one NetBox VRF per tenant), so the tenant of the spoke/agent that discovered the record (`source_tenant_id`: the nw device's `tenant_id`, else the source spoke's bound tenant) wins when it owns a containing prefix; an address outside a dedicated tenant's prefixes is dropped, never given to another tenant. Without a source tenant (or for Admin/shared spokes) the most specific prefix wins. The tenant's `netbox_tenant_slug` is the key, and the netbox spoke writes into that tenant's VRF.
 - **Hypervisor / Proxmox** — by **`proxmox_tag`**: a VM tagged for the tenant is shown to it regardless of subnet; VMs in a configured **template pool** are shared to all tenants.
 - **Firewall / OPNsense** — by subnet **and** by OPNsense **category** (matched against the tenant's display name, slug, netbox slug, or id).
 - **Directory / LDAP** — by `ldap_base_dn`.

@@ -43,7 +43,7 @@ try:
     from access import attribute_by_prefix  # sibling leaf (no main/api back-import)
 except Exception:  # pragma: no cover - access always importable in-app
     attribute_by_prefix = None  # type: ignore
-from access import norm_mac, unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import norm_mac, nw_spoke_tenant, unwrap_spoke  # sibling leaf (no main/api back-import)
 from sync_loop import run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
@@ -85,9 +85,13 @@ class RealtimeIpamNacSyncMixin:
         return (self.state.system_state.get("global_config", {})
                 .get(self._REALTIME_NAC_CFG_KEY, {})) or {}
 
-    def _rt_nac_spoke(self) -> Optional[str]:
-        """Connected NAC (CPPM) spoke id to pull from (first of type). None if down."""
-        return self.get_spoke_by_type(self._RT_NAC_SOURCE_MODULE)
+    def _rt_nac_spokes(self) -> List[str]:
+        """Every connected, configured NAC (CPPM) spoke to pull from. A tenant
+        whose addresses overlap another tenant's has its own ClearPass, so all
+        of them are pulled, not just the first."""
+        unconfigured = getattr(self, "_nac_unconfigured_spokes", set())
+        return [sid for sid in self.get_all_spokes_by_type(self._RT_NAC_SOURCE_MODULE)
+                if sid not in unconfigured]
 
     def _rt_ipam_spoke(self) -> Optional[str]:
         """Connected IPAM (netbox) spoke id to push to (first of type). None if down."""
@@ -121,7 +125,7 @@ class RealtimeIpamNacSyncMixin:
     # ── pull / attribute / push ─────────────────────────────────────────────
 
     async def _rt_pull_sessions(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        """Pull recent Access Tracker sessions from the CPPM spoke.
+        """Pull recent Access Tracker sessions from every CPPM spoke.
 
         Returns ``(sessions, pull_info)`` where each session is normalized to
         ``{mac, ip, nas_ip, nas_name, nas_port, nas_port_type, username,
@@ -130,9 +134,23 @@ class RealtimeIpamNacSyncMixin:
         ``{"errors": [<per-spoke errors>], "window_start": iso, "window_end":
         iso, "total": N}``. Empty list + an error when no NAC spoke is connected.
         """
-        nac = self._rt_nac_spoke()
-        if not nac:
+        spokes = self._rt_nac_spokes()
+        if not spokes:
             return [], {"errors": ["no NAC spoke connected"], "total": 0}
+        sessions: List[Dict[str, Any]] = []
+        info: Dict[str, Any] = {"errors": [], "total": 0,
+                                "window_start": "", "window_end": ""}
+        for nac in spokes:
+            rows, one = await self._rt_pull_one(nac)
+            sessions.extend(rows)
+            info["errors"].extend(one["errors"])
+            info["total"] += one["total"]
+            info["window_start"] = info["window_start"] or one.get("window_start", "")
+            info["window_end"] = info["window_end"] or one.get("window_end", "")
+        return sessions, info
+
+    async def _rt_pull_one(self, nac: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Pull + normalize one CPPM spoke's recent sessions (see _rt_pull_sessions)."""
         lookback = self._rt_nac_lookback()
         errors: List[str] = []
         try:
@@ -144,6 +162,9 @@ class RealtimeIpamNacSyncMixin:
                 errors.append(f"CPPM({nac}): {d.get('message', 'error')}")
                 return [], {"errors": errors, "total": 0}
             rows = (d.get("sessions") if isinstance(d, dict) else None) or []
+            # The CPPM spoke's tenant: framed IPs overlap across tenants'
+            # VRFs, so attribution prefers this tenant's prefixes.
+            nac_tid = nw_spoke_tenant(self, nac)
             out: List[Dict[str, Any]] = []
             for row in rows or []:
                 if not isinstance(row, dict):
@@ -172,6 +193,8 @@ class RealtimeIpamNacSyncMixin:
                     sess_rec["model"] = model
                 if manufacturer:
                     sess_rec["manufacturer"] = manufacturer
+                if nac_tid:
+                    sess_rec["source_tenant_id"] = nac_tid
                 out.append(sess_rec)
             info = {"errors": errors, "total": int(d.get("total", len(out)) or 0) if isinstance(d, dict) else len(out),
                     "window_start": (d.get("window_start") if isinstance(d, dict) else "") or "",
@@ -357,9 +380,7 @@ class RealtimeIpamNacSyncMixin:
         """
         def _guard() -> bool:
             cfg = self._rt_nac_cfg()
-            nac = self._rt_nac_spoke()
-            nac_up = bool(nac) and nac not in self._nac_unconfigured_spokes
-            return bool(cfg.get("enabled", False) and nac_up
+            return bool(cfg.get("enabled", False) and self._rt_nac_spokes()
                         and self._rt_ipam_spoke())
 
         def _delay() -> float:
