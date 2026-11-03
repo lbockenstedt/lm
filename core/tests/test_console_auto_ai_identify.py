@@ -94,8 +94,8 @@ def test_llm_result_does_not_re_escalate():
         "banner": "some banner", "method": "llm",
     }))
     assert hub.orchestrated == []  # no recursion
-    # method=llm with no identity falls through to the port_id-named sync path.
-    assert hub.synced and hub.synced[0][0] == "NETBOX_SYNC_DEVICES"
+    # Nothing identifies the device (no hostname/serial/ip/mac): no NetBox record.
+    assert hub.synced == []
 
 
 def test_identified_vendor_does_not_escalate():
@@ -117,19 +117,20 @@ def test_no_escalation_when_ai_disabled(monkeypatch):
         "banner": "unknown device", "method": "login",
     }))
     assert hub.orchestrated == []
-    # disabled → falls through to existing behavior (placeholder sync).
-    assert hub.synced and hub.synced[0][0] == "NETBOX_SYNC_DEVICES"
+    # disabled → no placeholder device for an unidentified port.
+    assert hub.synced == []
 
 
-def test_product_string_used_as_name_over_port_id():
+def test_adapter_product_and_port_id_never_name_a_device():
+    # They name the console cable, not the device: every port with the same
+    # adapter became one more junk NetBox device ("USB Serial Controller").
     hub = _Hub()
     _run(hub._handle_console_probe("console-1", {
         "port_id": "usb-067b:2303@6-2.4", "vendor": "hp-procurve", "identity": {},
         "banner": "MIA-SW-AOSS> ", "method": "login",
         "product": "USB Serial Controller",
     }))
-    dev = hub.synced[0][1]["devices"][0]
-    assert dev["hostname"] == "USB Serial Controller"  # not the cryptic port id
+    assert hub.synced == []
 
 
 def test_real_hostname_beats_product_string():

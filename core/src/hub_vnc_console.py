@@ -4,10 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("Console")
+
+# Words a console prompt parser can mistake for a hostname.
+_NOT_HOSTNAMES = {"hostname", "password", "login", "username", "standby",
+                  "localhost", "switch", "unknown", "n/a", "none"}
+
+
+def _usable_hostname(name: str) -> str:
+    """The name if it can be a real device hostname, else "". Rejects prompt
+    noise ("Password:", "N/A", "standby"), bare model numbers ("6300") and
+    anything with spaces (a USB adapter product string)."""
+    name = str(name or "").strip()
+    if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name)
+            or name.lower() in _NOT_HOSTNAMES or name.isdigit()):
+        return ""
+    return name
 
 
 class HubVncConsoleMixin:
@@ -371,9 +387,11 @@ class HubVncConsoleMixin:
                 "forcing %s (cross-tenant attribution refused)", spoke_id, claimed, base, base)
             return base
         # Shared / unassigned spoke with a differing claim: corroborate the claim
-        # against the claimed tenant's prefixes before honoring it.
+        # against the claimed tenant's prefixes before honoring it (the hint
+        # lets an address that overlaps another tenant's VRF still count).
         try:
-            buckets, _ = await access.attribute_by_prefix(self, [{"ip": device_ip or ""}])
+            buckets, _ = await access.attribute_by_prefix(
+                self, [{"ip": device_ip or "", "source_tenant_id": claimed}])
         except Exception:  # noqa: BLE001
             buckets = {}
         if device_ip and claimed in buckets:
@@ -413,11 +431,11 @@ class HubVncConsoleMixin:
         # it feeds the Console UI + global search independent of NetBox sync.
         if not self._console_netbox_sync_enabled():
             return
-        # Name preference: the device's real hostname (or serial), else the USB
-        # adapter product string (e.g. "USB Serial Controller") — a friendlier
-        # name than the cryptic port id, which is the last resort.
-        product = str(data.get("product") or "").strip()
-        hostname = str(real_host or serial or product or data.get("port_id") or "").strip()
+        # Name: the device's real hostname, else its serial. Never the USB
+        # adapter product string or the port id — those name the console
+        # cable, not the device, and every port sharing an adapter model
+        # became one more junk NetBox device ("FT232R USB UART", "uart-ttyS0").
+        hostname = _usable_hostname(real_host) or serial
         if not (ip or mac or hostname or serial):
             return
         netbox = self.get_spoke_by_type("ipam")

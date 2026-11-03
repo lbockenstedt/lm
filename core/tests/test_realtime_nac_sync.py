@@ -89,6 +89,11 @@ class _RtHub(RealtimeIpamNacSyncMixin):
             return self._ipam
         return None
 
+    def get_all_spokes_by_type(self, module_type):
+        if module_type == "nac":
+            return self._nac if isinstance(self._nac, list) else [s for s in [self._nac] if s]
+        return [s for s in [self.get_spoke_by_type(module_type)] if s]
+
     async def request_response(self, spoke_id, command, payload, timeout=30.0):
         self.request_log.append((spoke_id, command, payload))
         return self._responses[(spoke_id, command)]
@@ -173,6 +178,35 @@ async def test_attribute_buckets_by_prefix_and_drops_unattributed():
     assert set(buckets.keys()) == {"acme"}
     assert len(buckets["acme"]) == 1          # 10.20.0.5 (the mac-less 10.20.0.6 was dropped in pull)
     assert dropped == 1                        # 10.30.0.99 unmatched
+
+
+def _one_session(mac):
+    return {"payload": {"data": {"status": "SUCCESS", "total": 1, "sessions": [
+        {"mac": mac, "ip": "10.20.0.5", "start_time": "2026-06-30T10:00:30"}]}}}
+
+
+@pytest.mark.asyncio
+async def test_each_tenant_clearpass_is_pulled_and_keeps_its_overlapping_ip():
+    """Tenants with overlapping addresses each run their own ClearPass: every
+    CPPM spoke is pulled, and each session lands in its own spoke's tenant."""
+    h = _hub(responses={
+        ("cppm-ra", "CPPM_GET_RECENT_SESSIONS"): _one_session("aa:aa:aa:aa:aa:01"),
+        ("cppm-lrb", "CPPM_GET_RECENT_SESSIONS"): _one_session("bb:bb:bb:bb:bb:02"),
+        ("cppm-down", "CPPM_GET_RECENT_SESSIONS"): {"payload": {"data": {
+            "status": "ERROR", "message": "unreachable"}}},
+    }, nac_spoke=["cppm-ra", "cppm-down", "cppm-lrb"],
+       tenants={"ra": {"name": "RA", "netbox_tenant_slug": "ra"},
+                "lrb": {"name": "LRB", "netbox_tenant_slug": "lrb"}})
+    h.state.system_state["module_metadata"] = {
+        "cppm-ra": {"tenant_id": "ra"}, "cppm-lrb": {"tenant_id": "lrb"}}
+    sessions, info = await h._rt_pull_sessions()
+    assert len(sessions) == 2
+    assert info["total"] == 2
+    assert info["errors"] == ["CPPM(cppm-down): unreachable"]
+    buckets, dropped = await h._rt_attribute(sessions)
+    assert dropped == 0
+    assert [s["mac"] for s in buckets["ra"]] == ["aa:aa:aa:aa:aa:01"]
+    assert [s["mac"] for s in buckets["lrb"]] == ["bb:bb:bb:bb:bb:02"]
 
 
 # ── push / entry points ──────────────────────────────────────────────────────

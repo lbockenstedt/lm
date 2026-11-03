@@ -54,7 +54,7 @@ try:
 except Exception:  # pragma: no cover - access always importable in-app
     fetch_tenant_prefixes = None  # type: ignore
     attribute_by_prefix = None  # type: ignore
-from access import norm_mac, unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import norm_mac, nw_spoke_tenant, unwrap_spoke  # sibling leaf (no main/api back-import)
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
@@ -289,7 +289,8 @@ class FwDiscoverySyncMixin:
                         ip = ""
                     if not ip and not mac:
                         continue  # nothing to attribute or push
-                    raw.append({"ip": ip, "mac": mac, "hostname": hostname, "_src": tag})
+                    raw.append({"ip": ip, "mac": mac, "hostname": hostname, "_src": tag,
+                                "source_tenant_id": nw_spoke_tenant(self, sid)})
             except Exception as e:
                 errors.append(f"{tag}({sid}): {e}")
 
@@ -306,17 +307,22 @@ class FwDiscoverySyncMixin:
                 fetches.append(_fetch(sid, se["arp_command"], {}, "ARP"))
         await asyncio.gather(*fetches, return_exceptions=True)
 
-        # Merge + dedup: key by MAC (primary), else by ip:<ip>. DHCP hostname
-        # preferred; fill in ip/mac the other source supplied.
+        # Merge + dedup: key by MAC (primary), else by ip:<ip>, per source
+        # tenant (the same IP in two tenants' VRFs is two devices). DHCP
+        # hostname preferred; fill in ip/mac the other source supplied.
         merged: Dict[str, Dict[str, str]] = {}
         for rec in raw:
             mac, ip = rec.get("mac", ""), rec.get("ip", "")
             key = mac if mac else (f"ip:{ip}" if ip else "")
             if not key:
                 continue
+            src_tid = rec.get("source_tenant_id", "")
+            key = f"{src_tid}|{key}"
             ex = merged.get(key)
             if ex is None:
                 merged[key] = {"ip": ip, "mac": mac, "hostname": rec.get("hostname", "")}
+                if src_tid:
+                    merged[key]["source_tenant_id"] = src_tid
             else:
                 # The DHCP hostname is the authoritative one (the client told
                 # the server its name); ARP only ever has a reverse-lookup
@@ -341,8 +347,9 @@ class FwDiscoverySyncMixin:
         (extracted so the firewall-discovery sync and the realtime NAC→IPAM
         reverse sync share one attribution path). Builds the tenant→networks map
         once per cycle (concurrent prefix fetch, bounded so hundreds of tenants
-        don't stampede the netbox spoke), then assigns each record to the first
-        tenant whose prefix contains its IP. Records with no IP, an unparseable
+        don't stampede the netbox spoke), then assigns each record to the
+        tenant of the source spoke when it owns the IP, else the most specific
+        containing prefix. Records with no IP, an unparseable
         IP, or an IP no tenant owns are ``dropped`` (counted) — keeps NetBox
         tenant-authoritative, no orphans. Returns ``({tenant_id: [records]},
         dropped_count)``.

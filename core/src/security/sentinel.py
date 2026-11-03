@@ -63,7 +63,8 @@ _ALLOW: Dict[str, Set[str]] = {
         "instance_vault", "henet_sync", "le_cache",
         "routes.console", "routes.net_services",
     },
-    "vault.automation_list_by_type": {"routes.console"},
+    # routes.monitoring: the Zabbix sync resolves each tenant's SNMP community.
+    "vault.automation_list_by_type": {"routes.console", "routes.monitoring"},
     # Interactive PSK reveal — the human-facing cred-vault route only.
     "vault.reveal_secret": {"routes.cred_vault"},
 }
