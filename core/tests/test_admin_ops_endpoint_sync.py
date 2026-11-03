@@ -28,6 +28,9 @@ class _Hub:
         self.calls.append((tenant_id, allow_mass_remove))
         return {"tenant_id": tenant_id, "status": "success"}
 
+    async def sync_tenant_nads(self, tenant_id):
+        return {"status": "skipped"}
+
 
 def _run(body):
     with tempfile.TemporaryDirectory() as tmp:
