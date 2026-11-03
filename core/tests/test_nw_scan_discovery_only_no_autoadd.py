@@ -19,6 +19,8 @@ import textwrap
 import uuid
 from pathlib import Path
 
+from nw_discovery_sync import nw_short_name
+
 NW_ROUTES = Path(__file__).resolve().parents[1] / "src" / "routes" / "nw.py"
 
 _SCAN_OBJECT_TYPES = {"switch", "router", "firewall"}
@@ -27,13 +29,16 @@ _SCAN_OBJECT_TYPES = {"switch", "router", "firewall"}
 def _decision_source() -> str:
     src = NW_ROUTES.read_text(encoding="utf-8")
     start = src.index('        dry_run = bool(data.get("dry_run", False))')
-    end = src.index("        if added:", start)
+    end = src.index("        if added or alt_added:", start)
     return textwrap.dedent(src[start:end])
 
 
-def _run(identified, *, push_creds, dry_run_req=True, auto_add=False):
+def _run(identified, *, push_creds, dry_run_req=True, auto_add=False, by_name=None):
     """Execute the real dry-run/auto-add decision. Returns (added, preview)."""
     ns = {
+        "by_name": by_name or {},
+        "alt_added": False,
+        "nw_short_name": nw_short_name,
         "data": {"dry_run": dry_run_req, "auto_add": auto_add},
         "saved": {},
         "identified": identified,
@@ -110,3 +115,12 @@ def test_docs_no_longer_claim_preview_only_by_construction():
         return
     text = doc.read_text(encoding="utf-8")
     assert not re.search(r"inherently preview-only", text)
+
+
+def test_known_box_at_another_address_is_an_alt_address_not_a_new_device():
+    core = {"id": "d1", "name": "CORE-SW1", "object_type": "switch", "address": "10.1.1.1"}
+    alias = dict(_SSH_HIT, hostname="core-sw1.example.com")
+    added, preview, _ = _run([alias], push_creds=[_CRED], dry_run_req=False,
+                             auto_add=True, by_name={("switch", "core-sw1"): core})
+    assert added == [] and preview == []
+    assert core["alt_addresses"] == ["10.1.1.6"]

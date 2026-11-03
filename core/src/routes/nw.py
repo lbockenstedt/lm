@@ -9,6 +9,7 @@ from api import (
     logger, uuid,
 )
 from nw_topology import build_topology, netbox_lldp_links
+from nw_discovery_sync import nw_short_name
 from routes.role_pool import PRODUCT_ROLE, ensure_role_loaded, maybe_unload_orphaned_role
 
 
@@ -2156,9 +2157,16 @@ def register(app, hub, ctx):
 
         # Existing addresses for this tenant (dedup) — an identified device that
         # is already in the fleet (own or shared) is reported but not re-added.
-        known = {str((d or {}).get("address", "")).strip()
-                 for d in devices if isinstance(d, dict)
-                 and (d.get("tenant_id", "") in (tenant_id, access.shared_tenant_id()))}
+        mine = [d for d in devices if isinstance(d, dict)
+                and d.get("tenant_id", "") in (tenant_id, access.shared_tenant_id())]
+        known = {str(a or "").strip() for d in mine
+                 for a in [d.get("address")] + list(d.get("alt_addresses") or [])}
+        # A switch answers on every SVI: an identified host whose hostname and
+        # type match a tenant device is that box at another address, not a new
+        # device (same name rule as nw_hardware_primaries).
+        by_name = {(str(d.get("object_type") or ""), nw_short_name(d.get("name"))): d
+                   for d in mine if nw_short_name(d.get("name"))}
+        alt_added = False
         by_cred = {c.get("id"): c for c in chosen}
 
         dry_run = bool(data.get("dry_run", False)) or not bool(
@@ -2183,6 +2191,15 @@ def register(app, hub, ctx):
             if not addr or addr in known:
                 logger.info("nw scan tenant=%s SKIP %s (%s): already in fleet", tenant_id, addr,
                             dev.get("hostname"))
+                continue
+            same = by_name.get((str(dev.get("object_type") or ""), nw_short_name(dev.get("hostname"))))
+            if same is not None:
+                logger.info("nw scan tenant=%s SKIP %s (%s): another address of %s",
+                            tenant_id, addr, dev.get("hostname"), same.get("id"))
+                known.add(addr)
+                if not dry_run:
+                    same["alt_addresses"] = sorted(set(same.get("alt_addresses") or []) | {addr})
+                    alt_added = True
                 continue
             cred_set = by_cred.get(dev.get("credential_id")) or (chosen[0] if chosen else {})
             entry = {
@@ -2222,7 +2239,7 @@ def register(app, hub, ctx):
             known.add(addr)
             added.append(new_dev)
 
-        if added:
+        if added or alt_added:
             gc["nw_devices"] = devices
             hub.state.system_state["global_config"] = gc
             hub.state._mark_dirty()
@@ -2571,6 +2588,20 @@ def register(app, hub, ctx):
         pushed = await _nw_push_fleet(hub, spoke_id) if spoke_id else False
         return {"status": "ok", "message": f"Network device {device_id} deleted.",
                 "pushed": pushed}
+
+    @app.post("/setup/nw-devices/dedupe")
+    async def dedupe_nw_devices(request: Request):
+        """Merge rows that are the same physical box (a switch discovered at each
+        of its SVI addresses) into the row NetBox and Zabbix already use.
+        Body ``{apply: bool}``; ``apply=false`` (default) is a dry run."""
+        hub = app.state.hub
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await hub.merge_nw_hardware_duplicates(bool((body or {}).get("apply")))
 
     # ─── Multi-instance product connections (mirror firewalls) ────────────────
     # NAC / IPAM / LDAP / DNS / DHCP each manage a LIST of connection instances
