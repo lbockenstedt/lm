@@ -58,6 +58,13 @@ logger = logging.getLogger("Hub")
 _IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
+def nw_short_name(name: Any) -> str:
+    """Hostname used to match the same box across addresses: case-folded with
+    the domain suffix dropped (an IP address is kept whole)."""
+    n = str(name or "").strip().casefold()
+    return n if _IP_RE.match(n) else n.split(".")[0]
+
+
 def nw_hardware_primaries(devices: List[Dict[str, Any]],
                           identity: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
     """Map every nw device id → the id of the row that represents its physical
@@ -78,8 +85,7 @@ def nw_hardware_primaries(devices: List[Dict[str, Any]],
         return str((identity.get(did) or {}).get("serial") or "").strip().casefold()
 
     def _name(d):
-        n = str(d.get("name") or "").strip().casefold()
-        return n if _IP_RE.match(n) else n.split(".")[0]
+        return nw_short_name(d.get("name"))
 
     groups: List[List[Dict[str, Any]]] = []
     by_key: Dict[str, List[Dict[str, Any]]] = {}
@@ -194,6 +200,65 @@ class NwDiscoverySyncMixin:
                    .get("nw_devices", []) or [])
         return nw_hardware_primaries(devices, self._nw_identity_cache()).get(
             str(device_id), str(device_id))
+
+    async def merge_nw_hardware_duplicates(self, apply: bool = False) -> Dict[str, Any]:
+        """Fold rows that are the same physical box into its primary row (the
+        one NetBox and Zabbix already use), keeping the extra addresses as the
+        primary's ``alt_addresses``. Grouping is ``nw_hardware_primaries``; a
+        row is merged only when a poll confirms it: same chassis serial, else
+        (no serial on either) the same base MAC. Name-only matches are
+        reported, never removed. ``apply=False`` is a dry run."""
+        gc = self.state.system_state.get("global_config", {})
+        devices = [d for d in (gc.get("nw_devices", []) or []) if isinstance(d, dict)]
+        identity = self._nw_identity_cache()
+        prim = nw_hardware_primaries(devices, identity)
+        by_id = {str(d.get("id")): d for d in devices if d.get("id")}
+
+        def _id(did, key):
+            return str((identity.get(did) or {}).get(key) or "").strip().casefold()
+
+        def _confirmed(did, pid):
+            if _id(did, "serial") or _id(pid, "serial"):
+                return _id(did, "serial") == _id(pid, "serial")
+            return bool(_id(did, "mac")) and _id(did, "mac") == _id(pid, "mac")
+
+        def _row(d):
+            return {"id": d.get("id"), "name": d.get("name"), "address": d.get("address")}
+
+        groups: Dict[str, Dict[str, Any]] = {}
+        for did, pid in prim.items():
+            if did == pid:
+                continue
+            g = groups.setdefault(pid, {"primary": _row(by_id[pid]), "merged": [], "unconfirmed": []})
+            g["merged" if _confirmed(did, pid) else "unconfirmed"].append(_row(by_id[did]))
+
+        removed = {str(r["id"]) for g in groups.values() for r in g["merged"]}
+        if apply and removed:
+            spokes = set()
+            for pid, g in groups.items():
+                if not g["merged"]:
+                    continue
+                p = by_id[pid]
+                alts = [a for a in (p.get("alt_addresses") or []) + [r["address"] for r in g["merged"]]
+                        + [a for r in g["merged"] for a in (by_id[str(r["id"])].get("alt_addresses") or [])]
+                        if a and a != p.get("address")]
+                p["alt_addresses"] = sorted(set(alts))
+                spokes.update(by_id[str(r["id"])].get("spoke_id") for r in g["merged"])
+            gc["nw_devices"] = [d for d in (gc.get("nw_devices", []) or [])
+                                if not (isinstance(d, dict) and str(d.get("id")) in removed)]
+            self.state.system_state["global_config"] = gc
+            self.state._mark_dirty()
+            pusher = getattr(self, "nw_push_fleet", None)
+            for sid in filter(None, spokes):
+                try:
+                    if callable(pusher):
+                        await pusher(sid)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("nw dedupe: re-push to %s failed: %s", sid, e)
+            logger.warning("nw dedupe: merged %d duplicate row(s) into %d device(s)",
+                           len(removed), sum(1 for g in groups.values() if g["merged"]))
+        return {"applied": bool(apply), "removed": len(removed),
+                "groups": [g for g in groups.values() if g["merged"] or g["unconfirmed"]]}
 
     def _nw_spokes(self) -> List[str]:
         """Connected nw spoke ids to pull from this cycle."""
