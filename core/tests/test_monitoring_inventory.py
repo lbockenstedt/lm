@@ -128,6 +128,20 @@ def test_zbxproxy_load_config_uses_monitoring_server_setting():
     assert _zbxproxy_load_config(hub, {"proxy_name": "mine"})["proxy_name"] == "mine"
 
 
+def test_zbxproxy_default_name_follows_tenant_proxies_mapping():
+    # A reinstall without a name must keep the proxy the monitoring sync
+    # assigns the tenant's hosts to, not rename it to lm-<tenant>.
+    from types import SimpleNamespace
+    from routes.agents import _zbxproxy_load_config
+    gc = {"monitoring_server": "zbx:10051", "monitoring_tls": False,
+          "monitoring": {"tenant_proxies": {"default": "mipbe-default"}}}
+    hub = SimpleNamespace(state=SimpleNamespace(system_state={"global_config": gc},
+                                                get_spoke_tenant=lambda pk: pk and "dxp"),
+                          _primary_key=lambda s: s)
+    assert _zbxproxy_load_config(hub, {})["proxy_name"] == "mipbe-default"
+    assert _zbxproxy_load_config(hub, {}, "s1")["proxy_name"] == "lm-dxp"
+
+
 def test_monitoring_hosts_are_tenant_scoped_and_problems_flattened():
     from routes import monitoring as m
     hosts = [
