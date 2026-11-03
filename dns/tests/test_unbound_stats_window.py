@@ -127,3 +127,22 @@ def test_hour_window_query_names_use_event_timestamps(monkeypatch, tmp_path):
     rows = mgr.get_query_names(range_seconds=3600, source_prefixes=["10.0.0.0/24"])
     assert rows == [{"name": "new.example", "type": "A", "count": 1,
                      "sources": [{"ip": "10.0.0.5", "count": 1}]}]
+
+
+def test_reload_snapshots_counters_first_so_the_reset_loses_nothing(monkeypatch, tmp_path):
+    mgr = _mgr(monkeypatch, tmp_path)
+    mgr._stats_sampler = object()  # sampler running on a worker
+    t0 = 1_000_000.0
+    _at(monkeypatch, t0)
+    _run(monkeypatch, _counters(100, 50))
+    mgr.sample_stats()
+    _at(monkeypatch, t0 + 30)  # inside the min gap: still recorded (forced)
+    _run(monkeypatch, _counters(140, 70))
+    mgr._reload()
+    _at(monkeypatch, t0 + 600)
+    _run(monkeypatch, _counters(10, 5))  # reload zeroed the counters
+
+    res = mgr.get_stats(range_seconds=3600)
+
+    # 40 before the reload (captured by the forced sample) + 10 after it.
+    assert res["global"]["total_queries"] == 50
