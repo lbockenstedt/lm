@@ -775,7 +775,8 @@ def register(app, hub, ctx):
 
     @app.post("/admin/ops/endpoint-sync")
     async def admin_ops_endpoint_sync(request: Request):
-        """Run the IPAM -> CPPM endpoint sync for one tenant now.
+        """Run the IPAM -> CPPM endpoint sync for one tenant now, plus the
+        tenant-subnet Network Device (RADIUS/TACACS) sync.
 
         Body: ``{"tenant_id": "...", "allow_mass_remove": false}``.
         ``allow_mass_remove: true`` is the operator's confirmation that the
@@ -793,9 +794,10 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail="tenant_id required")
         allow = (body or {}).get("allow_mass_remove") is True
         result = await hub.sync_tenant_endpoints(tid, allow_mass_remove=allow)
-        logger.warning("admin_ops: endpoint-sync tenant=%s allow_mass_remove=%s -> %s",
-                       tid, allow, (result or {}).get("status"))
-        return {"status": "ok", "result": result}
+        nads = await hub.sync_tenant_nads(tid)
+        logger.warning("admin_ops: endpoint-sync tenant=%s allow_mass_remove=%s -> %s, nads %s",
+                       tid, allow, (result or {}).get("status"), (nads or {}).get("status"))
+        return {"status": "ok", "result": result, "nads": nads}
 
     @app.post("/admin/ops/dot1x-jit-selftest")
     async def admin_ops_dot1x_jit_selftest(request: Request):
