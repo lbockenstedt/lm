@@ -944,3 +944,52 @@ def test_available_targets_lists_connected_zabbix_server_agents():
     assert zbx == [{"module_type": "zabbix-server", "identifier": "LM-ZBX",
                     "label": "Monitoring Server (Zabbix UI) — LM-ZBX", "spoke_id": "LM-ZBX"}]
     assert "zabbix-server" in cd.CERT_CAPABLE_MODULES
+
+
+def test_sweep_repushes_when_device_behind_target_changes():
+    """Ledger says the firewall target is current, but the firewall(s) behind
+    the spoke changed since the last push → the sweep must re-push and then
+    record the new device set (next sweep skips again)."""
+    import asyncio
+    devices = {"key": "10.0.0.1:443"}
+    store = {}
+    tracker = cd.TargetDeviceTracker(lambda mt, ident: devices["key"] if mt == "firewall" else None, store)
+    t = {"module_type": "firewall", "identifier": "fw-spoke", "last_pushed_hash": "h", "last_status": "SUCCESS"}
+    assert tracker.changed("d", t) is False          # baseline on first sight
+    assert store == {"d|firewall|fw-spoke": "10.0.0.1:443"}
+    devices["key"] = "10.0.0.1:443,10.0.0.2:443"     # firewall added
+    assert tracker.changed("d", t) is True
+
+    calls = []
+
+    async def rr(sid, cmd, data=None, timeout=None):
+        calls.append(cmd)
+        if cmd == "LE_GET_CERT":
+            return {"payload": {"data": {"status": "SUCCESS", "data": {
+                "fullchain": "x", "privkey": "k", "chain": "", "material_hash": "h"}}}}
+        return {"payload": {"data": {"status": "SUCCESS", "message": "ok"}}}
+    out = asyncio.new_event_loop().run_until_complete(cd.distribute_cert_to_targets(
+        rr, lambda mt, ident: "fw-spoke", {"firewall"}, "le", "d", [t], device_tracker=tracker))
+    assert "INSTALL_CERT" in calls and out[0]["status"] == "SUCCESS"
+    assert tracker.changed("d", t) is False          # recorded after success
+
+
+def test_target_payload_extras_reach_install_cert():
+    """Firewall targets carry every bound firewall (``devices``) in INSTALL_CERT."""
+    import asyncio
+    sent = {}
+
+    async def rr(sid, cmd, data=None, timeout=None):
+        if cmd == "LE_GET_CERT":
+            return {"payload": {"data": {"status": "SUCCESS", "data": {
+                "fullchain": "x", "privkey": "k", "chain": "", "material_hash": "h"}}}}
+        if cmd == "INSTALL_CERT":
+            sent.update(data)
+        return {"payload": {"data": {"status": "SUCCESS", "message": "ok"}}}
+
+    async def extras(mt, ident, sid):
+        return {"devices": [{"host": "10.0.0.1"}, {"host": "10.0.0.2"}]} if mt == "firewall" else {}
+    asyncio.new_event_loop().run_until_complete(cd.distribute_cert_to_targets(
+        rr, lambda mt, ident: "fw", {"firewall"}, "le", "d",
+        [{"module_type": "firewall", "identifier": "fw"}], target_payload=extras))
+    assert [d["host"] for d in sent["devices"]] == ["10.0.0.1", "10.0.0.2"]
