@@ -41,7 +41,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from simulations.tenant_filter import (filter_items_by_prefixes,
                                        filter_firewall_rules, filter_record_by_prefixes,
                                        filter_hypervisor_vms,
-                                       build_alias_map, _find_list_slot)
+                                       build_alias_map, _find_list_slot,
+                                       _replace_slot, extract_addrs)
 
 if TYPE_CHECKING:  # annotations only — never evaluated at runtime
     from fastapi import Request
@@ -2307,8 +2308,34 @@ def _tenant_tag_set(hub, tid) -> set:
             if x}
 
 
+def _keep_owned_items(data, tid: str, nets_by_tid: Dict[str, List[Any]], ip_fields):
+    """Keep only records whose address belongs to ``tid`` by most-specific
+    prefix (``_prefix_owner``). A CIDR record (a DHCP subnet) counts by its
+    network address."""
+    container, key = _find_list_slot(data)
+    if container is None:
+        return data
+
+    def owned(item) -> bool:
+        if not isinstance(item, dict):
+            return True
+        for f in ip_fields:
+            for a in extract_addrs(item.get(f)) or []:
+                try:
+                    addr = ipaddress.ip_network(a, strict=False).network_address
+                except ValueError:
+                    continue
+                if same_tenant(_prefix_owner(addr, nets_by_tid) or "", tid):
+                    return True
+        return False
+
+    lst = container if key is None else container[key]
+    kept = [i for i in lst if owned(i)]
+    return kept if key is None else _replace_slot(data, container, key, kept)
+
+
 async def filter_tenant(hub, sessions: dict, request: "Request", data, module: str, ip_fields,
-                         explicit_tenant: str = None):
+                         explicit_tenant: str = None, shared_source: bool = False):
     """Tenant-aware filter (renamed from ``filter_session_tenant`` — it filters a
     tenant's data by subnet plus module-specific overrides, not just subnet).
 
@@ -2322,6 +2349,12 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
     on top of the subnet match: VMs in a configured template pool are visible to
     ALL tenants (shared templates), and VMs whose Proxmox tag matches the tenant
     are shown to that tenant regardless of subnet.
+
+    ``shared_source`` marks data from a server shared by every tenant (the
+    shared Kea). Tenants overlap (one VRF each), so a tenant whose prefixes
+    are broad containers (DXP's 10.0.0.0/8) would otherwise match everyone's
+    records; there a record is kept only when the tenant is its most specific
+    prefix owner — the same rule the syncs use (``_prefix_owner``).
     """
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
@@ -2353,6 +2386,10 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
                                         tenant_tags=_tenant_tag_set(hub, tid))
         else:
             out = filter_items_by_prefixes(data, prefixes, ip_fields)
+            if shared_source and not tenant_is_shared(tid):
+                nets_by_tid = await _tenant_networks(hub)
+                if any(same_tenant(t, tid) for t in nets_by_tid):
+                    out = _keep_owned_items(out, tid, nets_by_tid, ip_fields)
         logger.debug("DIAG filter_tenant[%s] filtered %d -> %d prefixes=%s",
                        module, before, _list_len(out), prefixes)
         return out
