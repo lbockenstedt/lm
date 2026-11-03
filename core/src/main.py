@@ -2942,12 +2942,21 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # Handle Firewall multi-instance config
             if module_key == 'opn':
                 firewalls = self.state.get_global_config().get("firewalls", [])
-                fw_config = next((f for f in firewalls if f.get("spoke_id") == spoke_id), None)
+                # Match through _primary_key on both sides (see the nw branch):
+                # a binding saved before/after the guid-identity migration must
+                # still resolve to this spoke.
+                fw_config = next((f for f in firewalls if isinstance(f, dict) and f.get("spoke_id")
+                                  and self._primary_key(f.get("spoke_id")) == pk), None)
                 if fw_config:
                     config = fw_config
                 else:
                     opn_fws = [f for f in firewalls if f.get("model") == "opnsense"]
                     config = opn_fws[0] if opn_fws else {}
+                    logger.warning(
+                        "[firewall] no firewall is bound to spoke %s — %s",
+                        spoke_id,
+                        (f"falling back to '{config.get('name')}'" if config
+                         else "it stays 'No firewall configured' until one is added in Setup → Firewalls"))
                 # Overlay any Credential Vault api_key/api_secret so a
                 # vault-backed firewall still authenticates after a spoke
                 # reconnect (hourly self-update, reboot, …) — mirrors the nw
@@ -2955,6 +2964,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 if config:
                     import instance_vault as _instance_vault
                     config = await _instance_vault.overlay(self, config, "firewalls")
+                    _missing = [k for k, ok in (("host", config.get("host") or config.get("opn_host")),
+                                                ("api_key", config.get("api_key")),
+                                                ("api_secret", config.get("api_secret"))) if not ok]
+                    if _missing:
+                        logger.warning(
+                            "[firewall] firewall '%s' pushed to %s is missing %s — the spoke "
+                            "will report 'No firewall configured' (cert installs, DHCP/ARP "
+                            "discovery all fail) until it is re-entered in Setup → Firewalls",
+                            config.get("name"), spoke_id, ", ".join(_missing))
             elif module_key == 'nw':
                 # Network Devices fleet: one nw spoke manages many devices.
                 # Push the devices bound to this spoke; fall back to unbound
