@@ -163,6 +163,8 @@ async def get_spec(hub, model: str, vendor: str = "",
         rec = models.get(key) or {}
         if rec.get("spec"):
             return rec["spec"], True
+        if not rec.get("unidentified"):
+            return None, False
         return None, time.time() - float(rec.get("asked") or 0) < _UNKNOWN_RETRY_S
 
     spec, done = _known()
@@ -193,7 +195,8 @@ async def get_spec(hub, model: str, vendor: str = "",
             # Not an explicit "don't know": a bad reply, so don't hold off for a day.
             logger.warning("device spec: unusable LLM reply for %r: %.300s", model, reply)
             return None
-        models[key] = {"spec": spec, "asked": time.time(), "reported_model": model}
+        models[key] = {"spec": spec, "unidentified": not spec, "asked": time.time(),
+                       "reported_model": model}
         _save(hub)
         logger.info("device spec: %r -> %s", model,
                     f"{spec['manufacturer']} {spec['model']} ({len(spec['ports'])} port groups)"
