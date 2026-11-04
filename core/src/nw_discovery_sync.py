@@ -201,6 +201,173 @@ class NwDiscoverySyncMixin:
         return nw_hardware_primaries(devices, self._nw_identity_cache()).get(
             str(device_id), str(device_id))
 
+    # ── cross-tenant relocation ─────────────────────────────────────────────
+    # A device record stays with the tenant that created it. When its agent is
+    # moved to another tenant (or deleted) the record is "unanchored": it is
+    # moved to the tenant that finds it again, once that sighting is verified
+    # (IP + hostname, the same agent at the same IP, or chassis serial/MAC).
+    # Anchored records (their agent still belongs to their tenant) never move,
+    # so two tenants that both see a box can't bounce it back and forth.
+
+    @staticmethod
+    def _nw_shared_tid() -> str:
+        try:
+            from access import shared_tenant_id
+            return str(shared_tenant_id() or "shared")
+        except Exception:  # noqa: BLE001
+            return "shared"
+
+    def _nw_prior_identity(self, device_id: str) -> Dict[str, Any]:
+        getter = getattr(self, "nw_cache_get_device", None)
+        env = getter(str(device_id), "info") if callable(getter) else None
+        data = env.get("data") if isinstance(env, dict) else None
+        return dict(data) if isinstance(data, dict) else {}
+
+    def nw_device_anchored(self, device: Dict[str, Any]) -> bool:
+        """True while the device's own nw agent still belongs to its tenant
+        (or the record has no agent binding / the agent has no owner)."""
+        sid = str(device.get("spoke_id") or "").strip()
+        if not sid:
+            return True
+        md = self.state.system_state.get("module_metadata", {}) or {}
+        if sid not in md:
+            return False  # agent deleted
+        owner = str((md.get(sid) or {}).get("tenant_id") or "")
+        return not owner or owner == str(device.get("tenant_id") or "")
+
+    def nw_relocatable(self, device: Dict[str, Any], to_tenant: str) -> bool:
+        tid = str(device.get("tenant_id") or "")
+        return (bool(to_tenant) and tid != to_tenant and tid != self._nw_shared_tid()
+                and to_tenant != self._nw_shared_tid() and not self.nw_device_anchored(device))
+
+    def nw_relocate_device(self, device: Dict[str, Any], to_tenant: str, to_spoke: str,
+                           evidence: List[str], cred_set: Optional[Dict[str, Any]] = None
+                           ) -> Dict[str, Any]:
+        """Move ``device`` (in place, same id) to ``to_tenant``/``to_spoke``.
+        ``cred_set`` (the scan credential that just authenticated to it) replaces
+        the old tenant's credential reference. Returns a report row."""
+        old_t = str(device.get("tenant_id") or "")
+        old_s = str(device.get("spoke_id") or "")
+        device["tenant_id"] = to_tenant
+        if to_spoke:
+            device["spoke_id"] = to_spoke
+        if cred_set and cred_set.get("vault_credential"):
+            device["vault_credential"] = cred_set["vault_credential"]
+            device["username"] = (cred_set.get("username") or cred_set.get("user")
+                                  or device.get("username") or "")
+        device["moved_from"] = {"tenant_id": old_t, "spoke_id": old_s,
+                                "at": int(time.time()), "evidence": list(evidence)}
+        try:
+            self.state._mark_dirty()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning("nw: moved device %s '%s' (%s) from tenant %s to %s (agent %s -> %s); "
+                       "verified by %s", device.get("id"), device.get("name"), device.get("address"),
+                       old_t or "-", to_tenant, old_s[:8] or "-", (to_spoke or old_s)[:8] or "-",
+                       "+".join(evidence))
+        return {"id": device.get("id"), "name": device.get("name"),
+                "address": device.get("address"), "from_tenant": old_t,
+                "to_tenant": to_tenant, "from_spoke": old_s, "evidence": list(evidence)}
+
+    def nw_find_relocation(self, devices: List[Dict[str, Any]], tenant_id: str, spoke_id: str,
+                           address: str, hostname: str, object_type: str = ""
+                           ) -> Optional[Tuple[Dict[str, Any], List[str]]]:
+        """An unanchored device in another tenant that a ``tenant_id`` scan
+        through ``spoke_id`` just identified at ``address`` as ``hostname``:
+        same IP plus the same short hostname, or the same agent at the same IP."""
+        address = str(address or "").strip()
+        if not address:
+            return None
+        name = nw_short_name(hostname)
+        for d in devices or []:
+            if not isinstance(d, dict) or not self.nw_relocatable(d, tenant_id):
+                continue
+            addrs = {str(a or "").strip() for a in [d.get("address")] + list(d.get("alt_addresses") or [])}
+            if address not in addrs:
+                continue
+            ot = str(d.get("object_type") or "")
+            if object_type and ot and object_type != ot and name != nw_short_name(d.get("name")):
+                continue
+            if name and name == nw_short_name(d.get("name")):
+                return d, ["ip", "hostname"]
+            if spoke_id and str(d.get("spoke_id") or "") == spoke_id:
+                return d, ["ip", "same agent"]
+        return None
+
+    async def nw_reconcile_tenant_after_poll(self, device_cfg: Dict[str, Any],
+                                             device_info: Dict[str, Any], reachable: bool,
+                                             prior_identity: Optional[Dict[str, Any]] = None
+                                             ) -> List[Dict[str, Any]]:
+        """Poll-time relocation. (1) The polled record is unanchored and its
+        agent now belongs to another tenant: the agent reached it at its address
+        and the hostname or serial matches → move it to the agent's tenant.
+        (2) Another tenant's unanchored record has this box's chassis serial
+        (or, both serial-less, the same base MAC and hostname) → fold it into
+        this one (its addresses become alt_addresses; the stale row is removed).
+        Returns the moves made. Best-effort, never raises."""
+        moves: List[Dict[str, Any]] = []
+        try:
+            info = device_info if isinstance(device_info, dict) else {}
+            gc = self.state.system_state.get("global_config", {}) or {}
+            devices = [d for d in (gc.get("nw_devices") or []) if isinstance(d, dict)]
+            serial = str(info.get("serial") or "").strip().casefold()
+            mac = (norm_mac(info.get("mac")) if norm_mac else str(info.get("mac") or "")).strip().casefold() \
+                if info.get("mac") else ""
+            host = nw_short_name(info.get("hostname"))
+            sid = str(device_cfg.get("spoke_id") or "")
+            owner = nw_spoke_tenant(self, sid) if (nw_spoke_tenant and sid) else ""
+            if reachable and owner and self.nw_relocatable(device_cfg, owner):
+                prev = prior_identity if isinstance(prior_identity, dict) else {}
+                prev_serial = str(prev.get("serial") or "").strip().casefold()
+                ev = []
+                if serial and prev_serial == serial:
+                    ev = ["ip", "serial"]
+                elif host and host == nw_short_name(device_cfg.get("name")):
+                    ev = ["ip", "hostname"]
+                if ev:
+                    moves.append(self.nw_relocate_device(device_cfg, owner, sid, ev + ["agent"]))
+            tid = str(device_cfg.get("tenant_id") or "")
+            if not (serial or mac) or tid == self._nw_shared_tid():
+                return moves
+            identity = self._nw_identity_cache()
+            stale = []
+            for d in devices:
+                if d is device_cfg or d.get("id") == device_cfg.get("id") or not self.nw_relocatable(d, tid):
+                    continue
+                di = identity.get(str(d.get("id"))) or {}
+                ds = str(di.get("serial") or "").strip().casefold()
+                dm = (norm_mac(di.get("mac")) if norm_mac else str(di.get("mac") or "")).strip().casefold() \
+                    if di.get("mac") else ""
+                if serial and ds == serial:
+                    stale.append((d, ["serial"]))
+                elif not serial and not ds and mac and dm == mac and host and host == nw_short_name(d.get("name")):
+                    stale.append((d, ["mac", "hostname"]))
+            if stale:
+                gone = {str(d.get("id")) for d, _ in stale}
+                alts = set(device_cfg.get("alt_addresses") or [])
+                for d, ev in stale:
+                    alts |= {a for a in [d.get("address")] + list(d.get("alt_addresses") or []) if a}
+                    row = self.nw_relocate_device(dict(d), tid, sid, ev)
+                    row["merged_into"] = device_cfg.get("id")
+                    moves.append(row)
+                alts.discard(device_cfg.get("address"))
+                device_cfg["alt_addresses"] = sorted(a for a in alts if a)
+                gc["nw_devices"] = [d for d in (gc.get("nw_devices") or [])
+                                    if not (isinstance(d, dict) and str(d.get("id")) in gone)]
+                self.state.system_state["global_config"] = gc
+                self.state._mark_dirty()
+            if moves:
+                pusher = getattr(self, "nw_push_fleet", None)
+                for s in {m.get("from_spoke") for m in moves} | {sid}:
+                    if s and callable(pusher):
+                        try:
+                            await pusher(s)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("nw relocate: re-push to %s failed: %s", s, e)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("nw relocate after poll of %s failed: %s", device_cfg.get("id"), e)
+        return moves
+
     async def merge_nw_hardware_duplicates(self, apply: bool = False) -> Dict[str, Any]:
         """Fold rows that are the same physical box into its primary row (the
         one NetBox and Zabbix already use), keeping the extra addresses as the
@@ -881,6 +1048,7 @@ class NwDiscoverySyncMixin:
         """
         if not isinstance(pdata, dict):
             return
+        prior_identity = self._nw_prior_identity(device_id)
         try:
             await self.nw_cache_set_poll(device_id, pdata)
         except Exception as e:
@@ -895,6 +1063,8 @@ class NwDiscoverySyncMixin:
         # Reconcile the stored display name to the hostname actually configured
         # on the box (best-effort; only when the poll read one and it differs).
         self.reconcile_nw_device_name(device_cfg, pdata.get("device_info") or {})
+        await self.nw_reconcile_tenant_after_poll(
+            device_cfg, pdata.get("device_info") or {}, bool(pdata.get("reachable")), prior_identity)
         try:
             _push, errs, _slug = await self.push_nw_device_inventory(
                 device_cfg, pdata.get("device_info") or {},
@@ -978,6 +1148,7 @@ class NwDiscoverySyncMixin:
             return {"status": "ERROR", "reachable": False, "errors":
                     ["no nw spoke connected"], "message": "no nw spoke connected"}
 
+        prior_identity = self._nw_prior_identity(device_id)
         # 1) Poll.
         poll_res: Dict[str, Any] = {}
         try:
@@ -1010,6 +1181,8 @@ class NwDiscoverySyncMixin:
         # with the spoke-driven auto-poll via push_nw_device_inventory, which
         # also returns the resolved tenant_slug for the poll report).
         self.reconcile_nw_device_name(device_cfg, device_info)
+        moves = await self.nw_reconcile_tenant_after_poll(
+            device_cfg, device_info, reachable, prior_identity)
         netbox_push, push_errors, tenant_slug = await self.push_nw_device_inventory(
             device_cfg, device_info, interfaces)
         errors.extend(push_errors)
@@ -1030,6 +1203,7 @@ class NwDiscoverySyncMixin:
             "vlans": vlans,
             "netbox_push": netbox_push,
             "tenant_slug": tenant_slug,
+            "tenant_moves": moves,
             "errors": errors,
             "message": (f"reachable={reachable}, "
                         f"{len(interfaces) if isinstance(interfaces, list) else 0} "
