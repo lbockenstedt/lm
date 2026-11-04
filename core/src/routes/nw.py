@@ -772,6 +772,10 @@ def register(app, hub, ctx):
             return out
 
         info_by_id = {did: _device_identity(did) for did in visible_ids}
+        # NetBox site (from the site-scoped prefix of the address), recorded on each poll.
+        for d in visible:
+            if d.get("id") and isinstance(d.get("site"), dict):
+                info_by_id.setdefault(d["id"], {})["site"] = d["site"]
 
         def _overlay_names(env):
             if not isinstance(env, dict):
