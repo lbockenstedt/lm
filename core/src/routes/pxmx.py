@@ -870,7 +870,7 @@ def register(app, hub, ctx):
                     vm_record["pool"] = lk.get("pool") or ""
         # Toggle-independent, fail-closed ownership (subnet or tenant tag) — NOT
         # _filter_tenant, which fails OPEN when the hypervisor display filter is off.
-        if not await access.vm_in_tenant_scope(hub, sess, vm_record):
+        if not await access.vm_in_tenant_scope(hub, sess, vm_record, spoke_id=spoke):
             try:
                 _u = (sess or {}).get("user", {}) or {}
                 logger.warning(
@@ -926,7 +926,8 @@ def register(app, hub, ctx):
                 "tags": px_res.get("tags") or [],
                 "pool": px_res.get("pool") or "",
             }
-            kept = await _filter_tenant(request, [vm_record], "hypervisor", ["ips"])
+            kept = await _filter_tenant(request, [vm_record], "hypervisor", ["ips"],
+                                        spoke_id=pxmx_spoke)
             if not kept:
                 raise HTTPException(status_code=403,
                                     detail="not authorized for this VM's tenant")
@@ -2115,7 +2116,12 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.exception("get_pxmx_vms failed")
             raise HTTPException(status_code=500, detail=str(e))
-        out = await _filter_tenant(request, data, "hypervisor", ["ips"], tenant)
+        # VMs from a tenant-dedicated spoke are that tenant's whole; the rest
+        # are tag/subnet attributed.
+        out = await _filter_tenant(request, data, "hypervisor", ["ips"], tenant,
+                                   spoke_of=lambda vm: hub.get_spoke_for_agent(
+                                       vm.get("agent_id"), fallback_hypervisor=False)
+                                   if vm.get("agent_id") else None)
         out = await _merge_pinned_agent_vms(hub, out, tid, visible_spokes, agent_id=agent_id)
         return _with_tpl(hub.cache_annotate(out, job.ns, job.key))
 

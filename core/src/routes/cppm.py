@@ -95,7 +95,7 @@ def register(app, hub, ctx):
         return {list_key: merged, "total": len(merged)}
 
     async def _nac_gather_merge(spokes, cmd: str, payload: dict, list_key: str,
-                                own_spoke: str = None):
+                                own_spoke=None):
         """Query every spoke in ``spokes`` with ``cmd``, merging each response's
         ``list_key`` list into one combined list — used for a SINGLE tenant's
         combined view (their own dedicated CPPM + the shared CPPM, if any;
@@ -105,7 +105,8 @@ def register(app, hub, ctx):
         offline source must not blank the other's data. Returns ``None`` only
         when every spoke fails.
 
-        Records from ``own_spoke`` (the tenant's OWN dedicated CPPM) are stamped
+        Records from ``own_spoke`` (the tenant's OWN dedicated CPPM, or a set
+        of them) are stamped
         with the ``OWN_SOURCE_MARKER`` so the downstream subnet filter shows them
         all — that appliance is entirely the tenant's equipment. Only records
         merged in from a SHARED CPPM stay subject to the subnet filter.
@@ -130,7 +131,8 @@ def register(app, hub, ctx):
             if isinstance(d, dict) and isinstance(d.get(list_key), list):
                 any_ok = True
                 recs = d[list_key]
-                if own_spoke and sid == own_spoke:
+                if own_spoke and (sid == own_spoke or (isinstance(own_spoke, set)
+                                                       and sid in own_spoke)):
                     recs = [{**r, tenant_filter.OWN_SOURCE_MARKER: True}
                             if isinstance(r, dict) else r for r in recs]
                 merged.extend(recs)
@@ -168,8 +170,13 @@ def register(app, hub, ctx):
                 spokes = hub.get_cppm_spokes_for_tenant(tid)
                 if not spokes:
                     raise HTTPException(status_code=503, detail="No spoke connected")
+                # Every spoke dedicated to this tenant (or a member of this
+                # tenant group) is its own equipment, never subnet filtered.
+                own = {s for s in spokes
+                       if access.tenant_in(access.spoke_owner_tenant(hub, s) or "", tid)}
+                own.add(hub.get_cppm_spoke_for_tenant(tid))
                 data = await _nac_gather_merge(spokes, cmd, payload, list_key,
-                                               own_spoke=hub.get_cppm_spoke_for_tenant(tid))
+                                               own_spoke=own)
                 if data is None:
                     raise HTTPException(status_code=503, detail="No spoke connected")
                 return data
@@ -589,7 +596,8 @@ def register(app, hub, ctx):
         # Gate the single endpoint record by tenant subnet (returns {} if the
         # resolved IP is concrete and off the tenant's prefixes). Honors the
         # selected tenant for admins / multi-tenant switches.
-        return await _gate_record_tenant(request, ep, "nac", ["ip"], tenant) or {}
+        return await _gate_record_tenant(request, ep, "nac", ["ip"], tenant,
+                                         spoke_id=cppm_spoke) or {}
 
     @app.get("/api/cppm/device-sessions")
     async def get_cppm_device_sessions(request: Request, mac: str, tenant: str = None):
@@ -599,7 +607,8 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "GET_DEVICE_SESSIONS", {"mac": mac})
-            return await _filter_tenant(request, _cppm_unwrap(result), "nac", ["ip"], tenant)
+            return await _filter_tenant(request, _cppm_unwrap(result), "nac", ["ip"], tenant,
+                                        spoke_id=cppm_spoke)
         except HTTPException:
             raise
         except Exception as e:
@@ -637,7 +646,8 @@ def register(app, hub, ctx):
         try:
             result = await hub.request_response(cppm_spoke, "GET_LOGS", {"start": start, "end": end}, timeout=20.0)
             data = _unwrap_spoke(result)
-            return await _filter_tenant(request, data, "nac", ["ip", "nas_ip_address"], tenant)
+            return await _filter_tenant(request, data, "nac", ["ip", "nas_ip_address"], tenant,
+                                        spoke_id=cppm_spoke)
         except Exception as e:
             logger.error(f"API: Error fetching CPPM logs: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))

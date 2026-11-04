@@ -60,12 +60,26 @@ async def tenant_vms(hub, tenant: str) -> List[Dict[str, Any]]:
         return all_vms(hub)
     import access
     vms = all_vms(hub, tenant)
+    # A VM on a tenant-dedicated spoke is that tenant's (never subnet/tag
+    # attributed); the rest go through the hypervisor filter.
+    owned, rest = [], []
+    for vm in vms:
+        aid = vm.get("agent_id")
+        sid = hub.get_spoke_for_agent(aid, fallback_hypervisor=False) \
+            if aid and hasattr(hub, "get_spoke_for_agent") else None
+        owner = access.spoke_owner_tenant(hub, sid)
+        if not owner:
+            rest.append(vm)
+        elif access.tenant_in(owner, tenant):
+            owned.append(vm)
     if access.filter_enabled(hub, "hypervisor"):
         prefixes = await access.resolve_prefixes_for_tenant(hub, tenant)
         if prefixes:
-            vms = access.filter_hypervisor_vms(
-                vms, prefixes, template_pools=access._template_pools(hub),
+            rest = access.filter_hypervisor_vms(
+                rest, prefixes, template_pools=access._template_pools(hub),
                 tenant_tags=access._tenant_tag_set(hub, tenant))
+    keep = {id(vm) for vm in owned + rest}
+    vms = [vm for vm in vms if id(vm) in keep]
     pinned_hosts = set()
     for apk, cfg in (hub.state.system_state.get("agent_config") or {}).items():
         pin = str(((cfg or {}).get("client_simulation") or {}).get("tenant_id") or "")
