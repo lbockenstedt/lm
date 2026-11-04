@@ -287,3 +287,45 @@ def test_tenant_view_omits_other_tenants_stale_and_failing_servers():
     assert [p["alias"] for p in body["ports"]] == ["dxp-sw"]
     assert body["stale_spokes"] == ["con-dxp"]
     assert body["errors"] == {}
+
+
+class _SharedMaskAccess(_FakeAccess):
+    """Console subnet filter on; every shared device IP is in every tenant's
+    prefixes, so only the own-console rule can hide a shared port."""
+
+    @staticmethod
+    def filter_enabled(hub, module):
+        return True
+
+    @staticmethod
+    def tenant_is_shared(t):
+        return t == "shared"
+
+    @staticmethod
+    async def resolve_prefixes_for_tenant(hub, scope):
+        return ["172.21.0.0/16"]
+
+
+def test_tenant_with_own_console_gets_no_shared_ports(monkeypatch):
+    """Shared is only shared, not a mix: a tenant with its own console agent
+    sees only its own ports, never shared ports routed to it by device IP; a
+    tenant without one still gets the shared ports its prefixes cover."""
+    monkeypatch.setattr(console, "access", _SharedMaskAccess)
+    shared_port = _port("ttyUSB0", "core-sw", "core-sw")
+    shared_port["probe"]["identity"]["ip"] = "172.21.4.10"
+    hub = _Hub(connected=["con-shared", "con-dxp"],
+               ports_by_spoke={"con-shared": [shared_port],
+                               "con-dxp": [_port("ttyUSB1", "dxp-sw", "dxp-sw")]})
+    hub.state = _State(tenants={"con-shared": "shared", "con-dxp": "dxp"})
+    ctx = _ctx()
+    ctx._resolve_tenant = lambda request, explicit=None: explicit
+    app = FastAPI()
+    app.state.hub = hub
+    console.register(app, hub, ctx)
+    c = TestClient(app)
+
+    dxp = c.get("/api/console/ports?tenant=dxp").json()
+    assert [(p["spoke_id"], p["port_id"]) for p in dxp["ports"]] == [("con-dxp", "ttyUSB1")]
+
+    ra = c.get("/api/console/ports?tenant=ra").json()
+    assert [(p["spoke_id"], p["port_id"]) for p in ra["ports"]] == [("con-shared", "ttyUSB0")]
