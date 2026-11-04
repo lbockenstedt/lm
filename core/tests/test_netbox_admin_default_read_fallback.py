@@ -174,3 +174,20 @@ async def test_foreign_tenant_ips_tie_goes_to_asking_tenant():
     hub = _overlap_hub()
     assert await access.foreign_tenant_ips(hub, "ra", ["172.16.1.10"]) == set()
     assert await access.foreign_tenant_ips(hub, "lrb", ["172.16.1.10"]) == set()
+
+
+@pytest.mark.asyncio
+async def test_foreign_tenant_ips_group_owns_member_prefixes():
+    # A tenant group has no prefixes of its own: its scan targets come from
+    # its member tenants, which must not be "foreign" to it.
+    tenants = {"default": {"netbox_tenant_slug": "default", "tenant_group_slug": "ssplm"},
+               "lrb": {"netbox_tenant_slug": "lrb"},
+               "group:ssplm": {"is_tenant_group": True, "netbox_tenant_group_slug": "ssplm"}}
+    hub = _FakeHub(tenants=tenants,
+                   prefixes_by_tenant={"default": ["172.21.0.0/16"], "lrb": ["172.16.0.0/23"]})
+    access._GROUP_MEMBERS = access._compute_group_members(tenants)
+    try:
+        assert await access.foreign_tenant_ips(hub, "group:ssplm", ["172.21.0.33", "172.16.1.1"]) == {
+            "172.16.1.1"}
+    finally:
+        access._GROUP_MEMBERS = {}
