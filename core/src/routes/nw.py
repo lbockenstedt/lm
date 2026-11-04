@@ -2152,10 +2152,42 @@ def register(app, hub, ctx):
 
         gc = hub.state.system_state.get("global_config", {})
         devices = gc.get("nw_devices", []) or []
+        # A device recorded under another tenant whose agent has since moved
+        # (or been deleted) is relocated to this tenant when this scan verifies
+        # it: same IP + hostname, or the same agent at the same IP. Explicit
+        # preview scans only report it; a credential-free pass still moves it
+        # (the record already carries working credentials).
+        preview_only = bool(data.get("dry_run", False)) or not bool(
+            data.get("auto_add", saved.get("auto_add", True)))
+        moved, move_preview, from_spokes = [], [], set()
+        _scan_creds = {c.get("id"): c for c in chosen}
+        _finder = getattr(hub, "nw_find_relocation", None)
+        for dev in (identified if callable(_finder) else []):
+            hit = _finder(devices, tenant_id, spoke_id, dev.get("address"),
+                                         dev.get("hostname"), str(dev.get("object_type") or ""))
+            if not hit:
+                continue
+            d, evidence = hit
+            if preview_only:
+                move_preview.append({"id": d.get("id"), "name": d.get("name"),
+                                     "address": d.get("address"), "from_tenant": d.get("tenant_id"),
+                                     "to_tenant": tenant_id, "evidence": evidence})
+                continue
+            from_spokes.add(str(d.get("spoke_id") or ""))
+            moved.append(hub.nw_relocate_device(d, tenant_id, spoke_id, evidence,
+                                                _scan_creds.get(dev.get("credential_id"))))
+        moved_addrs = {str(a or "").strip() for m in moved for d in devices
+                       if isinstance(d, dict) and d.get("id") == m["id"]
+                       for a in [d.get("address")] + list(d.get("alt_addresses") or [])}
+        if moved or move_preview:
+            logger.info("nw scan tenant=%s relocated from other tenants: %s%s", tenant_id,
+                        [(m["name"], m["address"], m["from_tenant"], "+".join(m["evidence"])) for m in moved],
+                        f" (preview: {len(move_preview)})" if move_preview else "")
         # LLDP crawling can reach past the targets: never add an address NetBox
-        # assigns to another tenant.
+        # assigns to another tenant (a just-relocated device is still recorded
+        # there until its next NetBox push).
         foreign = await access.foreign_tenant_ips(hub, tenant_id, {
-            str(d.get("address") or "").strip() for d in identified + reachable})
+            str(d.get("address") or "").strip() for d in identified + reachable}) - moved_addrs
         identified = [d for d in identified if str(d.get("address") or "").strip() not in foreign]
         reachable = [d for d in reachable if str(d.get("address") or "").strip() not in foreign]
 
@@ -2248,6 +2280,15 @@ def register(app, hub, ctx):
             hub.state.system_state["global_config"] = gc
             hub.state._mark_dirty()
             await _nw_push_fleet(hub, spoke_id)
+        if moved:
+            hub.state._mark_dirty()
+            if not (added or alt_added):
+                await _nw_push_fleet(hub, spoke_id)
+            for old_sid in from_spokes - {spoke_id, ""}:
+                try:
+                    await _nw_push_fleet(hub, old_sid)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("nw scan: re-push to former agent %s failed: %s", old_sid, e)
 
         # Hosts that answered SNMP but aren't an auto-addable platform (e.g. TOR
         # switches) are still monitorable: hand them to the monitoring sync.
@@ -2282,7 +2323,7 @@ def register(app, hub, ctx):
                      and d.get("id") and d.get("id") not in {a["id"] for a in added}
                      and str(d.get("name") or "").strip()
                      == str(d.get("address") or "").strip()]
-        poll_ids = [d["id"] for d in added] + stale_ids
+        poll_ids = list(dict.fromkeys([d["id"] for d in added] + [m["id"] for m in moved] + stale_ids))
         if poll_ids:
             _nw_spawn_refresh(f"discovery-poll:{poll_ids[0]}",
                               lambda: _nw_poll_discovered(hub, poll_ids))
@@ -2301,6 +2342,8 @@ def register(app, hub, ctx):
             "dry_run": dry_run,
             "preview": preview,
             "added": added,
+            "moved": moved,
+            "move_preview": move_preview,
         }
 
     async def _run_nw_scheduled_scan(tenant_id, targets=None, dry_run=None):
