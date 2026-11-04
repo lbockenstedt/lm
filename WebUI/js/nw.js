@@ -138,9 +138,10 @@ function _nwDetailHtml() {
         // warm per-device cache) — help positively ID the physical box.
         const idRow = (k, val) => val ? metaRow(k, escapeHtml(String(val))) : '';
         body = `<div class="rounded-md border border-slate-200 bg-white p-4 max-w-lg">
-            ${metaRow('Type', escapeHtml(typeLabel))}
+            ${idRow('Type', typeLabel)}
             ${metaRow('Transport', escapeHtml(transport))}
             ${metaRow('Address', escapeHtml(dev.address || '—'))}
+            ${idRow('Site', dev.site?.name || dev.site?.slug)}
             ${(dev._addresses || []).length > 1 ? metaRow('Also seen at', dev._addresses.filter(a => a !== dev.address).map(a => escapeHtml(a)).join('<br>')) : ''}
             ${idRow('Hostname', dev.hostname)}
             ${idRow('Model', dev.model)}
@@ -412,11 +413,12 @@ function _renderNwOverview(devices, counts) {
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(category)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${_nwSerialCell(it)}</td>
             <td class="px-4 py-3 text-slate-600 font-mono text-xs">${_nwAddressCell(it)}</td>
+            <td class="px-4 py-3 text-slate-600 text-xs" title="NetBox site of the prefix holding this address">${escapeHtml(it.site?.name || it.site?.slug || '—')}</td>
             <td class="px-4 py-3">${rcell}</td>
             <td class="px-4 py-3 text-right"><span class="text-slate-300">›</span></td>
         </tr>`;
     }).join('');
-    const headers = ['device', 'type', 'category', 'serial', 'address', 'reachable']
+    const headers = ['device', 'type', 'category', 'serial', 'address', 'site', 'reachable']
         .map(k => `<th class="px-4 py-3">${k.toUpperCase()}</th>`).join('');
 
     container.innerHTML = `

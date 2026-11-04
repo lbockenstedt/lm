@@ -1028,6 +1028,7 @@ class NwDiscoverySyncMixin:
                 "interfaces_total": int((rd or {}).get("interfaces_total", 0) or 0),
                 "message": (rd or {}).get("message", ""),
             }
+            self._nw_record_site(device_cfg, (rd or {}).get("site"))
             if netbox_push["status"] == "ERROR" or netbox_push["errors"]:
                 errors.append(f"netbox: {netbox_push['message'] or 'error'}")
                 logger.warning("nw device push %s (%s) -> NetBox %s: %s",
@@ -1038,6 +1039,21 @@ class NwDiscoverySyncMixin:
         except Exception as e:
             errors.append(f"netbox push: {e}")
             return {"status": "ERROR", "message": str(e)}, errors, tenant_slug
+
+    def _nw_record_site(self, device_cfg: Dict[str, Any], site: Any) -> None:
+        """Keep the NetBox site (from the site-scoped prefix of its address)
+        on the fleet record so LM shows where the device is."""
+        if not (isinstance(site, dict) and site.get("slug")):
+            return
+        site = {"slug": str(site["slug"]), "name": str(site.get("name") or site["slug"])}
+        if device_cfg.get("site") == site:
+            return
+        device_cfg["site"] = site
+        try:
+            self.state._mark_dirty()
+        except Exception:  # noqa: BLE001 - persistence is best-effort
+            logger.debug("nw site record: mark_dirty failed", exc_info=True)
+        logger.info("nw: device %s is in NetBox site %s", device_cfg.get("id"), site["slug"])
 
     async def apply_nw_auto_poll(self, device_id: str,
                                  pdata: Dict[str, Any]) -> None:
