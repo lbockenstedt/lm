@@ -1802,10 +1802,16 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
 async def foreign_tenant_ips(hub, tenant_id, ips) -> set:
     """The ``ips`` NetBox assigns to a tenant other than ``tenant_id`` (most
     specific prefix wins; on a tie — the same prefix in two tenants' VRFs —
-    ``tenant_id`` keeps it). Unowned IPs and IPs of the shared tenant are not
-    foreign. Empty when NetBox is unreachable."""
+    ``tenant_id`` keeps it). Unowned IPs, IPs of the shared tenant and, for a
+    tenant group, IPs of its member tenants are not foreign. Empty when NetBox is unreachable."""
     nets_by_tid = await _tenant_networks(hub)
     mine = str(tenant_id or ADMIN_TENANT_ID)
+    # A tenant group owns no prefixes itself; its member tenants' are its own.
+    members = _GROUP_MEMBERS.get(_norm_tenant_id(mine), set())
+
+    def _own(tid):
+        return same_tenant(tid, mine) or _norm_tenant_id(tid) in members
+
     foreign = set()
     for ip in ips:
         try:
@@ -1818,9 +1824,9 @@ async def foreign_tenant_ips(hub, tenant_id, ips) -> set:
                 if addr not in net:
                     continue
                 if (best is None or net.prefixlen > best[1]
-                        or (net.prefixlen == best[1] and same_tenant(tid, mine))):
+                        or (net.prefixlen == best[1] and _own(tid))):
                     best = (tid, net.prefixlen)
-        if best and not same_tenant(best[0], mine) and not tenant_is_shared(best[0]):
+        if best and not _own(best[0]) and not tenant_is_shared(best[0]):
             foreign.add(str(ip))
     return foreign
 
