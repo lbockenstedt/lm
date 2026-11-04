@@ -2189,7 +2189,7 @@ const VIEW_SUBMENUS = {
     settings: ['General', 'User Access', 'Cloud', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons', 'Diagnostics'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-console', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
     setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'Test Data Feed'],
-    opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'Impairment', 'DHCP Leases', 'Interfaces'],
+    opnsense: ['Overview', 'Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'Impairment', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Diagnostics', 'Settings'],
     ldap: ['Users', 'Groups'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices', 'My Users'],
