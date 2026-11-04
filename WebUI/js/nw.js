@@ -138,10 +138,10 @@ function _nwDetailHtml() {
         // warm per-device cache) — help positively ID the physical box.
         const idRow = (k, val) => val ? metaRow(k, escapeHtml(String(val))) : '';
         body = `<div class="rounded-md border border-slate-200 bg-white p-4 max-w-lg">
-            ${metaRow('Type', escapeHtml(typeLabel))}
+            ${idRow('Type', typeLabel)}
             ${metaRow('Transport', escapeHtml(transport))}
             ${metaRow('Address', escapeHtml(dev.address || '—'))}
-            ${metaRow('Site', escapeHtml(dev.site?.name || dev.site?.slug || '—'))}
+            ${idRow('Site', dev.site?.name || dev.site?.slug)}
             ${(dev._addresses || []).length > 1 ? metaRow('Also seen at', dev._addresses.filter(a => a !== dev.address).map(a => escapeHtml(a)).join('<br>')) : ''}
             ${idRow('Hostname', dev.hostname)}
             ${idRow('Model', dev.model)}
