@@ -1276,6 +1276,16 @@ def register(app, hub, ctx):
 
         all_spokes = list(spokes) + [s for s in stale_spokes if s not in spokes]
         consoles = all_spokes if sel is None else [s for s in all_spokes if s in visible_spokes]
+        if sel is not None:
+            # errors / stale_spokes name console servers, so scope them like the
+            # ports: a tenant must not see another tenant's servers here.
+            def _for_sel(sid):
+                st = hub.state.get_spoke_tenant(sid) or ""
+                return (sid in visible_spokes
+                        or (st == sel and not access.tenant_is_shared(st))
+                        or (admin_scope and not st))
+            errors = {s: e for s, e in errors.items() if _for_sel(s)}
+            stale_spokes = {s for s in stale_spokes if _for_sel(s)}
         out = {"consoles": consoles, "ports": ports, "errors": errors,
                "stale_spokes": sorted(stale_spokes)}
         if admin:

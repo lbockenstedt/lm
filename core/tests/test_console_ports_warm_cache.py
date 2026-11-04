@@ -261,3 +261,24 @@ def test_aging_cache_served_and_refreshed_in_background():
     assert "con-1" in body["stale_spokes"]
     assert hub._rr_calls == []              # still no blocking live poll
     assert "con-1" in hub._scheduled        # refreshed in the background instead
+
+
+def test_tenant_view_omits_other_tenants_stale_and_failing_servers():
+    """Under ?tenant=dxp, another tenant's offline/failing console servers must
+    not be named in stale_spokes/errors (their ports are already hidden)."""
+    import time as _t
+    hub = _Hub(connected=["con-dxp", "con-ra", "con-ra-down"], fail=["con-ra-down"])
+    hub.state = _State(tenants={"con-dxp": "dxp", "con-ra": "ra", "con-ra-down": "ra"})
+    old = _t.time() - 999
+    hub.warm_cache["console_ports"] = {
+        "con-dxp": {"data": [_port("ttyUSB0", "dxp-sw")], "fetched_at": old},
+        "con-ra": {"data": [_port("ttyUSB0", "ra-sw")], "fetched_at": old}}
+    ctx = _ctx()
+    ctx._resolve_tenant = lambda request, explicit=None: explicit
+    app = FastAPI()
+    app.state.hub = hub
+    console.register(app, hub, ctx)
+    body = TestClient(app).get("/api/console/ports?tenant=dxp").json()
+    assert [p["alias"] for p in body["ports"]] == ["dxp-sw"]
+    assert body["stale_spokes"] == ["con-dxp"]
+    assert body["errors"] == {}
