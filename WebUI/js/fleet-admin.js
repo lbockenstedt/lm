@@ -3842,6 +3842,8 @@ async function loadOpnsenseManagement() {
         }
     }
 
+    if (subMenu === 'Overview') return lmViews.fwoverview(container, firewalls);
+
     try {
         // Map the active sub-view to the per-firewall endpoint suffix.
         const suffixFor = sm => {
