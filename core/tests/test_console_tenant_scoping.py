@@ -131,3 +131,13 @@ def test_tenant_group_lists_member_tenants_ports():
     assert disp(True, True, "default", "group:SSPLM", False) == "show"
     assert disp(True, True, "shared", "group:ssplm", True) == "show"   # member → unmasked
     assert disp(True, True, "dxp", "group:ssplm", False) == "hide"
+
+
+def test_assigned_tenant_shows_only_in_that_tenant():
+    # Assigned to the SSPLM group → only under SSPLM, never RA/CENTRAL; assigned
+    # to CENTRAL → only under CENTRAL (not SSPLM, not RA).
+    for sel in ("ra", "central", "default"):
+        assert disp(True, True, "group:ssplm", sel, False) == "hide"
+    assert disp(True, True, "central", "central", False) == "show"
+    for sel in ("ra", "group:ssplm", "dxp"):
+        assert disp(True, True, "central", sel, False) == "hide"
