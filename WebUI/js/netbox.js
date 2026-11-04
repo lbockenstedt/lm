@@ -646,7 +646,7 @@ async function showNetboxAllocatePrefixModal(editItem) {
             ${allocFields ? `<div class="grid grid-cols-1 md:grid-cols-3 gap-3">${allocFields}</div>` : ''}
             <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description</label><input id="nb-p-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Lab Tenant A VLAN10"></div>
-                <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site Slug (optional)</label><input id="nb-p-site" value="${val(editItem?.site)}" class="${inputCls}" placeholder="lab-a"></div>
+                <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site</label><select id="nb-p-site" class="${selectCls}" title="NetBox site this subnet belongs to; scanned devices with an IP in it are placed in this site"><option value="">Loading sites…</option></select></div>
                 ${editing ? `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-p-status" class="${selectCls}">${statusOpts}</select></div>` : ''}
             </div>
             <div>
@@ -672,6 +672,7 @@ async function showNetboxAllocatePrefixModal(editItem) {
             <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-4xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     if (editing) modal.dataset.prefixId = editItem.id;
+    loadNetboxPrefixSiteOptions(editItem?.site_slug || '');
 
     if (editing) return;
 
@@ -693,6 +694,26 @@ async function showNetboxAllocatePrefixModal(editItem) {
         console.error('showNetboxAllocatePrefixModal: could not load parent prefixes', err);
         const sel = document.getElementById('nb-p-parent');
         if (sel) sel.innerHTML = `<option value="">Could not load prefixes</option>`;
+    }
+}
+
+// Sites come from NetBox so a subnet can only be placed in a site that exists.
+async function loadNetboxPrefixSiteOptions(selected) {
+    const sel = document.getElementById('nb-p-site');
+    if (!sel) return;
+    const esc = v => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    try {
+        const r = await fetch('/api/netbox/sites', { credentials: 'same-origin' });
+        const d = r.ok ? await r.json() : {};
+        const sites = (d.sites || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
+        sel.innerHTML = '<option value="">— no site —</option>' + sites.map(s =>
+            `<option value="${esc(s.slug)}"${s.slug === selected ? ' selected' : ''}>${esc(s.name)} (${esc(s.slug)})</option>`).join('');
+        if (selected && !sites.some(s => s.slug === selected)) {
+            sel.insertAdjacentHTML('beforeend', `<option value="${esc(selected)}" selected>${esc(selected)} (not found in NetBox)</option>`);
+        }
+    } catch (err) {
+        console.error('loadNetboxPrefixSiteOptions: could not load NetBox sites', err);
+        sel.innerHTML = `<option value="${esc(selected)}">${selected ? esc(selected) : 'Could not load sites'}</option>`;
     }
 }
 
@@ -721,7 +742,7 @@ async function submitNetboxAllocatePrefix() {
         const payload = {
             description: get('nb-p-desc'),
             status: get('nb-p-status') || 'active',
-            site: get('nb-p-site') || undefined,
+            site: get('nb-p-site'),  // "" clears the site
             custom_fields: { dhcp_enabled: dhcpEnabled, ...dhcpOptionFields },
         };
         try {
