@@ -1371,17 +1371,21 @@ let _xtermMod = null;
 async function loadConsoleData() {
     const el = document.getElementById('console-container');
     if (!el) return;
+    const tenant = currentTenant || 'default';
     try {
-        const res = await fetch(`/api/console/ports?tenant=${encodeURIComponent(currentTenant || 'default')}`, { credentials: 'same-origin' });
+        const res = await fetch(`/api/console/ports?tenant=${encodeURIComponent(tenant)}`, { credentials: 'same-origin' });
+        if ((currentTenant || 'default') !== tenant) return;  // tenant switched mid-fetch
         if (!res.ok) {
             el.innerHTML = `<div class="py-12 text-center text-red-400 italic">${res.status === 403 ? 'Console module access required.' : 'Failed to load console ports (' + res.status + ').'}</div>`;
             return;
         }
         const data = await res.json();
+        if ((currentTenant || 'default') !== tenant) return;
         _consolePorts = data.ports || [];
         _consoleSpokes = data.consoles || [];
         _consoleDpaSpokes = data.dpa_consoles || [];
         _renderConsolePorts(el, data);
+        if (document.getElementById('serial-console-modal')) serialRenderConsoleList();
     } catch (e) {
         el.innerHTML = `<div class="py-12 text-center text-red-400 italic">Error: ${escapeHtml(e.message)}</div>`;
     }
@@ -1714,11 +1718,13 @@ async function refreshConsoleDiagnostics() {
     const body = document.getElementById('console-diag-body');
     if (!body) return;
     let data = { diagnostics: [], errors: {} };
+    const tenant = currentTenant || 'default';
     try {
-        const res = await fetch(`/api/console/diagnostics?tenant=${encodeURIComponent(currentTenant || 'default')}`, { credentials: 'same-origin' });
+        const res = await fetch(`/api/console/diagnostics?tenant=${encodeURIComponent(tenant)}`, { credentials: 'same-origin' });
         if (res.ok) data = await res.json();
         else { body.innerHTML = `<div class="text-red-500">Failed to load (${res.status})</div>`; return; }
     } catch (e) { body.innerHTML = `<div class="text-red-500">${escapeHtml(e.message)}</div>`; return; }
+    if ((currentTenant || 'default') !== tenant) return;  // tenant switched mid-fetch
     window._consoleDiagLast = { ...data, _fetched_at: new Date().toISOString() };
     const rows = data.diagnostics || [];
     const errs = Object.entries(data.errors || {});
@@ -2952,11 +2958,13 @@ function _serialPortLabel(p) {
 // EVERY console you can connect to — not just the ones already open. Silently
 // keeps the last-known list on error (the menu still shows open sessions).
 async function serialRefreshAvailablePorts() {
+    const tenant = currentTenant || 'default';
     try {
-        const res = await fetch(`/api/console/ports?tenant=${encodeURIComponent(currentTenant || 'default')}`,
-                                { credentials: 'same-origin' });
+        const res = await fetch(`/api/console/ports?tenant=${encodeURIComponent(tenant)}`,
+                                { credentials: 'same-origin', _keepOnNavigate: true });
         if (res.ok) {
             const data = await res.json();
+            if ((currentTenant || 'default') !== tenant) return;  // tenant switched mid-fetch
             _consolePorts = data.ports || [];
         }
     } catch (e) { /* keep last-known list */ }
