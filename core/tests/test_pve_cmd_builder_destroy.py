@@ -45,3 +45,35 @@ def test_stop_precedes_destroy_via_vm_action_cmd():
     # destroy FAILS on a running guest; the spoke issues this stop first.
     assert pve_cmd_builder.vm_action_cmd(9001, "stop", "qemu") == "qm stop 9001"
     assert pve_cmd_builder.vm_action_cmd(9002, "stop", "lxc") == "pct stop 9002"
+
+
+def _run_with_fake_pvesh(cmd, status_json, tmp_path):
+    import subprocess
+    fake = tmp_path / "pvesh"
+    fake.write_text("#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/calls\"\n"
+                    "case \"$1\" in create|delete) echo '\"UPID:n:1:2:3:qmsnapshot:1:root@pam:\"';;\n"
+                    f"get) echo '{status_json}';; esac\n")
+    fake.chmod(0o755)
+    env = {"PATH": f"{tmp_path}:/usr/bin:/bin"}
+    r = subprocess.run(["sh", "-c", cmd], env=env, capture_output=True, text=True)
+    return r, (tmp_path / "calls").read_text()
+
+
+def test_snapshot_cmd_targets_vm_node_via_cluster_api(tmp_path):
+    cmd = pve_cmd_builder.snapshot_cmd("PXMX-R06-01", 10199, "qemu", "lm-prepatch-1")
+    r, calls = _run_with_fake_pvesh(cmd, '{"status": "stopped", "exitstatus": "OK"}', tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "create /nodes/PXMX-R06-01/qemu/10199/snapshot --snapname lm-prepatch-1" in calls
+    assert "get /nodes/PXMX-R06-01/tasks/UPID:n:1:2:3:qmsnapshot:1:root@pam:/status" in calls
+
+
+def test_snapshot_cmd_fails_when_task_fails(tmp_path):
+    cmd = pve_cmd_builder.snapshot_cmd("n1", 5, "lxc", "s")
+    r, calls = _run_with_fake_pvesh(cmd, '{"status":"stopped","exitstatus":"snapshot error"}', tmp_path)
+    assert r.returncode == 1 and "failed" in r.stderr
+    assert "/nodes/n1/lxc/5/snapshot" in calls
+
+
+def test_delete_snapshot_cmd_uses_node_when_known():
+    assert pve_cmd_builder.delete_snapshot_cmd(5, "qemu", "s") == "qm delsnapshot 5 s"
+    assert "pvesh delete /nodes/n1/qemu/5/snapshot/s" in pve_cmd_builder.delete_snapshot_cmd(5, "qemu", "s", "n1")

@@ -676,8 +676,45 @@ def parse_snapshots(run_response: Any) -> List[Dict[str, Any]]:
     return sorted(out, key=lambda s: s["snaptime"])
 
 
-def delete_snapshot_cmd(vmid: Any, kind: str, name: str) -> str:
-    """``qm``/``pct delsnapshot <vmid> <name>`` (run on the VM's own node)."""
+def _pvesh_task_cmd(method: str, node: str, path: str, args: str = "",
+                    wait_s: int = 300) -> str:
+    """``pvesh <method> /nodes/<node><path>`` then wait for the Proxmox task it
+    starts and fail unless it ends OK. Unlike ``qm``/``pct`` (which only see
+    guests on the local node) this works from ANY node in the cluster, so the
+    command can run on an agent that isn't on the VM's node."""
+    n = shlex.quote(str(node))
+    return (
+        f"out=$(pvesh {method} /nodes/{n}{path} {args} --output-format json 2>&1)"
+        " || { echo \"$out\" >&2; exit 1; }; "
+        "upid=$(printf '%s' \"$out\" | grep -o 'UPID:[^\" ]*' | tail -1); "
+        "[ -z \"$upid\" ] && exit 0; "
+        f"for i in $(seq 1 {int(wait_s)}); do "
+        f"st=$(pvesh get /nodes/{n}/tasks/\"$upid\"/status --output-format json 2>&1 | tr -d ' \\n'); "
+        "case \"$st\" in *'\"status\":\"stopped\"'*) "
+        "case \"$st\" in *'\"exitstatus\":\"OK\"'*) exit 0;; esac; "
+        "echo \"task $upid failed: $st\" >&2; exit 1;; esac; sleep 1; done; "
+        "echo \"task $upid still running\" >&2; exit 1"
+    )
+
+
+def snapshot_cmd(node: str, vmid: Any, kind: str, name: Optional[str] = None) -> str:
+    """Take a snapshot of the VM on ``node`` (cluster-wide, see _pvesh_task_cmd).
+    Without a node, falls back to local ``qm``/``pct snapshot``."""
+    if not node:
+        return vm_action_cmd(vmid, "snapshot", kind, name)
+    snap = name or default_snapshot_name()
+    return _pvesh_task_cmd(
+        "create", node, f"/{'lxc' if kind == 'lxc' else 'qemu'}/{int(vmid)}/snapshot",
+        f"--snapname {shlex.quote(snap)} --description lm-hub")
+
+
+def delete_snapshot_cmd(vmid: Any, kind: str, name: str, node: str = "") -> str:
+    """Delete snapshot ``name``: via the cluster API on ``node`` when known,
+    else ``qm``/``pct delsnapshot`` (only works on the VM's own node)."""
+    if node:
+        return _pvesh_task_cmd(
+            "delete", node,
+            f"/{'lxc' if kind == 'lxc' else 'qemu'}/{int(vmid)}/snapshot/{shlex.quote(name)}")
     bin_ = "pct" if kind == "lxc" else "qm"
     return f"{bin_} delsnapshot {int(vmid)} {shlex.quote(name)}"
 
