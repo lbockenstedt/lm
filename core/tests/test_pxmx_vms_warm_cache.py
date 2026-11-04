@@ -111,7 +111,7 @@ class _Hub(WarmCacheMixin):
 def _ctx(admin=True, tenant=None):
     """Route ctx with stubbed auth + a passthrough tenant filter (these tests
     exercise the warm-cache wiring, not subnet filtering)."""
-    async def _filter_tenant(request, data, module, ip_fields, explicit=None):
+    async def _filter_tenant(request, data, module, ip_fields, explicit=None, **_kw):
         return data
     return SimpleNamespace(
         _session_user=lambda request: None,

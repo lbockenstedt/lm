@@ -1400,6 +1400,89 @@ def hypervisor_owned_by_caller(hub, sess, spoke_id: str) -> bool:
     return spoke_tenant in allowed
 
 
+def spoke_owner_tenant(hub, spoke_id) -> Optional[str]:
+    """The tenant ``spoke_id`` is dedicated to, or None when it is unassigned
+    or bound to the shared tenant. Everything a dedicated spoke/agent reports
+    belongs to its tenant: the same IP can exist in several tenants' VRFs, so
+    IP/prefix filtering and attribution only apply to shared/unassigned spokes."""
+    if not spoke_id:
+        return None
+    try:
+        tid = str(hub.state.get_spoke_tenant(spoke_id) or "").strip()
+    except Exception:  # noqa: BLE001
+        return None
+    if not tid or tenant_is_shared(tid):
+        return None
+    return tid
+
+
+def tenant_in(tenant, selected) -> bool:
+    """``tenant`` is the ``selected`` tenant or a member of the selected group."""
+    t, s = _norm_tenant_id(tenant), _norm_tenant_id(selected)
+    return bool(t) and (t == s or t in _GROUP_MEMBERS.get(s, set()))
+
+
+def _session_tenants(sess) -> list:
+    user = (sess or {}).get("user", {}) or {}
+    tids = [str(t).strip() for t in (user.get("tenants") or []) if str(t).strip()]
+    if not tids and str(user.get("tenant_id") or "").strip():
+        tids = [str(user["tenant_id"]).strip()]
+    return tids
+
+
+def firewall_owner_tenant(hub, firewall_id) -> Optional[str]:
+    """The tenant a firewall is dedicated to: its own non-shared ``tenant_id``,
+    else its spoke's (``spoke_owner_tenant``). None for a shared firewall."""
+    if not firewall_id:
+        return None
+    try:
+        fws = hub.state.system_state.get("global_config", {}).get("firewalls", []) or []
+        fw = next((f for f in fws if isinstance(f, dict) and f.get("id") == firewall_id), None)
+    except Exception:  # noqa: BLE001
+        fw = None
+    if not fw:
+        return None
+    tid = str(fw.get("tenant_id") or "").strip()
+    if tid and not tenant_is_shared(tid):
+        return tid
+    return spoke_owner_tenant(hub, fw.get("spoke_id"))
+
+
+def _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant=None,
+                         owner=None) -> Optional[bool]:
+    """Read visibility of data from a tenant-dedicated spoke: shown when the
+    reader's selected/effective tenant is the owner or a group containing it
+    (a Global Admin with no selection sees all), hidden otherwise. None when
+    the spoke isn't dedicated (the IP filter applies)."""
+    owner = owner or spoke_owner_tenant(hub, spoke_id)
+    if not owner:
+        return None
+    sess = session_user(sessions, request)
+    if not sess:
+        return False
+    if explicit_tenant is None:
+        try:
+            explicit_tenant = request.query_params.get("tenant")
+        except Exception:  # noqa: BLE001
+            explicit_tenant = None
+    tid = effective_tenant(sessions, request, explicit_tenant)
+    if not tid:
+        return is_admin(sess)
+    return tenant_in(owner, tid)
+
+
+def _owned_spoke_writable(hub, sess, spoke_id, owner=None) -> Optional[bool]:
+    """Write/control counterpart of ``_owned_spoke_visible``: any of the
+    caller's tenants owns (or is a group containing) the dedicated spoke's
+    tenant. None when the spoke isn't dedicated."""
+    owner = owner or spoke_owner_tenant(hub, spoke_id)
+    if not owner:
+        return None
+    if is_admin(sess):
+        return True
+    return any(tenant_in(owner, t) for t in _session_tenants(sess))
+
+
 async def tenant_admin_console_allowed(hub, sess, spoke_id: str) -> bool:
     """True iff a TENANT ADMIN may console/control any VM on hypervisor
     ``spoke_id`` because the operator has explicitly opted that hypervisor into
@@ -1768,7 +1851,9 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
     netbox spoke), then assigns each record to its owner (``_prefix_owner``):
     the record's ``source_tenant_id`` (the tenant of the spoke/agent that
     discovered it) when that tenant owns a containing prefix, else the most
-    specific containing prefix. Records with no IP, an unparseable IP, or an
+    specific containing prefix. A record with ``owner_tenant_id`` (discovered
+    by a tenant-dedicated spoke, see ``spoke_owner_tenant``) goes to that
+    tenant without any prefix check. Records with no IP, an unparseable IP, or an
     IP no tenant owns are ``dropped`` (counted) — keeps NetBox
     tenant-authoritative, no orphans. Returns ``({tenant_id: [records]},
     dropped_count)``.
@@ -1791,7 +1876,11 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
         except Exception:
             dropped += 1
             continue
-        matched = _prefix_owner(addr, nets_by_tid, str(rec.get("source_tenant_id") or ""))
+        owner = str(rec.get("owner_tenant_id") or "").strip()
+        if owner:
+            matched = next((t for t in nets_by_tid if same_tenant(t, owner)), owner)
+        else:
+            matched = _prefix_owner(addr, nets_by_tid, str(rec.get("source_tenant_id") or ""))
         if matched:
             buckets.setdefault(matched, []).append(rec)
         else:
@@ -1901,7 +1990,8 @@ def filter_enabled(hub, module: str) -> bool:
     return filter_config(hub).get(module, False)
 
 
-async def filter_session(hub, sessions: dict, request: "Request", data, module: str, ip_fields):
+async def filter_session(hub, sessions: dict, request: "Request", data, module: str, ip_fields,
+                         spoke_id=None, spoke_of=None):
     """Apply server-side subnet filtering to ``data`` for ``module``.
 
     No-op for admins and for disabled modules. Otherwise drops items whose
@@ -1927,6 +2017,13 @@ async def filter_session(hub, sessions: dict, request: "Request", data, module: 
     unowned selection, so a crafted ``?tenant=`` can never widen the filter —
     the cross-tenant backstop is preserved.
     """
+    if spoke_of is not None:
+        return await filter_by_source_spoke(
+            hub, sessions, request, data, spoke_of,
+            lambda d: filter_session(hub, sessions, request, d, module, ip_fields))
+    visible = _owned_spoke_visible(hub, sessions, request, spoke_id, None)
+    if visible is not None:
+        return data if visible else _empty_filter_result(data)
     sess = session_user(sessions, request)
     if not sess or is_admin(sess):
         return data
@@ -1995,7 +2092,7 @@ async def _fw_alias_map(hub, firewall_id) -> "dict | None":
 
 
 async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str,
-                           firewall_id=None, explicit_tenant=None):
+                           firewall_id=None, explicit_tenant=None, spoke_id=None):
     """Firewall-specific subnet filter: strict source/destination for ``rules``
     (with OPNsense alias resolution via ``_fw_alias_map``), field-based for
     nat/dns/interfaces/dhcp/aliases.
@@ -2011,6 +2108,10 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
     spec = _FW_FILTER_SPEC.get(endpoint)
     if not spec:
         return data  # health / unknown → no IP to filter on
+    visible = _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant,
+                                   owner=firewall_owner_tenant(hub, firewall_id))
+    if visible is not None:
+        return data if visible else _empty_filter_result(data)
     mode, fields = spec
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
@@ -2064,7 +2165,8 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
     return out
 
 
-async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload) -> bool:
+async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload,
+                                  spoke_id=None) -> bool:
     """CONSTRAINED-WRITE gate for a SHARED firewall. True iff ``payload`` (one
     rule / NAT / DNS / alias record being written) is attributable to ``sess``'s
     tenant by SUBNET — its source/destination (after server-side alias resolution)
@@ -2085,6 +2187,10 @@ async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload
     spec = _FW_FILTER_SPEC.get(endpoint)
     if not spec:
         return False
+    owned = _owned_spoke_writable(hub, sess, spoke_id,
+                                  owner=firewall_owner_tenant(hub, firewall_id))
+    if owned is not None:
+        return owned
     mode, fields = spec
     prefixes = await resolve_owned_prefixes(hub, sess)
     if not prefixes:
@@ -2098,7 +2204,7 @@ async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload
     return _list_len(out) > 0
 
 
-async def vm_in_tenant_scope(hub, sess, vm_record) -> bool:
+async def vm_in_tenant_scope(hub, sess, vm_record, spoke_id=None) -> bool:
     """Toggle-INDEPENDENT VM ownership for CONTROL/console gates (start/stop/
     snapshot/backup/create/clone/VNC). True iff the VM is attributable to ANY of
     the caller's assigned tenants by TENANT TAG or by SUBNET (ips ∈ that tenant's
@@ -2126,6 +2232,9 @@ async def vm_in_tenant_scope(hub, sess, vm_record) -> bool:
     """
     if is_admin(sess):
         return True
+    owned = _owned_spoke_writable(hub, sess, spoke_id)
+    if owned is not None:
+        return owned
     user = (sess or {}).get("user", {}) or {}
     tenant_ids = [str(t).strip() for t in (user.get("tenants") or []) if str(t).strip()]
     if not tenant_ids:
@@ -2150,7 +2259,7 @@ async def vm_in_tenant_scope(hub, sess, vm_record) -> bool:
     return False
 
 
-async def record_in_tenant_scope(hub, sess, record, fields) -> bool:
+async def record_in_tenant_scope(hub, sess, record, fields, spoke_id=None) -> bool:
     """CONSTRAINED-WRITE gate for a SHARED single-server module (DNS Unbound /
     DHCP Kea). True iff ``record``'s IP field(s) (``fields``, e.g. ["ip","value"]
     for DNS, ["ip"] for DHCP) fall within the caller's tenant prefixes — the SAME
@@ -2161,6 +2270,9 @@ async def record_in_tenant_scope(hub, sess, record, fields) -> bool:
     subnets (any of their tenants'); anything else is a Global-Admin action."""
     if not isinstance(record, dict):
         return False
+    owned = _owned_spoke_writable(hub, sess, spoke_id)
+    if owned is not None:
+        return owned
     prefixes = await resolve_owned_prefixes(hub, sess)
     if not prefixes:
         return False
@@ -2169,7 +2281,7 @@ async def record_in_tenant_scope(hub, sess, record, fields) -> bool:
 
 
 async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str,
-                    explicit_tenant=None):
+                    explicit_tenant=None, spoke_id=None):
     """Network Devices subnet filter: field-based on the concrete-IP columns of
     the MAC-table / ARP / interfaces views. Tenant-aware with the same contract
     as ``filter_fw`` — an explicit ``?tenant=`` scopes admins to that tenant's
@@ -2184,6 +2296,9 @@ async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str
     spec = _NW_FILTER_SPEC.get(endpoint)
     if not spec:
         return data  # devices / info / unknown → no IP to filter on
+    visible = _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant)
+    if visible is not None:
+        return data if visible else _empty_filter_result(data)
     mode, fields = spec
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
@@ -2210,11 +2325,15 @@ async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str
     return out
 
 
-async def gate_record(hub, sessions: dict, request: "Request", record, module: str, ip_fields):
+async def gate_record(hub, sessions: dict, request: "Request", record, module: str, ip_fields,
+                      spoke_id=None):
     """Gate a single-record endpoint (e.g. CPPM device-enrich): return the record
     if it may be shown, else ``None``. No-op for admins / disabled modules. A
     non-admin whose tenant has no prefixes FAILS CLOSED (``None``): a tenant
     unconfigured for subnets may not enrich a foreign device's record."""
+    visible = _owned_spoke_visible(hub, sessions, request, spoke_id, None)
+    if visible is not None:
+        return record if visible else None
     sess = session_user(sessions, request)
     if not sess or is_admin(sess):
         return record
@@ -2341,7 +2460,8 @@ def _keep_owned_items(data, tid: str, nets_by_tid: Dict[str, List[Any]], ip_fiel
 
 
 async def filter_tenant(hub, sessions: dict, request: "Request", data, module: str, ip_fields,
-                         explicit_tenant: str = None, shared_source: bool = False):
+                         explicit_tenant: str = None, shared_source: bool = False,
+                         spoke_id=None, spoke_of=None):
     """Tenant-aware filter (renamed from ``filter_session_tenant`` — it filters a
     tenant's data by subnet plus module-specific overrides, not just subnet).
 
@@ -2361,7 +2481,22 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
     are broad containers (DXP's 10.0.0.0/8) would otherwise match everyone's
     records; there a record is kept only when the tenant is its most specific
     prefix owner — the same rule the syncs use (``_prefix_owner``).
+
+    ``spoke_id`` (here and on the other read filters) names the source spoke:
+    data from a tenant-dedicated spoke is its tenant's whole, never IP
+    filtered — shown to that tenant (or a group containing it), hidden from
+    others (``_owned_spoke_visible``). ``spoke_of(item)`` does the same per
+    item of a list aggregated across spokes (``filter_by_source_spoke``).
     """
+    if spoke_of is not None:
+        return await filter_by_source_spoke(
+            hub, sessions, request, data, spoke_of,
+            lambda d: filter_tenant(hub, sessions, request, d, module, ip_fields,
+                                    explicit_tenant, shared_source),
+            explicit_tenant)
+    visible = _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant)
+    if visible is not None:
+        return data if visible else _empty_filter_result(data)
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
         enabled = filter_enabled(hub, module)
@@ -2419,10 +2554,13 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
 
 
 async def gate_record_tenant(hub, sessions: dict, request: "Request", record, module: str, ip_fields,
-                                    explicit_tenant: str = None):
+                                    explicit_tenant: str = None, spoke_id=None):
     """Tenant-aware single-record gate (device-enrich). Returns ``record`` if its
     IP is in the selected tenant's prefixes, else ``None``; no explicit tenant →
     legacy ``gate_record`` (no-op for admins)."""
+    visible = _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant)
+    if visible is not None:
+        return record if visible else None
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
         if not filter_enabled(hub, module):
@@ -2432,3 +2570,31 @@ async def gate_record_tenant(hub, sessions: dict, request: "Request", record, mo
             return None      # FAIL-CLOSED: a no-prefix tenant sees no foreign record
         return filter_record_by_prefixes(record, prefixes, ip_fields)
     return await gate_record(hub, sessions, request, record, module, ip_fields)
+
+async def filter_by_source_spoke(hub, sessions: dict, request: "Request", data, spoke_of, ip_filter,
+                                 explicit_tenant: str = None):
+    """The dedicated-spoke rule for a list aggregated across spokes. Each item's
+    source spoke is ``spoke_of(item)``: an item from a tenant-dedicated spoke is
+    kept whole or dropped (``_owned_spoke_visible``); the rest go through
+    ``await ip_filter(data)``, the usual IP/prefix filter. Order is preserved."""
+    container, key = _find_list_slot(data)
+    if container is None:
+        return await ip_filter(data)
+    lst = container if key is None else container[key]
+    verdict: Dict[Any, Optional[bool]] = {}
+    owned, rest = set(), []
+    for item in lst:
+        sid = spoke_of(item) if isinstance(item, dict) else None
+        if sid not in verdict:
+            verdict[sid] = _owned_spoke_visible(hub, sessions, request, sid, explicit_tenant)
+        if verdict[sid] is None:
+            rest.append(item)
+        elif verdict[sid]:
+            owned.add(id(item))
+    if len(rest) == len(lst):
+        return await ip_filter(data)
+    out = await ip_filter(rest if key is None else _replace_slot(data, container, key, rest))
+    c2, k2 = _find_list_slot(out)
+    kept = owned | {id(i) for i in ((c2 if k2 is None else c2[k2]) if c2 is not None else [])}
+    merged = [i for i in lst if id(i) in kept]
+    return merged if key is None else _replace_slot(data, container, key, merged)

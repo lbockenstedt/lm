@@ -1971,25 +1971,31 @@ def create_app(hub):
     def _filter_enabled(hub, module):
         return access.filter_enabled(hub, module)
 
-    async def _filter_session(request, data, module, ip_fields):
-        return await access.filter_session(hub, _sessions, request, data, module, ip_fields)
+    async def _filter_session(request, data, module, ip_fields, spoke_id=None, spoke_of=None):
+        return await access.filter_session(hub, _sessions, request, data, module, ip_fields,
+                                           spoke_id=spoke_id, spoke_of=spoke_of)
 
-    async def _filter_fw(request, data, endpoint, firewall_id=None, explicit_tenant=None):
-        return await access.filter_fw(hub, _sessions, request, data, endpoint, firewall_id, explicit_tenant)
+    async def _filter_fw(request, data, endpoint, firewall_id=None, explicit_tenant=None, spoke_id=None):
+        return await access.filter_fw(hub, _sessions, request, data, endpoint, firewall_id, explicit_tenant,
+                                      spoke_id=spoke_id)
 
-    async def _filter_nw(request, data, endpoint, explicit_tenant=None):
-        return await access.filter_nw(hub, _sessions, request, data, endpoint, explicit_tenant)
+    async def _filter_nw(request, data, endpoint, explicit_tenant=None, spoke_id=None):
+        return await access.filter_nw(hub, _sessions, request, data, endpoint, explicit_tenant,
+                                      spoke_id=spoke_id)
 
-    async def _gate_record(request, record, module, ip_fields):
-        return await access.gate_record(hub, _sessions, request, record, module, ip_fields)
+    async def _gate_record(request, record, module, ip_fields, spoke_id=None):
+        return await access.gate_record(hub, _sessions, request, record, module, ip_fields,
+                                        spoke_id=spoke_id)
 
     async def _filter_tenant(request, data, module, ip_fields, explicit_tenant=None,
-                             shared_source=False):
+                             shared_source=False, spoke_id=None, spoke_of=None):
         return await access.filter_tenant(hub, _sessions, request, data, module, ip_fields,
-                                          explicit_tenant, shared_source)
+                                          explicit_tenant, shared_source, spoke_id=spoke_id,
+                                          spoke_of=spoke_of)
 
-    async def _gate_record_tenant(request, record, module, ip_fields, explicit_tenant=None):
-        return await access.gate_record_tenant(hub, _sessions, request, record, module, ip_fields, explicit_tenant)
+    async def _gate_record_tenant(request, record, module, ip_fields, explicit_tenant=None, spoke_id=None):
+        return await access.gate_record_tenant(hub, _sessions, request, record, module, ip_fields,
+                                               explicit_tenant, spoke_id=spoke_id)
 
     def _trigger_endpoint_sync_after_ipam_edit(hub, request: Request,
                                                data: Dict[str, Any] = None):
