@@ -427,6 +427,22 @@ def register(app, hub, ctx):
         """Target console spoke: explicit spoke_id, else the first connected one."""
         return (body or {}).get("spoke_id") or hub.get_spoke_by_type("console")
 
+    def _tenant_has_own_console(tid) -> bool:
+        """``tid`` has a console agent bound to it. Such a tenant uses its own
+        console servers only: shared-infra ports are never IP-routed to it, so
+        shared stays shared, not a mix. Exact match: one group member owning a
+        console must not cut the shared ports of the group's other members."""
+        if not tid:
+            return False
+        sids = set(hub.get_all_spokes_by_type("console") or [])
+        sids |= set(((getattr(hub, "warm_cache", None) or {}).get("console_ports") or {}))
+        for sid in sids:
+            st = hub.state.get_spoke_tenant(sid) or ""
+            if (st and not access.tenant_is_shared(st)
+                    and access._norm_tenant_id(st) == access._norm_tenant_id(tid)):
+                return True
+        return False
+
     async def _console_tenant_ok(sess, sid, eff, device_ip):
         """Whether a NON-admin session may open/act on a console port — kept
         consistent with the ``/api/console/ports`` listing so a tenant can use
@@ -439,12 +455,19 @@ def register(app, hub, ctx):
             return False
         if not access.tenant_is_shared(eff):
             return True                      # dedicated to a tenant the caller owns
+        user = (sess or {}).get("user", {}) or {}
+        tids = [t for t in dict.fromkeys((user.get("tenants") or []) + [user.get("tenant_id")])
+                if t and not _tenant_has_own_console(t)]
+        if not tids:
+            return False                     # the caller's tenants all have their own consoles
         if not access.filter_enabled(hub, "console"):
             return True                      # subnet mask off → shared is open to all
-        try:
-            prefixes = await access.resolve_owned_prefixes(hub, sess)
-        except Exception:  # noqa: BLE001
-            prefixes = []
+        prefixes = []
+        for t in tids:
+            try:
+                prefixes += await access.resolve_prefixes_for_tenant(hub, t) or []
+            except Exception:  # noqa: BLE001
+                pass
         if not prefixes:
             return False
         return access.filter_record_by_prefixes({"ip": device_ip}, prefixes, ("ip",)) is not None
@@ -1134,7 +1157,9 @@ def register(app, hub, ctx):
             each port is routed by its identified device IP against the viewing
             tenant's NetBox prefixes (the ``console`` subnet-filter module). An
             admin can still pin ONE port to a specific tenant via the per-port
-            override, which then behaves as dedicated.
+            override, which then behaves as dedicated. A tenant that has its own
+            console agent gets no shared ports this way (shared or own, never a
+            mix).
           * An UNASSIGNED agent/port → admin-only holding state (global view).
 
         Visibility mirrors ``access.spoke_visible_to_session`` +
@@ -1156,6 +1181,8 @@ def register(app, hub, ctx):
             or (None if admin else (sess or {}).get("user", {}).get("tenant_id") or None)
         hub = app.state.hub
         console_filter_on = access.filter_enabled(hub, "console")
+        # A tenant with its own console agent never gets shared ports by IP.
+        mask_own_console = _tenant_has_own_console(mask_scope)
         mask_prefixes = None
         if mask_scope and console_filter_on:
             try:
@@ -1206,6 +1233,8 @@ def register(app, hub, ctx):
                 if disp == "mask":
                     # Shared infra: route by the identified device IP. Toggle off
                     # → show unmasked; no scope/prefixes → fail closed (hide).
+                    if mask_own_console:
+                        continue
                     if console_filter_on:
                         if not mask_scope or not mask_prefixes:
                             continue
