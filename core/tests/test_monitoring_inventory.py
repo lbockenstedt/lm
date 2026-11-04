@@ -167,3 +167,23 @@ def test_monitoring_sync_config_defaults_and_status_record():
     monitoring.record_monitoring_sync(hub, res={"payload": {"data": {"created": 2, "errors": ["x"]}}})
     st = hub.state.system_state["global_config"]["monitoring_sync_status"]
     assert st["status"] == "error" and st["created"] == 2 and st["errors"] == 1
+
+
+def test_device_moved_into_tenant_group_uses_member_snmp_and_proxies(monkeypatch):
+    import access
+
+    async def fake_overlay_many(hub, records, storage_key):
+        return records
+
+    async def snmp_secrets(hub, sec_type, buckets=None):
+        return [{"bucket": "default", "name": "SNMP", "value": {"snmp_community": "mbr"}}]
+
+    monkeypatch.setattr(cred_vault, "automation_list_by_type", snmp_secrets)
+    monkeypatch.setattr(instance_vault, "overlay_many", fake_overlay_many)
+    monkeypatch.setattr(access, "_GROUP_MEMBERS", {"group:ssplm": {"shared", "default"}})
+    hub = SimpleNamespace(state=SimpleNamespace(system_state={"global_config": {"nw_devices": [
+        {"name": "sw1", "address": "10.0.0.1", "tenant_id": "group:ssplm", "transport": "ssh",
+         "moved_from": {"tenant_id": "default", "spoke_id": "s1"}}]}}))
+    (d,) = asyncio.run(monitoring.inventory_devices(hub))
+    assert d["snmp_community"] == "mbr" and d["snmp"]
+    assert d["proxy_tenants"] == ["default", "shared"] and d["moved_from"] == "default"

@@ -483,7 +483,9 @@ def register(app, hub, ctx):
                     [{kk: x.get(kk) for kk in ("address", "hostname", "object_type", "method")}
                      for x in res[k] if isinstance(x, dict)])
                 for k in ("status", "message", "reason", "targets", "sources", "scanned",
-                          "identified", "reachable", "added", "preview", "dry_run")}
+                          "identified", "reachable", "added", "preview", "dry_run")} | {
+            # Devices moved into this tenant (verified as the same hardware).
+            k: res.get(k) or [] for k in ("moved", "move_preview")}
 
     @app.post("/admin/ops/nw-neighbors")
     async def admin_ops_nw_neighbors(request: Request):
