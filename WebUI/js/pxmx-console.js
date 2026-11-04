@@ -1484,7 +1484,7 @@ function _renderConsolePorts(el, data) {
     const diagBtn = hasConsoleView()
         ? `<button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button>`
         : '';
-    const dpaBtn = admin
+    const dpaBtn = (admin || _consoleDpaSpokes.length)
         ? `<button onclick="openConsoleDpaModal()" class="text-[11px] px-3 py-1.5 rounded border border-sky-400 text-sky-700 hover:bg-slate-50" title="Direct Port Access: SSH (or telnet) straight to a serial port on the console server">🔌 Direct Port Access</button>`
         : '';
     const adminTools = diagBtn + dpaBtn + ((admin || isTenantAdmin())
@@ -3348,7 +3348,7 @@ async function saveConsoleSettings(spokeId, portId) {
     } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
 }
 
-// Direct Port Access knob (admin): per console agent, persisted on the agent
+// Direct Port Access knob (admin, or a tenant admin on its own servers): per console agent, persisted on the agent
 // and applied live. The SSH password is write-only (never read back).
 function openConsoleDpaModal() {
   const existing = document.getElementById('console-dpa-modal');

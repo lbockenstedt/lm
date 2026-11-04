@@ -31,36 +31,53 @@ def _console_tenant_in(eff, tid) -> bool:
 
 def _console_port_disposition(admin: bool, visible: bool, eff: str, sel, shared: bool,
                               in_sel: bool) -> str:
-    """``"show"`` or ``"hide"`` for one console port.
+    """How a console port should be treated for the requesting session.
 
-    A port belongs to its effective tenant -- the per-port override, else the
-    agent's tenant ("inherit") -- and nothing else. The attached device's IP
-    never moves it to another tenant: the same address can exist in several
-    tenants' VRFs. A per-port override is how an admin puts one device of a
-    shared console server in another tenant.
+    Returns one of:
+      * ``"show"``  — list the port as-is (full, no masking).
+      * ``"mask"``  — SHARED-tenant infra: list only if the device IP falls in
+                      the scoping tenant's NetBox prefixes (subnet mask applied
+                      by the caller). This is how a shared console server's ports
+                      get routed to the right tenant.
+      * ``"hide"``  — not visible to this session / selected tenant.
 
-      * ``visible`` -- ``access.spoke_visible_to_session(sess, eff)``.
-      * ``eff``     -- effective tenant (``""`` when unassigned).
-      * ``sel``     -- the SELECTED tenant (``None`` == an unscoped
-        programmatic call; ``"default"`` == the ADMIN tenant).
-      * ``shared``  -- ``access.tenant_is_shared(eff)``.
-      * ``in_sel``  -- ``eff`` is ``sel`` or a member of the ``sel`` group.
+    Inputs mirror the tenant model:
+      * ``visible`` — ``access.spoke_visible_to_session(sess, eff)``: admin→all,
+        SHARED tenant→everyone, own dedicated tenant→yes, unassigned→admin-only.
+      * ``eff``     — the port's effective tenant (per-port override, else the
+        agent binding; ``""`` when unassigned). A per-port override is exactly
+        how an admin pins ONE device of a shared console server to a tenant.
+      * ``sel``     — the SELECTED tenant from the picker (``None`` == an
+        unscoped programmatic call; ``"default"`` == the ADMIN tenant scope).
+      * ``shared``  — ``access.tenant_is_shared(eff)``.
+      * ``in_sel``  — ``eff`` is ``sel`` or a member of the ``sel`` group.
 
-    The ADMIN tenant (``default``) shows unassigned ports, ports bound to
-    ``default`` and shared-tenant ports, never another tenant's.
+    Only a port whose tenant IS the shared tenant is routed by its device IP.
+    A port with any other tenant set (its override, or the agent's tenant via
+    "inherit") belongs to that tenant; its IP never moves it elsewhere — the
+    same address can exist in another tenant's VRF.
+
+    Dedicated data belongs wholly to its tenant (exact-match the picker, like
+    ``/api/pxmx/agents``); shared data is visible to all but subnet-masked;
+    unassigned is an admin-only holding state.
+
+    ``default`` is the ADMIN tenant, not an "All tenants" view: under it an
+    admin sees UNASSIGNED ports, ports explicitly bound to ``default`` and
+    shared infra (unmasked — the ADMIN tenant owns no NetBox prefixes of its
+    own, so masking there would fail closed), but never another tenant's
+    dedicated ports. Same rule routes/nw.py names "ADMIN(default) must not
+    accumulate across tenants".
     """
     if not visible:
         return "hide"
     admin_scope = admin and (sel is None or sel == access.ADMIN_TENANT_ID)
     if not eff:                              # unassigned holding state
         return "show" if admin_scope else "hide"
-    if admin and sel is None:
-        return "show"
-    if shared and admin_scope:
-        return "show"
-    if sel is None:                          # non-admin, no tenant: own dedicated only
-        return "hide" if shared else "show"
-    return "show" if in_sel else "hide"
+    if shared:                               # shared infra → everyone, masked
+        return "show" if admin_scope or (sel is not None and in_sel) else "mask"
+    if sel is not None and not in_sel:       # tenant set → honor the picker only
+        return "hide"
+    return "show"
 
 
 def console_port_search_blob(p: dict) -> str:
@@ -410,23 +427,34 @@ def register(app, hub, ctx):
         """Target console spoke: explicit spoke_id, else the first connected one."""
         return (body or {}).get("spoke_id") or hub.get_spoke_by_type("console")
 
-    def _console_tenant_ok(sess, eff):
+    async def _console_tenant_ok(sess, sid, eff, device_ip):
         """Whether a NON-admin session may open/act on a console port — kept
         consistent with the ``/api/console/ports`` listing so a tenant can use
-        exactly the ports it can see: the port's effective tenant must be one of
-        the caller's tenants (or a member of a tenant group they have). The device
-        IP plays no part. Unassigned → no. (Admin bypasses at the call site.)"""
+        exactly the ports it can see. Dedicated → the caller's own tenant. SHARED
+        → the identified device IP must fall in the caller's tenant prefixes (the
+        ``console`` subnet-filter), fail-closed when the tenant has no prefixes or
+        the device has no IP. Unassigned / other tenant → no. (Admin bypasses at
+        the call site.)"""
         if not access.spoke_visible_to_session(sess, eff):
             return False
-        user = (sess or {}).get("user", {}) or {}
-        mine = list(user.get("tenants") or []) + [user.get("tenant_id")]
-        return any(_console_tenant_in(eff, t) for t in mine if t)
+        if not access.tenant_is_shared(eff):
+            return True                      # dedicated to a tenant the caller owns
+        if not access.filter_enabled(hub, "console"):
+            return True                      # subnet mask off → shared is open to all
+        try:
+            prefixes = await access.resolve_owned_prefixes(hub, sess)
+        except Exception:  # noqa: BLE001
+            prefixes = []
+        if not prefixes:
+            return False
+        return access.filter_record_by_prefixes({"ip": device_ip}, prefixes, ("ip",)) is not None
 
     async def _assert_port_tenant(request, sid, port_id):
         """Cross-tenant guard for per-port Console actions (settings, detect-baud,
         identify, config get/push). A non-admin may only act on a port it can see
-        in the listing (see :func:`_console_tenant_ok`). Admin bypasses. The
-        port's effective tenant is resolved from
+        in the listing (see :func:`_console_tenant_ok`): dedicated to one of its
+        tenants, or a SHARED-tenant device whose IP is in its prefixes. Admin
+        bypasses. The port's effective tenant + device IP are resolved from
         CONSOLE_LIST_PORTS (best-effort: a fetch failure falls back to the
         agent's whole-agent tenant, fail-closed if that isn't accessible)."""
         sess = _session_user(request)
@@ -435,17 +463,18 @@ def register(app, hub, ctx):
         if _is_admin(sess):
             return
         pid = str(port_id or "").strip()
-        override = ""
+        override, device_ip = "", None
         if pid:
             try:
                 lr = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=60.0)
                 match = next((x for x in (_console_unwrap(lr).get("ports") or [])
                               if str(x.get("port_id", "")) == pid), None)
                 override = (match or {}).get("tenant_id") or ""
+                device_ip = ((match or {}).get("probe") or {}).get("identity", {}).get("ip")
             except Exception:  # noqa: BLE001
                 pass
         eff = override or (hub.state.get_spoke_tenant(sid) or "")
-        if not _console_tenant_ok(sess, eff):
+        if not await _console_tenant_ok(sess, sid, eff, device_ip):
             raise HTTPException(status_code=403,
                                 detail="not authorized for this console port's tenant")
 
@@ -1101,13 +1130,15 @@ def register(app, hub, ctx):
 
           * A console agent DEDICATED to a tenant → all its ports are that
             tenant's; they never appear under another tenant (the reported leak).
-          * A console agent on the SHARED tenant → its ports are the shared
-            tenant's: listed under ADMIN, the shared tenant and any tenant group
-            containing it (SSPLM). The device IP never routes a port to another
-            tenant; an admin pins ONE port to a tenant with the per-port override.
+          * A console agent on the SHARED tenant → visible to every tenant, but
+            each port is routed by its identified device IP against the viewing
+            tenant's NetBox prefixes (the ``console`` subnet-filter module). An
+            admin can still pin ONE port to a specific tenant via the per-port
+            override, which then behaves as dedicated.
           * An UNASSIGNED agent/port → admin-only holding state (global view).
 
-        See ``_console_port_disposition``."""
+        Visibility mirrors ``access.spoke_visible_to_session`` +
+        ``filter_record_by_prefixes`` (see ``_console_port_disposition``)."""
         sess = _session_user(request)
         admin = _is_admin(sess)
         explicit = str(request.query_params.get("tenant") or "").strip()
@@ -1118,7 +1149,19 @@ def register(app, hub, ctx):
         tid = _resolve_tenant(request, explicit or None)
         sel = tid or None
         admin_scope = admin and (sel is None or sel == access.ADMIN_TENANT_ID)
+        # Tenant whose prefixes shared-console ports are masked against: the
+        # selected tenant, else (non-admin) the caller's own tenant. The ADMIN
+        # tenant owns no NetBox prefixes, so never mask against it.
+        mask_scope = (None if sel == access.ADMIN_TENANT_ID else sel) \
+            or (None if admin else (sess or {}).get("user", {}).get("tenant_id") or None)
         hub = app.state.hub
+        console_filter_on = access.filter_enabled(hub, "console")
+        mask_prefixes = None
+        if mask_scope and console_filter_on:
+            try:
+                mask_prefixes = await access.resolve_prefixes_for_tenant(hub, mask_scope)
+            except Exception:  # noqa: BLE001 - prefix fetch best-effort; fail closed below
+                mask_prefixes = []
         spokes = hub.get_all_spokes_by_type("console") or []
         await _console_seed_credentials(hub, spokes)  # ensure new console spokes have creds
         ports, errors, visible_spokes = [], {}, set()
@@ -1128,7 +1171,7 @@ def register(app, hub, ctx):
             """Enrich + tenant-gate one spoke's raw port list into ``ports``.
 
             Shared by the live path and the warm-cache (spoke-offline) path so the
-            visibility rules are identical. ``stale=True`` tags ports
+            visibility/masking rules are identical. ``stale=True`` tags ports
             served from the last-known snapshot. Each port dict is COPIED before
             enrichment so the persisted warm-cache list is never mutated in place
             (it's reused across requests)."""
@@ -1140,8 +1183,8 @@ def register(app, hub, ctx):
             # Under the ADMIN scope an UNASSIGNED agent is also "present": that
             # holding state belongs to ADMIN.
             if (sel is None
-                    or _console_tenant_in(stenant, sel)
-                    or (admin_scope and (not stenant or access.tenant_is_shared(stenant)))):
+                    or (_console_tenant_in(stenant, sel) and not access.tenant_is_shared(stenant))
+                    or (admin_scope and not stenant)):
                 visible_spokes.add(sid)
             for src in (raw_ports or []):
                 p = dict(src)
@@ -1156,9 +1199,20 @@ def register(app, hub, ctx):
                     p["stale"] = True            # served from warm cache (spoke offline)
                 shared = access.tenant_is_shared(eff)
                 visible = access.spoke_visible_to_session(sess, eff)
-                if _console_port_disposition(admin, visible, eff, sel, shared,
-                                             _console_tenant_in(eff, sel)) == "hide":
+                disp = _console_port_disposition(admin, visible, eff, sel, shared,
+                                                 _console_tenant_in(eff, sel))
+                if disp == "hide":
                     continue
+                if disp == "mask":
+                    # Shared infra: route by the identified device IP. Toggle off
+                    # → show unmasked; no scope/prefixes → fail closed (hide).
+                    if console_filter_on:
+                        if not mask_scope or not mask_prefixes:
+                            continue
+                        device_ip = ((p.get("probe") or {}).get("identity") or {}).get("ip")
+                        if access.filter_record_by_prefixes(
+                                {"ip": device_ip}, mask_prefixes, ("ip",)) is None:
+                            continue
                 ports.append(p)
                 visible_spokes.add(sid)
 
@@ -1242,18 +1296,21 @@ def register(app, hub, ctx):
             # ports: a tenant must not see another tenant's servers here.
             def _for_sel(sid):
                 st = hub.state.get_spoke_tenant(sid) or ""
-                return (sid in visible_spokes or _console_tenant_in(st, sel)
-                        or (admin_scope and (not st or access.tenant_is_shared(st))))
+                return (sid in visible_spokes
+                        or (_console_tenant_in(st, sel) and not access.tenant_is_shared(st))
+                        or (admin_scope and not st))
             errors = {s: e for s, e in errors.items() if _for_sel(s)}
             stale_spokes = {s for s in stale_spokes if _for_sel(s)}
         out = {"consoles": consoles, "ports": ports, "errors": errors,
                "stale_spokes": sorted(stale_spokes)}
-        if admin:
-            # DPA is configured per console server (admin-only), so admins get
-            # every connected one by name, including servers with no port
-            # visible under the selected tenant.
+        # DPA is configured per console server: admins get every connected
+        # one by name (including servers with no port visible under the
+        # selected tenant); a tenant admin gets the servers dedicated to its
+        # own tenants.
+        dpa = [sid for sid in spokes if _dpa_manageable(sess, sid)]
+        if dpa:
             out["dpa_consoles"] = [{"spoke_id": sid, "name": hub.state.get_module_name(sid) or sid}
-                                   for sid in spokes]
+                                   for sid in dpa]
         return out
 
     @app.get("/api/console/ports")
@@ -1263,7 +1320,7 @@ def register(app, hub, ctx):
 
     # Expose the tenant-scoped console listing so other route modules (global
     # search, device-detail) can surface a found device's console for connect
-    # without duplicating the visibility logic.
+    # without duplicating the visibility/masking logic.
     app.state.console_list_visible_ports = _list_visible_console_ports
 
     # ── Console → NetBox device sync config/status (System → Sync card) ───────
@@ -1475,6 +1532,17 @@ def register(app, hub, ctx):
         return {"enabled": enabled, "available": llm.find_ab(hub) is not None}
 
     # ── Direct Port Access (DPA) knob + per-port override ────────────────────
+    def _dpa_manageable(sess, sid) -> bool:
+        """Global Admin: any console server. Tenant admin: only a server bound
+        to one of its own (non-shared) tenants — DPA is a whole-server setting,
+        so a shared server stays Global-Admin-only."""
+        if _is_admin(sess):
+            return True
+        if not _is_tenant_admin(sess):
+            return False
+        st = hub.state.get_spoke_tenant(sid) or ""
+        return bool(st) and not access.tenant_is_shared(st) and access.check_tenant_access(sess, st)
+
     def _console_dpa_spoke(hub, body):
         """The console spoke named by body["spoke_id"] (or the first one), only
         if it really is a connected console spoke."""
@@ -1505,26 +1573,26 @@ def register(app, hub, ctx):
 
     @app.get("/api/console/dpa")
     async def console_dpa_get(request: Request):
-        """Direct Port Access config + status for one console spoke (admin)."""
+        """Direct Port Access config + status for one console spoke (admin, or a
+        tenant admin on a server dedicated to its tenant)."""
         sess = _session_user(request)
-        if not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
         body = {"spoke_id": request.query_params.get("spoke_id", "")}
         sid = _console_dpa_spoke(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No spoke connected")
+        if not _dpa_manageable(sess, sid):
+            raise HTTPException(status_code=403, detail="admin only")
         r = await hub.request_response(sid, "CONSOLE_GET_DPA", {}, timeout=15.0)
         return {"spoke_id": sid, **_console_dpa_result(r)}
 
     @app.post("/api/console/dpa")
     async def console_dpa_set(request: Request):
-        """Update the persisted DPA knob on a console spoke (admin); applied
+        """Update the persisted DPA knob on a console spoke (admin, or a tenant
+        admin on a server dedicated to its tenant); applied
         live. The SSH password is forwarded once to the spoke (stored there only
         as a hash) and never logged or echoed."""
         sess = _session_user(request)
-        if not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
         try:
             body = await request.json()
@@ -1535,6 +1603,8 @@ def register(app, hub, ctx):
         sid = _console_dpa_spoke(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No spoke connected")
+        if not _dpa_manageable(sess, sid):
+            raise HTTPException(status_code=403, detail="admin only")
         payload = {
             k: v for k, v in body.items()
             if k in ("enabled", "ssh_enabled", "telnet_enabled", "ssh_bind", "ssh_base",
@@ -1631,7 +1701,7 @@ def register(app, hub, ctx):
         # shared), not an "All tenants" view; only ``all``/``__all__`` or an
         # absent ?tenant= gives the fleet-wide report. A Global Admin who picked
         # a specific tenant sees ONLY that tenant's console diagnostics
-        # (ports whose effective tenant is in it), exactly like the
+        # (dedicated agents + shared-infra ports masked to it), exactly like the
         # ports list — never the whole fleet. A non-admin is always scoped.
         explicit = str(request.query_params.get("tenant") or "").strip()
         tid = _resolve_tenant(request, explicit or None)
@@ -2159,18 +2229,20 @@ def register(app, hub, ctx):
         if not port_id:
             raise HTTPException(status_code=400, detail="port_id is required")
         # Enforce the port's effective tenant for non-admins — same rule as the
-        # /api/console/ports listing (the port's tenant is one of the caller's).
+        # /api/console/ports listing (dedicated own-tenant, or a SHARED device
+        # routed by its IP to the caller's prefixes).
         if not admin:
-            override = ""
+            override, device_ip = "", None
             try:
                 lr = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=60.0)
                 match = next((x for x in (_console_unwrap(lr).get("ports") or [])
                               if x.get("port_id") == port_id), None)
                 override = (match or {}).get("tenant_id") or ""
+                device_ip = ((match or {}).get("probe") or {}).get("identity", {}).get("ip")
             except Exception:
                 pass
             eff = override or (hub.state.get_spoke_tenant(sid) or "")
-            if not _console_tenant_ok(sess, eff):
+            if not await _console_tenant_ok(sess, sid, eff, device_ip):
                 raise HTTPException(status_code=403,
                                     detail="not authorized for this console port's tenant")
         session_id = str(uuid.uuid4())

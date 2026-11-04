@@ -316,13 +316,19 @@ def register(app, hub, ctx):
         # ("<cluster>/<node>/<vmid>") so a cluster-mate spoke self-reporting the
         # full cluster (or the unbound-global spoke overlapping a visible one)
         # can't double-count. Falls back to (node, vmid) when unique_id is absent.
+        # A spoke dedicated to a tenant contributes its whole VM list to that
+        # tenant (no subnet/tag attribution) and nothing to any other tenant.
         _seen: dict = {}
-        for _env in _vm_envelopes:
+        _spoke_owned: dict = {}
+        for _sp, _env in zip(hv_spokes, _vm_envelopes):
+            _owner = access.spoke_owner_tenant(hub, _sp)
+            if _owner and not access.tenant_in(_owner, _tid):
+                continue
             for _v in (_env.get("vms") or []):
                 if isinstance(_v, dict):
                     _key = _v.get("unique_id") or (_v.get("node"), _v.get("vmid"))
-                    _seen[_key] = _v
-        all_vms  = list(_seen.values())
+                    (_spoke_owned if _owner else _seen)[_key] = _v
+        all_vms  = [v for k, v in _seen.items() if k not in _spoke_owned]
         sessions_list = sessions_r.get("sessions", sessions_r.get("data", []))
         # Scope the VM + active-session counts by the tenant so the dashboard
         # matches the (tenant-scoped) hypervisor + Access Tracker views, not the
@@ -358,13 +364,22 @@ def register(app, hub, ctx):
                            for v in all_vms}
                 _merged.update(_owned)
                 all_vms = list(_merged.values())
+        if _spoke_owned:
+            _merged = {(v.get("unique_id") or (v.get("node"), v.get("vmid"))): v
+                       for v in all_vms}
+            _merged.update(_spoke_owned)
+            all_vms = list(_merged.values())
         # NAC sessions come from the SHARED (global) nac spoke — CPPM_GET_ACCESS_TRACKER
         # returns every tenant's sessions, so subnet scoping is the ONLY isolation.
         # A tenant with no bound prefixes must therefore show 0, NOT the global list
         # (else every unbound tenant shows the same cross-tenant total). Strict,
         # matching the tenant-bound hypervisor VM isolation.
-        sessions_list = (filter_items_by_prefixes(sessions_list, sess_prefixes, ["ip"])
-                         if sess_prefixes else [])
+        _nac_owner = access.spoke_owner_tenant(hub, spoke_nac)
+        if _nac_owner:
+            sessions_list = sessions_list if access.tenant_in(_nac_owner, _tid) else []
+        else:
+            sessions_list = (filter_items_by_prefixes(sessions_list, sess_prefixes, ["ip"])
+                             if sess_prefixes else [])
         vms      = sum(1 for v in all_vms if v.get("status") == "running")
         sessions = len(sessions_list)
 

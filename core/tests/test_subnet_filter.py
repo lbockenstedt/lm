@@ -537,3 +537,75 @@ def test_tenant_own_dhcp_server_keeps_overlap_matching():
     out = asyncio.run(filter_tenant(_vrf_hub(), {"a": _admin_session()}, _FakeRequest("a"),
                                     data, "dhcp", ["subnet"], explicit_tenant="dxp"))
     assert out["subnets"] == [{"subnet": "10.21.16.0/24"}]
+
+
+# ── Tenant-dedicated spokes: data is the owner's, never IP filtered ─────────
+# The same IP can live in several tenants' VRFs, so when the source spoke is
+# bound to a (non-shared) tenant its data belongs to that tenant outright.
+
+import access as _access
+
+
+def _owned_hub():
+    hub = _vrf_hub()
+    hub.state._spoke_tenants = {"cen-spoke": "central", "shr-spoke": "shared"}
+    return hub
+
+
+def _owned_data():
+    # 10.5.0.1 lies in dxp's 10.0.0.0/8, NOT in central's 10.21.16.0/24.
+    return {"sessions": [{"ip": "10.5.0.1"}, {"ip": "10.21.16.9"}]}
+
+
+def _filter_as(hub, tenant, spoke):
+    return asyncio.run(filter_tenant(hub, {"a": _admin_session()}, _QSRequest("a"),
+                                     _owned_data(), "nac", ["ip"],
+                                     explicit_tenant=tenant, spoke_id=spoke))
+
+
+def test_owned_spoke_data_shown_unfiltered_to_its_tenant():
+    out = _filter_as(_owned_hub(), "central", "cen-spoke")
+    assert out == _owned_data()
+
+
+def test_owned_spoke_data_hidden_from_other_tenant():
+    out = _filter_as(_owned_hub(), "dxp", "cen-spoke")
+    assert out["sessions"] == []
+
+
+def test_owned_spoke_data_shown_under_group_containing_owner(monkeypatch):
+    monkeypatch.setitem(_access._GROUP_MEMBERS, "group:g1", {"central"})
+    out = _filter_as(_owned_hub(), "group:g1", "cen-spoke")
+    assert out == _owned_data()
+
+
+def test_owned_spoke_data_shown_to_admin_without_selection():
+    out = _filter_as(_owned_hub(), None, "cen-spoke")
+    assert out == _owned_data()
+
+
+def test_shared_spoke_data_still_ip_filtered():
+    out = _filter_as(_owned_hub(), "central", "shr-spoke")
+    assert out["sessions"] == [{"ip": "10.21.16.9"}]
+
+
+def test_aggregated_list_scoped_per_source_spoke():
+    data = {"vms": [{"ip": "10.5.0.1", "s": "cen-spoke"}, {"ip": "10.5.0.2", "s": "shr-spoke"}]}
+    out = asyncio.run(filter_tenant(_owned_hub(), {"a": _admin_session()}, _QSRequest("a"),
+                                    data, "nac", ["ip"], explicit_tenant="central",
+                                    spoke_of=lambda r: r["s"]))
+    assert out["vms"] == [{"ip": "10.5.0.1", "s": "cen-spoke"}]
+
+
+def test_owned_record_attributed_to_owner_not_prefix(monkeypatch):
+    import ipaddress
+    nets = {t: [ipaddress.ip_network(p)] for t, p in
+            (("dxp", "10.0.0.0/8"), ("central", "10.21.16.0/24"))}
+
+    async def _nets(_hub):
+        return nets
+    monkeypatch.setattr(_access, "_tenant_networks", _nets)
+    owned = {"ip": "10.5.0.1", "owner_tenant_id": "central"}
+    plain = {"ip": "10.5.0.2"}
+    buckets, dropped = asyncio.run(_access.attribute_by_prefix(None, [owned, plain]))
+    assert buckets == {"central": [owned], "dxp": [plain]} and dropped == 0

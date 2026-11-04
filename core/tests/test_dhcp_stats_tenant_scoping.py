@@ -124,7 +124,7 @@ def test_non_stats_shapes_pass_through():
 def _build_with_real_filter(sess, hub, allowed_prefix, calls):
     """Like test_dhcp_tenant_routing._build, but _filter_tenant records its
     arguments and really prunes, instead of passing through."""
-    async def _filter(request, data, module, ip_fields, explicit_tenant=None, shared_source=False):
+    async def _filter(request, data, module, ip_fields, explicit_tenant=None, shared_source=False, **_kw):
         calls.append({"module": module, "ip_fields": ip_fields,
                       "tenant": explicit_tenant})
         is_admin = bool(sess and sess.get("user", {}).get("is_admin"))

@@ -246,7 +246,7 @@ def _build(monkeypatch, tmp_path, shared=False, gc_extra=None):
     def _is_tenant_admin(sess):
         return access_mod.is_tenant_admin(sess)
 
-    async def _filter_nw(request, data, endpoint, explicit_tenant=None):
+    async def _filter_nw(request, data, endpoint, explicit_tenant=None, **_kw):
         return await access_mod.filter_nw(hub, _sessions, request, data,
                                           endpoint, explicit_tenant)
 
