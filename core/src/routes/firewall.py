@@ -15,6 +15,7 @@ FW_READ_CMDS = {
     "rules": "OPNSENSE_GET_ALL_RULES",
     "interfaces": "GET_INTERFACE_STATUS",
     "health": "GET_SYSTEM_HEALTH",
+    "overview": "OPNSENSE_GET_OVERVIEW",
     "dhcp": "OPNSENSE_GET_DHCP_LEASES",
     "nat": "OPNSENSE_GET_NAT_POLICIES",
     "dns": "OPNSENSE_GET_DNS_RECORDS",
