@@ -2326,46 +2326,56 @@ async function setTenant(tenant) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ tenant_id: tenant, config: { active: true } })
         });
-        if (response.ok) {
-            console.log(`Switched to tenant: ${tenant}`);
-            // Reload tenant prefixes for the newly-selected tenant BEFORE the
-            // view re-renders, so the client-side subnet filter (NAT/DHCP/DNS/
-            // Interfaces) and the server-side ?tenant= filter on the firewall
-            // fetch agree on the same tenant. Without this, a multi-tenant user
-            // switching tenant would filter on stale session-tenant prefixes.
-            await loadTenantPrefixes();
-            // Re-point the Managed Devices tenant filter at the tenant we just
-            // switched to. That filter lives on window (_mdFilter) so the tab
-            // handlers survive re-renders, which also means it survived a TENANT
-            // switch -- and for a Global Admin the device fetch is unscoped
-            // (_devEndpoint returns the bare /setup/* path, no ?tenant=), so
-            // every tenant's devices are always present. The self-heal in
-            // loadAllDevices only clears a filter whose tenant owns NO device,
-            // so it could never fire here: the old tenant still owned devices
-            // and the list stayed pinned to it. The page really did refetch --
-            // it was re-filtered back to the previous tenant, which is why this
-            // read as "My Devices does not refresh" (lm#486). loadAllDevices()
-            // falls back to 'all' if the new tenant owns nothing.
-            if (window._mdFilter) window._mdFilter.tenant = tenant;
-            // Preserve the active sub-view across a tenant switch. setView()
-            // re-renders the whole view and resets currentSubView to the first
-            // sub-menu (Overview/Devices), so a user on Prefixes who switches
-            // tenant would be bounced back to the default tab. Instead, just
-            // reload the current sub-view's data for the new tenant — the view
-            // layout (nav/header) is unchanged, only the tenant filter moved.
-            // Fall back to setView() only if the recorded sub-view isn't valid
-            // for the current view (e.g. view changed mid-flight).
-            const subs = VIEW_SUBMENUS[currentView] || [];
-            if (subs.includes(currentSubView) && VIEW_LOADERS[currentView]) {
-                setSubView(currentSubView);
-            } else {
-                // No loader for this view: setSubView would no-op and leave the
-                // OLD tenant's data on screen, so do a full re-render instead.
-                setView(currentView);
-            }
-        }
+        if (response.ok) console.log(`Switched to tenant: ${tenant}`);
     } catch (err) {
         console.error('Failed to set tenant', err);
+    }
+    // Recording the hub-wide active tenant is Global-Admin-only (403 for every
+    // other user), but the page must follow the picker either way -- otherwise
+    // the previous tenant's data stays on screen under the new tenant's name.
+    try {
+        // Reload tenant prefixes for the newly-selected tenant BEFORE the
+        // view re-renders, so the client-side subnet filter (NAT/DHCP/DNS/
+        // Interfaces) and the server-side ?tenant= filter on the firewall
+        // fetch agree on the same tenant. Without this, a multi-tenant user
+        // switching tenant would filter on stale session-tenant prefixes.
+        await loadTenantPrefixes();
+        // Re-point the Managed Devices tenant filter at the tenant we just
+        // switched to. That filter lives on window (_mdFilter) so the tab
+        // handlers survive re-renders, which also means it survived a TENANT
+        // switch -- and for a Global Admin the device fetch is unscoped
+        // (_devEndpoint returns the bare /setup/* path, no ?tenant=), so
+        // every tenant's devices are always present. The self-heal in
+        // loadAllDevices only clears a filter whose tenant owns NO device,
+        // so it could never fire here: the old tenant still owned devices
+        // and the list stayed pinned to it. The page really did refetch --
+        // it was re-filtered back to the previous tenant, which is why this
+        // read as "My Devices does not refresh" (lm#486). loadAllDevices()
+        // falls back to 'all' if the new tenant owns nothing.
+        if (window._mdFilter) window._mdFilter.tenant = tenant;
+        // The serial console dock floats over every view and lists the
+        // consoles of the tenant it was opened under; re-list for this one.
+        if (document.getElementById('serial-console-modal') && typeof serialRefreshAvailablePorts === 'function') {
+            serialRefreshAvailablePorts();
+        }
+        // Preserve the active sub-view across a tenant switch. setView()
+        // re-renders the whole view and resets currentSubView to the first
+        // sub-menu (Overview/Devices), so a user on Prefixes who switches
+        // tenant would be bounced back to the default tab. Instead, just
+        // reload the current sub-view's data for the new tenant — the view
+        // layout (nav/header) is unchanged, only the tenant filter moved.
+        // Fall back to setView() only if the recorded sub-view isn't valid
+        // for the current view (e.g. view changed mid-flight).
+        const subs = VIEW_SUBMENUS[currentView] || [];
+        if (subs.includes(currentSubView) && VIEW_LOADERS[currentView]) {
+            setSubView(currentSubView);
+        } else {
+            // No loader for this view: setSubView would no-op and leave the
+            // OLD tenant's data on screen, so do a full re-render instead.
+            setView(currentView);
+        }
+    } catch (err) {
+        console.error('Failed to refresh after tenant switch', err);
     }
 }
 
