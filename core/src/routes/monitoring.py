@@ -50,25 +50,43 @@ async def inventory_devices(hub):
     extra = [n for n in (gc.get("nw_monitor_neighbors", []) or [])
              if isinstance(n, dict) and n.get("name") and n.get("address")
              and str(n["name"]).casefold() not in names]
+    import access
     for d in list(inv) + extra:
         tenant = d.get("tenant") or d.get("tenant_id") or "default"
+        moved = d.get("moved_from") if isinstance(d.get("moved_from"), dict) else {}
+        former = str(moved.get("tenant_id") or "")
+        # A tenant group has no SNMP bucket or proxy of its own: its member
+        # tenants' are its own (the device it holds came from one of them).
+        members = sorted(access._GROUP_MEMBERS.get(access._norm_tenant_id(tenant), set()),
+                         key=lambda m: (m != access._norm_tenant_id(former), m != "default", m))
         # Credentials never cross tenants: the verified credential and the
         # tenant bucket only count when they belong to this device's tenant.
         # Only the Admin/Default tenant may use the Global Admin slot.
         ref = d.get("snmp_secret") or ""
         ref_bucket = ref.split(":")[1] if ref.startswith("snmp:") and ref.count(":") >= 2 else None
-        own = {tenant} | ({cred_vault.ADMIN_BUCKET} if tenant == "default" else set())
+        own = {tenant, *members}
+        if "default" in own:
+            own.add(cred_vault.ADMIN_BUCKET)
         community = (d.get("snmp_community")
                      or (by_ref.get(ref, "") if ref_bucket in own else "")
                      or tenant_snmp.get(tenant)
-                     or (tenant_snmp.get(cred_vault.ADMIN_BUCKET, "") if tenant == "default" else ""))
-        out.append({"tenant": tenant, "name": d.get("name"),
-                    "type": d.get("type") or d.get("object_type") or d.get("model") or "",
-                    "ip": str(d.get("address") or "").split("/")[0],
-                    # Only a device that failed an SNMP probe is held back.
-                    "snmp": (bool(community) or d.get("transport") == "snmp")
-                    and d.get("snmp_ok") is not False,
-                    "snmp_community": community, "_ok": d.get("snmp_ok")})
+                     or next((tenant_snmp[m] for m in members if tenant_snmp.get(m)), "")
+                     or (tenant_snmp.get(cred_vault.ADMIN_BUCKET, "") if "default" in own else ""))
+        row = {"tenant": tenant, "name": d.get("name"),
+               "type": d.get("type") or d.get("object_type") or d.get("model") or "",
+               "ip": str(d.get("address") or "").split("/")[0],
+               # Only a device that failed an SNMP probe is held back.
+               "snmp": (bool(community) or d.get("transport") == "snmp")
+               and d.get("snmp_ok") is not False,
+               "snmp_community": community, "_ok": d.get("snmp_ok")}
+        if members:
+            # Proxies to try after the group's own: its member tenants'.
+            row["proxy_tenants"] = members
+        if former and former != tenant:
+            # Lets the sync re-key the device's existing host instead of
+            # creating a second one next to it.
+            row["moved_from"] = former
+        out.append(row)
     # The sync keeps the first address per device name: prefer one that answered SNMP.
     out.sort(key=lambda x: 0 if x["_ok"] is True else (2 if x["_ok"] is False else 1))
     for x in out:
