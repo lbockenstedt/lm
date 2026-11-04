@@ -5,15 +5,15 @@ Regression + model guard for ``/api/console/ports``:
   * DEDICATED agent → all its ports are that tenant's; they must NOT appear
     under another tenant (the reported leak: an "LRB" console server showing
     devices under every tenant).
-  * SHARED agent (tenant flagged ``shared: True``) → its ports are the shared
-    tenant's: shown under ADMIN, the shared tenant and groups containing it,
-    never routed to another tenant by the device IP.
+  * SHARED agent (tenant flagged ``shared: True``) → visible to every tenant but
+    each port is subnet-masked by its device IP → disposition ``"mask"``.
   * UNASSIGNED → admin-only holding state, only in the global ("All") view.
   * A per-port override pins one shared device to a tenant → behaves dedicated.
 
 ``_console_port_disposition`` is the single pure predicate the route uses to
-pick show / hide; it's extracted via AST (like the other route-logic tests) so
-we don't import the whole hub app.
+pick show / mask / hide; it's extracted via AST (like the other route-logic
+tests) so we don't import the whole hub app. The subnet mask itself
+(``filter_record_by_prefixes``) is covered by the tenant-filter tests.
 """
 import ast
 import os
@@ -79,18 +79,9 @@ def test_admin_selected_tenant_hides_other_dedicated():
     assert disp(True, True, "acme", "acme", False) == "show"
 
 
-def test_shared_port_never_routed_to_another_tenant():
-    # The reported leak: an SSPLM (shared) console port whose device IP lies in
-    # a DXP prefix of another VRF showed under DXP. The tenant decides, not the IP.
-    assert disp(True, True, "shared", "dxp", True) == "hide"
-    assert disp(False, True, "shared", "dxp", True) == "hide"
-
-
-def test_shared_port_shows_under_shared_and_its_group():
-    assert disp(True, True, "shared", "shared", True) == "show"
-    assert disp(True, True, "shared", "group:ssplm", True) == "show"
-    assert disp(True, True, "default", "group:SSPLM", False) == "show"
-    assert disp(True, True, "dxp", "group:ssplm", False) == "hide"
+def test_admin_selected_tenant_masks_shared():
+    # Shared infra shows under the selected tenant, but subnet-masked.
+    assert disp(True, True, "shared", "acme", True) == "mask"
 
 
 def test_admin_selected_tenant_hides_unassigned():
@@ -109,9 +100,10 @@ def test_nonadmin_other_dedicated_hidden():
     assert disp(False, False, "acme", "lrb", False) == "hide"
 
 
-def test_nonadmin_shared_hidden_outside_shared_tenant():
-    assert disp(False, True, "shared", None, True) == "hide"
-    assert disp(False, True, "shared", "lrb", True) == "hide"
+def test_nonadmin_shared_is_masked_not_shown_wholesale():
+    # Shared is visible to everyone but must be subnet-masked, never full.
+    assert disp(False, True, "shared", None, True) == "mask"
+    assert disp(False, True, "shared", "lrb", True) == "mask"
 
 
 def test_nonadmin_never_sees_unassigned():
@@ -121,7 +113,21 @@ def test_nonadmin_never_sees_unassigned():
 
 # ── Per-port override pins a shared device to a tenant (dedicated behaviour) ──
 def test_override_pins_shared_device_to_tenant():
-    # eff is the OVERRIDE tenant (not shared) → dedicated exact-match.
+    # eff is the OVERRIDE tenant (not shared) → dedicated exact-match, no mask.
     assert disp(True, True, "lrb", "lrb", False) == "show"
     assert disp(True, True, "lrb", "acme", False) == "hide"
     assert disp(False, True, "lrb", "lrb", False) == "show"
+
+
+# ── Only the shared tenant is IP-routed; a set tenant never is ──────────────
+def test_set_tenant_is_never_routed_by_ip():
+    # A port inheriting a non-shared tenant (e.g. the SSPLM group) stays in it
+    # even when its device IP falls in another tenant's prefix (other VRF).
+    assert disp(True, True, "group:ssplm", "dxp", False) == "hide"
+    assert disp(True, True, "group:ssplm", "group:ssplm", False) == "show"
+
+
+def test_tenant_group_lists_member_tenants_ports():
+    assert disp(True, True, "default", "group:SSPLM", False) == "show"
+    assert disp(True, True, "shared", "group:ssplm", True) == "show"   # member → unmasked
+    assert disp(True, True, "dxp", "group:ssplm", False) == "hide"

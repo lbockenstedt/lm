@@ -70,3 +70,40 @@ def test_port_override_refreshes_cache():
     r = c.post("/api/console/dpa-port", json={"spoke_id": "c1", "port_id": "p1", "proto": "ssh", "port": 4000})
     assert r.status_code == 200
     assert hub.refreshed == [["c1"]]
+
+
+class _TaAccess(_FakeAccess):
+    @staticmethod
+    def tenant_is_shared(t):
+        return t == "shared"
+
+    @staticmethod
+    def check_tenant_access(sess, t):
+        return t in sess["user"]["tenants"]
+
+
+def test_tenant_admin_gets_dpa_on_own_console_servers_only(monkeypatch):
+    """A tenant admin manages DPA on console servers dedicated to its tenant,
+    never on a shared or another tenant's server (DPA is whole-server)."""
+    monkeypatch.setattr(console, "access", _TaAccess)
+    hub = _DpaHub()
+    hub._connected = ["c1", "c2", "c3"]
+    hub._console_creds_seeded = set(hub._connected)
+    hub.state._tenants = {"c1": "dxp", "c2": "shared", "c3": "ra"}
+    hub.state.system_state = {}
+    ctx = _ctx()
+    ctx._is_admin = lambda sess: False
+    ctx._is_tenant_admin = lambda sess: True
+    ctx._session_user = lambda request: {"user": {"tenant_id": "dxp", "tenants": ["dxp"]}}
+    app = FastAPI()
+    app.state.hub = hub
+    console.register(app, hub, ctx)
+    c = TestClient(app)
+
+    body = c.get("/api/console/ports?tenant=dxp").json()
+    assert [d["spoke_id"] for d in body["dpa_consoles"]] == ["c1"]
+    assert c.get("/api/console/dpa?spoke_id=c1").status_code == 200
+    assert c.post("/api/console/dpa", json={"spoke_id": "c1", "enabled": True}).status_code == 200
+    for sid in ("c2", "c3"):
+        assert c.get(f"/api/console/dpa?spoke_id={sid}").status_code == 403
+        assert c.post("/api/console/dpa", json={"spoke_id": sid, "enabled": True}).status_code == 403
