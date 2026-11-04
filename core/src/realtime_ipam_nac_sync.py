@@ -43,7 +43,7 @@ try:
     from access import attribute_by_prefix  # sibling leaf (no main/api back-import)
 except Exception:  # pragma: no cover - access always importable in-app
     attribute_by_prefix = None  # type: ignore
-from access import norm_mac, nw_spoke_tenant, unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import norm_mac, nw_spoke_tenant, spoke_owner_tenant, unwrap_spoke  # sibling leaf (no main/api back-import)
 from sync_loop import run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
@@ -165,6 +165,7 @@ class RealtimeIpamNacSyncMixin:
             # The CPPM spoke's tenant: framed IPs overlap across tenants'
             # VRFs, so attribution prefers this tenant's prefixes.
             nac_tid = nw_spoke_tenant(self, nac)
+            nac_owner = spoke_owner_tenant(self, nac)
             out: List[Dict[str, Any]] = []
             for row in rows or []:
                 if not isinstance(row, dict):
@@ -195,6 +196,8 @@ class RealtimeIpamNacSyncMixin:
                     sess_rec["manufacturer"] = manufacturer
                 if nac_tid:
                     sess_rec["source_tenant_id"] = nac_tid
+                if nac_owner:
+                    sess_rec["owner_tenant_id"] = nac_owner
                 out.append(sess_rec)
             info = {"errors": errors, "total": int(d.get("total", len(out)) or 0) if isinstance(d, dict) else len(out),
                     "window_start": (d.get("window_start") if isinstance(d, dict) else "") or "",

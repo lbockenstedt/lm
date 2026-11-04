@@ -650,7 +650,7 @@ def register(app, hub, ctx):
         return dev, scope, spoke_id
 
     async def _filter_nw_optional(scope, request, data, endpoint, tenant,
-                                  dedicated=False):
+                                  dedicated=False, spoke_id=None):
         """Apply the nw subnet filter ONLY when the reader is scoped or
         acting-as. A ``"full"``-scope reader (admin, or a device DEDICATED to
         the caller's own tenant) with no explicit ``?tenant=`` gets the whole
@@ -666,12 +666,13 @@ def register(app, hub, ctx):
         own subnet slice. Without this, a dedicated gateway whose owning tenant
         has no (or non-covering) NetBox prefixes fails closed to an EMPTY view
         even though every record is legitimately theirs (mirrors the own-CPPM
-        NAC bypass)."""
+        NAC bypass). ``spoke_id`` is the device's nw agent: an agent dedicated
+        to a tenant makes the data that tenant's too (see access.filter_nw)."""
         if dedicated:
             return data
         if scope == "full" and not tenant:
             return data
-        return await _filter_nw(request, data, endpoint, tenant)
+        return await _filter_nw(request, data, endpoint, tenant, spoke_id=spoke_id)
 
     @app.get("/api/nw/devices")
     async def nw_list_devices(request: Request, tenant: str = None):
@@ -1053,7 +1054,7 @@ def register(app, hub, ctx):
             dedicated = bool(tid) and not access.tenant_is_shared(tid)
             out = await _filter_nw_optional(scope_by_id.get(dev["id"], "full"),
                                             request, {"data": rows}, endpoint,
-                                            acting_tenant, dedicated)
+                                            acting_tenant, dedicated, dev.get("spoke_id"))
             got = out.get("data") if isinstance(out, dict) else None
             return [r for r in (got or []) if isinstance(r, dict)]
 
@@ -1282,7 +1283,8 @@ def register(app, hub, ctx):
         force = _nw_truthy(request.query_params.get("refresh"))
         cached = None if force else hub.nw_cache_get_device(device_id, endpoint)
         if cached is not None:
-            filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant, dedicated)
+            filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant, dedicated,
+                                                   dev.get("spoke_id"))
             fetched_at = hub.nw_cache_device_fetched_at(device_id)
             if isinstance(filtered, dict):
                 filtered = dict(filtered)
@@ -1306,7 +1308,8 @@ def register(app, hub, ctx):
                                                 timeout=timeout)
             data = access.unwrap_spoke(result)
             await hub.nw_cache_set_device(device_id, endpoint, data)
-            return await _filter_nw_optional(scope, request, data, endpoint, tenant, dedicated)
+            return await _filter_nw_optional(scope, request, data, endpoint, tenant, dedicated,
+                                              dev.get("spoke_id"))
         except HTTPException:
             raise
         except Exception as e:
@@ -1317,7 +1320,8 @@ def register(app, hub, ctx):
             if cached is not None:
                 logger.warning("nw_get_device_data live fetch failed (%s/%s: %s)"
                                " — serving cached", device_id, endpoint, e)
-                filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant, dedicated)
+                filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant, dedicated,
+                                                   dev.get("spoke_id"))
                 if isinstance(filtered, dict):
                     filtered = dict(filtered)
                     filtered["stale"] = True
@@ -2077,8 +2081,12 @@ def register(app, hub, ctx):
             data.get("subnets") or saved.get("subnets") or [],
             data.get("targets") or [], _NW_SCAN_MAX_TOTAL)
         # Shared DNS/DHCP/NAC spokes list every tenant's addresses; never probe
-        # (or adopt) an address NetBox assigns to another tenant.
-        foreign = await access.foreign_tenant_ips(hub, tenant_id, targets)
+        # (or adopt) an address NetBox assigns to another tenant — unless the
+        # scan runs on the tenant's own agent, which only reaches its own VRF
+        # (the same IP can exist in several tenants' VRFs).
+        scan_owner = access.spoke_owner_tenant(hub, spoke_id)
+        own_agent = bool(scan_owner) and access.tenant_in(scan_owner, tenant_id)
+        foreign = set() if own_agent else await access.foreign_tenant_ips(hub, tenant_id, targets)
         if foreign:
             targets = [t for t in targets if t not in foreign]
             per_source["other_tenant"] = len(foreign)
@@ -2190,7 +2198,7 @@ def register(app, hub, ctx):
         # LLDP crawling can reach past the targets: never add an address NetBox
         # assigns to another tenant (a just-relocated device is still recorded
         # there until its next NetBox push).
-        foreign = await access.foreign_tenant_ips(hub, tenant_id, {
+        foreign = set() if own_agent else await access.foreign_tenant_ips(hub, tenant_id, {
             str(d.get("address") or "").strip() for d in identified + reachable}) - moved_addrs
         identified = [d for d in identified if str(d.get("address") or "").strip() not in foreign]
         reachable = [d for d in reachable if str(d.get("address") or "").strip() not in foreign]

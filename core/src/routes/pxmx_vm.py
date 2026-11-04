@@ -157,7 +157,7 @@ def register(app, hub, ctx):
         # Toggle-independent, fail-closed ownership (subnet or tenant tag). NOT
         # _filter_tenant — that returns the record unchanged when the hypervisor
         # display filter is off, which would fail OPEN for control actions.
-        if not await access.vm_in_tenant_scope(hub, sess, vm_record):
+        if not await access.vm_in_tenant_scope(hub, sess, vm_record, spoke_id=pxmx_spoke):
             try:
                 _u = (sess or {}).get("user", {}) or {}
                 logger.warning(

@@ -88,6 +88,11 @@ class _FakeAccess:
     """Neutral access shim: filter off, nothing shared, admin sees all."""
 
     ADMIN_TENANT_ID = "default"
+    _GROUP_MEMBERS = {}
+
+    @staticmethod
+    def _norm_tenant_id(t):
+        return "" if t is None else str(t).strip().casefold()
 
     @staticmethod
     def filter_enabled(hub, module):

@@ -22,19 +22,26 @@ import types
 _CONSOLE = os.path.join(os.path.dirname(__file__), "..", "src", "routes", "console.py")
 
 
-def _load_disposition():
+def _load():
     src = open(_CONSOLE).read()
     mod = ast.parse(src)
-    fn = next(n for n in mod.body
-             if isinstance(n, ast.FunctionDef) and n.name == "_console_port_disposition")
-    # The predicate reads access.ADMIN_TENANT_ID; stub it rather than importing
-    # the whole access module (which pulls in the hub).
-    ns = {"access": types.SimpleNamespace(ADMIN_TENANT_ID="default")}
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), "<console>", "exec"), ns)
-    return ns["_console_port_disposition"]
+    fns = [n for n in mod.body if isinstance(n, ast.FunctionDef)
+           and n.name in ("_console_port_disposition", "_console_tenant_in")]
+    # Stub the access attributes the predicates read rather than importing the
+    # whole access module (which pulls in the hub).
+    ns = {"access": types.SimpleNamespace(
+        ADMIN_TENANT_ID="default",
+        _norm_tenant_id=lambda t: "" if t is None else str(t).strip().casefold(),
+        _GROUP_MEMBERS={"group:ssplm": {"default", "shared"}})}
+    exec(compile(ast.Module(body=fns, type_ignores=[]), "<console>", "exec"), ns)
+    return ns["_console_port_disposition"], ns["_console_tenant_in"]
 
 
-disp = _load_disposition()
+_disp, tenant_in = _load()
+
+
+def disp(admin, visible, eff, sel, shared):
+    return _disp(admin, visible, eff, sel, shared, tenant_in(eff, sel))
 
 
 # ── Admin ────────────────────────────────────────────────────────────────────
@@ -110,3 +117,17 @@ def test_override_pins_shared_device_to_tenant():
     assert disp(True, True, "lrb", "lrb", False) == "show"
     assert disp(True, True, "lrb", "acme", False) == "hide"
     assert disp(False, True, "lrb", "lrb", False) == "show"
+
+
+# ── Only the shared tenant is IP-routed; a set tenant never is ──────────────
+def test_set_tenant_is_never_routed_by_ip():
+    # A port inheriting a non-shared tenant (e.g. the SSPLM group) stays in it
+    # even when its device IP falls in another tenant's prefix (other VRF).
+    assert disp(True, True, "group:ssplm", "dxp", False) == "hide"
+    assert disp(True, True, "group:ssplm", "group:ssplm", False) == "show"
+
+
+def test_tenant_group_lists_member_tenants_ports():
+    assert disp(True, True, "default", "group:SSPLM", False) == "show"
+    assert disp(True, True, "shared", "group:ssplm", True) == "show"   # member → unmasked
+    assert disp(True, True, "dxp", "group:ssplm", False) == "hide"
