@@ -223,6 +223,7 @@ const _SUBNET_FILTER_MODULES = [
     { key: 'hypervisor', label: 'Hypervisor' },
     { key: 'cs',         label: 'Simulations (tenant-ID scoped)' },
     { key: 'le',         label: 'Certificates (SAN → DNS → IP)' },
+    { key: 'console',    label: 'Console (shared-tenant device IP)' },
 ];
 let _subnetFilterState = {};
 

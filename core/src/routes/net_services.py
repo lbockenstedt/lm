@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import hashlib
+import inspect
 import ipaddress
 import json
 import time
@@ -225,7 +226,7 @@ def register(app, hub, ctx):
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
 
-    async def _constrain_shared_write(request, record, fields, kind):
+    async def _constrain_shared_write(request, record, fields, kind, spoke=None):
         """Constrained-write gate for the SHARED DNS/DHCP servers. Global Admin →
         unrestricted. Otherwise (a tenant-admin — the middleware already required
         can_edit_shared) the record's IP must fall within the caller's tenant
@@ -234,10 +235,32 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         if _is_admin(sess):
             return
-        if not await access.record_in_tenant_scope(hub, sess, record, fields):
+        if not await access.record_in_tenant_scope(hub, sess, record, fields) \
+                and not await _own_spoke_write(sess, spoke):
             raise HTTPException(
                 status_code=403,
                 detail=f"On the shared DNS/DHCP server you may only modify a {kind} whose address is in your tenant's subnets")
+
+    async def _own_spoke_write(sess, spoke):
+        """True when the write lands on a spoke dedicated to the caller's
+        tenant: its records are the tenant's whatever their IP."""
+        try:
+            sid = spoke() if callable(spoke) else spoke
+            if inspect.isawaitable(sid):
+                sid = await sid
+        except Exception:  # noqa: BLE001 - unresolvable spoke: fail closed
+            return False
+        owner = access.spoke_owner_tenant(hub, sid)
+        return bool(owner) and access._owned_spoke_writable(hub, sess, sid, owner)
+
+    def _resolved_spoke(kind, request, tenant):
+        """The single dns/dhcp spoke serving this request, or None (offline,
+        or an admin merge across spokes)."""
+        try:
+            resolver = _dns_spoke_for_request if kind == "dns" else _dhcp_spoke_for_request
+            return resolver(request, tenant)
+        except HTTPException:
+            return None
 
     def _get_dns_spoke(hub):
         return get_spoke_or_503(hub, "dns", "DNS")
@@ -961,24 +984,28 @@ def register(app, hub, ctx):
             data = await _cached_merge("DNS_LIST", {}, "records", _dns_merge_fanout)
         else:
             data = await _cached_relay(_spoke_ref("dns", request, tenant), "DNS_LIST", log_name="dns_list_records")
-        return await _filter_tenant(request, data, "dns", ["value", "ip"], tenant)
+        return await _filter_tenant(request, data, "dns", ["value", "ip"], tenant,
+                                    spoke_id=_resolved_spoke("dns", request, tenant) if tid else None)
 
     @app.post("/api/dns/record")
     async def dns_add_record(request: Request, tenant: str = None):
         body = await request.json()
-        await _constrain_shared_write(request, body, ["ip", "value"], "DNS record")
+        await _constrain_shared_write(request, body, ["ip", "value"], "DNS record",
+                                      spoke=lambda: _dns_spoke_for_request(request, tenant))
         return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_ADD", body, log_name="dns_add_record")
 
     @app.delete("/api/dns/record")
     async def dns_delete_record(request: Request, tenant: str = None):
         body = await request.json()
-        await _constrain_shared_write(request, body, ["ip", "value"], "DNS record")
+        await _constrain_shared_write(request, body, ["ip", "value"], "DNS record",
+                                      spoke=lambda: _dns_spoke_for_request(request, tenant))
         return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_DELETE", body, log_name="dns_delete_record")
 
     @app.put("/api/dns/record")
     async def dns_update_record(request: Request, tenant: str = None):
         body = await request.json()
-        await _constrain_shared_write(request, body, ["ip", "value"], "DNS record")
+        await _constrain_shared_write(request, body, ["ip", "value"], "DNS record",
+                                      spoke=lambda: _dns_spoke_for_request(request, tenant))
         return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_UPDATE", body, log_name="dns_update_record")
 
     @app.get("/api/dns/status")
@@ -3694,6 +3721,10 @@ def register(app, hub, ctx):
             resolved = hub.get_dhcp_spoke_for_shared()
         return spoke_or_503(resolved, "DHCP")
 
+    def _dhcp_list_spoke(request: Request, tenant: str = None):
+        """The single dhcp spoke behind a tenant-scoped list read, else None."""
+        return _resolved_spoke("dhcp", request, tenant) if _effective_tenant(request, tenant) else None
+
     def _dhcp_shared(request: Request, tenant: str = None) -> bool:
         """True when the selected tenant has no DHCP server of its own, so its
         DHCP views read the shared Kea that holds every tenant's scopes."""
@@ -4193,7 +4224,8 @@ def register(app, hub, ctx):
         logger.debug("relay GET /api/dhcp/subnets")
         data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_SUBNETS", {}, "subnets", "dhcp_list_subnets")
         return await _filter_tenant(request, data, "dhcp", ["subnet"], tenant,
-                                    shared_source=_dhcp_shared(request, tenant))
+                                    shared_source=_dhcp_shared(request, tenant),
+                                    spoke_id=_dhcp_list_spoke(request, tenant))
 
     @app.get("/api/dhcp/leases")
     async def dhcp_list_leases(request: Request, subnet: str = None, tenant: str = None):
@@ -4203,13 +4235,15 @@ def register(app, hub, ctx):
         logger.debug("relay %s %s subnet=%s", request.method, request.url.path, subnet)
         data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_LEASES", {"subnet": subnet}, "leases", "dhcp_list_leases")
         return await _filter_tenant(request, data, "dhcp", ["ip", "address", "ip-address", "ip_address"], tenant,
-                                    shared_source=_dhcp_shared(request, tenant))
+                                    shared_source=_dhcp_shared(request, tenant),
+                                    spoke_id=_dhcp_list_spoke(request, tenant))
 
     @app.delete("/api/dhcp/lease")
     async def dhcp_delete_lease(request: Request, tenant: str = None):
         """Delete an active DHCP lease from Kea's lease database."""
         body = await request.json()
-        await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP lease")
+        await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP lease",
+                                      spoke=lambda: _dhcp_write_spoke(request, tenant, body))
         spoke = await _dhcp_write_spoke(request, tenant, body)
         return await _relay_spoke(spoke, "DHCP_DEL_LEASE", _dhcp_write_body(body), log_name="dhcp_delete_lease")
 
@@ -4430,7 +4464,8 @@ def register(app, hub, ctx):
         logger.debug("relay GET /api/dhcp/reservations")
         data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_RES", {}, "reservations", "dhcp_list_reservations")
         return await _filter_tenant(request, data, "dhcp", ["ip", "address", "ip-address", "ip_address"], tenant,
-                                    shared_source=_dhcp_shared(request, tenant))
+                                    shared_source=_dhcp_shared(request, tenant),
+                                    spoke_id=_dhcp_list_spoke(request, tenant))
 
     @app.put("/api/dhcp/reservation")
     async def dhcp_update_reservation(request: Request, tenant: str = None):
@@ -4715,7 +4750,8 @@ def register(app, hub, ctx):
         logger.debug("relay GET /api/dhcp/stats")
         data = await _cached_relay(_spoke_ref("dhcp", request, tenant), "DHCP_STATS", log_name="dhcp_stats")
         filtered = await _filter_tenant(request, data, "dhcp", ["subnet"], tenant,
-                                    shared_source=_dhcp_shared(request, tenant))
+                                    shared_source=_dhcp_shared(request, tenant),
+                                    spoke_id=_dhcp_list_spoke(request, tenant))
         return _dhcp_rescope_stats(data, filtered)
 
     @app.post("/api/dhcp/sync")

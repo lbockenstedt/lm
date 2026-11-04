@@ -44,11 +44,12 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from access import attribute_by_prefix, norm_mac, nw_spoke_tenant  # sibling leaf (no main/api back-import)
+    from access import attribute_by_prefix, norm_mac, nw_spoke_tenant, spoke_owner_tenant  # sibling leaf (no main/api back-import)
 except Exception:  # pragma: no cover - access always importable in-app
     attribute_by_prefix = None  # type: ignore
     norm_mac = None  # type: ignore
     nw_spoke_tenant = None  # type: ignore
+    spoke_owner_tenant = None  # type: ignore
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
 from device_specs import get_spec as get_device_spec  # sibling leaf
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
@@ -495,8 +496,10 @@ class NwDiscoverySyncMixin:
             # records where the MAC was last seen.
             sw = {"source_switch_name": dname, "source_switch_ip": daddr}
             # Tenant of the agent that saw the row: tenants overlap address
-            # space, so attribution prefers this tenant's VRF.
-            src_tid = str(device.get("tenant_id") or "").strip() or (
+            # space, so attribution prefers this tenant's VRF. A dedicated
+            # agent's rows are its tenant's outright (no prefix check).
+            owner = spoke_owner_tenant(self, sid) if spoke_owner_tenant else None
+            src_tid = owner or str(device.get("tenant_id") or "").strip() or (
                 nw_spoke_tenant(self, sid) if nw_spoke_tenant else "")
             cmds = [se.get("arp_command", "NW_GET_ARP")]
             mac_cmd = se.get("mac_command")
@@ -532,6 +535,8 @@ class NwDiscoverySyncMixin:
                             rec["source_switch_port"] = port
                         if src_tid:
                             rec["source_tenant_id"] = src_tid
+                        if owner:
+                            rec["owner_tenant_id"] = owner
                         raw.append(rec)
                 except Exception as e:
                     errors.append(f"{cmd}({dname}@{sid}): {e}")
@@ -563,7 +568,7 @@ class NwDiscoverySyncMixin:
                 if not ex.get("mac") and mac:
                     ex["mac"] = mac
                 for k in ("source_switch_name", "source_switch_ip",
-                          "source_switch_port"):
+                          "source_switch_port", "owner_tenant_id"):
                     if not ex.get(k) and rec.get(k):
                         ex[k] = rec[k]
         records = list(merged.values())
@@ -975,9 +980,12 @@ class NwDiscoverySyncMixin:
                 src_tid = str(device_cfg.get("tenant_id") or "").strip() or (
                     nw_spoke_tenant(self, device_cfg.get("spoke_id"))
                     if nw_spoke_tenant and device_cfg.get("spoke_id") else "")
+                owner = (spoke_owner_tenant(self, device_cfg.get("spoke_id"))
+                         if spoke_owner_tenant else None)
                 buckets, _dropped = await attribute_by_prefix(
                     self, [{"ip": str(device_cfg.get("address")), "mac": "",
-                            "hostname": "", "source_tenant_id": src_tid}])
+                            "hostname": "", "source_tenant_id": src_tid,
+                            "owner_tenant_id": owner or ""}])
                 tid = next(iter(buckets), None)
                 if tid:
                     tcfg = self.state.get_tenant(tid) or {}

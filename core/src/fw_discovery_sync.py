@@ -54,7 +54,7 @@ try:
 except Exception:  # pragma: no cover - access always importable in-app
     fetch_tenant_prefixes = None  # type: ignore
     attribute_by_prefix = None  # type: ignore
-from access import norm_mac, nw_spoke_tenant, unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import norm_mac, nw_spoke_tenant, spoke_owner_tenant, unwrap_spoke  # sibling leaf (no main/api back-import)
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
@@ -255,6 +255,8 @@ class FwDiscoverySyncMixin:
         fetch_sem = asyncio.Semaphore(self._fw_discovery_concurrency())
 
         async def _fetch(sid: str, cmd: str, payload: Dict[str, Any], tag: str) -> None:
+            # A tenant-dedicated source's records are its tenant's, not IP-attributed.
+            owner = spoke_owner_tenant(self, sid)
             try:
                 async with fetch_sem:
                     r = await self.request_response(sid, cmd, payload, timeout=30.0)
@@ -289,8 +291,11 @@ class FwDiscoverySyncMixin:
                         ip = ""
                     if not ip and not mac:
                         continue  # nothing to attribute or push
-                    raw.append({"ip": ip, "mac": mac, "hostname": hostname, "_src": tag,
-                                "source_tenant_id": nw_spoke_tenant(self, sid)})
+                    rec = {"ip": ip, "mac": mac, "hostname": hostname, "_src": tag,
+                           "source_tenant_id": nw_spoke_tenant(self, sid)}
+                    if owner:
+                        rec["owner_tenant_id"] = owner
+                    raw.append(rec)
             except Exception as e:
                 errors.append(f"{tag}({sid}): {e}")
 
@@ -323,6 +328,8 @@ class FwDiscoverySyncMixin:
                 merged[key] = {"ip": ip, "mac": mac, "hostname": rec.get("hostname", "")}
                 if src_tid:
                     merged[key]["source_tenant_id"] = src_tid
+                if rec.get("owner_tenant_id"):
+                    merged[key]["owner_tenant_id"] = rec["owner_tenant_id"]
             else:
                 # The DHCP hostname is the authoritative one (the client told
                 # the server its name); ARP only ever has a reverse-lookup

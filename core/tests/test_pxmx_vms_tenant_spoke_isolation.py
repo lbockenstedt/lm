@@ -105,7 +105,7 @@ class _Hub(WarmCacheMixin):
 
 
 def _ctx(admin=True, tenant=None, sess=None):
-    async def _filter_tenant(request, data, module, ip_fields, explicit=None):
+    async def _filter_tenant(request, data, module, ip_fields, explicit=None, **_kw):
         return data  # isolate the SPOKE-level gate from the subnet filter
     return SimpleNamespace(
         _session_user=lambda request: sess,
