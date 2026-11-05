@@ -70,6 +70,7 @@ from security.auth_manager import AuthManager, LDAPAuthProvider
 from security.threat_monitor import ThreatMonitor
 from security.probe_signatures import looks_like_probe as _edge_looks_like_probe
 from alert_engine import AlertEngine, run_alert_loop
+from display_names import node_name
 from role_listeners import LISTENER_PORT_ROLES, listener_conflict, is_deploy_role
 from security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
                                    encryption_enabled, is_encrypted, wrap)
@@ -302,19 +303,11 @@ def _log_source_label(hub, sid: str) -> str:
     ``SpokeAlertSync._spoke_label``.
     """
     sid = str(sid or "")
-    name = ""
     try:
-        md = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
-        name = (md.get("display_name") or md.get("name") or md.get("hostname") or "").strip()
+        name = node_name(hub.state.system_state, sid, getattr(hub, "agent_info", None))
     except Exception:  # noqa: BLE001 — a label must never break log collection
-        name = ""
-    if not name:
-        try:
-            info = (hub.agent_info or {}).get(sid, {}) or {}
-            name = str(info.get("hostname") or "").strip()
-        except Exception:  # noqa: BLE001
-            name = ""
-    if name and name != sid:
+        name = sid
+    if name != sid:
         return f"{name} ({sid[:8]})"
     return sid
 

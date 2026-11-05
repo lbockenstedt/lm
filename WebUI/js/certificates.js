@@ -2150,11 +2150,17 @@ function _srdAge(s) {
     return Math.round(s / 86400) + 'd ago';
 }
 
+// spoke_id → hostname from the last registry render (confirm prompts use it).
+let _srdNames = {};
+
 function _spokeRegistryDiagHtml(d) {
     const rows = (d && d.rows) || [];
     const brokers = (d && d.brokers) || {};
     const findings = (d && d.findings) || [];
     if (!rows.length) return `<p class="text-slate-400 italic text-xs">No spoke registrations.</p>`;
+    // Operators know boxes by hostname, never by registration UUID.
+    _srdNames = Object.fromEntries(rows.map(r => [r.spoke_id, r.hostname || _spokeLabelFor(r.spoke_id)]));
+    const nameOf = id => _srdNames[id] || _spokeLabelFor(id);
 
     // Elected brokers first — this is the value that flips, so it leads.
     let html = '';
@@ -2167,7 +2173,7 @@ function _spokeRegistryDiagHtml(d) {
             return `<div class="flex items-start justify-between gap-3 text-xs p-2 rounded ${warn ? 'bg-amber-50 border border-amber-200' : 'bg-slate-50'}">
                 <div><span class="font-bold text-slate-600">${escapeHtml(t)}</span>
                     <span class="text-slate-400"> → </span>
-                    <span class="font-mono text-slate-700">${escapeHtml(b.elected || 'none')}</span></div>
+                    <span class="font-medium text-slate-700">${escapeHtml(b.elected ? nameOf(b.elected) : 'none')}</span></div>
                 <div class="text-right whitespace-nowrap ${warn ? 'text-amber-700' : 'text-slate-400'}">
                     ${(b.candidates || []).length} connected candidate(s)${warn ? ' — pinned to the incumbent' : ''}</div>
             </div>`;
@@ -2212,7 +2218,7 @@ function _spokeRegistryDiagHtml(d) {
         if (r.stuck_never_keyed) badges.push('<span class="px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-bold" title="Approved but never seen and never keyed. Approval only keys a spoke while it is connected, so clicking Approve here never makes it report in. Delete it everywhere, then approve it WHILE it is connected.">stuck — re-approve while connected</span>');
         if (!r.approved && !r.is_relayed_agent) badges.push('<span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">unapproved</span>');
         if (r.admin_only) badges.push('<span class="px-1.5 py-0.5 rounded bg-purple-100 text-purple-700" title="No tenant_id — hidden from a non-admin Spokes list, but still claimable as a tenant broker">hidden</span>');
-        if (r.legacy_twin_of) badges.push('<span class="px-1.5 py-0.5 rounded bg-orange-100 text-orange-700" title="Same box as ' + escapeHtml(r.legacy_twin_of) + ' — registered under the pre-2026-07-20 &quot;-spoke&quot; id. Safe to delete once the twin is connected.">twin of ' + escapeHtml(r.legacy_twin_of) + '</span>');
+        if (r.legacy_twin_of) badges.push('<span class="px-1.5 py-0.5 rounded bg-orange-100 text-orange-700" title="Same box, registered under the pre-2026-07-20 &quot;-spoke&quot; id. Safe to delete once the twin is connected.">twin of ' + escapeHtml(nameOf(r.legacy_twin_of)) + '</span>');
         const del = (r.connected || r.is_relayed_agent)
             ? `<span class="text-slate-300" title="${r.is_relayed_agent ? 'Relayed agent reporting through its parent spoke — not a leftover' : 'Connected — this is a live spoke, not a leftover'}">live</span>`
             : `<button onclick="deleteSpokeRegistration('${escJsAttr(r.spoke_id)}')" class="px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50" title="Delete this spoke registration">Delete</button>`;
@@ -2221,8 +2227,7 @@ function _spokeRegistryDiagHtml(d) {
             `value="${escapeHtml(r.spoke_id)}" onchange="srdSyncCount()" title="Select this spoke registration for deletion">`;
         html += `<tr class="border-b border-slate-100 ${r.connected ? '' : 'bg-slate-50/60'}">
             <td class="py-1.5 pr-2">${sel}</td>
-            <td class="py-1.5 pr-2 font-mono text-slate-700">${escapeHtml(r.spoke_id)}
-                ${r.hostname ? `<span class="text-slate-400"> (${escapeHtml(r.hostname)})</span>` : ''}</td>
+            <td class="py-1.5 pr-2 font-medium text-slate-700">${escapeHtml(nameOf(r.spoke_id))}</td>
             <td class="py-1.5 pr-2 text-slate-500">${escapeHtml(r.module_type || '—')}</td>
             <td class="py-1.5 pr-2 text-slate-500">${escapeHtml(r.tenant_id || 'unassigned')}</td>
             <td class="py-1.5 pr-2"><div class="flex flex-wrap gap-1">${badges.join('')}</div></td>
@@ -2247,7 +2252,7 @@ function _spokeRegistryDiagHtml(d) {
             <div class="space-y-1">` + orphans.map(o =>
             `<label class="flex items-start gap-2 text-xs p-2 rounded bg-amber-50 border border-amber-200 cursor-pointer">
                 <input type="checkbox" class="srd-orph mt-0.5" value="${escapeHtml(o.spoke_id)}" onchange="srdSyncOrphCount()" title="Select orphaned telemetry entry to purge">
-                <span class="flex-1"><span class="font-mono text-slate-700">${escapeHtml(o.spoke_id)}</span>
+                <span class="flex-1"><span class="font-medium text-slate-700">${escapeHtml(_spokeLabelFor(o.spoke_id))}</span>
                     <span class="text-slate-400"> — tenant ${escapeHtml(o.tenant_id || 'none')}, claims ${o.host_count} host(s)</span>
                     ${(o.hosts || []).length ? `<span class="block text-slate-500 mt-0.5">${(o.hosts || []).map(escapeHtml).join(', ')}</span>` : ''}
                 </span>
@@ -2322,7 +2327,7 @@ async function srdDeleteSelected() {
     const ids = Array.from(document.querySelectorAll('.srd-sel'))
                      .filter(b => b.checked).map(b => b.value);
     if (!ids.length) return;
-    if (!confirm(`Delete ${ids.length} spoke registration(s)?\n\n` + ids.join('\n')
+    if (!confirm(`Delete ${ids.length} spoke registration(s)?\n\n` + ids.map(i => _srdNames[i] || _spokeLabelFor(i)).join('\n')
                  + `\n\nOnly do this for boxes that are gone, were rebuilt, or are a `
                  + `pre-rename twin. A box that is still running will re-register on its `
                  + `next connect.`)) return;
@@ -2349,11 +2354,11 @@ window.srdDeleteSelected = srdDeleteSelected;
 // deleting a connected spoke would tear down a live one, and the whole point of
 // this card is to remove ghosts without that risk.
 async function deleteSpokeRegistration(spokeId) {
-    if (!confirm(`Delete spoke registration "${_spokeLabelFor(spokeId)}"?\n\nOnly do this if the box is gone or was rebuilt. `
+    if (!confirm(`Delete spoke registration "${_srdNames[spokeId] || _spokeLabelFor(spokeId)}"?\n\nOnly do this if the box is gone or was rebuilt. `
                  + `If it is still running it will re-register on its next connect.`)) return;
     try {
         await apiJson(`/setup/spokes/${encodeURIComponent(spokeId)}`, { method: 'DELETE' });
-        showToast(`Deleted registration ${_spokeLabelFor(spokeId)}`, 'success');
+        showToast(`Deleted registration ${_srdNames[spokeId] || _spokeLabelFor(spokeId)}`, 'success');
     } catch (e) {
         showToast(`Delete failed: ${e.message}`, 'error');
     }
@@ -2525,6 +2530,7 @@ window.loadAlertDiagnostics = loadAlertDiagnostics;
 // footer tooltip's single "Out-of-contact alerts" heading misleading.
 const _ALERT_SOURCE_LABEL = {
     spoke_out_of_contact: 'Spoke out-of-contact',
+    agent_out_of_contact: 'Agent out-of-contact',
     fleet_availability:   'Fleet availability',
 };
 
@@ -2535,6 +2541,9 @@ function _alertDiagHtml(d) {
     const dur = s => s == null ? '—' : s >= 3600 ? `${(s/3600).toFixed(1)}h`
         : s >= 60 ? `${Math.floor(s/60)}m` : `${s}s`;
     const ago = ts => ts == null ? '—' : dur(Math.max(0, Math.floor(Date.now()/1000 - ts)));
+    // Show the friendly name; keep the raw id one hover away.
+    const names = d.names || {};
+    const named = id => `<span title="${esc(id)}">${esc(names[id] || id)}</span>`;
 
     // Headline verdict: the dot is red iff any error-tier alert is active, and a
     // false positive means red for a fleet that is actually healthy.
@@ -2553,7 +2562,7 @@ function _alertDiagHtml(d) {
         <div class="border ${sevClass(f.severity)} rounded p-2 text-xs">
             <div class="font-bold uppercase tracking-wide text-[10px] mb-0.5">${esc(f.code.replace(/_/g, ' '))}</div>
             <div class="mb-1">${esc(f.detail)}</div>
-            <div class="font-mono text-[11px] opacity-80">${f.ids.map(esc).join(', ')}</div>
+            <div class="text-[11px] opacity-80">${f.ids.map(named).join(', ')}</div>
         </div>`).join('')
         : `<p class="text-xs text-[#01A982]">No stale or false alert state detected — every active alert reflects a real condition.</p>`;
 
@@ -2573,7 +2582,7 @@ function _alertDiagHtml(d) {
     const forensicRows = rows.length ? rows.map(r => {
         const comp = (r.heartbeat_composite || []);
         return `<tr class="border-b border-slate-100">
-            <td class="px-3 py-1.5 font-mono text-xs">${esc(r.spoke_id)}</td>
+            <td class="px-3 py-1.5 text-xs font-medium">${named(r.spoke_id)}</td>
             <td class="px-3 py-1.5 text-center text-xs ${r.tier === 'error' ? 'text-red-600 font-bold' : 'text-amber-600'}">${esc(r.tier)}</td>
             <td class="px-3 py-1.5 text-center text-xs">${r.heartbeat_bare != null ? ago(r.heartbeat_bare) + ' ago' : '<span class="text-red-600">none</span>'}</td>
             <td class="px-3 py-1.5 text-center text-xs">${comp.length ? comp.map(c => `<span class="text-[#01A982]" title="${esc(c.key)}">${c.age_s}s ago</span>`).join(', ') : '—'}</td>
@@ -2587,8 +2596,9 @@ function _alertDiagHtml(d) {
       <div class="flex items-center justify-end">
         <span class="text-xs px-2 py-1 rounded-full ${vClass}">${esc(verdict)}</span>
       </div>
-      <div class="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
         <div><div class="text-slate-500 text-xs">Spoke out-of-contact</div><div class="font-bold ${bySrc.spoke_out_of_contact ? 'text-red-600' : 'text-slate-800'}">${bySrc.spoke_out_of_contact || 0}</div></div>
+        <div><div class="text-slate-500 text-xs">Agent out-of-contact</div><div class="font-bold ${bySrc.agent_out_of_contact ? 'text-red-600' : 'text-slate-800'}">${bySrc.agent_out_of_contact || 0}</div></div>
         <div><div class="text-slate-500 text-xs">Fleet availability</div><div class="font-bold ${bySrc.fleet_availability ? 'text-red-600' : 'text-slate-800'}">${bySrc.fleet_availability || 0}</div></div>
         <div><div class="text-slate-500 text-xs">Approved · relayed agents</div><div class="font-bold text-slate-800">${counts.approved || 0} · ${counts.relay_ids || 0}</div></div>
       </div>
@@ -2603,7 +2613,7 @@ function _alertDiagHtml(d) {
         <p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-1">Out-of-contact lookups (per alerted id)</p>
         <div class="overflow-x-auto border border-slate-200 rounded-lg">
           <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
-            <th class="px-3 py-1 text-left">Id</th><th class="px-3 py-1 text-center">Tier</th>
+            <th class="px-3 py-1 text-left">Spoke</th><th class="px-3 py-1 text-center">Tier</th>
             <th class="px-3 py-1 text-center" title="heartbeat.last_seen[bare_id] — what the alert loop reads">Bare heartbeat</th>
             <th class="px-3 py-1 text-center" title="heartbeat.last_seen['{parent}:{agent_id}'] — where a relayed agent actually reports">Composite heartbeat</th>
             <th class="px-3 py-1 text-center">Relayed agent</th><th class="px-3 py-1 text-center">Approved</th>

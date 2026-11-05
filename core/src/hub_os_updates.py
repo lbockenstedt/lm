@@ -95,6 +95,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from cache_core import JsonCacheFile  # sibling leaf
+from display_names import node_name  # sibling leaf
 from os_cve import CVE_RE, FeedCache, match_node  # sibling leaf
 from sync_loop import run_sync_loop  # sibling leaf
 import vm_snapshots  # sibling leaf
@@ -270,8 +271,7 @@ class HubOsUpdatesMixin:
             mtype = str(md.get("module_type") or md.get("type") or "").strip()
             if mtype.lower() in _NEVER_PROBE_TYPES:
                 continue  # appliance-managed: no OS we can patch, so not listed
-            label = (md.get("display_name") or md.get("name")
-                     or md.get("hostname") or sid)
+            label = node_name(self.state.system_state, sid)
             out.append({"kind": "spoke", "id": sid, "spoke_id": sid,
                         "label": str(label), "module_type": mtype})
         def _host(name):

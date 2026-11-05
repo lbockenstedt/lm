@@ -2266,8 +2266,17 @@ def register(app, hub, ctx):
              "Kea while a real HA pair is up. Not a DHCP outage.",
              {default_dhcp} & clusterless if default_dhcp else set())
 
+        # Friendly names for every id the card renders (lookup rows + finding
+        # ids), so the WebUI never has to show a bare UUID.
+        name_of = getattr(hub, "_alert_display_name", None) or (lambda s: s)
+        shown = {r["spoke_id"] for r in rows}
+        for f in findings:
+            shown.update(f["ids"])
+        names = {s: _safe(lambda s=s: name_of(s), s) for s in shown if s}
+
         return {
             "generated_ts": now,
+            "names": names,
             "config": {"enabled": bool(cfg.get("enabled", False)),
                        "warn_s": warn_s, "error_s": error_s},
             "counts": {
@@ -2276,7 +2285,8 @@ def register(app, hub, ctx):
                 "spoke_alerts": len(spoke_alerts),
                 "alerts_total": len(alerts),
                 "by_source": {s: sum(1 for a in alerts if a["source"] == s)
-                              for s in ("spoke_out_of_contact", "fleet_availability")},
+                              for s in ("spoke_out_of_contact", "agent_out_of_contact",
+                                        "fleet_availability")},
             },
             "alerts": alerts,
             "spoke_alert_rows": rows,

@@ -24,6 +24,7 @@ item re-alerts once (arguably useful — confirms it's still down).
 import asyncio
 import logging
 from typing import Any, Dict
+from display_names import node_name  # sibling leaf
 
 logger = logging.getLogger("AlertEngine")
 
@@ -220,7 +221,7 @@ async def _eval_tenant(engine: "AlertEngine", service, tenant: str, needed: set)
             if source not in needed:
                 continue
             tier = alerts.get(sid, "none")
-            await engine.evaluate(tenant, source, meta.get("display_name") or sid,
+            await engine.evaluate(tenant, source, node_name(hub.state.system_state, sid),
                                   tier in ("warning", "error"), f"out of contact ({tier})",
                                   severity=tier)
     # cert_issue_failed / cert_renew_failed / cert_deploy_failed — from the hub's

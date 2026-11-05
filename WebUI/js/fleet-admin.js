@@ -2479,10 +2479,10 @@ async function loadMyDeviceSpokes() {
             // spoke must fully re-onboard (a fresh key) to return. Tenant-scoped
             // server-side (/tenant/{tenant}/spokes/{id}) — a tenant-admin can
             // only delete a spoke bound to their own tenant.
-            const eName = String(s.display_name || s.spoke_id).replace(/'/g, "\\'");
+            const eName = String(_spokeName(s)).replace(/'/g, "\\'");
             const delBtn = `<button onclick="_myDevDeleteSpoke('${eSid}', '${eName}')" class="px-2.5 py-1 rounded-md text-[11px] font-bold bg-white hover:bg-red-50 text-red-600 border border-red-300 transition-colors" title="Permanently remove this spoke/agent — it must re-onboard to return">Delete</button>`;
             return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
-                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(_nodeLabel(s.display_name || s.spoke_id, s.tenant_id || tenant))}</span>
+                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(_nodeLabel(_spokeName(s), s.tenant_id || tenant))}</span>
                 <span class="ml-2 text-[11px] text-slate-400 font-mono">${escapeHtml(s.module_type || '—')}</span></div>
                 <div class="flex items-center gap-2">${rolesBtn}${revoked}${appr}${conn}${delBtn}</div></div>`;
         }).join('');
@@ -2537,7 +2537,7 @@ async function loadMyDeviceAgents() {
                 : '';
             return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
                 <div><span class="text-sm font-medium text-slate-700">${escapeHtml(String(a.hostname || a.agent_id || '').toUpperCase())}</span>
-                <span class="ml-2 text-[11px] text-slate-400 font-mono">via ${escapeHtml(a.spoke_id || '—')}</span>
+                <span class="ml-2 text-[11px] text-slate-400">via ${escapeHtml(a.spoke_id ? _spokeLabelFor(a.spoke_id) : '—')}</span>
                 ${csEnabled ? '<span class="ml-2 px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700">CS</span>' : ''}</div>
                 <div class="flex items-center gap-2">${badge}${approveBtn}${csToggle}</div></div>`;
         }).join('');
@@ -2704,7 +2704,7 @@ async function loadMyPxmxSpokes() {
         sel.innerHTML = '<option value="">— auto-discover (omit --spoke-ip) —</option>'
             + rows.map((s) => {
                 const kind = s.module_type === 'hypervisor' ? 'pxmx' : 'cs';
-                return `<option value="${escapeHtml(s.ip)}">${escapeHtml(s.display_name || s.spoke_id)} (${kind}, ${escapeHtml(s.ip)})</option>`;
+                return `<option value="${escapeHtml(s.ip)}">${escapeHtml(_spokeName(s))} (${kind}, ${escapeHtml(s.ip)})</option>`;
             }).join('');
         if (prior && rows.some((s) => s.ip === prior)) sel.value = prior;
     } catch (e) {
@@ -3413,7 +3413,7 @@ async function showLoadRoleModal(spokeId) {
                 </button>
             </div>
             <div class="p-6 space-y-4 overflow-y-auto">
-                <p class="text-xs text-slate-500">An agent can host <strong>multiple roles at once</strong>. Each role opens its own sub-spoke (<code class="bg-slate-100 px-1 rounded">${spokeId}-&lt;role&gt;</code>) that auto-approves via this agent.</p>
+                <p class="text-xs text-slate-500">An agent can host <strong>multiple roles at once</strong>. Each role opens its own sub-spoke (<code class="bg-slate-100 px-1 rounded">&lt;agent-id&gt;-&lt;role&gt;</code>) that auto-approves via this agent.</p>
                 <div id="role-list" class="grid grid-cols-3 gap-2 max-h-44 overflow-y-auto pr-1">
                     <p class="text-xs text-slate-400 italic col-span-3">Loading roles…</p>
                 </div>

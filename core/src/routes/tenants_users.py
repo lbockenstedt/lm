@@ -1,4 +1,5 @@
 """Setup: updates, modules, tenants, users routes."""
+from display_names import node_name  # sibling leaf
 from api import (
     HTTPException, Request, _hash_password, _hub_msg, _invalidate_user_sessions,
     _unwrap_spoke, get_spoke_or_503, get_tenant_scoping,
@@ -353,7 +354,7 @@ def register(app, hub, ctx):
         # orphan the binding. List the bound spokes so the UI can name them.
         meta = hub.state.system_state.get("module_metadata", {}) or {}
         bound = [
-            (m.get("display_name") or m.get("hostname") or sid)
+            node_name(hub.state.system_state, sid)
             for sid, m in meta.items()
             if isinstance(m, dict) and (m.get("tenant_id") or "").strip() == clean
         ]
