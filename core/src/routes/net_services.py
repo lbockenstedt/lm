@@ -6,6 +6,7 @@ import inspect
 import ipaddress
 import json
 import time
+from display_names import node_name  # sibling leaf
 from cache_core import FRESH, REFRESH, STALE
 from api import (
     HTTPException, Request, _refresh_module_all_tenants,
@@ -3434,9 +3435,7 @@ def register(app, hub, ctx):
         _md = hub.state.system_state.get("module_metadata", {}) or {}
 
         def _label(_pk):
-            m = _md.get(_pk, {}) or {}
-            nm = (m.get("display_name") or m.get("name") or m.get("hostname") or "").strip()
-            return nm or _pk
+            return node_name(hub.state.system_state, _pk)
 
         clients = []
         for pk, ws in list((hub.active_connections or {}).items()):
