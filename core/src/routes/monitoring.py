@@ -50,6 +50,15 @@ async def inventory_devices(hub):
     extra = [n for n in (gc.get("nw_monitor_neighbors", []) or [])
              if isinstance(n, dict) and n.get("name") and n.get("address")
              and str(n["name"]).casefold() not in names]
+    # Hosts the nw scan/sweep saw answering within the last day (ping-only
+    # ones get the ICMP template); they age out of Zabbix once they stop.
+    import time
+    import nw_seen_hosts
+    addrs = {str(a or "").strip() for d in list(inv) + extra
+             for a in [d.get("address")] + list(d.get("alt_addresses") or [])}
+    extra += nw_seen_hosts.monitor_rows(
+        gc.get("nw_seen_hosts") or {}, time.time(), addrs,
+        names | {str(n["name"]).casefold() for n in extra})
     import access
     for d in list(inv) + extra:
         tenant = d.get("tenant") or d.get("tenant_id") or "default"
