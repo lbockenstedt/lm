@@ -46,6 +46,7 @@ class _Hub:
     _AGENT_ALERT_MAX_AGE_S = sas.SpokeAlertMixin._AGENT_ALERT_MAX_AGE_S
     _relayed_agent_last_seen = sas.SpokeAlertMixin._relayed_agent_last_seen
     get_agent_alerts = sas.SpokeAlertMixin.get_agent_alerts
+    _alert_display_name = sas.SpokeAlertMixin._alert_display_name
 
     def __init__(self, agent_info=None, hb=None, decommissioned=()):
         self.agent_info = agent_info or {}
@@ -147,3 +148,19 @@ def test_friendly_name_prefers_the_raw_agent_id():
     hub = _Hub(agent_info={"guid-123": {"agent_id": "pxmx-cs-svr-02",
                                         "last_seen": NOW - 9999}})
     assert _alerts(hub)[0]["name"] == "pxmx-cs-svr-02"
+
+
+def test_offline_agent_is_named_from_persisted_config():
+    """agent_info is evicted once the parent spoke drops — the persisted
+    agent_config must still name the alert instead of the raw guid."""
+    hub = _Hub(hb={"cs-1:guid-123": NOW - 9999})
+    hub.state.system_state["agent_config"] = {"guid-123": {"hostname": "cs-svr-02"}}
+    assert _alerts(hub)[0]["name"] == "cs-svr-02"
+
+
+def test_spoke_id_is_named_from_module_metadata():
+    hub = _Hub()
+    hub.state.system_state["module_metadata"] = {
+        "uuid-1": {"display_name": "uuid-1", "hostname": "srv-con-r11"}}
+    assert hub._alert_display_name("uuid-1") == "srv-con-r11"
+    assert hub._alert_display_name("unknown") == "unknown"

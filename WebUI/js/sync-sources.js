@@ -259,7 +259,7 @@ async function loadDhcpServerStatus() {
     }
     wrap.innerHTML = rows.map(({ tenant, spoke }) => {
         const d = spoke.dhcp || {};
-        const head = `<span class="text-sm font-bold text-slate-700">${esc(tenant)} <span class="text-xs font-mono text-slate-400">${esc(spoke.spoke_id)}</span></span>`;
+        const head = `<span class="text-sm font-bold text-slate-700">${esc(tenant)} <span class="text-xs text-slate-400" title="${esc(spoke.spoke_id)}">${esc(spoke.spoke_name && spoke.spoke_name !== spoke.spoke_id ? spoke.spoke_name : _spokeLabelFor(spoke.spoke_id))}</span></span>`;
         // Kea not installed → "Not configured" (ignore, per requirement).
         if (d.installed === false) {
             return `<div class="border border-slate-200 rounded-md p-3">
