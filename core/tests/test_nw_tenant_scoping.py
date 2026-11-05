@@ -824,3 +824,90 @@ def test_sweep_adds_answering_gateway_24s_then_pings_before_probing(monkeypatch,
     opts = hub.calls[1][2]["options"]
     assert opts["pinged"] is True and opts["try_snmp"] is True
     assert {22, 80, 443}.issubset(opts["tcp_ports"])
+
+
+def test_scheduled_scan_checks_known_ips_and_pushes_every_responder(monkeypatch, tmp_path):
+    _client, hub = _build(monkeypatch, tmp_path)
+
+    async def prefixes(_hub, _tid):
+        return ["10.0.0.0/29"]
+    monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", prefixes)
+    hub.state.system_state["global_config"]["nw_seen_hosts"] = {
+        "acme": {"10.8.0.9": {"address": "10.8.0.9", "last_seen": 1.0}}}
+
+    async def rr(spoke_id, cmd, data, timeout=30.0):
+        hub.calls.append((spoke_id, cmd, data))
+        if cmd == "NETBOX_GET_IPS":
+            return {"payload": {"data": {"status": "SUCCESS", "ip_addresses": [
+                {"address": "10.7.0.5/24"}, {"address": "10.0.0.2/24"}]}}}
+        if cmd == "NW_PING_SWEEP":
+            return {"payload": {"data": {"status": "SUCCESS", "alive": [
+                t for t in data["targets"] if t in ("10.7.0.5", "10.0.0.2", "10.0.0.6")]}}}
+        if cmd == "NW_SCAN" and data["options"].get("pinged"):
+            return {"payload": {"data": {"status": "SUCCESS", "reachable": [
+                {"address": "10.7.0.5", "reachable": True, "snmp_ok": True,
+                 "hostname": "pdu-a", "profile": {"sys_descr": "Rack PDU"}}]}}}
+        if cmd == "NW_SCAN":
+            return {"payload": {"data": {"status": "SUCCESS", "scanned": len(data["targets"]),
+                                         "reachable": [{"address": "10.0.0.3",
+                                                        "open_ports": [80], "reachable": True}]}}}
+        return {"payload": {"data": {"status": "SUCCESS"}}}
+    hub.request_response = rr
+    for name in ("get_dns_spoke_for_tenant", "get_dhcp_spoke_for_tenant",
+                 "get_cppm_spoke_for_tenant"):
+        setattr(hub, name, lambda *_a, **_k: None)
+    hub.get_spoke_by_type = lambda t: "ipam-spoke" if t == "ipam" else "nw-acme"
+
+    async def run():
+        await hub.run_nw_scheduled_scan("acme")
+        for _ in range(5):
+            await asyncio.sleep(0)
+    asyncio.run(run())
+
+    scan = next(d for _s, c, d in hub.calls if c == "NW_SCAN")
+    # Known hosts first (NetBox IPs, then registry), then the leaf prefix.
+    assert scan["targets"][:3] == ["10.7.0.5", "10.0.0.2", "10.8.0.9"]
+    probe = [d for _s, c, d in hub.calls if c == "NW_SCAN"][-1]
+    assert probe["options"]["pinged"] and probe["targets"] == ["10.7.0.5", "10.0.0.6"]
+    (push,) = [d for _s, c, d in hub.calls if c == "NETBOX_SYNC_DEVICES"]
+    assert push["source"] == "Network Sweep" and push["replace"] is False
+    rows = {r["ip"]: r for r in push["devices"]}
+    assert set(rows) == {"10.0.0.3", "10.0.0.6", "10.7.0.5"}  # 10.0.0.2 is fleet
+    assert rows["10.7.0.5"]["profile"] == {"sys_descr": "Rack PDU"}
+    seen = hub.state.system_state["global_config"]["nw_seen_hosts"]["acme"]
+    assert "10.8.0.9" not in seen  # unseen for > 37 days: pruned
+    assert seen["10.7.0.5"]["hostname"] == "pdu-a"
+
+
+def test_sweep_on_shared_agent_never_records_another_tenants_hosts(monkeypatch, tmp_path):
+    _client, hub = _build(monkeypatch, tmp_path)
+
+    async def prefixes(_hub, _tid):
+        return ["10.9.0.0/22", "10.9.0.0/24", "10.9.1.0/24", "10.9.2.0/24"]
+    monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", prefixes)
+    monkeypatch.setattr(access_mod, "spoke_owner_tenant", lambda *_a: None)
+
+    async def foreign(_hub, _tid, ips):
+        return {ip for ip in ips if ip == "10.9.3.8"}
+    monkeypatch.setattr(access_mod, "foreign_tenant_ips", foreign)
+
+    async def rr(spoke_id, cmd, data, timeout=30.0):
+        hub.calls.append((spoke_id, cmd, data))
+        if cmd == "NW_PING_SWEEP":
+            return {"payload": {"data": {"status": "SUCCESS", "alive": [
+                t for t in data["targets"] if t in ("10.9.3.7", "10.9.3.8")]}}}
+        return {"payload": {"data": {"status": "SUCCESS", "reachable": [
+            {"address": t, "reachable": True} for t in data.get("targets") or []]}}}
+    hub.request_response = rr
+    for name in ("get_dns_spoke_for_tenant", "get_dhcp_spoke_for_tenant",
+                 "get_cppm_spoke_for_tenant"):
+        setattr(hub, name, lambda *_a, **_k: None)
+
+    async def run():
+        await hub.run_nw_sweep_step("acme", force=True)  # gateway pass
+        await hub.run_nw_sweep_step("acme", force=True)  # host sweep
+        for _ in range(5):
+            await asyncio.sleep(0)
+    asyncio.run(run())
+    seen = hub.state.system_state["global_config"]["nw_seen_hosts"]["acme"]
+    assert "10.9.3.7" in seen and "10.9.3.8" not in seen
