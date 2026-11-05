@@ -118,9 +118,18 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         tid = fw.get("tenant_id", "")
         scope = access.write_scope(sess, tid) if write else access.read_scope(sess, tid)
+        if scope in ("filtered", "constrained") and _shared_fw_hidden(request, fw):
+            scope = "deny"
         if scope == "deny":
             raise HTTPException(status_code=403, detail="You do not have access to this firewall")
         return fw, scope
+
+    def _shared_fw_hidden(request, fw):
+        """A shared firewall is hidden from a tenant that has its own."""
+        if access.firewall_owner_tenant(app.state.hub, fw.get("id")):
+            return False
+        tid = access.request_effective_tenant(_session_user(request), request)
+        return access.tenant_has_own_firewall(app.state.hub, tid)
 
     async def _authz_fw_write(request, firewall_id, endpoint, payload=None, uuid=None):
         """Write-authorize a firewall mutation and, on a SHARED firewall

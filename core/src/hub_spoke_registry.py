@@ -436,6 +436,7 @@ class SpokeRegistryMixin:
             want.add("")  # UNASSIGNED resources are visible to the ADMIN scope
         if shared:
             want.add(shared)
+        from access import spoke_module_type, tenant_has_own_spoke
         out = []
         for sid in cands:
             if sid not in self.active_connections:
@@ -443,8 +444,14 @@ class SpokeRegistryMixin:
             if not self.approved_modules.get(sid, False):
                 continue
             effs = self._spoke_effective_tenants(sid) or {""}
-            if effs & want:
-                out.append(sid)
+            if not effs & want:
+                continue
+            # A tenant with its own spoke of this type is out of the shared
+            # environment: only hosts scoped to the tenant itself remain.
+            if tenant_id not in effs and tenant_has_own_spoke(
+                    self, tenant_id, spoke_module_type(self, sid)):
+                continue
+            out.append(sid)
         return out
 
     def get_nw_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
@@ -513,7 +520,9 @@ class SpokeRegistryMixin:
         # This fallback is intentional and DIFFERENT from nw/hypervisor (which
         # return None here) — do not "fix" it to match them.
         # A spoke bound to the SHARED tenant is the same shared server.
-        from access import tenant_is_shared
+        from access import tenant_is_shared, tenant_has_own_spoke
+        if tenant_has_own_spoke(self, tenant_id, "directory"):
+            return None  # own (offline) spoke → never the shared one
         shared = [sid for sid in cands
                   if not (md.get(sid, {}).get("tenant_id") or "")
                   or tenant_is_shared(md.get(sid, {}).get("tenant_id"))]
@@ -669,16 +678,13 @@ class SpokeRegistryMixin:
                 if sid else self.get_spoke_by_type("nac"))
 
     def get_cppm_spokes_for_tenant(self, tenant_id: str = None) -> list:
-        """Every nac spoke whose records belong in ``tenant_id``'s COMBINED NAC
-        view: their own dedicated spoke (``get_cppm_spoke_for_tenant``) PLUS
+        """Every nac spoke whose records belong in ``tenant_id``'s NAC view:
+        their own dedicated spoke when they have one (connected or not: a
+        tenant with its own ClearPass is out of the shared environment), else
         the hub's shared-tenant CPPM spoke, IF a shared tenant is actually
-        configured and its bound spoke differs from the tenant's own. A
-        tenant's own CPPM shows every record (it's entirely their own
-        equipment); a shared CPPM's records are narrowed to just this
+        configured. A shared CPPM's records are narrowed to just this
         tenant's own by the SAME downstream subnet/tag filter every NAC route
-        already applies to a single source — applying it to the union
-        instead just makes that filter do double duty as the "which shared
-        records are mine" gate.
+        already applies to a single source.
 
         Deliberately does NOT call ``get_cppm_spoke_for_shared()`` — that
         method falls back to ``get_spoke_by_type("nac")`` (ANY connected nac
@@ -695,7 +701,10 @@ class SpokeRegistryMixin:
         if not tenant_id or tenant_id == "default":
             return []
         own = self.get_cppm_spoke_for_tenant(tenant_id)
-        from access import shared_tenant_id as _shared_tenant_id
+        from access import shared_tenant_id as _shared_tenant_id, tenant_has_own_spoke
+        if own or tenant_has_own_spoke(self, tenant_id, "nac"):
+            # A tenant with its own ClearPass is out of the shared NAC environment.
+            return [own] if own else []
         shared_tid = _shared_tenant_id()
         shared = self.get_cppm_spoke_for_tenant(shared_tid) if shared_tid else None
         return list(dict.fromkeys(sid for sid in (own, shared) if sid))
