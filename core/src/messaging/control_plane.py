@@ -1,8 +1,18 @@
+"""Base control plane shared by every spoke.
+
+``BaseControlPlane`` connects a spoke to the hub over a WebSocket, does mutual
+authentication, signs (and optionally encrypts) frames, sends heartbeats and logs,
+routes hub commands to the spoke's modules and handles shared system commands
+such as self-update and log-level changes. ``_SpokeLogRelayHandler`` captures log
+records so they can be relayed to the hub.
+"""
+# Standard-library imports used across the control plane.
 import asyncio
 import json
 import uuid
 import time
 import websockets
+# Load websockets' exception classes up front.
 import websockets.exceptions  # noqa: F401 — eager-load so websockets.exceptions.* is
                               # reachable without websockets.connect having run first
                               # (websockets >=11 lazy-imports submodules; unit tests that
@@ -12,18 +22,22 @@ import hmac
 import hashlib
 import subprocess
 import threading
+# Thread-safe queue that carries relayed log lines.
 import queue
 import random
 import re
 import os
 import tempfile
+# Low-level socket options (TCP keepalive) for the hub connection.
 import socket
 import ssl
 import sys
 import fcntl
 import contextlib
+# Thread-pool futures, used to wait on work handed to the event loop.
 import concurrent.futures
 from typing import Dict, Any, List, Optional
+# Frame signing and encryption helpers (package or bare-module layout).
 try:
     from ..security.signer import MessageSigner, encode_frame, split_frame
     from ..security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
@@ -32,8 +46,10 @@ except ImportError:  # imported off a stale path (messaging.* top-level, no repo
     from security.signer import MessageSigner, encode_frame, split_frame  # type: ignore
     from security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
                                        encryption_enabled, is_encrypted, wrap, unwrap)  # type: ignore
+# Raised when an encrypted frame fails to decrypt.
 from cryptography.exceptions import InvalidTag
 
+# Log-level helpers (package or bare-module layout).
 try:
     from ..logging_setup import set_log_level, truncate_log_files
 except ImportError:  # imported as top-level messaging.* (core/src on sys.path)
@@ -80,6 +96,7 @@ try:
 except ImportError:  # bare-module layout (messaging.* top-level, no repo root)
     from hub_contact_watchdog import HubContactWatchdogMixin  # type: ignore
 
+# Logger for this module.
 logger = logging.getLogger("BaseControlPlane")
 
 # Commands whose handler may run long enough to blow the hub's request_response
@@ -170,6 +187,7 @@ def _ws_keepalive_env(name: str, default: float) -> float:
     api.build_server so both ends of a link use the same ping interval / pong
     timeout. Clamped to >=5s. See control_plane.run() for why the library
     default 20s/20s is too tight."""
+    # Read the env value, falling back to the default and never going below 5s.
     try:
         return max(5.0, float(os.environ.get(name, str(default))))
     except Exception:
@@ -220,6 +238,8 @@ class _SpokeLogRelayHandler(logging.Handler):
     _exclude_prefixes: Optional[set] = None
 
     def __init__(self, log_queue: queue.Queue):
+        """Set up the handler at DEBUG level with the standard LM log format."""
+        # Relay everything from DEBUG up and keep a handle on the queue.
         super().__init__(level=logging.DEBUG)
         self._queue = log_queue
         # Canonical LM format — matches logging_setup.DEFAULT_FORMAT so a
@@ -237,34 +257,46 @@ class _SpokeLogRelayHandler(logging.Handler):
         self._exclude_prefixes = set(prefixes) if prefixes else None
 
     def _in_scope(self, name: str) -> bool:
+        """True if this handler should relay records from logger ``name``."""
+        # Include list wins; otherwise apply the exclude list; otherwise relay everything.
         inc = self._include_prefixes
+        # Only relay loggers that match an include prefix.
         if inc is not None:
             return any(name == p or name.startswith(p) for p in inc)
         exc = self._exclude_prefixes
+        # Otherwise relay everything except loggers matching an exclude prefix.
         if exc is not None:
             return not any(name == p or name.startswith(p) for p in exc)
         return True
 
+    # Per-thread flag that stops a record from being relayed while we are already relaying one.
     _emitting = threading.local()
 
     def emit(self, record: logging.LogRecord) -> None:
+        """Queue a log record, skipping nested calls from the same thread to avoid deadlock."""
         # A GC finalizer (e.g. a destroyed pending asyncio Task) can log while
         # this thread is inside queue.put holding the queue's non-reentrant
         # lock. Re-entering put would deadlock the thread forever, so drop the
         # nested record instead.
         if getattr(self._emitting, "active", False):
             return
+        # Mark this thread busy while queuing the record.
         self._emitting.active = True
+        # Queue the record, always clearing the busy flag afterwards.
         try:
             self._emit(record)
         finally:
             self._emitting.active = False
 
     def _emit(self, record: logging.LogRecord) -> None:
+        """Format the record and add it to the queue, dropping the oldest entry when full."""
+        # Never let a logging failure escape into the caller.
         try:
+            # Skip records outside this handler's scope.
             if not self._in_scope(record.name):
                 return
             entry = self.format(record)
+            # Try to queue the line without blocking.
             try:
                 self._queue.put_nowait(entry)
             except queue.Full:
@@ -276,6 +308,7 @@ class _SpokeLogRelayHandler(logging.Handler):
                     self._queue.get_nowait()
                 except queue.Empty:
                     pass
+                # Retry now that there is room.
                 try:
                     self._queue.put_nowait(entry)
                 except queue.Full:
@@ -297,6 +330,8 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
 
     def __init__(self, spoke_id: str, secret: str = None, hub_secret: str = None, hub_url: str = None,
                  onboarding_psk: str = None, tenant_id_hint: str = None):
+        """Set up identity, secrets, signer, log relay, update and TLS state for this spoke."""
+        # Basic identity, secrets and the hub URL.
         self.spoke_id = spoke_id
         self.secret = secret
         # Fall back to persisted value from .env if no hub_secret was passed at startup
@@ -318,6 +353,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # sleeps through — the escape hatch out of the permanent
         # "Hub identity unverified (TLS verify off)" refusal below.
         self.recovery_psk = os.environ.get("LM_RECOVERY_PSK", "").strip()
+        # Hosted modules and the frame signer (only once a secret exists).
         self.modules: Dict[str, Any] = {} # { module_name: BaseSpoke instance }
         self.signer = MessageSigner(secret) if secret else None
         # H4: True once the hub advertised ``enc="v1"`` in its HUB_VERIFIED proof
@@ -431,12 +467,16 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # A hub-pushed fleet policy (Setup → Hub TLS Verification, persisted
         # locally by SPOKE_SET_TLS_VERIFY) overrides the install-time env value.
         self._tls_verify_mode = self._tls_mode_from_env()
+        # Apply a saved fleet TLS policy unless the hub is on loopback.
         try:
+            # Read the saved policy.
             _pol = self._read_hub_tls_policy()
+            # Use it only for a remote hub.
             if _pol and not self._hub_url_is_loopback(self.hub_url or ""):
                 self._tls_verify_mode = _pol
         except Exception:  # noqa: BLE001
             pass
+        # Resolved verify flag, auto-probe timer and pinned CA path.
         self._tls_verify = self._tls_verify_mode == "on"
         self._tls_auto_neg_until = 0.0
         self._tls_ca_cert = (os.environ.get("LM_HUB_CA_CERT", "").strip()
@@ -460,6 +500,8 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
     # ------------------------------------------------------------------
 
     def _repo_root(self) -> str:
+        """Repo root, taken as the working directory (or its parent when that is ``src``)."""
+        # Use the cwd, or its parent when we were started from src/.
         cwd = os.path.abspath(os.getcwd())
         return os.path.dirname(cwd) if cwd.endswith("src") else cwd
 
@@ -487,7 +529,9 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
           warning pointing at re-running the installer and skips core this
           cycle — the spoke's own repo still updates (graceful, not a crash).
         """
+        # Use the first location that has a .git directory.
         for path in ("/opt/lm", "/opt/lm/core"):
+            # Return it if this location is a git checkout.
             if os.path.isdir(os.path.join(path, ".git")):
                 return path
         return None
@@ -505,21 +549,27 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # request/reply pushes instead of timing them out on the exit. Off by
         # default (the hub drives updates via SPOKE_UPDATE); cheap when unused.
         self._draining = True
+        # Any error ends the check with a log line and no restart.
         try:
+            # Set the pull options and fetch from origin.
             cwd = self._repo_root()
             self._ensure_git_pull_strategy(cwd)
             fetch = self._run_git(["fetch", "origin"], cwd=cwd)
+            # Give up if the fetch failed.
             if fetch.returncode != 0:
                 logger.warning("Self-update check failed: git fetch error: %s", (fetch.stderr or "").strip())
                 return False
+            # Count how many commits we are behind the upstream branch.
             branch = self._run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd)
             branch_name = (branch.stdout or "").strip()
             upstream = f"origin/{branch_name}" if branch_name and branch_name != "HEAD" else "origin/HEAD"
             behind = self._run_git(["rev-list", "--count", f"HEAD..{upstream}"], cwd=cwd)
+            # Count how many commits we are behind; treat unparsable output as zero.
             try:
                 behind_count = int((behind.stdout or "0").strip() or "0")
             except ValueError:
                 behind_count = 0
+            # Nothing new to pull.
             if behind_count <= 0:
                 logger.debug("Self-update check: already up to date.")
                 return False
@@ -529,32 +579,41 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             # of src/ is the fallback if the working tree is dirty/broken.
             head_before = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
             backup_dir = self._snapshot_for_update(head_before, cwd)
+            # Pull the new commits.
             logger.info("Self-update check: %d new commit(s) upstream; pulling.", behind_count)
             pull = self._run_git(["pull", "--rebase", "--autostash", "origin"], cwd=cwd)
+            # Give up if the pull failed.
             if pull.returncode != 0:
                 logger.warning("Self-update check failed: git pull error: %s", (pull.stderr or pull.stdout or "").strip())
                 return False
             logger.info("Self-update check: pull completed successfully.")
+            # Stop if HEAD didn't move.
             head_after = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+            # Nothing changed, so no restart is needed.
             if head_after == head_before:
                 logger.debug("Self-update: no change after pull.")
                 return False
             # Skip a known-bad commit (rolled back before): reset to head_before
             # and stay put rather than crash-looping into the same broken code.
             if self._is_known_bad_commit(head_after):
+                # Roll back to the previous commit and clear the pending marker.
                 logger.warning(
                     "Self-update: new HEAD %s is a known-bad commit (rolled back "
                     "before); resetting to %s and skipping this update.",
                     head_after[:8], head_before[:8])
                 self._run_git(["reset", "--hard", head_before], cwd=cwd)
+                # Forget the pending-update marker.
                 self._clear_pending_update()
                 return False
             # Re-install requirements so new deps are available before restart
             req_file = os.path.join(cwd, "requirements.txt")
             venv_pip = os.path.join(cwd, "venv", "bin", "pip")
+            # Install the requirements if both the file and the venv pip exist.
             if os.path.exists(req_file) and os.path.exists(venv_pip):
+                # Install quietly, with a 5-minute limit.
                 pip_r = subprocess.run([venv_pip, "install", "-r", req_file, "-q"],
                                        capture_output=True, check=False, timeout=300)
+                # Log a failed install but continue with the restart.
                 if pip_r.returncode != 0:
                     logger.warning("Self-update: pip install failed: %s", (pip_r.stderr or b"").decode())
                 else:
@@ -592,24 +651,33 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # a restart triggered by an update will re-authenticate cleanly rather than
         # falling back to zero-touch on every cycle.
         logger.info("Updater worker started; grace period 120s before first check.")
+        # Wait out the 120s grace period, exiting if asked to stop.
         if self._updater_stop.wait(timeout=120):
             logger.info("Updater worker exiting.")
             return
         logger.info("Updater worker: grace period elapsed; polling every 3600s.")
+        # Check hourly; after an error wait a minute and try again.
         while not self._updater_stop.is_set():
+            # Run a check, then sleep an hour (or stop if asked).
             try:
+                # Log, then run the check.
                 logger.info("Checking for self-updates...")
                 self.perform_self_update_check()
+                # Sleep an hour; stop early if asked.
                 if self._updater_stop.wait(timeout=3600):
                     break
             except Exception as e:
+                # On error, log it and retry after a minute.
                 logger.error("Updater worker error: %s", e)
+                # Wait a minute; stop early if asked.
                 if self._updater_stop.wait(timeout=60):
                     break
+        # The loop only ends when the worker is told to stop.
         logger.info("Updater worker exiting.")
 
     def start_updater_worker(self) -> None:
         """Launch the updater background thread (no-op if already running)."""
+        # Start the thread unless it's already running.
         if self._updater_thread and self._updater_thread.is_alive():
             return
         self._updater_thread = threading.Thread(target=self.updater_worker, name="updater-worker", daemon=True)
@@ -631,6 +699,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         ``Restart=always``/``on-failure`` relaunches the process, which on boot
         re-reads the now-persisted ``.env``. The short sleep lets the ack + any
         final relay frames land first."""
+        # Wait briefly, flush logs, then always exit for systemd to restart.
         try:
             await asyncio.sleep(0.5)
             await self._flush_log_relay_async()
@@ -643,6 +712,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
 
     def register_module(self, name: str, module_instance: Any):
         """Registers a module to be handled by this control plane."""
+        # Store the module under its name.
         self.modules[name] = module_instance
         logger.info(f"Registered module: {name}")
 
@@ -662,17 +732,22 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         heartbeat send (signed, ``destination_id: hub``). Returns True on send.
         A module calls this via the ``control_plane`` reference its
         ControlPlane passes it (see LEControlPlane.run_hub_mode → LESpoke)."""
+        # Need a live hub connection.
         ws = self._hub_ws
+        # Skip when not connected.
         if ws is None:
             logger.debug("send_to_hub(%s): not connected; skipping", payload_type)
             return False
+        # Build and send a signed message.
         try:
+            # Build the message with a fresh id and timestamp.
             msg = {
                 "header": {"message_id": str(uuid.uuid4()),
                            "timestamp": round(time.time(), 6),
                            "sender_id": self.spoke_id, "destination_id": "hub"},
                 "payload": {"type": payload_type, "data": data or {}},
             }
+            # Sign it and send it.
             await ws.send(self._encode_frame(msg))
             return True
         except Exception as e:  # noqa: BLE001
@@ -702,26 +777,33 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         waiter future. The frame is signed via the same path as ``send_to_hub``
         so the hub's approved-sender check succeeds.
         """
+        # Need a live hub connection.
         ws = self._hub_ws
+        # Skip when not connected.
         if ws is None:
             logger.debug("request_to_hub(%s): not connected; skipping", req_type)
             return {"status": "ERROR", "message": "not connected to hub"}
+        # Register a future for the reply under a new correlation id.
         loop = asyncio.get_event_loop()
         corr_id = str(uuid.uuid4())
         fut: "asyncio.Future" = loop.create_future()
         self._hub_response_futures[corr_id] = fut
+        # Build the request.
         msg = {
             "header": {"message_id": corr_id,
                        "timestamp": round(time.time(), 6),
                        "sender_id": self.spoke_id, "destination_id": "hub"},
             "payload": {"type": "HUB_REQUEST", "data": {"type": req_type, **(data or {})}},
         }
+        # Send it.
         try:
             await ws.send(self._encode_frame(msg))
         except Exception as e:  # noqa: BLE001 — socket closed mid-send
+            # Forget the waiter since no reply will come.
             self._hub_response_futures.pop(corr_id, None)
             logger.warning("request_to_hub(%s) send failed: %s", req_type, e)
             return {"status": "ERROR", "message": f"hub request send failed: {e}"}
+        # Wait for the reply, always removing the future afterwards.
         try:
             result = await asyncio.wait_for(fut, timeout)
             return result if isinstance(result, dict) else {"status": "SUCCESS",
@@ -747,6 +829,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # it as the "new code booted OK" signal. Without this, a crash-looping new
         # version could inherit a stale marker and the watchdog would never roll back.
         self._clear_healthy_marker()
+        # Work out the hub URL.
         await self._resolve_hub_url()
         logger.info(f"Starting Control Plane in HUB MODE -> {self.hub_url}")
         # Single-scheduler policy: the HUB's WebUI-configured repo-sync
@@ -782,13 +865,18 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # on the Proxmox HOST). Hard-disable the task with LM_DISABLE_HUB_CONTACT_WATCHDOG=1.
         if os.environ.get("LM_DISABLE_HUB_CONTACT_WATCHDOG", "0").lower() not in ("1", "true", "yes"):
             self._hub_contact_task = asyncio.create_task(self._hub_contact_watchdog())
+        # Reconnect forever, starting with a 5s backoff.
         _delay = 5
+        # Each pass runs one hub session and records when it started.
         while True:
+            # Remember when this session started.
             _sess_start = time.time()
+            # Run one session; errors are handled below with a backoff.
             try:
                 await self._connect_and_serve()
                 _delay = 5  # clean return after a successful session → reset
             except (websockets.exceptions.ConnectionClosedError, OSError) as e:
+                # Note how long the session lasted.
                 _lasted = time.time() - _sess_start
                 # A session that stayed up a while then dropped (e.g. ONE
                 # keepalive-ping timeout after minutes of health) is NOT a
@@ -804,8 +892,10 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 _delay = 5 if _lasted >= 60 else min(_delay * 2, 60)
                 logger.warning("Connection lost after %.0fs (%s). Reconnecting in %ds...", _lasted, e, _delay)
             except Exception as e:
+                # Back off; reset to 5s if the session lasted at least a minute.
                 _lasted = time.time() - _sess_start
                 _delay = 5 if _lasted >= 60 else min(_delay * 2, 60)
+                # Name-resolution failures get a clearer log message.
                 if self._is_dns_error(e):
                     _host = self._hub_host()
                     logger.error(
@@ -877,24 +967,30 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         Returns None only on a build failure / misconfiguration (the caller then
         connects without TLS and fails fast, surfacing the problem instead of
         hanging or silently degrading security)."""
+        # A build error is logged and returns None.
         try:
+            # Verify off: use a context that accepts any cert.
             if not self._tls_verify:
+                # Accept any cert.
                 ctx = ssl._create_unverified_context()
                 logger.debug("wss: using unverified context (self-signed hub cert; "
                              "set LM_HUB_TLS_VERIFY=1 to verify)")
                 return self._present_client_cert(ctx)
             # Verify ON: prefer a pinned CA, else the system store.
             if self._tls_ca_cert:
+                # The pinned CA file must exist; otherwise refuse to connect.
                 if not os.path.isfile(self._tls_ca_cert):
                     logger.error("wss: LM_HUB_TLS_VERIFY=1 but CA path %s does not "
                                  "exist — refusing to silently downgrade to "
                                  "unverified. Fix the path or unset LM_HUB_TLS_VERIFY.",
                                  self._tls_ca_cert)
                     return None
+                # Verify against the pinned CA.
                 ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
                 logger.info("wss: verifying hub cert against pinned CA %s",
                             self._tls_ca_cert)
                 return self._present_client_cert(ctx)
+            # No pinned CA: verify against the system trust store.
             ctx = ssl.create_default_context()  # system trust store (public CA)
             logger.info("wss: verifying hub cert against system trust store "
                         "(LM_HUB_TLS_VERIFY=1, no LM_HUB_CA_CERT)")
@@ -905,22 +1001,31 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
 
     @staticmethod
     def _tls_mode_from_env() -> str:
+        """TLS verify mode from LM_HUB_TLS_VERIFY: "on", "off" or "auto" (the default)."""
+        # Read and normalize the env value.
         _tv = os.environ.get("LM_HUB_TLS_VERIFY", "").strip().lower()
+        # Truthy values mean "on".
         if _tv in ("1", "true", "yes", "on"):
             return "on"
+        # Explicit off values mean "off".
         if _tv in ("off", "never", "force-off", "disable", "disabled"):
             return "off"
         return "auto"
 
     def _hub_tls_policy_path(self) -> str:
+        """Path of the local file holding the hub-pushed TLS verify policy."""
         return os.path.join(self._mtls_material_dir(), "hub-tls-policy")
 
     def _read_hub_tls_policy(self) -> str:
+        """Saved hub TLS policy ("on", "auto" or "off"), or "" if none or invalid."""
+        # Read the file; a missing file means no policy.
         try:
+            # Read the saved value.
             with open(self._hub_tls_policy_path(), "r") as f:
                 v = f.read().strip().lower()
         except OSError:
             return ""
+        # Only accept a known mode.
         return v if v in ("on", "auto", "off") else ""
 
     async def _handle_set_tls_verify(self, data: dict) -> dict:
@@ -933,19 +1038,27 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         only when the effective mode changes (idempotent on every reconnect).
         ``on`` is refused unless the hub cert verifies from this node right now
         — applying it blind would lock the node out of the hub."""
+        # Validate the mode; skip role sub-spokes and loopback or non-TLS hubs.
         mode = str((data or {}).get("mode") or "").strip().lower()
+        # Reject unknown modes.
         if mode not in ("on", "auto", "off", "install"):
             return {"status": "ERROR", "message": f"invalid mode {mode!r}"}
+        # Role sub-spokes share the parent's connection.
         if getattr(self, "parent_spoke_id", ""):
             return {"status": "SUCCESS", "message": "skipped (role sub-spoke shares the parent's connection)"}
+        # Loopback or plain-ws hubs have nothing to verify.
         if self._hub_url_is_loopback(self.hub_url or "") or \
                 not (self.hub_url or "").lower().startswith("wss://"):
             return {"status": "SUCCESS", "message": "skipped (loopback/non-TLS hub URL)",
                     "effective": self._tls_verify_mode}
+        # Work out the new mode; only allow "on" if the hub cert verifies now.
         cur = self._tls_verify_mode
         new = self._tls_mode_from_env() if mode == "install" else mode
+        # Turning verify on needs a successful probe first.
         if new == "on" and cur != "on":
+            # Probe the hub; refuse if its cert doesn't verify.
             ok = await self._probe_hub_tls_verify()
+            # The probe failed or couldn't tell.
             if ok is not True:
                 logger.warning("SPOKE_SET_TLS_VERIFY: refusing 'on' — the hub cert does "
                                "not verify from this node (%s). Keeping %s.",
@@ -955,28 +1068,36 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                         "message": "hub cert does not verify from this node "
                                    "(deploy a trusted hub cert or set LM_HUB_CA_CERT); "
                                    f"keeping {cur}"}
+        # Save the policy (or remove it for "install").
         path = self._hub_tls_policy_path()
+        # "install" means go back to the install-time setting, so delete the saved policy.
         if mode == "install":
+            # A missing file is fine.
             try:
                 os.remove(path)
             except FileNotFoundError:
                 pass
         else:
             self._mtls_write_if_changed(path, mode + "\n", 0o644)
+        # Restart only when the effective mode changes.
         if new == cur:
             return {"status": "SUCCESS", "message": "already current", "effective": cur}
         logger.warning("SPOKE_SET_TLS_VERIFY: hub TLS verification %s → %s; restarting "
                        "to reconnect.", cur, new)
         self._tls_verify_mode = new
+        # Drain and restart so the new mode applies on the next connect.
         self._draining = True
         asyncio.create_task(self._deferred_restart_exit())
         return {"status": "SUCCESS", "effective": new,
                 "message": f"hub TLS verify {cur} → {new}; restarting"}
 
     def _hub_tls_marker_path(self) -> str:
+        """Path of the marker recording which hub host has passed TLS verification."""
         return os.path.join(self._mtls_material_dir(), "hub-tls-verified")
 
     def _hub_host_port(self):
+        """Host and port (default 443) from the hub URL."""
+        # Parse the URL and fill in 443 when no port is given.
         from urllib.parse import urlsplit
         u = urlsplit(self.hub_url)
         return (u.hostname or ""), (u.port or 443)
@@ -985,21 +1106,28 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         """True = the hub cert verifies (CA pin or system store, hostname checked);
         False = it was presented but does NOT verify; None = couldn't tell
         (network error)."""
+        # Work out where to connect; nothing to probe without a host.
         host, port = self._hub_host_port()
+        # No host means nothing to probe.
         if not host:
             return None
+        # Use the pinned CA if present, else the system store.
         try:
+            # Pinned CA file exists, so use it.
             if self._tls_ca_cert and os.path.isfile(self._tls_ca_cert):
                 ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
             else:
                 ctx = ssl.create_default_context()
         except Exception:  # noqa: BLE001
             return None
+        # Open a TLS connection; success means it verifies.
         try:
+            # Connect with a 10s timeout.
             _r, w = await asyncio.wait_for(
                 asyncio.open_connection(host, port, ssl=ctx, server_hostname=host),
                 timeout=10.0)
             w.close()
+            # Close the connection cleanly, ignoring errors.
             try:
                 await w.wait_closed()
             except Exception:  # noqa: BLE001
@@ -1014,22 +1142,32 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
 
     async def _resolve_auto_tls_verify(self) -> None:
         """AUTO mode: decide verify on/off for this connect (see __init__)."""
+        # Host used to match the ratchet marker.
         host, _port = self._hub_host_port()
+        # Already verified before (marker matches): always verify.
         try:
+            # Read the marker and check it names this hub.
             marker = self._hub_tls_marker_path()
+            # Compare the saved host with this hub.
             with open(marker, "r") as f:
                 ratcheted = f.read().strip() == host
         except Exception:  # noqa: BLE001
             marker, ratcheted = "", False
+        # Marker matches, so keep verifying.
         if ratcheted:
             self._tls_verify = True
             return
+        # Failed recently: stay unverified until the retry time.
         if time.time() < self._tls_auto_neg_until:
             self._tls_verify = False
             return
+        # Probe now; on success turn verify on and write the marker.
         ok = await self._probe_hub_tls_verify()
+        # The cert verified.
         if ok is True:
+            # Verified: switch verify on and record this hub in the marker.
             self._tls_verify = True
+            # Write the marker; failure just means we probe again next time.
             try:
                 self._mtls_write_if_changed(marker or self._hub_tls_marker_path(),
                                             host + "\n", 0o644)
@@ -1039,8 +1177,11 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             except Exception as e:  # noqa: BLE001
                 logger.warning("Hub TLS verified but could not persist the ratchet "
                                "marker: %s", e)
+            # Done; verify stays on.
             return
+        # Otherwise connect unverified, backing off an hour after a real failure.
         self._tls_verify = False
+        # A real verify failure (not a network error) blocks reprobing for an hour.
         if ok is False:
             self._tls_auto_neg_until = time.time() + 3600
             logger.warning("Hub TLS cert for %s does NOT verify against %s — "
@@ -1067,23 +1208,33 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         NOTHING (cert-less still connects under the permissive model, and the hub
         re-issues the hub-CA cert on the next connect). Best-effort: a missing/broken
         cert never breaks the transport."""
+        # Nothing to do without a context.
         if ctx is None:
             return ctx
+        # Never let a cert problem break the connection.
         try:
+            # Look for the hub-leg cert in the material dir first.
             cc = ck = ""
+            # Find the cert/key pair in the material dir.
             try:
+                # Look in the mTLS material folder.
                 cert_dir = self._mtls_material_dir()
                 _cc = os.path.join(cert_dir, "mtls-hub-client.crt")
                 _ck = os.path.join(cert_dir, "mtls-hub-client.key")
+                # Use them only if both files exist.
                 if os.path.isfile(_cc) and os.path.isfile(_ck):
                     cc, ck = _cc, _ck
             except Exception:  # noqa: BLE001
                 pass
+            # Otherwise try the env vars.
             if not (cc and ck):
+                # Read both paths from the environment.
                 _cc = os.getenv("LM_MTLS_HUB_CLIENT_CERT", "").strip()
                 _ck = os.getenv("LM_MTLS_HUB_CLIENT_KEY", "").strip()
+                # Use them only if both files exist.
                 if _cc and _ck and os.path.isfile(_cc) and os.path.isfile(_ck):
                     cc, ck = _cc, _ck
+            # Load it if found.
             if cc and ck:
                 ctx.load_cert_chain(cc, ck)
                 logger.info("wss: presenting hub-CA mTLS client cert to the hub (%s)", cc)
@@ -1092,6 +1243,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         except Exception as e:  # noqa: BLE001 - never break the transport on cert load
             logger.warning("wss: could not present mTLS client cert (%s) — "
                            "connecting cert-less", e)
+        # Return the context, with or without a client cert.
         return ctx
 
     def _apply_tcp_keepalive(self, websocket):
@@ -1113,28 +1265,38 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
           stuck send errors out in ~this many seconds and the spoke reconnects fast,
           instead of hanging on the 90s WS keepalive (or minutes of retransmits).
         All best-effort + env-overridable; never fatal to the transport."""
+        # Tuning is best effort; errors are ignored.
         try:
+            # Get the raw socket; nothing to do without one.
             tr = getattr(websocket, "transport", None)
             sock = tr.get_extra_info("socket") if tr is not None else None
+            # No socket to tune.
             if sock is None:
                 return
+            # Turn keepalive on and read the tuning values.
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             idle = int(_ws_keepalive_env("LM_WS_TCP_KEEPIDLE_S", 30.0))
             intvl = int(_ws_keepalive_env("LM_WS_TCP_KEEPINTVL_S", 10.0))
+            # Probe count before giving up, default 3.
             try:
                 cnt = max(1, int(os.environ.get("LM_WS_TCP_KEEPCNT", "3")))
             except Exception:  # noqa: BLE001
                 cnt = 3
+            # Max time unacked data may sit before the kernel drops the link (min 5s).
             try:
                 uto_ms = max(5000, int(os.environ.get("LM_WS_TCP_USER_TIMEOUT_MS", "60000")))
             except Exception:  # noqa: BLE001
                 uto_ms = 60000
+            # Apply each option the platform supports.
             if hasattr(socket, "TCP_KEEPIDLE"):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, idle)
+            # Interval between keepalive probes.
             if hasattr(socket, "TCP_KEEPINTVL"):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, intvl)
+            # Number of failed probes before the link is dropped.
             if hasattr(socket, "TCP_KEEPCNT"):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, cnt)
+            # Drop the link if sent data stays unacknowledged this long.
             if hasattr(socket, "TCP_USER_TIMEOUT"):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, uto_ms)
             logger.info("spoke→hub TCP keepalive on (idle=%ss intvl=%ss cnt=%s "
@@ -1149,8 +1311,10 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         log can say 'could not resolve the hub domain' plainly instead of a cryptic
         errno (the operator spent real time detective-ing exactly this). Covers
         socket.gaierror plus the wrapped OSError text websockets/asyncio surface."""
+        # A resolver error is always DNS.
         if isinstance(e, socket.gaierror):
             return True
+        # Otherwise look for DNS-failure wording.
         s = str(e).lower()
         return any(k in s for k in (
             "name or service not known", "temporary failure in name resolution",
@@ -1160,8 +1324,11 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
     def _hub_host(self) -> str:
         """Bare hostname of the pinned hub URL (scheme/port/path stripped), for
         DNS diagnostics."""
+        # Strip scheme, path, user info and port.
         try:
+            # Keep only the host[:port] part.
             u = str(self.hub_url or "").split("://", 1)[-1].split("/", 1)[0].rsplit("@", 1)[-1]
+            # IPv6 literal: return what is inside the brackets.
             if u.startswith("["):            # IPv6 literal
                 return u.split("]", 1)[0].lstrip("[")
             return u.split(":", 1)[0]        # strip :port
@@ -1204,33 +1371,43 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         The ``auto`` sentinel and empty string are returned unchanged
         (``_resolve_hub_url`` handles ``auto``).
         """
+        # Leave empty or "auto" alone.
         if not url or url == "auto":
             return url
+        # Add wss:// if no scheme, then split the URL.
         raw = url.strip()
+        # Default to wss://.
         if "://" not in raw:
             raw = "wss://" + raw
+        # Split the URL; give up and return it unchanged if it can't be parsed.
         try:
             from urllib.parse import urlsplit, urlunsplit
             parts = urlsplit(raw)
         except Exception:
             return url
+        # Add port 443 if no port was given.
         scheme = parts.scheme or "wss"
         netloc = parts.netloc
         host_part = netloc.rsplit("]", 1)[-1] if netloc else netloc
+        # Add :443 when no port is given.
         if netloc and ":" not in host_part:
             netloc = f"{netloc}:443"
             port = 443
         else:
             port = parts.port
+        # Port 443 is always TLS.
         if scheme == "ws" and port == 443:
             scheme = "wss"
             logger.info("Upgrading pinned %s → wss:// (port 443 is the hub TLS listener)", url)
+        # Add /ws/spoke to a bare :443 URL; trim trailing slashes otherwise.
         path = parts.path
+        # Bare :443 URL: add the spoke websocket path.
         if port == 443 and path in ("", "/"):
             path = "/ws/spoke"
             logger.info("Appending /ws/spoke to pinned URL (unified-443 spoke-WS path): %s", url)
         elif path not in ("", "/"):
             path = path.rstrip("/")
+        # Rebuild the URL without query or fragment.
         return urlunsplit((scheme, netloc, path, "", ""))
 
     @staticmethod
@@ -1244,6 +1421,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         treated as loopback too: the unified-443 hub speaks ``wss://`` on 443,
         so a ``ws://`` pin is either the legacy plaintext loopback listener
         (``:8765``) or an explicit plaintext loopback — either way same-box."""
+        # An empty URL is not loopback.
         if not url:
             return False
         u = url.lower()
@@ -1258,15 +1436,19 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         (mirroring the install-script discovery). Best-effort: on no result it
         leaves ``self.hub_url`` as the sentinel so the next reconnect retries —
         discovery is never fatal to the spoke."""
+        # Only when no hub URL is set.
         if self.hub_url not in ("", "auto", None):
             return
+        # Import the discovery helper (package or bare-module path).
         try:
             from .hub_discovery import discover_hub_url
         except ImportError:
             logger.warning("hub_discovery module unavailable — cannot auto-discover "
                            "the hub; pass --hub or set HUB_URL.")
             return
+        # Try discovery and use the result if found.
         url = discover_hub_url(timeout=5.0)
+        # Use the discovered URL if there is one.
         if url:
             self.hub_url = url
             logger.info(f"Auto-discovered hub at {url}")
@@ -1297,15 +1479,20 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         only the single-signature check ran) — the caller falls through to
         the PSK/refuse handling exactly as before this fallback existed.
         """
+        # Start unverified.
         verified = False
         matched_index = None
+        # Check the main signature against each known hub secret.
         for hs in self.hub_secrets:
+            # Compute the expected signature for this secret.
             expected_sig = hmac.new(
                 hs.encode(),
                 challenge.encode(),
                 hashlib.sha256
             ).hexdigest()
+            # A match against any secret verifies the hub.
             if hmac.compare_digest(expected_sig, signature):
+                # Mark it verified as the main signature.
                 verified = True
                 matched_index = 0
                 break
@@ -1326,25 +1513,35 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # ``verified``/``matched_index`` exactly as the single-signature
         # check left them, i.e. today's behavior, byte-for-byte.
         if not verified and isinstance(signatures_field, list):
+            # Compare each extra signature against each known secret.
             for hs in self.hub_secrets:
+                # Compute the expected signature for this secret.
                 expected_sig = hmac.new(
                     hs.encode(),
                     challenge.encode(),
                     hashlib.sha256
                 ).hexdigest()
+                # Check every signature in the list.
                 for idx, sig in enumerate(signatures_field):
+                    # Skip anything that isn't a string.
                     if not isinstance(sig, str):
                         continue
+                    # Remember which signature matched.
                     if hmac.compare_digest(expected_sig, sig):
+                        # Mark it verified and remember the index.
                         verified = True
                         matched_index = idx
                         break
+                # Stop once a match is found.
                 if verified:
                     break
 
+        # Return whether it verified and which signature matched.
         return verified, matched_index
 
     async def _connect_and_serve(self):
+        """Connect to the hub, authenticate both ways, then run the receive loop until the connection ends.
+        """
         # Disable per-message-deflate. A deflate-context desync between this
         # spoke's client and the hub manifests as "decompression failed"
         # (code 1002) and garbled frames that fail json.loads with
@@ -1368,6 +1565,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # MITM exposure and must not be silent. Loopback/legacy ws:// stays INFO.
         _is_loopback = ("127.0.0.1" in self.hub_url or "localhost" in self.hub_url
                         or "ws://" in self.hub_url.lower())
+        # Describe the TLS mode for the log line.
         if ssl_ctx is None:
             _tls_mode = "plaintext (loopback/legacy)"
         elif self._tls_verify and self._tls_ca_cert:
@@ -1376,6 +1574,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             _tls_mode = "TLS verified (system trust store)"
         else:
             _tls_mode = "TLS unverified (self-signed hub cert)"
+        # Warn loudly when a remote hub's cert is not being checked.
         if "unverified" in _tls_mode and not _is_loopback:
             logger.warning("Connecting to hub %s [%s] — hub cert NOT authenticated; "
                            "an on-path MITM can read/forge the wire. Set "
@@ -1403,6 +1602,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             ping_interval=_ws_keepalive_env("LM_WS_PING_INTERVAL_S", 30.0),
             ping_timeout=_ws_keepalive_env("LM_WS_PING_TIMEOUT_S", 90.0),
         ) as websocket:
+            # Remember the socket, tune TCP keepalive and note the contact time.
             self._hub_ws = websocket
             self._apply_tcp_keepalive(websocket)   # keep the flow alive + bound a stuck send
             self._last_hub_contact = time.time()  # TCP+TLS+WS up = hub reachable
@@ -1411,12 +1611,16 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             self._loop = asyncio.get_running_loop()
             # 1. Spoke Authentication Handshake
             auth_payload = {"spoke_id": self.spoke_id}
+            # Add each optional identity field we have.
             if self.secret:
                 auth_payload["secret"] = self.secret
+            # Module type, used by the hub to route commands.
             if self.module_type:
                 auth_payload["module_type"] = self.module_type
+            # Onboarding PSK, used for zero-touch approval.
             if self.onboarding_psk:
                 auth_payload["onboarding_psk"] = self.onboarding_psk
+            # Tenant hint, used to place the spoke in a tenant.
             if self.tenant_id_hint:
                 auth_payload["tenant_id_hint"] = self.tenant_id_hint
             # Stable install UUID + current OS hostname: lets the hub detect a
@@ -1425,6 +1629,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             # stranger. Empty install_uuid = .env unwritable → hub skips correlation.
             if self.install_uuid:
                 auth_payload["install_uuid"] = self.install_uuid
+            # Hostname shown in the WebUI.
             if self.hostname:
                 auth_payload["hostname"] = self.hostname
             # Subclasses (e.g. agent RoleConnection) can add extra auth fields
@@ -1443,25 +1648,34 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             if not getattr(self, "parent_spoke_id", ""):
                 auth_payload["mtls_csr"] = 1
 
+            # Send the auth frame.
             await websocket.send(json.dumps(auth_payload, separators=(',', ':')))
             logger.info(f"Connected to Lab Manager Hub as {self.spoke_id}. Performing mutual authentication...")
 
             # 2. Hub Mutual Authentication (Verify Hub's identity)
             # H4: reset capability before each attempt (downgrade safety).
             self.hub_enc_capable = False
+            # Wait for the hub's proof and check it.
             try:
+                # Wait up to 5s for the hub's reply and parse it.
                 hub_proof_json = await asyncio.wait_for(websocket.recv(), timeout=5.0)
                 hub_proof = json.loads(hub_proof_json)
 
+                # The hub sent its identity proof.
                 if hub_proof.get("status") == "HUB_VERIFIED":
+                    # Pull out the challenge and signature(s).
                     challenge = hub_proof.get("challenge")
                     signature = hub_proof.get("signature")
 
+                    # Check the hub's signature against our known hub secrets.
                     if self.hub_secrets:
+                        # Check the signature against each known secret.
                         verified, matched_signature_index = self._verify_hub_challenge(
                             challenge, signature, hub_proof.get("signatures"))
 
+                        # Verified with a stored secret.
                         if verified:
+                            # Log success.
                             logger.info("Hub identity verified successfully.")
                             # H4: parse the hub's encryption capability. Combined
                             # with encryption_enabled() so LM_APP_ENCRYPTION=0
@@ -1505,6 +1719,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                             # the approved connect) instead of refusing forever.
                             psk_sig = hub_proof.get("psk_signature")
                             psk_verified = False
+                            # Check the PSK signature if we have an onboarding PSK.
                             if self.onboarding_psk and psk_sig:
                                 expected_psk_sig = hmac.new(
                                     self.onboarding_psk.encode(),
@@ -1559,12 +1774,14 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                             #     (re-deliver the current hub_secret, or flip
                             #     LM_HUB_TLS_VERIFY=1 once the hub cert is issued).
                             if psk_verified:
+                                # Verified by PSK: drop the stale secrets and accept the hub.
                                 logger.warning("Hub identity verified via onboarding PSK (stored hub_secret is stale) — discarding hub_secret(s), falling back to zero-touch so the hub can re-provision a fresh hub_secret + mTLS cert.")
                                 self.hub_secrets = []
                                 self._hub_secret_warned = True
                                 self._touch_healthy_marker()
                                 await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
                             elif self._tls_verify:
+                                # Verified only by TLS: drop the stale secrets and accept the hub.
                                 logger.warning("Hub identity verification failed for all known secrets — TLS verifies the hub, so treating as a stale rotation: discarding hub_secret(s), falling back to zero-touch (pending approval).")
                                 self.hub_secrets = []
                                 self._hub_secret_warned = True
@@ -1574,6 +1791,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                                 self._touch_healthy_marker()
                                 await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
                             else:
+                                # Nothing verifies the hub: refuse it.
                                 logger.error("Hub identity verification failed for all known secrets AND TLS verify is OFF — refusing unverified hub (possible MITM). Keeping hub_secret(s); close + back off. Re-onboard OOB or set LM_HUB_TLS_VERIFY=1.")
                                 self._hub_secret_warned = True
                                 # The code booted fine — the trust failure is
@@ -1581,12 +1799,14 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                                 # the update watchdog roll back a good build over
                                 # it. Mark healthy, then refuse the unverified hub.
                                 self._touch_healthy_marker()
+                                # Close the socket, ignoring errors.
                                 try:
                                     await websocket.close(1008, "Hub identity unverified (TLS verify off)")
                                 except Exception:
                                     pass
                                 return
                     else:
+                        # No hub secrets yet: warn once and accept the hub.
                         if not self._hub_secret_warned:
                             logger.warning("Hub secrets not configured. Skipping Hub identity verification (Insecure).")
                             self._hub_secret_warned = True
@@ -1596,6 +1816,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                         self._touch_healthy_marker()
                         await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
                 else:
+                    # Any other reply is a failed handshake.
                     logger.error(f"Unexpected response during Hub verification: {hub_proof.get('status')}")
                     await websocket.close(1008, "Mutual authentication failed")
                     return
@@ -1608,15 +1829,19 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                         and hasattr(e, 'rcvd') and e.rcvd
                         and e.rcvd.code == 1008
                         and "Authentication" in (e.rcvd.reason or "")):
+                    # Clear the rejected secret so the next attempt uses zero-touch onboarding.
                     logger.warning(
                         "Hub rejected secret for spoke '%s' — clearing and falling back to zero-touch.",
                         self.spoke_id)
                     self.secret = None
                     self.signer = None
+                    # Re-allow the warning and save the cleared secret.
                     self._hub_secret_warned = False  # allow the insecure-skip warning once on next attempt
                     self._persist_session_secret("")
+                # Give up on this connection; run() reconnects.
                 return
             except Exception as e:
+                # Timeout or other error: close and give up on this connection.
                 logger.error(f"Hub verification timed out or failed: {e}")
                 # Guard the close: when the original failure was a handshake
                 # timeout on an already-broken socket, websocket.close() can
@@ -1636,11 +1861,13 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             # Heartbeat — driven by a dedicated OS thread on its own clock so a
             # stalled event loop (sync-I/O in a command handler) can't drift the
             # cadence or hide the stall. See _heartbeat_thread_target.
+            # Start the heartbeat thread, log relay, health heartbeat and any subclass tasks.
             _hb_stop = threading.Event()
             _hb_thread = threading.Thread(
                 target=self._heartbeat_thread_target,
                 args=(websocket, asyncio.get_running_loop(), _hb_stop),
                 name=f"lm-heartbeat-{self.spoke_id}", daemon=True)
+            # Start the heartbeat thread plus the log relay and health heartbeat tasks.
             _hb_thread.start()
             _lr_task = asyncio.create_task(self._log_relay_task(websocket))
             # Per-module health heartbeat — emits a greppable [heartbeat] line
@@ -1676,9 +1903,12 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
 
             # Main Message Loop
             try:
+              # Handle each frame the hub sends.
               async for message in websocket:
+                # Any frame proves the hub is reachable; decode and verify it.
                 self._last_hub_contact = time.time()  # any frame = hub reachable
                 msg, _ok = self._decode_frame(message)
+                # Drop frames that fail verification.
                 if not _ok:
                     # _decode_frame returns ok=False for two distinct reasons:
                     # a genuinely bad frame (bad HMAC / tamper / undecryptable)
@@ -1688,6 +1918,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                     # deferred one is replayed by _drain_pending_encrypted.
                     continue
 
+                # Pull out the command type, data and message id.
                 payload = msg.get("payload", {})
                 cmd_type = payload.get("type")
                 data = payload.get("data", {})
@@ -1701,6 +1932,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                         self.spoke_id,
                     )
                     continue
+                # The admin approved this spoke.
                 if cmd_type == "APPROVED":
                     logger.info("Spoke '%s' approved by admin. Ready for commands.", self.spoke_id)
                     continue
@@ -1710,8 +1942,10 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 # data.correlation_id and the handler return dict as data.result.
                 # Resolve the matching waiter future (no ack, no module dispatch).
                 if cmd_type == "HUB_RESPONSE":
+                    # Find and complete the waiter for this reply.
                     corr = data.get("correlation_id")
                     fut = self._hub_response_futures.pop(corr, None)
+                    # Complete the waiter if it is still waiting.
                     if fut is not None and not fut.done():
                         fut.set_result(data.get("result") or {})
                     continue
@@ -1723,6 +1957,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 # The spoke does the heavy lifting: coalesce/merge its outbound
                 # updates LOCALLY and slow its send cadence (apply_backpressure).
                 if cmd_type == "LM_BACKPRESSURE":
+                    # Apply the hub's backpressure settings.
                     try:
                         self.apply_backpressure(
                             int(data.get("level", 0)),
@@ -1731,18 +1966,21 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                         )
                     except Exception as e:  # noqa: BLE001 — never crash the loop
                         logger.debug("apply_backpressure failed: %s", e)
+                    # Not a command; nothing to ack.
                     continue
 
                 # Backpressure: cap in-flight handlers so a sustained overload
                 # can't grow unbounded. Reject with a fast ERROR ack so the hub
                 # doesn't pile up timed-out requests waiting on a stalled spoke.
                 if len(cmd_tasks) >= self._max_inflight_commands():
+                    # Too many commands in flight: reject this one with an error ack.
                     logger.warning("command queue full (%d in-flight); rejected %s",
                                    len(cmd_tasks), cmd_type)
                     await self._send_cmd_result(
                         websocket, corr_id,
                         {"status": "ERROR", "message": "spoke command queue full"},
                         cmd_send_lock)
+                    # Move on to the next frame.
                     continue
                 # Handle + ack in a bounded concurrent task so the receive loop
                 # keeps draining the socket while a slow handler runs.
@@ -1751,6 +1989,8 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 cmd_tasks.add(task)
                 task.add_done_callback(cmd_tasks.discard)
             finally:
+                # Connection ended: clear state, stop the heartbeat and cancel every
+                # per-connection task. First, mark the hub as disconnected.
                 self._hub_ws = None
                 # Drop the bootstrap-race replay context + any still-pending
                 # deferred frames — they belong to THIS (now-closed) connection.
@@ -1759,9 +1999,12 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 _hb_stop.set()  # signal the heartbeat thread to exit
                 _hb_thread.join(timeout=2.0)  # short — it ticks on its own clock
                 _lr_task.cancel()
+                # Cancel the background tasks.
                 _hh_task.cancel()
+                # Cancel any extra per-connection tasks.
                 for _t in _extra_tasks:
                     _t.cancel()
+                # Cancel any running command handlers.
                 for _t in list(cmd_tasks):
                     _t.cancel()
                 await asyncio.gather(
@@ -1791,20 +2034,27 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         drift-free, and the on-the-second tick resumes with no missed beat the
         moment the loop unblocks.
         """
+        # Send a heartbeat every 30s until told to stop.
         while not stop_event.is_set():
+            # Build a signed heartbeat frame.
             try:
+                # Stamp it with the current time.
                 ts = round(time.time(), 6)
                 msg = {
                     "header": {"message_id": str(uuid.uuid4()), "timestamp": ts,
                                "sender_id": self.spoke_id, "destination_id": "hub"},
                     "payload": {"type": "HEARTBEAT", "data": {}}
                 }
+                # Sign and serialize it.
                 frame = self._encode_frame(msg)
             except Exception as e:  # noqa: BLE001 — encode is sync; never kill the thread
+                # Encoding failed: log, wait, and try again.
                 logger.warning("Heartbeat encode failed: %s", e)
+                # Wait before retrying; stop if asked.
                 if stop_event.wait(30.0):
                     return
                 continue
+            # Send it on the event loop and wait for it to finish.
             try:
                 fut = asyncio.run_coroutine_threadsafe(websocket.send(frame), loop)
                 fut.result(timeout=self.HEARTBEAT_SEND_DEADLINE_S)
@@ -1832,9 +2082,13 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 # unreliable). Rate-limited so a persistent stall can't flood the
                 # log. Stacks go to stderr → the module log (StandardError=append).
                 _now = time.time()
+                # Dump thread stacks at most once a minute.
                 if _now - getattr(self, "_last_stall_dump", 0.0) > 60.0:
+                    # Record when this dump happened.
                     self._last_stall_dump = _now
+                    # Dumping stacks is best effort.
                     try:
+                        # Print every thread's stack to stderr.
                         import faulthandler as _fh, sys as _sys
                         print("=== lm loop-stall: thread stacks (heartbeat watchdog) ===",
                               file=_sys.stderr, flush=True)
@@ -1851,6 +2105,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             except Exception as e:  # noqa: BLE001
                 logger.warning("Heartbeat thread error: %s", e)
                 return
+            # Wait 30s (or until told to stop).
             if stop_event.wait(30.0):
                 return
 
@@ -1873,9 +2128,11 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         ``self._bp_level``); domain modules override to do the real conflation.
 
         level: 0 resume · 1 this spoke is the offender · 2 fleet-wide."""
+        # Record the requested level, coalescing flag and minimum interval.
         self._bp_level = int(level)
         self._bp_coalesce = bool(coalesce)
         self._bp_min_interval = max(0.0, float(min_interval_s))
+        # Log when backpressure turns on or off.
         if level:
             logger.info("backpressure ENGAGED (level=%d, min_interval=%.1fs) — "
                         "coalescing outbound locally", level, self._bp_min_interval)
@@ -1892,12 +2149,16 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
     # Tunable via env so an overloaded spoke can be adjusted without a code
     # change. Defaults: 8 concurrent handlers, 64 in-flight (waiting + running).
     def _max_concurrent_commands(self) -> int:
+        """Max command handlers running at once (env-overridable, default 8)."""
+        # Read the env override, never below 1; fall back to the default.
         try:
             return max(1, int(os.environ.get("LM_SPOKE_MAX_CONCURRENT_COMMANDS", "8")))
         except Exception:
             return 8
 
     def _max_inflight_commands(self) -> int:
+        """Max commands queued or running before new ones are rejected (default 64)."""
+        # Read the env override, never below 1; fall back to the default.
         try:
             return max(1, int(os.environ.get("LM_SPOKE_MAX_INFLIGHT_COMMANDS", "64")))
         except Exception:
@@ -1908,6 +2169,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         concurrent handlers don't interleave WS frames. A send failure (hub
         disconnected mid-handle) is logged at DEBUG and swallowed — the receive
         loop's outer finally owns teardown."""
+        # Build the signed result frame.
         ts = round(time.time(), 6)
         resp = {
             "correlation_id": corr_id,
@@ -1915,8 +2177,11 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                        "sender_id": self.spoke_id, "destination_id": "hub"},
             "payload": {"type": "COMMAND_RESULT", "data": result}
         }
+        # Sign and serialize it.
         _wire = self._encode_frame(resp)
+        # Send it under the lock.
         try:
+            # Hold the lock so frames don't interleave.
             async with send_lock:
                 await websocket.send(_wire)
         except Exception as e:  # noqa: BLE001 — socket closed mid-handle
@@ -1929,9 +2194,13 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         the hub matches it to the outstanding waiter. Serialized by ``send_lock``
         (same lock as the COMMAND_RESULT ack) so frames don't interleave. Runs as
         a background task; cancelled the instant the handler returns."""
+        # Every interval, send a signed SPOKE_PROGRESS frame under the send lock.
         try:
+            # Loop until cancelled.
             while True:
+                # Wait one interval.
                 await asyncio.sleep(_KEEPALIVE_INTERVAL_S)
+                # Build the progress frame tied to the hub's request id.
                 frame = {
                     "correlation_id": corr_id,
                     "header": {"message_id": str(uuid.uuid4()),
@@ -1940,7 +2209,9 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                     "payload": {"type": "SPOKE_PROGRESS",
                                 "data": {"command": cmd_type, "state": "working"}},
                 }
+                # Sign it and send it under the lock.
                 _wire = self._encode_frame(frame)
+                # Send under the lock.
                 async with send_lock:
                     await websocket.send(_wire)
                 logger.debug("SPOKE_PROGRESS keepalive sent for %s (%s)",
@@ -1961,7 +2232,9 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         dispatch order: system command → module match → first-module fallback →
         ``*_GET_STATUS`` get_status() fallback.
         """
+        # Hold a concurrency slot for the whole handler.
         async with sem:
+            # No result yet, and no module has claimed the command.
             result: Optional[Dict[str, Any]] = None
             handled_by_module = None
             # Keepalive: for potentially-slow commands, spawn a background task
@@ -1970,19 +2243,23 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             # _emit_spoke_progress). Cancelled in the finally the moment the
             # handler returns; fast commands finish before the first interval.
             _prog_task = None
+            # Start the keepalive for commands known to be slow.
             if cmd_type in _KEEPALIVE_CMDS:
                 _prog_task = asyncio.create_task(
                     self._emit_spoke_progress(websocket, corr_id, cmd_type, send_lock))
+            # Any unexpected error becomes an ERROR result instead of crashing.
             try:
                 # First, try handling as a system command
                 result = await self.handle_system_command(cmd_type, data)
 
                 # Route to the appropriate module if not handled by system
                 if result is None:
+                    # Find the first module that claims this command.
                     for module_name, module in self.modules.items():
                         # We check if the command_type is specific to this module
                         # In a real system, cmd_type might be "pxmx.get_vms"
                         if cmd_type.startswith(module_name) or self._module_handles_command(module, cmd_type):
+                            # Run the module's handler; its errors become an ERROR result.
                             try:
                                 result = await module.handle_command(cmd_type, data)
                             except asyncio.CancelledError:
@@ -1996,12 +2273,15 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                                 logger.exception("Module %s raised handling %s", module_name, cmd_type)
                                 result = {"status": "ERROR",
                                           "message": f"{type(e).__name__}: {e}"}
+                            # Remember which module handled it.
                             handled_by_module = module
                             break
 
+                    # No module matched, so try the first module.
                     if result is None and self.modules:
                         # Fallback: Try the first module if no specific match
                         first_mod = list(self.modules.values())[0]
+                        # Run it; its errors become an ERROR result.
                         try:
                             result = await first_mod.handle_command(cmd_type, data)
                         except asyncio.CancelledError:
@@ -2010,6 +2290,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                             logger.exception("Fallback module raised handling %s", cmd_type)
                             result = {"status": "ERROR",
                                       "message": f"{type(e).__name__}: {e}"}
+                        # Remember which module handled it.
                         handled_by_module = first_mod
 
                 # Fallback for *_GET_STATUS commands: if the module returned an error
@@ -2017,25 +2298,36 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 # This ensures that status commands like CS_GET_STATUS work even when
                 # a module's handle_command() doesn't explicitly implement them.
                 if cmd_type and cmd_type.endswith("_GET_STATUS") and self.modules:
+                    # Fall back when there is no result or the result is an error.
                     needs_fallback = False
+                    # No result at all.
                     if result is None:
                         needs_fallback = True
                     elif isinstance(result, dict) and result.get("status") == "ERROR":
                         needs_fallback = True
 
+                    # Try get_status() on the modules.
                     if needs_fallback:
                         # Try the module that was asked first, then any module
                         candidate_modules = []
+                        # Put the module that handled the command first.
                         if handled_by_module is not None:
                             candidate_modules.append(handled_by_module)
+                        # Then add every other module.
                         for m in self.modules.values():
+                            # Skip any already in the list.
                             if m not in candidate_modules:
                                 candidate_modules.append(m)
 
+                        # Use the first module whose get_status() returns a dict.
                         for module in candidate_modules:
+                            # A failing get_status() just moves on to the next module.
                             try:
+                                # Ask the module for its status.
                                 fallback_status = await module.get_status()
+                                # Accept the first dict result.
                                 if isinstance(fallback_status, dict):
+                                    # Use it as the result and stop.
                                     result = fallback_status
                                     logger.info(f"Module did not handle {cmd_type} in handle_command(); "
                                                 f"used get_status() fallback successfully.")
@@ -2052,6 +2344,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 # frame races the COMMAND_RESULT (which resolves the waiter).
                 if _prog_task is not None:
                     _prog_task.cancel()
+            # Send the result back to the hub.
             await self._send_cmd_result(websocket, corr_id, result, send_lock)
 
     async def _health_heartbeat_task(self, websocket):
@@ -2069,19 +2362,25 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # spoke-down traffic light + alerting). A once-a-minute line was just log
         # noise. Override with LM_HEARTBEAT_INTERVAL_S if faster triage is wanted.
         interval = 900
+        # Use the env override if valid, never below 10s.
         try:
             interval = max(10, int(os.environ.get("LM_HEARTBEAT_INTERVAL_S", "900")))
         except Exception:
             pass
+        # Log a heartbeat line every interval until cancelled.
         start = time.time()
+        # Loop until cancelled.
         while True:
+            # A non-cancel error stops the task quietly.
             try:
+                # Log the heartbeat line with uptime and relay queue size.
                 uptime = int(time.time() - start)
                 logger.info(
                     "[heartbeat] ok module=%s spoke_id=%s hub=connected uptime_s=%s queue=%d",
                     self.module_type or "unknown", self.spoke_id, uptime,
                     self._log_relay_queue.qsize(),
                 )
+                # Wait for the next tick.
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 raise
@@ -2121,11 +2420,13 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # a single handler covers all of them; a node with no request server just
         # holds the config harmlessly. Idempotent (full replace); empty clears.
         if cmd_type == "NODE_CANARY_SET":
+            # Import the canary config setter and apply the new entries.
             try:
                 from ..security.node_canary import set_config
             except ImportError:  # bare-module path (production: core/src on sys.path)
                 from security.node_canary import set_config  # type: ignore
             n = set_config(data.get("entries") or [])
+            # Report how many entries were set.
             return {"status": "SUCCESS", "count": n}
 
         # Remote Console (WebUI → troubleshooting). The hub only ever dispatches
@@ -2155,10 +2456,12 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # WebUI; it is used for this single call and never stored or logged.
         if cmd_type in ("OS_UPDATE_CHECK", "OS_UPDATE_APPLY",
                         "OS_UPDATE_APPLY_PACKAGES", "OS_REBOOT", "OS_FIX_ACCESS"):
+            # Import the OS-update helpers, then run the requested one on a worker thread.
             try:
                 from ..os_update import check_updates, apply_updates, reboot_node, fix_access
             except ImportError:  # bare-module path (production: core/src on sys.path)
                 from os_update import check_updates, apply_updates, reboot_node, fix_access  # type: ignore
+            # Fix access with the one-time credentials.
             if cmd_type == "OS_FIX_ACCESS":
                 res = await asyncio.to_thread(
                     fix_access, str(data.get("username") or "root"),
@@ -2173,21 +2476,26 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 res = await asyncio.to_thread(reboot_node)
             else:
                 res = await asyncio.to_thread(apply_updates)
+            # Tag the result with this node's id.
             res.setdefault("status", "SUCCESS")
             res["node_id"] = getattr(self, "spoke_id", "") or ""
             return res
 
+        # Remote console command.
         if cmd_type == "RUN_COMMAND":
+            # Import the command runner and run it on a worker thread.
             try:
                 from ..command_runner import run_local_command
             except ImportError:  # bare-module path (production: core/src on sys.path)
                 from command_runner import run_local_command  # type: ignore
+            # Run the command with the shell flag and timeout from the hub.
             res = await asyncio.to_thread(
                 run_local_command,
                 data.get("command", ""),
                 bool(data.get("allow_shell", False)),
                 float(data.get("timeout", 30.0) or 30.0),
             )
+            # Return the runner's output.
             return {"status": "SUCCESS", "result": res}
         # The hub's Agents tile / cs-bridge fan GET_AGENTS out to spokes. Answer it
         # HERE for every spoke so it's never routed to a module — a non-agent
@@ -2198,16 +2506,21 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # verbatim (minus the non-serializable ws), so agent-hosting spokes report
         # the same data their module handler did.
         if cmd_type == "GET_AGENTS":
+            # Build a list of connected agents without their sockets.
             ca = getattr(self, "connected_agents", None) or {}
             pa = getattr(self, "pending_agents", None) or {}
             agents = []
+            # Copy each agent's info without its socket and fill in defaults.
             for aid, info in ca.items():
+                # Copy the info minus the socket.
                 entry = {k: v for k, v in (info or {}).items() if k != "ws"}
                 entry["agent_id"] = aid
                 entry.setdefault("hostname", aid)
                 entry.setdefault("version", "unknown")
                 entry.setdefault("status", "connected")
+                # Add it to the list.
                 agents.append(entry)
+            # List pending agents and return both lists.
             pending = [{"agent_id": aid, "status": "pending"} for aid in pa]
             return {"status": "SUCCESS", "agents": agents, "pending_agents": pending}
 
@@ -2224,26 +2537,32 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # no such attribute and falls through to the module dispatch below,
         # same as before.
         if cmd_type == "GET_NODE_STATS" and hasattr(self, "connected_agents"):
+            # Import the node-stats aggregator and delegate to it.
             try:
                 from .pxmx_node_vm_aggregation import get_node_stats as _pxmx_get_node_stats
             except ImportError:  # bare-module path (production: core/src/messaging on sys.path)
                 from pxmx_node_vm_aggregation import get_node_stats as _pxmx_get_node_stats  # type: ignore
             return await _pxmx_get_node_stats(self, data)
 
+        # Proxmox VM list on an agent-hosting spoke.
         if cmd_type in ("PXMX_LIST_VMS", "GET_VM_LIST", "AGENT_GET_VM_LIST") \
                 and hasattr(self, "connected_agents"):
+            # Import the VM-list aggregator and delegate to it.
             try:
                 from .pxmx_node_vm_aggregation import list_vms as _pxmx_list_vms
             except ImportError:  # bare-module path (production: core/src/messaging on sys.path)
                 from pxmx_node_vm_aggregation import list_vms as _pxmx_list_vms  # type: ignore
             return await _pxmx_list_vms(self, data)
 
+        # Change this spoke's log level.
         if cmd_type in ("SPOKE_SET_LOG_LEVEL", "SET_LOG_LEVEL"):
+            # Switch debug logging on or off.
             enabled = data.get("enabled", False)
             level = set_log_level(enabled)
             logger.info(f"Log level set to {logging.getLevelName(level)}")
             return {"status": "SUCCESS", "message": f"Log level set to {logging.getLevelName(level)}"}
 
+        # Truncate the local log files.
         if cmd_type == "CLEAR_LOGS":
             # WebUI "Clear Logs" — truncate every on-disk /var/log/lm/*.log on
             # this spoke/agent box in place (O_TRUNC, same inode) so the open
@@ -2265,8 +2584,11 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         if cmd_type == "SPOKE_GET_STATUS":
             return await self._get_module_status()
 
+        # Hub-triggered self-update.
         if cmd_type == "SPOKE_UPDATE":
+            # The update needs a repo URL.
             repo_url = data.get("repo_url")
+            # Fail if no repo URL was sent.
             if not repo_url:
                 return {"status": "ERROR", "message": "Missing repo_url for update"}
             # lm/core source (optional). When the hub threads core_repo_url, the
@@ -2304,8 +2626,10 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                             "ignoring duplicate re-delivery.")
                 return {"status": "SUCCESS",
                         "message": "update already in progress"}
+            # Mark the update as running and run it on a worker thread.
             self._spoke_update_in_progress = True
             self._draining = True  # hub queues request/reply pushes; we os._exit at the end
+            # Run the update off the event loop.
             try:
                 return await asyncio.to_thread(
                     self._perform_self_update_sync, repo_url,
@@ -2326,16 +2650,22 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 # HEAD advance — the pulled-but-not-restarted trap.
                 self._draining = False
 
+        # Store a new hub identity secret.
         if cmd_type == "SPOKE_SET_HUB_SECRET":
+            # Add the new hub secret to the front of a 3-entry window and save it.
             new_secret = data.get("hub_secret")
+            # Only act if a secret was sent.
             if new_secret:
+                # Add it to the front and keep the newest three.
                 self.hub_secrets.insert(0, new_secret)
                 self.hub_secrets = self.hub_secrets[:3] # Window of 3
                 self._persist_hub_secret(new_secret)
                 logger.info(f"Hub secret updated for {self.spoke_id}. Current window size: {len(self.hub_secrets)}")
                 return {"status": "SUCCESS", "message": "Hub secret updated successfully"}
+            # No secret was sent.
             return {"status": "ERROR", "message": "Missing hub_secret in data"}
 
+        # Store the recovery PSK.
         if cmd_type == "SPOKE_SET_RECOVERY_PSK":
             # Arrives on every approved connect and is idempotent — the hub
             # derives it from a root it never rotates, so the value is stable for
@@ -2343,14 +2673,20 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             # to survive the months of downtime that push this spoke past the
             # root-secret rotation window.
             new_psk = data.get("recovery_psk")
+            # Only act if a PSK was sent.
             if new_psk:
+                # Save it only if it changed.
                 if new_psk != self.recovery_psk:
+                    # Keep it in memory and in .env.
                     self.recovery_psk = new_psk
                     self._persist_recovery_psk(new_psk)
                     logger.info("Recovery PSK provisioned for %s.", self.spoke_id)
+                # Ack the stored PSK.
                 return {"status": "SUCCESS", "message": "Recovery PSK stored"}
+            # No PSK was sent.
             return {"status": "ERROR", "message": "Missing recovery_psk in data"}
 
+        # Configure the hub-contact watchdog.
         if cmd_type == "SPOKE_SET_WATCHDOG":
             # Fleet-wide hub-contact watchdog config, pushed by the hub on every
             # (re)connect and on each WebUI save. Persist it locally so it applies
@@ -2360,18 +2696,23 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             # effect without a restart.
             wd = data or {}
             cfg = {"enabled": bool(wd.get("enabled", False))}
+            # Copy across any tuning values the hub sent.
             for k in ("service_s", "reboot_s", "reboot_grace_s", "sleep_s", "max_runs"):
+                # Skip values that are not set.
                 if wd.get(k) is not None:
                     cfg[k] = wd[k]
+            # Save the config and report the new state.
             self._hcw_save_config(cfg)
             logger.info("SPOKE_SET_WATCHDOG: hub-contact watchdog %s (service@%ss reboot@%ss).",
                         "ENABLED" if cfg["enabled"] else "disabled",
                         cfg.get("service_s", "def"), cfg.get("reboot_s", "def"))
             return {"status": "SUCCESS", "enabled": cfg["enabled"]}
 
+        # Change the hub TLS verify policy.
         if cmd_type == "SPOKE_SET_TLS_VERIFY":
             return await self._handle_set_tls_verify(data or {})
 
+        # Point the spoke at a new hub URL.
         if cmd_type == "SPOKE_SET_HUB_URL":
             # Hub-initiated repoint: the operator changed the hub's external
             # URL/DNS name in Setup → Spokes & Agents (global_config["hub"][
@@ -2396,14 +2737,19 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             #     idempotent no-op. This is what makes the reconcile-on-every-
             #     connect path safe: apply once → restart → reconnect → pushed
             #     URL == current → no-op. No restart loop.
+            # Validate and normalize the new URL.
             new_url = (data.get("hub_url") or "").strip()
+            # The URL is required.
             if not new_url:
                 return {"status": "ERROR", "message": "Missing hub_url in data"}
             new_norm = self._normalize_hub_url(new_url)
+            # Reject an empty result or the "auto" sentinel.
             if not new_norm or new_norm == "auto":
                 return {"status": "ERROR",
                         "message": "Invalid hub_url (empty or 'auto' sentinel)"}
+            # Skip when the current URL is loopback, auto, or already the same.
             cur = self.hub_url
+            # Loopback stays on loopback.
             if self._hub_url_is_loopback(cur):
                 logger.info(
                     "SPOKE_SET_HUB_URL: current hub URL is loopback (%s); "
@@ -2412,6 +2758,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 return {"status": "SUCCESS",
                         "message": "skipped (loopback) — co-located spoke keeps "
                                    "dialing loopback"}
+            # Auto-discovering spokes find the hub themselves.
             if cur in ("", "auto", None):
                 logger.info(
                     "SPOKE_SET_HUB_URL: current hub URL is the auto sentinel; "
@@ -2419,6 +2766,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                     "and will follow the hub's new advertisement).", new_norm)
                 return {"status": "SUCCESS",
                         "message": "skipped (auto) — spoke keeps auto-discovering"}
+            # Already on this URL.
             if new_norm == self._normalize_hub_url(cur):
                 logger.debug("SPOKE_SET_HUB_URL: already on %s; no-op.", new_norm)
                 return {"status": "SUCCESS", "message": "already current"}
@@ -2434,14 +2782,19 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 "to the new hub address.", cur, new_norm)
             self._persist_secret_to_env("HUB_URL", new_norm)
             self.hub_url = new_norm  # in case the deferred exit is interrupted
+            # Drain and restart after the ack goes out.
             self._draining = True  # hub queues request/reply pushes during the exit window
             asyncio.create_task(self._deferred_restart_exit())
             return {"status": "SUCCESS",
                     "message": f"repointing to {new_norm}; restarting to reconnect"}
 
+        # Session key rotation.
         if cmd_type == "SPOKE_UPDATE_SESSION_KEY":
+            # Install the new session key and save it.
             new_secret = data.get("secret")
+            # Only act if a key was sent.
             if new_secret:
+                # Swap in the new key and signer.
                 self.secret = new_secret
                 self.signer = MessageSigner(new_secret)
                 self._persist_session_secret(new_secret)
@@ -2452,14 +2805,20 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 # dispatches the replayed frames concurrently through the same
                 # bounded-concurrency path as live ones.
                 if self._pending_encrypted_frames:
+                    # Replay any frames buffered while waiting for this key.
                     _t = asyncio.create_task(self._drain_pending_encrypted())
                     self._drain_tasks.add(_t)
                     _t.add_done_callback(self._drain_tasks.discard)
+                # Ack the key change.
                 return {"status": "SUCCESS", "message": "Session key updated successfully"}
+            # No key was sent.
             return {"status": "ERROR", "message": "Missing secret in data"}
 
+        # Rename this host.
         if cmd_type == "SPOKE_SET_HOSTNAME":
+            # The hostname is required.
             new_hostname = data.get("hostname")
+            # The hostname is required.
             if not new_hostname:
                 return {"status": "ERROR", "message": "Missing hostname in data"}
 
@@ -2478,7 +2837,9 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                         "message": "Invalid hostname (RFC-1123: letters, digits, "
                                    "hyphens and dots only, ≤253 chars)"}
 
+            # Any failure is reported back as an error.
             try:
+                # Log the change.
                 logger.info(f"Updating system hostname to: {new_hostname}")
                 # 1. Set the hostname (timeout — a stuck sudo/hostnamectl would
                 # otherwise block this async handler on the spoke loop indefinitely).
@@ -2492,11 +2853,13 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                     check=True, timeout=10
                 )
 
+                # Both steps succeeded.
                 return {"status": "SUCCESS", "message": f"Hostname updated to {new_hostname}"}
             except Exception as e:
                 logger.error(f"SPOKE_SET_HOSTNAME failed: {e}")
                 return {"status": "ERROR", "message": str(e)}
 
+        # Report mTLS readiness.
         if cmd_type == "SPOKE_GET_MTLS_STATUS":
             # Hub queries this spoke's mTLS material presence for the readiness
             # card (System → Hub Status). Returns mtls.status() — the same dict
@@ -2508,6 +2871,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             except Exception as e:  # noqa: BLE001
                 return {"status": "ERROR", "message": f"mtls status unavailable: {e}"}
 
+        # Install hub-pushed mTLS materials.
         if cmd_type == "SPOKE_SET_MTLS_MATERIALS":
             # Hub-pushed mTLS materials: the LE chain (CA bundle) + the wildcard
             # client cert/key, so this spoke can mutually verify with the hub
@@ -2526,15 +2890,18 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             # to cert-renewal cadence (~60–90 days), not hourly.
             return await self._handle_set_mtls_materials(data)
 
+        # Install the hub-issued client cert.
         if cmd_type == "SPOKE_SET_MTLS_CLIENT_CERT":
             # Hub-Local-CA clientAuth cert minted for THIS spoke's mTLS CLIENT
             # identity to the hub (public CAs no longer issue clientAuth). Install
             # it as the client cert ONLY — the server/WebUI cert is untouched.
             return await self._handle_set_mtls_client_cert(data)
 
+        # Revoke the client cert.
         if cmd_type == "SPOKE_CLEAR_MTLS_CLIENT_CERT":
             return await self._handle_clear_mtls_client_cert(data)
 
+        # Make a new key and CSR.
         if cmd_type == "SPOKE_MTLS_CSR":
             return await self._handle_mtls_csr(data)
 
@@ -2544,6 +2911,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         """Revocation: delete this spoke's mTLS CLIENT cert/key + clear the runtime
         materials so the next reconnect presents NOTHING (cert-less), and restart to
         drop the current connection. Server/WebUI cert untouched."""
+        # Role sub-spokes don't own the cert; skip.
         if getattr(self, "parent_spoke_id", ""):
             return {"status": "SUCCESS", "message": "skipped — role sub-spoke"}
         cert_dir = self._mtls_material_dir()
@@ -2555,26 +2923,33 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                   os.path.join(cert_dir, "mtls-hub-client.key"),
                   os.path.join(cert_dir, "mtls-client.crt"),
                   os.path.join(cert_dir, "mtls-client.key")):
+            # Delete the file if present; ignore errors.
             try:
+                # Delete the file if it exists.
                 if os.path.exists(p):
                     os.remove(p)
                     removed = True
             except Exception:  # noqa: BLE001
                 pass
+        # Blank the cert paths in .env.
         try:
+            # Blank every client cert/key path.
             self._persist_secret_to_env("LM_MTLS_HUB_CLIENT_CERT", "")
             self._persist_secret_to_env("LM_MTLS_HUB_CLIENT_KEY", "")
             self._persist_secret_to_env("LM_MTLS_CLIENT_CERT", "")
             self._persist_secret_to_env("LM_MTLS_CLIENT_KEY", "")
         except Exception:  # noqa: BLE001
             pass
+        # Clear the in-memory mTLS materials.
         try:
             from security import mtls as _mtls
             _mtls.set_runtime_materials(client_cert="", client_key="")
         except Exception:  # noqa: BLE001
             pass
+        # Log the revocation.
         logger.info("SPOKE_CLEAR_MTLS_CLIENT_CERT: cleared mTLS client cert for %s "
                     "(revoked) — restarting cert-less", self.spoke_id)
+        # Restart only if a file was actually removed.
         if removed:
             self._draining = True
             asyncio.create_task(self._deferred_restart_exit())
@@ -2582,8 +2957,11 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
 
     @staticmethod
     def _pubkey_fingerprint(public_key) -> str:
+        """Return the SHA-256 hex fingerprint of a public key's DER encoding."""
+        # Imports for hashing and DER encoding.
         import hashlib
         from cryptography.hazmat.primitives import serialization
+        # Hash the DER-encoded public key.
         der = public_key.public_bytes(serialization.Encoding.DER,
                                       serialization.PublicFormat.SubjectPublicKeyInfo)
         return hashlib.sha256(der).hexdigest()
@@ -2593,35 +2971,44 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         return a CSR for it. The key stays here (in memory + a 0600 ``.pending``
         file) until the matching cert arrives in ``SPOKE_SET_MTLS_CLIENT_CERT``.
         The hub ignores the CSR subject and sets the identity itself."""
+        # Role sub-spokes don't own the cert.
         if getattr(self, "parent_spoke_id", ""):
             return {"status": "ERROR", "message": "role sub-spoke — parent carries the mTLS cert"}
+        # Load the crypto library.
         try:
+            # Imports for building the key and CSR.
             from cryptography import x509
             from cryptography.hazmat.primitives import hashes, serialization
             from cryptography.hazmat.primitives.asymmetric import ec
             from cryptography.x509.oid import NameOID
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "message": f"cryptography unavailable: {e}"}
+        # Generate a new key and a CSR for it.
         cn = str((data or {}).get("cn") or self.spoke_id or "spoke").strip()
         key = ec.generate_private_key(ec.SECP256R1())
         csr = (x509.CertificateSigningRequestBuilder()
                .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
                .sign(key, hashes.SHA256()))
+        # Keep the key in memory (max 4 pending), indexed by its fingerprint.
         key_pem = key.private_bytes(serialization.Encoding.PEM,
                                     serialization.PrivateFormat.PKCS8,
                                     serialization.NoEncryption()).decode()
         pending = getattr(self, "_mtls_pending_keys", None)
+        # Create the pending-key map on first use.
         if pending is None:
             pending = self._mtls_pending_keys = {}
         pending[self._pubkey_fingerprint(key.public_key())] = key_pem
+        # Drop the oldest entries beyond four.
         while len(pending) > 4:
             pending.pop(next(iter(pending)))
+        # Also save it to disk as a pending key.
         try:
             self._mtls_write_if_changed(
                 os.path.join(self._mtls_material_dir(), "mtls-hub-client.key.pending"),
                 key_pem, 0o600)
         except Exception as e:  # noqa: BLE001
             logger.debug("SPOKE_MTLS_CSR: could not persist pending key: %s", e)
+        # Return the PEM-encoded CSR.
         logger.info("SPOKE_MTLS_CSR: generated a local mTLS client key + CSR for %s", cn)
         return {"status": "SUCCESS",
                 "csr": csr.public_bytes(serialization.Encoding.PEM).decode()}
@@ -2629,7 +3016,9 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
     def _mtls_key_for_cert(self, cert_pem: str) -> str:
         """The locally generated pending key whose public key matches the leaf in
         ``cert_pem`` ('' if none — e.g. the hub signed a CSR from another run)."""
+        # Fingerprint the leaf cert's public key.
         try:
+            # Imports for parsing the cert.
             from cryptography import x509
             from cryptography.hazmat.primitives import serialization
             end = "-----END CERTIFICATE-----"
@@ -2637,18 +3026,25 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             fp = self._pubkey_fingerprint(leaf.public_key())
         except Exception:  # noqa: BLE001
             return ""
+        # Check the in-memory pending keys first.
         key_pem = (getattr(self, "_mtls_pending_keys", None) or {}).get(fp, "")
+        # Found in memory.
         if key_pem:
             return key_pem
+        # Otherwise try the pending key file on disk.
         try:
+            # Read the pending key file.
             p = os.path.join(self._mtls_material_dir(), "mtls-hub-client.key.pending")
+            # Read the candidate key.
             with open(p, "r") as f:
                 cand = f.read()
             k = serialization.load_pem_private_key(cand.encode(), password=None)
+            # Use it only if it matches the cert.
             if self._pubkey_fingerprint(k.public_key()) == fp:
                 return cand
         except Exception:  # noqa: BLE001
             pass
+        # No matching key.
         return ""
 
     async def _handle_set_mtls_client_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -2665,34 +3061,46 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         it, and the spoke fell off the fleet (connected but invisible). Keeping the
         hub-leg identity in its own file makes the two independent. Leaves LM_MTLS_CA
         + the server cert alone (the WebUI cert stays LE-issued)."""
+        # Role sub-spokes don't own the cert; skip.
         if getattr(self, "parent_spoke_id", ""):
             return {"status": "SUCCESS",
                     "message": "skipped — role sub-spoke; parent carries the mTLS client cert"}
+        # Read the cert and key; with no key, find the one we generated.
         cert = (data.get("cert") or "").strip()
         key = (data.get("key") or "").strip()
         from_csr = False
+        # Cert without a key: look up the key we generated for the CSR.
         if cert and not key:
             # CSR flow: the key was generated here by _handle_mtls_csr.
             key = self._mtls_key_for_cert(cert).strip()
             from_csr = bool(key)
+            # No matching key found.
             if not key:
                 return {"status": "ERROR",
                         "message": "cert does not match any locally generated key"}
+        # Both cert and key are required.
         if not cert or not key:
             return {"status": "ERROR", "message": "missing cert/key"}
+        # Write both files and save their paths in .env.
         cert_dir = self._mtls_material_dir()
         cc_path = os.path.join(cert_dir, "mtls-hub-client.crt")
         ck_path = os.path.join(cert_dir, "mtls-hub-client.key")
         changed = False
+        # Write the files and save their paths; any error is reported back.
         try:
+            # Write cert and key, each ending in a newline (key private).
             changed |= self._mtls_write_if_changed(
                 cc_path, cert if cert.endswith("\n") else cert + "\n", 0o644)
             changed |= self._mtls_write_if_changed(
                 ck_path, key if key.endswith("\n") else key + "\n", 0o600)
             self._persist_secret_to_env("LM_MTLS_HUB_CLIENT_CERT", cc_path)
+            # Point .env at the files.
             self._persist_secret_to_env("LM_MTLS_HUB_CLIENT_KEY", ck_path)
+            # CSR flow: the pending key is now installed, so discard it.
             if from_csr:
+                # Clear the in-memory pending keys.
                 self._mtls_pending_keys = {}
+                # Remove the pending key file if present.
                 try:
                     os.remove(os.path.join(cert_dir, "mtls-hub-client.key.pending"))
                 except OSError:
@@ -2700,13 +3108,16 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         except Exception as e:  # noqa: BLE001
             logger.warning("SPOKE_SET_MTLS_CLIENT_CERT: write to %s failed: %s", cert_dir, e)
             return {"status": "ERROR", "message": f"write failed: {e}"}
+        # Restart only if something changed.
         if changed:
+            # Drain and restart so the new cert is presented.
             logger.info("SPOKE_SET_MTLS_CLIENT_CERT: installed hub-CA mTLS client cert "
                         "for %s — restarting to present it", self.spoke_id)
             self._draining = True
             asyncio.create_task(self._deferred_restart_exit())
             return {"status": "SUCCESS",
                     "message": "hub-CA mTLS client cert installed; restarting to present it"}
+        # Already up to date.
         logger.info("SPOKE_SET_MTLS_CLIENT_CERT: mTLS client cert up to date for %s", self.spoke_id)
         return {"status": "SUCCESS", "message": "hub-CA mTLS client cert up to date (no change)"}
 
@@ -2727,20 +3138,27 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                           self.parent_spoke_id)
             return {"status": "SUCCESS",
                     "message": "skipped — role sub-spoke; parent agent carries mTLS materials"}
+        # Read the CA bundle and optional client cert/key.
         ca_bundle = (data.get("ca_bundle") or "").strip()
         client_cert = (data.get("client_cert") or "").strip()
         client_key = (data.get("client_key") or "").strip()
+        # The CA bundle is required.
         if not ca_bundle:
             return {"status": "ERROR", "message": "missing ca_bundle"}
+        # Write the files and save their paths in .env.
         cert_dir = self._mtls_material_dir()
         ca_path = os.path.join(cert_dir, "mtls-ca.pem")
         cc_path = os.path.join(cert_dir, "mtls-client.crt")
         ck_path = os.path.join(cert_dir, "mtls-client.key")
         changed = False
+        # Any write error is reported back.
         try:
+            # Write the CA bundle and point .env at it.
             changed |= self._mtls_write_if_changed(ca_path, ca_bundle, 0o644)
             self._persist_secret_to_env("LM_MTLS_CA", ca_path)
+            # Write the client cert/key too when both were sent.
             if client_cert and client_key:
+                # Write cert (public) and key (private).
                 changed |= self._mtls_write_if_changed(cc_path, client_cert, 0o644)
                 changed |= self._mtls_write_if_changed(ck_path, client_key, 0o600)
                 self._persist_secret_to_env("LM_MTLS_CLIENT_CERT", cc_path)
@@ -2760,14 +3178,18 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 client_key=ck_path if (client_cert and client_key) else None)
         except Exception:  # noqa: BLE001
             pass
+        # Restart only if something changed.
         what = "CA + client cert/key" if (client_cert and client_key) else "CA bundle"
+        # Something changed: drain and restart.
         if changed:
+            # Log the install.
             logger.info("SPOKE_SET_MTLS_MATERIALS: installed %s for %s — restarting "
                         "to arm the /ws/agent server leg", what, self.spoke_id)
             self._draining = True  # hub queues request/reply during the exit window
             asyncio.create_task(self._deferred_restart_exit())
             return {"status": "SUCCESS",
                     "message": f"mTLS {what} installed; restarting to arm verification"}
+        # Nothing changed.
         logger.info("SPOKE_SET_MTLS_MATERIALS: %s up to date for %s (no change)",
                     what, self.spoke_id)
         return {"status": "SUCCESS",
@@ -2779,13 +3201,18 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         client cert/key live alongside the cert they verify. Falls back to a
         ``certs`` dir under the repo root when the spoke has no server cert
         (loopback / cert-less spokes), creating it (0700)."""
+        # Use the server cert's folder if there is one.
         cert = os.environ.get("LM_TLS_CERT", "").strip()
+        # Server cert set: use its folder.
         if cert:
+            # Create the folder if needed.
             d = os.path.dirname(os.path.abspath(cert)) or "."
             os.makedirs(d, exist_ok=True)
             return d
+        # Otherwise use certs/ under the repo root.
         d = os.path.join(self._repo_root(), "certs")
         os.makedirs(d, exist_ok=True)
+        # Lock the folder down to the owner; ignore errors.
         try:
             os.chmod(d, 0o700)
         except OSError:
@@ -2801,26 +3228,35 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         when the file already has this exact content — so an idempotent re-push
         (hourly loop before push-state catches up, or a reconnect re-trigger)
         doesn't trigger a needless restart."""
+        # Skip if the file already has this exact content.
         if os.path.exists(path):
+            # An unreadable file is treated as changed.
             try:
+                # Compare the current contents.
                 with open(path, "r") as f:
+                    # Same content, so nothing to write.
                     if f.read() == content:
                         return False
             except OSError:
                 pass  # unreadable → treat as changed and overwrite
+        # Write to a temp file in the same folder, then swap it in.
         d = os.path.dirname(os.path.abspath(path)) or "."
         fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        # Write, set the mode and swap the file in.
         try:
+            # Write the content to the temp file.
             with os.fdopen(fd, "w") as f:
                 f.write(content)
             os.chmod(tmp, mode)
             os.replace(tmp, path)
         except Exception:
+            # On error, delete the temp file and re-raise.
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
             raise
+        # The file was written.
         return True
 
     async def _get_module_status(self) -> Dict[str, Any]:
@@ -2829,12 +3265,15 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         This is used by the SPOKE_GET_STATUS system command and as a fallback for
         module-specific *_GET_STATUS commands that modules don't explicitly implement.
         """
+        # Nothing to report without modules.
         if not self.modules:
             return {"status": "ERROR", "message": "No modules registered"}
 
         # If there's only one module, return its status directly
         if len(self.modules) == 1:
+            # Return the only module's status.
             module = list(self.modules.values())[0]
+            # Report a failure as an error.
             try:
                 return await module.get_status()
             except Exception as e:
@@ -2843,11 +3282,14 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
 
         # Multiple modules - return a composite status
         results = {}
+        # Collect each module's status by name.
         for name, module in self.modules.items():
+            # Record a failure as an error entry.
             try:
                 results[name] = await module.get_status()
             except Exception as e:
                 results[name] = {"status": "ERROR", "message": str(e)}
+        # Return all of them.
         return {"status": "SUCCESS", "data": results}
 
     def _persist_secret_to_env(self, key: str, value: str) -> None:
@@ -2869,8 +3311,11 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         an atomic-write failure FALLS BACK to the original in-place write — so
         this is strictly no worse than before, and better wherever the atomic
         path succeeds."""
+        # Serialize threads in this process.
         with _ENV_FILE_LOCK:
+            # Never let a write failure escape; just log it.
             try:
+                # Path to the .env file.
                 env_path = os.path.join(self._repo_root(), ".env")
                 # Cross-process lock: _ENV_FILE_LOCK only serializes THREADS in
                 # one process, but multiple agent PROCESSES share this .env
@@ -2884,27 +3329,37 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 # read before that write landed. An advisory flock held across
                 # the whole read-modify-write serializes processes too.
                 with self._env_file_flock(env_path):
+                    # Read the current lines and file mode.
                     lines: list = []
                     mode = 0o600
+                    # Read the existing file, keeping its permissions.
                     if os.path.exists(env_path):
+                        # Keep the current mode if we can read it.
                         try:
                             mode = os.stat(env_path).st_mode & 0o777
                         except OSError:
                             pass
+                        # Read all lines.
                         with open(env_path, "r") as f:
                             lines = f.readlines()
+                    # Replace the key's line, or append it if missing.
                     updated = []
                     found = False
                     prefix = f"{key}="
+                    # Copy each line, replacing the key's line.
                     for line in lines:
+                        # This is the line for our key.
                         if line.startswith(prefix):
                             updated.append(f"{prefix}{value}\n")
                             found = True
                         else:
                             updated.append(line)
+                    # Append the key if it wasn't there.
                     if not found:
                         updated.append(f"{prefix}{value}\n")
+                    # Write the new contents back.
                     self._atomic_write_lines(env_path, updated, mode)
+                # Log success.
                 logger.info("Persisted %s to %s", key, env_path)
             except Exception as e:
                 logger.warning("Failed to persist %s to .env: %s", key, e)
@@ -2922,28 +3377,39 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         unsupported (some network filesystems), proceed without the cross-process
         lock — the in-process ``_ENV_FILE_LOCK`` + atomic write still hold, so
         this is never worse than before."""
+        # No lock held yet.
         lock_fd = None
+        # Try to open and lock the sidecar lock file.
         try:
+            # The lock lives in a sidecar file next to .env.
             lock_path = env_path + ".lock"
+            # Open (or create) the lock file and lock it exclusively.
             try:
                 lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
             except OSError as e:
+                # Locking failed: log, close the file and carry on unlocked.
                 logger.debug("env flock unavailable (%s); proceeding without "
                              "cross-process lock", e)
+                # Close the lock file if it was opened.
                 if lock_fd is not None:
+                    # Ignore close errors.
                     try:
                         os.close(lock_fd)
                     except OSError:
                         pass
                     lock_fd = None
+            # Run the caller's code while holding the lock.
             yield
         finally:
+            # Release and close the lock.
             if lock_fd is not None:
+                # Unlock, ignoring errors.
                 try:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 except OSError:
                     pass
+                # Close, ignoring errors.
                 try:
                     os.close(lock_fd)
                 except OSError:
@@ -2957,18 +3423,26 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         dir isn't writable by this process even though the file is), fall back to
         an in-place truncate-write so behavior is never worse than the legacy
         writer. Caller holds ``_ENV_FILE_LOCK``."""
+        # Folder that holds the file.
         env_dir = os.path.dirname(path) or "."
+        # Write to a temp file, sync it, then swap it into place.
         try:
+            # Create the temp file in the same folder.
             fd, tmp_path = tempfile.mkstemp(prefix=".env.", dir=env_dir)
+            # Write it; on error remove it and re-raise.
             try:
+                # Write, flush and sync the lines.
                 with os.fdopen(fd, "w") as f:
+                    # Write the lines.
                     f.writelines(lines)
                     f.flush()
                     os.fsync(f.fileno())
                 os.chmod(tmp_path, mode)
+                # Swap it in atomically.
                 os.replace(tmp_path, path)
                 return
             except Exception:
+                # Remove the temp file, ignoring errors.
                 try:
                     os.unlink(tmp_path)
                 except OSError:
@@ -2979,8 +3453,10 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             # couldn't create a sibling temp file. Fall back to in-place write.
             logger.warning("atomic .env write failed (%s); falling back to "
                            "in-place write", e)
+            # Write in place.
             with open(path, "w") as f:
                 f.writelines(lines)
+            # Restore the mode, ignoring errors.
             try:
                 os.chmod(path, mode)
             except OSError:
@@ -2992,15 +3468,22 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
 
     def _read_env_value(self, key: str) -> str:
         """Reads a ``key=`` line from the spoke's .env file. Returns '' if absent/unreadable."""
+        # Scan .env for the key's line.
         try:
+            # Missing .env means no value.
             env_path = os.path.join(self._repo_root(), ".env")
+            # No .env file.
             if not os.path.exists(env_path):
                 return ""
             prefix = f"{key}="
+            # Return the value of the first matching line.
             with open(env_path, "r") as f:
+                # Check each line.
                 for line in f:
+                    # This line holds our key.
                     if line.startswith(prefix):
                         return line[len(prefix):].strip()
+            # Key not found.
             return ""
         except Exception:
             return ""
@@ -3011,15 +3494,20 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         clone by most provisioning / cloud-init), then the SMBIOS/DMI product UUID
         as a fallback. Returns '' if neither is readable — binding is then skipped
         (fail-open; we never re-mint on an unreadable fingerprint)."""
+        # Return the first non-empty machine id we can read.
         for path in ("/etc/machine-id", "/var/lib/dbus/machine-id",
                      "/sys/class/dmi/id/product_uuid"):
+            # Read and strip the file.
             try:
+                # Open the file.
                 with open(path) as f:
                     v = f.read().strip()
+                # Return the first non-empty value.
                 if v:
                     return v
             except Exception:
                 continue
+        # Nothing readable.
         return ""
 
     def _ensure_install_uuid(self) -> str:
@@ -3040,17 +3528,23 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         (it is NOT a clone). We trust only what lands on disk: a failed write returns
         '' so a write failure never yields a volatile identity across boots.
         """
+        # Read this box's fingerprint and any existing UUID.
         cur_fp = self._machine_fingerprint()
         existing = self._read_env_value("INSTALL_UUID")
+        # An existing UUID may need cloned-machine checks.
         if existing:
+            # A different stored fingerprint means the .env was cloned.
             stored_fp = self._read_env_value("INSTALL_UUID_MACHINE")
+            # Fingerprints differ: the .env was cloned.
             if cur_fp and stored_fp and stored_fp != cur_fp:
+                # Warn about it.
                 logger.warning(
                     "INSTALL_UUID %s… was minted on a different machine "
                     "(fingerprint %s… != this box %s…) — cloned .env detected; "
                     "minting a fresh identity + dropping the copied HUB_SECRET so "
                     "this clone onboards as itself and cannot step on the origin.",
                     existing[:8], stored_fp[:8], cur_fp[:8])
+                # Mint and save a new UUID bound to this machine.
                 new_uuid = str(uuid.uuid4())
                 self._persist_secret_to_env("INSTALL_UUID", new_uuid)
                 self._persist_secret_to_env("INSTALL_UUID_MACHINE", cur_fp)
@@ -3059,12 +3553,15 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 # the box it was cloned from.
                 self._persist_secret_to_env("HUB_SECRET", "")
                 return self._read_env_value("INSTALL_UUID")
+            # No stored fingerprint: older install, so bind it to this machine.
             if cur_fp and not stored_fp:
                 # Pre-binding install — adopt this machine as the binding, keep UUID.
                 self._persist_secret_to_env("INSTALL_UUID_MACHINE", cur_fp)
             return existing
+        # First start: mint a UUID and bind it to this machine.
         new_uuid = str(uuid.uuid4())
         self._persist_secret_to_env("INSTALL_UUID", new_uuid)
+        # Bind it to this machine when we have a fingerprint.
         if cur_fp:
             self._persist_secret_to_env("INSTALL_UUID_MACHINE", cur_fp)
         return self._read_env_value("INSTALL_UUID")
@@ -3082,10 +3579,13 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         the hub, a non-string signature — because this is the last authenticator
         consulted before the possible-MITM refusal. A spoke that never received a
         recovery PSK must keep refusing exactly as it did before this existed."""
+        # Fail closed when anything is missing.
         if not self.recovery_psk or not challenge:
             return False
+        # The signature must be a non-empty string.
         if not isinstance(recovery_signature, str) or not recovery_signature:
             return False
+        # Compare against the expected HMAC of the challenge.
         expected = hmac.new(self.recovery_psk.encode(), challenge.encode(),
                             hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, recovery_signature)
@@ -3113,19 +3613,27 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         data carries a Proxmox API token, rides inside AGENT_RELAY_UP). ``enc``
         is additive; a legacy hub ignores it. ``getattr`` so harnesses that
         bypass ``__init__`` (no ``hub_enc_capable``) default to plaintext."""
+        # Encrypt secret-bearing payloads (or a nested relay payload) when the hub supports it.
         if isinstance(msg, dict):
+            # Only encrypt when the hub supports it and we have a key.
             payload = msg.get("payload")
+            # Check that encryption applies.
             if (isinstance(payload, dict) and getattr(self, "hub_enc_capable", False)
                     and self.secret and encryption_enabled()):
+                # Encrypt this payload's data, or the nested payload inside a relay envelope.
                 ptype = payload.get("type")
+                # Payload type carries secrets.
                 if ptype in ENCRYPTED_TYPES:
                     wrap(self.secret, payload)
                 elif ptype == "AGENT_RELAY_UP":
+                    # Find the inner payload of the relayed message.
                     _orig = (payload.get("data") or {}).get("original_payload") or {}
                     inner = _orig.get("payload")
+                    # Encrypt it if its type carries secrets.
                     if (isinstance(inner, dict)
                             and inner.get("type") in ENCRYPTED_TYPES):
                         wrap(self.secret, inner)
+        # Sign and serialize.
         return encode_frame(self.signer, msg)
 
     def _decode_frame(self, wire: str):
@@ -3146,11 +3654,15 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         is dropped). An unsigned HEARTBEAT is still accepted so a hub that
         momentarily omits the signature on a keepalive can't wedge the liveness
         loop. A signed frame is verified; bad HMAC → reject."""
+        # Split the frame and reject a bad signature.
         sig, body = split_frame(wire)
         has_key = bool(self.secret and self.signer)
+        # With a key, a signed frame must verify.
         if has_key and sig:
+            # Bad signature: drop it.
             if not self.signer.verify_bytes(body.encode(), sig):
                 return None, False
+        # With a key, an unsigned frame is only allowed if it is a heartbeat.
         if has_key and not sig:
             # Post-bootstrap unsigned frame — parse to inspect the type, then
             # accept ONLY a heartbeat. Anything else is an injection.
@@ -3158,12 +3670,15 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 preview = json.loads(body)
             except Exception:
                 return None, False
+            # Drop anything that is not a heartbeat.
             if (preview.get("payload") or {}).get("type") != "HEARTBEAT":
                 logger.debug(
                     "Unsigned non-heartbeat dropped (session key active) type=%s",
                     (preview.get("payload") or {}).get("type"))
                 return None, False
+            # Accept the heartbeat.
             return preview, True
+        # Parse the body.
         try:
             msg = json.loads(body)
         except Exception:
@@ -3177,7 +3692,9 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # malformed b64/JSON → InvalidTag or ValueError), is dropped — ciphertext
         # is never dispatched. Plaintext/legacy frames pass through untouched.
         _payload = msg.get("payload", {})
+        # Encrypted payload: we need the key to read it.
         if is_encrypted(_payload):
+            # No key yet: buffer the frame for replay (or drop it).
             if not self.secret:
                 # Bootstrap race: the hub sent SPOKE_UPDATE_SESSION_KEY and this
                 # encrypted frame back-to-back; the session-key handler (a
@@ -3190,8 +3707,11 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 # getattr → test harnesses / subclasses that bypass __init__
                 # (no buffer attr) fall back to the legacy drop (return ok=False).
                 buf = getattr(self, "_pending_encrypted_frames", None)
+                # Buffer it, keeping at most 64.
                 if isinstance(buf, list):
+                    # Add it with the current time.
                     buf.append((wire, time.time()))
+                    # Drop the oldest if over the limit.
                     if len(buf) > 64:
                         buf.pop(0)
                         logger.warning(
@@ -3207,12 +3727,15 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                     logger.debug(
                         "Encrypted frame from hub but no session secret — "
                         "dropping (spoke=%s)", self.spoke_id)
+                # Not readable yet.
                 return None, False
+            # Decrypt, dropping frames that fail.
             try:
                 unwrap(self.secret, _payload)
             except (InvalidTag, ValueError) as e:
                 logger.debug("Dropping tampered/undecryptable frame from hub: %s", e)
                 return None, False
+        # Frame is verified (and decrypted if needed).
         return msg, True
 
     async def _drain_pending_encrypted(self) -> None:
@@ -3227,13 +3750,17 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         fast); the shared semaphore still bounds total concurrency against any
         live receive-loop dispatches racing this drain. The drain runs as its
         own task so the SPOKE_UPDATE_SESSION_KEY ack goes out immediately."""
+        # Nothing buffered or no connection to replay on.
         if not self._pending_encrypted_frames or not self._decrypt_dispatch_ctx:
             return
+        # Take the buffered frames and replay each one, dropping any older than 30s.
         websocket, send_lock, sem = self._decrypt_dispatch_ctx
         pending = self._pending_encrypted_frames
         self._pending_encrypted_frames = []
         now = time.time()
+        # Replay each buffered frame.
         for wire, enq in pending:
+            # Drop frames older than 30s.
             if now - enq > 30.0:
                 logger.warning(
                     "Dropping deferred encrypted frame — session key not armed "
@@ -3243,15 +3770,18 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             # (tamper / key rotated again mid-drain) is dropped — the hub
             # re-pushes on the next config change or reconnect.
             msg, ok = self._decode_frame(wire)
+            # Skip frames that still fail to decode.
             if not ok:
                 continue
             payload = msg.get("payload", {}) or {}
             cmd_type = payload.get("type")
+            # Skip frames with no type.
             if not cmd_type:
                 continue
             data = payload.get("data", {})
             corr_id = msg.get("header", {}).get("message_id")
             logger.debug("Replaying deferred encrypted %s (spoke=%s)",
                          cmd_type, self.spoke_id)
+            # Run it through the normal command handler.
             await self._handle_one_command(
                 websocket, cmd_type, data, corr_id, send_lock, sem)

@@ -18,20 +18,32 @@ identically to distributed mode.
 Mirrors ``central_poller.py``'s ``_poll_once`` + ``_client_count_entry`` (the
 rolling 1h client-count average / drop%% baseline) — keep the two in sync.
 """
+# Postponed annotations: type hints are not evaluated at runtime.
 from __future__ import annotations
 
+# asyncio for the background loop and parallel per-site work.
 import asyncio
+# JSON for the persisted history/state files.
 import json
+# Standard-library logging.
 import logging
+# Environment variables and file paths.
 import os
+# Wall-clock time for polling, windows and timestamps.
 import time
+# Type hints only.
 from typing import Any, Dict, Optional
 
+# Hub-side Aruba Central API client.
 from .aruba import ArubaClient
+# Decrypts stored Central credentials.
 from . import central_secrets
+# Shared helpers that turn counts into check results.
 from .check_eval import count_for_check, normalize_counts
+# Per-tenant sharded JSON storage helpers.
 from tenant_sharded import migrate_legacy, shard_load, shard_save
 
+# Logger for this poller.
 logger = logging.getLogger("CentralHubPoller")
 
 
@@ -41,12 +53,15 @@ def min_client_check(current: int, min_floor: Optional[int]) -> Optional[Dict[st
     (an absolute client-count floor — some sites should always have at least N
     clients), IN ADDITION to the % drop check. A floor of ``None``/``0`` means
     "monitor for change only" and emits no check (the site behaves as before)."""
+    # No floor (or zero) means no minimum-client check.
     if not min_floor or min_floor <= 0:
         return None
+    # Below the floor is an error; otherwise OK.
     if current < min_floor:
         return {"status": "error", "message": f"{current} clients — below minimum {min_floor}"}
     return {"status": "ok", "message": f"{current} clients (min {min_floor}) — OK"}
 
+# Default and minimum polling intervals.
 _POLL_INTERVAL_S = 300  # 5 min — default; matches the spoke poller + aruba.py cache TTLs
 _POLL_INTERVAL_FLOOR_S = 60  # min allowed per-tenant interval (protect the Central API)
 
@@ -62,6 +77,7 @@ def _boundary_guard_delay(now: float) -> float:
     """Seconds to wait so a poll does NOT fall within ``_BOUNDARY_GUARD_S`` of a
     5-minute wall-clock boundary. ``now`` is epoch seconds (UTC-aligned, so
     ``now % 300`` = seconds since the last 5-minute mark). 0 = already safe."""
+    # Seconds since the last 5-minute mark.
     phase = now % _CENTRAL_UPDATE_PERIOD_S
     if phase < _BOUNDARY_GUARD_S:                                  # just AFTER a boundary
         return _BOUNDARY_GUARD_S - phase
@@ -127,19 +143,24 @@ def _cc_thresholds(central_config):
     peak floor that arms the die-off rule. Returns resolved values with the
     die-off as a 0-1 fraction; ``error_pct`` is coerced up to ``warn_pct`` so red
     can never trip before amber. Mirror of the cs central_poller copy."""
+    # Thresholds configured for this tenant, if any.
     t = (central_config or {}).get("cc_thresholds") or {}
 
     def _num(val, dflt, lo, hi):
+        """Parse val as a float clamped to [lo, hi], or return dflt when it is not a number."""
+        # Non-numeric values fall back to the default.
         try:
             x = float(val)
         except (TypeError, ValueError):
             return dflt
         return max(lo, min(hi, x))
 
+    # Warning/error drop percentages; error can never be below warning.
     warn = _num(t.get("warn_pct"), _CC_WARN_PCT, 0.0, 100.0)
     err = _num(t.get("error_pct"), _CC_ERROR_PCT, 0.0, 100.0)
     if err < warn:
         err = warn
+    # Die-off fraction and the peak that arms it.
     die = _num(t.get("die_off_pct"), _CC_MAX_FRACTION * 100.0, 0.0, 100.0) / 100.0
     peak = int(_num(t.get("min_peak"), _CC_MAX_MIN_PEAK, 1, 1_000_000))
     # Steady-state fractions, defaulting to the existing die_off_pct so an
@@ -152,6 +173,7 @@ def _cc_thresholds(central_config):
     daily = _num(t.get("daily_pct"), die * 100.0, 0.0, 100.0) / 100.0
     weekly = _num(t.get("weekly_pct"), die * 100.0, 0.0, 100.0) / 100.0
     monthly = _num(t.get("monthly_pct"), die * 100.0, 0.0, 100.0) / 100.0
+    # Resolved thresholds for the checks.
     return {"warn_pct": warn, "error_pct": err, "die_off_frac": die,
             "min_peak": peak, "daily_frac": daily,
             "weekly_frac": weekly, "monthly_frac": monthly,
@@ -159,6 +181,7 @@ def _cc_thresholds(central_config):
             "rate_samples": rate_n}
 
 
+# Severity rank of each client-count status (higher is worse).
 _CC_SEVERITY = {"error": 3, "warning": 2, "ok": 1}  # else (no_data/pending/…) -> 0
 
 
@@ -168,24 +191,31 @@ def _cc_period_drop(hist, now, window_s):
     Returns None when either period lacks data, so a fresh site cannot alarm on
     an empty comparison. Drop only -- growth is not a fault.
     """
+    # Samples in this period and in the one before it.
     cur = [v for ts, v in hist if ts >= now - window_s]
     prev = [v for ts, v in hist if now - 2 * window_s <= ts < now - window_s]
+    # Need both periods to compare.
     if not cur or not prev:
         return None
+    # Average of the previous period; zero gives no meaningful percentage.
     a = sum(prev) / len(prev)
     if a <= 0:
         return None
+    # Percentage drop, never negative.
     return max(0.0, (a - (sum(cur) / len(cur))) / a * 100.0)
 
 
 def _cc_rate_drop(samples, n):
     """Drop % of the last *n* samples' average vs the *n* before them."""
+    # Need 2n samples to compare two windows.
     if len(samples) < 2 * n:
         return None
+    # Average of the earlier window; zero gives no meaningful percentage.
     vals = [s[1] for s in samples]
     prev = sum(vals[-2 * n:-n]) / n
     if prev <= 0:
         return None
+    # Percentage drop of the latest window, never negative.
     return max(0.0, (prev - sum(vals[-n:]) / n) / prev * 100.0)
 
 
@@ -202,13 +232,16 @@ def _cc_site_floor(sites_cfg, *site_names):
     Returns None when unset, zero or unparseable, which disables the floor rule
     for that site ONLY. Never inferred from history -- that is the peak problem.
     """
+    # The per-site minimum client map, if the config is a dict.
     try:
         floors = (sites_cfg or {}).get("site_min_clients") or {}
     except AttributeError:
         return None
+    # Return the first usable positive floor among the given names.
     for name in site_names:
         if name in (None, ""):
             continue
+        # Look up by the name as given and as a string.
         raw = floors.get(name) or floors.get(str(name))
         try:
             if raw not in (None, "") and float(raw) > 0:
@@ -223,6 +256,7 @@ def _cc_worst(*statuses):
     ok > no_data). So a wired-only or wireless-only die-off reddens the site even
     if the other half is healthy. All-empty → the first status (usually
     no_data). Mirror of the cs central_poller copy."""
+    # Keep the status with the highest severity rank.
     worst, rank = None, -1
     for s in statuses:
         r = _CC_SEVERITY.get(s, 0)
@@ -245,6 +279,7 @@ class ClientCountTracker:
     the reference instead of showing NO_DATA for an hour. ``scope`` is the
     tenant_id on the hub (a single fixed key on the distributed spoke)."""
 
+    # Storage module name and the JSON file names used for persistence.
     _MODULE = "simulations"
     _BASELINE = "client_count_baseline.json"
     _SEVENDAY = "client_count_7day.json"
@@ -254,26 +289,33 @@ class ClientCountTracker:
         # Sharded per tenant under <data_dir>/tenants/<tenant>/simulations/. Data is
         # small (per-site, not per-check) so we shard-all each save for corruption
         # isolation + per-tenant reset, without dirty-gating.
+        """Load persisted client-count state from the sharded data directory."""
         self._data_dir = data_dir
         self._samples: Dict[str, list] = {}    # key -> [(ts, count), ...] (1h)
         self._hourly: Dict[str, list] = {}      # key -> [(ts, hourly_avg), ...] (7d)
         self._baseline: Dict[str, dict] = {}    # key -> {hourly_avg, recorded_at}
         # Match the source: wait one full hour before the first snapshot write.
         self._last_snapshot = time.time()
+        # Move any pre-sharding files into the sharded layout, then load state.
         for name in (self._BASELINE, self._SEVENDAY, self._SAMPLES):
             migrate_legacy(data_dir, self._MODULE, name)
         self._load()
 
     @staticmethod
     def _key(scope: str, wsite: str, kind: str = "") -> str:
+        """Build the composite storage key from scope, site and optional kind."""
+        # Join the parts with an unprintable separator so names cannot collide.
         base = f"{scope}{_CC_KEYSEP}{wsite}"
         return f"{base}{_CC_KEYSEP}{kind}" if kind else base
 
     def _load(self) -> None:
+        """Load the saved baseline, hourly history and raw samples from disk."""
+        # Current time for age cutoffs.
         now = time.time()
         # baseline shards → synthetic sample seed (surfaces a reference immediately
         # on restart; ages out as live data arrives).
         self._baseline = shard_load(self._data_dir, self._MODULE, self._BASELINE)
+        # Seed a few synthetic samples at each saved hourly average.
         for key, saved in self._baseline.items():
             avg = round((saved or {}).get("hourly_avg", 0))
             self._samples[key] = [
@@ -297,6 +339,7 @@ class ClientCountTracker:
 
     def record(self, scope: str, wsite: str, current: int, kind: str = "") -> None:
         """Append a raw sample and trim to the 1-hour window."""
+        # Add the new sample, then drop samples older than one hour.
         now = time.time()
         key = self._key(scope, wsite, kind)
         samples = self._samples.setdefault(key, [])
@@ -315,6 +358,7 @@ class ClientCountTracker:
             disables it.
         ``thresholds`` (from _cc_thresholds → central_config) overrides the module
         defaults per tenant. The 7d/30d peaks are recorded regardless of status."""
+        # Resolve every threshold, falling back to the module defaults.
         _t = thresholds or {}
         warn_pct = _t.get("warn_pct", _CC_WARN_PCT)
         error_pct = _t.get("error_pct", _CC_ERROR_PCT)
@@ -327,6 +371,7 @@ class ClientCountTracker:
         rate_samples = int(_t.get("rate_samples", _CC_RATE_SAMPLES))
         floor = _t.get("floor")
         monthly_frac = _t.get("monthly_frac", die_off_frac)
+        # Look up this site's raw samples and hourly history.
         now = time.time()
         key = self._key(scope, wsite, kind)
         samples = self._samples.get(key, [])
@@ -335,6 +380,7 @@ class ClientCountTracker:
         vals_1d = [v for ts, v in hist if ts >= now - _CC_1DAY_WINDOW]
         vals_7d = [v for ts, v in hist if ts >= now - _CC_7DAY_WINDOW]
         vals_30d = [v for ts, v in hist if ts >= now - _CC_30DAY_WINDOW]
+        # No samples yet: report no data with whatever history exists.
         if not samples:
             return {"site_name": central_site, "current": 0, "hourly_avg": 0,
                     "drop_pct": 0.0, "max_7day": round(max(vals_7d or [0]), 1),
@@ -343,6 +389,7 @@ class ClientCountTracker:
                     "avg_7day": round(sum(vals_7d) / len(vals_7d), 1) if vals_7d else 0.0,
                     "avg_30day": round(sum(vals_30d) / len(vals_30d), 1) if vals_30d else 0.0,
                     "status": "no_data", "ts": now}
+        # Latest count, the hour's average, and the rolling peaks.
         current = samples[-1][1]
         hourly_avg = sum(s[1] for s in samples) / len(samples)
         max_7day = round(max(vals_7d + [hourly_avg]), 1)
@@ -362,16 +409,20 @@ class ClientCountTracker:
         triggered = []
         # Trend inputs. Each returns None when it lacks the history to judge,
         # so a fresh site never alarms on an empty comparison.
+        # Day-over-day, week-over-week and short-window drops.
         day_drop_pct = _cc_period_drop(hist, now, _CC_1DAY_WINDOW)
         week_drop_pct = _cc_period_drop(hist, now, _CC_7DAY_WINDOW)
         rate_drop_pct = _cc_rate_drop(samples, rate_samples)
+        # Too few samples: no verdict yet.
         if len(samples) < _CC_MIN_SAMPLES:
             drop_pct, status = 0.0, "no_data"
         else:
+            # Percent below the hourly average (needs an average of at least 1).
             if hourly_avg >= 1:
                 drop_pct = max(0.0, (hourly_avg - current) / hourly_avg * 100.0)
             else:
                 drop_pct = 0.0
+            # Within-hour tier.
             # Within-hour tier.
             if drop_pct > error_pct:
                 status = "error"
@@ -435,6 +486,7 @@ class ClientCountTracker:
                     die_off_peak = avg_7day
                     triggered.append("die_off_weekly(%s<%s*%s=%s)" %
                                      (hourly_avg, avg_7day, weekly_frac, round(avg_7day * weekly_frac, 1)))
+            # Same check against the 30-day average, as a warning.
             if die_off_frac > 0 and max_30day >= min_peak and avg_30day > 0:
                 if hourly_avg < avg_30day * monthly_frac:
                     status = _cc_worst(status, "warning")
@@ -442,6 +494,7 @@ class ClientCountTracker:
                         die_off_peak = avg_30day
                     triggered.append("die_off_monthly(%s<%s*%s=%s)" %
                                      (hourly_avg, avg_30day, monthly_frac, round(avg_30day * monthly_frac, 1)))
+        # Return the status, all the inputs and the debug details.
         return {"site_name": central_site, "current": current,
                 "hourly_avg": round(hourly_avg, 1), "drop_pct": round(drop_pct, 1),
                 "max_7day": max_7day, "max_30day": max_30day,
@@ -467,10 +520,12 @@ class ClientCountTracker:
         """Once per hour: append each site's current hourly average to the 7-day
         history and persist both files. Mirrors source hourly_baseline_saver +
         _save_client_count_baseline."""
+        # Only snapshot once per hour.
         now = time.time()
         if now - self._last_snapshot < _CC_SNAPSHOT_INTERVAL:
             return
         self._last_snapshot = now
+        # Compute each site's hourly average when it has enough samples.
         cutoff = now - _CC_30DAY_WINDOW
         snapshot: Dict[str, dict] = {}
         for key, samples in self._samples.items():
@@ -481,9 +536,11 @@ class ClientCountTracker:
             hist = self._hourly.setdefault(key, [])
             hist.append((now, avg))
             self._hourly[key] = [(ts, v) for ts, v in hist if ts >= cutoff]
+        # Persist the new hourly baselines.
         if snapshot:
             self._baseline.update(snapshot)
             shard_save(self._data_dir, self._MODULE, self._BASELINE, self._baseline)
+        # Persist the trimmed hourly history.
         if self._hourly:
             shard_save(self._data_dir, self._MODULE, self._SEVENDAY,
                        {k: list(v) for k, v in self._hourly.items()})
@@ -491,6 +548,7 @@ class ClientCountTracker:
     def save_samples(self) -> None:
         """Persist the raw 1h samples (trimmed to the window) every poll cycle so
         a restart restores the exact reference. Best-effort; sharded per tenant."""
+        # Keep only samples from the last hour and drop empty keys.
         now = time.time()
         cutoff = now - _CC_WINDOW
         trimmed = {
@@ -498,10 +556,12 @@ class ClientCountTracker:
             for k, v in self._samples.items()
         }
         trimmed = {k: v for k, v in trimmed.items() if v}
+        # Write them out.
         shard_save(self._data_dir, self._MODULE, self._SAMPLES, trimmed)
 
     def forget(self, scope: str) -> None:
         """Drop all in-memory state for a scope (left centralized mode / reset)."""
+        # Remove every key that belongs to this scope from all three stores.
         prefix = f"{scope}{_CC_KEYSEP}"
         for store in (self._samples, self._hourly, self._baseline):
             for k in [k for k in store if k.startswith(prefix)]:
@@ -509,11 +569,13 @@ class ClientCountTracker:
 
     def clear(self) -> None:
         """Drop ALL in-memory client-count state (global corruption-recovery reset)."""
+        # Empty every store.
         self._samples.clear()
         self._hourly.clear()
         self._baseline.clear()
 
 
+# Index of each status in a health bucket [ok, warning, error, other].
 _HEALTH_IDX = {"ok": 0, "warning": 1, "error": 2}  # else (no_data/pending/unknown) -> 3
 
 # Success-% reporting windows: (payload key, seconds). 4 weeks = 28d, inside the
@@ -526,18 +588,22 @@ def success_from_daily(daily: list) -> Dict[str, Any]:
     used for distributed-mode checks that relay only daily summaries (no hourly).
     Same denominator rule as CheckHealthHistory.success_stats: ok/(ok+warning+error),
     grey excluded. h24 = today's bucket only (best available at daily resolution)."""
+    # Window start times: today's midnight, 7 days ago and 28 days ago.
     now = time.time()
     today = int(now // 86400 * 86400)
     spans = {"h24": today, "d7": now - 7 * 86400, "w4": now - 28 * 86400}
     out: Dict[str, Any] = {}
+    # For each window, sum ok and graded counts of the daily buckets inside it.
     for label, floor in spans.items():
         ok = graded = 0
         for d in (daily or []):
+            # Skip days before the window.
             if int(d.get("d", 0)) < floor:
                 continue
             o, w, e = int(d.get("o", 0)), int(d.get("w", 0)), int(d.get("e", 0))
             ok += o
             graded += o + w + e
+        # Success percentage, or None when nothing was graded.
         out[label] = round(100.0 * ok / graded, 1) if graded else None
     return out
 
@@ -558,6 +624,7 @@ class CheckHealthHistory:
         # Sharded per tenant under <data_dir>/tenants/<tenant>/simulations/ — this
         # is the largest, most write-amplified store (30-day hourly × all checks),
         # so per-tenant files + dirty-only writes matter most here.
+        """Load the sharded health history for every tenant."""
         self._data_dir = data_dir
         # key = tenant\x1fsite\x1fcheck -> {hour_ts(int): [o, w, e, n]}
         self._h: Dict[str, Dict[int, list]] = {}
@@ -567,9 +634,12 @@ class CheckHealthHistory:
 
     @staticmethod
     def _key(tenant: str, site: str, check_id: str) -> str:
+        """Build the composite key for one tenant/site/check."""
         return f"{tenant}{_CC_KEYSEP}{site}{_CC_KEYSEP}{check_id}"
 
     def _load(self) -> None:
+        """Load the history from disk, dropping buckets older than 30 days."""
+        # Cutoff for buckets older than 30 days.
         cutoff = time.time() - _CC_30DAY_WINDOW
         raw = shard_load(self._data_dir, self._MODULE, self._NAME)
         self._h = {
@@ -578,6 +648,8 @@ class CheckHealthHistory:
         }
 
     def record(self, tenant: str, site: str, check_id: str, status: str) -> None:
+        """Count one status sample in the current hour's bucket for this check."""
+        # Find or create this hour's bucket for the check.
         now = time.time()
         buckets = self._h.setdefault(self._key(tenant, site, check_id), {})
         bucket = int(now // 3600 * 3600)
@@ -585,7 +657,9 @@ class CheckHealthHistory:
         if cell is None:
             cell = [0, 0, 0, 0]
             buckets[bucket] = cell
+        # Count the status (unknown statuses count as "other").
         cell[_HEALTH_IDX.get(str(status).strip().lower(), 3)] += 1
+        # Drop buckets older than 30 days and mark the tenant for saving.
         cutoff = now - _CC_30DAY_WINDOW
         for b in [b for b in buckets if b < cutoff]:
             del buckets[b]
@@ -594,6 +668,7 @@ class CheckHealthHistory:
     def save(self) -> None:
         # Only rewrite tenants that recorded since the last save. int hour keys
         # auto-stringify through json.dumps (shard_save); _load converts back.
+        """Write the history of every tenant changed since the last save."""
         shard_save(self._data_dir, self._MODULE, self._NAME, self._h,
                    dirty=(self._dirty or None))
         self._dirty = set()
@@ -601,6 +676,7 @@ class CheckHealthHistory:
     def forget(self, tenant: str) -> None:
         """Drop all in-memory buckets for a tenant + mark it dirty so its now-empty
         shard file is removed on the next save (leaving centralized mode / reset)."""
+        # Remove all of the tenant's checks and mark it dirty so its file is cleared.
         prefix = f"{tenant}{_CC_KEYSEP}"
         for k in [k for k in self._h if k.startswith(prefix)]:
             self._h.pop(k, None)
@@ -608,22 +684,27 @@ class CheckHealthHistory:
 
     def clear(self) -> None:
         """Drop ALL in-memory health buckets (global corruption-recovery reset)."""
+        # Empty the history and the pending-save set.
         self._h.clear()
         self._dirty.clear()
 
     def summary(self, tenant: str) -> Dict[str, Any]:
         """{site: {check_id: [{d, o, w, e, n} ... up to 30 daily]}} for the tenant."""
+        # Earliest day kept: 29 days before today.
         now = time.time()
         floor = int(now // 86400 * 86400) - 29 * 86400
         prefix = f"{tenant}{_CC_KEYSEP}"
         out: Dict[str, Any] = {}
+        # Walk this tenant's checks.
         for key, buckets in self._h.items():
             if not key.startswith(prefix):
                 continue
+            # Split the key into tenant, site and check id.
             parts = key.split(_CC_KEYSEP, 2)
             if len(parts) != 3:
                 continue
             _, site, check_id = parts
+            # Sum hourly buckets into daily ones within the 30-day range.
             days: Dict[int, list] = {}
             for b, cell in buckets.items():
                 d = int(b // 86400 * 86400)
@@ -632,6 +713,7 @@ class CheckHealthHistory:
                 acc = days.setdefault(d, [0, 0, 0, 0])
                 for i in range(4):
                     acc[i] += cell[i]
+            # Daily buckets sorted oldest first.
             out.setdefault(site, {})[check_id] = [
                 {"d": d, "o": v[0], "w": v[1], "e": v[2], "n": v[3]}
                 for d, v in sorted(days.items())
@@ -640,6 +722,7 @@ class CheckHealthHistory:
 
     def hourly(self, tenant: str, site: str, check_id: str) -> list:
         """Raw hourly buckets [{h, o, w, e, n}] (last 30 days) for one check."""
+        # This check's buckets, sorted oldest first.
         buckets = self._h.get(self._key(tenant, site, check_id), {})
         return [{"h": b, "o": v[0], "w": v[1], "e": v[2], "n": v[3]}
                 for b, v in sorted(buckets.items())]
@@ -651,17 +734,20 @@ class CheckHealthHistory:
         a check that simply wasn't reporting doesn't drag the score down. Each value
         is a 0–100 float rounded to 1 dp, or None when the window has no graded
         samples. Hourly-accurate (24h really means the last 24 one-hour buckets)."""
+        # Walk this tenant's checks.
         now = time.time()
         prefix = f"{tenant}{_CC_KEYSEP}"
         out: Dict[str, Any] = {}
         for key, buckets in self._h.items():
             if not key.startswith(prefix):
                 continue
+            # Split the key into tenant, site and check id.
             parts = key.split(_CC_KEYSEP, 2)
             if len(parts) != 3:
                 continue
             _, site, check_id = parts
             stats: Dict[str, Any] = {}
+            # For each window, sum ok and graded counts of the hourly buckets inside it.
             for label, span in _SUCCESS_WINDOWS:
                 floor = now - span
                 ok = graded = 0
@@ -670,14 +756,17 @@ class CheckHealthHistory:
                         continue
                     ok += cell[0]
                     graded += cell[0] + cell[1] + cell[2]
+                # Success percentage, or None when nothing was graded.
                 stats[label] = round(100.0 * ok / graded, 1) if graded else None
             out.setdefault(site, {})[check_id] = stats
         return out
 
 
+# Length of the PASS/FAIL window.
 _CPW_WINDOW = 3600  # seconds — the rolling 1-hour PASS/FAIL verdict window
 
 
+# Statuses that count as a passing poll.
 _POLL_PASS_STATES = ("ok", "pass", "passed", "green", "up", "healthy", "online")
 # Only genuinely-absent samples are IGNORED (don't count toward the verdict).
 # Everything that isn't a pass or an ignore is a FAIL — see below.
@@ -697,6 +786,7 @@ def _classify_poll_status(status: Any) -> Optional[bool]:
     FAIL (not ignore) is deliberate: a failure state the classifier didn't
     recognize used to be silently dropped, so a green last poll could win the
     verdict even though the hour had failures."""
+    # Case-insensitive status; pass, ignore, or else fail.
     s = str(status or "").strip().lower()
     if s in _POLL_PASS_STATES:
         return True
@@ -721,23 +811,29 @@ class CheckPollWindow:
     single JSON file in the data dir (``save_samples``), restored (trimmed) on
     init so a verdict survives a hub restart within the hour."""
 
+    # Storage module name and file name.
     _MODULE = "simulations"
     _NAME = "check_poll_window.json"
 
     def __init__(self, data_dir: str) -> None:
         # Sharded per tenant under <data_dir>/tenants/<tenant>/simulations/. One
         # migrate-on-first-boot split of any legacy shared file, then load shards.
+        """Load the persisted PASS/FAIL window from the sharded data directory."""
         self._data_dir = data_dir
         self._samples: Dict[str, list] = {}    # key -> [(ts, is_pass: bool), ...]
         self._dirty: set = set()               # tenants changed since last save
+        # Move any legacy shared file into per-tenant shards, then load.
         migrate_legacy(data_dir, self._MODULE, self._NAME)
         self._load()
 
     @staticmethod
     def _key(tenant: str, site: str, check: str) -> str:
+        """Build the composite key for one tenant/site/check."""
         return f"{tenant}{_CC_KEYSEP}{site}{_CC_KEYSEP}{check}"
 
     def _load(self) -> None:
+        """Load saved samples, keeping only those inside the last hour."""
+        # Read the shards and drop samples older than the window.
         cutoff = time.time() - _CPW_WINDOW
         raw = shard_load(self._data_dir, self._MODULE, self._NAME)
         trimmed = {
@@ -748,6 +844,7 @@ class CheckPollWindow:
 
     def record(self, tenant: str, site: str, check: str, is_pass: bool) -> None:
         """Append a PASS/FAIL sample and trim to the 1-hour window."""
+        # Add the sample, trim to the window, and mark the tenant for saving.
         now = time.time()
         key = self._key(tenant, site, check)
         samples = self._samples.setdefault(key, [])
@@ -757,6 +854,8 @@ class CheckPollWindow:
         self._dirty.add(str(tenant))
 
     def _window(self, tenant: str, site: str, check: str) -> list:
+        """Return the PASS/FAIL flags recorded for this check in the last hour."""
+        # Only samples inside the window.
         cutoff = time.time() - _CPW_WINDOW
         return [p for ts, p in self._samples.get(self._key(tenant, site, check), [])
                 if ts >= cutoff]
@@ -764,9 +863,11 @@ class CheckPollWindow:
     def verdict(self, tenant: str, site: str, check: str) -> Optional[str]:
         """Aggregate 1h verdict — ``"ok"``/``"warning"``/``"error"`` per the rule
         above, or ``None`` when there are no PASS/FAIL samples in the window."""
+        # No samples: no verdict.
         samples = self._window(tenant, site, check)
         if not samples:
             return None
+        # Count passes against the total.
         total = len(samples)
         passes = sum(1 for p in samples if p)
         if passes == total:
@@ -778,6 +879,7 @@ class CheckPollWindow:
 
     def counts(self, tenant: str, site: str, check: str) -> tuple:
         """``(passes, total)`` over the last hour — for the operator message hint."""
+        # Passes and total in the window.
         samples = self._window(tenant, site, check)
         return sum(1 for p in samples if p), len(samples)
 
@@ -785,6 +887,7 @@ class CheckPollWindow:
         """Persist the window (trimmed) per tenant so a restart within the hour
         restores the verdict. Writes only tenants that changed since the last save
         (recorded a sample OR had one trimmed away). Best-effort."""
+        # Trim every key to the window and track which tenants changed.
         cutoff = time.time() - _CPW_WINDOW
         dirty = set(self._dirty)
         new: Dict[str, list] = {}
@@ -794,6 +897,7 @@ class CheckPollWindow:
                 dirty.add(k.split(_CC_KEYSEP, 1)[0])   # trimmed → this tenant changed
             if kept:
                 new[k] = kept
+        # Keep the trimmed samples and write changed tenants.
         self._samples = new
         shard_save(self._data_dir, self._MODULE, self._NAME, self._samples,
                    dirty=(dirty or None))
@@ -802,6 +906,7 @@ class CheckPollWindow:
     def forget(self, tenant: str) -> None:
         """Drop all in-memory state for a tenant (left centralized mode) and mark
         it dirty so the next save removes its now-empty shard file."""
+        # Remove the tenant's keys and mark it dirty so its file is cleared.
         prefix = f"{tenant}{_CC_KEYSEP}"
         for k in [k for k in self._samples if k.startswith(prefix)]:
             self._samples.pop(k, None)
@@ -809,6 +914,7 @@ class CheckPollWindow:
 
     def clear(self) -> None:
         """Drop ALL in-memory samples (global corruption-recovery reset)."""
+        # Empty the samples and the pending-save set.
         self._samples.clear()
         self._dirty.clear()
 
@@ -824,16 +930,19 @@ class CheckPollWindow:
 # how Mist uses separate tracker classes (mist_client_count_*.json). No parent
 # behavior changes — cloud Central still uses the original classes byte-identically.
 class CentralOnPremClientCountTracker(ClientCountTracker):
+    """Client-count tracker for Central On-Prem, stored in separate files."""
     _BASELINE = "central_on_prem_client_count_baseline.json"
     _SEVENDAY = "central_on_prem_client_count_7day.json"
     _SAMPLES = "central_on_prem_client_count_samples.json"
 
 
 class CentralOnPremCheckHealthHistory(CheckHealthHistory):
+    """Check-health history for Central On-Prem, stored in a separate file."""
     _NAME = "central_on_prem_check_health_history.json"
 
 
 class CentralOnPremCheckPollWindow(CheckPollWindow):
+    """Poll window for Central On-Prem, stored in a separate file."""
     _NAME = "central_on_prem_check_poll_window.json"
 
 
@@ -883,11 +992,14 @@ class CentralHubPoller:
     Default ``instance="central"`` reproduces the original behavior exactly."""
 
     def __init__(self, hub, instance: str = "central") -> None:
+        """Bind to the hub, pick the instance wiring, and create its trackers."""
+        # Reject unknown instance names, then remember this instance's wiring.
         if instance not in _CENTRAL_INSTANCES:
             raise ValueError(f"unknown CentralHubPoller instance: {instance!r}")
         self.hub = hub
         self._inst_name = instance
         self._inst = _CENTRAL_INSTANCES[instance]
+        # Data directory for the trackers (current directory if unknown).
         ddir = getattr(getattr(hub, "state", None), "data_dir", ".") or "."
         # Per-instance trackers — cloud Central and Central On-Prem get SEPARATE
         # tracker instances (and, via the on-prem subclasses, separate shard
@@ -903,11 +1015,13 @@ class CentralHubPoller:
         # interval is configurable per tenant (Setup → Central API → Connection);
         # tenants are gated by their own interval and the loop wakes on the
         # shortest configured one.
+        # No tenant polled yet; default sleep until the first cycle decides.
         self._last_poll: Dict[str, float] = {}
         self._next_sleep_s: float = _POLL_INTERVAL_S
 
     @property
     def _store(self):
+        """The hub's simulations store (tenant configs and modes)."""
         return self.hub.simulations_store
 
     @property
@@ -916,6 +1030,7 @@ class CentralHubPoller:
         for cloud, central_on_prem_hub_status for on-prem). Created on first
         access if missing so the on-prem instance is safe before main.py wires
         its dict (cloud Central's is always present from startup)."""
+        # Use the hub's dict, creating it if it does not exist yet.
         d = getattr(self.hub, self._inst["status_attr"], None)
         if not isinstance(d, dict):
             d = {}
@@ -928,9 +1043,11 @@ class CentralHubPoller:
         Reads THIS instance's config getter + mode check (cloud Central vs Central
         On-Prem), so the two instances poll independently and a tenant with only an
         on-prem config is polled by the on-prem instance alone."""
+        # This instance's config getter and mode check.
         out = []
         get_cfg = getattr(self._store, self._inst["config_getter"])
         is_centralized = getattr(self._store, self._inst["mode_check"])
+        # Collect each centralized tenant that has a config.
         for tid in self._store.tenant_ids():
             try:
                 modes = await self._store.get_processing_modes(tid)
@@ -939,6 +1056,7 @@ class CentralHubPoller:
                 # spoke still gets polled and its checks show.
                 if not is_centralized(modes):
                     continue
+                # Skip tenants with no credentials.
                 cc = await get_cfg(tid)
                 if cc:
                     out.append((tid, cc))
@@ -951,20 +1069,25 @@ class CentralHubPoller:
         """This tenant's Central poll interval in seconds — ``poll_interval_s`` from
         its central_config (Setup → Central API → Connection), defaulting to 5 min
         and clamped to the floor so a misconfig can't hammer the Central API."""
+        # Use the configured interval, or the default if missing or invalid.
         try:
             iv = int((central_config or {}).get("poll_interval_s") or _POLL_INTERVAL_S)
         except (TypeError, ValueError):
             iv = _POLL_INTERVAL_S
+        # Never poll faster than the floor.
         return max(_POLL_INTERVAL_FLOOR_S, iv)
 
     async def _poll_tenant(self, tenant_id: str, central_config: Dict[str, Any]) -> None:
         # ArubaClient maps central_config's ``mode`` -> api_version itself.
+        """Poll Central for one tenant and publish its checks, client counts and hardware status."""
         client = ArubaClient(await central_secrets.resolve(self.hub, central_config))
+        # Not configured: clear this tenant's status and tracker state.
         if not client.is_configured():
             self._status.pop(tenant_id, None)
             self._cc.forget(tenant_id)
             self._cpw.forget(tenant_id)
             return
+        # Thresholds plus the tenant's site mappings, monitored and hardware checks.
         cc_thresh = _cc_thresholds(central_config)
         get_sites = getattr(self._store, self._inst["sites_getter"])
         sites_cfg = await get_sites(tenant_id)
@@ -980,20 +1103,25 @@ class CentralHubPoller:
             str(k): int(v) for k, v in (sites_cfg.get("site_min_clients") or {}).items()
             if isinstance(v, (int, float)) and int(v) > 0
         }
+        # Hardware check ids to request, and their definitions by id.
         hw_check_ids = {str(h.get("id")) for h in hw_checks if h.get("id")}
         hw_names = {str(h.get("id")): h for h in hw_checks if h.get("id")}
 
+        # Per-cycle results.
         status: Dict[str, Any] = {}
         client_count_status: Dict[str, Any] = {}
         central_clients_by_site: Dict[str, int] = {}
         hw_totals: Dict[str, int] = {}
 
+        # Poll each mapped wireless site's Central site.
         for wireless_site, central_site in site_mappings.items():
             try:
                 data = await client.poll_site_data(central_site, hw_check_ids)
+            # A failed site poll is reported as an error check for that site.
             except Exception as exc:  # noqa: BLE001
                 status[wireless_site] = {"poll_error": {"status": "error", "message": str(exc)}}
                 continue
+            # Alert and insight counts returned for the site.
             alert_counts = data.get("alert_type_counts") or {}
             insight_counts = data.get("insight_cat_counts") or {}
             # Match case-insensitively AND across BOTH the alert and insight
@@ -1034,8 +1162,10 @@ class CentralHubPoller:
                     await self._store.record_alert_insight_seen(_cat_items)
             except Exception:  # noqa: BLE001 — cataloguing must never break the poll
                 pass
+            # Evaluate each monitored check for this site.
             checks: Dict[str, Any] = {}
             for chk in monitored:
+                # Skip checks without an id.
                 cid = str(chk.get("id") or "")
                 if not cid:
                     continue
@@ -1045,6 +1175,7 @@ class CentralHubPoller:
                 chk_site = str(chk.get("site") or "").strip().lower()
                 if chk_site and chk_site not in (str(central_site).lower(), str(wireless_site).lower(), "all sites"):
                     continue
+                # How many matching alerts/insights are active.
                 n = count_for_check(chk, alert_ci, insight_ci)
                 # INVERTED semantics: this is a demo/simulation platform that is
                 # SUPPOSED to be generating these alerts/insights. A monitored check
@@ -1075,6 +1206,7 @@ class CentralHubPoller:
                                 f"(0 seen; {_seen} other condition(s) at site, "
                                 f"{_cc} clients)")
                     checks[cid] = {"status": "error", "message": _msg}
+            # Store the site's checks, then read its client counts.
             status[wireless_site] = checks
             current = int(data.get("client_count", 0) or 0)
             wired = int(data.get("wired_clients", 0) or 0)
@@ -1088,6 +1220,7 @@ class CentralHubPoller:
             self._cc.record(tenant_id, wireless_site, wireless, kind="wireless")
             # Per-site FLOOR, resolved here because entry() only sees thresholds.
             # Absent/0 disables the floor rule for THIS site alone.
+            # Copy the thresholds and add this site's floor.
             cc_thresh = dict(cc_thresh or {})
             cc_thresh["floor"] = _cc_site_floor(sites_cfg, wireless_site, central_site)
             cc_entry = self._cc.entry(tenant_id, wireless_site, central_site, cc_thresh)
@@ -1103,8 +1236,10 @@ class CentralHubPoller:
             # floor was actually configured for. Only the TOTAL call gets it.
             _sub_thresh = dict(cc_thresh)
             _sub_thresh["floor"] = None
+            # Wired and wireless series are evaluated without the floor.
             w_entry = self._cc.entry(tenant_id, wireless_site, central_site, _sub_thresh, kind="wired")
             wl_entry = self._cc.entry(tenant_id, wireless_site, central_site, _sub_thresh, kind="wireless")
+            # Attach the wired and wireless figures to the total entry.
             cc_entry["wired"] = wired
             cc_entry["wireless"] = wireless
             cc_entry["wired_status"] = w_entry["status"]
@@ -1113,10 +1248,12 @@ class CentralHubPoller:
             cc_entry["wireless_drop_pct"] = wl_entry["drop_pct"]
             # Overall = worst of total/wired/wireless.
             cc_entry["status"] = _cc_worst(cc_entry["status"], w_entry["status"], wl_entry["status"])
+            # Store the site's client-count entry.
             client_count_status[wireless_site] = cc_entry
             # Surface the site's client-count monitor as a CHECK so "everything
             # monitored" shows on the dashboard Checks view. Direct (NOT inverted)
             # semantics: a DROP in clients means the sim clients died -> warning / error.
+            # Message: current vs hourly average, plus wired and wireless drops.
             _cc_msg = (f"{cc_entry['current']} clients vs {cc_entry['hourly_avg']} hr-avg "
                        f"(down {cc_entry['drop_pct']}%) · wired {wired} (down {w_entry['drop_pct']}%) "
                        f"· wireless {wireless} (down {wl_entry['drop_pct']}%)")
@@ -1129,6 +1266,7 @@ class CentralHubPoller:
             # with no visible cause. Reporting thresholds here are just "worth
             # mentioning" — lower than the period/rate rule's own trigger
             # thresholds, so a rising-but-not-yet-firing trend is visible too.
+            # Add trend figures worth mentioning.
             _trend_bits = []
             if cc_entry.get("day_drop_pct") is not None and cc_entry["day_drop_pct"] >= 5:
                 _trend_bits.append(f"day {cc_entry['day_drop_pct']}%")
@@ -1153,6 +1291,7 @@ class CentralHubPoller:
             # operator can see WHY an otherwise-steady site reads red.
             _do = [(lbl, e) for lbl, e in (("total", cc_entry), ("wired", w_entry),
                                            ("wireless", wl_entry)) if e.get("die_off")]
+            # Explain which series tripped the die-off rule and against what peak.
             if _do:
                 _frac = int((_do[0][1].get("die_off_frac") or 0) * 100)
                 _do_txt = ", ".join(f"{lbl} {e['hourly_avg']} < {_frac}% of peak {e['die_off']}"
@@ -1171,6 +1310,7 @@ class CentralHubPoller:
                                 "sample_count", "min_samples", "warn_pct", "error_pct",
                                 "weekly_frac", "monthly_frac", "min_peak", "period_drop_pct",
                                 "rate_drop_thresh", "rate_samples", "triggered", "status")
+            # Add the client-count check with its message and per-series debug data.
             checks["Steady Client Count 1hr Average"] = {
                 "status": cc_entry["status"], "message": _cc_msg,
                 "debug": {
@@ -1186,9 +1326,11 @@ class CentralHubPoller:
             # on the wireless site name OR the central site name so a threshold
             # saved against either form applies.
             min_floor = site_min_clients.get(wireless_site) or site_min_clients.get(central_site)
+            # Add the minimum-client check when a floor is set.
             _mc = min_client_check(current, min_floor)
             if _mc:
                 checks["Minimum Client Threshold"] = _mc
+            # Record the site's client count and add up down-device totals.
             central_clients_by_site[wireless_site] = current
             for alert_id, devices in (data.get("hw_devices") or {}).items():
                 hw_totals[alert_id] = hw_totals.get(alert_id, 0) + sum(devices.values())
@@ -1197,23 +1339,28 @@ class CentralHubPoller:
         # the live device list and add a check on its pinned site — DOWN = error
         # (a monitored switch/AP/gateway is offline). new_central only; best-effort.
         if hw_checks:
+            # Fetch the live device list (empty on failure).
             try:
                 all_devices = await client._nc_devices()
             except Exception:  # noqa: BLE001
                 all_devices = []
+            # Index devices by serial and by name.
             dev_by_key: Dict[str, dict] = {}
             for d in all_devices:
                 for k in (d.get("serialNumber"), d.get("serial"), d.get("deviceName"), d.get("name")):
                     if k:
                         dev_by_key[str(k)] = d
+            # Evaluate each monitored hardware device.
             for hc in hw_checks:
                 hid = str(hc.get("id") or "")
                 if not hid:
                     continue
+                # The device's pinned site, its record and whether it is up.
                 hsite = str(hc.get("site") or "").strip().lower()
                 dev = dev_by_key.get(hid)
                 up = str((dev or {}).get("status") or "").upper() in ("UP", "ONLINE")
                 label = str(hc.get("name") or hid)
+                # Add the check to every matching mapped site.
                 for wsite, csite in site_mappings.items():
                     if hsite and hsite not in (str(csite).lower(), str(wsite).lower(), "all sites"):
                         continue
@@ -1222,12 +1369,14 @@ class CentralHubPoller:
                         "message": "up" if up else "DOWN",
                     }
 
+        # Summarise down-device totals per hardware check.
         hardware_alerts = [
             {"id": aid, "name": (hw_names.get(aid) or {}).get("name", aid),
              "device_type": (hw_names.get(aid) or {}).get("device_type", ""),
              "total": total}
             for aid, total in hw_totals.items()
         ]
+        # Publish the tenant's status in the shape the dashboards expect.
         self._status[tenant_id] = {
             "status": status,
             "hardware_alerts": hardware_alerts,
@@ -1238,10 +1387,12 @@ class CentralHubPoller:
             "fetched_at": time.time(),
         }
         # Record each check's status into the 30-day health history (hourly bucket).
+        # Walk every recorded check.
         for wsite, checks_map in status.items():
             if not isinstance(checks_map, dict):
                 continue
             for cid, info in checks_map.items():
+                # Record the check's status (missing means no data).
                 st = (info.get("status") if isinstance(info, dict) else info) or "no_data"
                 self._health.record(tenant_id, wsite, cid, st)
                 # Rolling 1h verdict: a check must NOT read OK if any poll FAILED
@@ -1253,8 +1404,10 @@ class CentralHubPoller:
                 # the persisted block and to the dashboard. no_data/other → ignore
                 # (verdict stays None) → leave the instantaneous status as-is.
                 is_pass = _classify_poll_status(st)
+                # Ignored statuses and non-dict entries do not enter the window.
                 if is_pass is None or not isinstance(info, dict):
                     continue
+                # Record this poll and compute the last-hour verdict.
                 self._cpw.record(tenant_id, wsite, cid, is_pass)
                 verdict = self._cpw.verdict(tenant_id, wsite, cid)
                 if verdict is not None:
@@ -1269,10 +1422,13 @@ class CentralHubPoller:
                             "live_status": st, "sticky_verdict": verdict,
                             "passes": passes, "total": total,
                         }
+                    # Replace the status with the verdict and add the pass count.
                     info["status"] = verdict
                     info["message"] = f"{info.get('message', '')} · {passes}/{total} polls OK in last 1h"
 
     async def _poll_once(self) -> None:
+        """Poll every due centralized tenant once, then persist all tracker state."""
+        # Tenants to poll this pass.
         tenants = await self._centralized_tenants()
         # Drop cached status for tenants that left centralized mode / cleared creds
         # so the UI stops showing a stale synthetic hub spoke.
@@ -1286,23 +1442,27 @@ class CentralHubPoller:
         # _BOUNDARY_GUARD_S of a boundary reads mid-refresh values as a false
         # positive. If we woke inside that window, delay into the safe zone before
         # querying Central this pass.
+        # Wait out the window around a 5-minute boundary.
         _guard = _boundary_guard_delay(time.time())
         if _guard > 0:
             logger.info("Central hub poll: within %ds of a 5-min clock boundary — "
                         "delaying %.0fs to avoid a mid-refresh false positive.",
                         _BOUNDARY_GUARD_S, _guard)
             await asyncio.sleep(_guard)
+        # Time used for the per-tenant interval checks.
         now = time.time()
         # Gate each tenant by its own configured interval; wake on the shortest.
         intervals = [self._interval_for(cc) for _, cc in tenants]
         self._next_sleep_s = min(intervals) if intervals else _POLL_INTERVAL_S
         for tid, cc in tenants:
+            # Skip tenants polled within their interval, otherwise poll them.
             iv = self._interval_for(cc)
             if now - self._last_poll.get(tid, 0.0) < iv:
                 continue  # not due yet
             self._last_poll[tid] = now
             try:
                 await self._poll_tenant(tid, cc)
+            # One tenant's failure never stops the others.
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Central hub poll failed for tenant %s: %s", tid, exc)
         # Append the hourly snapshot to the 7-day baseline history (self-gated to
@@ -1333,6 +1493,7 @@ class CentralHubPoller:
         # event loop — a bounded write once per 5-min cycle can't starve the WS.
         # Resolves to _save_central_hub_status (cloud) or _save_central_on_prem_hub_status
         # (on-prem) so each instance persists its own status slot.
+        # Save the hub's status for this instance.
         save = getattr(self.hub, self._inst["save_attr"], None)
         if save:
             try:
@@ -1341,6 +1502,9 @@ class CentralHubPoller:
                 logger.debug("%s persist skipped: %s", self._inst["status_attr"], exc)
 
     async def run_loop(self) -> None:
+        """Poll forever, sleeping the shortest tenant interval (at least the floor) between passes.
+        """
+        # Run one pass; cancellation propagates, other errors are logged.
         while True:
             try:
                 await self._poll_once()
@@ -1348,4 +1512,5 @@ class CentralHubPoller:
                 raise
             except Exception as exc:  # noqa: BLE001 — never let a bad poll kill the loop
                 logger.warning("Central hub poll loop error: %s", exc)
+            # Sleep until the next pass.
             await asyncio.sleep(max(_POLL_INTERVAL_FLOOR_S, self._next_sleep_s))

@@ -20,28 +20,40 @@ Commands (hub → spoke):
 
 Phase 2 (console shortcut) is NOT here yet — console still relays through the hub.
 """
+# asyncio: the event loop and the bind-retry sleep.
 import asyncio
+# datetime: validity window of the bootstrap self-signed certificate.
 import datetime
+# errno: recognise "address already in use" when binding :443.
 import errno
+# ipaddress: add an IP SAN to the self-signed cert when the name is an IP.
 import ipaddress
+# logging: lifecycle and error messages.
 import logging
+# os: environment variables, file existence checks and private file permissions.
 import os
+# socket: this host's FQDN as a fallback certificate name.
 import socket
+# ssl: TLS contexts for the browser-facing listener and the upstream hub leg.
 import ssl
+# Path for cert/data locations; typing for hints; urlsplit/urlunsplit to rewrite the hub URL.
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
 
+# BaseSpoke is the common spoke base class; import path depends on how we were loaded.
 try:
     from base_spoke import BaseSpoke
 except ImportError:  # loaded from the repo root / as core package
     from core.src.base_spoke import BaseSpoke
 
+# The aiohttp app that does the actual reverse proxying.
 try:
     from proxy_app import build_proxy_app
 except ImportError:  # loaded as a package by the agent role loader
     from .proxy_app import build_proxy_app  # type: ignore
 
+# Named logger for this role.
 logger = logging.getLogger("ProxySpoke")
 
 # A self-update / systemd restart can briefly overlap with the outgoing proxy
@@ -55,12 +67,16 @@ _BIND_RETRY_DELAY = 1.0  # seconds between bind attempts
 
 def _ws_to_http(url: str) -> str:
     """Turn a hub ws(s)://host:port[/path] into the https base https://host:port."""
+    # No hub URL configured: no upstream.
     if not url:
         return ""
+    # A malformed URL yields "" (no upstream) instead of an exception.
     try:
         parts = urlsplit(url)
+        # Map WebSocket schemes to their HTTP equivalents; default to https.
         scheme = {"wss": "https", "ws": "http"}.get(parts.scheme, parts.scheme or "https")
         netloc = parts.netloc or parts.path  # bare host slipped into path
+        # Keep only scheme and host:port; drop any path such as /ws/spoke.
         return urlunsplit((scheme, netloc, "", "", ""))
     except Exception:  # noqa: BLE001
         return ""
@@ -69,6 +85,7 @@ def _ws_to_http(url: str) -> str:
 def _as_bool(*vals, default: bool) -> bool:
     """First of ``vals`` that is a recognizable bool wins; else ``default``.
     Accepts real bools and the usual 1/true/yes/on ↔ 0/false/no/off strings."""
+    # Return the first value that clearly means true or false; skip None and unknown text.
     for v in vals:
         if v is None:
             continue
@@ -79,15 +96,23 @@ def _as_bool(*vals, default: bool) -> bool:
             return True
         if s in ("0", "false", "no", "off"):
             return False
+    # Nothing recognisable: use the default.
     return default
 
 
 class ProxySpoke(BaseSpoke):
+    """Generic-agent role that fronts the hub's WebUI on :443 and forwards to the hub over mTLS."""
     def __init__(self, spoke_id: str, config: Dict[str, Any]):
+        """Read listener, upstream, TLS, tenant and probe settings from config and environment.
+
+        Config values win over LM_PROXY_* environment variables, which win over defaults.
+        """
+        # Base spoke setup; the control plane and loop are attached later.
         super().__init__(spoke_id, config)
         self.control_plane = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
+        # Browser-facing listener: bind address/port and its TLS cert/key files.
         cfg = config or {}
         self.web_host = cfg.get("web_host") or os.environ.get("LM_PROXY_HOST", "0.0.0.0")
         self.web_port = int(cfg.get("web_port") or os.environ.get("LM_PROXY_PORT", "443"))
@@ -125,6 +150,7 @@ class ProxySpoke(BaseSpoke):
         self.upstream_key = (cfg.get("upstream_key")
                              or os.environ.get("LM_MTLS_HUB_CLIENT_KEY") or "")
 
+        # Where this role keeps installed certs and other state.
         self._data_dir = cfg.get("data_dir") or os.environ.get(
             "LM_PROXY_DATA_DIR", "/var/lib/lm/proxy")
 
@@ -133,9 +159,11 @@ class ProxySpoke(BaseSpoke):
         # seeds tls_cert/tls_key from cfg/env — so a bare restart (self-update, crash,
         # watchdog reboot) would forget the cert and silently fall back to plaintext
         # HTTP on :443 (browsers then get a TLS handshake reset). Reload it here.
+        # Only look on disk when no cert was given in config/env.
         if not (self.tls_cert and self.tls_key):
             _tls_dir = Path(self._data_dir) / "tls"
             _fc, _pk = _tls_dir / "fullchain.pem", _tls_dir / "privkey.pem"
+            # Use the persisted pair only if both files exist.
             if _fc.exists() and _pk.exists():
                 self.tls_cert, self.tls_key = str(_fc), str(_pk)
 
@@ -169,6 +197,7 @@ class ProxySpoke(BaseSpoke):
             os.environ.get("LM_PROXY_PROBE_DETECTION"),
             default=True)
 
+        # aiohttp application, runner and site objects once the server is running.
         self._proxy_app = None
         self._runner = None
         self._site = None
@@ -191,27 +220,36 @@ class ProxySpoke(BaseSpoke):
         click-through), but the transport is correct from the first boot. Any
         real cert delivered later via INSTALL_CERT takes precedence: this only
         ever fills the gap, and is never written over fullchain/privkey."""
+        # Self-signed pair location, kept separate from the real fullchain/privkey files.
         tls_dir = Path(self._data_dir) / "tls"
         crt, key = tls_dir / "selfsigned.pem", tls_dir / "selfsigned.key"
+        # Reuse a self-signed pair generated on an earlier start.
         if crt.exists() and key.exists():
             self.tls_cert, self.tls_key = str(crt), str(key)
             self._using_bootstrap_cert = True
             return True
+        # Any failure (cryptography missing, disk error) falls back to plaintext with a warning.
         try:
+            # cryptography is imported only here, since it is only needed to make a cert.
             from cryptography import x509
             from cryptography.x509.oid import NameOID
             from cryptography.hazmat.primitives import hashes, serialization
             from cryptography.hazmat.primitives.asymmetric import rsa
 
+            # Cert name: the public hostname, else this host's FQDN, else a fixed placeholder.
             cn = (self.public_host or socket.getfqdn() or "lm-proxy").strip()
+            # New 2048-bit RSA key; subject and issuer are the same name (self-signed).
             pkey = rsa.generate_private_key(public_exponent=65537, key_size=2048)
             name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+            # Validity starts now and the SAN list always includes the name as a DNS name.
             now = datetime.datetime.utcnow()
             alt = [x509.DNSName(cn)]
             try:  # let the IP form work too, when the CN is literally an IP
                 alt.append(x509.IPAddress(ipaddress.ip_address(cn)))
             except ValueError:
                 pass
+            # Build and sign the certificate: valid from 5 minutes ago (clock skew) for 825 days
+            # (the longest browsers accept), not a CA.
             cert = (x509.CertificateBuilder()
                     .subject_name(name).issuer_name(name)
                     .public_key(pkey.public_key())
@@ -223,6 +261,7 @@ class ProxySpoke(BaseSpoke):
                                    critical=True)
                     .sign(pkey, hashes.SHA256()))
 
+            # Create the tls folder if needed.
             tls_dir.mkdir(parents=True, exist_ok=True)
             # Key first, at 0600, before the cert exists — so the pair is never
             # momentarily readable or half-present to a concurrent reader.
@@ -232,12 +271,15 @@ class ProxySpoke(BaseSpoke):
                     serialization.Encoding.PEM,
                     serialization.PrivateFormat.TraditionalOpenSSL,
                     serialization.NoEncryption()))
+            # Then the public certificate, readable by all.
             crt.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
             os.chmod(str(crt), 0o644)
+        # Could not make a cert: caller will serve plain HTTP.
         except Exception as e:  # noqa: BLE001
             logger.warning("could not generate bootstrap self-signed cert (%s) — "
                            "falling back to plaintext HTTP on :%d", e, self.web_port)
             return False
+        # Adopt the new pair and flag that it is the bootstrap cert.
         self.tls_cert, self.tls_key = str(crt), str(key)
         self._using_bootstrap_cert = True
         logger.warning("No CA-issued cert yet — serving HTTPS on :%d with a "
@@ -249,12 +291,14 @@ class ProxySpoke(BaseSpoke):
     def _listener_ssl(self) -> Optional[ssl.SSLContext]:
         """Browser-facing context: server cert ONLY, no client-cert request
         (CERT_NONE) → no TLS CertificateRequest → no macOS Keychain prompt."""
+        # Missing or deleted cert files trigger the self-signed fallback.
         if not (self.tls_cert and self.tls_key
                 and os.path.exists(self.tls_cert) and os.path.exists(self.tls_key)):
             # No CA-issued cert. Bootstrap a self-signed one rather than
             # silently downgrading :443 to plaintext.
             if not self._ensure_bootstrap_cert():
                 return None
+        # Server-side context; Purpose.CLIENT_AUTH defaults to not asking for client certs.
         ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)  # verify_mode=CERT_NONE
         ctx.load_cert_chain(self.tls_cert, self.tls_key)
         return ctx
@@ -262,13 +306,16 @@ class ProxySpoke(BaseSpoke):
     def upstream_ssl(self):
         """Upstream (proxy → hub) context: present our client cert for mTLS, and
         verify the hub's server cert only when explicitly enabled."""
+        # Client-side context for connecting to the hub.
         ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        # Verify the hub cert and hostname only when enabled; otherwise accept self-signed.
         if self.upstream_verify:
             ctx.check_hostname = True
             ctx.verify_mode = ssl.CERT_REQUIRED
         else:
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
+        # Present the dedicated hub-leg client cert when both files exist; load errors just warn.
         if (self.upstream_cert and self.upstream_key
                 and os.path.exists(self.upstream_cert) and os.path.exists(self.upstream_key)):
             try:
@@ -279,7 +326,10 @@ class ProxySpoke(BaseSpoke):
 
     # ── web server lifecycle ─────────────────────────────────────────────────
     async def _ensure_web_server(self) -> None:
+        """Start (or restart) the HTTPS listener if it is not running with the current settings."""
+        # Remember the loop for later use by the proxy app.
         self._loop = asyncio.get_event_loop()
+        # Everything that, when changed, requires a re-bind.
         bind = (self.web_host, self.web_port, self.tls_cert, self.tls_key)
         if self._site is not None and bind == self._bind:
             return  # already serving the right bind
@@ -291,15 +341,19 @@ class ProxySpoke(BaseSpoke):
                 pass
             self._runner = self._site = None
 
+        # Build the proxy app and prepare it to serve (no per-request access log).
         from aiohttp import web  # local import so a missing dep can't brick load
         self._proxy_app = build_proxy_app(self)
         self._runner = web.AppRunner(self._proxy_app, access_log=None)
         await self._runner.setup()
+        # TLS context for the listener (None means plain HTTP).
         ctx = self._listener_ssl()
+        # Try to bind several times in case the previous process still holds the port.
         last_err: Optional[BaseException] = None
         for attempt in range(_BIND_MAX_ATTEMPTS):
             site = web.TCPSite(self._runner, self.web_host, self.web_port,
                                ssl_context=ctx)
+            # Success: record what we bound to and log it.
             try:
                 await site.start()
                 self._site = site
@@ -308,8 +362,10 @@ class ProxySpoke(BaseSpoke):
                             "https" if ctx else "http", self.web_host, self.web_port,
                             self.upstream_url or "?")
                 return
+            # OS-level bind error.
             except OSError as e:
                 last_err = e
+                # Port busy and attempts left: wait and try again.
                 if (getattr(e, "errno", None) == errno.EADDRINUSE
                         and attempt < _BIND_MAX_ATTEMPTS - 1):
                     logger.warning("edge proxy %s:%d in use (predecessor draining?); "
@@ -318,10 +374,13 @@ class ProxySpoke(BaseSpoke):
                                    _BIND_MAX_ATTEMPTS - 1, _BIND_RETRY_DELAY)
                     await asyncio.sleep(_BIND_RETRY_DELAY)
                     continue
+                # Other OS errors (e.g. permission denied) are not retried.
                 break
+            # Any other unexpected error also stops the retries.
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 break
+        # All attempts failed; the next status poll will call this again.
         logger.warning("edge proxy could not bind %s:%d yet: %s "
                        "(will retry on next status poll)",
                        self.web_host, self.web_port, last_err)
@@ -329,7 +388,10 @@ class ProxySpoke(BaseSpoke):
 
     # ── command dispatch (hub → spoke) ───────────────────────────────────────
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle a hub command: config updates and certificate installs."""
+        # Make sure the listener is up before handling any command.
         await self._ensure_web_server()
+        # Commands are case-insensitive.
         cmd = (command_type or "").upper()
         data = data or {}
         if cmd == "UPDATE_CONFIG":
@@ -339,7 +401,12 @@ class ProxySpoke(BaseSpoke):
         return {"status": "ERROR", "message": f"unknown command {command_type}"}
 
     async def _apply_config(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply an UPDATE_CONFIG payload; re-bind the listener only if bind-related settings
+        changed.
+        """
+        # Tracks whether a re-bind is needed.
         changed = False
+        # Settings that take effect immediately without re-binding.
         if "relay_spoke_url" in data and data["relay_spoke_url"] is not None:
             self.relay_spoke_url = data["relay_spoke_url"]  # hot — no re-bind needed
         if "tenant_id" in data and data["tenant_id"] is not None:
@@ -349,33 +416,44 @@ class ProxySpoke(BaseSpoke):
         if data.get("probe_detection") is not None:  # hot — no re-bind needed
             self.probe_detection_enabled = _as_bool(
                 data["probe_detection"], default=self.probe_detection_enabled)
+        # Listener/upstream settings: record changes that require a re-bind.
         for key in ("web_host", "tls_cert", "tls_key", "upstream_url",
                     "upstream_cert", "upstream_key"):
             if key in data and data[key] is not None and getattr(self, key) != data[key]:
                 setattr(self, key, data[key])
                 changed = True
+        # Port change also requires a re-bind.
         if data.get("web_port") is not None and int(data["web_port"]) != self.web_port:
             self.web_port = int(data["web_port"]); changed = True
+        # Upstream verify flag is read per request, so it does not need a re-bind.
         if data.get("upstream_verify") is not None:
             v = str(data["upstream_verify"]).strip().lower() in ("1", "true", "yes", "on")
             if v != self.upstream_verify:
                 self.upstream_verify = v
+        # Rebuild the listener with the new settings.
         if changed:
             await self._ensure_web_server()  # re-bind
         return {"status": "SUCCESS", "rebound": changed}
 
     async def _apply_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Install a TLS cert/key pushed by the le role and re-bind HTTPS with it."""
+        # Accept either naming convention used by the cert-distribution pipeline.
         cert_pem = data.get("fullchain") or data.get("cert")
         key_pem = data.get("privkey") or data.get("key")
+        # Both parts are required.
         if not (cert_pem and key_pem):
             return {"status": "ERROR", "message": "missing cert material"}
+        # Certs are stored under <data_dir>/tls.
         cert_dir = Path(self._data_dir) / "tls"
+        # Disk errors are returned to the hub as an ERROR result.
         try:
             cert_dir.mkdir(parents=True, exist_ok=True)
+            # Write cert and key; the key is made owner-only.
             cp, kp = cert_dir / "fullchain.pem", cert_dir / "privkey.pem"
             cp.write_text(cert_pem)
             kp.write_text(key_pem)
             os.chmod(kp, 0o600)
+            # Switch to the real cert (no longer bootstrap) and re-bind.
             self.tls_cert, self.tls_key = str(cp), str(kp)
             self._using_bootstrap_cert = False
             await self._ensure_web_server()  # re-bind HTTPS
@@ -385,6 +463,9 @@ class ProxySpoke(BaseSpoke):
 
     # ── status / version ─────────────────────────────────────────────────────
     async def get_status(self) -> Dict[str, Any]:
+        """Return the role's health/config snapshot for the hub (also ensures the listener is up).
+        """
+        # Each poll doubles as a retry for a listener that failed to bind earlier.
         await self._ensure_web_server()
         return {
             "role": "proxy",
@@ -407,6 +488,8 @@ class ProxySpoke(BaseSpoke):
         }
 
     def get_version(self) -> str:
+        """Return this repo's VERSION file contents, or "unknown"."""
+        # VERSION sits two folders above this file (repo root of the proxy component).
         try:
             vp = Path(__file__).resolve().parent.parent / "VERSION"
             if vp.exists():

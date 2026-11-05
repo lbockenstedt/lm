@@ -1,12 +1,17 @@
 """Generic-agent provision + agent command/load-role routes."""
+# Regular expressions, used to sanitise tenant names into Zabbix-safe identifiers.
 import re
+# Shared Hub helpers: HTTP error type, request object and the hub logger.
 from api import (
     HTTPException, Request, logger,
 )
+# Access-control helpers: name/identifier validators and spoke-binding permission check.
 from access import valid_display_name, valid_identifier, can_bind_spoke
+# Table of roles that bind network ports, plus helpers that detect/describe port clashes.
 from role_listeners import (
     LISTENER_PORT_ROLES, listener_conflict, listener_conflict_message,
 )
+# Let's Encrypt certificate access helpers (used for the ldap-server certificate).
 import le_cert_access as _lca
 
 
@@ -16,8 +21,10 @@ def _agent_role_preflight(hub, spoke_id):
     actionable hint when the agent is offline or a legacy/incompatible node that
     connects but never adopts a session key (so LOAD_ROLE would hang to the 120s
     timeout)."""
+    # The agent must hold a live WebSocket connection to receive any role command.
     if hub._primary_key(spoke_id) not in hub.active_connections:
         raise HTTPException(status_code=503, detail=f"Agent {spoke_id} not connected")
+    # A connected but unauthenticated agent (no session key) would hang LOAD_ROLE, so fail fast.
     _ok, reason = hub.spoke_can_accept_commands(spoke_id)
     if reason == hub._CMD_UNAUTHENTICATED:
         raise HTTPException(
@@ -35,6 +42,7 @@ def _agent_role_preflight(hub, spoke_id):
 # hub's role RE-ADOPTION path (main._readopt_agent_roles) enforces exactly the
 # same rule as these routes -- a re-push must not be able to recreate a
 # collision the API refuses to create.
+# Module-local aliases keep older imports of these private names working.
 _LISTENER_PORT_ROLES = LISTENER_PORT_ROLES
 _listener_conflict = listener_conflict
 _listener_conflict_message = listener_conflict_message
@@ -46,6 +54,7 @@ async def _active_role_names(hub, spoke_id):
     None means "unknown", not "none loaded". It deliberately does not block the
     load: an agent that cannot answer GET_AVAILABLE_ROLES would otherwise become
     unmanageable, and the spoke-side bind retry still contains the damage."""
+    # Ask the agent which roles it currently runs (15 s timeout).
     try:
         result = await hub.request_response(spoke_id, "GET_AVAILABLE_ROLES", {},
                                             timeout=15.0)
@@ -53,17 +62,21 @@ async def _active_role_names(hub, spoke_id):
         logger.warning("listener-conflict check: %s did not answer "
                        "GET_AVAILABLE_ROLES; proceeding without it", spoke_id)
         return None
+    # Unwrap the reply envelope; anything that isn't the expected dict means "unknown".
     payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
     if not isinstance(payload, dict):
         return None
+    # The "active" field must be a list of role entries.
     active = payload.get("active")
     if not isinstance(active, list):
         return None
+    # Collect each role's name; entries may be dicts with a "role" key or plain strings.
     names = set()
     for entry in active:
         name = entry.get("role") if isinstance(entry, dict) else entry
         if name:
             names.add(str(name))
+    # Return the set of loaded role names.
     return names
 
 
@@ -72,10 +85,12 @@ async def _guard_listener_conflicts(hub, spoke_id, requested):
 
     Checks the requested roles against each other AND against what is already
     loaded, so neither a batch nor a later single load can create the collision."""
+    # Only roles that bind a listener port can clash; nothing to check if there are none.
     candidates = [r for r in requested if r in _LISTENER_PORT_ROLES]
     if not candidates:
         return
 
+    # First reject clashes between roles requested in the same batch.
     seen = []  # within the batch itself
     for cand in candidates:
         clash = _listener_conflict(seen, cand)
@@ -85,9 +100,11 @@ async def _guard_listener_conflicts(hub, spoke_id, requested):
                 detail=_listener_conflict_message(spoke_id, cand, clash))
         seen.append(cand)
 
+    # Then compare against roles already loaded; skip that check if the agent can't answer.
     active = await _active_role_names(hub, spoke_id)
     if active is None:
         return
+    # Any requested port-binding role that clashes with a loaded one is refused with 409.
     for cand in candidates:
         clash = _listener_conflict(active, cand)
         if clash:
@@ -97,6 +114,8 @@ async def _guard_listener_conflicts(hub, spoke_id, requested):
 
 
 def _zbxproxy_tenant(hub, spoke_id):
+    """Return the tenant that owns ``spoke_id``, falling back to "default"."""
+    # Look up the spoke's tenant; a missing tenant or lookup error means "default".
     try:
         return hub.state.get_spoke_tenant(hub._primary_key(spoke_id)) or "default"
     except Exception:  # noqa: BLE001
@@ -107,8 +126,10 @@ def _monitoring_tls(hub, cfg, common_name):
     """Add a hub-CA client+server cert for ``common_name`` to a monitoring role's
     config so the proxy/agent link is mTLS. Off when System → General → Monitoring Server TLS is
     disabled (``global_config.monitoring_tls == False``)."""
+    # TLS for monitoring is on unless explicitly disabled; when off, leave the config as is.
     if hub.state.system_state.get("global_config", {}).get("monitoring_tls") is False:
         return cfg
+    # Issue a hub-CA-signed cert/key for this name and add it (plus the CA) to the config.
     from security import mtls_ca
     leaf, key, ca = mtls_ca.issue_service_cert(common_name)
     return {**cfg, "tls_cert_pem": leaf, "tls_key_pem": key, "tls_ca_pem": ca,
@@ -118,11 +139,13 @@ def _monitoring_tls(hub, cfg, common_name):
 async def _zbxproxy_register(hub, cfg):
     """Create the proxy in Zabbix so the server accepts it. Best effort: the
     next install or a manual registration covers a monitoring spoke that is down."""
+    # Need both a proxy name and a connected monitoring spoke to register anything.
     name = cfg.get("proxy_name")
     sid = hub.get_spoke_by_type("monitoring")
     if not (name and sid):
         logger.warning("zbxproxy: not registered in Zabbix (name=%r, monitoring spoke=%s)", name, bool(sid))
         return
+    # Ask the monitoring spoke to create the proxy in Zabbix; failure is only logged.
     try:
         await hub.request_response(sid, "MON_PROXY_REGISTER",
                                    {"name": name, "tls_subject": cfg.get("tls_subject")}, timeout=60.0)
@@ -134,19 +157,23 @@ def _zbxproxy_load_config(hub, cfg, spoke_id=None):
     """Fill the proxy's Zabbix server from the System → General → Monitoring Server setting and
     name it as the monitoring sync maps tenant hosts: the tenant's
     ``monitoring.tenant_proxies`` entry, else ``lm-<tenant>``."""
+    # Helper that returns the configured Zabbix server address; work on a config copy.
     from routes.monitoring import monitoring_server_address
     cfg = dict(cfg or {})
+    # No explicit proxy name: use the tenant's mapped proxy name, else "lm-<tenant>".
     if not cfg.get("proxy_name"):
         tenant = _zbxproxy_tenant(hub, spoke_id)
         mapped = ((hub.state.system_state.get("global_config", {}).get("monitoring") or {})
                   .get("tenant_proxies") or {}).get(tenant)
         cfg["proxy_name"] = mapped or "lm-" + re.sub(r"[^A-Za-z0-9._-]+", "-", tenant)
+    # No explicit server: use the System -> General setting, which must be set.
     if not cfg.get("server"):
         server = monitoring_server_address(hub)
         if not server:
             raise HTTPException(status_code=400, detail="Monitoring server address is not set: "
                                 "enter it under System → General → Monitoring Server before installing a proxy")
         cfg["server"] = server
+    # Add mTLS certs unless the caller already supplied them.
     return _monitoring_tls(hub, cfg, cfg["proxy_name"]) if not cfg.get("tls_cert_pem") else cfg
 
 
@@ -155,9 +182,11 @@ async def _zbxagent_load_config(hub, cfg, spoke_id):
     same tenant, ask it for its LAN address, and name the Zabbix host
     ``<tenant>--<hostname>`` so the registered host record matches. An explicit
     ``proxy`` in the config wins (used when the proxy can't be discovered)."""
+    # Work on a copy and record the (Zabbix-safe) tenant name.
     cfg = dict(cfg or {})
     tenant = re.sub(r"[^A-Za-z0-9._-]+", "-", _zbxproxy_tenant(hub, spoke_id))
     cfg["tenant"] = tenant
+    # No hostname given: ask the node for its hostname and name the host "<tenant>--<host>".
     if not cfg.get("hostname"):
         try:
             res = await hub.request_response(spoke_id, "GET_PRIMARY_IP", {}, timeout=15.0)
@@ -168,37 +197,48 @@ async def _zbxagent_load_config(hub, cfg, spoke_id):
         if not host:
             raise HTTPException(status_code=502, detail="Could not read this node's hostname for the monitoring agent")
         cfg["hostname"] = f"{tenant}--{host}"
+    # No explicit proxy: discover the tenant's proxy node.
     if not cfg.get("proxy"):
         cfg = await _zbxagent_find_proxy(hub, cfg, spoke_id, tenant)
+    # Add mTLS certs unless the caller already supplied them.
     return _monitoring_tls(hub, cfg, cfg["hostname"]) if not cfg.get("tls_cert_pem") else cfg
 
 
 async def _zbxagent_find_proxy(hub, cfg, spoke_id, tenant):
+    """Set ``cfg["proxy"]`` to the address of an online zbxproxy node in the same tenant.
+
+    Raises 400 when no such node answers."""
+    # Walk every agent's recorded roles looking for a zbxproxy in this tenant.
     for pk, roles in list(hub._agent_roles_store().items()):
         if "zbxproxy" not in (roles or []) or hub.state.get_spoke_tenant(pk) != _zbxproxy_tenant(hub, spoke_id):
             continue
+        # Ask the proxy node for its primary IP; skip nodes that don't answer.
         try:
             res = await hub.request_response(pk, "GET_PRIMARY_IP", {}, timeout=15.0)
         except Exception:  # noqa: BLE001
             logger.warning("zbxagent: proxy node %s did not answer GET_PRIMARY_IP", pk)
             continue
+        # Use the first node that reports an IP; Zabbix proxies listen on port 10051.
         info = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
         if isinstance(info, dict) and info.get("ip"):
             cfg["proxy"] = f"{info['ip']}:10051"
             logger.info("zbxagent: tenant %s proxy resolved to %s (node %s)", tenant, cfg["proxy"], pk)
             return cfg
+    # No proxy found in the tenant: the operator must install one first.
     raise HTTPException(status_code=400, detail=f"No online Monitoring Proxy found in tenant '{tenant}': "
                         "install the Monitoring Proxy for this tenant first")
 
 
 async def _zbxagent_register(hub, cfg):
     """Create the agent's host in Zabbix (best effort, same as the proxy)."""
+    # Split "<tenant>--<host>" back apart; need a monitoring spoke and a host to register.
     sid = hub.get_spoke_by_type("monitoring")
     tenant, _, host = str(cfg.get("hostname") or "").partition("--")
     if not (sid and host):
         logger.warning("zbxagent: host not registered in Zabbix (hostname=%r, monitoring spoke=%s)",
                        cfg.get("hostname"), bool(sid))
         return
+    # Ask the monitoring spoke to create the host in Zabbix; failure is only logged.
     try:
         await hub.request_response(sid, "MON_AGENT_REGISTER",
                                    {"tenant": tenant, "hostname": host,
@@ -212,23 +252,29 @@ async def _load_roles_impl(hub, spoke_id, data):
     either a batch (``{"roles": [...]}`` loaded sequentially) or a single
     ``{"role": ..., "config": ...}``. Returns the agent's payload/results. The
     caller MUST run :func:`_agent_role_preflight` first."""
+    # Work out every role name being requested, from a batch or a single "role".
     roles = data.get("roles")
     _requested = []
     if isinstance(roles, list) and roles:
         _requested = [(r.get("role") if isinstance(r, dict) else r) for r in roles]
     elif data.get("role"):
         _requested = [data["role"]]
+    # Refuse the whole request if any requested role would clash on a listener port.
     await _guard_listener_conflicts(hub, spoke_id, [r for r in _requested if r])
+    # Batch request: load each role in turn, collecting a result per role.
     if isinstance(roles, list) and roles:
         results = []
         for r in roles:
+            # Each entry may be a dict (role/config/force) or just a role name.
             rname = (r.get("role") if isinstance(r, dict) else r)
             rcfg = (r.get("config", {}) if isinstance(r, dict) else {})
             rforce = bool(r.get("force")) if isinstance(r, dict) else False
+            # An entry without a role name is reported as an error and skipped.
             if not rname:
                 results.append({"role": None, "status": "ERROR",
                                 "message": "role is required"})
                 continue
+            # Fill in role-specific config (LDAP cluster, mTLS certs, Zabbix proxy/agent).
             try:
                 if rname == "ldap-server":
                     rcfg = await _ldap_server_load_config(hub, spoke_id, rcfg)
@@ -238,32 +284,40 @@ async def _load_roles_impl(hub, spoke_id, data):
                     rcfg = _zbxproxy_load_config(hub, rcfg, spoke_id)
                 elif rname == "zbxagent":
                     rcfg = await _zbxagent_load_config(hub, rcfg, spoke_id)
+                # Ask the agent to load the role (120 s: a first load may git-clone the role repo).
                 res = await hub.request_response(spoke_id, "LOAD_ROLE",
                                                  {"role": rname, "config": rcfg,
                                                   **({"force": True} if rforce else {})},
                                                  timeout=120.0)
+                # Unwrap the reply; a legacy single-role "morph" changes the agent's module type.
                 pl = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
                 if isinstance(pl, dict) and pl.get("status") == "SUCCESS" \
                         and pl.get("morph") is True and pl.get("module_type"):
                     hub.spoke_module_types[hub._primary_key(spoke_id)] = pl["module_type"]
                     logger.info("Agent %s morphed to module_type %s",
                                 spoke_id, pl["module_type"])
+                # After a successful load, register Zabbix proxies/agents and request LDAP certs.
                 if rname == "zbxproxy" and isinstance(pl, dict) and pl.get("status") == "SUCCESS":
                     await _zbxproxy_register(hub, rcfg)
                 if rname == "zbxagent" and isinstance(pl, dict) and pl.get("status") == "SUCCESS":
                     await _zbxagent_register(hub, rcfg)
                 if rname == "ldap-server" and isinstance(pl, dict) and pl.get("status") == "SUCCESS":
                     await _auto_request_ldap_server_cert(hub, spoke_id, rcfg)
+                # Record this role's result (the agent's dict, or the raw value wrapped).
                 results.append({"role": rname,
                                 **(pl if isinstance(pl, dict) else {"result": pl})})
+            # One role failing must not stop the rest of the batch.
             except Exception as e:  # noqa: BLE001 — one role's failure ≠ batch fail
                 logger.exception("load_agent_role[%s] failed", rname)
                 results.append({"role": rname, "status": "ERROR", "message": str(e)})
+        # The batch itself succeeded; per-role outcomes are in "results".
         return {"status": "SUCCESS", "results": results}
+    # Single-role request: role name (required) and its config.
     role   = data.get("role")
     config = data.get("config", {})
     if not role:
         raise HTTPException(status_code=400, detail="role is required")
+    # Fill in role-specific config, same as in the batch path.
     if role == "ldap-server":
         config = await _ldap_server_load_config(hub, spoke_id, config)
     elif role == "zabbix-server":
@@ -278,10 +332,12 @@ async def _load_roles_impl(hub, spoke_id, data):
                                         {"role": role, "config": config,
                                          **({"force": True} if data.get("force") else {})},
                                         timeout=120.0)
+    # Unwrap the agent's reply envelope.
     payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
     # Multi-role agent: the base stays module_type "agent" and HOSTS the role as
     # a new sub-spoke; only a legacy single-role morph (explicit ``morph: true``)
     # rewrites the base's module_type.
+    # Only act on a successful load.
     if isinstance(payload, dict) and payload.get("status") == "SUCCESS":
         if payload.get("morph") is True:
             new_mtype = payload.get("module_type")
@@ -293,12 +349,14 @@ async def _load_roles_impl(hub, spoke_id, data):
             if sub_id:
                 logger.info("Agent %s hosting role sub-spoke %s (module_type=%s)",
                             spoke_id, sub_id, payload.get("module_type"))
+        # Post-load follow-ups: request the LDAP cert and register Zabbix proxy/agent.
         if role == "ldap-server":
             await _auto_request_ldap_server_cert(hub, spoke_id, config)
         if role == "zbxproxy":
             await _zbxproxy_register(hub, config)
         if role == "zbxagent":
             await _zbxagent_register(hub, config)
+    # Return the agent's reply to the caller.
     return payload
 
 
@@ -307,14 +365,17 @@ async def _ldap_server_load_config(hub, spoke_id, cfg):
     Directory has been saved, the node joins that cluster with the stored
     domain/admin account (see ldap_cluster.join_config); before that, the
     legacy per-load fields plus 2-node auto-pairing apply."""
+    # Prefer joining the saved directory cluster; a failure here must not block the deploy.
     import ldap_cluster
     try:
         joined = await ldap_cluster.join_config(hub, spoke_id, cfg)
     except Exception as e:  # noqa: BLE001 — never block the deploy
         logger.warning("ldap-server: joining the directory cluster failed: %s", e)
         joined = None
+    # Joined the cluster: just add Entra credentials.
     if joined is not None:
         return _enrich_ldap_server_config(hub, joined)
+    # No saved directory yet: add Entra creds and auto-pair with an existing node if any.
     cfg = _enrich_ldap_server_config(hub, cfg)
     return await _auto_cluster_ldap_server_config(hub, spoke_id, cfg)
 
@@ -325,6 +386,7 @@ def _enrich_ldap_server_config(hub, cfg):
     consumes --entra-tenant/--entra-client/--entra-cert/--entra-key; source them
     from get_oidc_config (tenant_id, client_id, cert path, key path). Only fills
     values the caller didn't already provide."""
+    # Copy the config, then fill any missing Entra values from the hub's OIDC config.
     cfg = dict(cfg or {})
     try:
         from security.oidc import get_oidc_config
@@ -333,8 +395,10 @@ def _enrich_ldap_server_config(hub, cfg):
         cfg.setdefault("entra_client", oc.client_id)
         cfg.setdefault("entra_cert", oc.cert_path)
         cfg.setdefault("entra_key", oc.key_path)
+    # Entra is optional: log and deploy LDAP without it.
     except Exception as e:  # noqa: BLE001 — Entra optional; deploy LDAP anyway
         logger.warning("ldap-server: could not source Entra creds from OIDC: %s", e)
+    # Return the (possibly) enriched copy.
     return cfg
 
 
@@ -342,10 +406,12 @@ async def _agent_primary_address(hub, spoke_id):
     """Best-effort private IPv4 an agent advertises, via GET_AVAILABLE_ROLES'
     ``service_addresses`` (the same probe used for the Spokes & Agents list).
     Returns None if the agent is unreachable or reports nothing routable."""
+    # Ask the agent for its roles/addresses; an unreachable agent yields None.
     try:
         result = await hub.request_response(spoke_id, "GET_AVAILABLE_ROLES", {}, timeout=15.0)
     except Exception:  # noqa: BLE001 — best-effort
         return None
+    # Unwrap the reply and return the first advertised service address, if any.
     payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
     if not isinstance(payload, dict):
         return None
@@ -358,13 +424,16 @@ def _parse_env_file(text):
     read back an already-provisioned ldap-server's ``.env`` so an auto-cluster
     re-push can reuse its EXACT base_dn/admin_dn/admin_pw rather than guessing
     or regenerating them."""
+    # Parse line by line, skipping blanks, comments and lines without "=".
     out = {}
     for line in (text or "").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        # Split at the first "=" and store the trimmed key/value.
         k, _, v = line.partition("=")
         out[k.strip()] = v.strip()
+    # Return the parsed key/value pairs.
     return out
 
 
@@ -372,18 +441,21 @@ async def _read_ldap_server_env(hub, spoke_id):
     """Read an already-provisioned ldap-server's ``/opt/lm/ldap/.env`` via the
     hub's own RUN_COMMAND RPC (``cat`` is allowlisted). Returns {} on any
     failure — callers must treat that as "peer's existing config unknown"."""
+    # Run "cat" on the agent's LDAP .env file via the allowlisted RUN_COMMAND RPC.
     try:
         result = await hub.request_response(
             spoke_id, "RUN_COMMAND",
             {"command": "cat /opt/lm/ldap/.env"}, timeout=15.0)
     except Exception:  # noqa: BLE001
         return {}
+    # Unwrap the reply; any unexpected shape or failed command means "unknown" ({}).
     payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
     if not isinstance(payload, dict):
         return {}
     res = payload.get("result") or {}
     if not res.get("ok"):
         return {}
+    # Parse the file's text into a dict.
     return _parse_env_file(res.get("stdout", ""))
 
 
@@ -407,29 +479,37 @@ async def _auto_cluster_ldap_server_config(hub, spoke_id, cfg):
 
     Zero or 2+ existing peers in the tenant are left untouched (first node, or
     an ambiguous 3+-node topology best left to manual configuration)."""
+    # Work on a copy of the caller's config.
     cfg = dict(cfg or {})
+    # Caller already gave a server-id and peer(s): respect them as-is.
     if cfg.get("server_id") and (cfg.get("peers") or cfg.get("peer")):
         return cfg  # caller fully specified the topology — don't second-guess it
+    # This node's key and tenant; look for exactly one other ldap-server in the same tenant.
     try:
         my_pk = hub._primary_key(spoke_id)
         tenant_id = hub.state.get_spoke_tenant(my_pk) or ""
         peer_pk = None
+        # Skip this node, nodes without ldap-server, and nodes in other tenants.
         for pk, roles in hub._agent_roles_store().items():
             if pk == my_pk or "ldap-server" not in (roles or []):
                 continue
             if (hub.state.get_spoke_tenant(pk) or "") != tenant_id:
                 continue
+            # A second match means 3+ nodes: ambiguous, so leave clustering manual.
             if peer_pk is not None:
                 logger.warning("ldap-server auto-cluster: >1 existing ldap-server in "
                                "tenant %r — leaving server-id/peer manual", tenant_id or "(default)")
                 return cfg
             peer_pk = pk
+        # No existing peer: this is the first ldap-server in the tenant.
         if not peer_pk:
             return cfg  # first ldap-server in this tenant — nothing to mirror yet
+        # The peer must be online to read its config and push the mirror settings.
         if peer_pk not in hub.active_connections:
             logger.warning("ldap-server auto-cluster: existing peer %s not connected — "
                            "leaving server-id/peer manual", peer_pk)
             return cfg
+        # Read the peer's live .env and both nodes' addresses; give up if any is missing.
         peer_env = await _read_ldap_server_env(hub, peer_pk)
         peer_addr = await _agent_primary_address(hub, peer_pk)
         my_addr = await _agent_primary_address(hub, spoke_id)
@@ -437,10 +517,12 @@ async def _auto_cluster_ldap_server_config(hub, spoke_id, cfg):
             logger.warning("ldap-server auto-cluster: could not read peer %s's existing "
                            "config/address — leaving server-id/peer manual", peer_pk)
             return cfg
+        # Give this node the other server-id (1 <-> 2) and build both LDAP URLs.
         peer_server_id = peer_env.get("LDAP_SERVER_ID") or "1"
         my_server_id = "2" if peer_server_id == "1" else "1"
         my_url = f"ldap://{my_addr}:389"
         peer_url = f"ldap://{peer_addr}:389"
+        # Fill only missing values: share the peer's bind identity and point at the peer.
         cfg.setdefault("base_dn", peer_env.get("LDAP_BASE_DN"))
         cfg.setdefault("admin_dn", peer_env.get("LDAP_ADMIN_DN"))
         cfg.setdefault("admin_pw", peer_env.get("LDAP_ADMIN_PW"))
@@ -449,6 +531,7 @@ async def _auto_cluster_ldap_server_config(hub, spoke_id, cfg):
         cfg.setdefault("server_url", my_url)
         logger.info("ldap-server auto-cluster: pairing %s (server-id %s) with existing "
                    "peer %s (server-id %s)", spoke_id, my_server_id, peer_pk, peer_server_id)
+        # Matching config for the peer: its own identity, now pointing back at this node.
         peer_cfg = _enrich_ldap_server_config(hub, {
             "base_dn": peer_env.get("LDAP_BASE_DN"),
             "admin_dn": peer_env.get("LDAP_ADMIN_DN"),
@@ -457,6 +540,7 @@ async def _auto_cluster_ldap_server_config(hub, spoke_id, cfg):
             "peers": [my_url],
             "server_url": peer_url,
         })
+        # Force-reload the role on the peer so mirroring is wired on both sides.
         try:
             await hub.request_response(
                 peer_pk, "LOAD_ROLE",
@@ -466,21 +550,26 @@ async def _auto_cluster_ldap_server_config(hub, spoke_id, cfg):
         except Exception as e:  # noqa: BLE001 — new node still deploys standalone-capable
             logger.warning("ldap-server auto-cluster: failed to update existing peer %s: %s",
                            peer_pk, e)
+    # Detection problems fall back to manual config rather than failing the deploy.
     except Exception as e:  # noqa: BLE001 — never block the deploy on detection failure
         logger.warning("ldap-server auto-cluster: detection failed, falling back to "
                        "manual config: %s", e)
+    # Return the (possibly) auto-clustered config.
     return cfg
 
 
 def _domain_from_base_dn(base_dn):
     """``dc=orange-tme,dc=com`` -> ``orange-tme.com``. None/malformed -> None."""
+    # No base DN: no domain.
     if not base_dn:
         return None
+    # Collect the value of every "dc=" component, in order.
     parts = []
     for comp in str(base_dn).split(","):
         comp = comp.strip()
         if comp.lower().startswith("dc="):
             parts.append(comp[3:].strip())
+    # Join the non-empty parts with dots, or None if there were none.
     return ".".join(p for p in parts if p) or None
 
 
@@ -489,11 +578,13 @@ async def _le_relay(hub, le_sid, command, body, timeout=None):
     unwrap the hub transport envelope down to the spoke's own
     ``{status, data}`` reply (same shape ``net_services._le_request`` exposes
     to the WebUI routes) — never raises, callers check ``status``."""
+    # Relay the command; a transport failure becomes an ERROR reply instead of raising.
     try:
         result = await hub.request_response(le_sid, command, body or {},
                                             timeout=timeout or 30.0)
     except Exception as e:  # noqa: BLE001
         return {"status": "ERROR", "message": str(e)}
+    # Unwrap to the spoke's own reply dict; anything else is reported as a bad reply.
     payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
     return payload if isinstance(payload, dict) else {"status": "ERROR", "message": "bad reply"}
 
@@ -520,22 +611,28 @@ async def _auto_request_ldap_server_cert(hub, spoke_id, cfg):
     domain from, no prior ``*.ext.<domain>`` cert to source a registration
     email from) just skips with a log line — the self-signed cert keeps LDAPS
     listening, just untrusted, exactly as install_ldap.sh already documents."""
+    # Derive the domain from the base DN; without one there's nothing to certify.
     try:
         domain_base = _domain_from_base_dn(cfg.get("base_dn"))
         if not domain_base:
             return  # no base_dn yet — nothing to derive a domain from
+        # The shared cert name, this node's key and tenant, and the connected LE spoke.
         cert_domain = f"ldap.ext.{domain_base}"
         my_pk = hub._primary_key(spoke_id)
         tenant_id = hub.state.get_spoke_tenant(my_pk) or "default"
         le_sid = hub.get_spoke_by_type("certificates")
+        # No certificates spoke: keep the self-signed cert.
         if not le_sid:
             logger.info("ldap-server auto-cert: no certificates (LE) spoke connected — "
                        "skipping, self-signed TLS stays in place")
             return
+        # List existing certs and look for one already issued for this domain.
         listed = await _le_relay(hub, le_sid, "LE_LIST_CERTS", {})
         certs = ((listed.get("data") or {}).get("certs") or []) if listed.get("status") == "SUCCESS" else []
         existing = next((c for c in certs if c.get("domain") == cert_domain), None)
+        # This node as a cert-distribution target.
         target = {"module_type": "ldap-server", "identifier": my_pk}
+        # Cert exists: if this node isn't already a target, add it and push the cert to it.
         if existing:
             already = any(t.get("module_type") == "ldap-server" and t.get("identifier") == my_pk
                          for t in (existing.get("targets") or []))
@@ -556,6 +653,7 @@ async def _auto_request_ldap_server_cert(hub, spoke_id, cfg):
         # No cert for this domain yet — issue one. Reuse the registration email
         # already on file for a sibling *.ext.<domain_base> cert (keeps the ACME
         # account/notification contact consistent); skip rather than invent one.
+        # Reuse the registration email from a sibling *.ext.<domain> cert, if any.
         email = next((c.get("email") for c in certs
                      if isinstance(c.get("domain"), str)
                      and c["domain"].endswith(f".ext.{domain_base}") and c.get("email")), None)
@@ -564,6 +662,7 @@ async def _auto_request_ldap_server_cert(hub, spoke_id, cfg):
                        "registration email from — skipping auto-issue for %s (issue manually "
                        "via Setup -> Certificate Management once)", domain_base, cert_domain)
             return
+        # Fetch the Hurricane Electric login used for the DNS-01 challenge from the vault.
         try:
             import cred_vault as _cred_vault
             he_creds = await _cred_vault.automation_get(hub, "__admin__", "HE.NET")
@@ -571,12 +670,14 @@ async def _auto_request_ldap_server_cert(hub, spoke_id, cfg):
             logger.info("ldap-server auto-cert: HE.NET vault credential not available (%s) — "
                        "skipping auto-issue for %s", e, cert_domain)
             return
+        # Accept the common field-name variants; both username and password are required.
         he_username = he_creds.get("he_username") or he_creds.get("username") or he_creds.get("email")
         he_password = he_creds.get("he_password") or he_creds.get("password")
         if not (he_username and he_password):
             logger.warning("ldap-server auto-cert: HE.NET vault credential missing username/"
                           "password fields — skipping auto-issue for %s", cert_domain)
             return
+        # Ask the LE spoke to issue the cert (up to 200 s for DNS propagation).
         issued = await _le_relay(hub, le_sid, "LE_ISSUE_CERT", {
             "domain": cert_domain, "email": email, "challenge": "dns",
             "dns_provider": "he-login", "he_username": he_username, "he_password": he_password,
@@ -586,6 +687,7 @@ async def _auto_request_ldap_server_cert(hub, spoke_id, cfg):
             logger.warning("ldap-server auto-cert: LE_ISSUE_CERT for %s failed: %s",
                           cert_domain, issued.get("message"))
             return
+        # Record the tenant as owner of the new cert and persist that immediately.
         inner = issued.get("data") or {}
         _lca.add_tenant(hub, cert_domain, tenant_id)
         try:
@@ -593,9 +695,11 @@ async def _auto_request_ldap_server_cert(hub, spoke_id, cfg):
         except Exception as e:  # noqa: BLE001
             logger.warning("ldap-server auto-cert: persisting tenant ownership for %s failed: %s",
                           cert_domain, e)
+        # Push the new cert to its targets (this node).
         await hub._distribute_one_cert(le_sid, cert_domain, inner.get("targets") or [target],
                                        material_hash=inner.get("material_hash"))
         logger.info("ldap-server auto-cert: issued + distributed %s for %s", cert_domain, spoke_id)
+    # Cert automation is best-effort; log and keep the self-signed cert.
     except Exception as e:  # noqa: BLE001 — never block the deploy on cert automation failure
         logger.warning("ldap-server auto-cert: detection/issue failed: %s", e)
 
@@ -603,9 +707,12 @@ async def _auto_request_ldap_server_cert(hub, spoke_id, cfg):
 def register(app, hub, ctx):
     """Register agents routes on the Hub app."""
 
+    # Provision a module on a generic agent (by loading the matching role).
     @app.post("/api/generic/provision")
     async def provision_generic_agent(request: Request):
+        """Load the role for ``module_id`` onto the connected generic agent ``agent_id``."""
         hub = app.state.hub
+        # Read the request fields.
         try:
             data = await request.json()
             agent_id = data.get("agent_id")
@@ -614,6 +721,7 @@ def register(app, hub, ctx):
             custom_spoke_id = data.get("spoke_id")
             display_name = data.get("display_name")
 
+            # Both the agent and the module are required.
             if not agent_id or not module_id:
                 raise HTTPException(status_code=400, detail="Missing agent_id or module_id")
             # Validate identifiers BEFORE they're relayed to the agent. module_id
@@ -631,6 +739,7 @@ def register(app, hub, ctx):
             if display_name and not valid_display_name(display_name):
                 raise HTTPException(status_code=400, detail="Invalid display_name")
 
+            # The agent must be connected.
             if hub._primary_key(agent_id) not in hub.active_connections:
                 raise HTTPException(status_code=503, detail=f"Generic agent {agent_id} not connected")
 
@@ -643,16 +752,19 @@ def register(app, hub, ctx):
                 "pxmx": "proxmox", "nw": "network", "le": "le", "console": "console",
                 "statuspage": "statuspage",
             }.get(module_id, module_id)
+            # Ask the agent to load the role and return its reply.
             result = await hub.request_response(agent_id, "LOAD_ROLE", {"role": role})
             return result
         except HTTPException:
             raise  # 4xx/503 must propagate as-is, not be re-wrapped as 500
+        # Anything unexpected is logged and returned as a 500.
         except Exception as e:
             logger.error(f"Provisioning failed: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     # ─── Generic Agent API ────────────────────────────────────────────────────
 
+    # Fleet-wide agent roster (admin only).
     @app.get("/api/agents")
     async def list_agents(request: Request):
         """List all connected generic agents and their active roles.
@@ -664,9 +776,11 @@ def register(app, hub, ctx):
         authenticated user (incl. a single-tenant non-admin) could enumerate the
         whole fleet. A tenant Admin doesn't gain fleet visibility via the role
         split (fleet stays Global-only — see the RBAC invariant)."""
+        # Only admins may see the whole fleet.
         sess = ctx._session_user(request)
         if not ctx._is_admin(sess):
             raise HTTPException(status_code=403, detail="Admin access required")
+        # Build a row for each connected spoke whose module type is "agent".
         hub = app.state.hub
         agents = []
         _meta = hub.state.system_state.get("module_metadata", {})
@@ -678,11 +792,14 @@ def register(app, hub, ctx):
                     # Canonical guid (alias of install_uuid; primary key in Phase 2).
                     "spoke_guid": ((_meta.get(sid) or {}).get("install_uuid", "")),
                 })
+        # Return the roster.
         return {"agents": agents}
 
+    # Send an arbitrary command to a generic agent (admin namespace).
     @app.post("/api/agent/{spoke_id}/command")
     async def send_agent_command(spoke_id: str, request: Request):
         """Send any command to a connected generic agent."""
+        # The agent must be connected.
         hub = app.state.hub
         if hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"Agent {spoke_id} not connected")
@@ -705,6 +822,7 @@ def register(app, hub, ctx):
                     f"generic node, then retry."
                 ),
             )
+        # Read the command name and its data; a command is required.
         try:
             data = await request.json()
             command = data.get("command")
@@ -716,17 +834,21 @@ def register(app, hub, ctx):
             # load-role. NETBOX_RESET_ADMIN_PASSWORD fetches install.sh + runs a
             # Django shell on the deployed NetBox.
             _LONG_OPS = {"NETBOX_RESET_ADMIN_PASSWORD"}
+            # Long operations get 180 s; everything else uses the default timeout.
             if command in _LONG_OPS:
                 result = await hub.request_response(spoke_id, command, payload, timeout=180.0)
             else:
                 result = await hub.request_response(spoke_id, command, payload)
+            # Return the unwrapped agent reply.
             return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+        # Our own HTTP errors pass through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
         except Exception as e:
             logger.exception("send_agent_command failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    # Load role(s) on a generic agent (admin namespace).
     @app.post("/api/agent/{spoke_id}/load-role")
     async def load_agent_role(spoke_id: str, request: Request):
         """
@@ -734,11 +856,13 @@ def register(app, hub, ctx):
         The agent installs required packages, loads the role, and re-registers
         its module_type so hub APIs can route to it.
         """
+        # Check the agent is connected and authenticated, then run the shared load logic.
         hub = app.state.hub
         _agent_role_preflight(hub, spoke_id)
         try:
             data = await request.json()
             return await _load_roles_impl(hub, spoke_id, data)
+        # Our own HTTP errors pass through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -754,35 +878,42 @@ def register(app, hub, ctx):
     # surface. The /tenant/ prefix is already tenant-admin-gated by the api.py
     # middleware; this adds the per-spoke ownership check.
     def _tenant_role_guard(request, spoke_id):
+        """Raise 403 unless the caller may manage roles on ``spoke_id`` (own tenant or admin)."""
         sess = ctx._session_user(request)
         if not can_bind_spoke(hub, sess, hub._primary_key(spoke_id)):
             raise HTTPException(
                 status_code=403,
                 detail="You can only manage roles on a spoke assigned to your tenant.")
 
+    # Tenant-scoped role load.
     @app.post("/tenant/agent/{spoke_id}/load-role")
     async def tenant_load_agent_role(spoke_id: str, request: Request):
         """Load one or more roles on a spoke the caller owns (tenant-scoped twin
         of ``/api/agent/{spoke_id}/load-role``)."""
+        # Ownership check, connection check, then the shared load logic.
         hub = app.state.hub
         _tenant_role_guard(request, spoke_id)
         _agent_role_preflight(hub, spoke_id)
         try:
             data = await request.json()
             return await _load_roles_impl(hub, spoke_id, data)
+        # Our own HTTP errors pass through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
         except Exception as e:
             logger.exception("tenant_load_agent_role failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    # Tenant-scoped role unload.
     @app.post("/tenant/agent/{spoke_id}/unload-role")
     async def tenant_unload_agent_role(spoke_id: str, request: Request):
         """Unload a single role from a spoke the caller owns. Only UNLOAD_ROLE is
         relayed (no arbitrary-command surface)."""
+        # Ownership check and connection check.
         hub = app.state.hub
         _tenant_role_guard(request, spoke_id)
         _agent_role_preflight(hub, spoke_id)
+        # Read the role name (required) and relay UNLOAD_ROLE with a 60 s timeout.
         try:
             data = await request.json()
             role = data.get("role")
@@ -790,13 +921,16 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400, detail="role is required")
             result = await hub.request_response(spoke_id, "UNLOAD_ROLE",
                                                 {"role": role}, timeout=60.0)
+            # Return the unwrapped agent reply.
             return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+        # Our own HTTP errors pass through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
         except Exception as e:
             logger.exception("tenant_unload_agent_role failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    # Tenant-scoped role uninstall (purge).
     @app.post("/tenant/agent/{spoke_id}/uninstall-role")
     async def tenant_uninstall_agent_role(spoke_id: str, request: Request):
         """Uninstall a deploy role from a spoke the caller owns.
@@ -807,9 +941,11 @@ def register(app, hub, ctx):
         UNINSTALL_ROLE is relayed (no arbitrary-command surface). The purge can
         take a while — packages plus an apt lock wait — so the timeout is
         generous compared with unload's."""
+        # Ownership check and connection check.
         hub = app.state.hub
         _tenant_role_guard(request, spoke_id)
         _agent_role_preflight(hub, spoke_id)
+        # Read the role name (required) and relay UNINSTALL_ROLE (21-minute timeout for purges).
         try:
             data = await request.json()
             role = data.get("role")
@@ -817,23 +953,29 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400, detail="role is required")
             result = await hub.request_response(spoke_id, "UNINSTALL_ROLE",
                                                 {"role": role}, timeout=1260.0)
+            # Return the unwrapped agent reply.
             return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+        # Our own HTTP errors pass through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
         except Exception as e:
             logger.exception("tenant_uninstall_agent_role failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    # Tenant-scoped list of loaded roles.
     @app.get("/tenant/agent/{spoke_id}/roles")
     async def tenant_list_agent_roles(spoke_id: str, request: Request):
         """List the roles currently loaded on a spoke the caller owns (relays
         GET_AVAILABLE_ROLES). Returns the agent's payload ({available, active})."""
+        # Ownership check and connection check.
         hub = app.state.hub
         _tenant_role_guard(request, spoke_id)
         _agent_role_preflight(hub, spoke_id)
+        # Relay GET_AVAILABLE_ROLES and return the unwrapped reply.
         try:
             result = await hub.request_response(spoke_id, "GET_AVAILABLE_ROLES", {})
             return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+        # Our own HTTP errors pass through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
         except Exception as e:

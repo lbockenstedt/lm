@@ -34,18 +34,24 @@ Audience: Hub developers.
 
 from __future__ import annotations
 
+# datetime stamps sync status; asyncio runs per-tenant pushes concurrently.
 import datetime as _dt
 import asyncio
+# logging for the hub log; type hints only.
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+# Shared prefix-containment attribution; tolerate its absence (it is always present in-app).
 try:
     from access import attribute_by_prefix  # sibling leaf (no main/api back-import)
 except Exception:  # pragma: no cover - access always importable in-app
     attribute_by_prefix = None  # type: ignore
+# MAC normalizer, spoke tenant lookups, and spoke response unwrapper.
 from access import norm_mac, nw_spoke_tenant, spoke_owner_tenant, unwrap_spoke  # sibling leaf (no main/api back-import)
+# Shared periodic-loop runner.
 from sync_loop import run_sync_loop  # sibling leaf
 
+# Log to the hub's logger.
 logger = logging.getLogger("Hub")
 
 
@@ -71,6 +77,7 @@ class RealtimeIpamNacSyncMixin:
     records per-tenant last-sync status. See those spokes for the contracts.
     """
 
+    # Config key, source/sink spoke types, and the pull/push command names.
     _REALTIME_NAC_CFG_KEY = "realtime_ipam_nac_sync"
     _RT_NAC_SOURCE_MODULE = "nac"        # CPPM spoke (pull side)
     _RT_NAC_SINK_MODULE = "ipam"         # netbox spoke (push side)
@@ -82,6 +89,7 @@ class RealtimeIpamNacSyncMixin:
     def _rt_nac_cfg(self) -> Dict[str, Any]:
         """Read the realtime reverse-sync config fresh (enabled/interval/lookback/
         defaults/concurrency)."""
+        # The config block from global_config, or {}.
         return (self.state.system_state.get("global_config", {})
                 .get(self._REALTIME_NAC_CFG_KEY, {})) or {}
 
@@ -89,16 +97,19 @@ class RealtimeIpamNacSyncMixin:
         """Every connected, configured NAC (CPPM) spoke to pull from. A tenant
         whose addresses overlap another tenant's has its own ClearPass, so all
         of them are pulled, not just the first."""
+        # NAC spokes known to be unconfigured are excluded.
         unconfigured = getattr(self, "_nac_unconfigured_spokes", set())
         return [sid for sid in self.get_all_spokes_by_type(self._RT_NAC_SOURCE_MODULE)
                 if sid not in unconfigured]
 
     def _rt_ipam_spoke(self) -> Optional[str]:
         """Connected IPAM (netbox) spoke id to push to (first of type). None if down."""
+        # First connected IPAM spoke.
         return self.get_spoke_by_type(self._RT_NAC_SINK_MODULE)
 
     def _rt_nac_lookback(self) -> int:
         """Sessions started in the last N minutes. Clamp 1..60; default 2."""
+        # Read and clamp the lookback; bad values fall back to 2.
         try:
             n = int(self._rt_nac_cfg().get("lookback_minutes", 2))
         except (TypeError, ValueError):
@@ -108,6 +119,7 @@ class RealtimeIpamNacSyncMixin:
     def _rt_nac_interval(self) -> float:
         """Seconds between cycles. Clamp >= 60 so a bad config can't hot-loop the
         hub (the user asked for ~1 minute; default 60)."""
+        # Read and clamp the interval; bad values fall back to 60.
         try:
             n = float(int(self._rt_nac_cfg().get("interval_seconds", 60)))
         except (TypeError, ValueError):
@@ -116,6 +128,7 @@ class RealtimeIpamNacSyncMixin:
 
     def _rt_nac_concurrency(self) -> int:
         """Max tenants pushed in parallel per cycle. Clamp 1..8; default 4."""
+        # Read and clamp the concurrency; bad values fall back to 4.
         try:
             n = int(self._rt_nac_cfg().get("concurrency", 4))
         except (TypeError, ValueError):
@@ -134,12 +147,15 @@ class RealtimeIpamNacSyncMixin:
         ``{"errors": [<per-spoke errors>], "window_start": iso, "window_end":
         iso, "total": N}``. Empty list + an error when no NAC spoke is connected.
         """
+        # No NAC spoke: nothing to pull.
         spokes = self._rt_nac_spokes()
         if not spokes:
             return [], {"errors": ["no NAC spoke connected"], "total": 0}
+        # Combined sessions and pull info.
         sessions: List[Dict[str, Any]] = []
         info: Dict[str, Any] = {"errors": [], "total": 0,
                                 "window_start": "", "window_end": ""}
+        # Pull each spoke and merge its rows, errors, totals, and first-seen window.
         for nac in spokes:
             rows, one = await self._rt_pull_one(nac)
             sessions.extend(rows)
@@ -151,28 +167,35 @@ class RealtimeIpamNacSyncMixin:
 
     async def _rt_pull_one(self, nac: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Pull + normalize one CPPM spoke's recent sessions (see _rt_pull_sessions)."""
+        # Lookback window and per-spoke errors.
         lookback = self._rt_nac_lookback()
         errors: List[str] = []
+        # Ask the spoke for recent sessions; any failure is recorded as an error.
         try:
             r = await self.request_response(nac, self._RT_NAC_PULL_COMMAND,
                                             {"lookback_minutes": lookback},
                                             timeout=30.0)
+            # Unwrap the response; an ERROR status ends this spoke's pull.
             d = unwrap_spoke(r) if isinstance(r, dict) else {}
             if isinstance(d, dict) and d.get("status") == "ERROR":
                 errors.append(f"CPPM({nac}): {d.get('message', 'error')}")
                 return [], {"errors": errors, "total": 0}
+            # Session rows from the response.
             rows = (d.get("sessions") if isinstance(d, dict) else None) or []
             # The CPPM spoke's tenant: framed IPs overlap across tenants'
             # VRFs, so attribution prefers this tenant's prefixes.
             nac_tid = nw_spoke_tenant(self, nac)
             nac_owner = spoke_owner_tenant(self, nac)
+            # Normalize each row; skip non-dict rows.
             out: List[Dict[str, Any]] = []
             for row in rows or []:
                 if not isinstance(row, dict):
                     continue
+                # Rows without a MAC cannot be matched; drop them.
                 mac = norm_mac(row.get("mac"))
                 if not mac:
                     continue  # MAC-less → nothing to match/create by
+                # Framed IP without any prefix length.
                 ip = str(row.get("ip") or "").strip().split("/")[0].strip()
                 # ClearPass endpoint profiling (best-effort — present only when
                 # the CPPM feed profiles the endpoint): model + manufacturer let
@@ -180,6 +203,7 @@ class RealtimeIpamNacSyncMixin:
                 model = str(row.get("model") or row.get("device_name") or "").strip()
                 manufacturer = str(row.get("manufacturer") or row.get("vendor")
                                    or row.get("device_category") or "").strip()
+                # Normalized session record.
                 sess_rec = {
                     "mac": mac,
                     "ip": ip,
@@ -190,6 +214,7 @@ class RealtimeIpamNacSyncMixin:
                     "username": str(row.get("username") or "").strip(),
                     "start_time": str(row.get("start_time") or "").strip(),
                 }
+                # Add optional profiling and tenant fields when known.
                 if model:
                     sess_rec["model"] = model
                 if manufacturer:
@@ -199,10 +224,12 @@ class RealtimeIpamNacSyncMixin:
                 if nac_owner:
                     sess_rec["owner_tenant_id"] = nac_owner
                 out.append(sess_rec)
+            # Pull info: errors, reported total, and the session window.
             info = {"errors": errors, "total": int(d.get("total", len(out)) or 0) if isinstance(d, dict) else len(out),
                     "window_start": (d.get("window_start") if isinstance(d, dict) else "") or "",
                     "window_end": (d.get("window_end") if isinstance(d, dict) else "") or ""}
             return out, info
+        # Spoke unreachable or bad response: record the error.
         except Exception as e:
             errors.append(f"CPPM({nac}): {e}")
             return [], {"errors": errors, "total": 0}
@@ -218,24 +245,29 @@ class RealtimeIpamNacSyncMixin:
         Idempotent + best-effort: a netbox outage or an unbound tenant yields an
         error/skipped status, never an unhandled exception (the loop depends on this).
         """
+        # Timestamp and tenant identity for the status record.
         now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         tenant_cfg = self.state.get_tenant(tenant_id) or {}
         tenant_name = tenant_cfg.get("name") or tenant_id
         netbox_slug = str(tenant_cfg.get("netbox_tenant_slug") or "").strip()
+        # Fields every status record shares.
         base = {"tenant_id": tenant_id, "tenant_name": tenant_name,
                 "last_sync_ts": now, "sessions_total": len(sessions)}
+        # No IPAM spoke: record an error and stop.
         netbox = self._rt_ipam_spoke()
         if not netbox:
             status = {**base, "status": "error", "pushed": 0, "errors": 0,
                       "skipped": 0, "deleted": 0, "message": "NetBox spoke not connected"}
             await self.simulations_store.set_realtime_nac_sync_status(tenant_id, status)
             return status
+        # Tenant not linked to a NetBox tenant: record skipped and stop.
         if not netbox_slug:
             status = {**base, "status": "skipped", "pushed": 0, "errors": 0,
                       "skipped": 0, "deleted": 0,
                       "message": "tenant not bound to NetBox (no netbox_tenant_slug)"}
             await self.simulations_store.set_realtime_nac_sync_status(tenant_id, status)
             return status
+        # Creation defaults from config.
         defaults = self._rt_nac_cfg().get("defaults", {}) or {}
         # access_tracker is only-add-missing by design (NetBox is source of
         # truth). source_of_truth is relayed for parity; "netbox" is the only
@@ -244,11 +276,14 @@ class RealtimeIpamNacSyncMixin:
         sot_raw = str((self.state.system_state.get("global_config", {}) or {})
                      .get("source_of_truth", {}).get("access_tracker", "netbox")
                      ).strip().lower()
+        # Accept only known modes.
         sot = sot_raw if sot_raw in ("external", "netbox") else "netbox"
+        # Push payload: only-add-missing (replace=False).
         payload = {"tenant_id": tenant_id, "tenant_slug": netbox_slug,
                    "tenant_name": tenant_name, "replace": False,
                    "sessions": sessions, "defaults": defaults,
                    "source_of_truth": sot}
+        # Push, then read the sink's counters.
         try:
             rr = await self.request_response(netbox, self._RT_NAC_PUSH_COMMAND,
                                              payload, timeout=120.0)
@@ -260,6 +295,7 @@ class RealtimeIpamNacSyncMixin:
             deleted = int((rd or {}).get("deleted", 0) or 0)
             sessions_total = int((rd or {}).get("sessions_total", len(sessions)) or 0)
             message = (rd or {}).get("message", "")
+            # Anything but ERROR counts as success.
             rstate = "success" if rstatus != "ERROR" else "error"
             # Hub-authoritative sync log: clean → INFO; errors/failure →
             # [sync-error] WARNING carrying the sink's message so the cause lands
@@ -274,16 +310,19 @@ class RealtimeIpamNacSyncMixin:
                             "pushed=%d skipped=%d deleted=%d errors=%d",
                             tenant_id, tenant_name, rstate,
                             len(sessions), pushed, skipped, deleted, errors)
+            # Status record from the sink's counters.
             status = {**base, "status": rstate,
                       "pushed": pushed, "errors": errors, "skipped": skipped,
                       "deleted": deleted, "sessions_total": sessions_total,
                       "message": message or (f"{len(sessions)} session(s) sent"
                                               if rstatus != "ERROR" else "NetBox error")}
+        # Push failed outright: log it and record an error status.
         except Exception as e:
             logger.warning("[sync-error] realtime-nac tenant=%s push failed: %s",
                            tenant_id, e)
             status = {**base, "status": "error", "pushed": 0, "errors": 0,
                       "skipped": 0, "deleted": 0, "message": str(e)}
+        # Persist the tenant's status and return it.
         await self.simulations_store.set_realtime_nac_sync_status(tenant_id, status)
         return status
 
@@ -298,9 +337,11 @@ class RealtimeIpamNacSyncMixin:
         with the cycle's global ``sessions_total_global`` and
         ``dropped_unattributed`` for the UI summary.
         """
+        # Pull everything, attribute, then push only this tenant.
         sessions, pull = await self._rt_pull_sessions()
         buckets, dropped = await self._rt_attribute(sessions)
         status = await self._rt_push_tenant(tenant_id, buckets.get(tenant_id, []))
+        # Add the global cycle figures for the UI.
         status["sessions_total_global"] = len(sessions)
         status["dropped_unattributed"] = dropped
         status["pull_errors"] = pull.get("errors", [])
@@ -311,8 +352,10 @@ class RealtimeIpamNacSyncMixin:
         """Bucket sessions by tenant via prefix containment (delegate to the
         shared ``access.attribute_by_prefix``). Sessions whose framed IP sits in
         no tenant prefix are dropped + counted."""
+        # Helper missing: every session counts as dropped.
         if attribute_by_prefix is None:  # pragma: no cover - access importable in-app
             return {}, len(sessions)
+        # Delegate to the shared prefix-containment helper.
         return await attribute_by_prefix(self, sessions)
 
     async def run_realtime_nac_sync_all(self) -> Dict[str, Any]:
@@ -323,8 +366,10 @@ class RealtimeIpamNacSyncMixin:
         "sessions_total": M}``. Called by the background loop (which discards the
         return) and the all-tenant 'Sync now'.
         """
+        # Pull and attribute.
         sessions, pull = await self._rt_pull_sessions()
         buckets, dropped = await self._rt_attribute(sessions)
+        # No tenant matched: log and return an empty result.
         tids = list(buckets.keys())
         if not tids:
             if dropped:
@@ -335,9 +380,12 @@ class RealtimeIpamNacSyncMixin:
             return {"results": [], "dropped_unattributed": dropped,
                     "sessions_total": len(sessions),
                     "pull_errors": pull.get("errors", [])}
+        # Bound the number of tenants pushed at once.
         sem = asyncio.Semaphore(self._rt_nac_concurrency())
 
         async def _one(tid: str):
+            """Push one tenant under the semaphore; return its status, or None on an unexpected error."""
+            # Hold a semaphore slot while pushing.
             async with sem:
                 try:
                     return await self._rt_push_tenant(tid, buckets.get(tid, []))
@@ -345,10 +393,13 @@ class RealtimeIpamNacSyncMixin:
                     logger.debug("realtime nac gather tenant=%s: %s", tid, e)
                     return None
 
+        # Push all tenants concurrently and keep the real results.
         results = await asyncio.gather(*(_one(tid) for tid in tids))
         out = [r for r in results if r]
+        # Totals for the cycle summary log.
         pushed = sum(int(r.get("pushed", 0)) for r in out)
         errs = sum(int(r.get("errors", 0)) for r in out)
+        # Log at warning on errors, info when something happened, debug otherwise.
         if errs > 0:
             logger.warning("[sync-error] realtime-nac cycle: %d sessions, %d tenants, "
                            "%d pushed, %d errors, %d dropped unattributed",
@@ -382,11 +433,17 @@ class RealtimeIpamNacSyncMixin:
         doesn't simultaneous-fire with the other heavy syncs.
         """
         def _guard() -> bool:
+            """Return True when the sync is enabled and both a NAC spoke and an IPAM spoke are
+            connected.
+            """
+            # Read config fresh each cycle.
             cfg = self._rt_nac_cfg()
             return bool(cfg.get("enabled", False) and self._rt_nac_spokes()
                         and self._rt_ipam_spoke())
 
         def _delay() -> float:
+            """Return seconds until the next cycle: the configured interval, or 60 while disabled."""
+            # Use the interval only while enabled.
             enabled = self._rt_nac_cfg().get("enabled", False)
             return self._rt_nac_interval() if enabled else 60
 

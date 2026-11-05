@@ -14,18 +14,23 @@ Wire protocol (matches ``core/src/messaging/agent_hosting.py``):
 Protocol-compatible with the pxmx node-agent; product-agnostic (no pvesh/qm).
 """
 
+# asyncio: event loop and tasks; json: frame bodies; logging: agent logs.
 import asyncio
 import json
 import logging
+# os/sys: paths, env flags, excepthook; queue: the log relay buffer.
 import os
 import queue
 import sys
+# time: timestamps; uuid: message ids and the install guid; ssl: TLS contexts.
 import time
 import uuid
 import ssl as _ssl
 
+# websockets: the client connection to the spoke's /ws/agent listener.
 import websockets
 
+# Frame signing helpers, from whichever package layout is installed.
 try:
     from core.src.security.signer import MessageSigner, encode_frame, split_frame
 except ImportError:  # bare-module layout (/opt/lm/core on sys.path)
@@ -64,6 +69,7 @@ except ImportError:
     except ImportError:
         _ensure_requirements = None
 
+# Module logger.
 logger = logging.getLogger("Agent.SpokeClient")
 
 
@@ -76,6 +82,12 @@ class _DeviceAgentLogHandler(logging.Handler):
     bucket (no multi-role prefix scoping — there is one agent, one spoke)."""
 
     def __init__(self, log_queue: "queue.Queue"):
+        """Create the handler.
+
+        Args:
+            log_queue: bounded queue that receives formatted log lines.
+        """
+        # Accept every level; the logger's own level decides what reaches us.
         super().__init__(level=logging.DEBUG)
         self._queue = log_queue
         # Canonical LM format — matches logging_setup.DEFAULT_FORMAT so a
@@ -85,6 +97,8 @@ class _DeviceAgentLogHandler(logging.Handler):
             datefmt='%Y-%m-%d %H:%M:%S'))
 
     def emit(self, record: logging.LogRecord) -> None:
+        """Format a record and queue it, dropping the oldest line if the queue is full."""
+        # Format the record and try to queue it.
         try:
             entry = self.format(record)
             try:
@@ -101,23 +115,30 @@ class _DeviceAgentLogHandler(logging.Handler):
                     self._queue.put_nowait(entry)
                 except queue.Full:
                     pass
+        # Logging must never raise.
         except Exception:
             pass
 
+# Path of the agent listener on the spoke.
 _AGENT_WS_PATH = "/ws/agent"
 
 
 def normalize_spoke_url(url: str) -> str:
     """Fill scheme/port/path → ``wss://host:443/ws/agent`` (or as given)."""
+    # Trim whitespace; return empty input unchanged.
     u = (url or "").strip()
     if not u:
         return u
+    # Default to wss:// when no scheme is given.
     if "://" not in u:
         u = "wss://" + u
+    # Split into scheme, host[:port] and path.
     scheme, rest = u.split("://", 1)
     host_port, _, path = rest.partition("/")
+    # Add the default port: 443 for wss, else 8767.
     if ":" not in host_port:
         host_port += ":443" if scheme == "wss" else ":8767"
+    # Force the path to /ws/agent.
     path = "/" + path if path else ""
     if not path.endswith(_AGENT_WS_PATH):
         path = _AGENT_WS_PATH
@@ -129,10 +150,21 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
 
     def __init__(self, agent_id: str, spoke_url: str, secret: str = "",
                  secret_path: str = "", install_uuid_path: str = ""):
+        """Set up the client.
+
+        Args:
+            agent_id: this agent's id.
+            spoke_url: spoke address (normalised to wss://host:port/ws/agent).
+            secret: shared secret, if already provisioned.
+            secret_path: where the provisioned secret is stored.
+            install_uuid_path: where the per-install guid is stored.
+        """
+        # Identity, spoke URL, secret and where to persist it.
         self.agent_id = agent_id
         self.spoke_url = normalize_spoke_url(spoke_url)
         self.secret = secret or ""
         self.secret_path = secret_path or os.path.expanduser("~/.lm-agent-secret")
+        # Install-guid path, signer, hostname and connection state.
         self.install_uuid_path = install_uuid_path or os.path.expanduser(
             "~/.lm-agent-install-uuid")
         self.signer = MessageSigner(self.secret)
@@ -173,11 +205,14 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         # hub, not just local stderr. The asyncio-task counterpart is armed in
         # run() once the loop is running. Mirrors BaseControlPlane.
         self._install_uncaught_exception_relay()
+        # No secret given: load a previously provisioned one from disk.
         if not self.secret:
             self._load_secret()
 
     # ── secret persistence (provisioned on approval) ────────────────────────
     def _load_secret(self):
+        """Load the provisioned secret from disk, if present, and rebuild the signer."""
+        # Read the file and re-create the signer; failures are only logged.
         try:
             if os.path.exists(self.secret_path):
                 with open(self.secret_path) as f:
@@ -187,6 +222,8 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
             logger.debug("secret load skipped: %s", e)
 
     def _save_secret(self, secret: str):
+        """Write the provisioned secret to disk with mode 600; return True on success."""
+        # Write, restrict permissions, report success.
         try:
             with open(self.secret_path, "w") as f:
                 f.write(secret)
@@ -204,6 +241,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         fresh identity), mirroring spokes' INSTALL_UUID semantics. Returns ''
         on write failure so the identity never flips per boot (hub treats ''
         as legacy spoke_id-keyed)."""
+        # Reuse a stored guid if present.
         path = self.install_uuid_path
         try:
             if os.path.exists(path):
@@ -211,16 +249,19 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
                     val = f.read().strip()
                 if val:
                     return val
+            # Otherwise mint one and write it atomically (temp file, then rename).
             new_uuid = str(uuid.uuid4())
             tmp = path + ".tmp"
             with open(tmp, "w") as f:
                 f.write(new_uuid)
             os.replace(tmp, path)
+            # Restrict permissions (best effort).
             try:
                 os.chmod(path, 0o600)
             except Exception:  # noqa: BLE001
                 pass
             return new_uuid
+        # Any failure: log and return "" (legacy identity).
         except Exception as e:  # noqa: BLE001
             logger.debug("install_uuid persist skipped: %s", e)
             return ""
@@ -229,6 +270,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         """The /ws/agent auth frame: agent_id + optional secret/hostname +
         the per-install guid (so the hub's AGENT_RELAY_UP carries a stable,
         non-observable identity, not just the agent_id/hostname)."""
+        # Always send agent_id; add secret, hostname and guid when known.
         hs = {"agent_id": self.agent_id}
         if self.secret:
             hs["secret"] = self.secret
@@ -239,6 +281,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         return hs
 
     def _ssl_ctx(self):
+        """Return the TLS context for a wss:// spoke URL, or None for plain ws://."""
         # mTLS-aware (plumbed, default-off): today's unverified-but-encrypted
         # context unless LM_MTLS_ENABLED — then verify the spoke against the CA
         # and present the client cert. See core/src/security/mtls.py.
@@ -249,6 +292,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         # unverified context so a broken/expired cert can't block reconnection.
         if self._mtls_fallback:
             return _ssl._create_unverified_context()
+        # Use the mTLS client context; on any error, fall back to unverified TLS.
         try:
             try:
                 from core.src.security.mtls import client_context
@@ -260,6 +304,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
 
     # ── run loop ────────────────────────────────────────────────────────────
     async def run(self):
+        """Main loop: set up relays and watchdogs once, then connect to the spoke with back-off."""
         # ── device-mode scaffolding: arm once for the process lifetime ───────
         # Route unhandled asyncio-task exceptions through the logger → AGENT_LOG
         # (the sync excepthook was installed in __init__). Set here because the
@@ -269,6 +314,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
             self._loop.set_exception_handler(self._asyncio_exception_relay)
         except Exception:  # noqa: BLE001
             pass
+        # Repair missing Python dependencies once.
         self._dep_guard_once()
         # Periodic code-drift self-heal: if code on disk advances ahead of the
         # running process (a manual pull / spoke-pushed update that pulled but
@@ -279,9 +325,11 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         # AGENT_LOG relay flusher (lives across reconnects; reads self.websocket
         # fresh each cycle). Armed once here, not per-reconnect.
         asyncio.create_task(self._log_relay_task())
+        # Reconnect forever until stopped, doubling the back-off up to 300s.
         backoff = 5
         while not self._stop:
             was_fallback = self._mtls_fallback
+            # One connection; a clean session resets the back-off.
             try:
                 await self._connect_once()
                 self._mtls_fallback = False  # connected cleanly → resume mTLS
@@ -291,6 +339,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
                 # PSK channel for a cert-refresh recovery (self-heal). If the
                 # fallback attempt ALSO failed, go back to mTLS next (avoid
                 # sticking in plain mode).
+                # Check whether mTLS is enabled.
                 try:
                     try:
                         from core.src.security.mtls import mtls_enabled as _me
@@ -299,6 +348,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
                     mtls_on = _me()
                 except Exception:  # noqa: BLE001
                     mtls_on = False
+                # Decide whether the next attempt uses the cert-refresh fallback, log, and wait.
                 self._mtls_fallback = bool(mtls_on and not was_fallback)
                 logger.warning("spoke connection to %s failed: %s — retry in %ss%s",
                                self.spoke_url, e, backoff,
@@ -307,18 +357,26 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
                 backoff = min(backoff * 2, 300)
 
     async def _connect_once(self):
+        """Dial the spoke once: handshake, approval or verification, then serve frames until
+        closed.
+        """
+        # Open the connection and send the handshake.
         logger.info("Agent (device mode) → dialing spoke %s", self.spoke_url)
         async with websockets.connect(self.spoke_url, ssl=self._ssl_ctx()) as ws:
             self.websocket = ws
             await ws.send(json.dumps(self._build_handshake()))
 
+            # Read the spoke's reply (5s limit).
             proof = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
             status = proof.get("status")
+            # Not approved yet: wait for an APPROVED frame carrying our secret.
             if status == "APPROVAL_REQUIRED":
                 logger.info("Agent '%s' pending admin approval (Setup → Spokes & "
                             "Agents).", self.agent_id)
                 async for raw in ws:
+                    # Frames can be plain JSON or signed "<sig>.<body>".
                     msg = json.loads(raw if raw[:1] == "{" else split_frame(raw)[1])
+                    # Approved: store the secret and return so the next connect authenticates.
                     if msg.get("status") == "APPROVED" and msg.get("secret"):
                         self.secret = msg["secret"]
                         self.signer = MessageSigner(self.secret)
@@ -326,6 +384,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
                         logger.info("Agent '%s' approved — reconnecting with secret.",
                                     self.agent_id)
                         return
+                    # Anything else is logged and ignored.
                     logger.warning(
                         "Agent '%s' still pending: received frame status=%r "
                         "secret_present=%s (keys=%s) — NOT applying. An APPROVED "
@@ -334,13 +393,17 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
                         "unauthenticated and re-enters approval.",
                         self.agent_id, msg.get("status"),
                         bool(msg.get("secret")), sorted(msg.keys()))
+                # Connection closed while still pending.
                 return
+            # Anything other than HUB_VERIFIED is a failed identity proof.
             if status != "HUB_VERIFIED":
                 await ws.close(1008, "spoke identity not verified")
                 raise RuntimeError(f"spoke identity proof failed: {proof}")
+            # Confirm, then start heartbeats.
             await ws.send(json.dumps({"status": "HUB_OK"}))
             logger.info("Agent '%s' authenticated to spoke.", self.agent_id)
 
+            # Handle frames until the connection closes; always stop the heartbeat.
             hb = asyncio.create_task(self._heartbeat_loop())
             try:
                 async for message in ws:
@@ -349,19 +412,27 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
                 hb.cancel()
 
     async def _handle_frame(self, ws, message):
+        """Verify and dispatch one frame, then send the AGENT_RESPONSE when it has a correlation
+        id.
+        """
+        # Split and parse the frame; drop anything malformed.
         try:
             sig, body = split_frame(message)
             msg = json.loads(body)
         except Exception:  # noqa: BLE001
             return
+        # Drop frames whose signature does not verify.
         if sig and not self.signer.verify_bytes(body.encode(), sig):
             logger.warning("invalid signature — dropping")
             return
+        # Pull the command type, data and correlation id.
         payload = msg.get("payload", {})
         cmd = payload.get("type")
         data = payload.get("data", {}) or {}
         corr = msg.get("header", {}).get("correlation_id")
+        # Run it.
         result = await self._dispatch(cmd, data)
+        # Reply only to requests that carry a correlation id.
         if corr is not None:
             resp = {"header": {"correlation_id": corr, "sender_id": self.agent_id},
                     "payload": {"type": "AGENT_RESPONSE", "data": result}}
@@ -372,8 +443,10 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
 
     async def _dispatch(self, cmd, data):
         """Generic primitives ONLY — the spoke holds all product logic."""
+        # Keep-alive messages: just acknowledge.
         if cmd in ("HUB_PING", "HEARTBEAT_ACK"):
             return {"status": "SUCCESS"}
+        # Session key rotation: persist the new secret, then switch the signer.
         if cmd == "SPOKE_UPDATE_SESSION_KEY":
             new_secret = str(data.get("secret") or "").strip()
             if not new_secret:
@@ -384,6 +457,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
             self.secret = new_secret
             self.signer = MessageSigner(new_secret)
             return {"status": "SUCCESS", "message": "session key updated"}
+        # Run a local command in a worker thread.
         if cmd == "RUN_COMMAND":
             from command_runner import run_local_command
             res = await asyncio.to_thread(
@@ -392,6 +466,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
                 float(data.get("timeout", 30.0) or 30.0))
             return {"status": "SUCCESS" if res.get("ok") else "ERROR",
                     "result": res, "message": res.get("error", "")}
+        # Write a local file in a worker thread.
         if cmd == "WRITE_FILE":
             from command_runner import write_local_file
             res = await asyncio.to_thread(
@@ -401,6 +476,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
                 atomic=bool(data.get("atomic", True)))
             return {"status": "SUCCESS" if res.get("ok") else "ERROR",
                     "result": res, "message": res.get("error", "")}
+        # Self-update request.
         if cmd == "AGENT_UPDATE":
             # Spoke-driven self-update — symmetric with the hub→spoke
             # SPOKE_UPDATE. The spoke sends {repo_url, core_repo_url?, core_branch?}
@@ -419,16 +495,20 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
             # re-delivery spawned a concurrent git pull. to_thread frees the
             # loop while the first run executes, so a duplicate arrives with
             # the flag set and short-circuits with an immediate ack.
+            # A repo URL is required.
             repo_url = data.get("repo_url")
             if not repo_url:
                 return {"status": "ERROR", "message": "Missing repo_url for update"}
+            # Ignore duplicates while an update is already running.
             if getattr(self, "_spoke_update_in_progress", False):
                 logger.info("AGENT_UPDATE already in progress; "
                             "ignoring duplicate re-delivery.")
                 return {"status": "SUCCESS",
                         "message": "update already in progress"}
+            # Mark the update as running and start draining.
             self._spoke_update_in_progress = True
             self._draining = True  # spoke queues pushes; we os._exit at the end
+            # Run the update off the event loop; always clear the flags afterwards.
             try:
                 return await asyncio.to_thread(
                     self._perform_self_update_sync, repo_url,
@@ -442,10 +522,13 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
                 # cycle for the rest of this process lifetime. The exit path
                 # os._exit(3)s above, killing the process before this runs.
                 self._draining = False
+        # Anything else is not supported in device mode.
         logger.debug("device-mode agent got non-primitive command %s (ignored)", cmd)
         return {"status": "ERROR", "message": f"unsupported in device mode: {cmd}"}
 
     async def _heartbeat_loop(self):
+        """Send a HEARTBEAT every 30 seconds; stop when a send fails."""
+        # Sleep, then send a signed heartbeat.
         while True:
             await asyncio.sleep(30)
             try:
@@ -468,11 +551,14 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         (import checks only); runs `pip install -r requirements.txt` if a
         declared dep is missing. No-op if dep_guard isn't importable or
         LM_DEP_GUARD_DISABLE=1 is set (dep_guard enforces the latter itself)."""
+        # Run only once per process.
         if self._dep_guard_done:
             return
         self._dep_guard_done = True
+        # Nothing to do without dep_guard.
         if _ensure_requirements is None:
             return
+        # Check the agent's own requirements.
         try:
             # agent/src/spoke_client.py → agent/requirements.txt
             agent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -495,27 +581,32 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         """Route uncaught sync exceptions through the logger (→ AGENT_LOG relay)
         before the interpreter's default handler, so a genuine crash reaches the
         hub, not just local stderr. Mirrors BaseControlPlane."""
+        # Keep the previous hook so we can chain to it.
         _prev = sys.excepthook
 
         def _hook(exc_type, exc, tb):
+            """Log an uncaught exception (except Ctrl-C), then call the previous hook."""
             try:
                 if not issubclass(exc_type, KeyboardInterrupt):
                     logger.error("Uncaught exception", exc_info=(exc_type, exc, tb))
             finally:
                 _prev(exc_type, exc, tb)
 
+        # Install our hook.
         sys.excepthook = _hook
 
     def _asyncio_exception_relay(self, loop, context) -> None:
         """asyncio loop exception handler — logs unhandled task exceptions via
         the logger (→ AGENT_LOG) then defers to the default handler for local
         reporting. Mirrors BaseControlPlane."""
+        # Log with a traceback when there is an exception object.
         exc = context.get("exception")
         msg = context.get("message") or "unhandled asyncio exception"
         if exc is not None:
             logger.error("Uncaught asyncio exception: %s", msg, exc_info=exc)
         else:
             logger.error("asyncio error: %s", msg)
+        # Let asyncio's default handler report it too.
         loop.default_exception_handler(context)
 
     async def _log_relay_task(self) -> None:
@@ -524,19 +615,23 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         Flushes every 5s so a short-lived or crashing process still gets its
         connect/handshake trail + final line to the hub. Best-effort: a dropped
         websocket just re-queues (the next connect resumes)."""
+        # Flush every 5 seconds until stopped.
         while not self._stop:
             await asyncio.sleep(5)
+            # Take everything currently queued.
             entries = []
             try:
                 while True:
                     entries.append(self._log_relay_queue.get_nowait())
             except queue.Empty:
                 pass
+            # Nothing queued, or no connection: try again next cycle.
             if not entries:
                 continue
             ws = self.websocket
             if ws is None:
                 continue
+            # Send them as one AGENT_LOG frame.
             try:
                 await self._send_agent_log(ws, entries)
             except Exception as e:  # noqa: BLE001
@@ -547,6 +642,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         Frame shape matches the pxmx node-agent's send_log (agent.py:1710) so
         the hub's AGENT_RELAY_UP handler stores data.message verbatim in
         agent_logs[agent_id]."""
+        # Message envelope with the joined log lines.
         msg = {
             "header": {
                 "message_id": str(uuid.uuid4()),
@@ -563,23 +659,27 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
                 },
             },
         }
+        # Sign and send.
         await ws.send(encode_frame(self.signer, msg))
 
     async def _flush_log_relay_async(self, timeout: float = 2.0) -> None:
         """Best-effort final flush of queued log entries before a hard exit
         (the drift watchdog's os._exit(3)), so the agent's last lines reach the
         hub instead of dying in the queue."""
+        # Take everything queued.
         entries = []
         try:
             while True:
                 entries.append(self._log_relay_queue.get_nowait())
         except queue.Empty:
             pass
+        # Nothing to send, or no connection.
         if not entries:
             return
         ws = self.websocket
         if ws is None:
             return
+        # Send with a time limit.
         try:
             await asyncio.wait_for(self._send_agent_log(ws, entries), timeout=timeout)
         except Exception as e:  # noqa: BLE001
@@ -593,18 +693,21 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         instead of dying in the queue. Schedules the send on the captured event
         loop and blocks briefly; any failure is swallowed because the process
         is about to exit regardless. Hook for SelfUpdateMixin."""
+        # Take everything queued.
         entries = []
         try:
             while True:
                 entries.append(self._log_relay_queue.get_nowait())
         except queue.Empty:
             pass
+        # Need queued lines, a captured loop and a connection.
         if not entries:
             return
         loop = self._loop
         ws = self.websocket
         if loop is None or ws is None:
             return
+        # Run the send on the event loop and wait briefly.
         try:
             fut = asyncio.run_coroutine_threadsafe(self._send_agent_log(ws, entries), loop)
             fut.result(timeout=timeout)
@@ -618,12 +721,14 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         from the agent_id like a spoke's ``lm-<module>``. Honors an
         ``LM_AGENT_SERVICE_NAME`` override for non-standard installs. Hook for
         SelfUpdateMixin."""
+        # Environment override, else "lm-agent".
         return os.environ.get("LM_AGENT_SERVICE_NAME", "").strip() or "lm-agent"
 
     def _repo_root(self) -> str:
         """The agent's own repo checkout root (the lm repo, which vendors
         agent/ + core/). Used by the code-drift watchdog. agent/src/spoke_client.py
         → agent/src → agent → repo root."""
+        # Two directories above this file's directory.
         return os.path.abspath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
@@ -633,6 +738,7 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         candidate that is itself a git repo, else None. The lm repo checkout
         already covers core/ when core is NOT a separate repo, so the watchdog
         watches the right thing either way."""
+        # Return the first candidate that is a git checkout.
         for cand in (
             os.environ.get("LM_CORE_ROOT", "").strip(),
             os.path.abspath(os.path.join(self._repo_root(), "core")),

@@ -23,23 +23,33 @@ ONLY in the sim-quota catalog/picker (Setup → Sim Quotas) — see
 the reports read these bare counts directly, so the prefix never leaks onto
 them (per the user's "prefix only in the setup screens" rule).
 """
+# Postponed annotations: type hints are not evaluated at runtime.
 from __future__ import annotations
 
+# asyncio runs the browse fetches concurrently.
 import asyncio
+# hashlib makes a short fingerprint of the config for cache keys.
 import hashlib
+# JSON serialises the config deterministically before hashing.
 import json
+# Standard-library logging for API failures and diagnostics.
 import logging
+# Wall-clock time for cache expiry.
 import time
+# Type hints only.
 from typing import Any, Dict, Optional
 
+# Async HTTP client used for every Mist API call.
 import httpx
 
+# Module-level logger named after this module.
 logger = logging.getLogger(__name__)
 
 # Default Mist API host (Global 01). Other regions: api.eu.mist.com (EMEA),
 # api.gc1.mist.com (Global 02), api.ac2.mist.com (Global 03), api.ac5.mist.com
 # (APAC). The operator picks the region their org lives in at Setup → Mist API.
 _DEFAULT_MIST_HOST = "api.mist.com"
+# Region hosts we recognise; anything else still works but triggers a warning.
 _KNOWN_MIST_HOSTS = {
     "api.mist.com", "api.eu.mist.com", "api.gc1.mist.com",
     "api.ac2.mist.com", "api.ac5.mist.com",
@@ -53,6 +63,7 @@ _sites_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 # warning lets a cached fetch-failed result surface to the UI like a fresh one.
 _alarms_cache: dict[str, tuple[float, tuple[list[dict[str, Any]], Optional[str]]]] = {}
 _inventory_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+# Cache lifetimes in seconds for org-level lists and alarms.
 _ORG_CACHE_TTL = 270  # 4.5 min — just under the 5-min poll interval
 _ALARMS_CACHE_TTL = 300  # 5 min — matches the poll loop
 # Browse/picker alarms window. The Mist /alarms/search endpoint DEFAULTS to a
@@ -63,6 +74,7 @@ _ALARMS_CACHE_TTL = 300  # 5 min — matches the poll loop
 _ALARMS_BROWSE_DURATION = "7d"
 # Per-site client stats are site-scoped, so they're keyed by (config_hash, site_id).
 _site_clients_cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+# Cache lifetime in seconds for per-site client stats.
 _SITE_CLIENTS_CACHE_TTL = 270
 
 # Mist alarm types that represent a device going DOWN — surfaced into hw_devices
@@ -86,11 +98,13 @@ _KNOWN_MIST_ALARM_TYPES: dict[str, str] = {
     "ap_version_mismatch": "AP Version Mismatch",
     "switch_non_mist": "Non-Mist Switch",
 }
+# Hardware checks offered by default in the Setup picker.
 DEFAULT_MIST_HARDWARE_CHECKS: tuple[dict[str, str], ...] = (
     {"id": "ap_offline", "name": "APs Offline", "device_type": "ap"},
     {"id": "switch_down", "name": "Switches Down", "device_type": "switch"},
     {"id": "gateway_down", "name": "Gateways Down", "device_type": "gateway"},
 )
+# Checks monitored by default for a new Mist tenant.
 DEFAULT_MIST_MONITORED_CHECKS: tuple[dict[str, str], ...] = (
     {"type": "alert", "id": "ap_offline", "name": "APs Offline"},
     {"type": "alert", "id": "switch_down", "name": "Switches Down"},
@@ -102,12 +116,15 @@ DEFAULT_MIST_MONITORED_CHECKS: tuple[dict[str, str], ...] = (
 
 def _coerce_host(host: str) -> str:
     """Normalize the configured Mist API host (strip scheme/path, lower-case)."""
+    # Normalise: trim, lowercase and drop any trailing slash.
     h = str(host or "").strip().lower().rstrip("/")
     # Tolerate a pasted ``https://api.mist.com`` by stripping the scheme.
     if "://" in h:
         h = h.split("://", 1)[1]
+    # Drop any path after the host name.
     if "/" in h:
         h = h.split("/", 1)[0]
+    # Empty input falls back to the default host.
     return h or _DEFAULT_MIST_HOST
 
 
@@ -118,7 +135,9 @@ def validate_mist_host(host: str) -> str:
     here — Mist's region hosts are a fixed, well-known set and the spoke's own
     SSRF guard (the hub route's validator) runs before creds are ever accepted.
     """
+    # Normalise the host first.
     h = _coerce_host(host)
+    # Unknown hosts are allowed but logged so typos are visible.
     if h not in _KNOWN_MIST_HOSTS:
         logger.warning("Mist API host %s is not a known region host", h)
     return h
@@ -132,33 +151,44 @@ class MistClient:
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
+        """Read credentials and region from the config and fingerprint it for caching."""
+        # Keep a private copy of the config.
         self.config = dict(config)
+        # Static API token, region host and org id from the config.
         self.api_token = str(self.config.get("api_token") or "").strip()
         self.host = _coerce_host(self.config.get("host"))
         self.org_id = str(self.config.get("org_id") or "").strip()
+        # Short MD5 of the sorted config; identical configs share the module caches.
         self._config_hash = hashlib.md5(
             json.dumps(self.config, sort_keys=True, default=str).encode()
         ).hexdigest()[:8]
 
     def is_configured(self) -> bool:
         """Return ``True`` when a Mist API token + org id are present."""
+        # Both a token and an org id are required.
         return bool(self.api_token and self.org_id)
 
     def _base_url(self) -> str:
+        """Return the HTTPS base URL for this tenant's Mist region."""
         return f"https://{self.host}"
 
     def _headers(self) -> dict[str, str]:
+        """Return the auth and accept headers for Mist API requests."""
+        # Mist uses a static "Token" authorisation header.
         return {"Authorization": f"Token {self.api_token}",
                 "Accept": "application/json"}
 
     async def _get(self, client: httpx.AsyncClient, path: str,
                   params: dict[str, Any] | None = None) -> Any:
+        """GET a Mist API path and return the parsed JSON, raising on HTTP errors."""
+        # Issue the request with auth headers, query params and a 30s timeout.
         resp = await client.get(
             f"{self._base_url()}{path}",
             headers=self._headers(),
             params=params or {},
             timeout=30,
         )
+        # Turn 4xx/5xx responses into exceptions for the caller.
         resp.raise_for_status()
         return resp.json()
 
@@ -168,7 +198,9 @@ class MistClient:
     def _alarm_severity(severity: str) -> str:
         """Map a Mist alarm severity (Critical/Major/Minor/Warning/Info) to a
         UI colour, mirroring Aruba's ``_nc_alert_severity``."""
+        # Compare case-insensitively.
         s = str(severity or "").lower()
+        # Critical maps to red, major to orange, minor/warning to yellow, else info.
         if s == "critical":
             return "red"
         if s == "major":
@@ -179,7 +211,10 @@ class MistClient:
 
     @staticmethod
     def _finding_status(value: Any) -> str:
+        """Map a severity/status word to a red/yellow/green traffic-light colour."""
+        # Compare case-insensitively.
         sev = str(value or "").strip().lower()
+        # Severe values are red, mild ones yellow, cleared ones green; unknown defaults to yellow.
         if sev in {"critical", "major", "red", "error"}:
             return "red"
         if sev in {"minor", "warning", "fair"}:
@@ -193,29 +228,38 @@ class MistClient:
     async def _list_sites(self) -> list[dict[str, Any]]:
         """Return cached org sites (``GET /api/v1/orgs/:org_id/sites``). One API
         call shared across all site queries in a poll cycle."""
+        # Serve the cached list while it is still fresh.
         cached = _sites_cache.get(self._config_hash)
         if cached and time.time() - cached[0] < _ORG_CACHE_TTL:
             return cached[1]
+        # Empty result used if every attempt fails.
         result: list[dict[str, Any]] = []
         try:
+            # One HTTP client for the fetch attempts.
             async with httpx.AsyncClient(timeout=30) as http:
                 # Mist's list-org-sites is /sites (plural); fall back to the
                 # singular /site form on 404 in case of API revision drift.
                 payload: Any = None
+                # Try the plural path first, then the singular one.
                 for path in (f"/api/v1/orgs/{self.org_id}/sites",
                              f"/api/v1/orgs/{self.org_id}/site"):
                     try:
+                        # Stop at the first path that succeeds.
                         payload = await self._get(http, path, params={"limit": 1000})
                         break
+                    # A 404 means try the next path; any other error is raised.
                     except httpx.HTTPStatusError as exc:
                         if exc.response.status_code == 404:
                             continue
                         raise
                 # Mist returns a bare list for these collection endpoints.
+                # Bare list response.
                 if isinstance(payload, list):
                     result = payload
+                # Wrapped response: look under the common container keys.
                 elif isinstance(payload, dict):
                     result = payload.get("sites") or payload.get("result") or payload.get("items") or []
+        # Fetch failed: log it and fall back to the last good list without caching.
         except Exception as exc:  # noqa: BLE001
             # Cache ONLY on success: a fetch failure must not latch an empty
             # list for the full TTL (that would make every site vanish for
@@ -223,16 +267,20 @@ class MistClient:
             # WITHOUT caching so the next cycle re-fetches.
             logger.warning("Mist sites fetch failed [%s]: %s", self._config_hash, exc)
             return cached[1] if cached else result
+        # Cache the successful result with the current time.
         _sites_cache[self._config_hash] = (time.time(), result)
         return result
 
     async def _site_name_to_id(self) -> dict[str, str]:
         """Map lower-cased site NAME → site_id from the cached sites list (for
         case-insensitive lookup by name)."""
+        # Build name -> id from the cached sites list.
         out: dict[str, str] = {}
         for s in await self._list_sites():
+            # Accept either "id" or "site_id" for the site identifier.
             nm = str(s.get("name") or "").strip()
             sid = str(s.get("id") or s.get("site_id") or "").strip()
+            # Only keep entries with both a name and an id.
             if nm and sid:
                 out[nm.casefold()] = sid
         return out
@@ -241,10 +289,13 @@ class MistClient:
         """Map site_id → ORIGINAL-CASE site name (for resolving alarm +
         inventory site_ids back to the display name). Distinct from
         ``_site_name_to_id`` which casefolds the name for lookup."""
+        # Build id -> name from the cached sites list.
         out: dict[str, str] = {}
         for s in await self._list_sites():
+            # Accept either "id" or "site_id" for the site identifier.
             nm = str(s.get("name") or "").strip()
             sid = str(s.get("id") or s.get("site_id") or "").strip()
+            # Only keep entries with both a name and an id.
             if nm and sid:
                 out[sid] = nm
         return out
@@ -271,47 +322,62 @@ class MistClient:
         (``_ALARMS_BROWSE_DURATION``) to surface recent history, while the
         dashboard active-alarm poll keeps the 1d default (current problems).
         """
+        # Separate cache entries per config, window and active/all mode.
         cache_key = f"{self._config_hash}:{duration}:{'all' if include_cleared else 'active'}"
+        # Serve the cached result while it is still fresh.
         cached = _alarms_cache.get(cache_key)
         if cached and time.time() - cached[0] < _ALARMS_CACHE_TTL:
             return cached[1]
 
+        # Normalised alarms plus an optional failure message.
         alarms: list[dict[str, Any]] = []
         warning: Optional[str] = None
         try:
             # Resolve site_id → site_name (original case) so alarms key to the
             # right site instead of falling to the global "—" bucket.
             id_to_name = await self._site_id_to_name()
+            # One HTTP client for all alarm pages.
             async with httpx.AsyncClient(timeout=30) as http:
+                # Raw alarm items across pages and the cursor for the next page.
                 raw: list[dict[str, Any]] = []
                 next_cursor: Any = None
                 pages = 0
                 # Bounded pagination (<=5 pages) so a looping cursor can never
                 # stall browse_all (which awaits alarms + sites in parallel).
                 while pages < 5:
+                    # Ask for up to 100 alarms in the window, continuing from the cursor if any.
                     params: dict[str, Any] = {"limit": 100, "duration": duration}
                     if next_cursor:
                         params["next"] = next_cursor
+                    # Fetch one page of alarms.
                     payload = await self._get(http, f"/api/v1/orgs/{self.org_id}/alarms/search",
                                               params=params)
+                    # Results may be under "results" or "alarms".
                     items = (payload or {}).get("results") or (payload or {}).get("alarms") or []
                     raw.extend(items)
                     pages += 1
+                    # Stop when the page is empty or there is no next cursor.
                     next_cursor = (payload or {}).get("next")
                     if not items or not next_cursor:
                         break
 
+            # Log the field names of one alarm to help diagnose API shape changes.
             if raw:
                 logger.info("Mist alarms sample keys [%s]: %s",
                             self._config_hash, sorted(raw[0].keys()))
 
+            # Normalise each raw alarm.
             for item in raw:
+                # Acked/cleared/resolved alarms are not active.
                 acked = bool(item.get("acked")) or str(item.get("state") or "").lower() in {"acked", "cleared", "resolved"}
+                # Skip inactive alarms unless the caller asked for them.
                 if acked and not include_cleared:
                     continue
+                # Alarm type name and the site it belongs to ("—" when global/unknown).
                 name = str(item.get("type") or item.get("key") or "alarm").strip()
                 sid = str(item.get("site_id") or item.get("siteId") or "").strip()
                 site = id_to_name.get(sid, "") or "—"
+                # Normalised alarm entry consumed by the poll and browse paths.
                 alarms.append({
                     "name": name,
                     "site": site,
@@ -323,6 +389,7 @@ class MistClient:
                     "status": "cleared" if acked else "active",
                     "device_name": self._alarm_device_name(item),
                 })
+        # Any failure: log it with the response body when available.
         except Exception as exc:  # noqa: BLE001
             body = getattr(getattr(exc, "response", None), "text", None)
             logger.warning("Mist alarms fetch [%s]: %s%s", self._config_hash, exc,
@@ -331,12 +398,15 @@ class MistClient:
             # alarms in the window" from "the alarms call failed" — the old
             # behavior swallowed this into a silent empty list.
             warning = f"Mist alarms fetch failed: {exc}"
+        # Summary log for each fetch.
         logger.info("Mist alarms fetched [%s]: %d alarms (duration=%s, include_cleared=%s, warning=%s)",
                     self._config_hash, len(alarms), duration, include_cleared, bool(warning))
+        # Backdate empty results so they expire after about 60 seconds instead of 5 minutes.
         ttl_offset = 0 if alarms else (_ALARMS_CACHE_TTL - 60)
         # Cache the (alarms, warning) tuple so a cached return matches a fresh
         # one. An empty/failed result is cached for only 60s (backdated) so a
         # transient empty doesn't mask the next real fetch for the full 5 min.
+        # Store and return the (alarms, warning) tuple.
         result = (alarms, warning)
         _alarms_cache[cache_key] = (time.time() - ttl_offset, result)
         return result
@@ -349,13 +419,17 @@ class MistClient:
         of the cached ``_fetch_alarms`` (no extra API call). Returns
         ``(grouped, warning)`` — the warning is propagated from
         ``_fetch_alarms`` so a fetch failure surfaces to the browse/picker."""
+        # Groups keyed by lowercased (type, site).
         groups: dict[tuple[str, str], dict[str, Any]] = {}
+        # Reuse the cached per-alarm list.
         alarms, warning = await self._fetch_alarms(include_cleared=include_cleared,
                                                     duration=duration)
+        # Fold each alarm into its (type, site) group.
         for al in alarms:
             name = str(al.get("name") or "alarm").strip()
             site = str(al.get("site") or "—").strip()
             key = (name.lower(), site.lower())
+            # First occurrence creates the group from this alarm's details.
             if key not in groups:
                 groups[key] = {
                     "name": name,
@@ -368,9 +442,11 @@ class MistClient:
                     "status": "cleared",
                     "count": 0,
                 }
+            # Count occurrences; any active occurrence makes the group active.
             groups[key]["count"] += 1
             if al.get("status") == "active":
                 groups[key]["status"] = "active"
+        # Turn groups into rows, describing repeat counts in the detail text.
         out: list[dict[str, Any]] = []
         for entry in groups.values():
             cnt = entry.pop("count")
@@ -382,6 +458,7 @@ class MistClient:
     @staticmethod
     def _device_type_for(alarm_type: str) -> str:
         """Infer a device_type (ap/switch/gateway) from a Mist alarm type."""
+        # Classify by substrings in the lowercased alarm type.
         t = str(alarm_type or "").lower()
         if t.startswith("ap_") or t == "ap_offline":
             return "ap"
@@ -393,49 +470,64 @@ class MistClient:
 
     async def _site_clients(self, site_id: str) -> list[dict[str, Any]]:
         """Return cached per-site client stats (``GET /api/v1/sites/:site_id/stats/clients``)."""
+        # Cache key is per config and per site.
         ckey = (self._config_hash, site_id)
+        # Serve the cached list while it is still fresh.
         cached = _site_clients_cache.get(ckey)
         if cached and time.time() - cached[0] < _SITE_CLIENTS_CACHE_TTL:
             return cached[1]
+        # Empty result used if the fetch fails.
         result: list[dict[str, Any]] = []
         try:
+            # Fetch client stats for the site, up to 1000 clients.
             async with httpx.AsyncClient(timeout=30) as http:
                 payload = await self._get(http, f"/api/v1/sites/{site_id}/stats/clients",
                                           params={"limit": 1000})
+                # Bare list response, or a wrapped one under common container keys.
                 if isinstance(payload, list):
                     result = payload
                 elif isinstance(payload, dict):
                     result = payload.get("clients") or payload.get("results") or payload.get("items") or []
+        # Failures are logged; the empty result is cached for the TTL.
         except Exception as exc:  # noqa: BLE001
             logger.warning("Mist site clients fetch failed [%s:%s]: %s",
                            self._config_hash, site_id, exc)
+        # Cache and return the result.
         _site_clients_cache[ckey] = (time.time(), result)
         return result
 
     async def _list_inventory(self) -> list[dict[str, Any]]:
         """Return cached org inventory (``GET /api/v1/orgs/:org_id/inventory``)."""
+        # Serve the cached inventory while it is still fresh.
         cached = _inventory_cache.get(self._config_hash)
         if cached and time.time() - cached[0] < _ORG_CACHE_TTL:
             return cached[1]
+        # Empty result used if the fetch fails.
         result: list[dict[str, Any]] = []
         try:
+            # Page through the inventory, at most 5 pages of 1000 devices.
             async with httpx.AsyncClient(timeout=30) as http:
                 page = 1
                 while page <= 5:
+                    # Fetch one page.
                     payload = await self._get(http, f"/api/v1/orgs/{self.org_id}/inventory",
                                               params={"limit": 1000, "page": page})
+                    # Bare list response, or a wrapped one under common container keys.
                     if isinstance(payload, list):
                         items = payload
                     elif isinstance(payload, dict):
                         items = payload.get("inventory") or payload.get("result") or payload.get("items") or []
                     else:
                         items = []
+                    # Add the page; a short page means it was the last.
                     result.extend(items)
                     if len(items) < 1000:
                         break
                     page += 1
+        # Failures are logged; whatever was collected is cached.
         except Exception as exc:  # noqa: BLE001
             logger.warning("Mist inventory fetch failed [%s]: %s", self._config_hash, exc)
+        # Cache and return the result.
         _inventory_cache[self._config_hash] = (time.time(), result)
         return result
 
@@ -449,6 +541,7 @@ class MistClient:
         """Collect per-site Mist health, client counts, alarm counts, and
         hardware device names — same dict shape as ``ArubaClient.poll_site_data``
         so ``MistPoller`` can consume it identically."""
+        # Not configured: return an all-zero result in the expected shape.
         if not self.is_configured():
             return {
                 "site_health": None,
@@ -460,7 +553,9 @@ class MistClient:
                 "hw_devices": {},
             }
 
+        # Normalise the requested hardware check ids.
         hw_check_ids = {str(c).strip() for c in (hw_check_ids or set()) if str(c).strip()}
+        # Accumulators for this site's counts.
         alert_type_counts: dict[str, int] = {}
         insight_cat_counts: dict[str, int] = {}
         hw_devices: dict[str, dict[str, int]] = {}
@@ -468,13 +563,16 @@ class MistClient:
         wired_clients = 0
 
         # Resolve the configured site NAME → site_id (Mist endpoints are id-keyed).
+        # Look up the Mist site id for the configured site name.
         name_to_id = await self._site_name_to_id()
         site_id = name_to_id.get(str(site).casefold().strip(), "")
+        # Unknown site name: warn; counts below will stay zero.
         if not site_id:
             logger.warning("Mist poll_site_data: site %r not found in org %s",
                            site, self.org_id)
 
         # Clients (per-site stats). Count wired vs wireless.
+        # Count connected clients by connection type.
         if site_id:
             for cl in await self._site_clients(site_id):
                 if self._client_is_wireless(cl):
@@ -487,18 +585,24 @@ class MistClient:
         # by bare type — two offline APs report ``ap_offline: 2``.
         # NOTE: alert_type_counts keys are BARE Mist alarm types (no ``Mist:``
         # prefix) — the prefix is applied only in the sim-quota catalog layer.
+        # Use the cached active alarm list for the org.
         alarms, _ = await self._fetch_alarms()
+        # Normalised site name for comparison.
         site_cf = str(site).casefold().strip()
+        # Count alarms that apply to this site.
         for al in alarms:
             al_site = str(al.get("site") or "—").strip()
             # A global (site="—") alarm counts for every site, mirroring Aruba;
             # otherwise the alarm must be pinned to THIS site.
             if al_site != "—" and al_site.casefold() != site_cf:
                 continue
+            # Skip alarms without a type.
             atype = str(al.get("name") or "").strip()
             if not atype:
                 continue
+            # Count per alarm type.
             alert_type_counts[atype] = alert_type_counts.get(atype, 0) + 1
+            # Also count per alarm group as an "insight" category.
             group = str(al.get("category") or "").strip()
             if group:
                 insight_cat_counts[group] = insight_cat_counts.get(group, 0) + 1
@@ -510,6 +614,7 @@ class MistClient:
                         hw_devices.setdefault(atype, {}).get(device_name, 0) + 1
                     )
 
+        # Return the poll result in the same shape as the Aruba client.
         return {
             "site_health": None,  # TODO: SLE ap-availability score (follow-on chunk)
             "wireless_clients": wireless_clients,
@@ -525,23 +630,27 @@ class MistClient:
         """Classify a Mist client as wireless vs wired. Mist stats/clients carry
         a ``type``/``connection_type`` when available; fall back to the presence
         of an SSID / band / ap_mac (wired clients have none of these)."""
+        # Prefer an explicit connection type when Mist provides one.
         conn = str(cl.get("type") or cl.get("connection_type") or "").lower()
         if "wired" in conn:
             return False
         if "wireless" in conn or "wifi" in conn or "wlan" in conn:
             return True
+        # Otherwise any wireless-only attribute marks the client as wireless.
         return bool(cl.get("ssid") or cl.get("band") or cl.get("ap_mac") or cl.get("bssid"))
 
     @staticmethod
     def _alarm_device_name(al: dict[str, Any]) -> str:
         """Pull a human-readable device name from a Mist alarm's related-device
         arrays (aps/switches/gateways/hostnames)."""
+        # Return the first non-empty name from the related-device arrays.
         for key in ("hostnames", "aps", "switches", "gateways", "bssids"):
             arr = al.get(key)
             if isinstance(arr, list) and arr:
                 first = str(arr[0] or "").strip()
                 if first:
                     return first
+        # Fall back to an explicit device name or the alarm detail.
         return str(al.get("device_name") or al.get("detail") or "").strip()
 
     # ── discovery / browse / catalog (Setup → Mist API tab) ──────────────────
@@ -550,30 +659,38 @@ class MistClient:
         """Return normalized Mist sites for hub auto-discovery (same shape as
         ``ArubaClient.list_sites``: ``{name, site_id, health_score,
         wireless_clients}``)."""
+        # Not configured: nothing to list.
         if not self.is_configured():
             return []
+        # De-duplicate by case-insensitive site name.
         sites: dict[str, dict[str, Any]] = {}
         for item in await self._list_sites():
+            # Skip sites without a name.
             nm = str(item.get("name") or "").strip()
             if not nm:
                 continue
+            # Normalised site entry.
             sites[nm.casefold()] = {
                 "name": nm,
                 "site_id": item.get("id") or item.get("site_id") or "",
                 "health_score": item.get("health") or item.get("health_score"),
                 "wireless_clients": item.get("num_clients") or item.get("client_count"),
             }
+        # Sort by name for a stable UI order.
         return sorted(sites.values(), key=lambda i: i["name"].casefold())
 
     async def list_clients(self, limit: int = 500) -> list[dict[str, Any]]:
         """Return normalized clients across the org's sites (same shape as
         ``ArubaClient.list_clients``). Gathers per-site stats/clients (Mist has
         no confirmed org-wide clients endpoint) — cached per site."""
+        # Not configured: nothing to list.
         if not self.is_configured():
             return []
+        # Collect clients site by site, labelled with the site name.
         out: list[dict[str, Any]] = []
         id_to_name = await self._site_id_to_name()
         for sid, nm in id_to_name.items():
+            # Normalise each client into the shared client-list shape.
             for cl in await self._site_clients(sid):
                 out.append({
                     "mac": cl.get("mac") or cl.get("mac_address") or "—",
@@ -588,23 +705,28 @@ class MistClient:
                     "vlan": str(cl.get("vlan_id") or cl.get("vlan") or "—"),
                     "connection_type": "wireless" if self._client_is_wireless(cl) else "wired",
                 })
+            # Stop early once enough clients have been collected.
             if len(out) >= limit:
                 break
+        # Trim to the requested limit.
         return out[:limit]
 
     async def browse_all(self) -> dict[str, Any]:
         """Fetch all Mist sites, alarms, clients, and devices for the browse
         view — same shape as ``ArubaClient.browse_all``."""
+        # Not configured: return an empty browse result.
         if not self.is_configured():
             return {"sites": [], "alerts": [], "insights": [], "clients": [],
                     "devices_by_site": {}, "clients_by_site": {}}
 
+        # Fetch sites, alarms and inventory concurrently, capturing exceptions.
         sites, alarms_result, all_inventory = await asyncio.gather(
             self.list_sites(),
             self._list_alarms(include_cleared=True, duration=_ALARMS_BROWSE_DURATION),
             self._list_inventory(),
             return_exceptions=True,
         )
+        # Sites are essential: re-raise a failure; inventory failures just mean no devices.
         if isinstance(sites, Exception):
             raise sites
         if isinstance(all_inventory, Exception):
@@ -612,6 +734,7 @@ class MistClient:
         # _list_alarms returns (grouped_list, warning). A gather-returned
         # Exception (it doesn't raise in practice, but be defensive) → empty
         # list + a synthesized warning so the Alerts tab still shows a reason.
+        # Unpack the alarms result, or synthesise a warning if it raised.
         if isinstance(alarms_result, Exception):
             all_alarms: list[dict[str, Any]] = []
             alarms_warning: Optional[str] = f"Mist alarms fetch failed: {alarms_result}"
@@ -619,8 +742,10 @@ class MistClient:
             all_alarms, alarms_warning = alarms_result
 
         # Inventory → devices_by_site (group by site name).
+        # Map site ids to names for grouping.
         id_to_name = await self._site_id_to_name()
         devices_by_site: dict[str, list[dict[str, Any]]] = {}
+        # Group each inventory device under its site name in a normalised shape.
         for dev in all_inventory:
             sid = str(dev.get("site_id") or "").strip()
             sn = id_to_name.get(sid, "—") or "—"
@@ -636,17 +761,21 @@ class MistClient:
             })
 
         # Clients → clients_by_site + normalized clients list (gather per site).
+        # Per-site client totals and a flat normalised client list.
         clients_by_site: dict[str, dict[str, Any]] = {}
         normalized_clients: list[dict[str, Any]] = []
+        # Walk each site's clients.
         for sid, nm in id_to_name.items():
             for cl in await self._site_clients(sid):
                 sn = nm or "—"
+                # Bump the site's total and wired/wireless counters.
                 entry = clients_by_site.setdefault(sn, {"total": 0, "wired": 0, "wireless": 0})
                 entry["total"] += 1
                 if self._client_is_wireless(cl):
                     entry["wireless"] += 1
                 else:
                     entry["wired"] += 1
+                # Add the client in the shared normalised shape.
                 normalized_clients.append({
                     "mac": cl.get("mac") or "—",
                     "ip": cl.get("ip_address") or cl.get("ip") or "—",
@@ -661,6 +790,7 @@ class MistClient:
                     "connection_type": "wireless" if self._client_is_wireless(cl) else "wired",
                 })
 
+        # Assemble the browse response.
         result = {
             "sites": sites,
             "alerts": list(all_alarms),
@@ -681,9 +811,11 @@ class MistClient:
         shape as ``ArubaClient.available_checks``). Live alarm types are sourced
         from the org's recent alarms; if none, the known-type fallback is shown
         so the picker isn't empty on day 1."""
+        # Not configured: return empty catalogs with a warning.
         if not self.is_configured():
             return {"alerts": [], "insights": [], "hardware": [], "warning": "Mist not configured."}
 
+        # Alarm type id -> display name, plus any warnings to show.
         alert_types: dict[str, str] = {}
         warnings: list[str] = []
         try:
@@ -693,16 +825,20 @@ class MistClient:
             # silently falling back to the known-type list on a transient error.
             alarms_list, alarms_warning = await self._list_alarms(
                 include_cleared=True, duration=_ALARMS_BROWSE_DURATION)
+            # Pass a fetch failure through to the UI.
             if alarms_warning:
                 warnings.append(alarms_warning)
+            # Collect each distinct alarm type.
             for al in alarms_list:
                 aid = str(al.get("name") or "").strip()
                 if not aid:
                     continue
                 alert_types[aid] = str(al.get("name") or aid.replace("_", " ").title())
+        # Any other error is reported as a warning.
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"Network error fetching Mist alarms: {exc}")
 
+        # No live alarm types: fall back to the known list so the picker is not empty.
         using_fallback = False
         if not alert_types:
             alert_types = dict(_KNOWN_MIST_ALARM_TYPES)
@@ -710,10 +846,12 @@ class MistClient:
         if using_fallback:
             warnings.append("No live alarms returned by Mist — showing standard Mist alarm types.")
 
+        # Offer hardware checks that match known or device-down alarm types.
         hardware_catalog = [
             dict(item) for item in DEFAULT_MIST_HARDWARE_CHECKS
             if item.get("id") in alert_types or item.get("id") in _DEVICE_DOWN_TYPES
         ]
+        # Return sorted alert entries, hardware catalog and de-duplicated warnings.
         return {
             "alerts": [{"id": k, "name": v} for k, v in sorted(alert_types.items())],
             "insights": [],  # TODO: SLE metrics (follow-on chunk)
@@ -724,20 +862,24 @@ class MistClient:
     async def test_connection(self) -> dict[str, Any]:
         """Best-effort connectivity check for the Setup → Mist API "Test" button.
         Mirrors Aruba's ``test_central`` single-spoke shape."""
+        # Not configured: report it as a status line rather than an error.
         if not self.is_configured():
             return {"status": "SUCCESS", "spokes": [{
                 "spoke_id": "", "spoke_name": "",
                 "token_state": None, "token_valid": False,
                 "status": "Mist not configured.",
             }]}
+        # Fetch the org record as a cheap authenticated probe.
         try:
             async with httpx.AsyncClient(timeout=15) as http:
                 await self._get(http, f"/api/v1/orgs/{self.org_id}")
+            # Success: report connected without exposing the token.
             return {"status": "SUCCESS", "spokes": [{
                 "spoke_id": "", "spoke_name": "",
                 "token_state": {"api_token": "***", "host": self.host, "org_id": self.org_id},
                 "token_valid": True, "status": "Connected.",
             }]}
+        # Failure: report the error without exposing the token.
         except Exception as exc:  # noqa: BLE001
             return {"status": "SUCCESS", "spokes": [{
                 "spoke_id": "", "spoke_name": "",
@@ -759,13 +901,17 @@ async def test_mist_from_config(cfg: Dict[str, Any], spoke_id: str = "hub") -> D
 
     ``token_state`` is a short string ("present"/"missing"), NOT the raw token,
     so the API token is never shipped to the browser."""
+    # Build a client from the stored config.
     client = MistClient(cfg)
+    # Missing credentials: report "not configured".
     if not client.is_configured():
         logger.info("test_mist [hub/%s]: Mist not configured (no api_token/org_id)", spoke_id)
         return {"spoke_id": spoke_id, "spoke_name": "Hub (centralized)",
                 "token_state": "missing", "token_valid": False,
                 "status": "Mist not configured."}
+    # Config fingerprint for log correlation.
     chash = client._config_hash
+    # Fetch the org record as a cheap authenticated probe.
     try:
         async with httpx.AsyncClient(timeout=20) as http:
             await client._get(http, f"/api/v1/orgs/{client.org_id}")
@@ -773,6 +919,7 @@ async def test_mist_from_config(cfg: Dict[str, Any], spoke_id: str = "hub") -> D
         return {"spoke_id": spoke_id, "spoke_name": "Hub (centralized)",
                 "token_state": "present", "token_valid": True,
                 "status": "Connected."}
+    # Any error is reported to the UI as a failed connection.
     except Exception as exc:  # noqa: BLE001 — surface any transport error
         logger.warning("test_mist [hub/%s] cfg=%s FAILED: %r", spoke_id, chash, exc)
         return {"spoke_id": spoke_id, "spoke_name": "Hub (centralized)",
@@ -785,7 +932,9 @@ async def get_mist_available_from_config(cfg: Dict[str, Any], spoke_id: str = "h
     Mirrors the cs spoke's ``mist_poller.available_checks()`` so the Mist API
     editor's monitored-check picker works without contacting the spoke. Returns
     the same ``{alerts, insights, hardware, warning}`` shape."""
+    # Build a client from the stored config.
     client = MistClient(cfg)
+    # Return the catalog; any error becomes an empty catalog with a warning.
     try:
         return await client.available_checks()
     except Exception as exc:  # noqa: BLE001
@@ -801,11 +950,14 @@ async def browse_mist_from_config(cfg: Dict[str, Any], spoke_id: str = "hub") ->
     Returns the same shape ``browse_all`` produces, or an empty set + warning on
     misconfig/error. Named ``browse_mist_`` (not ``browse_all_``) to avoid a
     collision with ``aruba.browse_all_from_config`` when both are imported."""
+    # Build a client from the stored config.
     client = MistClient(cfg)
+    # Missing credentials: return an empty browse result with a warning.
     if not client.is_configured():
         return {"status": "SUCCESS", "sites": [], "alerts": [], "insights": [],
                 "clients": [], "devices_by_site": {}, "clients_by_site": {},
                 "warning": "Mist not configured."}
+    # Return the full browse result; any error becomes an empty result with a message.
     try:
         data = await client.browse_all()
         return {"status": "SUCCESS", **data}

@@ -3,21 +3,27 @@
 Twin of lbockenstedt/dns (src/unbound_manager.py). Synchronized with PR #56
 for multi-line forwarder block parsing, atomic merge/rollback, and diagnostics.
 """
+# Subprocess, logging, filesystem, regex and tool lookup helpers.
 import subprocess
 import logging
 import os
 import re
 import shutil
+# Address parsing, sockets and binary packing for DNS probes.
 import ipaddress
 import socket
 import struct
+# JSON, threads and timing.
 import json
 import threading
 import time
+# Bounded event queue.
 from collections import deque
 
+# Module logger.
 logger = logging.getLogger("UnboundManager")
 
+# Managed records file, config directory and query-logging config.
 LM_CONF = "/etc/unbound/conf.d/lm-netbox.conf"
 UNBOUND_CONF_DIR = "/etc/unbound/conf.d"
 LOGGING_CONF = "/etc/unbound/conf.d/lm-logging.conf"
@@ -26,6 +32,7 @@ LOGGING_CONF = "/etc/unbound/conf.d/lm-logging.conf"
 MAIN_CONF = "/etc/unbound/unbound.conf"
 # Name of the one-line bridge file we drop into the distro's included dir.
 BRIDGE_CONF_NAME = "lm-include.conf"
+# Query log file Unbound writes when query logging is on.
 QUERY_LOG = "/var/log/unbound/lm-queries.log"
 
 
@@ -35,22 +42,27 @@ def worker_code_version() -> dict:
     can tell "still running old code" apart from "the fix is deployed but
     the failure is real" without separate manual git access to the host,
     since this worker's only code-update path is re-running the installer."""
+    # Repo root is three levels up from this file.
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))))
     out = {"commit": "", "commit_time": "", "dirty": None}
+    # Without git or a checkout there is nothing to report.
     if not shutil.which("git") or not os.path.isdir(os.path.join(repo_root, ".git")):
         return out
+    # Short commit hash.
     try:
         commit = subprocess.run(
             ["git", "-C", repo_root, "rev-parse", "--short", "HEAD"],
             capture_output=True, text=True, timeout=10)
         if commit.returncode == 0:
             out["commit"] = commit.stdout.strip()
+        # Commit time.
         ctime = subprocess.run(
             ["git", "-C", repo_root, "log", "-1", "--format=%cI"],
             capture_output=True, text=True, timeout=10)
         if ctime.returncode == 0:
             out["commit_time"] = ctime.stdout.strip()
+        # Whether the checkout has local changes.
         dirty = subprocess.run(
             ["git", "-C", repo_root, "status", "--porcelain"],
             capture_output=True, text=True, timeout=10)
@@ -58,6 +70,7 @@ def worker_code_version() -> dict:
             out["dirty"] = bool(dirty.stdout.strip())
     except Exception:  # noqa: BLE001 — best-effort only
         pass
+    # Return whatever was collected.
     return out
 
 # unbound-control's stats_noreset is aggregate-only (per-type/rcode/etc.) and
@@ -75,6 +88,7 @@ TOP_NAMES_LIMIT = 200
 # Timestamped per-query events retained for the per-client ("Pi-hole style")
 # query log, independent of the per-name counters above.
 MAX_QUERY_EVENTS = 200000
+# Max events returned for a single client's query log.
 CLIENT_QUERY_LIMIT = 1000
 
 # WebUI day/week/month selector for the "Queries by Destination" breakdown.
@@ -91,11 +105,13 @@ MAX_RETENTION_DAYS = 30
 # older than STATS_FINE_RETENTION_S are thinned to one per STATS_COARSE_STEP_S;
 # nothing older than STATS_HISTORY_MAX_S is kept.
 STATS_SAMPLE_INTERVAL_S = 300
+# Minimum gap between samples; how often history is saved to disk.
 STATS_MIN_SAMPLE_GAP_S = 60
 STATS_FINE_RETENTION_S = 26 * 3600
 STATS_COARSE_STEP_S = 3600
 STATS_HISTORY_MAX_S = 31 * 86400
 STATS_PERSIST_INTERVAL_S = 300
+# Short keys for the Unbound counters kept in each snapshot.
 _STATS_COUNTERS = {
     "q": "total.num.queries",
     "h": "total.num.cachehits",
@@ -104,24 +120,36 @@ _STATS_COUNTERS = {
     "p": "total.num.prefetch",
 }
 
+# Parses one "client name type IN" line from the query log.
 _QUERY_LOG_RE = re.compile(
     r"info:\s+(?P<ip>[0-9a-fA-F.:]+)\s+(?P<name>\S+?)\.?\s+(?P<type>\w+)\s+IN\s*$"
 )
 
 
 class UnboundManager:
+    """Manage Unbound: LM-managed records, forwarders, overrides, query stats and diagnostics."""
     def __init__(self, conf_path: str = LM_CONF, stats_history_path: str = None):
+        """Set up file paths, stats history and in-memory query tracking.
+
+        Args:
+            conf_path: Managed records file; sibling files live in the same directory.
+            stats_history_path: Optional file used to persist counter snapshots.
+        """
+        # Records file path.
         self.conf_path = conf_path
         # Counter snapshots for windowed stats: [{"t","up","c":{...},"types":{...}}]
         self.stats_history_path = stats_history_path
+        # Stats lock, last save time and sampler thread handle.
         self._stats_history = self._load_stats_history()
         self._stats_lock = threading.Lock()
         self._stats_persisted_at = 0.0
         self._stats_sampler = None
+        # Forwarder and override files next to the records file.
         self.forwarders_path = os.path.join(
             os.path.dirname(self.conf_path), "lm-forwarders.conf")
         self.overrides_path = os.path.join(
             os.path.dirname(self.conf_path), "lm-overrides.conf")
+        # Create the directory and make sure Unbound reads it.
         os.makedirs(os.path.dirname(self.conf_path), exist_ok=True)
         self._ensure_conf_included()
         # mtime-keyed memo for list_records(): status/add/update/delete all
@@ -177,6 +205,7 @@ class UnboundManager:
         Idempotent and best-effort — never raises, so a read-only or unusual
         layout degrades to today's behaviour instead of breaking startup.
         """
+        # Read the main config; give up if unreadable.
         conf_dir = os.path.dirname(self.conf_path)
         try:
             with open(MAIN_CONF) as fh:
@@ -185,13 +214,16 @@ class UnboundManager:
             logger.debug("unbound include check: cannot read %s: %s", MAIN_CONF, e)
             return {"ok": False, "reason": "main conf unreadable"}
 
+        # Directories/globs the main config includes.
         include_globs = re.findall(
             r'^\s*include(?:-toplevel)?:\s*"?([^"\s]+)"?', main_text, re.M)
 
         def _covers(glob_path):
+            # Same directory as ours.
             """True if this glob pulls in *.conf from our directory."""
             return os.path.dirname(glob_path.rstrip()) == conf_dir.rstrip("/")
 
+        # Already included directly.
         if any(_covers(g) for g in include_globs):
             return {"ok": True, "action": "already-included"}
 
@@ -212,12 +244,14 @@ class UnboundManager:
             except OSError:
                 continue
 
+        # Nothing to bridge into.
         if not bridge_dirs:
             logger.warning(
                 "unbound: %s includes no directory we can bridge into; managed "
                 "config in %s may not be loaded", MAIN_CONF, conf_dir)
             return {"ok": False, "reason": "no include dir"}
 
+        # Write the bridge file into the first included directory.
         bridge = os.path.join(bridge_dirs[0], BRIDGE_CONF_NAME)
         try:
             with open(bridge, "w") as fh:
@@ -225,9 +259,11 @@ class UnboundManager:
                          "# Bridges LM's managed config dir into Unbound, which\n"
                          "# otherwise only parses this directory.\n"
                          'include-toplevel: "%s/*.conf"\n' % conf_dir.rstrip("/"))
+        # Could not write it.
         except OSError as e:
             logger.warning("unbound: could not write include bridge %s: %s", bridge, e)
             return {"ok": False, "reason": str(e)}
+        # Log and report the bridge.
         logger.warning("unbound: wrote include bridge %s so %s is actually parsed",
                        bridge, conf_dir)
         return {"ok": True, "action": "bridged", "path": bridge}
@@ -241,7 +277,9 @@ class UnboundManager:
         Each record: {"name": "host.example.com", "type": "A", "value": "10.0.1.5", "ttl": 300}
         Forward (A/AAAA) and reverse (PTR) records are both written.
         """
+        # Header and server clause.
         lines = ["# Managed by Lab Manager — do not edit manually\n", "server:\n"]
+        # Read and clean up each record's fields; skip incomplete ones.
         for r in records:
             name = r.get("name", "").strip().rstrip(".")
             rtype = r.get("type", "A").upper()
@@ -250,18 +288,22 @@ class UnboundManager:
             if not name or not value:
                 continue
 
+            # A/AAAA: forward record plus a PTR when the address is valid.
             if rtype in ("A", "AAAA"):
                 lines.append(f'    local-data: "{name}. {ttl} IN {rtype} {value}"\n')
                 ptr = self._ptr_name(value)
                 if ptr:
                     lines.append(f'    local-data-ptr: "{value} {ttl} {name}."\n')
 
+            # CNAME record.
             elif rtype == "CNAME":
                 lines.append(f'    local-data: "{name}. {ttl} IN CNAME {value.rstrip(".")}."\n')
 
+            # PTR record.
             elif rtype == "PTR":
                 lines.append(f'    local-data: "{name}. {ttl} IN PTR {value.rstrip(".")}."\n')
 
+        # Write the records file.
         with open(self.conf_path, "w") as f:
             f.writelines(lines)
 
@@ -271,6 +313,7 @@ class UnboundManager:
         # A restart performed here already loaded the new records, so an
         # immediate reload would only race the restarting daemon.
         logging_result = self._ensure_query_logging()
+        # A restart already loaded the records; clear the cache and report success.
         if logging_result.get("restarted"):
             self._records_cache = None
             self._records_cache_mtime = None
@@ -286,6 +329,7 @@ class UnboundManager:
         # list_records re-reads the new contents rather than returning stale.
         self._records_cache = None
         self._records_cache_mtime = None
+        # Reload failed: the old records are still being served.
         if not reload_result["ok"]:
             logger.error("Wrote %d DNS records but unbound-control reload failed: %s",
                          count, reload_result["error"])
@@ -295,6 +339,7 @@ class UnboundManager:
                                 f"unbound-control reload failed: "
                                 f"{reload_result['error']} — the running resolver "
                                 f"is still serving the previous set")}
+        # Reloaded.
         logger.info("Synced %d DNS records to Unbound", count)
         return {"status": "SUCCESS", "records_written": count, "reloaded": True}
 
@@ -305,14 +350,17 @@ class UnboundManager:
         returns the cached list without re-reading/re-parsing — status/add/
         update/delete all flow through here, and the conf only changes when
         sync() rewrites it (which clears the memo)."""
+        # Get the file's mtime; a missing file means no records.
         try:
             mtime = os.stat(self.conf_path).st_mtime
         except FileNotFoundError:
             self._records_cache = None
             self._records_cache_mtime = None
             return []
+        # Same mtime as the last parse: reuse the cache.
         if self._records_cache is not None and self._records_cache_mtime == mtime:
             return self._records_cache
+        # Parse local-data and local-data-ptr lines.
         records = []
         with open(self.conf_path) as f:
             for line in f:
@@ -333,11 +381,24 @@ class UnboundManager:
                         "type":  "PTR",
                         "value": m2.group(3).rstrip("."),
                     })
+        # Cache the result with its mtime.
         self._records_cache = records
         self._records_cache_mtime = mtime
         return records
 
     def add_record(self, name: str, rtype: str, value: str, ttl: int = 300) -> dict:
+        """Add one record and re-sync.
+
+        Args:
+            name: Record name.
+            rtype: Record type.
+            value: Record value.
+            ttl: TTL in seconds.
+
+        Returns:
+            The sync result.
+        """
+        # Append to the current records and rewrite.
         existing = self.list_records()
         existing.append({"name": name, "type": rtype, "value": value, "ttl": ttl})
         return self.sync(existing)
@@ -350,6 +411,7 @@ class UnboundManager:
         records are preserved. If no match exists the record is added. The
         re-sync regenerates the companion PTR for A/AAAA records automatically.
         """
+        # Replace the first match, drop duplicates, keep everything else.
         existing = self.list_records()
         updated: list = []
         replaced = False
@@ -361,11 +423,22 @@ class UnboundManager:
                 # drop duplicate matches
             else:
                 updated.append(r)
+        # No match: add it.
         if not replaced:
             updated.append({"name": name, "type": rtype, "value": value, "ttl": ttl})
         return self.sync(updated)
 
     def delete_record(self, name: str, rtype: str = None) -> dict:
+        """Delete records by name, optionally limited to one type, and re-sync.
+
+        Args:
+            name: Record name.
+            rtype: Optional record type; None deletes all types.
+
+        Returns:
+            The sync result.
+        """
+        # Keep everything that does not match, then rewrite.
         existing = self.list_records()
         filtered = [
             r for r in existing
@@ -374,6 +447,12 @@ class UnboundManager:
         return self.sync(filtered)
 
     def status(self) -> dict:
+        """Check whether Unbound is running.
+
+        Returns:
+            Dict with running, record_count and conf_path.
+        """
+        # Running if unbound-control status succeeds.
         try:
             result = subprocess.run(
                 ["unbound-control", "status"],
@@ -382,6 +461,7 @@ class UnboundManager:
             running = result.returncode == 0
         except Exception:
             running = False
+        # Include the record count.
         return {
             "running":      running,
             "record_count": len(self.list_records()),
@@ -400,6 +480,7 @@ class UnboundManager:
         touching any configuration. Returns the list of repair actions taken
         (each a short human-readable string) for the UI/log.
         """
+        # Run the repair; never let it break diagnostics.
         actions = []
         try:
             actions.extend(self._heal_inactive_unbound())
@@ -408,13 +489,22 @@ class UnboundManager:
         return actions
 
     def _heal_inactive_unbound(self) -> list:
+        """Restart unbound if systemd reports it failed or inactive.
+
+        Returns:
+            List with one action string if restarted, else [].
+        """
+        # Read the unit state.
         state = self._unit_status("unbound")
         active = state.get("ActiveState")
         load = state.get("LoadState")
+        # Skip if not loaded or already active.
         if load != "loaded" or active == "active":
             return []
+        # Only failed or inactive units get restarted.
         if active not in ("failed", "inactive"):
             return []
+        # Restart and report the outcome.
         result = self._run_diag(["systemctl", "restart", "unbound"], timeout=20)
         if result["ok"]:
             logger.info("self-heal: restarted unbound (was %s)", active)
@@ -423,20 +513,32 @@ class UnboundManager:
         return []
 
     def _unit_status(self, unit):
+        """Read key systemd properties for a unit.
+
+        Args:
+            unit: Unit name.
+
+        Returns:
+            Dict of property values plus an "error" key.
+        """
+        # Ask systemctl for the properties.
         result = self._run_diag([
             "systemctl", "show", unit,
             "--property=LoadState,ActiveState,SubState,NRestarts,ExecMainStatus",
         ])
+        # Parse key=value lines.
         values = {}
         for line in result["output"].splitlines():
             key, sep, value = line.partition("=")
             if sep:
                 values[key] = value
+        # Add any command error.
         values["error"] = result["error"]
         return values
 
     def diagnostics(self) -> dict:
         """Return actionable Unbound service, config, listener, and query checks."""
+        # Run repairs, then check service, config, control and sockets.
         repairs = self._self_heal()
         service = self._run_diag(["systemctl", "is-active", "unbound"])
         config = self._run_diag(["unbound-checkconf"])
@@ -445,6 +547,7 @@ class UnboundManager:
         if not sockets["ok"]:
             sockets = self._run_diag(["ss", "-H", "-lntu"])
 
+        # Port-53 listeners, and DNS probes to loopback and each LAN address.
         listener_lines = [
             line.strip() for line in sockets["output"].splitlines()
             if re.search(r"(?:\]:|:)53(?:\s|$)", line)
@@ -453,6 +556,7 @@ class UnboundManager:
         probes = [self._dns_probe("127.0.0.1")]
         probes.extend(self._dns_probe(addr) for addr in lan_addresses)
 
+        # Read interface and access-control lines from the main config.
         root_conf = "/etc/unbound/unbound.conf"
         interfaces = []
         access_controls = []
@@ -465,18 +569,22 @@ class UnboundManager:
                     m = re.match(r"\s*access-control:\s*(\S+\s+\S+)", line)
                     if m:
                         access_controls.append(m.group(1))
+        # Unreadable: leave them empty.
         except OSError:
             pass
 
+        # Is there any listener, and is one on a non-loopback address?
         has_listener = bool(listener_lines)
         listener_hosts = [self._listener_host(line) for line in listener_lines]
         has_lan_listener = any(
             host and not host.startswith("127.") and host != "::1"
             for host in listener_hosts
         )
+        # Did any LAN probe get a reply?
         lan_probe_ok = any(
             p["responded"] for p in probes if p["server"] != "127.0.0.1"
         )
+        # Build recommendations, starting with any repairs made.
         recommendations = []
         for action in repairs:
             recommendations.append(f"Self-healed: {action}. Re-checking findings above.")
@@ -497,6 +605,7 @@ class UnboundManager:
                 "The local LAN-address DNS probe received no response; check the "
                 "listener owner, Unbound access-control, and host firewall.")
 
+        # Full diagnostics report.
         return {
             "status": "SUCCESS",
             "worker_code_version": worker_code_version(),
@@ -525,6 +634,12 @@ class UnboundManager:
         }
 
     def _safe_query_log_diagnostics(self) -> dict:
+        """Run query_log_diagnostics without letting it fail diagnostics.
+
+        Returns:
+            Its report, or a dict with the error and a matching finding.
+        """
+        # Run the check; on failure log it and return the error.
         try:
             return self.query_log_diagnostics()
         except Exception as e:
@@ -534,24 +649,47 @@ class UnboundManager:
     def query_log_diagnostics(self) -> dict:
         """Read-only evidence for why the query log / "Queries by Destination"
         / per-client log might be empty. Never changes any state."""
+        # Report and findings start with the configured paths.
         info = {"query_log": QUERY_LOG, "logging_conf": LOGGING_CONF}
         findings = []
 
         def tail(path, n=8, size=65536):
+            """Return the last lines of a file.
+
+            Args:
+                path: File to read.
+                n: Number of lines.
+                size: Bytes to read from the end.
+
+            Returns:
+                The last n lines, or [] if unreadable.
+            """
+            # Read the last size bytes and split into lines.
             try:
                 with open(path, "rb") as fh:
                     fh.seek(0, os.SEEK_END)
                     end = fh.tell()
                     fh.seek(max(0, end - size))
                     return fh.read().decode("utf-8", "replace").splitlines()[-n:]
+            # Unreadable.
             except OSError:
                 return []
 
         def stat_of(path):
+            """Describe a path's existence, size, mode, owner and age.
+
+            Args:
+                path: Path to inspect.
+
+            Returns:
+                Dict of file facts, or exists=False with the error.
+            """
+            # stat the path.
             try:
                 st = os.stat(path)
             except OSError as e:
                 return {"exists": False, "error": str(e)}
+            # Resolve owner and group names when possible.
             owner = group = None
             try:
                 import pwd, grp
@@ -559,21 +697,25 @@ class UnboundManager:
                 group = grp.getgrgid(st.st_gid).gr_name
             except Exception:
                 pass
+            # Return the facts.
             return {"exists": True, "size": st.st_size, "mode": oct(st.st_mode & 0o7777),
                     "owner": owner, "group": group,
                     "age_seconds": round(time.time() - st.st_mtime, 1)}
 
+        # Log directory and file state, plus a parsed sample of the tail.
         info["log_dir"] = stat_of(os.path.dirname(QUERY_LOG))
         info["log_file"] = stat_of(QUERY_LOG)
         log_tail = tail(QUERY_LOG)
         info["log_tail"] = log_tail
         info["log_tail_parsed"] = sum(1 for ln in log_tail if _QUERY_LOG_RE.search(ln))
+        # The logging config snippet; missing means logging was never enabled.
         try:
             info["logging_conf_content"] = open(LOGGING_CONF).read()
         except OSError as e:
             info["logging_conf_content"] = None
             findings.append(f"{LOGGING_CONF} is missing ({e}); logging was never enabled.")
 
+        # Is our config directory included by the main config?
         conf_dir = os.path.dirname(self.conf_path)
         try:
             main_text = open(MAIN_CONF, encoding="utf-8").read()
@@ -594,6 +736,7 @@ class UnboundManager:
         info["configured_log_queries"] = cf["output"].strip() if cf["ok"] else (cf["error"].strip() or "unavailable")
         cf = self._run_diag(["unbound-checkconf", "-o", "logfile"])
         info["configured_logfile"] = cf["output"].strip() if cf["ok"] else (cf["error"].strip() or "unavailable")
+        # Unbound version and when the service last started.
         ver = self._run_diag(["unbound", "-V"])
         info["unbound_version"] = (ver["output"] or ver["error"]).splitlines()[0] if (ver["output"] or ver["error"]) else ""
         pid = self._run_diag(["systemctl", "show", "-p", "ActiveEnterTimestamp", "--value", "unbound"])
@@ -611,6 +754,7 @@ class UnboundManager:
         aa = self._run_diag(["aa-status"])
         info["apparmor_unbound_status"] = ("loaded" if re.search(r"unbound", aa["output"])
                                            else ("aa-status unavailable" if not aa["ok"] else "not loaded"))
+        # Recent kernel AppArmor denials for unbound.
         den = self._run_diag(["journalctl", "-k", "--no-pager", "-n", "400", "-o", "cat"])
         info["apparmor_denials"] = [ln.strip() for ln in den["output"].splitlines()
                                     if "DENIED" in ln and "unbound" in ln][-5:]
@@ -627,6 +771,7 @@ class UnboundManager:
             "log_offset": self._query_log_offset, "log_inode": self._query_log_inode,
         }
 
+        # Turn the evidence into findings.
         if info["log_file"].get("exists") and info["log_file"].get("size", 0) == 0:
             findings.append("Query log exists but is empty: unbound is not writing to it "
                             "(check running logfile/log-queries below, and AppArmor).")
@@ -645,6 +790,7 @@ class UnboundManager:
             findings.append("Queries are appearing in the journal, not the logfile.")
         if info["log_tail"] and not info["log_tail_parsed"]:
             findings.append("Log has lines but none match the parser regex; see log_tail for the real format.")
+        # Attach findings and return.
         info["findings"] = findings
         return info
 
@@ -652,11 +798,13 @@ class UnboundManager:
 
     def _restart_unbound(self, reason: str) -> dict:
         """Restart Unbound and report a structured ``{"ok", "error"}`` outcome."""
+        # Restart and report success.
         try:
             subprocess.run(["systemctl", "restart", "unbound"], check=True,
                            capture_output=True, timeout=30)
             logger.info("Unbound restarted (%s)", reason)
             return {"ok": True, "error": ""}
+        # Restart failed.
         except Exception as e:
             logger.warning("unbound restart failed (%s): %s", reason, e)
             return {"ok": False, "error": str(e)}
@@ -677,12 +825,15 @@ class UnboundManager:
         is re-applied — once per process after a successful apply, so a
         transient first failure self-heals without restarting unbound on every
         sync."""
+        # AppArmor paths and the rule we need.
         local_dir = "/etc/apparmor.d/local"
         profile = "/etc/apparmor.d/usr.sbin.unbound"
         rule = f"{os.path.dirname(QUERY_LOG)}/** rw,\n"
+        # No AppArmor profile: nothing to do.
         if not os.path.isdir(local_dir) or not os.path.exists(profile):
             return {"status": "noop", "changed": False, "restarted": False,
                     "ok": True, "reason": "apparmor-unavailable"}
+        # Append the rule to the local override if it is missing.
         override = os.path.join(local_dir, "usr.sbin.unbound")
         try:
             current = open(override).read() if os.path.exists(override) else ""
@@ -693,14 +844,17 @@ class UnboundManager:
                         f.write("\n")
                     f.write("# Managed by Lab Manager — unbound query log (DNS stats)\n" + rule)
                 changed = True
+        # Could not write the override.
         except Exception as e:
             logger.warning("could not update AppArmor override %s: %s", override, e)
             return {"status": "failed", "changed": False, "restarted": False,
                     "ok": False, "reason": f"override-write-failed: {e}"}
 
+        # Rule present and already proven active: nothing to do.
         if rule in current and (os.path.exists(QUERY_LOG) or getattr(self, "_apparmor_applied", False)):
             return {"status": "noop", "changed": False, "restarted": False,
                     "ok": True, "reason": "rule-already-active"}
+        # Reload the AppArmor profile.
         try:
             subprocess.run(["apparmor_parser", "-r", profile], check=True,
                            capture_output=True, timeout=30)
@@ -708,10 +862,12 @@ class UnboundManager:
             logger.warning("AppArmor override written but profile reload failed: %s", e)
             return {"status": "failed", "changed": changed, "restarted": False,
                     "ok": False, "reason": f"apply-failed: {e}"}
+        # Restart unbound so it picks up the new rule.
         restart = self._restart_unbound("AppArmor query-log access")
         if not restart["ok"]:
             return {"status": "failed", "changed": changed, "restarted": False,
                     "ok": False, "reason": f"apply-failed: {restart['error']}"}
+        # Remember it was applied in this process.
         self._apparmor_applied = True
         logger.info("AppArmor: allowed unbound to write %s; profile reloaded, unbound restarted",
                     QUERY_LOG)
@@ -739,6 +895,7 @@ class UnboundManager:
         # permanently empty even though this snippet "looks" correct.
         want = (f'server:\n    log-queries: yes\n'
                 f'    use-syslog: no\n    logfile: "{QUERY_LOG}"\n')
+        # Create the log directory.
         log_dir = os.path.dirname(QUERY_LOG)
         try:
             os.makedirs(log_dir, exist_ok=True)
@@ -760,12 +917,15 @@ class UnboundManager:
             os.chmod(log_dir, 0o755)
         except (KeyError, ImportError):
             pass  # no "unbound" system user on this host (e.g. test env)
+        # Any other ownership failure is logged and ignored.
         except Exception as e:
             logger.warning("could not chown unbound log dir to unbound user: %s", e)
+        # Read the current logging snippet.
         try:
             current = open(LOGGING_CONF).read() if os.path.exists(LOGGING_CONF) else ""
         except Exception:
             current = ""
+        # Rewrite it if it differs.
         conf_changed = current != want
         if conf_changed:
             try:
@@ -777,12 +937,14 @@ class UnboundManager:
                 return {"status": "failed", "changed": False, "restarted": False,
                         "ok": False, "reason": f"logging-conf-write-failed: {e}"}
 
+        # Make sure AppArmor lets unbound write the log.
         apparmor_result = self._ensure_apparmor_log_access()
         if not apparmor_result["ok"]:
             return {"status": "failed",
                     "changed": bool(conf_changed or apparmor_result["changed"]),
                     "restarted": False, "ok": False,
                     "reason": apparmor_result["reason"]}
+        # An AppArmor restart already reloaded logging.
         if apparmor_result["restarted"]:
             self._logging_restarted = True
             return {"status": "restarted",
@@ -809,6 +971,7 @@ class UnboundManager:
                     "ok": True,
                     "reason": "logging-conf-written" if conf_changed else "logfile-missing"}
 
+        # Already enabled.
         return {"status": "unchanged", "changed": False, "restarted": False,
                 "ok": True, "reason": "already-enabled"}
 
@@ -820,6 +983,7 @@ class UnboundManager:
         Handles log rotation: if the file's inode changed (or it shrank),
         treat it as a fresh file and restart from offset 0.
         """
+        # stat the log; a missing file means nothing to read.
         try:
             st = os.stat(QUERY_LOG)
         except FileNotFoundError:
@@ -828,12 +992,14 @@ class UnboundManager:
             logger.debug("stat query log failed: %s", e)
             return
 
+        # Reset the offset if the file was rotated or truncated.
         if self._query_log_inode is not None and st.st_ino != self._query_log_inode:
             self._query_log_offset = 0  # rotated
         self._query_log_inode = st.st_ino
         if st.st_size < self._query_log_offset:
             self._query_log_offset = 0  # truncated/rotated in place
 
+        # Read from the last offset, parse each query line and record it.
         try:
             with open(QUERY_LOG, "r", errors="replace") as f:
                 f.seek(self._query_log_offset)
@@ -846,12 +1012,15 @@ class UnboundManager:
                     ip = m.group("ip")
                     key = f"{name}|{rtype}|{ip}"
                     self._query_events.append((self._line_epoch(line), ip, name, rtype))
+                    # Count it in today's bucket, unless at the name cap.
                     if key not in self._query_counts and len(self._query_counts) >= MAX_TRACKED_NAMES:
                         continue  # cap reached; keep counting names already tracked
                     day = int(time.time() // 86400)
                     bucket = self._day_buckets(key)
                     bucket[day] = bucket.get(day, 0) + 1
+                # Remember how far we read.
                 self._query_log_offset = f.tell()
+        # Read errors are logged; old entries are pruned regardless.
         except Exception as e:
             logger.warning("failed tailing unbound query log: %s", e)
         self._prune_query_counts()
@@ -861,9 +1030,11 @@ class UnboundManager:
         needed. A legacy bare-int lifetime count (the pre-bucketing format) is
         migrated in place into today's bucket so it keeps counting and ages
         out under MAX_RETENTION_DAYS like everything else."""
+        # Already bucketed.
         bucket = self._query_counts.get(key)
         if isinstance(bucket, dict):
             return bucket
+        # Migrate a legacy count (or create empty buckets).
         today = int(time.time() // 86400)
         bucket = {today: int(bucket)} if isinstance(bucket, (int, float)) and bucket else {}
         self._query_counts[key] = bucket
@@ -873,14 +1044,17 @@ class UnboundManager:
         """Age out day-buckets older than MAX_RETENTION_DAYS so tracked query
         history never grows unbounded and drops on its own, independent of
         whichever day/week/month window the WebUI happens to be viewing."""
+        # Oldest day still kept.
         cutoff = int(time.time() // 86400) - MAX_RETENTION_DAYS + 1
         empty_keys = []
+        # Drop old buckets and note keys left empty.
         for key in list(self._query_counts):
             buckets = self._day_buckets(key)
             for day in [d for d in buckets if d < cutoff]:
                 del buckets[day]
             if not buckets:
                 empty_keys.append(key)
+        # Remove empty keys.
         for key in empty_keys:
             del self._query_counts[key]
 
@@ -889,6 +1063,7 @@ class UnboundManager:
         """Epoch for a query-log/journal line: Unbound's own ``[epoch]``
         prefix, or a leading ``journalctl -o short-unix`` timestamp, else
         now() as a last resort (still bucketable, just slightly late)."""
+        # Try the [epoch] prefix, then a leading unix timestamp; else use now.
         m = re.match(r"\s*\[(\d{9,})\]", line) or re.match(r"\s*(\d{9,})(?:\.\d+)?\s", line)
         return float(m.group(1)) if m else time.time()
 
@@ -896,14 +1071,17 @@ class UnboundManager:
         """Fallback source when the logfile is absent or still empty (e.g. an
         AppArmor denial, or query logging was just enabled and the restart
         above hasn't landed yet): Unbound logs to the journal in that case."""
+        # Read recent unbound journal lines with unix timestamps.
         try:
             r = subprocess.run(
                 ["journalctl", "-u", "unbound", "--no-pager", "-o", "short-unix",
                  "--since", f"{int(minutes)} min ago"],
                 capture_output=True, text=True, timeout=15)
+        # journalctl failed: no events.
         except Exception as e:
             logger.debug("journalctl fallback failed: %s", e)
             return []
+        # Parse query lines into events.
         events = []
         for line in r.stdout.splitlines():
             m = _QUERY_LOG_RE.search(line)
@@ -921,14 +1099,17 @@ class UnboundManager:
         returned window. ``search``/``source_prefixes`` mirror
         ``get_query_names`` (substring match on name / tenant subnet scoping).
         """
+        # Make sure logging is on (reload if it could not be), then read new log lines.
         logging_result = self._ensure_query_logging()
         if not logging_result.get("ok") and not logging_result.get("restarted"):
             self._reload()
         self._tail_query_log()
+        # Clamp the window to 1 minute .. 30 days.
         try:
             minutes = max(1, min(int(minutes or 10), 30 * 1440))
         except (TypeError, ValueError):
             minutes = 10
+        # Start from the in-memory events.
         cutoff = time.time() - minutes * 60
         source = "logfile"
         events = list(self._query_events)
@@ -945,6 +1126,7 @@ class UnboundManager:
             if journal:
                 events = journal
                 source = "journal"
+        # Filters: client IP, name substring, and tenant source prefixes.
         client = (client or "").strip()
         needle = (search or "").strip().lower()
         nets = None
@@ -955,6 +1137,7 @@ class UnboundManager:
                     nets.append(ipaddress.ip_network(p, strict=False))
                 except ValueError:
                     continue
+        # Keep events in the window that pass every filter.
         rows = []
         for ts, ip, name, rtype in events:
             if ts < cutoff:
@@ -971,14 +1154,18 @@ class UnboundManager:
                 if not any(addr in n for n in nets):
                     continue  # source outside this tenant's subnets
             rows.append({"time": ts, "client": ip, "name": name, "type": rtype})
+        # Newest first.
         rows.sort(key=lambda r: r["time"], reverse=True)
+        # Count queries per (name, type) for the summary.
         summary = {}
         for r in rows:
             k = (r["name"], r["type"])
             summary[k] = summary.get(k, 0) + 1
+        # Top 100 names by count.
         top_names = sorted(
             ({"name": n, "type": t, "count": c} for (n, t), c in summary.items()),
             key=lambda x: x["count"], reverse=True)[:100]
+        # Return the rows (up to the limit) and the summary.
         return {"status": "SUCCESS", "client": client, "minutes": minutes,
                 "source": source, "total": len(rows),
                 "queries": rows[:(limit or CLIENT_QUERY_LIMIT)],
@@ -1007,6 +1194,7 @@ class UnboundManager:
         the timestamped query events when they still cover it, else it falls
         back to the per-day buckets.
         """
+        # Read new log lines and set up the name and tenant filters.
         self._tail_query_log()
         needle = (search or "").strip().lower()
         nets = None
@@ -1017,11 +1205,13 @@ class UnboundManager:
                     nets.append(ipaddress.ip_network(p, strict=False))
                 except ValueError:
                     continue
+        # Exact trailing window from events when they cover it; else fall back to day buckets.
         if range_seconds:
             rows = self._query_names_from_events(needle, nets, range_seconds)
             if rows is not None:
                 return rows[:limit] if limit else rows
             range_days = range_days or max(1, -(-int(range_seconds) // 86400))
+        # First day to include, if a range was given.
         cutoff_day = None
         if range_days:
             try:
@@ -1029,6 +1219,7 @@ class UnboundManager:
             except (TypeError, ValueError):
                 cutoff_day = None
         grouped = {}  # "name|TYPE" -> {"name":, "type":, "count":, "sources": {ip: count}}
+        # Sum filtered counts per (name, type), keeping per-source counts.
         for key in list(self._query_counts):
             buckets = self._day_buckets(key)
             name, rtype, ip = key.split("|", 2)
@@ -1048,6 +1239,7 @@ class UnboundManager:
             g = grouped.setdefault(gkey, {"name": name, "type": rtype, "count": 0, "sources": {}})
             g["count"] += count
             g["sources"][ip] = g["sources"].get(ip, 0) + count
+        # Turn groups into rows with sources sorted by count.
         rows = []
         for g in grouped.values():
             sources = sorted(
@@ -1055,6 +1247,7 @@ class UnboundManager:
                 key=lambda s: s["count"], reverse=True,
             )
             rows.append({"name": g["name"], "type": g["type"], "count": g["count"], "sources": sources})
+        # Highest count first, truncated to the limit.
         rows.sort(key=lambda r: r["count"], reverse=True)
         if limit:
             rows = rows[:limit]
@@ -1064,13 +1257,16 @@ class UnboundManager:
         """Exact trailing-window per-(name,type) rows from ``_query_events``,
         or None when the event ring no longer reaches back to the window start
         (it is full and its oldest event is newer than the cutoff)."""
+        # Window start; bad input means no answer.
         try:
             cutoff = time.time() - int(range_seconds)
         except (TypeError, ValueError):
             return None
+        # The event ring no longer reaches the window start.
         events = list(self._query_events)
         if len(events) >= MAX_QUERY_EVENTS and events and events[0][0] > cutoff:
             return None
+        # Group events in the window that pass the filters.
         grouped = {}
         for ts, ip, name, rtype in events:
             if ts < cutoff or (needle and needle not in name):
@@ -1086,6 +1282,7 @@ class UnboundManager:
                                    {"name": name, "type": rtype, "count": 0, "sources": {}})
             g["count"] += 1
             g["sources"][ip] = g["sources"].get(ip, 0) + 1
+        # Build rows with sources sorted by count.
         rows = [{"name": g["name"], "type": g["type"], "count": g["count"],
                  "sources": sorted(({"ip": ip, "count": c} for ip, c in g["sources"].items()),
                                    key=lambda x: x["count"], reverse=True)}
@@ -1096,24 +1293,41 @@ class UnboundManager:
     # ── Windowed counter history ───────────────────────────────────────────
 
     def _load_stats_history(self) -> list:
+        """Load saved counter snapshots.
+
+        Returns:
+            Valid snapshot dicts, or [] if no path, no file or unreadable.
+        """
+        # No path configured: no history.
         path = self.stats_history_path
         if not path:
             return []
+        # Read the JSON and keep well-formed samples.
         try:
             with open(path) as f:
                 data = json.load(f)
             samples = data.get("samples") if isinstance(data, dict) else None
             return [s for s in samples or [] if isinstance(s, dict) and "t" in s and "c" in s]
+        # No file yet.
         except FileNotFoundError:
             return []
+        # Unreadable: log and start fresh.
         except Exception as e:
             logger.warning("DNS stats history %s unreadable, starting fresh: %s", path, e)
             return []
 
     def _persist_stats_history(self, now: float, force: bool = False) -> None:
+        """Save the counter history to disk, at most every STATS_PERSIST_INTERVAL_S.
+
+        Args:
+            now: Current epoch time.
+            force: Save even if the interval has not passed.
+        """
+        # Skip without a path or when saved recently.
         path = self.stats_history_path
         if not path or (not force and now - self._stats_persisted_at < STATS_PERSIST_INTERVAL_S):
             return
+        # Write to a temp file and atomically replace.
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             tmp = path + ".tmp"
@@ -1121,27 +1335,51 @@ class UnboundManager:
                 json.dump({"samples": self._stats_history}, f, separators=(",", ":"))
             os.replace(tmp, path)
             self._stats_persisted_at = now
+        # Save failures are logged only.
         except Exception as e:
             logger.warning("DNS stats history persist to %s failed: %s", path, e)
 
     @staticmethod
     def _counter_snapshot(raw: dict, query_types: dict, now: float) -> dict:
+        """Build a compact counter snapshot.
+
+        Args:
+            raw: Parsed unbound-control stats.
+            query_types: Per-type query counts.
+            now: Snapshot epoch time.
+
+        Returns:
+            Dict with time, uptime, counters and query types.
+        """
         def n(key):
+            """Return a numeric stat, or 0 if missing or not a number."""
+            # Non-numbers become 0.
             v = raw.get(key, 0)
             return v if isinstance(v, (int, float)) else 0
+        # Pick out the tracked counters.
         c = {k: int(n(key)) for k, key in _STATS_COUNTERS.items()}
         # Total recursion time, so a window's average can be re-derived.
         c["rt"] = round(n("total.recursion.time.avg") * n("total.num.recursivereplies"), 4)
+        # Time, uptime, counters and types.
         return {"t": round(now, 1), "up": int(n("time.up")), "c": c,
                 "types": {k: int(v) for k, v in (query_types or {}).items()}}
 
     def _record_sample(self, snap: dict, force: bool = False) -> None:
+        """Add a snapshot to history and thin out old samples.
+
+        Args:
+            snap: Snapshot from _counter_snapshot.
+            force: Record even if the last sample is very recent.
+        """
+        # Under the lock, skip samples too close to the last one.
         with self._stats_lock:
             hist = self._stats_history
             if not force and hist and snap["t"] - hist[-1]["t"] < STATS_MIN_SAMPLE_GAP_S:
                 return
+            # Append it.
             hist.append(snap)
             now = snap["t"]
+            # Drop samples past the max age; keep one per coarse step past fine retention.
             kept, last_coarse = [], None
             for s in hist:
                 age = now - s["t"]
@@ -1153,6 +1391,7 @@ class UnboundManager:
                         continue
                     last_coarse = slot
                 kept.append(s)
+            # Store the thinned history and save it if due.
             self._stats_history = kept
             self._persist_stats_history(now)
 
@@ -1161,12 +1400,15 @@ class UnboundManager:
         """Per-counter increase from ``prev`` to ``cur``. Unbound zeroes its
         counters on restart, so a restart (uptime went backwards, or any
         counter dropped) counts ``cur`` itself as the increase."""
+        # Detect a restart: uptime went back or any counter dropped.
         restarted = cur.get("up", 0) < prev.get("up", 0) or any(
             cur["c"].get(k, 0) < prev["c"].get(k, 0) for k in _STATS_COUNTERS)
+        # Delta for each counter and the recursion-time total.
         out = {"c": {}, "types": {}}
         for k in (*_STATS_COUNTERS, "rt"):
             a, b = prev["c"].get(k, 0), cur["c"].get(k, 0)
             out["c"][k] = b if restarted else max(0, b - a)
+        # Delta for each query type, keeping non-zero ones.
         for t in set(prev.get("types") or {}) | set(cur.get("types") or {}):
             a, b = (prev.get("types") or {}).get(t, 0), (cur.get("types") or {}).get(t, 0)
             d = b if restarted else max(0, b - a)
@@ -1180,32 +1422,40 @@ class UnboundManager:
         before the window start; if history doesn't reach that far but Unbound
         itself started inside the window, its lifetime counters ARE the window.
         Otherwise the window is ``partial`` (only ``covered_seconds`` known)."""
+        # Window start and history before now.
         now = current["t"]
         start = now - window_s
         with self._stats_lock:
             hist = [s for s in self._stats_history if s["t"] < now]
+        # Newest sample at or before the window start.
         base_idx = None
         for i, s in enumerate(hist):
             if s["t"] <= start:
                 base_idx = i
+        # Choose the chain of samples to sum across.
         zero = {"t": start, "up": 0, "c": {}, "types": {}}
         partial = False
+        # History covers the window.
         if base_idx is not None:
             chain = hist[base_idx:]
             covered = window_s
+        # Unbound started inside the window: count from zero.
         elif now - current.get("up", 0) >= start and (
                 not hist or hist[0]["t"] >= now - current.get("up", 0)):
             chain = [zero] + hist
             covered = window_s
+        # History is shorter than the window: partial.
         elif hist:
             chain = hist
             covered = int(now - hist[0]["t"])
             partial = True
+        # No history at all.
         else:
             chain = [zero]
             covered = min(window_s, int(current.get("up", 0)))
             partial = covered < window_s
             # No history at all: lifetime counters are the best available.
+        # Sum deltas between consecutive samples, ending at the live snapshot.
         chain = chain + [current]
         tot = {"c": {k: 0 for k in (*_STATS_COUNTERS, "rt")}, "types": {}}
         for a, b in zip(chain, chain[1:]):
@@ -1214,19 +1464,24 @@ class UnboundManager:
                 tot["c"][k] += v
             for t, v in d["types"].items():
                 tot["types"][t] = tot["types"].get(t, 0) + v
+        # Note coverage.
         tot["covered_seconds"] = covered
         tot["partial"] = partial
         return tot
 
     def _read_counters(self):
         """``(raw, error)`` from ``unbound-control stats_noreset``."""
+        # Run unbound-control.
         try:
             result = subprocess.run(["unbound-control", "stats_noreset"],
                                     capture_output=True, text=True, timeout=8)
+        # Could not run it.
         except Exception as e:
             return None, str(e)
+        # Non-zero exit is an error.
         if result.returncode != 0:
             return None, (result.stderr.strip() or "unbound-control failed")
+        # Parse key=value lines, as floats where possible.
         raw = {}
         for line in result.stdout.splitlines():
             if "=" in line:
@@ -1239,6 +1494,15 @@ class UnboundManager:
 
     @staticmethod
     def _query_types(raw: dict) -> dict:
+        """Extract per-type query counts from raw stats.
+
+        Args:
+            raw: Parsed unbound-control stats.
+
+        Returns:
+            {type: count}, from aggregate keys if present, else summed per-thread keys.
+        """
+        # Collect aggregate and per-thread type counts.
         aggregate_types = {}
         threaded_types = {}
         for k, v in raw.items():
@@ -1249,14 +1513,17 @@ class UnboundManager:
             m = re.match(r"thread\d+\.num\.query\.type\.([A-Za-z0-9_-]+)$", k)
             if m and isinstance(v, (int, float)) and v:
                 threaded_types[m.group(1)] = threaded_types.get(m.group(1), 0) + int(v)
+        # Prefer aggregate counts.
         return aggregate_types or threaded_types
 
     def sample_stats(self, force: bool = False) -> bool:
         """Take one counter snapshot for the windowed-stats history."""
+        # Read counters; skip if unavailable.
         raw, err = self._read_counters()
         if raw is None:
             logger.debug("DNS stats sample skipped: %s", err)
             return False
+        # Record a snapshot of the counters.
         self._record_sample(self._counter_snapshot(raw, self._query_types(raw), time.time()),
                             force=force)
         return True
@@ -1265,10 +1532,13 @@ class UnboundManager:
         """Background daemon thread snapshotting counters every ``interval``
         seconds so hour/day/week/month windows have baselines even when
         nobody is viewing the DNS page. Idempotent."""
+        # Already running.
         if self._stats_sampler and self._stats_sampler.is_alive():
             return self._stats_sampler
 
         def run():
+            """Sample counters forever, sleeping between passes."""
+            # Never let one failed pass stop the loop.
             while True:
                 try:
                     self.sample_stats()
@@ -1276,6 +1546,7 @@ class UnboundManager:
                     logger.warning("DNS stats sampler pass failed: %s", e)
                 time.sleep(interval)
 
+        # Start the daemon thread.
         self._stats_sampler = threading.Thread(target=run, name="dns-stats-sampler", daemon=True)
         self._stats_sampler.start()
         logger.info("DNS stats sampler started (every %ss, history=%s, %d samples loaded)",
@@ -1306,6 +1577,7 @@ class UnboundManager:
         coverage. Without a range they are Unbound's lifetime totals. The
         lifetime totals are always also returned under ``lifetime``.
         """
+        # Make sure query logging is on; note any problem as a warning.
         reload_error = None
         logging_result = self._ensure_query_logging()
         restarted = bool(logging_result.get("restarted"))
@@ -1317,6 +1589,7 @@ class UnboundManager:
             if not reload_error:
                 reload_error = logging_result.get("reason", "query logging setup failed")
 
+        # Window length in seconds, if a range was given.
         window_s = None
         try:
             if range_seconds:
@@ -1325,6 +1598,7 @@ class UnboundManager:
                 window_s = int(range_days) * 86400
         except (TypeError, ValueError):
             window_s = None
+        # Per-name breakdown for the window.
         query_names = self.get_query_names(search=search, source_prefixes=source_prefixes,
                                             range_days=range_days, range_seconds=window_s)
         # A restart in this same call may still be settling, so give
@@ -1341,14 +1615,27 @@ class UnboundManager:
             return {"status": "ERROR", "message": err}
 
         def n(key):
+            """Return a numeric stat, or 0 if missing or not a number."""
+            # Non-numbers become 0.
             v = raw.get(key, 0)
             return v if isinstance(v, (int, float)) else 0
 
+        # Query types and a live snapshot.
         query_types = self._query_types(raw)
         now = time.time()
         snap = self._counter_snapshot(raw, query_types, now)
 
         def headline(c, types):
+            """Build headline metrics and sorted query types.
+
+            Args:
+                c: Counter dict (q, h, m, r, p, rt).
+                types: Per-type query counts.
+
+            Returns:
+                (headline dict, types sorted by count descending).
+            """
+            # Totals, hits and recursive replies.
             total, hits = c.get("q", 0), c.get("h", 0)
             rec = c.get("r", 0)
             return {
@@ -1362,6 +1649,7 @@ class UnboundManager:
                 "uptime_seconds":     int(n("time.up")),
             }, dict(sorted(types.items(), key=lambda kv: kv[1], reverse=True))
 
+        # Lifetime metrics use Unbound's own average recursion time.
         lifetime, _ = headline(snap["c"], query_types)
         lifetime["recursion_time_avg"] = round(n("total.recursion.time.avg"), 4)
         response = {
@@ -1372,12 +1660,14 @@ class UnboundManager:
             "query_names": query_names,
             "query_names_tracked": len(self._query_counts),
         }
+        # With a window, replace the headline and types with the window's increases.
         if window_s:
             win = self._window_totals(snap, window_s)
             response["global"], response["query_types"] = headline(win["c"], win["types"])
             response["window"] = {"seconds": window_s,
                                   "covered_seconds": win["covered_seconds"],
                                   "partial": win["partial"]}
+        # Record this snapshot and attach any warning.
         self._record_sample(snap)
         if reload_error:
             response["warning"] = reload_error
@@ -1390,6 +1680,7 @@ class UnboundManager:
         ``forward``, then the upstream servers). Normalized to a per-zone list
         of upstreams for the UI's Upstream Servers panel.
         """
+        # Run unbound-control list_forwards; any failure is an error.
         try:
             result = subprocess.run(
                 ["unbound-control", "list_forwards"],
@@ -1401,6 +1692,7 @@ class UnboundManager:
             logger.error("list_forwarders failed: %s", e)
             return {"status": "ERROR", "message": str(e)}
 
+        # Parse "zone class forward addr..." lines.
         forwarders = []
         for line in result.stdout.splitlines():
             parts = line.split()
@@ -1414,9 +1706,22 @@ class UnboundManager:
 
     @staticmethod
     def _normalize_forward_zone(zone: str) -> str:
+        """Validate and normalize a forward zone name.
+
+        Args:
+            zone: "." or a DNS domain.
+
+        Returns:
+            The zone in lower case with a trailing dot.
+
+        Raises:
+            ValueError: If the name is not a valid zone.
+        """
+        # Lower case; the root zone is returned as is.
         zone = str(zone or "").strip().lower()
         if zone == ".":
             return zone
+        # Length and per-label checks.
         zone = zone.rstrip(".")
         if not zone or len(zone) > 253:
             raise ValueError("zone must be '.' or a valid DNS domain")
@@ -1424,12 +1729,26 @@ class UnboundManager:
         if any(not re.fullmatch(r"(?!-)[a-z0-9-]{1,63}(?<!-)", label)
                for label in labels):
             raise ValueError("zone must be '.' or a valid DNS domain")
+        # Add the trailing dot.
         return zone + "."
 
     @staticmethod
     def _normalize_upstreams(upstreams) -> list:
+        """Validate and deduplicate forwarder addresses.
+
+        Args:
+            upstreams: Address list, or a comma/space-separated string.
+
+        Returns:
+            Normalized unique IP addresses, in order.
+
+        Raises:
+            ValueError: On a bad address, none given, or more than 8.
+        """
+        # Split a string into items.
         if isinstance(upstreams, str):
             upstreams = re.split(r"[\s,]+", upstreams.strip())
+        # Normalize each non-empty item as an IP address.
         values = []
         for raw in upstreams or []:
             raw = str(raw).strip()
@@ -1439,15 +1758,24 @@ class UnboundManager:
                 values.append(str(ipaddress.ip_address(raw)))
             except ValueError as exc:
                 raise ValueError(f"invalid forwarder address: {raw}") from exc
+        # Between 1 and 8 addresses.
         if not values:
             raise ValueError("at least one forwarder address is required")
         if len(values) > 8:
             raise ValueError("no more than 8 forwarder addresses are allowed")
+        # Remove duplicates, keeping order.
         return list(dict.fromkeys(values))
 
     def _managed_forwarders(self) -> list:
+        """Read the forwarders from our managed file.
+
+        Returns:
+            List of {"zone", "upstreams"}; [] if the file is missing.
+        """
+        # No file: none.
         if not os.path.exists(self.forwarders_path):
             return []
+        # Parse name: and forward-addr: lines into per-zone entries.
         forwarders = []
         current = None
         with open(self.forwarders_path, encoding="utf-8") as fh:
@@ -1473,6 +1801,7 @@ class UnboundManager:
         repeated adds for the same zone (the UI defaults the zone field to
         ".") piled up duplicate stanzas. Merging here also heals a file that
         already drifted, on the next successful write."""
+        # Merge upstreams per zone, skipping blank zones and duplicate addresses.
         merged: dict = {}
         for item in forwarders or []:
             zone = str((item or {}).get("zone") or "").strip()
@@ -1482,22 +1811,34 @@ class UnboundManager:
             for address in (item or {}).get("upstreams") or []:
                 if address not in bucket:
                     bucket.append(address)
+        # One entry per zone.
         return [{"zone": zone, "upstreams": upstreams}
                 for zone, upstreams in merged.items()]
 
     def _safe_zone(self, zone) -> str:
         """``_normalize_forward_zone`` that returns "" instead of raising, for
         zone names we did not write and cannot vouch for."""
+        # Normalize; invalid names become "".
         try:
             return self._normalize_forward_zone(zone)
         except ValueError:
             return ""
 
     def _write_forwarders(self, forwarders: list) -> dict:
+        """Atomically write the forwarders file, then reload Unbound.
+
+        Args:
+            forwarders: List of {"zone", "upstreams"}.
+
+        Returns:
+            Result dict; on failure the previous file is restored.
+        """
+        # Keep the current file so it can be restored.
         old = None
         if os.path.exists(self.forwarders_path):
             with open(self.forwarders_path, "rb") as fh:
                 old = fh.read()
+        # Render one forward-zone block per zone.
         tmp_path = self.forwarders_path + ".tmp"
         lines = ["# Managed by Lab Manager — do not edit manually\n"]
         for item in self._coalesce_forwarders(forwarders):
@@ -1508,12 +1849,15 @@ class UnboundManager:
                   for address in item["upstreams"]],
             ])
         try:
+            # Write to a temp file and atomically replace.
             with open(tmp_path, "w", encoding="utf-8") as fh:
                 fh.writelines(lines)
             os.replace(tmp_path, self.forwarders_path)
+            # Reload; success means done.
             result = self._reload()
             if result["ok"]:
                 return {"status": "SUCCESS", "reloaded": True}
+            # Reload failed: restore the previous file (or remove ours) and reload again.
             if old is None:
                 os.remove(self.forwarders_path)
             else:
@@ -1522,6 +1866,7 @@ class UnboundManager:
             self._reload()
             return {"status": "ERROR", "reloaded": False,
                     "message": result["error"]}
+        # Any other failure: remove the temp file and report.
         except Exception as exc:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -1551,14 +1896,17 @@ class UnboundManager:
         so "add an upstream server" is almost always an add against the
         already-present root zone.
         """
+        # Validate the zone and addresses.
         try:
             zone = self._normalize_forward_zone(zone)
             upstreams = self._normalize_upstreams(upstreams)
         except ValueError as exc:
             return {"status": "ERROR", "message": str(exc), "changed": False}
+        # Current managed forwarders and our entry for this zone, if any.
         managed = self._coalesce_forwarders(self._managed_forwarders())
         current = next((item for item in managed
                         if self._safe_zone(item.get("zone")) == zone), None)
+        # New zone: refuse if Unbound already serves it from config we do not manage.
         if current is None:
             live = self.list_forwarders()
             if live.get("status") != "SUCCESS":
@@ -1571,6 +1919,7 @@ class UnboundManager:
                                    "not manage"}
             desired = [*managed, {"zone": zone, "upstreams": upstreams}]
             final = upstreams
+        # Existing zone: merge in only the new addresses, within the 8-address limit.
         else:
             known = list(current.get("upstreams") or [])
             added = [a for a in upstreams if a not in known]
@@ -1586,9 +1935,11 @@ class UnboundManager:
                                    "8-address limit"}
             desired = [{**item, "upstreams": final} if item is current else item
                        for item in managed]
+        # Write and reload.
         result = self._write_forwarders(desired)
         if result.get("status") != "SUCCESS":
             return {**result, "zone": zone, "upstreams": final, "changed": False}
+        # Confirm Unbound actually serves the zone.
         confirm = self.list_forwarders()
         applied = confirm.get("status") == "SUCCESS" and any(
             self._safe_zone(item.get("zone")) == zone
@@ -1609,6 +1960,7 @@ class UnboundManager:
                     f"forward-zone, and the unbound journal for "
                     f"'duplicate forward zone ... ignored')"),
             }
+        # Applied.
         return {**result, "zone": zone, "upstreams": final, "changed": True}
 
     def update_forwarder(self, zone: str, upstreams, old_zone: str = None) -> dict:
@@ -1621,6 +1973,7 @@ class UnboundManager:
         "ok" reply is not proof the edited zone actually took effect, so the
         live ``list_forwards`` result is re-checked before reporting success.
         """
+        # Validate the zone, addresses and optional old zone name.
         try:
             zone = self._normalize_forward_zone(zone)
             upstreams = self._normalize_upstreams(upstreams)
@@ -1629,6 +1982,7 @@ class UnboundManager:
         except ValueError as exc:
             return {"status": "ERROR", "message": str(exc), "changed": False}
 
+        # Find the zone to edit.
         managed = self._coalesce_forwarders(self._managed_forwarders())
         target_zone = old_zone if old_zone is not None else zone
         current = next((item for item in managed
@@ -1636,19 +1990,23 @@ class UnboundManager:
         if current is None:
             return {"status": "ERROR", "changed": False,
                     "message": f"forwarder zone {target_zone} not found"}
+        # A rename must not collide with another managed zone.
         if old_zone is not None and old_zone != zone and any(
                 self._safe_zone(item.get("zone")) == zone for item in managed):
             return {"status": "ERROR", "changed": False,
                     "message": f"forwarder zone {zone} already exists"}
 
+        # Note whether anything changes, and swap in the new entry.
         renaming = old_zone is not None and old_zone != zone
         changed = renaming or (list(current.get("upstreams") or []) != upstreams)
         desired = [{"zone": zone, "upstreams": upstreams} if item is current else item
                    for item in managed]
 
+        # Write and reload.
         result = self._write_forwarders(desired)
         if result.get("status") != "SUCCESS":
             return {**result, "zone": zone, "upstreams": upstreams, "changed": False}
+        # Confirm Unbound actually serves the zone.
         confirm = self.list_forwarders()
         applied = confirm.get("status") == "SUCCESS" and any(
             self._safe_zone(item.get("zone")) == zone
@@ -1670,18 +2028,22 @@ class UnboundManager:
                     f"forward-zone, and the unbound journal for "
                     f"'duplicate forward zone ... ignored')"),
             }
+        # Applied.
         return {**result, "zone": zone, "upstreams": upstreams, "changed": changed}
 
     def remove_forwarder(self, zone: str) -> dict:
         """Remove an LM-managed forwarding zone. Used for cluster rollback."""
+        # Validate the zone.
         try:
             zone = self._normalize_forward_zone(zone)
         except ValueError as exc:
             return {"status": "ERROR", "message": str(exc)}
+        # Drop the zone; nothing to do if it was not there.
         existing = self._managed_forwarders()
         kept = [item for item in existing if item.get("zone") != zone]
         if len(kept) == len(existing):
             return {"status": "SUCCESS", "changed": False, "zone": zone}
+        # Write and reload.
         result = self._write_forwarders(kept)
         return {**result, "changed": result.get("status") == "SUCCESS",
                 "zone": zone}
@@ -1690,6 +2052,7 @@ class UnboundManager:
 
     def read_overrides(self):
         """Current managed override file contents, or ``None`` if absent."""
+        # Read the file; missing means no overrides.
         try:
             with open(self.overrides_path, encoding="utf-8") as fh:
                 return fh.read()
@@ -1699,8 +2062,10 @@ class UnboundManager:
     def _checkconf(self) -> dict:
         """Validate the full config Unbound would load. Skipped (ok) when
         ``unbound-checkconf`` is not installed — reload is then the only gate."""
+        # Without the tool, skip the check.
         if not shutil.which("unbound-checkconf"):
             return {"ok": True, "error": "", "skipped": True}
+        # Run it.
         result = self._run_diag(["unbound-checkconf"], timeout=20)
         return {"ok": result["ok"], "error": result["error"]}
 
@@ -1713,45 +2078,64 @@ class UnboundManager:
         the previous file and reports ``rejected`` so the coordinator rolls the
         whole cluster back instead of retrying a config that can never load.
         """
+        # Unchanged: nothing to do.
         old = self.read_overrides()
         if old == text:
             return {"status": "SUCCESS", "changed": False, "reloaded": True}
         tmp_path = self.overrides_path + ".tmp"
 
         def _restore():
+            """Put the previous override file back (or remove ours if there was none)."""
+            # No previous file: remove ours.
             if old is None:
                 if os.path.exists(self.overrides_path):
                     os.remove(self.overrides_path)
+            # Otherwise rewrite the old contents.
             else:
                 with open(self.overrides_path, "w", encoding="utf-8") as fh:
                     fh.write(old)
 
+        # Write to a temp file and atomically replace.
         try:
             with open(tmp_path, "w", encoding="utf-8") as fh:
                 fh.write(text)
             os.replace(tmp_path, self.overrides_path)
+        # Write failed: clean up and report as rejected.
         except Exception as exc:  # noqa: BLE001
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
             return {"status": "ERROR", "rejected": True, "reloaded": False,
                     "message": f"could not write {self.overrides_path}: {exc}"}
+        # Check the full config before reloading; restore on failure.
         check = self._checkconf()
         if not check["ok"]:
             _restore()
             return {"status": "ERROR", "rejected": True, "reloaded": False,
                     "message": f"unbound-checkconf rejected the override config: {check['error']}"}
+        # Reload; on failure restore and reload again.
         result = self._reload()
         if not result["ok"]:
             _restore()
             self._reload()
             return {"status": "ERROR", "rejected": True, "reloaded": False,
                     "message": f"unbound-control reload failed: {result['error']}"}
+        # Applied.
         return {"status": "SUCCESS", "changed": True, "reloaded": True}
 
     # ── Helpers ───────────────────────────────────────────────────────
 
     @staticmethod
     def _run_diag(cmd, timeout=5):
+        """Run a diagnostic command and capture its outcome.
+
+        Args:
+            cmd: Command and arguments.
+            timeout: Seconds before giving up.
+
+        Returns:
+            Dict with ok, exit_code, output (trimmed to 2000 chars) and error.
+        """
+        # Run it and keep stdout (or stderr), trimmed.
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=timeout)
@@ -1762,21 +2146,39 @@ class UnboundManager:
                 "output": output,
                 "error": "" if result.returncode == 0 else (output or "command failed"),
             }
+        # Could not run it at all.
         except Exception as e:
             return {"ok": False, "exit_code": None, "output": "", "error": str(e)}
 
     @staticmethod
     def _listener_host(line):
+        """Get the host part of the port-53 address in an ss output line.
+
+        Args:
+            line: One ss output line.
+
+        Returns:
+            The host without brackets or zone id, or "" if none.
+        """
+        # Find the token ending in :53 and strip the port, brackets and zone id.
         for token in line.split():
             if re.search(r":53$", token):
                 host = token.rsplit(":", 1)[0].strip("[]")
                 return host.split("%", 1)[0]
+        # No port-53 token.
         return ""
 
     def _local_ipv4s(self):
+        """List this host's global, non-loopback IPv4 addresses.
+
+        Returns:
+            Sorted unique addresses, or [] if ip fails.
+        """
+        # Ask ip for global IPv4 addresses.
         result = self._run_diag(["ip", "-o", "-4", "addr", "show", "scope", "global"])
         if not result["ok"]:
             return []
+        # Pull out each non-loopback address.
         addresses = []
         for line in result["output"].splitlines():
             match = re.search(r"\binet\s+(\d+\.\d+\.\d+\.\d+)/", line)
@@ -1786,23 +2188,39 @@ class UnboundManager:
 
     @staticmethod
     def _dns_probe(server, name="localhost"):
+        """Send a DNS A query over UDP and report the reply.
+
+        Args:
+            server: Server IPv4 address.
+            name: Name to query.
+
+        Returns:
+            Dict with server, responded, rcode, answers, latency_ms and error.
+        """
+        # Start time and a transaction id.
         started = time.monotonic()
         txid = time.monotonic_ns() & 0xFFFF
+        # Encode the question: labels, root, type A, class IN.
         labels = name.rstrip(".").split(".")
         question = b"".join(
             bytes([len(label)]) + label.encode("ascii") for label in labels
         ) + b"\x00" + struct.pack("!HH", 1, 1)
+        # Header with recursion desired and one question.
         packet = struct.pack("!HHHHHH", txid, 0x0100, 1, 0, 0, 0) + question
+        # UDP socket with a 2 s timeout.
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(2)
+        # Send and wait for a reply.
         try:
             sock.sendto(packet, (server, 53))
             response, _ = sock.recvfrom(4096)
+            # Check the header and matching id.
             if len(response) < 12:
                 raise ValueError("short DNS response")
             reply_id, flags, _, answers, _, _ = struct.unpack("!HHHHHH", response[:12])
             if reply_id != txid:
                 raise ValueError("DNS transaction ID mismatch")
+            # Got a valid reply.
             return {
                 "server": server,
                 "responded": True,
@@ -1811,6 +2229,7 @@ class UnboundManager:
                 "latency_ms": round((time.monotonic() - started) * 1000, 1),
                 "error": "",
             }
+        # No or bad reply.
         except Exception as e:
             return {
                 "server": server,
@@ -1820,6 +2239,7 @@ class UnboundManager:
                 "latency_ms": round((time.monotonic() - started) * 1000, 1),
                 "error": str(e),
             }
+        # Always close the socket.
         finally:
             sock.close()
 
@@ -1833,20 +2253,32 @@ class UnboundManager:
         A reload ZEROES Unbound's statistics counters, so when windowed-stats
         history is being kept, snapshot them first: the queries since the last
         periodic sample would otherwise be lost from every window."""
+        # Snapshot counters first, since reload zeroes them.
         if self._stats_sampler is not None:
             try:
                 self.sample_stats(force=True)
             except Exception as e:  # noqa: BLE001 — never block a reload on stats
                 logger.debug("pre-reload stats sample failed: %s", e)
+        # Run the reload.
         try:
             subprocess.run(["unbound-control", "reload"], check=True, timeout=10)
             logger.info("Unbound reloaded")
             return {"ok": True, "error": ""}
+        # Reload failed.
         except Exception as e:
             logger.warning("unbound-control reload failed: %s", e)
             return {"ok": False, "error": str(e)}
 
     def _ptr_name(self, ip: str) -> str:
+        """Return the reverse-DNS name for an IP.
+
+        Args:
+            ip: IPv4 or IPv6 address.
+
+        Returns:
+            The PTR name, or "" if the address is invalid.
+        """
+        # Build the reverse name; invalid input gives "".
         try:
             return ipaddress.ip_address(ip).reverse_pointer
         except ValueError:

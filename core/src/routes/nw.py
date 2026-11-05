@@ -35,6 +35,7 @@ _NW_BG_TASKS: set = set()
 
 
 def _nw_truthy(v) -> bool:
+    """True when a query-string style value means yes ("1", "true", "yes" or "on")."""
     return str(v or "").strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -43,15 +44,19 @@ def _nw_spawn_refresh(key, coro_factory) -> None:
     a zero-arg callable returning the coroutine — built INSIDE the guard so a
     skipped spawn never leaves an un-awaited coroutine. No running loop (sync
     test path) → no-op."""
+    # A refresh for this key is already running.
     if key in _NW_BG_INFLIGHT:
         return
+    # No running event loop (sync test path): do nothing.
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
+    # Mark the key as in flight before starting.
     _NW_BG_INFLIGHT.add(key)
 
     async def _run():
+        """Run the refresh, log any failure, and always clear the in-flight mark."""
         try:
             await coro_factory()
         except Exception as e:  # noqa: BLE001 - best-effort revalidate
@@ -59,6 +64,7 @@ def _nw_spawn_refresh(key, coro_factory) -> None:
         finally:
             _NW_BG_INFLIGHT.discard(key)
 
+    # Start the task and keep a reference until it finishes.
     t = loop.create_task(_run())
     _NW_BG_TASKS.add(t)
     t.add_done_callback(_NW_BG_TASKS.discard)
@@ -76,11 +82,16 @@ async def _nw_poll_discovered(hub, device_ids) -> None:
     (``hub.poll_nw_device``): renames it to the polled hostname, pushes it to
     NetBox, and warms the nw cache. Retries "not found" briefly in case the
     spoke hasn't applied the UPDATE_CONFIG carrying the new device yet."""
+    # Limit how many devices are polled at once.
     sem = asyncio.Semaphore(_NW_DISCOVERY_POLL_CONCURRENCY)
 
     async def _one(did):
+        """Poll one device, retrying briefly while the spoke does not know it yet, then cache the
+        result.
+        """
         async with sem:
             res = None
+            # Retry only on "not found" errors, up to the attempt limit.
             for attempt in range(_NW_DISCOVERY_POLL_ATTEMPTS):
                 try:
                     res = await hub.poll_nw_device(did)
@@ -92,10 +103,12 @@ async def _nw_poll_discovered(hub, device_ids) -> None:
                     await asyncio.sleep(_NW_DISCOVERY_POLL_RETRY_S)
                     continue
                 break
+            # Store the poll result in the nw cache.
             if isinstance(res, dict):
                 await hub.nw_cache_set_poll(did, res)
                 logger.info("nw discovery poll %s -> %s", did, res.get("message"))
 
+    # Poll every device in parallel.
     await asyncio.gather(*(_one(d) for d in device_ids), return_exceptions=True)
 
 
@@ -104,11 +117,14 @@ async def _nw_bg_refresh_fleet(hub) -> None:
     full inventory ({} = no tenant filter) and refresh the global fleet cache.
     Server-side (no session) — writes only the authoritative whole-fleet
     snapshot the offline/cache-first read path filters per-reader."""
+    # Connected and approved nw spokes; none means nothing to refresh.
     spokes = [s for s in (hub.get_all_spokes_by_type("nw") or [])
               if s in hub.active_connections and hub.approved_modules.get(s, False)]
     if not spokes:
         return
+    # Merged device rows, ids already seen, and how many spokes answered.
     merged, seen, answered = [], set(), 0
+    # Ask each spoke for its device list and merge the rows, de-duplicated by id.
     for sid in spokes:
         try:
             result = await hub.request_response(sid, "NW_LIST_DEVICES", {}, timeout=20.0)
@@ -127,6 +143,7 @@ async def _nw_bg_refresh_fleet(hub) -> None:
         # last-known snapshot rather than caching an empty fleet.
         logger.info("nw bg fleet refresh: no spoke answered — keeping cached fleet")
         return
+    # Save the merged fleet as the cached snapshot.
     env = {"status": "SUCCESS", "data": merged, "message": f"{len(merged)} device(s)"}
     try:
         await hub.nw_cache_set_fleet(env)
@@ -139,6 +156,7 @@ async def _nw_bg_refresh_device(hub, device_id, endpoint, spoke_id, spoke_cmd,
     """Per-device endpoint revalidate: re-run the live spoke fetch and refresh
     the cache so the next cache-first serve is fresh. Best-effort; the on-demand
     poll button + spoke poll telemetry are the primary refreshers."""
+    # Fetch live from the spoke and cache the unwrapped result.
     result = await hub.request_response(spoke_id, spoke_cmd, relay_payload,
                                         timeout=timeout)
     data = access.unwrap_spoke(result)
@@ -152,6 +170,7 @@ async def _nw_sync_lldp_netbox(hub, netbox_spoke, links, tenant_slug="") -> None
     neighbour as a discovered device, and never overwrites a human's cable.
     Detached from the request/response cycle; failures are logged, never
     raised (a NetBox hiccup must not be visible in the topology UI)."""
+    # Send all the links in one request and log the outcome.
     try:
         result = await hub.request_response(
             netbox_spoke, "NETBOX_SYNC_LLDP",
@@ -173,10 +192,12 @@ def validate_nw_address(addr):
     enforces exactly four 0-255 octets and rejects leading-zero octets. Shared
     by the ``/setup/nw-devices`` (admin) and ``/tenant/devices/nw-devices``
     (tenant-admin) CRUD paths so both enforce the same rule."""
+    # The address is required.
     a = str(addr or "").strip()
     if not a:
         raise HTTPException(status_code=400,
                             detail="Management IP address is required")
+    # It must parse as an IPv4 address.
     try:
         ipaddress.IPv4Address(a)
     except ipaddress.AddressValueError:
@@ -199,14 +220,17 @@ def nw_scan_spoke_choices(hub, tenant_id, shared_tenant_id):
     then shared; connected entries ahead of disconnected ones within each scope
     so the default pick is a usable agent. ``shared_tenant_id`` is passed in
     (rather than read from ``access``) so this stays pure + unit-testable."""
+    # Spoke tenant bindings and display names.
     md = hub.state.system_state.get("module_metadata", {}) or {}
     names = hub.state.system_state.get("module_names", {}) or {}
     out = []
     # Ids reach here with differing spelling ("Default" from the picker vs the
     # "default" a spoke is bound to), so compare canonicalised (strip+casefold).
     def _n(x):
+        """Canonical form of an id for comparison."""
         return str(x or "").strip().casefold()
     want, shared_n = _n(tenant_id), _n(shared_tenant_id)
+    # Check every approved nw spoke and classify it as the tenant's own, shared, or neither.
     for sid in (hub.get_all_spokes_by_type("nw") or []):
         if not hub.approved_modules.get(hub._primary_key(sid), False):
             continue
@@ -217,6 +241,7 @@ def nw_scan_spoke_choices(hub, tenant_id, shared_tenant_id):
             scope = "shared"
         else:
             continue
+        # A UI-ready entry for the spoke.
         out.append({
             "spoke_id": sid,
             "name": names.get(sid, sid),
@@ -227,6 +252,7 @@ def nw_scan_spoke_choices(hub, tenant_id, shared_tenant_id):
     # A tenant with its own nw spoke is out of the shared nw environment.
     if any(c["scope"] == "own" for c in out) or access.tenant_has_own_spoke(hub, tenant_id, "nw"):
         out = [c for c in out if c["scope"] == "own"]
+    # Own first, then connected, then by name.
     out.sort(key=lambda s: (s["scope"] != "own", not s["connected"], s["name"]))
     return out
 
@@ -246,16 +272,20 @@ def resolve_nw_scan_spoke(hub, tenant_id, requested_spoke_id, shared_tenant_id):
     There is deliberately no "any connected nw spoke" fallback: it silently ran
     an Admin-tenant scan on whichever single nw agent happened to be online
     (another tenant's), so the targets and results came from that tenant."""
+    # Connected spokes the tenant may use.
     live = [c for c in nw_scan_spoke_choices(hub, tenant_id, shared_tenant_id)
             if c["connected"]]
+    # Honor the requested spoke only if it is in that list.
     if requested_spoke_id:
         for c in live:
             if c["spoke_id"] == requested_spoke_id:
                 return requested_spoke_id
+    # Otherwise prefer the tenant's own spoke, then a shared one.
     for scope in ("own", "shared"):
         for c in live:
             if c["scope"] == scope:
                 return c["spoke_id"]
+    # No usable spoke.
     return ""
 
 
@@ -294,6 +324,7 @@ def split_leaf_and_supernets(prefixes):
     A supernet is a prefix that CONTAINS another prefix in the set, or is wider
     than /22 (too big for a targeted scan); invalid and
     IPv6 entries are ignored and duplicates collapsed."""
+    # Parse each entry into a unique IPv4 network, skipping invalid and IPv6 ones.
     nets = []
     for p in (prefixes or []):
         try:
@@ -302,9 +333,11 @@ def split_leaf_and_supernets(prefixes):
             continue
         if isinstance(n, ipaddress.IPv4Network) and n not in nets:
             nets.append(n)
+    # Supernets: wider than /22, or containing another prefix in the set.
     supers = [n for n in nets
               if n.prefixlen < _NW_MAX_LEAF_PREFIXLEN
               or any(o.prefixlen > n.prefixlen and o.subnet_of(n) for o in nets)]
+    # Everything else is a leaf.
     return [n for n in nets if n not in supers], supers
 
 
@@ -313,8 +346,10 @@ def sweep_ranges(supernets, leaves):
     minus the leaf prefixes carved out of it (those belong to the targeted
     scan, not the sweep). Sorted and non-overlapping; stable across calls so a
     persisted cursor stays valid while the prefix set is unchanged."""
+    # Process supernets in address order so the output is stable.
     out = []
     for sn in sorted(supernets, key=lambda n: (int(n.network_address), n.prefixlen)):
+        # Carve every leaf inside this supernet out of it.
         pieces = [sn]
         for leaf in leaves:
             if leaf.subnet_of(sn):
@@ -325,8 +360,10 @@ def sweep_ranges(supernets, leaves):
                     elif not piece.subnet_of(leaf):
                         nxt.append(piece)
                 pieces = nxt
+        # Turn each remaining piece into an integer host range.
         for piece in pieces:
             lo, hi = int(piece.network_address), int(piece.broadcast_address)
+            # Leave out the network and broadcast addresses of real subnets (not /31 or /32).
             if sn.prefixlen < 31:
                 if lo == int(sn.network_address):
                     lo += 1
@@ -334,6 +371,7 @@ def sweep_ranges(supernets, leaves):
                     hi -= 1
             if hi >= lo:
                 out.append((lo, hi))
+    # Sort the ranges and merge any that overlap or touch.
     out.sort()
     merged = []
     for lo, hi in out:
@@ -349,16 +387,20 @@ def sweep_take(ranges, cursor, n, skip=frozenset()):
     absolute index ``cursor`` of the concatenated space. Returns
     ``(ips, new_cursor, total)``; ``new_cursor`` is ``0`` after wrapping past
     the end (a full cycle completed)."""
+    # Total number of hosts across all ranges; none means nothing to take.
     total = sum(hi - lo + 1 for lo, hi in ranges)
     if total <= 0:
         return [], 0, 0
+    # Restart from 0 when the cursor is past the end.
     cursor = max(0, int(cursor)) % total if cursor < total else 0
     ips, idx, consumed = [], 0, cursor
+    # Walk the ranges, skipping whole ranges that lie before the cursor.
     for lo, hi in ranges:
         size = hi - lo + 1
         if cursor >= idx + size:
             idx += size
             continue
+        # Take hosts from this range until n have been consumed.
         start = lo + max(0, cursor - idx)
         for v in range(start, hi + 1):
             consumed += 1
@@ -370,6 +412,7 @@ def sweep_take(ranges, cursor, n, skip=frozenset()):
         idx += size
         if consumed - cursor >= n:
             break
+    # A cursor that reached the end wraps back to 0.
     return ips, (consumed if consumed < total else 0), total
 
 
@@ -379,14 +422,17 @@ def gateway_take(supernets, cursor, n, skip=frozenset()):
     (``int(address) >> 8``) is in ``skip`` are passed over but still advance
     the cursor. Returns ``(blocks, new_cursor, total_blocks)``; ``new_cursor``
     is ``0`` once the end is reached."""
+    # Top-level supernets of /24 or wider (not inside another), in address order.
     tops = sorted((s for s in supernets if s.prefixlen <= 24
                    and not any(o != s and s.subnet_of(o) for o in supernets)),
                   key=lambda s: int(s.network_address))
+    # Total number of /24 blocks they hold; none means nothing to take.
     total = sum(2 ** (24 - s.prefixlen) for s in tops)
     if not total:
         return [], 0, 0
     cursor = cursor if 0 <= cursor < total else 0
     blocks, idx, pos = [], 0, cursor
+    # Walk each supernet's /24 blocks from the cursor until n have been passed.
     for s in tops:
         size = 2 ** (24 - s.prefixlen)
         first = int(s.network_address) >> 8
@@ -396,6 +442,7 @@ def gateway_take(supernets, cursor, n, skip=frozenset()):
                 blocks.append(ipaddress.IPv4Network((num << 8, 24)))
             pos += 1
         idx += size
+    # A cursor that reached the end wraps back to 0.
     return blocks, (pos if pos < total else 0), total
 
 
@@ -403,6 +450,7 @@ def covered_blocks(leaves, supernets):
     """/24 numbers that already have a NetBox prefix: every /24 inside a leaf,
     and every /24 holding a prefix of /24 or longer."""
     out = set()
+    # Prefixes of /24 or longer cover their own /24; leaves cover every /24 inside them.
     for n in list(leaves) + list(supernets):
         first = int(n.network_address) >> 8
         if n.prefixlen >= 24:
@@ -425,11 +473,15 @@ def build_scan_target_pool(targets, subnets, cap):
     are expanded to host IPs. Previously a CIDR typed into the targets box had
     its mask silently stripped and scanned as the single network address, so
     "scan this range" quietly scanned one host."""
+    # The ordered pool, a set for fast duplicate checks, and counts per source.
     seen = []
     seen_set = set()
     per_source = {}
 
     def _add(ip):
+        """Add one IPv4 host (mask stripped) to the pool; returns False for blanks, duplicates and
+        non-IPv4.
+        """
         ip = str(ip or "").split("/")[0].strip()
         if not ip or ip in seen_set:
             return False
@@ -444,12 +496,14 @@ def build_scan_target_pool(targets, subnets, cap):
 
     def _expand_cidr(text):
         """Expand an IPv4 CIDR to host IPs (bounded by ``cap``). 0 if not one."""
+        # Must parse as an IPv4 network.
         try:
             net = ipaddress.ip_network(str(text).strip(), strict=False)
         except ValueError:
             return 0
         if not isinstance(net, ipaddress.IPv4Network):
             return 0
+        # Usable hosts, or the one address of a /31 or /32.
         hosts = net.hosts() if net.prefixlen < 31 else iter([net.network_address])
         n = 0
         for host in hosts:
@@ -461,12 +515,14 @@ def build_scan_target_pool(targets, subnets, cap):
 
     def _expand_range(text):
         """Expand ``a.b.c.d-e`` / ``a.b.c.d-a.b.c.e`` inclusively. 0 if not one."""
+        # Split on the dash; no second half means this is not a range.
         lo_s, _, hi_s = str(text).strip().partition("-")
         lo_s, hi_s = lo_s.strip(), hi_s.strip()
         if not hi_s:
             return 0
         if "." not in hi_s:  # shorthand last octet: 10.0.0.10-20
             hi_s = lo_s.rsplit(".", 1)[0] + "." + hi_s
+        # Both ends must be IPv4 and in order.
         try:
             lo = ipaddress.ip_address(lo_s)
             hi = ipaddress.ip_address(hi_s)
@@ -475,6 +531,7 @@ def build_scan_target_pool(targets, subnets, cap):
         if not (isinstance(lo, ipaddress.IPv4Address)
                 and isinstance(hi, ipaddress.IPv4Address)) or int(hi) < int(lo):
             return 0
+        # Add every address in between, stopping at the cap.
         n = 0
         for v in range(int(lo), int(hi) + 1):
             if len(seen) >= cap:
@@ -483,6 +540,7 @@ def build_scan_target_pool(targets, subnets, cap):
                 n += 1
         return n
 
+    # Expand the explicit targets (range, CIDR, or single IP), stopping at the cap.
     c = 0
     for t in (targets or []):
         if len(seen) >= cap:
@@ -499,6 +557,7 @@ def build_scan_target_pool(targets, subnets, cap):
     if c:
         per_source["explicit"] = c
 
+    # Then expand the subnets, stopping at the cap.
     c = 0
     for s in (subnets or []):
         if len(seen) >= cap:
@@ -512,6 +571,7 @@ def build_scan_target_pool(targets, subnets, cap):
 def _nw_norm_mac(mac):
     """Lowercase hex-only MAC for comparison (drops ``:``/``-``/``.``). Empty
     string for anything without 12 hex digits so a blank never false-matches."""
+    # Keep only hex digits; anything but 12 of them is not a MAC.
     h = "".join(ch for ch in str(mac or "").lower() if ch in "0123456789abcdef")
     return h if len(h) == 12 else ""
 
@@ -529,34 +589,41 @@ def correlate_nw_records(devices, device_cache, ip=None, mac=None):
     stitched to where it physically sits on the switched network. Pure (no hub,
     no I/O) so it is unit-testable without a spoke. Rows are returned verbatim
     (they already carry ``ip``/``mac``/``interface``/``vlan``)."""
+    # Normalized search values.
     ip = (str(ip).strip() if ip else "") or None
     norm = _nw_norm_mac(mac) if mac else ""
 
     def _rows(entry, ep):
+        """The cached data rows for one endpoint of a device (empty when none)."""
         env = entry.get(ep)
         data = env.get("data") if isinstance(env, dict) else None
         return data if isinstance(data, list) else []
 
     def _match(r):
+        """True when a row has the searched IP or MAC."""
         if ip and str(r.get("ip", "")).strip() == ip:
             return True
         if norm and _nw_norm_mac(r.get("mac", "")) == norm:
             return True
         return False
 
+    # Check each configured device against its cached rows.
     hits = []
     for dev in (devices or []):
         if not isinstance(dev, dict):
             continue
         did = dev.get("id")
         entry = (device_cache or {}).get(did) or {}
+        # The device itself has this IP as its management address.
         is_self = bool(ip and str(dev.get("address", "")).strip() == ip)
+        # Rows on this device that mention the IP or MAC.
         matched = {
             "arp":        [r for r in _rows(entry, "arp") if _match(r)],
             "mac":        [r for r in _rows(entry, "macs") if _match(r)],
             "endpoints":  [r for r in _rows(entry, "endpoints") if _match(r)],
             "interfaces": [r for r in _rows(entry, "interfaces") if _match(r)],
         }
+        # Keep devices that match in any way.
         if is_self or any(matched.values()):
             hits.append({
                 "device_id":   did,
@@ -572,17 +639,20 @@ def correlate_nw_records(devices, device_cache, ip=None, mac=None):
 
 def dns_members_from_instances(instances, spoke_id):
     """Project Setup DNS records for one management spoke into worker members."""
+    # Build a member for each DNS server on this spoke.
     members = []
     seen = set()
     for inst in instances or []:
         if not isinstance(inst, dict) or inst.get("spoke_id") != spoke_id:
             continue
+        # The worker id and host are required.
         member_id = str(inst.get("member_id") or inst.get("name") or "").strip()
         host = str(inst.get("host") or "").strip()
         if not member_id or not host:
             raise HTTPException(
                 status_code=400,
                 detail="Each DNS server requires a Worker ID and host/IP.")
+        # Worker ids must be unique.
         if member_id in seen:
             raise HTTPException(
                 status_code=400,
@@ -595,11 +665,14 @@ def dns_members_from_instances(instances, spoke_id):
 async def sync_dns_instance_topology(hub, instances, spoke_id,
                                      worker_secret=""):
     """Push Setup's DNS server list to its connected DNS Management spoke."""
+    # Nothing to push when the spoke is not connected.
     if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
         return False
+    # The member list, plus the worker secret when given.
     payload = {"members": dns_members_from_instances(instances, spoke_id)}
     if worker_secret:
         payload["worker_secret"] = worker_secret
+    # Send it to the spoke; anything but SUCCESS/PARTIAL is a 502.
     result = await hub.request_response(
         spoke_id, "DNS_CLUSTER_CONFIG", payload, timeout=30.0)
     data = _unwrap_spoke(result)
@@ -612,6 +685,7 @@ async def sync_dns_instance_topology(hub, instances, spoke_id,
 
 def register(app, hub, ctx):
     """Register nw routes on the Hub app."""
+    # Pull the shared session and filter helpers out of ctx once for the route closures below.
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
     _is_tenant_admin = ctx._is_tenant_admin
@@ -620,12 +694,14 @@ def register(app, hub, ctx):
     def _shared_nw_hidden(request, tenant=None):
         """The viewer's tenant has its own nw spoke, so shared nw devices and
         the shared nw spoke are hidden from it."""
+        # Use the tenant from the query string when none is given.
         if tenant is None:
             tenant = request.query_params.get("tenant")
         return access.tenant_left_shared(
             hub, access.request_effective_tenant(_session_user(request), request, tenant), "nw")
 
     def _validate_nw_address(addr):
+        """Validate a management IP address (see validate_nw_address)."""
         return validate_nw_address(addr)
 
     def _enforce_tenant_bind(request, cfg, kind):
@@ -635,8 +711,11 @@ def register(app, hub, ctx):
         is unrestricted (record tenant defaults to the spoke's tenant). Plain
         users are rejected. Mutates ``cfg['tenant_id']`` in place. Raises 403 on
         violation."""
+        # The caller and the spoke being bound to.
         sess = _session_user(request)
         spoke_id = cfg.get("spoke_id")
+        # Non-admins must be tenant admins binding to their own tenant's spoke; the record takes
+        # that tenant.
         if not _is_admin(sess):
             if not _is_tenant_admin(sess):
                 raise HTTPException(status_code=403, detail=f"Tenant-admin access required to add a {kind}")
@@ -644,11 +723,13 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=403,
                                     detail=f"You can only bind a {kind} to a spoke assigned to your tenant")
             cfg["tenant_id"] = hub.state.get_spoke_tenant(spoke_id) or ""
+        # Admins: default the record's tenant to the spoke's tenant.
         elif spoke_id and not cfg.get("tenant_id"):
             cfg["tenant_id"] = hub.state.get_spoke_tenant(spoke_id) or ""
 
     def _nw_devices_for_spoke(hub, spoke_id: str):
         """The device slice a spoke should receive (bound-to-it, else unbound)."""
+        # Devices bound to this spoke, else all unbound devices.
         devices = (hub.state.system_state.get("global_config", {})
                    .get("nw_devices", []) or [])
         mine = [d for d in devices if isinstance(d, dict) and d.get("spoke_id") == spoke_id]
@@ -664,6 +745,7 @@ def register(app, hub, ctx):
 
     async def _nw_push_fleet(hub, spoke_id: str):
         """Re-push the bound device slice to a connected nw spoke."""
+        # Nothing to push when the spoke is not connected.
         if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             return False
         # Overlay any per-device Credential Vault secret (password / enable
@@ -674,9 +756,11 @@ def register(app, hub, ctx):
         # Per-tenant poll knobs overlaid on the global defaults for the spoke's
         # owning tenant (see access.nw_poll_cfg_for_tenant).
         poll_cfg = access.nw_poll_cfg_for_tenant(hub, access.nw_spoke_tenant(hub, spoke_id))
+        # The UPDATE_CONFIG payload: devices, the shared tenant id, and the poll settings.
         payload = {"devices": _project_nw_devices_for_push(slice_),
                    "shared_tenant_id": access.shared_tenant_id() or "",
                    **poll_cfg}
+        # Send it to the spoke.
         msg = _hub_msg(spoke_id, "UPDATE_CONFIG", payload)
         await hub.send_to_spoke(msg)
         return True
@@ -695,11 +779,13 @@ def register(app, hub, ctx):
         ``get_nw_spoke_for_tenant`` / ``get_nw_spoke_for_shared`` — never an
         unassigned fallback (no cross-tenant leak). Empty ``spoke_id`` → the
         caller raises 503 (device's spoke not connected)."""
+        # Find the device; unknown ids are a 404.
         hub = app.state.hub
         devices = (hub.state.system_state.get("global_config", {}) or {}).get("nw_devices", []) or []
         dev = next((d for d in devices if isinstance(d, dict) and d.get("id") == device_id), None)
         if not dev:
             raise HTTPException(status_code=404, detail="Network device not found")
+        # The caller's access level for the device's tenant; denied (or hidden shared) is a 403.
         sess = _session_user(request)
         tid = dev.get("tenant_id", "")
         scope = access.write_scope(sess, tid) if write else access.read_scope(sess, tid)
@@ -738,10 +824,12 @@ def register(app, hub, ctx):
         even though every record is legitimately theirs (mirrors the own-CPPM
         NAC bypass). ``spoke_id`` is the device's nw agent: an agent dedicated
         to a tenant makes the data that tenant's too (see access.filter_nw)."""
+        # Dedicated devices and full-scope readers with no acting tenant get everything.
         if dedicated:
             return data
         if scope == "full" and not tenant:
             return data
+        # Otherwise apply the tenant subnet filter.
         return await _filter_nw(request, data, endpoint, tenant, spoke_id=spoke_id)
 
     @app.get("/api/nw/devices")
@@ -763,6 +851,7 @@ def register(app, hub, ctx):
         (which also seeds the cache, admin-only). No spoke + no cache → 503.
         ``?tenant=`` is accepted for signature compat (the fleet list is
         inventory, no IP to subnet-filter on)."""
+        # The caller and whether they are a Global Admin.
         hub = app.state.hub
         sess = _session_user(request)
         is_admin = _is_admin(sess)
@@ -794,6 +883,7 @@ def register(app, hub, ctx):
             # (plus unassigned and shared), never the cross-tenant firehose.
             acting_tenant = "default"
 
+        # Whether shared devices are hidden from this tenant.
         hide_shared = _shared_nw_hidden(request, acting_tenant or "")
 
         def _row_visible(tid):
@@ -801,13 +891,17 @@ def register(app, hub, ctx):
             request. Acting-as a specific tenant → only that tenant's dedicated
             devices + shared devices. Otherwise the existing rule: admin → all,
             non-admin → own-tenant + shared (``spoke_visible_to_session``)."""
+            # Shared devices hidden from this tenant are never visible.
             if hide_shared and access.tenant_is_shared(tid):
                 return False
+            # Acting as a tenant: that tenant's devices, shared devices, and (for default)
+            # unassigned ones.
             if acting_tenant is not None:
                 if acting_tenant == "default" and not str(tid or "").strip():
                     return True
                 return (str(tid or "").casefold() == str(acting_tenant).casefold()
                         or access.tenant_is_shared(tid))
+            # Otherwise admins see everything, others their own tenants plus shared.
             return is_admin or access.spoke_visible_to_session(sess, tid)
 
         # Authoritative visibility: the hub config is the source of truth for
@@ -835,10 +929,15 @@ def register(app, hub, ctx):
         # Pulled from the warm per-device cache (poll → device_info, mirrored to
         # the ``info`` envelope); absent until the device is first polled.
         def _device_identity(did):
+            """The identity details (serial, MAC, model, firmware, hostname) cached from the
+            device's last poll.
+            """
+            # The cached device info; none means no identity yet.
             env = hub.nw_cache_get_device(did, "info")
             info = (env or {}).get("data") if isinstance(env, dict) else None
             if not isinstance(info, dict):
                 return {}
+            # Keep only the fields that have a value.
             out = {}
             for k in ("serial", "mac", "model", "firmware", "hostname"):
                 v = info.get(k)
@@ -846,6 +945,7 @@ def register(app, hub, ctx):
                     out[k] = v
             return out
 
+        # Identity details for every visible device.
         info_by_id = {did: _device_identity(did) for did in visible_ids}
         # NetBox site (from the site-scoped prefix of the address), recorded on each poll.
         for d in visible:
@@ -853,11 +953,16 @@ def register(app, hub, ctx):
                 info_by_id.setdefault(d["id"], {})["site"] = d["site"]
 
         def _overlay_names(env):
+            """Return a copy of the envelope with each row's name and identity details taken from
+            the hub config.
+            """
+            # Leave anything that is not an envelope alone.
             if not isinstance(env, dict):
                 return env
             rows = env.get("data")
             if isinstance(rows, list):
                 def _merge(r):
+                    """Return a copy of one row with the hub's name and identity details applied."""
                     if not isinstance(r, dict):
                         return r
                     rid = r.get("id")
@@ -866,6 +971,7 @@ def register(app, hub, ctx):
                         extra["name"] = name_by_id[rid]
                     extra.update(info_by_id.get(rid) or {})
                     return {**r, **extra} if extra else r
+                # Replace the rows with the merged copies.
                 env = {**env, "data": [_merge(r) for r in rows]}
             return env
 
@@ -879,8 +985,10 @@ def register(app, hub, ctx):
             spokes = [s for s in (hub.get_all_spokes_by_type("nw") or [])
                       if s in hub.active_connections
                       and hub.approved_modules.get(s, False)]
+            # Admins query with no tenant filter.
             spoke_to_tid = {s: "" for s in spokes}
         else:
+            # Non-admins: the spoke for each of their tenants, plus the shared spoke unless hidden.
             spoke_to_tid = {}
             for t in ((sess or {}).get("user", {}).get("tenants") or []):
                 s = hub.get_nw_spoke_for_tenant(t)
@@ -891,6 +999,7 @@ def register(app, hub, ctx):
                 s = hub.get_nw_spoke_for_shared()
                 if s:
                     spoke_to_tid[s] = shared_tid
+            # Keep only connected, approved spokes.
             spoke_to_tid = {s: t for s, t in spoke_to_tid.items()
                             if s in hub.active_connections
                             and hub.approved_modules.get(s, False)}
@@ -908,12 +1017,17 @@ def register(app, hub, ctx):
         gate_by_config = bool(visible_ids) or acting_tenant is not None
 
         def _row_served(r):
+            """Whether a row may be served: in the visible config when gating by config, else by
+            tenant.
+            """
             if gate_by_config:
                 return r.get("id") in visible_ids
             return _row_visible(r.get("tenant_id", ""))
 
+        # The cached fleet filtered to this reader (skipped when refresh is forced).
         cached = None if force else hub.nw_cache_get_fleet_filtered(_row_served)
         if cached is not None:
+            # Serve the cache, with hub names applied and marked as cached.
             out = dict(_overlay_names(dict(cached.get("devices") or {})))
             out["cached"] = True
             out["fetched_at"] = cached.get("fetched_at")
@@ -937,6 +1051,7 @@ def register(app, hub, ctx):
                     "Network Devices spoke offline — reachability unknown "
                     "(showing last-known inventory)")
             else:
+                # Spoke online: refresh in the background if the snapshot is getting old.
                 age = time.time() - float(cached.get("fetched_at") or 0.0)
                 if age > _NW_SERVE_MAX_AGE_S:
                     _nw_spawn_refresh("__fleet__", lambda: _nw_bg_refresh_fleet(hub))
@@ -947,9 +1062,11 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503,
                                 detail="Network Devices spoke not connected")
 
+        # Merged rows, ids already seen, and how many spokes answered.
         # Fan out NW_LIST_DEVICES (admin: {} = whole fleet per spoke; non-admin:
         # {"tenant": tid} = own+shared from that spoke) + merge rows by id.
         merged, seen, answered = [], set(), 0
+        # Ask each spoke for its devices (filtered to the reader's tenant) and merge them by id.
         for sid in spokes:
             tid = spoke_to_tid.get(sid, "")
             payload = {"tenant": tid} if tid else {}
@@ -967,9 +1084,11 @@ def register(app, hub, ctx):
             except Exception as e:
                 logger.warning("nw_list_devices: spoke %s fetch failed: %s", sid, e)
 
+        # Drop rows the reader may not see.
         if gate_by_config:
             merged = [r for r in merged if _row_served(r)]
 
+        # The merged result.
         env = {"status": "SUCCESS", "data": merged,
                "message": f"{len(merged)} device(s)"}
         # The global cache holds the WHOLE fleet (last admin fetch) so the
@@ -981,6 +1100,7 @@ def register(app, hub, ctx):
                 await hub.nw_cache_set_fleet(env)
             except Exception:
                 logger.debug("nw_list_devices: cache set failed", exc_info=True)
+        # Return it with hub names applied.
         return _overlay_names(env)
 
     # ── topology ─────────────────────────────────────────────────────────────
@@ -994,8 +1114,10 @@ def register(app, hub, ctx):
         These are the whole point of the feature: a lot of lab gear (unmanaged
         switches, media converters, PDUs, older APs) speaks no LLDP and would
         otherwise be invisible on the map."""
+        # This tenant's saved topology config.
         gc = hub.state.system_state.get("global_config", {}) or {}
         cur = (((gc.get("nw_tenant_cfg") or {}).get(tid) or {}).get("topology") or {})
+        # Only dict entries are kept.
         return {
             "devices": [d for d in (cur.get("devices") or []) if isinstance(d, dict)],
             "links": [l for l in (cur.get("links") or []) if isinstance(l, dict)],
@@ -1003,6 +1125,7 @@ def register(app, hub, ctx):
 
     def _nw_cached_rows(hub, device_id, endpoint):
         """Rows from the warm per-device cache, or [] on a cold miss."""
+        # The cached envelope's data rows, if it is a list.
         env = hub.nw_cache_get_device(device_id, endpoint)
         rows = env.get("data") if isinstance(env, dict) else None
         return rows if isinstance(rows, list) else []
@@ -1027,9 +1150,11 @@ def register(app, hub, ctx):
 
         ``?infer=0`` drops MAC-table inference and shows only links something
         actually asserted (LLDP or a human)."""
+        # The caller and whether they are a Global Admin.
         hub = app.state.hub
         sess = _session_user(request)
         is_admin = _is_admin(sess)
+        # The result for an empty map.
         empty = {"nodes": [], "edges": [], "trunks": [],
                  "stats": {"nodes": 0, "edges": 0, "trunks": 0,
                            "trunk_ports": 0, "nodes_without_lldp": 0,
@@ -1046,9 +1171,13 @@ def register(app, hub, ctx):
             # (plus unassigned and shared), never the cross-tenant firehose.
             acting_tenant = "default"
 
+        # Whether shared devices are hidden from this tenant.
         hide_shared = _shared_nw_hidden(request, acting_tenant or "")
 
         def _row_visible(tid):
+            """Whether a device of tenant tid is visible to this request (same rule as the device
+            list).
+            """
             if hide_shared and access.tenant_is_shared(tid):
                 return False
             if acting_tenant is not None:
@@ -1058,6 +1187,7 @@ def register(app, hub, ctx):
                         or access.tenant_is_shared(tid))
             return is_admin or access.spoke_visible_to_session(sess, tid)
 
+        # Visible devices from the hub config.
         all_devs = (hub.state.system_state.get("global_config", {}) or {}).get("nw_devices", []) or []
         fleet = [d for d in all_devs if isinstance(d, dict)
                  and _row_visible(d.get("tenant_id", ""))]
@@ -1079,19 +1209,23 @@ def register(app, hub, ctx):
             scope_by_id[did] = scope
         fleet = authed
 
+        # Whether to fetch live first, and whether to infer links from MAC tables.
         force = _nw_truthy(request.query_params.get("refresh"))
         infer = not (request.query_params.get("infer") in ("0", "false", "no"))
 
         async def _gather(device_id, endpoint, spoke_cmd, timeout):
             """Live-fetch one device endpoint and seed the cache. Never raises:
             one unreachable switch must not blank the whole map."""
+            # No connected spoke for this device: nothing to fetch.
             spoke_id = spoke_by_id.get(device_id) or ""
             if not spoke_id:
                 return
+            # Send the device's tenant along with the request.
             dev = next((d for d in fleet if d.get("id") == device_id), {})
             payload = {"device_id": device_id}
             if dev.get("tenant_id"):
                 payload["tenant"] = dev["tenant_id"]
+            # Fetch from the spoke and cache the unwrapped result.
             try:
                 result = await hub.request_response(spoke_id, spoke_cmd, payload,
                                                     timeout=timeout)
@@ -1107,9 +1241,11 @@ def register(app, hub, ctx):
             sem = asyncio.Semaphore(4)
 
             async def _one(device_id, endpoint, cmd, timeout):
+                """Fetch one device endpoint, at most 4 at a time."""
                 async with sem:
                     await _gather(device_id, endpoint, cmd, timeout)
 
+            # LLDP neighbours for every device, plus MAC tables when inferring links.
             jobs = []
             for dev in fleet:
                 did = dev["id"]
@@ -1128,14 +1264,17 @@ def register(app, hub, ctx):
             tenant and is never filtered (the subnet filter only makes sense
             where many tenants' clients coexist).
             """
+            # Dedicated: bound to one tenant that is not the shared tenant.
             tid = dev.get("tenant_id", "")
             dedicated = bool(tid) and not access.tenant_is_shared(tid)
             out = await _filter_nw_optional(scope_by_id.get(dev["id"], "full"),
                                             request, {"data": rows}, endpoint,
                                             acting_tenant, dedicated, dev.get("spoke_id"))
+            # Only dict rows survive.
             got = out.get("data") if isinstance(out, dict) else None
             return [r for r in (got or []) if isinstance(r, dict)]
 
+        # Collect each device's cached (and tenant-filtered) LLDP and MAC rows.
         lldp_by_device, macs_by_device = {}, {}
         for dev in fleet:
             did = dev["id"]
@@ -1144,12 +1283,14 @@ def register(app, hub, ctx):
             if infer:
                 macs_by_device[did] = await _scoped(
                     dev, "macs", _nw_cached_rows(hub, did, "macs"))
+            # No background refresh after a forced live fetch, or without a spoke.
             if force or not spoke_by_id.get(did):
                 continue
             # Stale-while-revalidate: refresh aging entries for the NEXT load.
             age = time.time() - hub.nw_cache_device_fetched_at(did)
             if age <= _NW_SERVE_MAX_AGE_S:
                 continue
+            # Refresh each stale endpoint in the background, sending the device's tenant along.
             payload = {"device_id": did}
             if dev.get("tenant_id"):
                 payload["tenant"] = dev["tenant_id"]
@@ -1199,9 +1340,11 @@ def register(app, hub, ctx):
             rows = filtered.get("data") if isinstance(filtered, dict) else None
             netbox_devices = [r for r in (rows or []) if isinstance(r, dict)]
 
+        # The tenant whose declared devices and links are added to the map.
         cfg_tid = acting_tenant or _nw_caller_tenant(sess, None)
         manual = _nw_topology_cfg(hub, cfg_tid)
 
+        # Build the map from every source.
         graph = build_topology(
             fleet=fleet,
             lldp_by_device=lldp_by_device,
@@ -1229,12 +1372,14 @@ def register(app, hub, ctx):
                     "netbox_tenant_slug") or "").strip() if cfg_tid else ""
                 asyncio.create_task(_nw_sync_lldp_netbox(hub, netbox, links, slug))
 
+        # Return the map.
         return graph
 
     @app.get("/api/nw/topology/manual")
     async def nw_topology_manual_get(request: Request, tenant: str = None):
         """The operator-declared devices and links for a tenant (the editable
         half of the map)."""
+        # The caller's tenant (an explicit "default" counts as none).
         hub = app.state.hub
         sess = _session_user(request)
         tid = _nw_caller_tenant(sess, tenant if tenant != "default" else None)
@@ -1253,17 +1398,23 @@ def register(app, hub, ctx):
         are a device id, name, IP or MAC."""
         hub = app.state.hub
         sess = _session_user(request)
+        # Admins or tenant admins only.
         if not (_is_admin(sess) or _is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="admin or tenant-admin required")
+        # Read the JSON body; a bad body counts as empty, and it must be an object.
         try:
             data = await request.json()
         except Exception:
             data = {}
         if not isinstance(data, dict):
             raise HTTPException(status_code=400, detail="body must be an object")
+        # The tenant whose topology is being replaced.
         tid = _nw_caller_tenant(sess, data.get("tenant"))
 
         def _clean(items, keys, required):
+            """Return the dict items with the given keys as trimmed strings, dropping ones missing a
+            required key and giving each an id.
+            """
             if not isinstance(items, list):
                 raise HTTPException(status_code=400,
                                     detail="devices/links must be lists")
@@ -1278,16 +1429,19 @@ def register(app, hub, ctx):
                 out.append(row)
             return out
 
+        # Copy the tenant's stored config so it is replaced as a whole.
         gc = hub.state.system_state.get("global_config", {})
         tmap = dict(gc.get("nw_tenant_cfg") or {})
         cur = dict(tmap.get(tid) or {})
         topo = dict(cur.get("topology") or {})
+        # Replace whichever lists were sent.
         if "devices" in data:
             topo["devices"] = _clean(
                 data["devices"], ("name", "mac", "ip", "kind", "note"), ("name",))
         if "links" in data:
             topo["links"] = _clean(
                 data["links"], ("a", "a_port", "b", "b_port", "note"), ("a", "b"))
+        # Save it back.
         cur["topology"] = topo
         tmap[tid] = cur
         gc["nw_tenant_cfg"] = tmap
@@ -1319,6 +1473,7 @@ def register(app, hub, ctx):
         (which also seeds the cache). The cache is gated by the same
         ``_authz_nw_device`` check, so a non-admin can't fetch another tenant's
         device cache."""
+        # The spoke command for each supported endpoint.
         hub = app.state.hub
         command_map = {
             "info":       "NW_GET_DEVICE_INFO",
@@ -1329,10 +1484,12 @@ def register(app, hub, ctx):
             "vlans":      "NW_GET_VLANS",       # per-VLAN rollup
             "lldp":       "NW_GET_LLDP_NEIGHBORS",  # adjacencies for the map
         }
+        # Unsupported endpoints are a 400.
         spoke_cmd = command_map.get(endpoint)
         if not spoke_cmd:
             raise HTTPException(status_code=400, detail=f"Endpoint {endpoint} not supported by nw module")
         logger.debug("relay GET /api/nw/%s/%s tenant=%s", device_id, endpoint, tenant)
+        # Authorize the read; this also finds the device's spoke.
         dev, scope, spoke_id = _authz_nw_device(request, device_id)
         tid = dev.get("tenant_id", "")
         # A device bound to ONE (non-shared) tenant is DEDICATED: its whole
@@ -1348,6 +1505,7 @@ def register(app, hub, ctx):
         relay_payload = {"device_id": device_id}
         if tid:
             relay_payload["tenant"] = tid
+        # Live timeout for this endpoint.
         # endpoints/vlans run three sequential SSH gathers (arp+mac+interfaces)
         # on the spoke, so the 5s default relay timeout is far too short — give
         # them room; lldp walks every port's neighbour detail and is slow on a
@@ -1359,8 +1517,10 @@ def register(app, hub, ctx):
         # live SSH, then revalidate in the background when it's aging and the
         # spoke is up. ``?refresh=1`` forces a live fetch (cold path below).
         force = _nw_truthy(request.query_params.get("refresh"))
+        # The cached value (skipped when refresh is forced).
         cached = None if force else hub.nw_cache_get_device(device_id, endpoint)
         if cached is not None:
+            # Serve it tenant-filtered and marked as cached (stale when the spoke is down).
             filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant, dedicated,
                                                    dev.get("spoke_id"))
             fetched_at = hub.nw_cache_device_fetched_at(device_id)
@@ -1370,6 +1530,7 @@ def register(app, hub, ctx):
                 filtered["fetched_at"] = fetched_at
                 if not spoke_id:
                     filtered["stale"] = True
+            # Refresh it in the background when it is getting old.
             if spoke_id and (time.time() - fetched_at) > _NW_SERVE_MAX_AGE_S:
                 _nw_spawn_refresh(
                     f"{device_id}:{endpoint}",
@@ -1381,6 +1542,7 @@ def register(app, hub, ctx):
             # Cold miss AND no live spoke → nothing to serve.
             raise HTTPException(status_code=503,
                                 detail="Network Devices spoke not connected")
+        # Fetch live, cache the result, and return it tenant-filtered.
         try:
             result = await hub.request_response(spoke_id, spoke_cmd, relay_payload,
                                                 timeout=timeout)
@@ -1388,6 +1550,7 @@ def register(app, hub, ctx):
             await hub.nw_cache_set_device(device_id, endpoint, data)
             return await _filter_nw_optional(scope, request, data, endpoint, tenant, dedicated,
                                               dev.get("spoke_id"))
+        # Pass HTTP errors through.
         except HTTPException:
             raise
         except Exception as e:
@@ -1404,6 +1567,7 @@ def register(app, hub, ctx):
                     filtered = dict(filtered)
                     filtered["stale"] = True
                 return filtered
+            # No cached copy either: report a 500.
             logger.exception("nw_get_device_data failed (%s/%s)", device_id, endpoint)
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -1419,23 +1583,28 @@ def register(app, hub, ctx):
         record's ``spoke_id`` (per-tenant) so a config push lands on the spoke
         that owns the device."""
         hub = app.state.hub
+        # Read the JSON body; a bad body counts as empty.
         try:
             data = await request.json()
         except Exception:
             data = {}
+        # The command list must be a list.
         commands = (data or {}).get("commands", []) if isinstance(data, dict) else []
         if not isinstance(commands, list):
             raise HTTPException(status_code=400, detail="commands must be a list")
+        # Authorize the write; this also finds the device's spoke.
         dev, _scope, spoke_id = _authz_nw_device(request, device_id, write=True)
         if not spoke_id:
             raise HTTPException(status_code=503,
                                 detail="Network Devices spoke not connected")
+        # Send the commands to the spoke and return its reply.
         try:
             result = await hub.request_response(spoke_id, "NW_RUN_CONFIG",
                                                 {"device_id": device_id,
                                                  "commands": commands,
                                                  "tenant": dev.get("tenant_id", "")})
             return access.unwrap_spoke(result)
+        # Pass HTTP errors through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -1454,6 +1623,7 @@ def register(app, hub, ctx):
         other/unassigned devices are denied."""
         hub = app.state.hub
         _authz_nw_device(request, device_id, write=False)  # 404/403 by tenant ownership
+        # Run the poll (and NetBox push) through the hub.
         try:
             result = await hub.poll_nw_device(device_id)
             # Fold the poll's rich result into the per-device cache so a later
@@ -1461,6 +1631,7 @@ def register(app, hub, ctx):
             if isinstance(result, dict):
                 await hub.nw_cache_set_poll(device_id, result)
             return result
+        # Pass HTTP errors through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -1469,6 +1640,7 @@ def register(app, hub, ctx):
 
     @app.get("/setup/nw-devices")
     async def get_nw_devices(request: Request):
+        """Return the configured network devices visible to the caller."""
         hub = app.state.hub
         devices = hub.state.system_state.get("global_config", {}).get("nw_devices", [])
         # Tenant-scope the device list (shared + own visible; other/unassigned
@@ -1488,6 +1660,7 @@ def register(app, hub, ctx):
         ``max_poll_concurrency`` (1..50) tune the spoke's stampede protection;
         null → the spoke's built-in defaults."""
         hub = app.state.hub
+        # Read the stored settings (None means the spoke default).
         gc = hub.state.system_state.get("global_config", {}) or {}
         return {"default_poll_interval": gc.get("nw_poll_default_interval"),
                 "poll_jitter_frac": gc.get("nw_poll_jitter_frac"),
@@ -1497,10 +1670,13 @@ def register(app, hub, ctx):
 
     @app.post("/setup/nw-poll-config")
     async def set_nw_poll_config(request: Request):
+        """Save the module-level nw poll settings and re-push every nw spoke (admin only)."""
+        # Admins only.
         hub = app.state.hub
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Read and validate the default poll interval (an integer, or null for the spoke default).
         data = await request.json()
         raw = data.get("default_poll_interval")
         try:
@@ -1511,6 +1687,7 @@ def register(app, hub, ctx):
         def _opt_num(key, cast, lo, hi):
             """Parse an optional numeric knob: null/absent → None (spoke default),
             else cast + clamp to [lo, hi]."""
+            # Null or blank means use the spoke default.
             v = data.get(key)
             if v in (None, "", "null"):
                 return None
@@ -1519,6 +1696,7 @@ def register(app, hub, ctx):
             except (TypeError, ValueError):
                 raise HTTPException(status_code=400, detail=f"{key} must be numeric or null")
 
+        # Read and clamp the optional anti-stampede settings.
         jitter = _opt_num("poll_jitter_frac", float, 0.0, 0.9)
         per_tick = _opt_num("max_poll_per_tick", int, 1, 100)
         concurrency = _opt_num("max_poll_concurrency", int, 1, 50)
@@ -1536,6 +1714,7 @@ def register(app, hub, ctx):
             if ping_interval != 0:
                 ping_interval = max(30, min(ping_interval, 86400))
 
+        # Save everything to the global config.
         gc = hub.state.system_state.get("global_config", {})
         gc["nw_poll_default_interval"] = val
         gc["nw_poll_jitter_frac"] = jitter
@@ -1549,6 +1728,7 @@ def register(app, hub, ctx):
         for sid in (hub.get_all_spokes_by_type("nw") or []):
             if await _nw_push_fleet(hub, sid):
                 pushed += 1
+        # Report the saved values and how many spokes were updated.
         return {"status": "ok", "default_poll_interval": val,
                 "poll_jitter_frac": jitter, "max_poll_per_tick": per_tick,
                 "max_poll_concurrency": concurrency,
@@ -1558,21 +1738,26 @@ def register(app, hub, ctx):
     async def get_nw_netbox_import(request: Request):
         """NetBox→NW import config (NetBox = fleet source of truth): which NetBox
         device roles get imported into the nw fleet, object_type mapping, cadence."""
+        # Read the stored import config.
         hub = app.state.hub
         gc = hub.state.system_state.get("global_config", {}) or {}
         return {"nw_netbox_import": gc.get("nw_netbox_import", {}) or {}}
 
     @app.post("/setup/nw-netbox-import")
     async def set_nw_netbox_import(request: Request):
+        """Save the NetBox-to-NW import config (admin only)."""
+        # Admins only.
         hub = app.state.hub
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Read the config (wrapped in "config" or bare); roles may be a comma-separated string.
         data = await request.json()
         cfg = data.get("config", data) or {}
         roles = cfg.get("roles")
         if isinstance(roles, str):
             roles = [r.strip() for r in roles.split(",") if r.strip()]
+        # Normalize every field, with defaults.
         clean = {
             "enabled": bool(cfg.get("enabled", False)),
             "roles": [str(r).strip() for r in (roles or []) if str(r).strip()],
@@ -1581,6 +1766,7 @@ def register(app, hub, ctx):
             "interval": int(cfg.get("interval") or 900),
             "spoke_id": str(cfg.get("spoke_id") or "").strip(),
         }
+        # Save it.
         gc = hub.state.system_state.get("global_config", {})
         gc["nw_netbox_import"] = clean
         hub.state.system_state["global_config"] = gc
@@ -1590,10 +1776,12 @@ def register(app, hub, ctx):
     @app.post("/setup/nw-netbox-import/run")
     async def run_nw_netbox_import(request: Request):
         """On-demand 'Import now' — run one NetBox→NW import cycle."""
+        # Admins only.
         hub = app.state.hub
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Run one import cycle; failures are logged and returned as a 500.
         try:
             return await hub.run_nw_netbox_import_all()
         except Exception as e:
@@ -1608,6 +1796,7 @@ def register(app, hub, ctx):
         A supernet is any prefix that CONTAINS another of the tenant's prefixes
         (e.g. a /16 carved into /24s); everything else is a leaf. Leaves are
         what a targeted scan expands; supernets are left to the background sweep."""
+        # The tenant's prefixes (empty when they cannot be fetched).
         try:
             prefixes = await access.fetch_tenant_prefixes(hub, tenant_id)
         except Exception:
@@ -1616,24 +1805,29 @@ def register(app, hub, ctx):
 
     def _seen_registry(tid):
         """``{ip: entry}`` of hosts seen answering for the tenant (nw_seen_hosts)."""
+        # Created on first use.
         gc = hub.state.system_state.setdefault("global_config", {})
         return gc.setdefault("nw_seen_hosts", {}).setdefault(tid, {})
 
     async def _nw_netbox_known_ips(tid):
         """Every IP NetBox records for the tenant (or tenant group). [] when
         the tenant has no NetBox mapping or NetBox is unreachable."""
+        # The tenant's NetBox scope as a request (tenant group, else tenant).
         scope = access.netbox_tenant_scope(hub, tid)
         req = ({"tenant_group": scope["tenant_group"]} if scope.get("tenant_group")
                else {"tenant": scope["tenant"]} if scope.get("tenant") else None)
         nb = access.get_netbox_spoke(hub)
+        # No NetBox mapping or no NetBox spoke: nothing known.
         if not req or not nb:
             return []
+        # Fetch the IPs; any failure means nothing known.
         try:
             res = access.unwrap_spoke(await hub.request_response(
                 nb, "NETBOX_GET_IPS", req, timeout=60.0)) or {}
         except Exception as e:  # noqa: BLE001
             logger.warning("scan aggregate tenant=%s known NetBox IPs skipped: %s", tid, e)
             return []
+        # Just the address part of each IP.
         return [str(r.get("address") or "").split("/")[0]
                 for r in (res.get("ip_addresses") or []) if isinstance(r, dict)]
 
@@ -1654,11 +1848,16 @@ def register(app, hub, ctx):
         batches). Returns ``(targets, per_source)``; ``per_source`` counts each
         tier's contribution and ``"truncated"`` is the number of IPs dropped
         because the total ceiling was hit."""
+        # The enabled sources, the ordered pool, a set for duplicate checks, per-source counts, and
+        # how many were dropped at the cap.
         sources = set(sources or [])
         seen, seen_set, per_source = [], set(), {}
         dropped = 0
 
         def _add(ip):
+            """Add one IPv4 host to the pool (counting it as dropped once the cap is reached);
+            returns True if added.
+            """
             nonlocal dropped
             ip = str(ip or "").split("/")[0].strip()
             if not ip or ip in seen_set:
@@ -1676,8 +1875,13 @@ def register(app, hub, ctx):
             return True
 
         async def _pull(source, spoke_getter, command, payload=None):
+            """Add every IP from one source's spoke (DNS, DHCP or NAC) to the pool, if that source
+            is enabled.
+            """
+            # Skip sources that are not enabled.
             if source not in sources:
                 return
+            # Ask the tenant's spoke for this source; a missing or failed spoke just skips it.
             try:
                 sid = spoke_getter(tenant_id) if tenant_id else None
                 if not sid or hub._primary_key(sid) not in hub.active_connections:
@@ -1687,6 +1891,7 @@ def register(app, hub, ctx):
             except Exception as e:
                 logger.warning("scan aggregate tenant=%s %s skipped: %s", tenant_id, source, e)
                 return
+            # Find the row list under whichever key this spoke uses.
             rows = []
             if isinstance(data, dict):
                 for key in ("endpoints", "leases", "records", "data", "results"):
@@ -1695,6 +1900,7 @@ def register(app, hub, ctx):
                         break
             elif isinstance(data, list):
                 rows = data
+            # Add each row's IP (whichever field it is in).
             c = 0
             for r in rows:
                 if not isinstance(r, dict):
@@ -1709,16 +1915,19 @@ def register(app, hub, ctx):
                         tenant_id, source, sid, len(rows), c,
                         "" if rows else " (resp=%s)" % str(data)[:200])
 
+        # Tier 0: known hosts from NetBox and from earlier scans.
         if "netbox" in sources and tenant_id:
             c = 0
             for ip in (await _nw_netbox_known_ips(tenant_id)) + list(_seen_registry(tenant_id)):
                 c += _add(ip)
             if c:
                 per_source["known"] = c
+        # Tiers 1-3: DNS records, DHCP leases and NAC endpoints.
         await _pull("dns", hub.get_dns_spoke_for_tenant, "DNS_LIST")
         await _pull("dhcp", hub.get_dhcp_spoke_for_tenant, "DHCP_LIST_LEASES")
         await _pull("nac", hub.get_cppm_spoke_for_tenant, "LIST_ENDPOINTS")
 
+        # Tier 4: every host in the tenant's NetBox leaf prefixes.
         if "netbox" in sources and tenant_id:
             leaves, _supers = await _nw_netbox_prefix_split(hub, tenant_id)
             logger.info("scan aggregate tenant=%s netbox: %d leaf prefix(es), %d supernet(s)",
@@ -1739,6 +1948,7 @@ def register(app, hub, ctx):
             _add(ip)
         for k, v in extra_counts.items():
             per_source[k] = v
+        # Record how many were dropped at the cap.
         if dropped:
             per_source["truncated"] = dropped
         return seen, per_source
@@ -1748,13 +1958,16 @@ def register(app, hub, ctx):
         When ``tenant_id`` is given and that tenant has a per-tenant override
         (``nw_tenant_cfg[tenant]['scan']``), its keys win — so a tenant manages
         its own scan settings without clobbering the shared/global config."""
+        # Start from the global config.
         gc = hub.state.system_state.get("global_config", {}) or {}
         cfg = dict(gc.get("nw_scan", {}) or {})
+        # Overlay the tenant's own settings (non-null values only).
         if tenant_id:
             ov = (((gc.get("nw_tenant_cfg") or {}).get(tenant_id) or {}).get("scan") or {})
             for k, v in ov.items():
                 if v is not None:
                     cfg[k] = v
+        # Defaults for anything still unset.
         cfg.setdefault("enabled", False)
         cfg.setdefault("crawl", False)
         cfg.setdefault("auto_add", True)
@@ -1777,12 +1990,16 @@ def register(app, hub, ctx):
 
     @app.post("/setup/nw-scan-config")
     async def set_nw_scan_config(request: Request):
+        """Save the global network-scan config (admin or tenant admin)."""
+        # Admins or tenant admins only.
         hub = app.state.hub
         sess = _session_user(request)
         if not (_is_admin(sess) or _is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="admin or tenant-admin required")
+        # Read the config (wrapped in "config" or bare).
         data = await request.json()
         cfg = data.get("config", data) or {}
+        # TCP ports may be a list or a comma-separated string; all must be integers.
         ports = cfg.get("tcp_ports")
         if isinstance(ports, str):
             ports = [p.strip() for p in ports.split(",") if p.strip()]
@@ -1790,6 +2007,7 @@ def register(app, hub, ctx):
             ports = [int(p) for p in (ports or [22, 443, 80, 23])]
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="tcp_ports must be integers")
+        # Normalize every field, clamping the limits.
         clean = {
             "enabled": bool(cfg.get("enabled", False)),
             "crawl": bool(cfg.get("crawl", False)),
@@ -1803,6 +2021,7 @@ def register(app, hub, ctx):
             "concurrency": max(1, min(int(cfg.get("concurrency") or 32), 128)),
             "spoke_id": str(cfg.get("spoke_id") or "").strip(),
         }
+        # Save it.
         gc = hub.state.system_state.get("global_config", {})
         gc["nw_scan"] = clean
         hub.state.system_state["global_config"] = gc
@@ -1813,20 +2032,25 @@ def register(app, hub, ctx):
         """Resolve+authorize the tenant a caller may configure. Admin: the named
         tenant or the shared tenant. Tenant-admin: only one of their own tenants.
         Raises 403/400 on violation."""
+        # Admins: the named tenant, else the shared tenant.
         req_tenant = str(req_tenant or "").strip()
         if _is_admin(sess):
             return req_tenant or access.shared_tenant_id() or ""
+        # Others: their own tenants only.
         own = ((sess or {}).get("user", {}).get("tenants")
                or [(sess or {}).get("user", {}).get("tenant_id")])
         own = [t for t in own if t]
         if req_tenant and req_tenant not in own:
             raise HTTPException(status_code=403, detail="You may only configure your own tenant")
+        # Use the requested tenant, else the first one they own.
         tid = req_tenant or (own[0] if own else "")
         if not tid:
             raise HTTPException(status_code=400, detail="No tenant resolved")
         return tid
 
     def _tenant_owned_scan_sets(hub, tenant_id):
+        """Scan credential sets the tenant owns: stored sets in its scope plus its vault-held sets.
+        """
         gc = hub.state.system_state.get("global_config", {}) or {}
         owned = access.tenant_scope_ids(tenant_id)
         sets = [c for c in (gc.get("nw_scan_credentials") or []) if isinstance(c, dict)]
@@ -1834,6 +2058,7 @@ def register(app, hub, ctx):
                 + _vault_scan_sets(hub, tenant_id))
 
     def _tenant_has_own_nw_spoke(hub, tenant_id):
+        """True when the tenant has an nw spoke of its own."""
         return any(c.get("scope") == "own"
                    for c in nw_scan_spoke_choices(hub, tenant_id, None))
 
@@ -1844,10 +2069,13 @@ def register(app, hub, ctx):
         spoke is scheduled (every ``_NW_SCAN_DEFAULT_INTERVAL``) and adds what it
         finds unless the tenant explicitly saved otherwise. ``interval_seconds``
         0 = off; ``dry_run`` true = preview only (opt-in)."""
+        # The tenant's saved schedule.
         gc = hub.state.system_state.get("global_config", {}) or {}
         sc = (((gc.get("nw_tenant_cfg") or {}).get(tenant_id) or {}).get("scan_schedule") or {})
+        # Nothing saved means automatic: enabled when the tenant has its own nw spoke.
         auto = "enabled" not in sc
         enabled = _tenant_has_own_nw_spoke(hub, tenant_id) if auto else bool(sc["enabled"])
+        # A saved interval wins; otherwise the default when enabled, else off.
         iv = sc.get("interval_seconds")
         interval = int(iv or 0) if iv is not None else (_NW_SCAN_DEFAULT_INTERVAL if enabled else 0)
         return {
@@ -1861,13 +2089,16 @@ def register(app, hub, ctx):
         """One-time: scans used to default to preview-only, so the stored
         ``dry_run: true`` / ``auto_add: false`` values are old defaults, not
         choices. Drop them so every tenant inherits the auto-add default."""
+        # Run only once.
         gc = hub.state.system_state.get("global_config")
         if not isinstance(gc, dict) or gc.get("nw_scan_autodiscover_v1"):
             return
+        # Remove the old auto_add=false default from the global config.
         changed = []
         if (gc.get("nw_scan") or {}).get("auto_add") is False:
             gc["nw_scan"].pop("auto_add", None)
             changed.append("global")
+        # Remove old dry_run=true and auto_add=false defaults from each tenant's config.
         for tid, cur in (gc.get("nw_tenant_cfg") or {}).items():
             if not isinstance(cur, dict):
                 continue
@@ -1877,11 +2108,13 @@ def register(app, hub, ctx):
             if (cur.get("scan") or {}).get("auto_add") is False:
                 cur["scan"].pop("auto_add", None)
                 changed.append(f"{tid}:auto_add")
+        # Mark the migration as done.
         gc["nw_scan_autodiscover_v1"] = True
         hub.state._mark_dirty()
         logger.info("nw scan auto-discover migration: cleared preview/auto-add-off defaults %s",
                     changed or "(none)")
 
+    # Run the migration at startup; a failure must not stop the routes registering.
     try:
         _migrate_nw_scan_autodiscover(hub)
     except Exception as e:  # noqa: BLE001 - never block route registration
@@ -1895,12 +2128,15 @@ def register(app, hub, ctx):
         overrides the global admin default."""
         hub = app.state.hub
         sess = _session_user(request)
+        # Admins or tenant admins only.
         if not (_is_admin(sess) or _is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="admin or tenant-admin required")
         tid = _nw_caller_tenant(sess, request.query_params.get("tenant"))
+        # The tenant's own poll overrides, and the effective poll settings.
         gc = hub.state.system_state.get("global_config", {}) or {}
         poll_ov = (((gc.get("nw_tenant_cfg") or {}).get(tid) or {}).get("poll") or {})
         eff = access.nw_poll_cfg_for_tenant(hub, tid)
+        # The tenant's effective scan, poll and schedule settings.
         return {
             "tenant_id": tid,
             "scan": _nw_scan_config(hub, tid),
@@ -1937,21 +2173,26 @@ def register(app, hub, ctx):
         ``last_run_at`` means "not since this hub started", not "never"."""
         hub = app.state.hub
         sess = _session_user(request)
+        # Admins or tenant admins only.
         if not (_is_admin(sess) or _is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="admin or tenant-admin required")
+        # Admins see every tenant; tenant admins only their own.
         all_t = (getattr(hub.state, "tenant_state", {}) or {}).get("tenants", {}) or {}
         if _is_admin(sess):
             ids = list(all_t.keys())
         else:
             ids = [t for t in ((sess or {}).get("user", {}).get("tenants") or []) if t]
+        # Narrow to the selected tenant, if any.
         selected = str(request.query_params.get("tenant") or "").strip()
         if selected:
             ids = [t for t in ids if t == selected]
+        # Runtime status kept by the hub, and credential sets by id (for names).
         runtime = getattr(hub, "nw_scan_runtime", {}) or {}
         gc = hub.state.system_state.get("global_config", {}) or {}
         all_sets = gc.get("nw_scan_credentials", []) or []
         by_id = {c.get("id"): c for c in all_sets if isinstance(c, dict)}
         rows = []
+        # One row per tenant: its schedule, scan summary and runtime status.
         for tid in ids:
             sched = _nw_scan_schedule(hub, tid)
             cfg = _nw_scan_config(hub, tid)
@@ -1982,6 +2223,7 @@ def register(app, hub, ctx):
                 "last_identified": int(rt.get("last_identified") or 0),
                 "last_error": rt.get("last_error") or "",
             })
+        # Enabled schedules first, then by tenant name.
         rows.sort(key=lambda r: (not r["enabled"], r["tenant_name"].lower()))
         return {"schedules": rows,
                 "runtime_since_restart": bool(runtime),
@@ -1995,27 +2237,33 @@ def register(app, hub, ctx):
         tenant's connected nw spoke(s) so poll changes take effect immediately."""
         hub = app.state.hub
         sess = _session_user(request)
+        # Admins or tenant admins only.
         if not (_is_admin(sess) or _is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="admin or tenant-admin required")
+        # Read the body and resolve the tenant being configured.
         data = await request.json()
         tid = _nw_caller_tenant(sess, data.get("tenant"))
 
+        # Copy the tenant's stored config so it is replaced as a whole.
         gc = hub.state.system_state.get("global_config", {})
         tmap = dict(gc.get("nw_tenant_cfg") or {})
         cur = dict(tmap.get(tid) or {})
 
         # ── scan (partial merge over the existing tenant scan override) ──
         if isinstance(data.get("scan"), dict):
+            # Copy the tenant's scan override and apply each field that was sent.
             s = data["scan"]
             scan_ov = dict(cur.get("scan") or {})
             for k in ("enabled", "crawl", "auto_add", "try_snmp"):
                 if k in s:
                     scan_ov[k] = bool(s[k])
+            # Lists are stored as trimmed strings.
             if "ip_sources" in s:
                 scan_ov["ip_sources"] = [str(x) for x in (s["ip_sources"] or []) if str(x).strip()]
             if "credential_ids" in s:
                 scan_ov["credential_ids"] = [str(x) for x in (s["credential_ids"] or []) if str(x).strip()]
             if "subnets" in s:
+                # Subnets may be a list or a string; each must be a valid network.
                 subs = s["subnets"]
                 if isinstance(subs, str):
                     subs = subs.replace(",", " ").split()
@@ -2027,6 +2275,7 @@ def register(app, hub, ctx):
                         raise HTTPException(status_code=400, detail=f"invalid subnet: {sub}")
                 scan_ov["subnets"] = clean_subs
             if "tcp_ports" in s:
+                # TCP ports may be a list or a comma-separated string; all must be integers.
                 ports = s["tcp_ports"]
                 if isinstance(ports, str):
                     ports = [p.strip() for p in ports.split(",") if p.strip()]
@@ -2034,6 +2283,7 @@ def register(app, hub, ctx):
                     scan_ov["tcp_ports"] = [int(p) for p in (ports or [])]
                 except (TypeError, ValueError):
                     raise HTTPException(status_code=400, detail="tcp_ports must be integers")
+            # Limits are clamped.
             if "max_targets" in s:
                 scan_ov["max_targets"] = max(1, min(int(s["max_targets"] or 1024), 4096))
             if "concurrency" in s:
@@ -2044,12 +2294,16 @@ def register(app, hub, ctx):
 
         # ── poll (null a key → clear override so it inherits the global) ──
         if isinstance(data.get("poll"), dict):
+            # Copy the tenant's poll override.
             p = data["poll"]
             poll_ov = dict(cur.get("poll") or {})
 
             def _num_or_clear(key, cast, lo, hi):
+                """Set (clamped) or clear one numeric poll override from the request."""
+                # Not in the request: leave it alone.
                 if key not in p:
                     return
+                # Null or blank clears the override.
                 v = p[key]
                 if v in (None, "", "null"):
                     poll_ov.pop(key, None)
@@ -2059,6 +2313,7 @@ def register(app, hub, ctx):
                 except (TypeError, ValueError):
                     raise HTTPException(status_code=400, detail=f"{key} must be numeric or null")
 
+            # Apply each poll setting.
             _num_or_clear("default_interval", int, 0, 604800)
             _num_or_clear("jitter_frac", float, 0.0, 0.9)
             _num_or_clear("max_per_tick", int, 1, 100)
@@ -2067,6 +2322,7 @@ def register(app, hub, ctx):
 
         # ── scan_schedule ──
         if isinstance(data.get("scan_schedule"), dict):
+            # Copy the tenant's schedule and apply each field that was sent.
             ss = data["scan_schedule"]
             sched = dict(cur.get("scan_schedule") or {})
             if "enabled" in ss:
@@ -2082,6 +2338,7 @@ def register(app, hub, ctx):
                 sched["dry_run"] = bool(ss["dry_run"])
             cur["scan_schedule"] = sched
 
+        # Save the tenant's config.
         tmap[tid] = cur
         gc["nw_tenant_cfg"] = tmap
         hub.state.system_state["global_config"] = gc
@@ -2094,6 +2351,7 @@ def register(app, hub, ctx):
             if (md.get(sid, {}) or {}).get("tenant_id") == tid:
                 if await _nw_push_fleet(hub, sid):
                     pushed += 1
+        # Report the effective settings and how many spokes were updated.
         return {"status": "ok", "tenant_id": tid, "pushed": pushed,
                 "scan": _nw_scan_config(hub, tid),
                 "scan_schedule": _nw_scan_schedule(hub, tid)}
@@ -2111,11 +2369,15 @@ def register(app, hub, ctx):
         full admin — a scan runs with THAT tenant's vault credentials, never
         another tenant's. A tenant-admin is additionally limited to sets visible
         to their session."""
+        # A scheduled (system) scan has no session.
         system = sess is None
+        # The spoke to scan with: requested, else saved, limited to the tenant's own or shared
+        # spokes.
         spoke_id = resolve_nw_scan_spoke(
             hub, tenant_id,
             str(data.get("spoke_id") or saved.get("spoke_id") or "").strip(),
             access.shared_tenant_id())
+        # None available: a scheduled scan is skipped, an interactive one gets a 503.
         if not spoke_id:
             if system:
                 return {"status": "skipped", "reason": "no nw spoke connected",
@@ -2150,6 +2412,7 @@ def register(app, hub, ctx):
             # exactly the leak this scoping exists to prevent. Fall back to the
             # ADMIN scope (unassigned + default-tagged + shared) instead.
             owned = access.tenant_scope_ids(access.ADMIN_TENANT_ID)
+        # Keep only sets in that scope; tenant admins are also limited to sets they can see.
         chosen = [c for c in chosen if access.in_tenant_scope(c.get("tenant_id"), owned)]
         if not system and not _is_admin(sess):
             chosen = [c for c in chosen
@@ -2172,6 +2435,7 @@ def register(app, hub, ctx):
             # scan cannot mutate the fleet — it is preview-only by construction.
             logger.info("nw scan tenant=%s: no scan credentials — discovery-only pass",
                         tenant_id)
+        # Fill in each set's secrets from the vault and shape them for the spoke.
         overlaid = await instance_vault.overlay_many(hub, chosen, "nw_scan_credentials")
         push_creds = [{
             "id": c.get("id"), "name": c.get("name") or c.get("id"),
@@ -2181,11 +2445,13 @@ def register(app, hub, ctx):
             "snmp_community": c.get("snmp_community") or "",
         } for c in overlaid]
 
+        # Which IP sources to collect targets from.
         ip_sources = data.get("ip_sources") or saved.get("ip_sources") or ["netbox"]
         # ``max_targets`` is the per-request BATCH size: a longer target list is
         # split into batches (run a few in parallel) rather than truncated. Only
         # the absolute ceiling below truncates.
         cap = max(1, min(int(data.get("max_targets") or saved.get("max_targets") or 1024), 4096))
+        # Collect the candidate targets from every source.
         targets, per_source = await _aggregate_scan_targets(
             hub, tenant_id, ip_sources,
             data.get("subnets") or saved.get("subnets") or [],
@@ -2200,11 +2466,13 @@ def register(app, hub, ctx):
         if foreign:
             targets = [t for t in targets if t not in foreign]
             per_source["other_tenant"] = len(foreign)
+        # Log the targets and sources for troubleshooting.
         logger.info("nw scan tenant=%s targets=%d sources=%s creds=%d cred_ids=%s",
                     tenant_id, len(targets), per_source, len(chosen),
                     [c.get("id") for c in chosen])
         logger.info("nw scan tenant=%s candidate targets (%d): %s", tenant_id, len(targets),
                     " ".join(sorted(str(t) for t in targets)))
+        # No candidates: report that and stop.
         if not targets:
             return {"status": "ok", "message": "No candidate IPs found for this tenant "
                     "(no DNS/DHCP/NAC rows and no NetBox prefixes tagged to it). Add "
@@ -2225,6 +2493,7 @@ def register(app, hub, ctx):
         else:
             use_nmap = bool(saved.get("use_nmap", False))
 
+        # Scan options sent to the spoke.
         options = {
             "tcp_ports": saved.get("tcp_ports") or [22, 443, 80, 23],
             "try_snmp": bool(saved.get("try_snmp", True)),
@@ -2237,10 +2506,14 @@ def register(app, hub, ctx):
         # Ping every target too: a host that only answers ping is still a
         # device (NetBox + Zabbix), and a missed reply is what ages it out.
         alive = await _nw_ping_all(spoke_id, targets)
+        # Split the targets into batches, a few running at once.
         batches = [targets[i:i + cap] for i in range(0, len(targets), cap)]
         sem = asyncio.Semaphore(_NW_SCAN_PARALLEL_BATCHES)
 
         async def _run_batch(batch):
+            """Send one batch to the spoke (limited by the semaphore) and return its unwrapped
+            result.
+            """
             async with sem:
                 result = await hub.request_response(
                     spoke_id, "NW_SCAN",
@@ -2249,9 +2522,11 @@ def register(app, hub, ctx):
                     timeout=max(60.0, min(len(batch) * 2.0, 900.0)))
                 return access.unwrap_spoke(result)
 
+        # Run every batch; failed batches come back as exceptions.
         outcomes = await asyncio.gather(*(_run_batch(b) for b in batches),
                                         return_exceptions=True)
         failed = [o for o in outcomes if isinstance(o, BaseException)]
+        # Every batch failed: a scheduled scan reports an error, an interactive one gets a 500.
         if len(failed) == len(outcomes):
             e = failed[0]
             logger.error("nw scan failed (tenant=%s): %s", tenant_id, e)
@@ -2259,17 +2534,22 @@ def register(app, hub, ctx):
                 return {"status": "error", "reason": str(e), "tenant": tenant_id,
                         "added": [], "identified": []}
             raise HTTPException(status_code=500, detail=f"scan failed: {e}")
+        # Some batches failed: log it and keep the rest.
         if failed:
             logger.warning("nw scan tenant=%s: %d of %d batch(es) failed: %s",
                            tenant_id, len(failed), len(outcomes), failed[0])
             per_source["failed_batches"] = len(failed)
+        # Successful batch results.
         scans = [o for o in outcomes if isinstance(o, dict)]
+        # Addresses that answered a probe, plus every address already in the fleet.
         answered = {str(d.get("address") or "").strip() for o in scans
                     for d in (o.get("reachable") or []) + (o.get("identified") or [])}
         answered |= {str(a or "").strip()
                      for d in (hub.state.system_state.get("global_config", {}) or {}).get("nw_devices") or []
                      if isinstance(d, dict) for a in [d.get("address")] + list(d.get("alt_addresses") or [])}
+        # Hosts that answered ping but nothing else.
         quiet = [ip for ip in targets if ip in alive and ip not in answered]
+        # Results of probing those ping-only hosts.
         pinged = {}
         if quiet:
             # Answered ping but no management port: try SNMP + the profile
@@ -2283,6 +2563,7 @@ def register(app, hub, ctx):
                                                 bool(saved.get("try_snmp", True)))
             except Exception as e:  # noqa: BLE001
                 logger.warning("nw scan tenant=%s ping-only probe failed: %s", tenant_id, e)
+        # Every identified device across all batches.
         identified = [d for o in scans for d in (o.get("identified") or [])]
         # Hosts that answered a TCP probe but were not classified into a device
         # family. Always reported now — on a discovery-only (credential-free)
@@ -2292,8 +2573,10 @@ def register(app, hub, ctx):
         # the unclassified ones so they aren't logged/handled as UNIDENTIFIED.
         reachable = [d for o in scans for d in (o.get("reachable") or [])
                      if not d.get("object_type")]
+        # Total hosts scanned.
         scan = {"scanned": sum(int(o.get("scanned") or 0) for o in scans)}
 
+        # The current fleet.
         gc = hub.state.system_state.get("global_config", {})
         devices = gc.get("nw_devices", []) or []
         # A device recorded under another tenant whose agent has since moved
@@ -2303,23 +2586,28 @@ def register(app, hub, ctx):
         # (the record already carries working credentials).
         preview_only = bool(data.get("dry_run", False)) or not bool(
             data.get("auto_add", saved.get("auto_add", True)))
+        # Moved devices, previews of moves, and the spokes they moved from.
         moved, move_preview, from_spokes = [], [], set()
         _scan_creds = {c.get("id"): c for c in chosen}
         _finder = getattr(hub, "nw_find_relocation", None)
+        # Check each identified device for a record under another tenant that should move here.
         for dev in (identified if callable(_finder) else []):
             hit = _finder(devices, tenant_id, spoke_id, dev.get("address"),
                                          dev.get("hostname"), str(dev.get("object_type") or ""))
             if not hit:
                 continue
+            # Preview scans only report the move.
             d, evidence = hit
             if preview_only:
                 move_preview.append({"id": d.get("id"), "name": d.get("name"),
                                      "address": d.get("address"), "from_tenant": d.get("tenant_id"),
                                      "to_tenant": tenant_id, "evidence": evidence})
                 continue
+            # Move the record to this tenant and this spoke.
             from_spokes.add(str(d.get("spoke_id") or ""))
             moved.append(hub.nw_relocate_device(d, tenant_id, spoke_id, evidence,
                                                 _scan_creds.get(dev.get("credential_id"))))
+        # Every address of the moved devices.
         moved_addrs = {str(a or "").strip() for m in moved for d in devices
                        if isinstance(d, dict) and d.get("id") == m["id"]
                        for a in [d.get("address")] + list(d.get("alt_addresses") or [])}
@@ -2346,6 +2634,7 @@ def register(app, hub, ctx):
         # device (same name rule as nw_hardware_primaries).
         by_name = {(str(d.get("object_type") or ""), nw_short_name(d.get("name"))): d
                    for d in mine if nw_short_name(d.get("name"))}
+        # Whether any alternate address was recorded, and credential sets by id.
         alt_added = False
         by_cred = {c.get("id"): c for c in chosen}
 
@@ -2359,19 +2648,25 @@ def register(app, hub, ctx):
         # devices the fleet can never actually manage.
         discovery_only = not push_creds
         dry_run = dry_run or discovery_only
+        # Devices added, and devices that would be added in a preview.
         added, preview = [], []
         logger.info("nw scan tenant=%s result: scanned=%s identified=%d reachable-unidentified=%d dry_run=%s",
                     tenant_id, scan["scanned"], len(identified), len(reachable), dry_run)
+        # Log each reachable host that could not be identified.
         for dev in reachable:
             logger.info("nw scan tenant=%s UNIDENTIFIED %s ports=%s detail=%s", tenant_id,
                         dev.get("address"), dev.get("open_ports") or dev.get("ports"),
                         {k: dev.get(k) for k in ("reason", "error", "banner", "ssh_error") if dev.get(k)})
+        # Decide what to do with each identified device.
         for dev in identified:
+            # Skip addresses already in the fleet.
             addr = str(dev.get("address", "")).strip()
             if not addr or addr in known:
                 logger.info("nw scan tenant=%s SKIP %s (%s): already in fleet", tenant_id, addr,
                             dev.get("hostname"))
                 continue
+            # Same hostname and type as an existing device: record it as another address of that
+            # device.
             same = by_name.get((str(dev.get("object_type") or ""), nw_short_name(dev.get("hostname"))))
             if same is not None:
                 logger.info("nw scan tenant=%s SKIP %s (%s): another address of %s",
@@ -2381,6 +2676,8 @@ def register(app, hub, ctx):
                     same["alt_addresses"] = sorted(set(same.get("alt_addresses") or []) | {addr})
                     alt_added = True
                 continue
+            # The credential set that worked (else the first chosen one), and a summary of the
+            # device.
             cred_set = by_cred.get(dev.get("credential_id")) or (chosen[0] if chosen else {})
             entry = {
                 "name": dev.get("hostname") or addr,
@@ -2390,10 +2687,12 @@ def register(app, hub, ctx):
                 "method": dev.get("method"),
                 "credential_id": dev.get("credential_id"),
             }
+            # Only manageable device types are added.
             if dev.get("object_type") not in _SCAN_OBJECT_TYPES:
                 logger.info("nw scan tenant=%s SKIP %s (%s): object_type %r not auto-addable",
                             tenant_id, addr, dev.get("hostname"), dev.get("object_type"))
                 continue
+            # Preview: report it without adding.
             if dry_run:
                 preview.append(entry)
                 continue
@@ -2412,18 +2711,23 @@ def register(app, hub, ctx):
                 "spoke_id": spoke_id,
                 "source": "scanned",
             }
+            # Link the credential set's vault entry.
             ref = cred_set.get("vault_credential")
             if ref:
                 new_dev["vault_credential"] = ref
+            # Add it to the fleet.
             devices.append(new_dev)
             known.add(addr)
             added.append(new_dev)
 
+        # Save any new devices or addresses and push the fleet to the spoke.
         if added or alt_added:
             gc["nw_devices"] = devices
             hub.state.system_state["global_config"] = gc
             hub.state._mark_dirty()
             await _nw_push_fleet(hub, spoke_id)
+        # Moved devices: save, push to this spoke, and push to each spoke they left so it drops
+        # them.
         if moved:
             hub.state._mark_dirty()
             if not (added or alt_added):
@@ -2439,6 +2743,7 @@ def register(app, hub, ctx):
         snmp_only = [d for d in reachable if d.get("snmp_ok") and d.get("snmp_credential_id")
                      and str(d.get("address") or "").strip() not in known]
         if snmp_only:
+            # This tenant's monitor-only hosts by address; add or update each SNMP host.
             mine = {str(n.get("address")): n for n in (gc.get("nw_monitor_neighbors") or [])
                     if isinstance(n, dict) and n.get("tenant_id") == tenant_id}
             for d in snmp_only:
@@ -2446,6 +2751,7 @@ def register(app, hub, ctx):
                 mine[addr] = {"tenant_id": tenant_id, "name": d.get("hostname") or addr,
                               "address": addr, "type": "switch", "snmp_ok": True,
                               "snmp_secret": d["snmp_credential_id"]}
+            # Replace this tenant's entries with the updated set.
             gc["nw_monitor_neighbors"] = [n for n in (gc.get("nw_monitor_neighbors") or [])
                                           if not (isinstance(n, dict) and n.get("tenant_id") == tenant_id)
                                           ] + list(mine.values())
@@ -2454,6 +2760,7 @@ def register(app, hub, ctx):
             logger.info("nw scan tenant=%s monitor-only SNMP hosts: %s", tenant_id,
                         [(d["address"], d.get("hostname")) for d in snmp_only])
 
+        # Record every host that answered (not for preview scans).
         if not data.get("dry_run"):
             await _nw_note_responders(
                 tenant_id, identified + reachable + (pinged.get("reachable") or [])
@@ -2473,11 +2780,13 @@ def register(app, hub, ctx):
                      and d.get("id") and d.get("id") not in {a["id"] for a in added}
                      and str(d.get("name") or "").strip()
                      == str(d.get("address") or "").strip()]
+        # Poll the added, moved and unnamed devices in the background.
         poll_ids = list(dict.fromkeys([d["id"] for d in added] + [m["id"] for m in moved] + stale_ids))
         if poll_ids:
             _nw_spawn_refresh(f"discovery-poll:{poll_ids[0]}",
                               lambda: _nw_poll_discovered(hub, poll_ids))
 
+        # The full scan result.
         return {
             "status": "ok",
             "tenant": tenant_id,
@@ -2502,10 +2811,13 @@ def register(app, hub, ctx):
         schedule; ``dry_run`` honors the schedule's preview flag (else the scan
         config's auto_add). Admin ops may pass explicit ``targets`` (scanned
         instead of the tenant's IP sources) and override ``dry_run``."""
+        # The tenant's saved scan config and schedule.
         saved = _nw_scan_config(hub, tenant_id)
         sched = _nw_scan_schedule(hub, tenant_id)
+        # Preview or add, per the schedule (or the caller's override).
         data = {"dry_run": bool(sched.get("dry_run", False)) if dry_run is None else bool(dry_run),
                 "auto_add": bool(saved.get("auto_add", True))}
+        # Explicit targets replace the tenant's IP sources.
         if targets:
             data["targets"] = list(targets)
             data["ip_sources"] = ["explicit"]  # no aggregated sources, targets only
@@ -2525,10 +2837,12 @@ def register(app, hub, ctx):
     #     tick and probes only hosts that answer (_NW_SWEEP_PORTS + SNMP).
     #     Report-only: it never adds devices and never blocks a scheduled scan.
     def _sweep_enabled(hub, tid):
+        """True when the tenant has turned on the background supernet sweep."""
         gc = hub.state.system_state.get("global_config", {}) or {}
         return bool((((gc.get("nw_tenant_cfg") or {}).get(tid) or {}).get("sweep") or {}).get("enabled", False))
 
     def _sweep_state(hub, tid):
+        """The tenant's stored sweep progress, created with defaults on first use."""
         gc = hub.state.system_state.setdefault("global_config", {})
         return gc.setdefault("nw_sweep", {}).setdefault(tid, {
             "cursor": 0, "total": 0, "cycles": 0, "scanned": 0, "discovered": [],
@@ -2537,16 +2851,20 @@ def register(app, hub, ctx):
     async def _nw_sweep_step(tid, *, force=False):
         """Probe the next batch of the tenant's sweep space. Returns the sweep
         state dict (or ``{"status": ...}`` when skipped)."""
+        # Skip when the sweep is off (unless forced).
         if not force and not _sweep_enabled(hub, tid):
             return {"status": "disabled"}
+        # The spoke to sweep with; none means skip.
         saved = _nw_scan_config(hub, tid)
         spoke_id = resolve_nw_scan_spoke(
             hub, tid, str(saved.get("spoke_id") or "").strip(), access.shared_tenant_id())
         if not spoke_id:
             return {"status": "skipped", "reason": "no nw spoke connected"}
+        # Run the gateway pass first; it does one batch per tick until finished.
         gw = await _nw_gateway_sweep_step(tid, spoke_id)
         if gw.get("status") == "ok":
             return gw  # one batch per tick: finish the gateway pass first
+        # The sweep progress, and the tenant's prefixes split into leaves and supernets.
         st = _sweep_state(hub, tid)
         leaves, supers = await _nw_netbox_prefix_split(hub, tid)
         # The directed (6h) scan already covers its leaf prefixes and the
@@ -2556,19 +2874,24 @@ def register(app, hub, ctx):
                 leaves.append(ipaddress.ip_network(str(sub).strip(), strict=False))
             except ValueError:
                 pass
+        # Integer host ranges to sweep: the supernets minus the leaves.
         ranges = sweep_ranges(supers, [n for n in leaves if n.version == 4])
         if not ranges:
             st.update(total=0, cursor=0, last_status="no-supernets", last_run_at=time.time())
             hub.state._mark_dirty()
             return {"status": "no-supernets"}
+        # Addresses the targeted scan already covers, plus seen hosts and fleet devices, are
+        # skipped.
         covered, _ps = await _aggregate_scan_targets(
             hub, tid, ["dns", "dhcp", "nac"], saved.get("subnets") or [], [], _NW_SCAN_MAX_TOTAL)
         gc = hub.state.system_state.get("global_config", {}) or {}
         covered = set(covered) | set(_seen_registry(tid)) | {
             str((d or {}).get("address", "")).strip()
             for d in (gc.get("nw_devices") or []) if isinstance(d, dict)}
+        # The next batch to probe, and the new cursor.
         batch, cursor, total = sweep_take(ranges, st.get("cursor") or 0,
                                           _NW_SWEEP_BATCH, skip=frozenset(covered))
+        # Probe options for the sweep.
         options = {"tcp_ports": list(_NW_SWEEP_PORTS), "try_snmp": True, "use_nmap": False,
                    "concurrency": 32, "crawl": False, "max_targets": _NW_SWEEP_BATCH,
                    "max_depth": 1}
@@ -2583,11 +2906,13 @@ def register(app, hub, ctx):
                 {"targets": targets, "credentials": await _nw_snmp_creds(tid),
                  "options": options, "tenant": tid},
                 timeout=600.0)) if targets else {}
+        # A failed batch is recorded and reported.
         except Exception as e:
             st.update(last_status="error", last_error=str(e), last_run_at=time.time())
             hub.state._mark_dirty()
             logger.warning("nw sweep tenant=%s batch failed: %s", tid, e)
             return {"status": "error", "reason": str(e)}
+        # Merge what answered into the discovered list, keyed by address.
         now = time.time()
         found = {str(d.get("address")): d for d in (st.get("discovered") or []) if isinstance(d, dict)}
         for r in ((res or {}).get("reachable") or []) + ((res or {}).get("identified") or []):
@@ -2600,8 +2925,10 @@ def register(app, hub, ctx):
                         hostname=r.get("hostname") or prev.get("hostname") or "",
                         snmp=bool(r.get("snmp_ok")) or bool(prev.get("snmp")))
             found[ip] = prev
+        # Every fleet address (not pushed to NetBox as a sighting).
         fleet = {str(a or "").strip() for d in (gc.get("nw_devices") or []) if isinstance(d, dict)
                  for a in [d.get("address")] + list(d.get("alt_addresses") or [])}
+        # Everything that answered.
         heard = ((res or {}).get("reachable") or []) + ((res or {}).get("identified") or [])
         owner = access.spoke_owner_tenant(hub, spoke_id)
         if heard and not (owner and access.tenant_in(owner, tid)):
@@ -2609,7 +2936,9 @@ def register(app, hub, ctx):
             foreign = await access.foreign_tenant_ips(
                 hub, tid, {str(h.get("address") or "").strip() for h in heard})
             heard = [h for h in heard if str(h.get("address") or "").strip() not in foreign]
+        # Record the responders.
         await _nw_note_responders(tid, heard, fleet)
+        # Save progress, counting a completed pass when the cursor wraps.
         wrapped = cursor == 0 and bool(batch)
         st.update(cursor=cursor, total=total, scanned=int(st.get("scanned") or 0) + len(batch),
                   discovered=sorted(found.values(), key=lambda d: -d.get("last_seen", 0))[:2000],
@@ -2622,6 +2951,7 @@ def register(app, hub, ctx):
         """The tenant's vault SNMP communities as scan credentials (no logins:
         the sweep only reads SNMP, it never SSHes into unknown hosts)."""
         from routes.monitoring import vault_snmp_scan_sets
+        # Fill in the secrets from the vault and keep only sets with a community.
         sets = await instance_vault.overlay_many(hub, vault_snmp_scan_sets(hub, tid),
                                                  "nw_scan_credentials")
         return [{"id": c.get("id"), "name": c.get("name"),
@@ -2631,6 +2961,7 @@ def register(app, hub, ctx):
     async def _nw_ping(spoke_id, targets):
         """IPs from ``targets`` that answer a ping on the nw spoke, or None when
         the spoke can't ping (older spoke without NW_PING_SWEEP)."""
+        # Ask the spoke to ping the targets.
         res = access.unwrap_spoke(await hub.request_response(
             spoke_id, "NW_PING_SWEEP", {"targets": targets}, timeout=300.0)) or {}
         if str(res.get("status", "")).upper() != "SUCCESS":
@@ -2639,6 +2970,7 @@ def register(app, hub, ctx):
 
     async def _nw_ping_all(spoke_id, targets):
         """Set of ``targets`` answering ping (empty when the spoke can't ping)."""
+        # Ping the targets in chunks; stop at the first chunk the spoke cannot ping.
         alive = set()
         for i in range(0, len(targets), _NW_PING_CHUNK):
             try:
@@ -2653,9 +2985,11 @@ def register(app, hub, ctx):
 
     async def _nw_probe_pinged(tid, spoke_id, ips, snmp=True):
         """NW_SCAN of hosts known to answer ping: sweep ports + SNMP + profile."""
+        # Probe options: the sweep ports, plus SNMP if asked.
         options = {"tcp_ports": list(_NW_SWEEP_PORTS), "try_snmp": snmp, "use_nmap": False,
                    "concurrency": 32, "crawl": False, "max_targets": len(ips),
                    "max_depth": 1, "pinged": True}
+        # Run the scan on the spoke and return its unwrapped result.
         return access.unwrap_spoke(await hub.request_response(
             spoke_id, "NW_SCAN", {"targets": ips,
                                   "credentials": await _nw_snmp_creds(tid) if snmp else [],
@@ -2665,11 +2999,13 @@ def register(app, hub, ctx):
     async def _nw_note_responders(tid, hosts, skip):
         """Record the hosts that answered in the tenant's seen-host registry
         and push the ones outside the fleet (``skip`` addresses) to NetBox."""
+        # Record the hosts and prune old entries.
         reg = _seen_registry(tid)
         now = time.time()
         ips = set(nw_seen_hosts.record(reg, hosts, now))
         nw_seen_hosts.prune(reg, now)
         hub.state._mark_dirty()
+        # Hosts not already in the fleet.
         fresh = ips - set(skip or ())
         if fresh:
             # A push already running picks these up when it finishes.
@@ -2677,7 +3013,11 @@ def register(app, hub, ctx):
             _nw_spawn_refresh(f"seen-push:{tid}", lambda: _nw_drain_seen(tid))
 
     async def _nw_drain_seen(tid):
+        """Push pending sightings for the tenant to NetBox until none are left (new ones may arrive
+        meanwhile).
+        """
         while _NW_SEEN_PENDING.get(tid):
+            # Take everything pending and push the matching registry entries.
             ips = _NW_SEEN_PENDING.pop(tid)
             reg = _seen_registry(tid)
             await _nw_push_seen(tid, [reg[ip] for ip in sorted(ips) if ip in reg])
@@ -2685,16 +3025,19 @@ def register(app, hub, ctx):
     async def _nw_push_seen(tid, entries):
         """Push sightings to NetBox (NETBOX_SYNC_DEVICES, own source tag, no
         replace): creates unknown hosts, refreshes ``last_seen`` on known ones."""
+        # The tenant's NetBox slug and the NetBox spoke; without both nothing is pushed.
         slug = access.netbox_tenant_scope(hub, tid).get("tenant")
         nb = access.get_netbox_spoke(hub)
         if not slug or not nb:
             logger.info("nw seen-hosts tenant=%s: %d host(s) not pushed (%s)", tid, len(entries),
                         "no NetBox tenant" if not slug else "NetBox spoke offline")
             return
+        # Sightings go under their own source tag and never replace other records.
         cfg = hub._nw_discovery_cfg() if callable(getattr(hub, "_nw_discovery_cfg", None)) else {}
         payload = {"tenant_id": tid, "tenant_slug": slug, "source": _NW_SEEN_SOURCE,
                    "replace": False, "devices": nw_seen_hosts.netbox_records(entries),
                    "defaults": (cfg or {}).get("defaults") or {}}
+        # Push them; any failure is logged.
         try:
             res = access.unwrap_spoke(await hub.request_response(
                 nb, "NETBOX_SYNC_DEVICES", payload, timeout=600.0)) or {}
@@ -2705,6 +3048,7 @@ def register(app, hub, ctx):
             logger.warning("[sync-error] nw seen-hosts tenant=%s NetBox push failed: %s", tid, e)
 
     def _gw_state(hub, tid):
+        """The tenant's stored gateway-pass progress, created with defaults on first use."""
         gc = hub.state.system_state.setdefault("global_config", {})
         return gc.setdefault("nw_gw_sweep", {}).setdefault(tid, {
             "cursor": 0, "total": 0, "cycles": 0, "cycle_done_at": None,
@@ -2713,10 +3057,12 @@ def register(app, hub, ctx):
     async def _nw_add_subnet(tid, block, supers):
         """Create ``block`` in NetBox for the tenant (its VRF, under the
         narrowest supernet). Returns "" on success, else the reason."""
+        # The tenant's NetBox slug and the NetBox spoke are both required.
         slug = access.netbox_tenant_scope(hub, tid).get("tenant")
         nb = access.get_netbox_spoke(hub)
         if not slug or not nb:
             return "no NetBox tenant" if not slug else "NetBox spoke offline"
+        # Create it under the narrowest supernet that contains it.
         parent = max((s for s in supers if block.subnet_of(s)), key=lambda s: s.prefixlen)
         try:
             res = access.unwrap_spoke(await hub.request_response(nb, "NETBOX_ALLOCATE_PREFIX", {
@@ -2732,11 +3078,14 @@ def register(app, hub, ctx):
         that has no NetBox prefix yet. Every /24 whose gateway answers is added
         to NetBox, so the scheduled scan sweeps it. A finished pass reruns
         after a week (or now with ``force``)."""
+        # The pass progress.
         st = _gw_state(hub, tid)
         now = time.time()
+        # A finished pass waits a week before running again (unless forced).
         if (not force and not st.get("cursor") and st.get("cycle_done_at")
                 and now - st["cycle_done_at"] < _NW_GW_RESWEEP_SECONDS):
             return {"status": "idle"}
+        # The next /24 blocks without a NetBox prefix.
         leaves, supers = await _nw_netbox_prefix_split(hub, tid)
         blocks, cursor, total = gateway_take(supers, st.get("cursor") or 0, _NW_GW_SWEEP_BLOCKS,
                                              skip=covered_blocks(leaves, supers))
@@ -2744,10 +3093,12 @@ def register(app, hub, ctx):
             st.update(total=0, cursor=0, last_status="no-supernets", last_run_at=now)
             hub.state._mark_dirty()
             return {"status": "no-supernets"}
+        # Map each block's .1 and .254 addresses back to the block.
         gateways = {}
         for b in blocks:
             gateways[str(b[1])] = b
             gateways[str(b[254])] = b
+        # Ping them; failure or a spoke without ping support is recorded as an error.
         try:
             alive = await _nw_ping(spoke_id, list(gateways)) if gateways else []
         except Exception as e:
@@ -2758,6 +3109,7 @@ def register(app, hub, ctx):
             st.update(last_status="error", last_error=err, last_run_at=now)
             hub.state._mark_dirty()
             return {"status": "error", "reason": err}
+        # Blocks that answered, with the first gateway that did.
         found = {}
         for ip in alive:
             found.setdefault(gateways[ip], ip)
@@ -2768,14 +3120,17 @@ def register(app, hub, ctx):
             found = {}
         else:
             st["last_error"] = ""
+        # Add each answering block to NetBox and record the outcome (newest first, at most 2000).
         added = 0
         for block, ip in found.items():
             error = await _nw_add_subnet(tid, block, supers)
             added += not error
             st["found"] = ([{"prefix": str(block), "gateway": ip, "found_at": now, "error": error}]
                            + [f for f in st.get("found") or [] if f.get("prefix") != str(block)])[:2000]
+        # New prefixes: clear the cached prefix list.
         if added:
             access.clear_prefix_cache(hub)
+        # Save progress; a cursor back at 0 means the pass is finished.
         done = cursor == 0
         st.update(cursor=cursor, total=total, last_run_at=now, last_status="ok",
                   cycles=int(st.get("cycles") or 0) + done,
@@ -2783,13 +3138,18 @@ def register(app, hub, ctx):
         hub.state._mark_dirty()
         return {"status": "ok", "checked": len(blocks), "added": added}
 
+    # Expose the sweep step and the enabled check to the hub's background loop.
     hub.run_nw_sweep_step = _nw_sweep_step
     hub.nw_sweep_enabled_for_tenant = lambda tid: _sweep_enabled(hub, tid)
 
     @app.get("/api/nw/sweep")
     async def get_nw_sweep(request: Request, tenant: str = ""):
+        """Return the tenant's sweep progress, gateway-pass state and unidentified hosts."""
+        # The tenant being viewed.
         sess = _session_user(request)
         tid = _nw_caller_tenant(sess, tenant or None)
+        # A copy of the progress, with the discovered list replaced by a count of hosts not in the
+        # fleet.
         st = dict(_sweep_state(hub, tid))
         known = {str((d or {}).get("address", "")).strip()
                  for d in ((hub.state.system_state.get("global_config", {}) or {}).get("nw_devices") or [])
@@ -2810,32 +3170,39 @@ def register(app, hub, ctx):
         one batch now), ``find_subnets`` (bool, run one gateway-pass batch now),
         ``reset`` (bool, restart both cycles + clear findings)."""
         sess = _session_user(request)
+        # Admins or tenant admins only.
         if not (_is_admin(sess) or _is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="admin or tenant-admin required")
+        # Read the body and resolve the tenant.
         data = await request.json()
         tid = _nw_caller_tenant(sess, data.get("tenant"))
         gc = hub.state.system_state.setdefault("global_config", {})
+        # Turn the sweep on or off.
         if "enabled" in data:
             tmap = dict(gc.get("nw_tenant_cfg") or {})
             cur = dict(tmap.get(tid) or {})
             cur["sweep"] = {"enabled": bool(data["enabled"])}
             tmap[tid] = cur
             gc["nw_tenant_cfg"] = tmap
+        # Reset clears both passes.
         if data.get("reset"):
             gc.setdefault("nw_sweep", {}).pop(tid, None)
             gc.setdefault("nw_gw_sweep", {}).pop(tid, None)
         hub.state._mark_dirty()
         out = {"status": "ok", "enabled": _sweep_enabled(hub, tid)}
+        # Run one gateway-pass batch now.
         if data.get("find_subnets"):
             saved = _nw_scan_config(hub, tid)
             spoke_id = resolve_nw_scan_spoke(
                 hub, tid, str(saved.get("spoke_id") or "").strip(), access.shared_tenant_id())
             out["run"] = (await _nw_gateway_sweep_step(tid, spoke_id, force=True) if spoke_id
                           else {"status": "skipped", "reason": "no nw spoke connected"})
+        # Run one host-sweep batch now.
         if data.get("run"):
             out["run"] = await _nw_sweep_step(tid, force=True)
         return out
 
+    # Expose the scheduled scan, fleet push and schedule reader to the hub.
     hub.run_nw_scheduled_scan = _run_nw_scheduled_scan
     hub.nw_push_fleet = lambda sid: _nw_push_fleet(hub, sid)
     hub.nw_scan_schedule_for_tenant = lambda tid: _nw_scan_schedule(hub, tid)
@@ -2857,8 +3224,10 @@ def register(app, hub, ctx):
         credential's vault reference so future fleet pushes overlay the secret."""
         hub = app.state.hub
         sess = _session_user(request)
+        # Admins or tenant admins only.
         if not (_is_admin(sess) or _is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="admin or tenant-admin required")
+        # Read the JSON body; a bad body counts as empty.
         try:
             data = await request.json()
         except Exception:
@@ -2885,7 +3254,10 @@ def register(app, hub, ctx):
 
     @app.post("/setup/nw-devices")
     async def add_nw_device(request: Request):
+        """Add a network device to the fleet (admin, or tenant admin for their own tenant's spoke).
+        """
         hub = app.state.hub
+        # Read the device; name and type are required, and the address must be a valid IPv4 address.
         try:
             data = await request.json()
             new_dev = data.get("device", {})
@@ -2895,17 +3267,21 @@ def register(app, hub, ctx):
             if new_dev.get("object_type") not in ("aos_switch", "cx_switch",
                                                    "ex_switch", "gateway"):
                 raise HTTPException(status_code=400, detail="Invalid object_type")
+            # Bind it to the caller's tenant and check its vault reference.
             _enforce_tenant_bind(request, new_dev, "network device")
             await instance_vault.validate_ref(
                 hub, new_dev, _session_user(request),
                 is_admin=_is_admin(_session_user(request)), storage_key="nw_devices")
+            # Never store secrets inline.
             instance_vault.strip_inline_secrets(new_dev, "nw_devices")
+            # Give it an id if it has none.
             if "id" not in new_dev:
                 new_dev["id"] = str(uuid.uuid4())
             # A manually-added device is nw-owned (not a NetBox import) — tag it so
             # the NetBox→NW import loop never prunes it as a stale netbox record.
             new_dev.setdefault("source", "manual")
 
+            # Save it to the fleet.
             global_config = hub.state.system_state.get("global_config", {})
             devices = global_config.get("nw_devices", [])
             devices.append(new_dev)
@@ -2929,6 +3305,7 @@ def register(app, hub, ctx):
                     logger.debug("add_nw_device NetBox write-back skipped: %s", e)
             return {"status": "ok", "device": new_dev, "pushed": pushed,
                     "netbox_pushed": netbox_pushed}
+        # Pass HTTP errors through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -2937,11 +3314,14 @@ def register(app, hub, ctx):
 
     @app.put("/setup/nw-devices/{device_id}")
     async def update_nw_device(device_id: str, request: Request):
+        """Update a network device's config and re-push its spoke."""
         hub = app.state.hub
         try:
+            # Read the changes.
             data = await request.json()
             update_data = data.get("config", {})
 
+            # Find the device; unknown ids are a 404.
             global_config = hub.state.system_state.get("global_config", {})
             devices = global_config.get("nw_devices", [])
             idx = next((i for i, d in enumerate(devices)
@@ -2955,14 +3335,17 @@ def register(app, hub, ctx):
                               else devices[idx].get("address"))
             _validate_nw_address(effective_addr)
 
+            # Apply the changes, check the vault reference, and strip any inline secrets.
             devices[idx].update(update_data)
             await instance_vault.validate_ref(
                 hub, devices[idx], _session_user(request),
                 is_admin=_is_admin(_session_user(request)), storage_key="nw_devices")
             instance_vault.strip_inline_secrets(devices[idx], "nw_devices")
+            # Save.
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
 
+            # Push the fleet to the device's spoke and report whether that worked.
             spoke_id = devices[idx].get("spoke_id")
             pushed = await _nw_push_fleet(hub, spoke_id) if spoke_id else False
             if pushed:
@@ -2972,6 +3355,7 @@ def register(app, hub, ctx):
             return {"status": "partial_success",
                     "message": "Configuration saved, but associated spoke is not connected.",
                     "pushed": False}
+        # Pass HTTP errors through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -2980,7 +3364,9 @@ def register(app, hub, ctx):
 
     @app.delete("/setup/nw-devices/{device_id}")
     async def delete_nw_device(device_id: str):
+        """Delete a network device and re-push its spoke."""
         hub = app.state.hub
+        # Find the device being removed, then drop it from the list; unknown ids are a 404.
         global_config = hub.state.system_state.get("global_config", {})
         devices = global_config.get("nw_devices", [])
         victim = next((d for d in devices if isinstance(d, dict) and d.get("id") == device_id), None)
@@ -2989,6 +3375,7 @@ def register(app, hub, ctx):
         if len(devices) == original_len:
             raise HTTPException(status_code=404, detail="Network device not found")
 
+        # Save.
         hub.state.system_state["global_config"] = global_config
         hub.state._mark_dirty()
         # Re-push so the spoke drops the deleted device from its fleet.
@@ -3003,8 +3390,10 @@ def register(app, hub, ctx):
         of its SVI addresses) into the row NetBox and Zabbix already use.
         Body ``{apply: bool}``; ``apply=false`` (default) is a dry run."""
         hub = app.state.hub
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="admin required")
+        # Read the JSON body; a bad body counts as empty.
         try:
             body = await request.json()
         except Exception:
@@ -3020,8 +3409,10 @@ def register(app, hub, ctx):
         """Send UPDATE_CONFIG to the instance's bound spoke, if connected.
         `payload_fn(instance)` returns the spoke-side config dict (or None for
         save-only products like DNS/DHCP). Returns True when a message was sent."""
+        # Products without a spoke payload are save-only.
         if not payload_fn:
             return False
+        # Nothing to send when the spoke is not connected.
         spoke_id = instance.get("spoke_id")
         if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             return False
@@ -3030,9 +3421,11 @@ def register(app, hub, ctx):
         # persisted in global_config, only resolved on demand at push time.
         if storage_key:
             instance = await instance_vault.overlay(hub, instance, storage_key)
+        # Build the spoke payload; an empty one means nothing to send.
         payload = payload_fn(instance)
         if not payload:
             return False
+        # Send it.
         msg = _hub_msg(spoke_id, "UPDATE_CONFIG", payload)
         await hub.send_to_spoke(msg)
         return True
@@ -3042,15 +3435,18 @@ def register(app, hub, ctx):
         bucket (login/console secrets, automation-readable), so a vault login is
         selectable on the scan tab without hand-creating a set. Ids are
         ``vault:<bucket>:<name>`` and resolve at scan time via the normal overlay."""
+        # No tenant: no vault sets.
         tid = str(tenant_id or "").strip()
         if not tid:
             return []
+        # The tenant's vault bucket (case-insensitive match); none means no sets.
         bucket = next((b for b in (
             (((hub.state.system_state.get("global_config", {}) or {})
               .get("cred_vault", {}) or {}).get("secrets", {}) or {}))
             if str(b).casefold() == tid.casefold()), None)
         if bucket is None:
             return []
+        # One set per hub-mode login or console secret in the bucket.
         secrets = (hub.state.system_state["global_config"]["cred_vault"]["secrets"].get(bucket) or {})
         return [{
             "id": f"vault:{bucket}:{name}", "name": f"{name} (vault)", "username": "",
@@ -3073,18 +3469,22 @@ def register(app, hub, ctx):
         before the refactor still see their server on Setup → NAC /
         IPAM. The migrated entry is deduped by host/url and persisted so it
         becomes a normal editable instance."""
+        # The hub, and an id-safe form of the route prefix for operation ids.
         hub = app.state.hub
         op = route_prefix.replace("-", "_")
 
         @app.get(f"/setup/{route_prefix}", operation_id=f"list_{op}")
         async def list_instances(request: Request):
             """List instances for this product (NAC/IPAM/Directory); folds in any legacy single-instance config."""
+            # Copy the stored instance list.
             global_config = hub.state.system_state.get("global_config", {})
             instances = list(global_config.get(storage_key, []))
+            # Move a legacy single config into the list once (unless it is already there).
             if legacy_key and legacy_to_instance:
                 legacy = global_config.get(legacy_key)
                 if isinstance(legacy, dict) and legacy:
                     inst = legacy_to_instance(legacy)
+                    # Its identifying host or URL, and whether an instance already has it.
                     ident = inst.get("host") or inst.get("url") or inst.get("server_url")
                     already = any(
                         (inst.get("host") and i.get("host") == inst.get("host")) or
@@ -3107,6 +3507,7 @@ def register(app, hub, ctx):
             if not _is_admin(sess):
                 instances = [i for i in instances
                              if isinstance(i, dict) and access.spoke_visible_to_session(sess, i.get("tenant_id", ""))]
+            # Narrow to an explicitly requested tenant (see above).
             # Optional explicit tenant scope (``?tenant=``): narrow to that
             # tenant's own instances plus shared ones. Opt-in and additive — no
             # caller that omits the param changes behavior. This is what lets a
@@ -3139,11 +3540,14 @@ def register(app, hub, ctx):
         async def add_instance(request: Request):
             """Add an instance and push its config to the bound spoke (partial_success + pushed=False when the spoke is down)."""
             try:
+                # Read the new instance; a name is required.
                 data = await request.json()
                 new_inst = dict(data.get("instance", {}))
                 if not new_inst.get("name"):
                     raise HTTPException(status_code=400, detail="Missing instance name")
+                # Take out the worker secret (sent to the spoke, never stored).
                 worker_secret = str(new_inst.pop("worker_secret", "") or "")
+                # Bind it to the caller's tenant.
                 _enforce_tenant_bind(request, new_inst, route_prefix.split("-")[0])
                 if new_inst.get("spoke_id") and route_prefix in PRODUCT_ROLE:
                     # Auto-load the matching coordinator role if the operator
@@ -3159,23 +3563,29 @@ def register(app, hub, ctx):
                     hub, new_inst, _session_user(request),
                     is_admin=_is_admin(_session_user(request)), storage_key=storage_key)
                 instance_vault.strip_inline_secrets(new_inst, storage_key)
+                # Give it an id if it has none.
                 if "id" not in new_inst:
                     new_inst["id"] = str(uuid.uuid4())
+                # The stored list plus the new instance.
                 global_config = hub.state.system_state.get("global_config", {})
                 instances = list(global_config.get(storage_key, []))
                 candidate = [*instances, new_inst]
+                # Push the whole server list (DNS) or just this instance's config to its spoke.
                 pushed = (await topology_sync(
                     hub, candidate, new_inst.get("spoke_id"), worker_secret)
                     if topology_sync else
                     await _push_instance_config(
                         hub, new_inst, payload_fn, storage_key))
+                # Save it.
                 instances.append(new_inst)
                 global_config[storage_key] = instances
                 hub.state.system_state["global_config"] = global_config
                 hub.state._mark_dirty()
+                # Report whether it was pushed.
                 status = "ok" if pushed else "partial_success"
                 msg = "Instance added and pushed to spoke." if pushed else "Instance added; spoke not connected."
                 return {"status": status, "message": msg, "pushed": pushed, "instance": new_inst}
+            # Pass HTTP errors through; anything else is logged and returned as a 500.
             except HTTPException:
                 raise
             except Exception as e:
@@ -3186,19 +3596,23 @@ def register(app, hub, ctx):
         async def update_instance(instance_id: str, request: Request):
             """Update an instance and push to its spoke (partial_success + pushed=False when the spoke is down)."""
             try:
+                # Read the changes, taking out the worker secret.
                 data = await request.json()
                 update_data = dict(data.get("config", {}))
                 worker_secret = str(update_data.pop("worker_secret", "") or "")
+                # Find the instance; unknown ids are a 404.
                 global_config = hub.state.system_state.get("global_config", {})
                 instances = list(global_config.get(storage_key, []))
                 idx = next((i for i, x in enumerate(instances) if x.get("id") == instance_id), None)
                 if idx is None:
                     raise HTTPException(status_code=404, detail="Instance not found")
+                # Moving to a different spoke: load the product's role on the new one if needed.
                 old_spoke = instances[idx].get("spoke_id")
                 new_spoke = update_data.get("spoke_id")
                 if new_spoke and new_spoke != old_spoke and route_prefix in PRODUCT_ROLE:
                     role, module_type = PRODUCT_ROLE[route_prefix]
                     update_data["spoke_id"] = await ensure_role_loaded(hub, new_spoke, role, module_type)
+                # Merge the changes into a copy of the instance.
                 updated = dict(instances[idx])
                 updated.update(update_data)
                 # Validate/strip a Credential Vault reference on the merged record.
@@ -3206,7 +3620,9 @@ def register(app, hub, ctx):
                     hub, updated, _session_user(request),
                     is_admin=_is_admin(_session_user(request)), storage_key=storage_key)
                 instance_vault.strip_inline_secrets(updated, storage_key)
+                # Replace it in the list.
                 instances[idx] = updated
+                # DNS: push the whole server list to the new spoke (and to the old one if it moved).
                 if topology_sync:
                     pushed = await topology_sync(
                         hub, instances, updated.get("spoke_id"), worker_secret)
@@ -3214,18 +3630,23 @@ def register(app, hub, ctx):
                         old_pushed = await topology_sync(
                             hub, instances, old_spoke, "")
                         pushed = pushed and old_pushed
+                # Others: push just this instance's config.
                 else:
                     pushed = await _push_instance_config(
                         hub, updated, payload_fn, storage_key)
+                # Save.
                 global_config[storage_key] = instances
                 hub.state.system_state["global_config"] = global_config
                 hub.state._mark_dirty()
+                # Moved off a spoke: unload the role there if nothing else uses it.
                 if route_prefix in PRODUCT_ROLE and old_spoke and old_spoke != updated.get("spoke_id"):
                     role, _mt = PRODUCT_ROLE[route_prefix]
                     await maybe_unload_orphaned_role(hub, old_spoke, role, instances)
+                # Report whether it was pushed.
                 if pushed:
                     return {"status": "ok", "message": "Instance updated and pushed to spoke.", "pushed": True}
                 return {"status": "partial_success", "message": "Instance saved; associated spoke not connected.", "pushed": False}
+            # Pass HTTP errors through; anything else is logged and returned as a 500.
             except HTTPException:
                 raise
             except Exception as e:
@@ -3235,19 +3656,23 @@ def register(app, hub, ctx):
         @app.delete(f"/setup/{route_prefix}/{{instance_id}}", operation_id=f"delete_{op}")
         async def delete_instance(instance_id: str):
             """Delete an instance; the spoke keeps its last config until re-pushed."""
+            # Find the instance; unknown ids are a 404.
             global_config = hub.state.system_state.get("global_config", {})
             instances = list(global_config.get(storage_key, []))
             deleted = next((x for x in instances if x.get("id") == instance_id), None)
             if deleted is None:
                 raise HTTPException(status_code=404, detail="Instance not found")
+            # The list without it; DNS also pushes that list to the spoke.
             candidate = [x for x in instances if x.get("id") != instance_id]
             pushed = (await topology_sync(
                 hub, candidate, deleted.get("spoke_id"), "")
                 if topology_sync else False)
+            # Save.
             instances = candidate
             global_config[storage_key] = instances
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
+            # Unload the product's role on its spoke if nothing else uses it.
             spoke_id = (deleted or {}).get("spoke_id")
             if route_prefix in PRODUCT_ROLE and spoke_id:
                 role, _mt = PRODUCT_ROLE[route_prefix]
@@ -3255,6 +3680,7 @@ def register(app, hub, ctx):
             return {"status": "ok", "message": f"Instance {instance_id} deleted.",
                     "pushed": pushed}
 
+    # ClearPass (NAC) instances, migrated from the old single "cppm" config.
     _instance_crud(
         "nac-instances", "nac_instances",
         lambda inst: {
@@ -3278,6 +3704,7 @@ def register(app, hub, ctx):
             "verify_ssl": c.get("verify_ssl", True),
         },
     )
+    # NetBox (IPAM) instances, migrated from the old single "netbox" config.
     _instance_crud(
         "ipam-instances", "ipam_instances",
         lambda inst: {"netbox_url": inst.get("url"), "api_token": inst.get("api_token"), "netbox_verify_ssl": inst.get("verify_ssl")},
@@ -3310,6 +3737,7 @@ def register(app, hub, ctx):
         attachment). Returns the spoke's report
         (status/total/present/created/attached/already_attached/warnings).
         """
+        # The connected IPAM spoke, or a 503.
         hub = app.state.hub
         spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
         try:
@@ -3323,16 +3751,19 @@ def register(app, hub, ctx):
             result = await hub.request_response(spoke_id,
                                                 "NETBOX_PROVISION_CUSTOM_FIELDS", {},
                                                 timeout=120.0)
+            # Anything but SUCCESS/PARTIAL is a 502.
             data = _unwrap_spoke(result)
             if data.get("status") not in ("SUCCESS", "PARTIAL"):
                 raise HTTPException(status_code=502,
                                     detail=data.get("message", "NetBox provisioning error"))
             return data
+        # Pass HTTP errors through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
         except Exception as e:
             logger.exception("ipam_apply_schema failed")
             raise HTTPException(status_code=500, detail=str(e))
+    # LDAP directory instances.
     _instance_crud(
         "ldap-instances", "ldap_instances",
         lambda inst: {
@@ -3342,6 +3773,7 @@ def register(app, hub, ctx):
             "LDAP_ADMIN_PW": inst.get("admin_pw"),
         },
     )
+    # DNS and DHCP instances (DNS pushes its server list to the spoke; DHCP is save-only).
     _instance_crud(
         "dns-instances", "dns_instances", None,
         topology_sync=sync_dns_instance_topology)

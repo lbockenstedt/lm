@@ -34,17 +34,26 @@ Modes (per resource; default :data:`OBSERVE`)
 The policy below is the single, readable contract of *what the code should and
 should not access*.
 """
+# Allows modern type-hint syntax regardless of the running Python version.
 from __future__ import annotations
 
+# logging: fallback output when no reporter is registered, and guard errors.
 import logging
+# sys._getframe walks the call stack to find who is touching a resource.
 import sys
+# time.time() timestamps each access for the rate window.
 import time
+# deque efficiently drops old timestamps from the front of each rate window.
 from collections import deque
+# Lock protects the shared hit counters across threads.
 from threading import Lock
+# Type hints only.
 from typing import Callable, Deque, Dict, Optional, Set
 
+# Share the "Security" logger with the other security modules.
 logger = logging.getLogger("Security")
 
+# The two enforcement modes: report only, or report and deny.
 OBSERVE = "observe"
 ENFORCE = "enforce"
 
@@ -92,6 +101,7 @@ _SEAM_MODULES: Set[str] = {
     "security.encryption",  # the decrypt primitive
 }
 
+# Recent access timestamps per resource, its lock, and the registered anomaly sink.
 _hits: Dict[str, Deque[float]] = {}
 _lock = Lock()
 _reporter: Optional[Callable[[str, str, Optional[str], str], None]] = None
@@ -102,30 +112,37 @@ def set_reporter(fn: Optional[Callable[[str, str, Optional[str], str], None]]) -
 
     Wired at hub startup to ``ThreatMonitor.note_anomaly``. Until set, anomalies
     fall back to the ``Security`` logger so nothing is ever silently dropped."""
+    # Rebind the module-level sink so every later guard() call uses it.
     global _reporter
     _reporter = fn
 
 
 def register_canary(resource: str) -> None:
     """Mark ``resource`` as a canary — ANY :func:`guard` on it is a violation."""
+    # Add to the canary set; from now on any access is a violation.
     _CANARY.add(resource)
 
 
 def set_mode(resource: str, mode: str) -> None:
     """Set OBSERVE (log only) or ENFORCE (also deny) for ``resource``."""
+    # Reject anything other than the two known modes.
     if mode not in (OBSERVE, ENFORCE):
         raise ValueError(f"mode must be {OBSERVE!r} or {ENFORCE!r}")
+    # Remember the mode for this resource.
     _MODE[resource] = mode
 
 
 def is_allowed(resource: str, module: str) -> bool:
     """Pure predicate (no side effects) — used by tests and callers that want to
     ask without tripping the reporter. Canary resources allow no one."""
+    # Nobody is allowed to touch a canary.
     if resource in _CANARY:
         return False
+    # Look up the allow-list; resources without one are not policed.
     allow = _ALLOW.get(resource)
     if allow is None:
         return True  # unknown resource: not under contract → don't flag
+    # Allowed only when the calling module is on the list.
     return module in allow
 
 
@@ -133,39 +150,53 @@ def _derive_accessor() -> tuple:
     """Return ``(module, qualname)`` of the nearest business caller — the first
     stack frame whose module is not sentinel/seam plumbing."""
     depth = 2  # skip _derive_accessor + guard
+    # Walk outward through the call stack one frame at a time.
     while True:
+        # Running off the top of the stack means the caller could not be identified.
         try:
             frame = sys._getframe(depth)
         except ValueError:
             return ("<unknown>", "")
+        # The module name the frame's code belongs to.
         mod = frame.f_globals.get("__name__", "") or "<unknown>"
+        # First frame outside the plumbing modules is the real caller; return its function name
+        # (qualified name when this Python provides it).
         if mod not in _SEAM_MODULES:
             return (mod, frame.f_code.co_qualname
                     if hasattr(frame.f_code, "co_qualname") else frame.f_code.co_name)
+        # Still inside plumbing: look one frame further out.
         depth += 1
 
 
 def _over_rate(resource: str, now: float) -> Optional[int]:
+    """Record an access to ``resource`` and return the hit count if it exceeds its limit, else None.
+    """
+    # Resources without a configured limit are never rate-flagged.
     limit_window = _RATE.get(resource)
     if not limit_window:
         return None
     limit, window = limit_window
+    # Append this hit, discard hits older than the window, and count what remains.
     with _lock:
         dq = _hits.setdefault(resource, deque())
         dq.append(now)
         while dq and dq[0] <= now - window:
             dq.popleft()
         count = len(dq)
+    # Only report the count when it is over the limit.
     return count if count > limit else None
 
 
 def _emit(kind: str, detail: str, ip: Optional[str], severity: str) -> None:
+    """Send an anomaly to the registered reporter, falling back to the Security logger."""
+    # Prefer the registered sink (the threat monitor); stop here if it succeeded.
     if _reporter is not None:
         try:
             _reporter(kind, detail, ip, severity)
             return
         except Exception:  # a broken sink must never break the guarded call
             logger.exception("sentinel reporter failed")
+    # No sink (or it failed): log critical anomalies at CRITICAL, others at WARNING.
     lvl = logging.CRITICAL if severity == "critical" else logging.WARNING
     logger.log(lvl, "SENTINEL %s [%s] — %s", kind.upper(), severity, detail)
 
@@ -178,10 +209,12 @@ def guard(resource: str, *, detail: str = "", ip: Optional[str] = None) -> None:
     raises :class:`SentinelViolation`. Guaranteed not to raise anything other
     than :class:`SentinelViolation` — a bug in the sentinel must never take down
     a guarded seam."""
+    # Identify the business caller and the current time.
     try:
         module, qualname = _derive_accessor()
         now = time.time()
 
+        # Flag unusually high access volume, whether or not the caller is allowed.
         over = _over_rate(resource, now)
         if over is not None:
             _emit("sentinel_rate",
@@ -189,18 +222,24 @@ def guard(resource: str, *, detail: str = "", ip: Optional[str] = None) -> None:
                   + (f" — {detail}" if detail else ""),
                   ip, "warning")
 
+        # An allowed caller of a non-canary resource needs nothing more.
         if is_allowed(resource, module):
             return
 
+        # Build a message that says whether a canary or a protected resource was touched, by whom.
         is_canary = resource in _CANARY
         what = "canary tripped" if is_canary else "unauthorized access"
         msg = (f"{what}: resource '{resource}' touched by '{module}'"
                f" ({qualname})" + (f" — {detail}" if detail else ""))
+        # Report the breach as critical.
         _emit("sentinel_violation", msg, ip, "critical")
 
+        # In ENFORCE mode also deny the access by raising.
         if _MODE.get(resource, OBSERVE) == ENFORCE:
             raise SentinelViolation(msg)
+    # Let the deliberate denial propagate to the caller.
     except SentinelViolation:
         raise
+    # Any other error is a sentinel bug; log it and allow the call to continue.
     except Exception:
         logger.exception("sentinel guard error on resource %s", resource)

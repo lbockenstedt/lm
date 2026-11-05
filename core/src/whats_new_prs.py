@@ -5,6 +5,7 @@ life as a WebUI "File a Bug" report. A leaf: stdlib + httpx only, no import of
 main/api/hub."""
 from __future__ import annotations
 
+# Standard library: logging, regex, git subprocess, cache lock, time.
 import logging
 import os
 import re
@@ -14,13 +15,17 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
+# Reuse the GitHub token and headers from github_source.
 from routes.github_source import _headers, _token  # noqa: F401 -- same env-var fallback chain
 
+# Module logger.
 logger = logging.getLogger(__name__)
 
+# GitHub API base and HTTP timeout.
 API = "https://api.github.com"
 _HTTP_TIMEOUT = 5.0
 
+# promote/backmerge PRs are excluded.
 _PR_EXCLUDE_BRANCH_PREFIXES = ("promote/", "backmerge/")
 _PR_EXCLUDE_TITLE_PREFIXES = ("promote:", "backmerge:")
 #: branch prefix -> "feature" | "bug". First match wins; unmatched branches are skipped
@@ -29,6 +34,7 @@ _PR_BRANCH_TYPE = (
     ("feat/", "feature"), ("feature/", "feature"), ("perf/", "feature"),
     ("fix/", "bug"), ("hotfix/", "bug"), ("bugfix/", "bug"),
 )
+# Matches a conventional-commit prefix.
 _CONVENTIONAL_TITLE_RE = re.compile(
     r"^(feat|fix|perf|docs|chore|refactor|test|style|build|ci)(\([^)]*\))?:\s*", re.I)
 
@@ -40,6 +46,7 @@ _WHATS_NEW_REPOS = ("lbockenstedt/lm",)
 # 1h: matches github_source.py's CACHE_TTL_SECONDS reasoning (source activity
 # changes on a human timescale; a warm cache keeps popover opens offline).
 _WHATS_NEW_REPO_CACHE_TTL = 3600.0
+# Negative-cache TTL and the PR cache with its lock.
 _WHATS_NEW_NEGATIVE_CACHE_TTL = 30.0
 _CACHE: Dict[Tuple[str, str, int], Tuple[float, list, float]] = {}
 _CACHE_LOCK = threading.Lock()
@@ -47,9 +54,11 @@ _CACHE_LOCK = threading.Lock()
 
 def classify_pr_branch(head_ref: Optional[str]) -> Optional[str]:
     """"feature" | "bug" | None (branch prefix not recognised -> caller skips it)."""
+    # Normalised branch name; empty means unknown.
     ref = (head_ref or "").strip().lower()
     if not ref:
         return None
+    # First matching prefix decides.
     for prefix, kind in _PR_BRANCH_TYPE:
         if ref.startswith(prefix):
             return kind
@@ -60,6 +69,7 @@ def pr_summary(title: str) -> str:
     """Title with a leading conventional-commit prefix ("feat(scope): ", "fix: ", ...)
     stripped, else the title unchanged. Never empty (falls back to the original title
     if stripping would empty it)."""
+    # Strip the prefix; keep the original if that leaves nothing.
     t = title or ""
     stripped = _CONVENTIONAL_TITLE_RE.sub("", t, count=1).strip()
     return stripped if stripped else t
@@ -69,6 +79,7 @@ def is_excluded_pr(head_ref: Optional[str], title: Optional[str]) -> bool:
     """True for a promote/backmerge carrier PR (branch prefix OR title prefix,
     case-insensitive) - these carry no new content of their own, the real PR
     already appears separately."""
+    # Excluded if the branch or the title matches.
     ref = (head_ref or "").strip().lower()
     t = (title or "").strip().lower()
     return ref.startswith(_PR_EXCLUDE_BRANCH_PREFIXES) or t.startswith(_PR_EXCLUDE_TITLE_PREFIXES)
@@ -81,23 +92,30 @@ def merged_prs_to_items(prs: list, *, now: float = None, within_days: int = 14) 
     an unrecognised branch prefix (``classify_pr_branch`` returns None). Pure,
     no network. Newest-first by ``fixed_at``; no cap here (the caller merges
     this with the bug-store source and caps once)."""
+    # Cutoff timestamp.
     if now is None:
         now = time.time()
     cutoff = now - within_days * 86400
     items = []
+    # Filter each PR.
     for pr in prs or []:
+        # Unmerged PRs are skipped.
         merged_at = pr.get("merged_at")
         if not merged_at:
             continue
+        # Carrier PRs are skipped.
         head_ref = pr.get("head_ref")
         title = pr.get("title") or ""
         if is_excluded_pr(head_ref, title):
             continue
+        # Too old.
         if merged_at < cutoff:
             continue
+        # Unknown branch type.
         kind = classify_pr_branch(head_ref)
         if kind is None:
             continue
+        # Popover item.
         items.append({
             "id": f"pr-{pr.get('number')}",
             "summary": pr_summary(title),
@@ -105,6 +123,7 @@ def merged_prs_to_items(prs: list, *, now: float = None, within_days: int = 14) 
             "fixed_at": merged_at,
             "issue_url": pr.get("html_url") or "",
         })
+    # Newest first.
     items.sort(key=lambda x: x.get("fixed_at") or 0, reverse=True)
     return items
 
@@ -115,10 +134,13 @@ def merged_prs_to_items(prs: list, *, now: float = None, within_days: int = 14) 
 # runs. A subject whose prefix (text before the first ":") names tests, docs or
 # housekeeping is skipped, as are release bumps, merges, reverts and "AI Fix #" /
 # "AI Feature #" commits (those are already in the bug store with a curated summary).
+# Repo root, three dirs up from here.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Commit filters.
 _SKIP_COMMIT_RE = re.compile(r"^(release\b|merge\b|revert\b|ai (fix|feature) #)", re.I)
 _SKIP_COMMIT_PREFIX_RE = re.compile(r"\b(tests?|docs?|chore|ci|build|style|refactor)\b", re.I)
 _FIX_WORD_RE = re.compile(r"\bfix(e[sd])?\b", re.I)
+# Commit cache: ten minutes.
 _COMMIT_CACHE_TTL = 600.0
 _COMMIT_CACHE: Dict[Tuple[str, int], Tuple[float, list]] = {}
 
@@ -128,12 +150,16 @@ def commit_to_item(sha: str, when: float, subject: str, repo_url: str = "") -> O
     ``fix``-type commits (conventional ``fix:`` or the word "fix" in a plain
     subject) are bug fixes; everything else that survives the filters is a
     feature. Pure."""
+    # Subject and its conventional prefix, if any.
     s = (subject or "").strip()
     prefix = s.split(":", 1)[0] if ":" in s[:40] else ""
+    # Skip non-user-facing commits.
     if not s or "[skip ci]" in s or _SKIP_COMMIT_RE.match(s) or _SKIP_COMMIT_PREFIX_RE.search(prefix):
         return None
+    # Fix or feature.
     m = _CONVENTIONAL_TITLE_RE.match(s)
     is_fix = m.group(1).lower() == "fix" if m else bool(_FIX_WORD_RE.search(s))
+    # Popover item.
     return {
         "id": f"commit-{sha[:8]}",
         "summary": pr_summary(s),
@@ -148,10 +174,12 @@ def recent_commit_items(within_days: int = 14, repo_root: str = _REPO_ROOT,
     """Popover items for the non-merge commits of the last ``within_days`` on
     the checkout this hub runs from, newest first. Cached for 10 minutes.
     Fail-soft: no git or no checkout (tarball install) -> ``[]``. Blocking."""
+    # Serve from cache while fresh.
     key = (repo_root, within_days)
     cached = _COMMIT_CACHE.get(key)
     if cached and time.time() - cached[0] < _COMMIT_CACHE_TTL:
         return cached[1]
+    # git log on this checkout; failure means no items.
     try:
         r = subprocess.run(
             ["git", "-c", f"safe.directory={repo_root}", "-C", repo_root, "log",
@@ -160,9 +188,11 @@ def recent_commit_items(within_days: int = 14, repo_root: str = _REPO_ROOT,
     except Exception as e:  # noqa: BLE001
         logger.warning("whats-new: git log failed: %s", e)
         return []
+    # Non-zero exit means no items.
     if r.returncode != 0:
         logger.warning("whats-new: git log exited %s: %s", r.returncode, r.stderr.strip()[:200])
         return []
+    # Parse sha, timestamp and subject per line.
     items = []
     for line in r.stdout.splitlines():
         parts = line.split("\x1f")
@@ -171,6 +201,7 @@ def recent_commit_items(within_days: int = 14, repo_root: str = _REPO_ROOT,
         item = commit_to_item(parts[0], float(parts[1]), parts[2], repo_url)
         if item:
             items.append(item)
+    # Cache and return.
     _COMMIT_CACHE[key] = (time.time(), items)
     return items
 
@@ -178,6 +209,7 @@ def recent_commit_items(within_days: int = 14, repo_root: str = _REPO_ROOT,
 def _parse_iso(ts: str) -> Optional[float]:
     """GitHub's ISO-8601 ``2024-01-15T10:30:00Z`` -> epoch float. ``None`` on any
     parse failure (fail-soft: caller then treats the PR as unmerged/unaged)."""
+    # Parse as UTC.
     try:
         return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
     except (TypeError, ValueError):
@@ -185,13 +217,24 @@ def _parse_iso(ts: str) -> Optional[float]:
 
 
 async def _fetch_pages(owner: str, repo: str, within_days: int, *, client=None) -> list:
+    """Fetch up to 3 pages of closed PRs for owner/repo, newest updated first.
+
+    Pages stop early once a whole page is older than within_days or short. A page-1 failure raises;
+    later failures keep what was fetched. Creates and closes its own httpx client when none is
+    given.
+    """
+    # Cutoff for paging.
     cutoff = time.time() - within_days * 86400
+    # Make a client if none was passed.
     own_client = client is None
     if own_client:
         import httpx
         client = httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
+    # Collected PR records.
     out: List[dict] = []
+    # Fetch pages, closing our own client at the end.
     try:
+        # At most three pages.
         for page in range(1, 4):  # hard cap: 3 pages / 150 PRs
             # No `base` filter: this repo's flow merges real feat/fix work into
             # `dev` (verified live - every feat/*/fix/* PR in the last 2 weeks
@@ -201,6 +244,7 @@ async def _fetch_pages(owner: str, repo: str, within_days: int, *, client=None) 
             # already filters to merged-only and excludes the promote/backmerge
             # carriers, so an unfiltered `state=closed` listing is exactly as
             # precise and far more robust.
+            # Request the page; page 1 errors raise, later ones stop.
             try:
                 resp = await client.get(
                     f"{API}/repos/{owner}/{repo}/pulls",
@@ -213,12 +257,14 @@ async def _fetch_pages(owner: str, repo: str, within_days: int, *, client=None) 
                 if page == 1:
                     raise
                 break
+            # Non-200: page 1 raises, later pages stop.
             if resp.status_code != 200:
                 logger.warning("whats-new: %s/%s pulls fetch returned HTTP %s",
                                owner, repo, resp.status_code)
                 if page == 1:
                     raise RuntimeError(f"HTTP {resp.status_code}")
                 break
+            # Parse JSON; page 1 errors raise, later ones stop.
             try:
                 batch = resp.json()
             except Exception as e:
@@ -227,8 +273,10 @@ async def _fetch_pages(owner: str, repo: str, within_days: int, *, client=None) 
                 if page == 1:
                     raise
                 break
+            # Empty page: done.
             if not batch:
                 break
+            # Keep the fields we need.
             for pr in batch:
                 merged_at = _parse_iso(pr.get("merged_at")) if pr.get("merged_at") else None
                 out.append({
@@ -238,6 +286,7 @@ async def _fetch_pages(owner: str, repo: str, within_days: int, *, client=None) 
                     "merged_at": merged_at,
                     "head_ref": (pr.get("head") or {}).get("ref"),
                 })
+            # Stop at a page entirely older than the cutoff, or a short page.
             ts_list = [
                 (_parse_iso(p.get("updated_at") or p.get("merged_at")) or 0)
                 for p in batch
@@ -248,6 +297,7 @@ async def _fetch_pages(owner: str, repo: str, within_days: int, *, client=None) 
                 break
         return out
     finally:
+        # Close only a client we created.
         if own_client:
             await client.aclose()
 
@@ -261,11 +311,13 @@ async def fetch_recent_merged_prs(owner: str, repo: str, within_days: int = 14, 
     the whole call - this source must never break the "What's New" popover, it
     can only shrink it.
     """
+    # Use the cache entry while within its TTL.
     cache_key = (owner, repo, within_days)
     with _CACHE_LOCK:
         cached = _CACHE.get(cache_key)
     if cached and (time.time() - cached[0]) < cached[2]:
         return cached[1]
+    # Fetch; failure caches an empty result briefly.
     try:
         items = await _fetch_pages(owner, repo, within_days, client=client)
     except Exception as e:  # noqa: BLE001 -- fail-soft: degrade, never raise
@@ -273,6 +325,7 @@ async def fetch_recent_merged_prs(owner: str, repo: str, within_days: int = 14, 
         with _CACHE_LOCK:
             _CACHE[cache_key] = (time.time(), [], _WHATS_NEW_NEGATIVE_CACHE_TTL)
         return []
+    # Cache with the normal TTL.
     with _CACHE_LOCK:
         _CACHE[cache_key] = (time.time(), items, _WHATS_NEW_REPO_CACHE_TTL)
     return items

@@ -23,22 +23,35 @@ or ``api`` (dependency direction is ``main → dns_dhcp_sync`` only).
 Audience: Hub developers.
 """
 
+# Postpone evaluation of type hints so annotations are never evaluated at runtime.
 from __future__ import annotations
 
+# asyncio runs NetBox reads and spoke pushes concurrently.
 import asyncio
+# hashlib fingerprints payloads so unchanged pushes can be skipped.
 import hashlib
+# ipaddress parses addresses and prefixes for record types and scope matching.
 import ipaddress
+# json serialises payloads deterministically for hashing.
 import json
+# Standard-library logging for sync results and failures.
 import logging
+# re validates DNS labels.
 import re
+# time stamps each side's last run.
 import time
+# Type hints only.
 from typing import Any, Dict, List, Tuple
 
+# Unwraps a spoke's reply envelope into its payload.
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+# Shared periodic-loop runner.
 from sync_loop import run_sync_loop  # sibling leaf
 
+# Use the hub's main logger so sync lines appear with other hub output.
 logger = logging.getLogger("Hub")
 
+# global_config key for this sync and the default interval.
 _CFG_KEY = "dns_dhcp_sync"
 _DEFAULT_INTERVAL = 300  # seconds
 # Real-time Kea -> Unbound registration hook (dhcp/src/kea_dns_hook.py). On by
@@ -54,43 +67,56 @@ def _scope_domains(pfx_data: Dict[str, Any]) -> List[Tuple[Any, str]]:
     """DHCP scopes (NetBox prefixes Kea serves) -> [(network, domain_name)],
     most specific prefix first."""
 
+    # (network, domain) pairs.
     result = []
+    # Look at every prefix.
     for p in (pfx_data or {}).get("prefixes") or []:
         if not isinstance(p, dict):
             continue
+        # Status may be a plain string or a {"value": ...} dict; skip container (parent) prefixes.
         st = p.get("status")
         if isinstance(st, dict):
             st = st.get("value") or ""
         if str(st).lower() == "container":
             continue
+        # Only DHCP-enabled prefixes count as scopes.
         cf = p.get("custom_fields") or {}
         if not cf.get("dhcp_enabled"):
             continue
+        # Domain name, normalised; skip if missing or any label is invalid.
         dom = str(cf.get("domain_name") or "").strip().strip(".").lower()
         if not dom or not all(_LABEL_RE.match(l) for l in dom.split(".")):
             continue
+        # Parse the prefix; skip if invalid.
         try:
             net = ipaddress.ip_network(str(p.get("prefix") or ""), strict=False)
         except ValueError:
             continue
+        # Keep it.
         result.append((net, dom))
+    # Longest prefix (most specific) first.
     return sorted(result, key=lambda t: t[0].prefixlen, reverse=True)
 
 
 def qualify_dns_name(name: str, address: str, scopes: List[Tuple[Any, str]]) -> str:
     """Append the containing DHCP scope's domain to a single-label host name."""
 
+    # Trim whitespace and a trailing dot.
     orig = (name or "").strip()
     n = orig.rstrip(".")
+    # Leave it alone if empty, already qualified, or there are no scopes.
     if not n or "." in n or not scopes:
         return orig
+    # Parse the address; leave the name alone if invalid.
     try:
         ip = ipaddress.ip_address(address)
     except ValueError:
         return orig
+    # Use the first (most specific) scope containing the address.
     for net, dom in scopes:
         if ip.version == net.version and ip in net:
             return f"{n}.{dom}"
+    # No scope contains it.
     return orig
 
 
@@ -112,17 +138,23 @@ def build_dns_records(ips_data: Dict[str, Any],
     address appended — the same domain Kea hands that client — so DNS holds
     ``printer1.lab.example``. Names that already contain a dot are untouched.
     """
+    # DHCP scopes used to qualify bare host names.
     scopes = _scope_domains(pfx_data) if pfx_data else []
+    # Build one record per usable IP.
     records: List[Dict[str, Any]] = []
     for entry in (ips_data.get("ip_addresses") or []):
+        # DNS name and the address without its prefix length.
         dns_name = (entry.get("dns_name") or "").strip()
         address = (entry.get("address") or "").split("/")[0].strip()
+        # Need both a name and an address.
         if not (dns_name and address):
             continue
+        # A for IPv4, AAAA for IPv6.
         try:
             rtype = "AAAA" if ipaddress.ip_address(address).version == 6 else "A"
         except ValueError:
             continue  # malformed address — skip rather than mis-sync
+        # Add the record, qualifying a bare name with its scope's domain.
         records.append({"name": qualify_dns_name(dns_name, address, scopes),
                         "type": rtype, "value": address, "ttl": 300})
     return records
@@ -167,18 +199,23 @@ def build_dhcp_payload(pfx_data: Dict[str, Any],
     this function only translates its custom fields into Kea's shape.
     """
     def _csv(raw: str) -> List[str]:
+        """Split a comma-separated string into trimmed, non-empty items."""
         return [v.strip() for v in (raw or "").split(",") if v.strip()]
 
+    # Build one Kea subnet per eligible prefix.
     subnets: List[Dict[str, Any]] = []
     for p in (pfx_data.get("prefixes") or []):
+        # Skip prefixes with no prefix value.
         prefix_str = p.get("prefix", "")
         if not prefix_str:
             continue
         if (p.get("status") or "").lower() == "container":
             continue  # aggregate/parent block — never a DHCP scope itself
+        # Custom fields hold the DHCP options.
         cf = p.get("custom_fields") or {}
         if not cf.get("dhcp_enabled"):
             continue  # not opted in — carve child prefixes with the checkbox on
+        # Translate NetBox custom fields into the spoke's subnet shape.
         subnets.append({
             "subnet":              prefix_str,
             "description":         p.get("description", ""),
@@ -196,11 +233,14 @@ def build_dhcp_payload(pfx_data: Dict[str, Any],
             "pools":               [],
         })
 
+    # Build reservations from IPs explicitly marked for one.
     reservations: List[Dict[str, Any]] = []
     for ip in (ips_data.get("ip_addresses") or []):
+        # MAC and address (without prefix length).
         cf = ip.get("custom_fields") or {}
         mac = (cf.get("mac_address") or "").strip()
         address = (ip.get("address") or "").split("/")[0].strip()
+        # Need a MAC, an address and the explicit opt-in.
         if mac and address and cf.get("dhcp_reservation"):
             reservations.append({
                 "ip":       address,
@@ -225,19 +265,25 @@ def dhcp_skip_warning(spoke_result: Any) -> Dict[str, Any]:
     scope (see ``build_dhcp_payload``), so the fix is almost always ticking
     ``dhcp_enabled`` on the prefix that owns those addresses. Say so.
     """
+    # Accept one result or a list (one per DHCP spoke).
     results = spoke_result if isinstance(spoke_result, list) else [spoke_result]
+    # Total skipped and applied reservations.
     skipped = applied = 0
     for r in results:
         if not isinstance(r, dict):
             continue
+        # Ignore non-numeric counters.
         try:
             skipped += int(r.get("reservations_skipped") or 0)
             applied += int(r.get("reservations") or 0)
         except (TypeError, ValueError):
             continue
+    # Nothing skipped: no warning.
     if skipped <= 0:
         return {}
+    # "every" if none applied, else "N of M".
     what = "every" if applied == 0 else f"{skipped} of {skipped + applied}"
+    # Warning text tells the operator how to fix it.
     return {"warning": (
         f"{what} reservation was not applied because its address falls outside "
         f"every DHCP-enabled prefix. Tick 'dhcp_enabled' on the NetBox prefix "
@@ -260,8 +306,10 @@ class DnsDhcpSyncMixin:
 
     def _dds_cfg(self) -> Dict[str, Any]:
         """Read the sync config fresh: enabled (default True), interval (default 300s)."""
+        # Read global_config[dns_dhcp_sync]; "or {}" guards against a stored None.
         gc = self.state.system_state.get("global_config", {}) or {}
         cfg = gc.get(_CFG_KEY, {}) or {}
+        # Apply defaults.
         return {
             "enabled":  bool(cfg.get("enabled", True)),
             "interval": int(cfg.get("interval", _DEFAULT_INTERVAL) or _DEFAULT_INTERVAL),
@@ -271,13 +319,17 @@ class DnsDhcpSyncMixin:
         """Desired real-time DNS hook settings, normalized the way the dhcp
         spoke stores them (kea_dns_hook.validate_settings) so a converged node
         never reads as drifted."""
+        # Read global_config[dhcp_dns_hook].
         gc = self.state.system_state.get("global_config", {}) or {}
         cfg = gc.get(_HOOK_CFG_KEY, {}) or {}
+        # Non-empty target strings.
         targets = [str(t).strip() for t in (cfg.get("targets") or []) if str(t).strip()]
+        # TTL; fall back to 300 if not a number.
         try:
             ttl = int(cfg.get("ttl", 300) or 300)
         except (TypeError, ValueError):
             ttl = 300
+        # Normalised settings with defaults.
         return {
             "enabled":      bool(cfg.get("enabled", True)),
             "targets":      targets or list(_HOOK_DEFAULT_TARGETS),
@@ -289,27 +341,36 @@ class DnsDhcpSyncMixin:
     async def _reconcile_dns_hook(self) -> Dict[str, Any]:
         """Converge every DHCP spoke's real-time Kea->Unbound DNS hook to
         global_config["dhcp_dns_hook"]; only pushes when a node has drifted."""
+        # Desired settings, target spokes and result accumulators.
         desired = self._dns_hook_desired()
         spokes = self._get_dhcp_spokes()
         applied = []
         errors = {}
 
+        # No DHCP spoke: record skipped.
         if not spokes:
             return self._record_status("dns_hook", status="skipped", enabled=desired["enabled"], reason="DHCP spoke not connected")
 
         def _drifted(node: dict) -> bool:
+            """Return True if ``node``'s hook state differs from the desired settings."""
+            # The node's current settings.
             s = (node or {}).get("settings") or {}
+            # Desired off: drifted if it is still on or loaded.
             if not desired["enabled"]:
                 return bool(s.get("enabled")) or node.get("loaded_in_running_config") is True
+            # Desired on: drifted if off or not loaded.
             if not s.get("enabled") or node.get("loaded_in_running_config") is False:
                 return True
+            # Or if any setting differs.
             for k in ("targets", "domain", "ttl", "register_ptr"):
                 if s.get(k) != desired[k]:
                     return True
             return False
 
+        # Check and, if needed, fix each DHCP spoke.
         for sid in spokes:
             try:
+                # Read the spoke's current hook status.
                 st = unwrap_spoke(await self.request_response(sid, "DHCP_DNS_HOOK_STATUS", {}, timeout=30.0)) or {}
                 members = st.get("members")
                 if st.get("status") == "ERROR" and not members and "settings" not in st:
@@ -317,24 +378,31 @@ class DnsDhcpSyncMixin:
                     # don't blindly re-push config every tick.
                     errors[sid] = str(st.get("message") or st.get("error") or "status read failed")
                     continue
+                # A cluster reports per-member status; otherwise the spoke itself is the only node.
                 nodes = list(members.values()) if isinstance(members, dict) and members else [st]
+                # Nothing drifted: leave it alone.
                 if not any(_drifted(n if isinstance(n, dict) else {}) for n in nodes):
                     continue
+                # Push the desired settings.
                 res = unwrap_spoke(await self.request_response(sid, "DHCP_DNS_HOOK_CONFIG", {"settings": dict(desired), "hook_dir": ""}, timeout=30.0)) or {}
+                # Record success or the error message.
                 if res.get("status") in ("SUCCESS", "PARTIAL"):
                     applied.append(sid)
                     logger.info("DNS hook %s on %s", "enabled" if desired["enabled"] else "disabled", sid)
                 else:
                     errors[sid] = str(res.get("message") or res.get("error") or res.get("member_errors") or "config failed")
+            # Transport failure: record and log.
             except Exception as e:
                 errors[sid] = str(e)
                 logger.warning("DNS hook reconcile %s failed: %s", sid, e)
 
+        # Record overall status.
         return self._record_status("dns_hook", status=("error" if errors else "ok"), enabled=desired["enabled"], applied=applied, errors=errors, spokes=len(spokes))
 
     @property
     def dns_dhcp_sync_status(self) -> Dict[str, Any]:
         """Last-run status for each side; lazily initialized (mixin has no __init__)."""
+        # Create the status dict on first access.
         st = getattr(self, "_dns_dhcp_sync_status", None)
         if st is None:
             st = {"dns": {}, "dhcp": {}, "dns_hook": {}}
@@ -342,6 +410,10 @@ class DnsDhcpSyncMixin:
         return st
 
     def _record_status(self, side: str, **fields) -> Dict[str, Any]:
+        """Record ``fields`` plus the current time as ``side``'s last-run status; returns the
+        entry.
+        """
+        # Stamp with the current time and store.
         entry = {"last_run": time.time(), **fields}
         self.dns_dhcp_sync_status[side] = entry
         return entry
@@ -351,16 +423,21 @@ class DnsDhcpSyncMixin:
         first. With several IPAM spokes connected (e.g. a dedicated NetBox
         spoke plus a netbox role on a generic agent) "first registered wins"
         can land on one with no NetBox URL configured."""
+        # Primary IPAM spoke, then all IPAM spokes (if the hub supports listing them).
         first = self.get_spoke_by_type("ipam")
         spokes = []
         if hasattr(self, "get_all_spokes_by_type"):
             spokes = list(self.get_all_spokes_by_type("ipam") or [])
+        # Make sure the primary is included and first.
         if first and first not in spokes:
             spokes.insert(0, first)
+        # Function mapping a spoke id to its primary key (identity if unavailable).
         pk = getattr(self, "_primary_key", None) or (lambda s: s)
+        # Spokes referenced by configured IPAM instances.
         gc = (self.state.system_state or {}).get("global_config", {}) or {}
         bound = {pk(str(i.get("spoke_id"))) for i in (gc.get("ipam_instances") or [])
                  if isinstance(i, dict) and i.get("spoke_id")}
+        # Bound spokes first, keeping the original order otherwise.
         return sorted(spokes, key=lambda s: 0 if pk(s) in bound else 1)
 
     async def _netbox_prefixes_and_ips(self, filters: Dict[str, Any] = None
@@ -376,12 +453,15 @@ class DnsDhcpSyncMixin:
         passed to both reads so a tenant-dedicated target only gets its own
         tenant's prefixes and IPs.
         """
+        # Filters for both reads, and spokes to try in order.
         req = dict(filters or {})
         candidates = self._ipam_spoke_candidates()
         if not candidates:
             raise RuntimeError("NetBox spoke not connected")
+        # Try each spoke until one returns both lists.
         errors = []
         for nb in candidates:
+            # Read prefixes and IPs in parallel.
             try:
                 pfx_raw, ips_raw = await asyncio.gather(
                     self.request_response(nb, "NETBOX_GET_PREFIXES", dict(req), timeout=30.0),
@@ -390,16 +470,20 @@ class DnsDhcpSyncMixin:
             except Exception as e:  # noqa: BLE001 — try the next IPAM spoke
                 errors.append(f"{nb}: {e}")
                 continue
+            # Unwrap and check each reply is a successful dict containing its list.
             pfx, ips = unwrap_spoke(pfx_raw), unwrap_spoke(ips_raw)
             bad = [f"{what}: {(d or {}).get('message') if isinstance(d, dict) else d!r}"
                    for what, d, key in (("prefixes", pfx, "prefixes"),
                                         ("ip_addresses", ips, "ip_addresses"))
                    if not isinstance(d, dict) or str(d.get("status", "")).upper() == "ERROR"
                    or not isinstance(d.get(key), list)]
+            # Any problem: remember it and try the next spoke.
             if bad:
                 errors.append(f"{nb}: " + "; ".join(bad))
                 continue
+            # Both lists OK.
             return pfx, ips
+        # Every spoke failed.
         raise RuntimeError("NetBox fetch failed on every IPAM spoke — " + " | ".join(errors))
 
     def _sync_scope(self, spoke_id):
@@ -414,8 +498,11 @@ class DnsDhcpSyncMixin:
             NetBox mapping (or the binding is unreadable): the caller skips it,
             never pushing another tenant's subnets nor an empty set.
         """
+        # Imported lazily: tenant binding and NetBox tenant scope helpers.
         from access import spoke_is_unbound, netbox_tenant_scope
+        # Look up the spoke's tenant and its NetBox scope; any error fails closed.
         try:
+            # Unbound spoke: unfiltered.
             if spoke_is_unbound(self, spoke_id):
                 return "", {}
             tenant = self.state.get_spoke_tenant(spoke_id) or ""
@@ -423,17 +510,22 @@ class DnsDhcpSyncMixin:
         except Exception as e:  # noqa: BLE001 — fail closed
             logger.warning("DNS/DHCP sync: tenant scope for %s unreadable: %s", spoke_id, e)
             return None, None
+        # NetBox filters for the tenant.
         filters = {k: scope.get(k) for k in ("tenant", "tenant_group") if scope.get(k)}
+        # Tenant has no NetBox mapping: skip the spoke.
         if not filters:
             logger.warning("DNS/DHCP sync: %s is bound to tenant %r with no NetBox "
                            "tenant mapping — not synced", spoke_id, tenant)
             return None, None
+        # Scoped key and filters.
         return "tenant:" + str(scope.get("key")), filters
 
     def _scope_groups(self, spokes):
         """Group target spokes by ``_sync_scope`` →
         ``({key: (filters, [sids])}, [skipped sids])``."""
+        # Groups and skipped spokes.
         groups, skipped = {}, []
+        # Put each spoke in its scope group, or skip it.
         for sid in spokes:
             key, filters = self._sync_scope(sid)
             if key is None:
@@ -444,18 +536,22 @@ class DnsDhcpSyncMixin:
 
     @staticmethod
     def _hash_key(side: str, scope_key: str) -> str:
+        """Return the hash-cache key for a side and scope ("dns" or "dns|tenant:x")."""
         return side if not scope_key else f"{side}|{scope_key}"
 
     async def _scoped_push(self, side: str, spokes: List[str]):
         """On-demand (non-hashed) push of one side to ``spokes``, one NetBox
         fetch per tenant scope. Returns ``(counts, spoke_results, skipped)``;
         raises on a fetch or push failure."""
+        # Group spokes by tenant scope and set up counters.
         groups, skipped = self._scope_groups(spokes)
         counts = ({"records_synced": 0} if side == "dns" else
                   {"subnets_synced": 0, "reservations_synced": 0})
         spoke_results = []
+        # Fetch NetBox once per scope and push to that scope's spokes.
         for _key, (filters, sids) in groups.items():
             pfx_data, ips_data = await self._netbox_prefixes_and_ips(filters)
+            # Build the DNS or DHCP payload and count it.
             if side == "dns":
                 records = build_dns_records(ips_data, pfx_data)
                 payload, cmd = {"records": records}, "DNS_SYNC"
@@ -465,17 +561,20 @@ class DnsDhcpSyncMixin:
                 payload, cmd = {"subnets": subnets, "reservations": reservations}, "DHCP_SYNC"
                 counts["subnets_synced"] += len(subnets)
                 counts["reservations_synced"] += len(reservations)
+            # Push to all spokes in this scope in parallel; any failure is raised.
             results = await asyncio.gather(*[
                 self.request_response(sid, cmd, payload, timeout=30.0) for sid in sids
             ], return_exceptions=True)
             errs = [r for r in results if isinstance(r, Exception)]
             if errs:
                 raise errs[0]
+            # Collect the unwrapped spoke results.
             spoke_results.extend(unwrap_spoke(r) for r in results)
         return counts, spoke_results, skipped
 
     def _get_dhcp_spokes(self) -> List[str]:
         """All connected, approved DHCP spokes to sync to."""
+        # Prefer every connected, approved DHCP spoke.
         if hasattr(self, "get_all_spokes_by_type") and hasattr(self, "active_connections"):
             all_spokes = [
                 s for s in (self.get_all_spokes_by_type("dhcp") or [])
@@ -483,11 +582,13 @@ class DnsDhcpSyncMixin:
             ]
             if all_spokes:
                 return all_spokes
+        # Fallback: the single DHCP spoke, if any.
         single = self.get_spoke_by_type("dhcp")
         return [single] if single else []
 
     def _get_dns_spokes(self) -> List[str]:
         """All connected, approved DNS spokes to sync to."""
+        # Prefer every connected, approved DNS spoke.
         if hasattr(self, "get_all_spokes_by_type") and hasattr(self, "active_connections"):
             all_spokes = [
                 s for s in (self.get_all_spokes_by_type("dns") or [])
@@ -495,6 +596,7 @@ class DnsDhcpSyncMixin:
             ]
             if all_spokes:
                 return all_spokes
+        # Fallback: the single DNS spoke, if any.
         single = self.get_spoke_by_type("dns")
         return [single] if single else []
 
@@ -504,11 +606,13 @@ class DnsDhcpSyncMixin:
         ``status`` is ``ok`` on success, ``skipped`` when a required spoke is
         offline (loop no-ops quietly), or ``error`` on failure.
         """
+        # Need a DNS spoke and NetBox; otherwise record skipped.
         dns_spokes = self._get_dns_spokes()
         if not dns_spokes or not self.get_spoke_by_type("ipam"):
             missing = "DNS" if not dns_spokes else "NetBox"
             return self._record_status("dns", status="skipped",
                                        reason=f"{missing} spoke not connected")
+        # Push per scope and record success (or the error).
         try:
             counts, spoke_results, skipped = await self._scoped_push("dns", dns_spokes)
             extra = {"skipped_spokes": skipped} if skipped else {}
@@ -520,11 +624,13 @@ class DnsDhcpSyncMixin:
 
     async def sync_dhcp_from_netbox(self) -> Dict[str, Any]:
         """Reconcile Kea to NetBox prefixes + reservations. Returns a status dict."""
+        # Need a DHCP spoke and NetBox; otherwise record skipped.
         dhcp_spokes = self._get_dhcp_spokes()
         if not dhcp_spokes or not self.get_spoke_by_type("ipam"):
             missing = "DHCP" if not dhcp_spokes else "NetBox"
             return self._record_status("dhcp", status="skipped",
                                        reason=f"{missing} spoke not connected")
+        # Push per scope and record success (with any skipped-reservation warning) or the error.
         try:
             counts, spoke_results, skipped = await self._scoped_push("dhcp", dhcp_spokes)
             single = spoke_results[0] if len(spoke_results) == 1 else spoke_results
@@ -551,6 +657,7 @@ class DnsDhcpSyncMixin:
         Hashes are kept per (side, scope); a failed fetch or push never
         latches a hash and never pushes an empty set for that scope.
         """
+        # Nothing to do without NetBox or any target spoke.
         ipam = self.get_spoke_by_type("ipam")
         if not ipam:
             return
@@ -559,14 +666,17 @@ class DnsDhcpSyncMixin:
         if not dns_spokes and not dhcp_spokes:
             return
 
+        # Group DNS and DHCP spokes by tenant scope.
         dns_groups, dns_skipped = self._scope_groups(dns_spokes)
         dhcp_groups, dhcp_skipped = self._scope_groups(dhcp_spokes)
 
+        # Distinct scopes across both sides.
         scopes = {}
         for groups in (dns_groups, dhcp_groups):
             for key, (filters, _sids) in groups.items():
                 scopes.setdefault(key, filters)
 
+        # Fetch NetBox data once per scope.
         fetched, fetch_errors = {}, {}
         for key, filters in scopes.items():
             try:
@@ -575,20 +685,27 @@ class DnsDhcpSyncMixin:
                 fetch_errors[key] = str(e)
                 logger.warning("DNS/DHCP sync: NetBox fetch failed (%s): %s", key or "all", e)
 
+        # Hashes from last tick; new ones start as a copy.
         last = getattr(self, "_last_sync_hashes", None) or {}
         new_hashes = dict(last)
+        # Per-side status accumulators.
         st = {side: {"error": None, "records_synced": 0, "subnets_synced": 0,
                      "reservations_synced": 0, "spoke_results": []}
               for side in ("dns", "dhcp")}
 
+        # Push coroutines and, per scope, which ones belong to it.
         pushes, push_groups = [], []
+        # Build each side's payload per scope.
         for side, groups in (("dns", dns_groups), ("dhcp", dhcp_groups)):
             for key, (_filters, sids) in groups.items():
+                # Fetch failed for this scope: record the error and skip.
                 if key not in fetched:
                     if st[side]["error"] is None:
                         st[side]["error"] = fetch_errors.get(key) or "NetBox fetch failed"
                     continue
+                # This scope's NetBox data.
                 pfx, ips = fetched[key]
+                # Build the payload, hash it and count it.
                 if side == "dns":
                     records = build_dns_records(ips, pfx)
                     payload = {"records": records}
@@ -602,10 +719,12 @@ class DnsDhcpSyncMixin:
                                                   default=str).encode()).hexdigest()
                     st[side]["subnets_synced"] += len(subnets)
                     st[side]["reservations_synced"] += len(reservations)
+                # Unchanged since last time: skip the push.
                 hk = self._hash_key(side, key)
                 if last.get(hk) == h:
                     new_hashes[hk] = h
                     continue
+                # Queue a push to each spoke in this scope, remembering its index.
                 cmd = "DNS_SYNC" if side == "dns" else "DHCP_SYNC"
                 indices = []
                 for sid in sids:
@@ -613,6 +732,7 @@ class DnsDhcpSyncMixin:
                     pushes.append(self.request_response(sid, cmd, payload, timeout=30.0))
                 push_groups.append((side, hk, h, indices))
 
+        # Run all pushes in parallel.
         results = await asyncio.gather(*pushes, return_exceptions=True) if pushes else []
         # Latch a scope's hash ONLY when every push for it succeeded, so a
         # transiently-offline spoke is retried next cycle.
@@ -627,14 +747,18 @@ class DnsDhcpSyncMixin:
                 new_hashes[hk] = h
                 st[side]["spoke_results"].extend(unwrap_spoke(r) for r in res)
 
+        # Record each side's status.
         for side, skipped in (("dns", dns_skipped), ("dhcp", dhcp_skipped)):
             s = st[side]
+            # Any error: record it.
             if s["error"]:
                 self._record_status(side, status="error", error=s["error"])
                 continue
+            # Counts for this side.
             fields = ({"records_synced": s["records_synced"]} if side == "dns" else
                       {"subnets_synced": s["subnets_synced"],
                        "reservations_synced": s["reservations_synced"]})
+            # Attach spoke results, or note the push was skipped as unchanged.
             results_ = s["spoke_results"]
             if results_:
                 single = results_[0] if len(results_) == 1 else results_
@@ -643,10 +767,12 @@ class DnsDhcpSyncMixin:
                 fields["spoke_result"] = single
             else:
                 fields["skipped_unchanged"] = True
+            # List spokes skipped for missing tenant scope.
             if skipped:
                 fields["skipped_spokes"] = list(skipped)
             self._record_status(side, status="ok", **fields)
 
+        # Save hashes for next tick.
         self._last_sync_hashes = new_hashes
 
     async def run_dns_dhcp_sync_loop(self):
@@ -659,9 +785,11 @@ class DnsDhcpSyncMixin:
         hub restart. Skips quietly whenever the NetBox / DNS / DHCP spokes are
         offline — nothing to reconcile against.
         """
+        # Log loop start.
         logger.info("DNS/DHCP NetBox auto-sync loop started.")
 
         def _delay() -> float:
+            """Return seconds until the next tick (configured interval, minimum 30 s)."""
             try:
                 return max(30, self._dds_cfg()["interval"])
             except Exception:  # noqa: BLE001 — bad config falls back to default
@@ -670,6 +798,9 @@ class DnsDhcpSyncMixin:
         async def _body():
             # The real-time hook has its own on/off knob, so it converges even
             # while the NetBox reconciliation below is disabled.
+            """One tick: converge the DNS hook, then (if enabled) reconcile Unbound/Kea to
+            NetBox.
+            """
             try:
                 await self._reconcile_dns_hook()
             except Exception as e:  # noqa: BLE001
@@ -682,6 +813,7 @@ class DnsDhcpSyncMixin:
             # which is correct for an explicit button press).
             await self._sync_dns_dhcp_once()
 
+        # Run forever with no startup delay; errors are logged and retried after the interval.
         await run_sync_loop(
             stagger=0,
             body=_body, delay=_delay,
@@ -697,13 +829,17 @@ class DnsDhcpSyncMixin:
         cache continuously fresh (every 60s, inside the 300s "cached" badge
         threshold) via ``hub.net_services_feed_once`` (set by routes.net_services).
         """
+        # Log loop start.
         logger.info("DNS/DHCP page data-feed loop started.")
 
         async def _body():
+            """One tick: refresh the DNS/DHCP page cache, if the feed function is registered."""
+            # Set by routes.net_services; may be absent.
             feed = getattr(self, "net_services_feed_once", None)
             if feed:
                 await feed()
 
+        # Every 60 s, starting 20 s after startup.
         await run_sync_loop(
             stagger=20, body=_body, delay=lambda: 60.0,
             on_error=lambda e: logger.warning("DNS/DHCP feed loop error: %s", e),

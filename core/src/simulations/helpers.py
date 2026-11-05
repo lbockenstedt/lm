@@ -10,10 +10,15 @@ is unchanged. The cache dicts are mutated in place by the route handlers via the
 imported reference (same object); nothing here rebinds them.
 """
 
+# Type hints only.
 from typing import Any, Dict, List
+# INI parser for the simulation.conf structured view.
 import configparser
+# Timezone-aware timestamps for fetched_at stamps.
 from datetime import datetime, timezone
+# JSON parsing for list fields that may arrive as JSON text.
 import json
+# Regular expressions for vid:pid validation and delimiter splitting.
 import re
 
 # Sim-Quota catalog cache. The catalog (Config → Sim Quotas) is derived from the
@@ -28,6 +33,7 @@ _sim_quota_catalog_cache: Dict[str, tuple] = {}  # tenant_id -> (monotonic_deadl
 
 def _invalidate_sim_quota_catalog(tenant_id: str) -> None:
     """Drop the cached Sim-Quota catalog for a tenant after a config change."""
+    # pop() with a default is a no-op when nothing is cached.
     _sim_quota_catalog_cache.pop(tenant_id, None)
 
 
@@ -41,6 +47,7 @@ _pxmx_site_map_cache: Dict[str, tuple] = {}  # tenant_id -> (monotonic_deadline,
 
 def _invalidate_pxmx_site_map(tenant_id: str) -> None:
     """Drop the cached PXMX site-map for a tenant after a save."""
+    # pop() with a default is a no-op when nothing is cached.
     _pxmx_site_map_cache.pop(tenant_id, None)
 
 
@@ -51,12 +58,15 @@ def _parse_ini_sections(text: str) -> Dict[str, Dict[str, str]]:
     A malformed file degrades to an empty dict (never raises) so a bad override
     doesn't 500 the editor — the UI shows the raw text fallback instead.
     """
+    # Build a parser that keeps option names exactly as written.
     p = configparser.ConfigParser()
     p.optionxform = str  # preserve key case (matches sim_config._new_parser)
+    # Parse the text; a syntax error yields an empty result instead of an exception.
     try:
         p.read_string(text or "")
     except configparser.Error:
         return {}
+    # Convert to plain nested dicts the API can return as JSON.
     return {section: dict(p.items(section)) for section in p.sections()}
 
 
@@ -64,6 +74,7 @@ def _now_iso() -> str:
     """UTC now as an ISO-8601 string (for ``fetched_at`` stamps in config reads)."""
     return datetime.now(timezone.utc).isoformat()
 
+# A valid USB id is exactly four lowercase hex digits, a colon, and four more.
 _USB_VIDPID_RE = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{4}$")
 # Allowed dongle classes. The Global USB Approvals UI offers these; the
 # tenant approval surfaces (Per-Tenant USB + per-host Certify) send one of
@@ -81,11 +92,15 @@ def _normalize_usb_vidpids(raw: Any) -> list:
     a JSON string of such a list, a JSON string of bare vidpid strings, an
     already-parsed list, or a legacy comma-joined bare-vidpid string. Invalid
     vidpids are dropped."""
+    # Turn whatever was stored into a plain list of items.
     items = _coerce_vidpid_items(raw)
+    # Output list plus a set of vid:pids already emitted, to drop duplicates.
     out: list = []
     seen: set = set()
+    # Items may be full dicts or bare vid:pid strings; handle each shape.
     for it in items:
         if isinstance(it, dict):
+            # Dict item: validate its vid:pid and keep its type/label (with defaults).
             vp = str(it.get("vidpid", "")).strip().lower()
             if not _USB_VIDPID_RE.match(vp) or vp in seen:
                 continue
@@ -93,6 +108,7 @@ def _normalize_usb_vidpids(raw: Any) -> list:
             out.append({"vidpid": vp,
                         "type": str(it.get("type") or "wireless"),
                         "label": str(it.get("label") or vp)})
+        # Bare string: validate it and give it the default wireless type.
         else:
             vp = str(it).strip().lower()
             if not _USB_VIDPID_RE.match(vp) or vp in seen:
@@ -106,21 +122,29 @@ def _normalize_usb_ignored(raw: Any) -> list:
     """Normalize a stored ``usb_ignored_vidpids`` value into a sorted list of
     bare lowercased vidpid strings (the cs-spoke re-filter shape). Accepts the
     same shapes as ``_normalize_usb_vidpids`` (dicts → their ``vidpid``)."""
+    # Turn whatever was stored into a plain list of items.
     items = _coerce_vidpid_items(raw)
+    # A set removes duplicates; it is sorted on return for stable output.
     out: set = set()
+    # Accept dict items (use their vidpid) or bare strings.
     for it in items:
         vp = (it.get("vidpid") if isinstance(it, dict) else it)
         vp = str(vp or "").strip().lower()
+        # Keep only syntactically valid vid:pids.
         if _USB_VIDPID_RE.match(vp):
             out.add(vp)
     return sorted(out)
 
 
 def _coerce_vidpid_items(raw: Any) -> list:
+    """Turn a stored vid:pid value (None, list, JSON text or CSV text) into a plain list."""
+    # Nothing stored.
     if raw is None:
         return []
+    # Already a list: use as is.
     if isinstance(raw, list):
         return raw
+    # Treat everything else as text.
     s = str(raw).strip()
     if not s:
         return []
@@ -132,6 +156,7 @@ def _coerce_vidpid_items(raw: Any) -> list:
         except (json.JSONDecodeError, ValueError):
             return []
     # Legacy comma-joined bare vidpids.
+    # Split on commas, dropping empty pieces.
     return [p.strip() for p in s.split(",") if p.strip()]
 
 
@@ -145,6 +170,7 @@ def _coerce_vidpid_items(raw: Any) -> list:
 # type/label are preserved from the currently-stored entry when the same vidpid
 # already exists, so editing the field as a plain vidpid list does NOT discard
 # metadata a user set via another UI.
+# Hub-config fields that are plain lists of strings.
 _HUB_CONFIG_LIST_KEYS = (
     "usb_ignored_vidpids",   # list of "vid:pid"
     "t1_pci_vidpids",        # list of "vid:pid"
@@ -152,30 +178,37 @@ _HUB_CONFIG_LIST_KEYS = (
     "t1_exclude_hosts",      # list of str (hostname/prefix — per-host T1 opt-out / hub mode)
     "ignored_hostnames",     # list of str
 )
+# Hub-config field that is a list of {vidpid,type,label} objects.
 _HUB_CONFIG_VIDPID_OBJ_KEY = "usb_vidpids"  # list of {vidpid,type,label}
 
 
 def _split_delim(s: str) -> list:
     """Split a comma/space/newline-delimited string into trimmed tokens."""
+    # Split on any run of commas or whitespace and drop empty tokens.
     return [p.strip() for p in re.split(r"[,\s]+", s) if p.strip()]
 
 
 def _coerce_to_list(raw: Any) -> list:
     """Best-effort raw → list. Accepts an already-parsed list, a JSON array
     string, or a delimited string. Returns [] for empty/None."""
+    # Nothing stored.
     if raw is None:
         return []
+    # Already a list: use as is.
     if isinstance(raw, list):
         return raw
+    # Treat everything else as text.
     s = str(raw).strip()
     if not s:
         return []
+    # Looks like JSON: try to parse it; on failure fall back to delimiter splitting.
     if s.startswith("["):
         try:
             parsed = json.loads(s)
             return parsed if isinstance(parsed, list) else []
         except (json.JSONDecodeError, ValueError):
             pass
+    # Delimited text: split into tokens.
     return _split_delim(s)
 
 
@@ -188,8 +221,10 @@ def _hub_config_list_value(key: str, raw: Any, stored_raw: Any = None) -> list:
     ``{vidpid,type,label}`` dicts, reusing the stored entry's type/label when the
     same vidpid already exists (else type ``"wireless"``, label = vidpid).
     """
+    # The object-list field (usb_vidpids) needs type/label handling.
     if key == _HUB_CONFIG_VIDPID_OBJ_KEY:
         items = _coerce_to_list(raw)
+        # Index the previously stored entries by vid:pid so their type/label can be reused.
         prev: Dict[str, Dict[str, str]] = {}
         for it in _coerce_to_list(stored_raw):
             if isinstance(it, dict) and it.get("vidpid"):
@@ -197,9 +232,12 @@ def _hub_config_list_value(key: str, raw: Any, stored_raw: Any = None) -> list:
                 if _USB_VIDPID_RE.match(vp):
                     prev[vp] = {"type": str(it.get("type") or "wireless"),
                                 "label": str(it.get("label") or vp)}
+        # Build the new deduplicated list from the submitted items.
         out, seen = [], set()
         for it in items:
+            # Accept dict items or bare strings, lowercased for comparison.
             vp = str(it.get("vidpid", "") if isinstance(it, dict) else it).strip().lower()
+            # Skip invalid and duplicate vid:pids.
             if not _USB_VIDPID_RE.match(vp) or vp in seen:
                 continue
             seen.add(vp)
@@ -216,7 +254,9 @@ def _hub_config_list_value(key: str, raw: Any, stored_raw: Any = None) -> list:
                             "type": p["type"] if p else "wireless",
                             "label": p["label"] if p else vp})
         return out
+    # All other keys are simple string lists.
     items = _coerce_to_list(raw)
+    # Hostname lists keep tokens verbatim.
     if key in ("ignored_hostnames", "t1_exclude_hosts"):
         # Plain hostname/prefix string lists — NOT vid:pid. Keep non-empty tokens
         # verbatim (order/case preserved). Must NOT fall through to the vidpid
@@ -228,6 +268,7 @@ def _hub_config_list_value(key: str, raw: Any, stored_raw: Any = None) -> list:
                 seen.add(s)
                 out.append(s)
         return out
+    # Remaining keys are vid:pid string lists: keep valid, unique, lowercased ids.
     out, seen = [], set()
     for it in items:
         vp = str(it.get("vidpid", "") if isinstance(it, dict) else it).strip().lower()
@@ -242,13 +283,17 @@ def normalize_hub_config_lists(hc: Any, stored_hc: Any = None) -> dict:
     lists. The PUT /hub-config route calls this before persisting+pushing so the
     WebUI may send comma/space-delimited strings instead of raw JSON. Fields not
     present in ``hc`` are left untouched (the UI omits empty fields)."""
+    # Anything that is not a dict is returned unchanged.
     if not isinstance(hc, dict):
         return hc
+    # Work on a copy and treat a missing stored config as empty.
     out = dict(hc)
     stored_hc = stored_hc or {}
+    # Normalise each plain list field the client actually sent.
     for k in _HUB_CONFIG_LIST_KEYS:
         if k in out:
             out[k] = _hub_config_list_value(k, out[k], stored_hc.get(k))
+    # Normalise the object-list field, reusing stored type/label where possible.
     if _HUB_CONFIG_VIDPID_OBJ_KEY in out:
         out[_HUB_CONFIG_VIDPID_OBJ_KEY] = _hub_config_list_value(
             _HUB_CONFIG_VIDPID_OBJ_KEY, out[_HUB_CONFIG_VIDPID_OBJ_KEY],
@@ -259,11 +304,14 @@ def normalize_hub_config_lists(hc: Any, stored_hc: Any = None) -> dict:
 def _usb_dev_vidpid(dev: Any) -> str:
     """Lowercased ``vid:pid`` for a USB device/state entry. Entries carry either
     explicit ``vid``+``pid`` fields or a single ``vidpid`` string."""
+    # Non-dict entries have no id.
     if not isinstance(dev, dict):
         return ""
+    # Prefer explicit vid and pid fields when both are present and non-empty.
     vid, pid = dev.get("vid"), dev.get("pid")
     if vid is not None and pid is not None and str(vid).strip() and str(pid).strip():
         return f"{vid}:{pid}".strip().lower()
+    # Otherwise use the combined vidpid string (or "").
     return str(dev.get("vidpid") or "").strip().lower()
 
 
@@ -286,17 +334,23 @@ def _reclassify_host_usb(host: dict, ign: set, g_cert: dict, t_cert: dict) -> di
         UI's Wired/Wireless dropdown reflects the operator's choice immediately
         instead of reverting to stale spoke telemetry on the post-save
         re-render."""
+    # Merge global and tenant certifications into one {vidpid: type} map.
     cert = {**g_cert, **t_cert}  # tenant-local type wins on overlap
+    # Nothing to apply: return the host unchanged.
     if not ign and not cert:
         return host
+    # Only rewrite the proxmox block when it is a dict.
     px = host.get("proxmox")
     if isinstance(px, dict):
         px = dict(px)  # shallow copy — don't mutate the cached proxmox dict
+        # Remove ignored dongles from each USB list on the proxmox block.
         for key in ("present_usb", "unknown_usb", "usb_state"):
             v = px.get(key)
             if isinstance(v, list):
                 px[key] = [d for d in v if _usb_dev_vidpid(d) not in ign]
+        # Certified dongles need to move out of "unknown" and be tagged.
         if cert:
+            # Start from a copy of the present list (or empty if missing/malformed).
             present = list(px.get("present_usb")) if isinstance(px.get("present_usb"), list) else []
             # present_usb / unknown_usb are PER PHYSICAL DONGLE (keyed by
             # bus_path), so multiple instances of the same vid:pid are legitimate
@@ -305,10 +359,12 @@ def _reclassify_host_usb(host: dict, ign: set, g_cert: dict, t_cert: dict) -> di
             # already represented in present).
             present_paths = {(d.get("bus_path") if isinstance(d, dict) else None)
                              for d in present}
+            # Split the unknown list into certified (moved to present) and still-unknown.
             unknown = px.get("unknown_usb")
             if isinstance(unknown, list):
                 leftover = []
                 for d in unknown:
+                    # Look up this dongle's vid:pid against the certified map.
                     vp = _usb_dev_vidpid(d)
                     if vp in cert:
                         # Certified (global or local) → move EVERY physical
@@ -321,15 +377,19 @@ def _reclassify_host_usb(host: dict, ign: set, g_cert: dict, t_cert: dict) -> di
                         present.append(d)
                         if bp:
                             present_paths.add(bp)
+                    # Not certified: it stays in the unknown list.
                     else:
                         leftover.append(d)
                 px["unknown_usb"] = leftover
             # Tag each certified device with its approval scope (copy each dict so
             # cached device dicts aren't mutated).
+            # Rebuild the present list with tagged copies of each device.
             tagged = []
             for d in present:
+                # Non-dict entries are passed through unchanged.
                 if isinstance(d, dict):
                     d = dict(d)
+                    # Record whether it was approved globally, by the tenant, or both.
                     vp = _usb_dev_vidpid(d)
                     in_g, in_t = vp in g_cert, vp in t_cert
                     d["approval_scope"] = ("global+local" if (in_g and in_t)
@@ -345,10 +405,13 @@ def _reclassify_host_usb(host: dict, ign: set, g_cert: dict, t_cert: dict) -> di
                         d["type"] = saved_type
                 tagged.append(d)
             px["present_usb"] = tagged
+        # Store the rewritten proxmox block on the host copy.
         host["proxmox"] = px
+    # Also drop ignored dongles from the host-level device list.
     devs = host.get("usb_devices")
     if isinstance(devs, list):
         host["usb_devices"] = [d for d in devs if _usb_dev_vidpid(d) not in ign]
+    # Recompute the count so it matches the filtered list.
     host["usb_count"] = len(host.get("usb_devices") or [])
     return host
 
@@ -357,12 +420,15 @@ def _usb_keys_summary(node) -> dict:
     """Report which USB-related keys exist on a dict and, for list/dict ones,
     their length — enough to see the cs spoke's payload SHAPE without exposing
     any values (a CS payload may carry Proxmox tokens in other frames)."""
+    # Non-dict input has no keys to report.
     if not isinstance(node, dict):
         return {}
+    # Check only the USB-related keys we care about.
     out = {}
     for k in ("present_usb", "unknown_usb", "usb_state",
               "usb_devices", "usb_count", "vm_count", "proxmox_vms"):
         if k in node:
+            # Report lists and dicts by size; scalars by their repr.
             v = node[k]
             if isinstance(v, list):
                 out[k] = f"list[{len(v)}]"
@@ -377,11 +443,14 @@ def _usb_structure_dump(data: dict) -> dict:
     """Summarize where USB data lives in one cached CS_TELEMETRY payload:
     top-level keys, payload shape (multi-host vs legacy), and which USB keys
     exist on ``proxmox`` vs the host top-level. Values are never returned."""
+    # Treat a missing payload as empty, and list its top-level keys.
     data = data or {}
     entry = {"top_level_keys": sorted(data.keys() if isinstance(data, dict) else [])}
+    # Multi-host payloads carry one entry per Proxmox host.
     ph = data.get("proxmox_hosts")
     if isinstance(ph, list) and ph:
         entry["shape"] = "multi-host"
+        # Summarise USB keys per host, both in the proxmox block and at host level.
         entry["proxmox_hosts"] = [
             {
                 "host_keys": sorted((hh.keys() if isinstance(hh, dict) else [])),
@@ -390,6 +459,7 @@ def _usb_structure_dump(data: dict) -> dict:
             }
             for hh in ph
         ]
+    # Legacy single-host payload: summarise the top-level proxmox block.
     else:
         entry["shape"] = "legacy"
         entry["proxmox.usb"] = _usb_keys_summary(data.get("proxmox"))
@@ -414,16 +484,22 @@ def _usb_provisioning_status_payload(cfg: Dict[str, Any],
     the "Auto-Provisioning on but no host has CS enabled" mismatch instead of
     grepping the pxmx agent log.
     """
+    # One summary row per spoke in this tenant's cache.
     spokes: List[Dict[str, Any]] = []
     for sid, data in (tenant_cache or {}).items():
+        # Skip malformed cache entries.
         if not isinstance(data, dict):
             continue
+        # Spoke-level proxmox block and its last provisioning diagnostic.
         px = data.get("proxmox") or {}
         px_prov = px.get("provision") if isinstance(px, dict) else None
+        # Collect each host's own provisioning diagnostic.
         hosts: List[Dict[str, Any]] = []
         for h in (data.get("proxmox_hosts") or []):
+            # Skip malformed host entries.
             if not isinstance(h, dict):
                 continue
+            # Name the host by hostname, spoke name, or spoke id in that order.
             hp = h.get("proxmox") or {}
             hosts.append({
                 "hostname": h.get("hostname") or h.get("spoke_name") or sid,
@@ -437,15 +513,18 @@ def _usb_provisioning_status_payload(cfg: Dict[str, Any],
         # Server rows) so the Setup "Present USB" count matches the USB view
         # instead of reading 0; fall back to the spoke-level block for the
         # legacy single-host shape.
+        # Multi-host payload: sum dongle counts across every host.
         host_list = data.get("proxmox_hosts") or []
         if isinstance(host_list, list) and host_list:
             present = sum(len((h.get("proxmox") or {}).get("present_usb") or [])
                           for h in host_list if isinstance(h, dict))
             unknown = sum(len((h.get("proxmox") or {}).get("unknown_usb") or [])
                          for h in host_list if isinstance(h, dict))
+        # Legacy payload: read counts from the spoke-level block.
         else:
             present = len(px.get("present_usb") or []) if isinstance(px, dict) else 0
             unknown = len(px.get("unknown_usb") or []) if isinstance(px, dict) else 0
+        # Add this spoke's summary row.
         spokes.append({
             "spoke_id": sid, "spoke_name": data.get("spoke_name") or sid,
             "usb_auto_provision": px.get("usb_auto_provision") if isinstance(px, dict) else None,
@@ -458,15 +537,20 @@ def _usb_provisioning_status_payload(cfg: Dict[str, Any],
     # loop; the tenant toggle alone provisions nothing without it. Counting it
     # (tenant-scoped) lets the UI warn about the most common "I enabled it but
     # nothing happens" cause. ``str()``-coerced so int/str tenant ids both match.
+    # Normalise the tenant id to a string for comparison.
     tid = str(tenant_id or "")
     cs_enabled_agent_count = 0
+    # Count agents whose client simulation is enabled for this tenant.
     for ac in (agent_config or {}).values():
         if not isinstance(ac, dict):
+            # Skip malformed agent entries.
             continue
+        # Read the agent's client-simulation settings.
         cs = ac.get("client_simulation") or {}
         if isinstance(cs, dict) and cs.get("enabled") \
                 and str(cs.get("tenant_id") or "") == tid:
             cs_enabled_agent_count += 1
+    # Return the tenant toggle (default off), per-spoke rows and the agent count.
     return {"usb_auto_provision": (cfg or {}).get("usb_auto_provision", "off"),
             "spokes": spokes,
             "cs_enabled_agent_count": cs_enabled_agent_count}
@@ -480,7 +564,9 @@ def _cached_command_queue(hub_obj, sid):
     ``request_response`` that stalls when the spoke is busy. Returns None for a
     non-list so the caller falls back to the live fetch rather than rendering a
     malformed queue."""
+    # Look up the spoke's cached telemetry, tolerating a hub without a cache.
     cached = (getattr(hub_obj, "simulations_cache", {}) or {}).get(sid) or {}
+    # Only a real list is a usable queue.
     cq = cached.get("command_queue")
     return cq if isinstance(cq, list) else None
 
@@ -504,31 +590,44 @@ def bridge_undeliverable_message(agent_rows, targets):
     it yet) or an offline agent still queues, because those are transient and
     the queue exists precisely to ride them out.
     """
+    # Map host alias -> True when every bridge row for it is a "not enabled" skip.
     skipped = {}
+    # Walk each bridge agent row.
     for row in agent_rows or []:
+        # Skip malformed rows.
         if not isinstance(row, dict):
             continue
+        # Normalise the hostname: trim, drop a trailing dot, lowercase.
         hn = str(row.get("hostname") or "").strip().rstrip(".").lower()
         if not hn:
             continue
+        # Is this row a permanent "client simulation not enabled" skip?
         not_enabled = str(row.get("decision") or "").startswith("SKIP not-enabled")
+        # Record under both the full name and the short name.
         for alias in {hn, hn.split(".", 1)[0]}:
             # A host with several rows is undeliverable only if EVERY one of
             # them is skipped.
             skipped[alias] = skipped.get(alias, True) and not_enabled
+    # Targets the bridge will never deliver to.
     blocked = []
+    # Check every target host of the action.
     for target in targets or ():
+        # Normalise the target the same way as the bridge hostnames.
         t = str(target or "").strip().rstrip(".").lower()
+        # Skip empty targets and the generic "proxmox" placeholder.
         if not t or t == "proxmox":
             continue
+        # Match on full or short name; the for/else returns early if this target is reachable.
         for alias in (t, t.split(".", 1)[0]):
             if skipped.get(alias):
                 blocked.append(t)
                 break
         else:
             return ""   # at least one target IS reachable — let it queue
+    # No blocked targets: nothing to warn about.
     if not blocked:
         return ""
+    # Build an operator-facing message naming the blocked hosts and how to fix it.
     hosts = ", ".join(sorted(set(blocked)))
     return (f"Client Simulation mode is disabled for {hosts} — the CS bridge will "
             f"never relay this command to that host's agent, so it would sit "

@@ -9,17 +9,26 @@ any method/body) and WebSocket upgrades (/ws/console*, /sim/ws) are proxied.
 Phase 1 (Option A): the hub keeps ALL logic + the live `hub` object; this is a
 dumb forwarding front door. See docs/edge-proxy-role.md.
 """
+# asyncio: tasks for the two directions of each WebSocket relay, timeouts.
 import asyncio
+# base64: wrap/unwrap console bytes inside JSON frames for the spoke relay.
 import base64
+# html: escape error text placed in the "hub unavailable" page.
 import html
+# ipaddress: match client addresses against trusted front proxies.
 import ipaddress
+# json: read console-open responses and relay control messages.
 import json
+# logging: upstream errors and relay fallbacks.
 import logging
+# os: read LM_TRUSTED_PROXIES; re: split that list.
 import os
 import re
 
+# aiohttp: HTTP/WebSocket client for the hub leg and the server framework for the browser leg.
 from aiohttp import (ClientSession, ClientTimeout, DummyCookieJar, TCPConnector,
                      WSMsgType, client_exceptions, web)
+# Case-insensitive multi-value header dict, so repeated headers (Set-Cookie) survive.
 from multidict import CIMultiDict
 
 try:  # shared scanner-signature classifier (single source of truth with the hub)
@@ -44,24 +53,30 @@ def _load_trusted_proxies() -> tuple:
     trusted unless the immediate TCP peer is a configured front load balancer /
     CDN that stamped it. Fail-safe: with no trusted proxies configured, XFF is
     ignored and the TCP peer is used."""
+    # Read the env var; an unset or blank value means "trust no proxy".
     raw = os.environ.get("LM_TRUSTED_PROXIES", "").strip()
     nets = []
     if raw:
+        # Split on commas/whitespace and parse each entry as a network.
         for tok in re.split(r"[,\s]+", raw):
             tok = tok.strip()
             if not tok:
                 continue
             try:
                 nets.append(ipaddress.ip_network(tok, strict=False))
+            # Bad entries are skipped with a warning.
             except ValueError:
                 logger.warning("LM_TRUSTED_PROXIES: skipping unparseable entry %r", tok)
     return tuple(nets)
 
 
+# Parsed once at import; changing the env var needs a restart.
 _TRUSTED_PROXY_NETS = _load_trusted_proxies()
 
 
 def _ip_in_trusted(ip: str) -> bool:
+    """Return True if ip is inside one of the trusted front-proxy networks."""
+    # Unparseable or missing addresses are never trusted.
     try:
         addr = ipaddress.ip_address(ip)
     except (ValueError, TypeError):
@@ -204,29 +219,37 @@ def _hub_unavailable(request: web.BaseRequest, detail: str) -> web.Response:
     """503 response for an unreachable hub upstream. Browser navigations (Accept:
     text/html) get the branded auto-refreshing splash; API/XHR/other callers get a
     short text body. Both carry Retry-After so clients back off politely."""
+    # Tell clients to retry after the refresh interval and never cache this response.
     secs = _REFRESH_SECS
     headers = {"Retry-After": str(secs), "Cache-Control": "no-store"}
+    # Only browser page loads (GET/HEAD asking for HTML) get the styled page.
     accepts_html = "text/html" in (request.headers.get("Accept") or "")
     if accepts_html and request.method in ("GET", "HEAD"):
+        # Fill in the countdown and the escaped technical detail.
         body = (_HUB_DOWN_HTML
                 .replace("__SECS__", str(secs))
                 .replace("__DETAIL__", html.escape(detail or "connection refused")))
         return web.Response(status=503, text=body, content_type="text/html",
                             headers=headers)
+    # Everyone else gets a short plain-text 503.
     return web.Response(status=503, headers=headers,
                         text=f"LabManager Hub is not accessible: {detail}")
 
 
 def build_proxy_app(spoke) -> web.Application:
     """aiohttp app with a single catch-all route that forwards to the hub."""
+    # Store the spoke so the handler can read its settings.
     app = web.Application(client_max_size=0)  # 0 = unlimited (large uploads stream)
     app["spoke"] = spoke
+    # One catch-all route: every method and path goes to _dispatch.
     app.router.add_route("*", "/{tail:.*}", _dispatch)
+    # Close the shared upstream client session when the app shuts down.
     app.on_cleanup.append(_close_session)
     return app
 
 
 async def _close_session(app) -> None:
+    """Close the shared upstream client session on app shutdown."""
     sess = app.get("_session")
     if sess is not None and not sess.closed:
         await sess.close()
@@ -235,9 +258,12 @@ async def _close_session(app) -> None:
 def _session(spoke) -> ClientSession:
     """Lazily build the shared upstream client session bound to the spoke's
     mTLS/verify SSL context (so the proxy presents its client cert to the hub)."""
+    # The session is cached on the app; build a new one if missing or closed.
     app = spoke._proxy_app
     sess = app.get("_session")
     if sess is None or sess.closed:
+        # Connector uses the spoke's upstream TLS context (client cert + verify setting);
+        # limit=0 removes aiohttp's default cap of 100 concurrent connections.
         connector = TCPConnector(ssl=spoke.upstream_ssl(), limit=0)
         # DummyCookieJar: a reverse proxy MUST be cookie-stateless. aiohttp's
         # default ClientSession carries a shared CookieJar — with ONE session
@@ -252,6 +278,7 @@ def _session(spoke) -> ClientSession:
                              timeout=ClientTimeout(total=None, sock_connect=15),
                              cookie_jar=DummyCookieJar(),
                              auto_decompress=False)  # pass bytes through verbatim
+        # Cache it for later requests.
         app["_session"] = sess
     return sess
 
@@ -259,9 +286,12 @@ def _session(spoke) -> ClientSession:
 def _fwd_headers(request: web.BaseRequest, client_ip: str) -> dict:
     """Copy client headers minus hop-by-hop, and stamp the X-Forwarded-* chain so
     the hub sees the REAL client IP (its per-IP login lockout depends on this)."""
+    # Copy every non hop-by-hop header (cookies, auth, content type...).
     headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP}
+    # Append the real client IP to any existing X-Forwarded-For chain.
     prior = request.headers.get("X-Forwarded-For")
     headers["X-Forwarded-For"] = f"{prior}, {client_ip}" if prior else client_ip
+    # Tell the hub the original scheme and Host the browser used.
     headers["X-Forwarded-Proto"] = request.scheme
     host = request.headers.get("Host")
     if host:
@@ -283,14 +313,19 @@ def _report_source_ip(request: web.BaseRequest) -> str:
     report the direct TCP peer (``request.remote``) — the host actually sending
     the probe. This mirrors the hub's ``_client_ip`` discipline; the forwarding
     path already uses ``request.remote`` for the same reason."""
+    # Direct TCP peer address.
     peer = request.remote or ""
+    # No trusted proxies, or the peer is not one: report the peer itself.
     if not _TRUSTED_PROXY_NETS or not _ip_in_trusted(peer):
         return peer
+    # Peer is a trusted proxy: parse its X-Forwarded-For list.
     xff = request.headers.get("X-Forwarded-For", "")
     chain = [h.strip() for h in xff.split(",") if h.strip()]
+    # Walk from the closest hop outward; the first untrusted address is the real client.
     for hop in reversed(chain):
         if not _ip_in_trusted(hop):
             return hop
+    # Every hop was trusted: use the leftmost (original) entry, or the peer if XFF was empty.
     return chain[0] if chain else peer
 
 
@@ -299,15 +334,18 @@ def _report_edge_probe(spoke, request: web.BaseRequest) -> None:
     to the hub (``HTTP_PROBE_REPORT``) so it blocks the source centrally. Never
     raises into the request path — a missing control-plane back-reference (not yet
     connected) or no running loop just drops the report (best-effort)."""
+    # No control plane link yet: drop the report.
     cp = getattr(spoke, "control_plane", None)
     if cp is None or not hasattr(cp, "send_to_hub"):
         return
+    # What the hub needs to decide on a block: source, path, method and which edge saw it.
     data = {
         "source_ip": _report_source_ip(request),
         "path": request.path,
         "method": request.method,
         "node": getattr(spoke, "spoke_id", None) or "proxy",
     }
+    # Send it in the background so the browser response is not delayed.
     try:
         asyncio.get_event_loop().create_task(cp.send_to_hub("HTTP_PROBE_REPORT", data))
     except RuntimeError:  # pragma: no cover - no running loop (never inside a handler)
@@ -320,15 +358,18 @@ def _report_canary_hit(spoke, request: web.BaseRequest) -> None:
     centrally (self-scoped containment for a tenant node, source block at the
     perimeter). A canary has no legitimate use, so any hit is high-signal. Mirrors
     ``_report_edge_probe``: never raises into the request path."""
+    # No control plane link yet: drop the report.
     cp = getattr(spoke, "control_plane", None)
     if cp is None or not hasattr(cp, "send_to_hub"):
         return
+    # Same payload shape as a probe report.
     data = {
         "source_ip": _report_source_ip(request),
         "path": request.path,
         "method": request.method,
         "node": getattr(spoke, "spoke_id", None) or "proxy",
     }
+    # Send it in the background.
     try:
         asyncio.get_event_loop().create_task(cp.send_to_hub("NODE_CANARY_HIT", data))
     except RuntimeError:  # pragma: no cover - no running loop (never inside a handler)
@@ -336,6 +377,8 @@ def _report_canary_hit(spoke, request: web.BaseRequest) -> None:
 
 
 async def _dispatch(request: web.Request) -> web.StreamResponse:
+    """Handle every browser request: probe/canary checks, then forward to the hub (HTTP or WS)."""
+    # The ProxySpoke instance that owns this app.
     spoke = request.app["spoke"]
     # HTTPS-port scanner detection at the edge. A request for a path we never
     # serve (PHP/dotfiles/DB-admin panels/app-server consoles) is an automated
@@ -360,10 +403,13 @@ async def _dispatch(request: web.Request) -> web.StreamResponse:
         _report_canary_hit(spoke, request)
         return web.Response(status=_canary["status"], body=_canary["body"],
                             content_type=_canary["ctype"])
+    # Hub base URL; without it we can only show the "hub unavailable" page.
     upstream = spoke.upstream_url
     if not upstream:
         return _hub_unavailable(request, "no upstream configured")
+    # Hub URL + the original path and query string, unchanged.
     target = upstream.rstrip("/") + request.rel_url.raw_path_qs
+    # WebSocket upgrade requests are relayed as WebSockets.
     if request.headers.get("Upgrade", "").lower() == "websocket":
         # Phase 2: an edge-relayed console session (browser opened /ws/console/{id}
         # after the hub returned a `relay` descriptor we snooped) is relayed
@@ -372,8 +418,10 @@ async def _dispatch(request: web.Request) -> web.StreamResponse:
         # _tenant_allows_shortcut). Anything without a cached descriptor, no
         # relay_spoke_url, or a cross-tenant/shared/unassigned proxy falls back to
         # the Phase-1 hub WS proxy.
+        # Is this a console WebSocket, and if so for which session?
         sid = _console_ws_session(request.path)
         if sid and spoke.relay_spoke_url:
+            # Use the shortcut only with a cached relay descriptor and a matching tenant.
             cached = (spoke._console_relay_cache or {}).get(sid)
             if cached and cached.get("relay") and _tenant_allows_shortcut(spoke, cached["relay"]):
                 relayed = await _proxy_console_relay(request, spoke, sid, cached)
@@ -382,15 +430,19 @@ async def _dispatch(request: web.Request) -> web.StreamResponse:
                 # console still works, just via the hub.
                 if relayed is not None:
                     return relayed
+        # Normal case: relay the WebSocket through the hub.
         return await _proxy_ws(request, spoke, target)
+    # Plain HTTP request: stream it to the hub.
     return await _proxy_http(request, spoke, target)
 
 
 def _console_ws_session(path: str):
     """Return the session id for a browser console WS path, else None.
     /ws/console/{id}, /ws/console-shell/{id}, /ws/console-serial/{id}."""
+    # Check the longer prefixes first so "/ws/console/" does not match the others.
     for pfx in ("/ws/console-shell/", "/ws/console-serial/", "/ws/console/"):
         if path.startswith(pfx):
+            # The id is the next path segment; an empty id means "not a console session".
             return path[len(pfx):].split("/", 1)[0] or None
     return None
 
@@ -403,9 +455,11 @@ def _tenant_allows_shortcut(spoke, desc: dict) -> bool:
     All tenant assignment is authored on the hub; the proxy just compares the
     tenant it was told it owns against the tenant the hub stamped on the
     descriptor."""
+    # This proxy's tenant; unassigned or shared proxies never take the shortcut.
     my_tenant = getattr(spoke, "tenant_id", "") or ""
     if not my_tenant or getattr(spoke, "tenant_shared", False):
         return False
+    # Same tenant as the target spoke: shortcut allowed.
     return (desc.get("tenant_id") or "") == my_tenant
 
 
@@ -417,11 +471,14 @@ def _resp_headers(upstream_resp, *, drop_content_length: bool = False) -> CIMult
     a single entry, silently dropping the session cookie and breaking SSO. Now
     that the proxy holds no cookie state of its own (DummyCookieJar), the browser
     MUST receive every Set-Cookie verbatim. Hop-by-hop headers are stripped."""
+    # add() (not item assignment) keeps every value of repeated headers.
     out: CIMultiDict = CIMultiDict()
+    # Copy each header, skipping hop-by-hop ones.
     for k, v in upstream_resp.headers.items():
         lk = k.lower()
         if lk in _HOP:
             continue
+        # Drop Content-Length when the body is being re-sent from a buffer (aiohttp sets it).
         if drop_content_length and lk == "content-length":
             continue
         out.add(k, v)
@@ -429,11 +486,17 @@ def _resp_headers(upstream_resp, *, drop_content_length: bool = False) -> CIMult
 
 
 async def _proxy_http(request: web.Request, spoke, target: str) -> web.StreamResponse:
+    """Forward a normal HTTP request to the hub and stream the response back to the browser."""
+    # Real client IP, forwarded headers and the shared upstream session.
     client_ip = request.remote or ""
     headers = _fwd_headers(request, client_ip)
     sess = _session(spoke)
+    # Console-open POSTs are read in full so their relay descriptor can be cached.
     snoop = request.method == "POST" and request.path in _CONSOLE_OPEN_PATHS
+    # Connection failures/timeouts produce the friendly 503 instead of an error.
     try:
+        # Send the same method and headers; stream the request body in 64 KiB chunks if there is
+        # one. Redirects are passed back to the browser, not followed here.
         async with sess.request(
             request.method, target, headers=headers,
             data=request.content.iter_chunked(_CHUNK) if request.body_exists else None,
@@ -443,18 +506,23 @@ async def _proxy_http(request: web.Request, spoke, target: str) -> web.StreamRes
                 # Buffer the small console-open JSON, cache its `relay` descriptor
                 # (+ ws_token for browser-leg auth), then forward it verbatim.
                 body = await upstream_resp.read()
+                # Parse the JSON and pick out the relay descriptor and its session id.
                 try:
                     obj = json.loads(body)
                     rel = obj.get("relay") if isinstance(obj, dict) else None
                     sid = (rel or {}).get("session_id")
+                    # Remember the descriptor and token for the browser's upcoming console
+                    # WebSocket.
                     if sid:
                         spoke._console_relay_cache[sid] = {
                             "relay": rel, "ws_token": obj.get("ws_token")}
                 except Exception:  # noqa: BLE001 — gzipped/odd body: skip caching, still forward
                     pass
+                # Return the buffered body with the hub's status and headers.
                 return web.Response(
                     status=upstream_resp.status, body=body,
                     headers=_resp_headers(upstream_resp, drop_content_length=True))
+            # Normal path: send status/headers, then stream the body chunk by chunk.
             resp = web.StreamResponse(status=upstream_resp.status,
                                       headers=_resp_headers(upstream_resp))
             await resp.prepare(request)
@@ -462,9 +530,11 @@ async def _proxy_http(request: web.Request, spoke, target: str) -> web.StreamRes
                 await resp.write(chunk)
             await resp.write_eof()
             return resp
+    # Hub refused/reset the connection or similar client error.
     except client_exceptions.ClientError as e:
         logger.warning("proxy upstream error %s %s: %s", request.method, target, e)
         return _hub_unavailable(request, f"{type(e).__name__}: {e}")
+    # Hub did not answer within the connect timeout.
     except asyncio.TimeoutError:
         logger.warning("proxy upstream timeout %s %s", request.method, target)
         return _hub_unavailable(request, "upstream connect timed out")
@@ -472,19 +542,25 @@ async def _proxy_http(request: web.Request, spoke, target: str) -> web.StreamRes
 
 async def _proxy_ws(request: web.Request, spoke, target: str) -> web.StreamResponse:
     """Full-duplex WebSocket proxy (browser ↔ hub). Covers /ws/console*, /sim/ws."""
+    # Accept the browser's WebSocket (no message size limit, keepalive pings on).
     ws_client = web.WebSocketResponse(heartbeat=_WS_HEARTBEAT, max_msg_size=0)
     await ws_client.prepare(request)
+    # Same URL but with ws:// / wss:// schemes for the hub leg.
     ws_target = target.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
+    # Shared upstream session and forwarded headers.
     sess = _session(spoke)
     headers = _fwd_headers(request, request.remote or "")
     # Strip the browser's WebSocket handshake headers — aiohttp mints its own for
     # the upstream leg (see _WS_HANDSHAKE). Leaving them in opens the upstream but
     # breaks it on the first data frame (browser sees an immediate disconnect).
     headers = {k: v for k, v in headers.items() if k.lower() not in _WS_HANDSHAKE}
+    # Open the hub-side WebSocket; client errors are logged and the browser socket closed.
     try:
         async with sess.ws_connect(ws_target, headers=headers, max_msg_size=0,
                                    heartbeat=_WS_HEARTBEAT) as ws_up:
             async def pump(src, dst):
+                """Copy WebSocket messages from src to dst until either side closes or errors."""
+                # Forward text and binary frames as-is; stop on close or error.
                 async for msg in src:
                     if msg.type == WSMsgType.TEXT:
                         await dst.send_str(msg.data)
@@ -494,6 +570,7 @@ async def _proxy_ws(request: web.Request, spoke, target: str) -> web.StreamRespo
                         break
                     elif msg.type == WSMsgType.ERROR:
                         break
+            # Pump both directions at once; when either ends, cancel the other.
             b2h = asyncio.ensure_future(pump(ws_client, ws_up))
             h2b = asyncio.ensure_future(pump(ws_up, ws_client))
             done, pending = await asyncio.wait({b2h, h2b},
@@ -502,6 +579,7 @@ async def _proxy_ws(request: web.Request, spoke, target: str) -> web.StreamRespo
                 t.cancel()
     except client_exceptions.ClientError as e:
         logger.warning("proxy ws upstream error %s: %s", ws_target, e)
+    # Always make sure the browser socket is closed.
     finally:
         if not ws_client.closed:
             await ws_client.close()
@@ -514,25 +592,31 @@ async def _proxy_console_relay(request: web.Request, spoke, session_id: str,
     ↔ Proxmox, with the hub OUT of the byte path. The browser speaks raw noVNC
     bytes; we wrap them as ``VNC_FRAME_DOWN`` and unwrap ``VNC_FRAME_UP`` back to
     bytes. (Shell/serial reuse the same shape once their brokers emit a descriptor.)"""
+    # Relay descriptor captured earlier from the console-open response.
     desc = cached.get("relay") or {}
     # Browser-leg auth: the same ws_token the hub minted (mirrors the hub console WS).
     want = cached.get("ws_token")
     got = request.query.get("token")
+    # Wrong or missing token: close the browser socket with an auth error code.
     if want and got != want:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         await ws.close(code=4401, reason="invalid or expired console session")
         return ws  # authoritative reject (NOT a fall-back)
+    # Kind of console decides the message types used on the spoke relay (VNC by default).
     kind = desc.get("kind") or "vnc"
     down_cmd, up_type, disc_cmd = {
         "shell":  ("SHELL_IN",     "SHELL_OUT",      "SHELL_DISCONNECT"),
         "serial": ("CONSOLE_DATA", "CONSOLE_DATA_UP", "CONSOLE_CLOSE"),
     }.get(kind, ("VNC_FRAME_DOWN", "VNC_FRAME_UP", "VNC_DISCONNECT"))
+    # Any of these messages from the spoke ends the session.
     disconnect_types = ("VNC_DISCONNECT", "VNC_ERROR", "SHELL_DISCONNECT",
                         "SHELL_ERROR", "CONSOLE_CLOSE", "CONSOLE_CLOSED", "CONSOLE_ERROR")
 
+    # Spoke relay URL for this session, converted to a WebSocket scheme.
     relay_url = (spoke.relay_spoke_url.rstrip("/") + "/ws/console-relay/" + session_id)
     relay_url = relay_url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
+    # Use our mTLS upstream context only for TLS connections.
     ssl_ctx = spoke.upstream_ssl() if relay_url.startswith("wss://") else None
     sess = _session(spoke)
 
@@ -544,8 +628,11 @@ async def _proxy_console_relay(request: web.Request, spoke, session_id: str,
     except (client_exceptions.ClientError, OSError, asyncio.TimeoutError) as e:
         logger.info("console relay to spoke unavailable (%s): %s — hub fallback", relay_url, e)
         return None
+    # Browser socket is created only after the spoke accepts the relay.
     ws_browser = None
+    # Errors mid-session are logged; cleanup happens in finally.
     try:
+        # Authenticate to the spoke with the descriptor's relay token and wait for its reply.
         await ws_sp.send_json({"relay_token": desc.get("relay_token")})
         ack = await ws_sp.receive()
         ok = (ack.type == WSMsgType.TEXT
@@ -553,10 +640,13 @@ async def _proxy_console_relay(request: web.Request, spoke, session_id: str,
         if not ok:
             return None  # relay refused → hub fallback (finally closes ws_sp)
 
+        # Spoke accepted: now accept the browser's WebSocket.
         ws_browser = web.WebSocketResponse(heartbeat=_WS_HEARTBEAT, max_msg_size=0)
         await ws_browser.prepare(request)
 
         async def browser_to_spoke():
+            """Wrap each browser frame as base64 JSON for the spoke; send a disconnect when done."""
+            # Binary frames (noVNC) and text frames are both forwarded as base64 data.
             async for msg in ws_browser:
                 if msg.type == WSMsgType.BINARY:
                     await ws_sp.send_json({"type": down_cmd,
@@ -567,12 +657,15 @@ async def _proxy_console_relay(request: web.Request, spoke, session_id: str,
                 elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING,
                                   WSMsgType.CLOSED, WSMsgType.ERROR):
                     break
+            # Tell the spoke the browser left; ignore errors if the spoke is already gone.
             try:
                 await ws_sp.send_json({"type": disc_cmd, "data": {}})
             except Exception:  # noqa: BLE001
                 pass
 
         async def spoke_to_browser():
+            """Unwrap spoke frames back to raw bytes for the browser; ping when the spoke is idle.
+            """
             while True:
                 # Idle app-ping: in this edge path the hub is out of the byte
                 # stream, so it can't send its own control "ping". When the spoke
@@ -588,33 +681,41 @@ async def _proxy_console_relay(request: web.Request, spoke, session_id: str,
                         continue
                     except Exception:  # noqa: BLE001
                         break
+                # Ignore non-text frames; stop on close/error.
                 if msg.type != WSMsgType.TEXT:
                     if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING,
                                     WSMsgType.CLOSED, WSMsgType.ERROR):
                         break
                     continue
+                # Skip frames that are not valid JSON.
                 try:
                     obj = json.loads(msg.data)
                 except Exception:  # noqa: BLE001
                     continue
+                # Message type and its payload.
                 t = obj.get("type")
                 d = obj.get("data") or {}
+                # Console output: decode the bytes and send them to the browser.
                 if t == up_type:
                     try:
                         await ws_browser.send_bytes(base64.b64decode(d.get("data") or ""))
                     except Exception:  # noqa: BLE001
                         break
+                # Spoke says the session ended.
                 elif t in disconnect_types:
                     break
                 # *_READY carries no bytes — the RFB/PTY stream itself signals readiness.
 
+        # Run both directions; when one finishes, cancel the other.
         b2s = asyncio.ensure_future(browser_to_spoke())
         s2b = asyncio.ensure_future(spoke_to_browser())
         _, pending = await asyncio.wait({b2s, s2b}, return_when=asyncio.FIRST_COMPLETED)
         for t in pending:
             t.cancel()
+    # Spoke connection error during the session.
     except client_exceptions.ClientError as e:
         logger.warning("console relay to spoke failed (%s): %s", relay_url, e)
+    # Always forget the descriptor (one-time use) and close both sockets.
     finally:
         spoke._console_relay_cache.pop(session_id, None)
         try:

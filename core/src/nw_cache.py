@@ -31,13 +31,18 @@ is ``main → nw_cache`` only). Audience: Hub developers.
 
 from __future__ import annotations
 
+# logging for restore/refresh messages; os builds the cache file path; time stamps writes.
 import logging
 import os
 import time
+# Type hints only; they document the shapes of values passed around.
 from typing import Any, Dict, Optional
 
+# Shared cache helpers: JsonCacheFile does debounced atomic JSON persistence and
+# StalenessPolicy decides when cached data is old.
 from cache_core import JsonCacheFile, StalenessPolicy
 
+# Logs under the shared "Hub" logger so cache messages appear with other hub output.
 logger = logging.getLogger("Hub")
 
 
@@ -51,7 +56,9 @@ class NwCacheMixin:
     ``cache/nw_data.json`` and reloaded on startup to seed the UI.
     """
 
+    # File name of the persisted cache inside the hub's cache directory.
     NW_CACHE_FILE = "nw_data.json"
+    # Per-device endpoint slots that may be cached ("poll" is handled separately).
     _NW_CACHE_ENDPOINTS = ("info", "macs", "arp", "interfaces",
                            "endpoints", "vlans", "lldp")
 
@@ -64,9 +71,13 @@ class NwCacheMixin:
 
     def nw_cache_init(self) -> None:
         """Initialize the in-memory cache slots. Call once from ``__init__``."""
+        # Fleet snapshot and per-device endpoint data, both empty until first fetch or load.
         self.nw_fleet_cache: Dict[str, Any] = {}
         self.nw_device_cache: Dict[str, Dict[str, Any]] = {}
+        # Staleness rules used by the read path to decide when to revalidate.
         self.nw_policy = StalenessPolicy()
+        # Persistence helper: label, path function, a callable that returns what to save,
+        # and the coalescing delay between disk writes.
         self._nw_cache_file = JsonCacheFile(
             "nw cache", self._nw_cache_path,
             lambda: {"fleet": self.nw_fleet_cache,
@@ -74,6 +85,8 @@ class NwCacheMixin:
             flush_delay_s=self._NW_CACHE_FLUSH_DELAY_S)
 
     def _nw_cache_path(self) -> str:
+        """Return the full path of the persisted nw cache file."""
+        # Use the hub's cache_dir when set, else the current directory.
         return os.path.join(getattr(self, "cache_dir", "."), self.NW_CACHE_FILE)
 
     def nw_cache_load(self) -> None:
@@ -84,15 +97,18 @@ class NwCacheMixin:
         The read itself is ``cache_core``'s, so a truncated or non-JSON file
         degrades identically here and in every other module.
         """
+        # Read the persisted file; anything that is not a dict means start cold.
         data = self._nw_cache_file.load()
         if not isinstance(data, dict):
             return
+        # Restore the fleet snapshot, coercing fetched_at to a float.
         fleet = data.get("fleet")
         if isinstance(fleet, dict):
             self.nw_fleet_cache = {
                 "devices": fleet.get("devices"),
                 "fetched_at": float(fleet.get("fetched_at", 0.0) or 0.0),
             }
+        # Restore per-device entries, skipping non-dict values.
         devices = data.get("devices")
         if isinstance(devices, dict):
             # Drop failed envelopes persisted before set_device refused them, so
@@ -103,6 +119,7 @@ class NwCacheMixin:
                 for did, v in devices.items()
                 if isinstance(v, dict)
             }
+        # Log what was restored so operators can see the warm start happened.
         if self.nw_fleet_cache or self.nw_device_cache:
             logger.info("nw cache: restored %d device(s) + fleet snapshot from %s",
                         len(self.nw_device_cache), self._nw_cache_path())
@@ -111,6 +128,7 @@ class NwCacheMixin:
 
     def nw_cache_get_fleet(self) -> Optional[Dict[str, Any]]:
         """Last-known fleet envelope + ``fetched_at``, or None if never cached."""
+        # Return the fleet snapshot only if a device list was actually cached.
         f = self.nw_fleet_cache
         if not f or f.get("devices") is None:
             return None
@@ -132,27 +150,33 @@ class NwCacheMixin:
         builds a shallow-copied envelope; the underlying cache is untouched.
         A missing/empty ``data`` list is returned as-is (None cache or a
         zero-row fleet both short-circuit to the caller's empty handling)."""
+        # No cached fleet list means nothing to filter.
         f = self.nw_fleet_cache
         if not f or f.get("devices") is None:
             return None
+        # Filter the envelope's data rows through the caller's visibility predicate.
         env = f["devices"]
         data = env.get("data") if isinstance(env, dict) else None
         if isinstance(data, list):
             env = {**env, "data": [r for r in data
                                    if isinstance(r, dict) and predicate(r)]}
+        # Same shape as nw_cache_get_fleet, with the filtered envelope.
         return {"devices": env, "fetched_at": f["fetched_at"]}
 
     def nw_cache_get_device(self, device_id: str, endpoint: str) -> Optional[Any]:
         """Last-known raw envelope for one device endpoint, or None."""
+        # Look up the device entry; unknown devices have no cached data.
         entry = self.nw_device_cache.get(device_id)
         if not entry:
             return None
+        # Return the cached envelope for this endpoint (None when absent).
         val = entry.get(endpoint)
         return val if val is not None else None
 
     def nw_cache_fleet_fetched_at(self) -> float:
         """Epoch of the last fleet-cache write (0.0 if never cached). Drives the
         cache-first read path's staleness/revalidate decision in ``routes/nw``."""
+        # Return the fleet write time, or 0.0 if there is no cached fleet list.
         f = self.nw_fleet_cache
         if not f or f.get("devices") is None:
             return 0.0
@@ -162,6 +186,7 @@ class NwCacheMixin:
         """Epoch of the most recent write to one device's cache entry (0.0 if
         the device was never cached). Drives the cache-first read path's
         staleness/revalidate decision in ``routes/nw``."""
+        # Return the device's last write time, or 0.0 if it was never cached.
         entry = self.nw_device_cache.get(device_id)
         if not entry:
             return 0.0
@@ -172,16 +197,20 @@ class NwCacheMixin:
     @staticmethod
     def _nw_failed_envelope(data: Any) -> bool:
         """Return True when data is a dict whose 'status' value, converted with str(...).strip().upper(), is one of 'ERROR', 'FAILED', 'FAILURE'. Otherwise False."""
+        # Only dict envelopes can carry a status.
         if not isinstance(data, dict):
             return False
+        # Normalize the status text and treat any of the failure words as failed.
         status = str(data.get("status", "")).strip().upper()
         return status in ("ERROR", "FAILED", "FAILURE")
 
     async def nw_cache_set_fleet(self, data: Any) -> None:
         """Store a fresh NW_LIST_DEVICES envelope + persist (best-effort). Failed envelopes never overwrite last-known-good data."""
+        # Never overwrite good cached data with a failed refresh.
         if self._nw_failed_envelope(data):
             logger.info("nw cache: keeping last-known fleet snapshot (refresh failed: %s)", data.get("message"))
             return
+        # Store the new envelope with the current time and schedule a debounced save.
         self.nw_fleet_cache = {"devices": data, "fetched_at": time.time()}
         self._nw_cache_file.schedule_save()
 
@@ -196,12 +225,15 @@ class NwCacheMixin:
         ``latency_ms`` in place (no-op if the fleet snapshot or the row is not
         cached yet — the first fleet list seeds it). ``reachable`` may be
         ``None`` (UNKNOWN) which surfaces as the yellow 'unknown' badge."""
+        # Need a cached fleet envelope to update.
         f = self.nw_fleet_cache
         if not f or not isinstance(f.get("devices"), dict):
             return
+        # The rows live under the envelope's "data" list.
         rows = f["devices"].get("data")
         if not isinstance(rows, list):
             return
+        # Find this device's row and update its reachability fields in place.
         touched = False
         for r in rows:
             if isinstance(r, dict) and r.get("id") == device_id:
@@ -209,20 +241,25 @@ class NwCacheMixin:
                 r["latency_ms"] = latency_ms
                 touched = True
                 break
+        # Persist only if a row actually changed.
         if touched:
             self._nw_cache_file.schedule_save()
 
     async def nw_cache_set_device(self, device_id: str, endpoint: str,
                                   data: Any) -> None:
         """Store a fresh per-device endpoint envelope + persist (best-effort). Failed envelopes never overwrite last-known-good data."""
+        # Ignore endpoints that are not cacheable.
         if endpoint not in self._NW_CACHE_ENDPOINTS and endpoint != "poll":
             return
+        # Keep last-known data rather than caching an error envelope.
         if self._nw_failed_envelope(data):
             logger.info("nw cache: keeping last-known %s for %s (refresh failed: %s)", endpoint, device_id, data.get("message"))
             return
+        # Create the device entry if needed, store the envelope and stamp the time.
         entry = self.nw_device_cache.setdefault(device_id, {})
         entry[endpoint] = data
         entry["fetched_at"] = time.time()
+        # Schedule a debounced write to disk.
         self._nw_cache_file.schedule_save()
 
     async def nw_cache_set_poll(self, device_id: str, poll_result: Dict[str, Any]
@@ -233,8 +270,10 @@ class NwCacheMixin:
         the reachability + NetBox-push summary; threading it into the cache
         means a later page load (spoke offline) still reflects the last poll.
         """
+        # Ignore malformed poll results.
         if not isinstance(poll_result, dict):
             return
+        # Keep the full poll result in its own slot.
         entry = self.nw_device_cache.setdefault(device_id, {})
         entry["poll"] = poll_result
         # Best-effort: mirror the poll's sub-resources into the endpoint slots
@@ -249,6 +288,7 @@ class NwCacheMixin:
         # fetches still work. A poll we couldn't complete must preserve, not
         # destroy, the cached data.
         if poll_result.get("reachable"):
+            # Copy each sub-resource present in the poll into its endpoint slot.
             info = poll_result.get("device_info")
             if isinstance(info, dict) and info:
                 entry["info"] = {"status": "SUCCESS", "data": info}
@@ -267,6 +307,7 @@ class NwCacheMixin:
             vlans = poll_result.get("vlans")
             if isinstance(vlans, list):
                 entry["vlans"] = {"status": "SUCCESS", "data": vlans}
+        # Stamp the write time and schedule a debounced save.
         entry["fetched_at"] = time.time()
         self._nw_cache_file.schedule_save()
 
@@ -277,6 +318,7 @@ class NwCacheMixin:
 
     async def nw_cache_flush_now(self) -> None:
         """Immediate persist (shutdown path) — skips the coalescing delay."""
+        # Write the cache to disk now, bypassing the debounce timer.
         await self._nw_cache_file.flush_now()
 
     # ── staleness ─────────────────────────────────────────────────────────────
