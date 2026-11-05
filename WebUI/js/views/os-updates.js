@@ -610,6 +610,24 @@ function _osuRender(d) {
     if (busy && !_osuPoll) _osuStartPoll();
 }
 
+// Failed nodes of the last run that share a cause (e.g. one offline spoke),
+// shown once with the nodes it took down instead of N identical row errors.
+function _osuFailureGroups(run) {
+    const groups = new Map();
+    (run && run.items || []).filter(i => i.status === 'failed').forEach(i => {
+        const cause = i.cause || i.message || 'failed';
+        if (!groups.has(cause)) groups.set(cause, []);
+        groups.get(cause).push(i.label || i.key);
+    });
+    const shared = [...groups].filter(([, labels]) => labels.length > 1);
+    if (!shared.length) return '';
+    return safeHtml`<div class="space-y-2 mb-3">${shared.map(([cause, labels]) => safeHtml`
+        <div class="rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+            <div class="font-bold">${labels.length} nodes not patched — ${cause}</div>
+            <div class="mt-1 text-red-600">${labels.join(', ')}</div>
+        </div>`)}</div>`;
+}
+
 function _osuBodyHtml({ data: d }) {
     const run = d.run;
     const busy = _osuBusy();
@@ -677,7 +695,7 @@ function _osuBodyHtml({ data: d }) {
         </div>`;
     });
     return rows.length
-        ? safeHtml`<div class="divide-y divide-slate-100">${rows}</div>`
+        ? safeHtml`${_osuFailureGroups(run)}<div class="divide-y divide-slate-100">${rows}</div>`
         : safeHtml`<p class="text-xs text-slate-400 italic">No nodes reporting.</p>`;
 }
 
