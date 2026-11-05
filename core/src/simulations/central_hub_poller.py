@@ -23,6 +23,8 @@ from __future__ import annotations
 
 # asyncio for the background loop and parallel per-site work.
 import asyncio
+# Calendar months/quarters for the compliance roll-up.
+import datetime
 # JSON for the persisted history/state files.
 import json
 # Standard-library logging.
@@ -608,6 +610,127 @@ def success_from_daily(daily: list) -> Dict[str, Any]:
     return out
 
 
+# How long the daily compliance store keeps days (a year plus a margin).
+_DAILY_KEEP_S = 400 * 86400
+# Rolling compliance windows in days (week, month, quarter, year).
+_COMPLIANCE_WINDOWS = (("d7", 7), ("d30", 30), ("d90", 90), ("y1", 365))
+
+
+def _add_cell(target: Dict[int, list], ts: Any, cell: list) -> None:
+    """Add a [o, w, e, n] count cell into target[ts]."""
+    acc = target.setdefault(int(ts), [0, 0, 0, 0])
+    for i in range(4):
+        acc[i] += int(cell[i] or 0)
+
+
+def _score(cells: list) -> Dict[str, Any]:
+    """Compliance of a list of [o, w, e, n] cells: % of graded polls that were OK."""
+    ok = sum(c[0] for c in cells)
+    graded = sum(c[0] + c[1] + c[2] for c in cells)
+    return {"pct": round(100.0 * ok / graded, 1) if graded else None,
+            "ok": ok, "graded": graded, "days": None}
+
+
+def _window(days: Dict[int, list], today: int, n: int, back: int = 0) -> Dict[str, Any]:
+    """Score the n days ending `back` periods ago (back=1 is the previous period)."""
+    hi = today - back * n * 86400
+    lo = hi - (n - 1) * 86400
+    picked = [c for d, c in days.items() if lo <= d <= hi]
+    out = _score(picked)
+    out["days"] = sum(1 for c in picked if c[0] + c[1] + c[2])
+    return out
+
+
+def _month_start(ts: int) -> datetime.date:
+    """First day of the UTC month containing ts."""
+    d = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).date()
+    return d.replace(day=1)
+
+
+def _months_back(n: int, now: float) -> list:
+    """The last n calendar months (UTC) as 'YYYY-MM', oldest first."""
+    d = _month_start(int(now))
+    out = []
+    for _ in range(n):
+        out.append(d.strftime("%Y-%m"))
+        d = (d - datetime.timedelta(days=1)).replace(day=1)
+    return out[::-1]
+
+
+def _by_month(days: Dict[int, list]) -> Dict[str, list]:
+    """Group daily cells by 'YYYY-MM'."""
+    out: Dict[str, list] = {}
+    for d, c in days.items():
+        out.setdefault(_month_start(d).strftime("%Y-%m"), []).append(c)
+    return out
+
+
+def _quarter(month: str) -> str:
+    """'2026-11' -> '2026-Q4'."""
+    y, m = month.split("-")
+    return f"{y}-Q{(int(m) - 1) // 3 + 1}"
+
+
+def _hour_cells(hours: Dict[int, list], now: float) -> list:
+    """The last 24 hourly cells, oldest first ({h, o, w, e, n}); empty hours are zeros."""
+    top = int(now // 3600 * 3600)
+    out = []
+    for i in range(23, -1, -1):
+        h = top - i * 3600
+        c = hours.get(h, [0, 0, 0, 0])
+        out.append({"h": h, "o": c[0], "w": c[1], "e": c[2], "n": c[3]})
+    return out
+
+
+def build_compliance(raw: Dict[str, Dict[str, Any]], now: Optional[float] = None) -> Dict[str, Any]:
+    """Turn per-check raw counts (see CheckHealthHistory.compliance_raw) into the
+    compliance report: overall and per-check scores for the rolling week, month,
+    quarter and year (each with the previous period for comparison), the last 12
+    calendar months, the last 4 quarters, and a 24-hour hourly bar + flap count."""
+    now = time.time() if now is None else now
+    today = int(now // 86400 * 86400)
+    months = _months_back(12, now)
+    quarters = list(dict.fromkeys(_quarter(m) for m in months))[-4:]
+    all_days: Dict[int, list] = {}
+    checks = []
+    for name, row in raw.items():
+        days = row.get("days") or {}
+        for d, c in days.items():
+            _add_cell(all_days, d, c)
+        by_month = _by_month(days)
+        hours = row.get("hours") or {}
+        item = {
+            "check": row.get("check", name),
+            "product": row.get("product", ""),
+            "sites": len(row.get("sites") or ()),
+            "hours": _hour_cells(hours, now) if hours else [],
+            "flaps": row.get("flaps") if hours else None,
+            "h24": _score([c for h, c in hours.items() if h > now - 86400])["pct"] if hours
+                   else _window(days, today, 1)["pct"],
+            "months": [_score(by_month.get(m, []))["pct"] for m in months],
+        }
+        for label, n in _COMPLIANCE_WINDOWS:
+            item[label] = _window(days, today, n)["pct"]
+        checks.append(item)
+    # Worst 30-day compliance first; checks with no score go last.
+    checks.sort(key=lambda c: (c["d30"] is None, c["d30"] if c["d30"] is not None else 0, c["check"]))
+    by_month = _by_month(all_days)
+    overall = {}
+    for label, n in _COMPLIANCE_WINDOWS:
+        overall[label] = _window(all_days, today, n)
+        overall[label]["prev"] = _window(all_days, today, n, back=1)["pct"]
+    graded_days = sorted(d for d, c in all_days.items() if c[0] + c[1] + c[2])
+    return {
+        "generated": int(now),
+        "since": graded_days[0] if graded_days else None,
+        "overall": overall,
+        "months": [{"m": m, **_score(by_month.get(m, []))} for m in months],
+        "quarters": [{"q": q, **_score([c for m in months if _quarter(m) == q
+                                        for c in by_month.get(m, [])])} for q in quarters],
+        "checks": checks,
+    }
+
+
 class CheckHealthHistory:
     """Rolling 30-day status history for every dashboard check, in HOURLY buckets.
 
@@ -629,8 +752,12 @@ class CheckHealthHistory:
         # key = tenant\x1fsite\x1fcheck -> {hour_ts(int): [o, w, e, n]}
         self._h: Dict[str, Dict[int, list]] = {}
         self._dirty: set = set()   # tenants changed since last save
+        # Long-term daily counts + 24h flap tracking, kept for the compliance view:
+        # key -> {"days": {day_ts: [o, w, e, n]}, "last": status idx, "flips": [ts]}
+        self._d: Dict[str, Dict[str, Any]] = {}
         migrate_legacy(data_dir, self._MODULE, self._NAME)
         self._load()
+        self._load_daily()
 
     @staticmethod
     def _key(tenant: str, site: str, check_id: str) -> str:
@@ -647,29 +774,73 @@ class CheckHealthHistory:
             for k, buckets in raw.items()
         }
 
+    def _daily_name(self) -> str:
+        """File name of the long-term daily store (one per subclass)."""
+        return self._NAME.replace(".json", "_daily.json")
+
+    def _load_daily(self) -> None:
+        """Load the daily store, then back-fill any check it has never seen from
+        the hourly history (so the first run starts with the last 30 days)."""
+        cutoff = time.time() - _DAILY_KEEP_S
+        raw = shard_load(self._data_dir, self._MODULE, self._daily_name())
+        for k, v in raw.items():
+            days = {int(d): list(c) for d, c in (v.get("days") or {}).items() if int(d) >= cutoff}
+            self._d[k] = {"days": days, "last": v.get("last"),
+                          "flips": [float(t) for t in (v.get("flips") or [])]}
+        for k, buckets in self._h.items():
+            if k in self._d:
+                continue
+            days: Dict[int, list] = {}
+            for b, cell in buckets.items():
+                acc = days.setdefault(int(b // 86400 * 86400), [0, 0, 0, 0])
+                for i in range(4):
+                    acc[i] += cell[i]
+            self._d[k] = {"days": days, "last": None, "flips": []}
+            self._dirty.add(k.split(_CC_KEYSEP, 1)[0])
+
     def record(self, tenant: str, site: str, check_id: str, status: str) -> None:
         """Count one status sample in the current hour's bucket for this check."""
         # Find or create this hour's bucket for the check.
         now = time.time()
-        buckets = self._h.setdefault(self._key(tenant, site, check_id), {})
+        key = self._key(tenant, site, check_id)
+        buckets = self._h.setdefault(key, {})
         bucket = int(now // 3600 * 3600)
         cell = buckets.get(bucket)
         if cell is None:
             cell = [0, 0, 0, 0]
             buckets[bucket] = cell
         # Count the status (unknown statuses count as "other").
-        cell[_HEALTH_IDX.get(str(status).strip().lower(), 3)] += 1
+        idx = _HEALTH_IDX.get(str(status).strip().lower(), 3)
+        cell[idx] += 1
+        self._record_daily(key, idx, now)
         # Drop buckets older than 30 days and mark the tenant for saving.
         cutoff = now - _CC_30DAY_WINDOW
         for b in [b for b in buckets if b < cutoff]:
             del buckets[b]
         self._dirty.add(str(tenant))
 
+    def _record_daily(self, key: str, idx: int, now: float) -> None:
+        """Add one sample to the daily store and note a flap when a graded
+        status differs from the previous graded one."""
+        entry = self._d.setdefault(key, {"days": {}, "last": None, "flips": []})
+        day = int(now // 86400 * 86400)
+        entry["days"].setdefault(day, [0, 0, 0, 0])[idx] += 1
+        if idx != 3:
+            if entry["last"] is not None and entry["last"] != idx:
+                entry["flips"].append(now)
+            entry["last"] = idx
+        entry["flips"] = [t for t in entry["flips"] if t >= now - 86400]
+        cutoff = now - _DAILY_KEEP_S
+        for d in [d for d in entry["days"] if d < cutoff]:
+            del entry["days"][d]
+
     def save(self) -> None:
         # Only rewrite tenants that recorded since the last save. int hour keys
         # auto-stringify through json.dumps (shard_save); _load converts back.
         """Write the history of every tenant changed since the last save."""
         shard_save(self._data_dir, self._MODULE, self._NAME, self._h,
+                   dirty=(self._dirty or None))
+        shard_save(self._data_dir, self._MODULE, self._daily_name(), self._d,
                    dirty=(self._dirty or None))
         self._dirty = set()
 
@@ -680,12 +851,15 @@ class CheckHealthHistory:
         prefix = f"{tenant}{_CC_KEYSEP}"
         for k in [k for k in self._h if k.startswith(prefix)]:
             self._h.pop(k, None)
+        for k in [k for k in self._d if k.startswith(prefix)]:
+            self._d.pop(k, None)
         self._dirty.add(str(tenant))
 
     def clear(self) -> None:
         """Drop ALL in-memory health buckets (global corruption-recovery reset)."""
         # Empty the history and the pending-save set.
         self._h.clear()
+        self._d.clear()
         self._dirty.clear()
 
     def summary(self, tenant: str) -> Dict[str, Any]:
@@ -726,6 +900,28 @@ class CheckHealthHistory:
         buckets = self._h.get(self._key(tenant, site, check_id), {})
         return [{"h": b, "o": v[0], "w": v[1], "e": v[2], "n": v[3]}
                 for b, v in sorted(buckets.items())]
+
+    def compliance_raw(self, tenant: str) -> Dict[str, Dict[str, Any]]:
+        """Per check (all sites combined): {check: {"sites": set, "hours": {h: [4]},
+        "days": {d: [4]}, "flaps": int}} — the input to build_compliance."""
+        prefix = f"{tenant}{_CC_KEYSEP}"
+        out: Dict[str, Dict[str, Any]] = {}
+        for key in set(self._h) | set(self._d):
+            if not key.startswith(prefix):
+                continue
+            parts = key.split(_CC_KEYSEP, 2)
+            if len(parts) != 3:
+                continue
+            _, site, check_id = parts
+            row = out.setdefault(check_id, {"sites": set(), "hours": {}, "days": {}, "flaps": 0})
+            row["sites"].add(site)
+            for b, cell in (self._h.get(key) or {}).items():
+                _add_cell(row["hours"], b, cell)
+            entry = self._d.get(key) or {}
+            for d, cell in (entry.get("days") or {}).items():
+                _add_cell(row["days"], d, cell)
+            row["flaps"] += len(entry.get("flips") or [])
+        return out
 
     def success_stats(self, tenant: str) -> Dict[str, Any]:
         """{site: {check_id: {"h24", "d7", "w4"}}} — the % of GRADED samples that
