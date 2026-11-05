@@ -432,3 +432,25 @@ def test_nac_status_second_read_served_from_cache():
     assert len(hub.forwarded) == 1               # no new spoke round-trip
     assert second["active_sessions"] == 7
     assert second.get("cached_at")
+
+
+# ── role-override list (one global SSPLM- list, cached) ──────────────────────
+
+def test_role_overrides_lists_prefixed_roles_from_global_spoke():
+    hub = FakeHub({"cppm-g"}, global_nac="cppm-g", replies={"cppm-g": {"LIST_ROLES": {
+        "status": "SUCCESS",
+        "roles": [{"name": "SSPLM-ROUTED"}, {"name": "[Guest]"}, {"name": "SSPLM-DMZ"}]}}})
+    c = _build(_tenant_user("tenantA"), hub)
+    r = c.get("/api/cppm/role-overrides")
+    assert r.status_code == 200
+    # Older spokes ignore the prefix, so the hub filters too.
+    assert r.json()["roles"] == ["SSPLM-DMZ", "SSPLM-ROUTED"]
+    assert hub.forwarded[-1] == ("cppm-g", "LIST_ROLES", {"prefix": "SSPLM-"})
+    # Second read is served from the cache.
+    c.get("/api/cppm/role-overrides")
+    assert len(hub.forwarded) == 1
+
+
+def test_role_overrides_503_without_nac_spoke():
+    c = _build(_admin(), FakeHub(set()))
+    assert c.get("/api/cppm/role-overrides").status_code == 503

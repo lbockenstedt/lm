@@ -21,6 +21,10 @@ NAC_FEED_READS = (
     ("CPPM_GET_ACCESS_TRACKER", "sessions", {"limit": 200, "offset": 0}),
 )
 
+# ClearPass roles offered as per-device overrides (one list for every tenant).
+ROLE_OVERRIDE_PREFIX = "SSPLM-"
+ROLE_OVERRIDE_NS = "nac_role_overrides"
+
 
 def register(app, hub, ctx):
     """Register cppm routes on the Hub app."""
@@ -222,9 +226,48 @@ def register(app, hub, ctx):
         return await hub.cache_read(job.ns, job.key, job.fetch, tenants=job.tenants,
                                     lane=job.lane, detail=job.detail)
 
+    def role_override_job() -> CacheJob:
+        """The SSPLM- role list from the global ClearPass, cached for everyone."""
+        async def fetch():
+            spoke = hub.get_spoke_by_type("nac")
+            if not spoke:
+                raise HTTPException(status_code=503, detail="No spoke connected")
+            data = _cppm_unwrap(await hub.request_response(
+                spoke, "LIST_ROLES", {"prefix": ROLE_OVERRIDE_PREFIX}, timeout=30.0))
+            if not isinstance(data, dict) or data.get("status") == "ERROR":
+                raise HTTPException(status_code=502, detail=str((data or {}).get("message") or "LIST_ROLES failed"))
+            return data
+        return CacheJob(ROLE_OVERRIDE_NS, "_", fetch, None, lane="nac")
+
+    def _role_override_response(data) -> dict:
+        """Role names starting with the prefix, sorted, with the cache badge fields."""
+        # Older cppm spokes ignore "prefix", so filter here too.
+        names = sorted({str(r.get("name") or "") for r in (data or {}).get("roles") or []
+                        if isinstance(r, dict) and str(r.get("name") or "").startswith(ROLE_OVERRIDE_PREFIX)})
+        return hub.cache_annotate({"prefix": ROLE_OVERRIDE_PREFIX, "roles": names},
+                                  ROLE_OVERRIDE_NS, "_")
+
+    @app.get("/api/cppm/role-overrides")
+    async def get_role_overrides(request: Request):
+        """ClearPass roles a device can be overridden to (cached, refreshed on a schedule)."""
+        if not _session_user(request):
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        job = role_override_job()
+        return _role_override_response(await _nac_read(job))
+
+    @app.post("/api/cppm/role-overrides/refresh")
+    async def refresh_role_overrides(request: Request):
+        """Re-read the role list from ClearPass now (e.g. right after adding a role)."""
+        if not _session_user(request):
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        job = role_override_job()
+        data = await hub.cache_fetch_now(job.ns, job.key, job.fetch, lane=job.lane)
+        return _role_override_response(data)
+
     def nac_cache_feed(_hub):
         """Feed: devices + first sessions page for every tenant that has a
-        CPPM, plus the admin fan-out view."""
+        CPPM, plus the admin fan-out view, plus the role-override list."""
+        yield role_override_job()
         # For each dataset: the admin fan-out view, plus each tenant that has a CPPM.
         for cmd, list_key, payload in NAC_FEED_READS:
             yield nac_cache_job(cmd, list_key, None, payload, fanout=True)
