@@ -2214,7 +2214,7 @@ const VIEW_SUBMENUS = {
 // of Truth + simulation.conf + user-overrides + hub config).
 const VIEW_CHILDREN = {
     cs: {
-        'Dashboard': ['Checks', 'Hardware', 'Client Count'],
+        'Dashboard': ['Checks', 'Compliance', 'Compliance by Check', 'Compliance Heatmap', 'Hardware', 'Client Count'],
         'Clients':     ['All', 'T1', 'T2', 'T3', 'Offline'],
         'Central':         ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware', 'Diagnostic'],
         'Central On-Prem': ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware', 'Diagnostic'],
