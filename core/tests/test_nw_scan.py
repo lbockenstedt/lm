@@ -219,3 +219,19 @@ def test_wide_leaf_is_sweep_only():
     leaves, supers = split_leaf_and_supernets(["10.21.0.0/16", "172.21.0.0/24", "10.5.0.0/22"])
     assert [str(n) for n in supers] == ["10.21.0.0/16"]
     assert sorted(str(n) for n in leaves) == ["10.5.0.0/22", "172.21.0.0/24"]
+
+
+def test_gateway_take_walks_24s_and_skips_known():
+    import ipaddress
+    from routes.nw import gateway_take, covered_blocks, split_leaf_and_supernets
+    leaves, supers = split_leaf_and_supernets(["10.1.0.0/22", "10.1.1.0/24", "10.1.4.0/23"])
+    # 10.1.0.0/22 is a supernet (it has a child); 10.1.4.0/23 is a leaf outside it.
+    skip = covered_blocks(leaves, supers)
+    blocks, cur, total = gateway_take(supers, 0, 3, skip=skip)
+    assert total == 4 and cur == 3
+    assert [str(b) for b in blocks] == ["10.1.0.0/24", "10.1.2.0/24"]  # 10.1.1.0 skipped
+    blocks, cur, _ = gateway_take(supers, cur, 3, skip=skip)
+    assert [str(b) for b in blocks] == ["10.1.3.0/24"] and cur == 0
+    # Nested supernets are walked once, via the outermost one.
+    nested = [ipaddress.ip_network("10.0.0.0/16"), ipaddress.ip_network("10.0.0.0/20")]
+    assert gateway_take(nested, 0, 1)[2] == 256
