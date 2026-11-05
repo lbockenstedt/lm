@@ -61,7 +61,8 @@ class _SyncHub(EndpointSyncMixin):
 
 def _netbox_ips_payload():
     return {"payload": {"data": {"status": "SUCCESS", "ip_addresses": [
-        {"address": "10.20.0.5/24", "dns_name": "host1", "custom_fields": {"mac_address": "aa:bb:cc:dd:ee:01"}},
+        {"address": "10.20.0.5/24", "dns_name": "host1",
+         "custom_fields": {"mac_address": "aa:bb:cc:dd:ee:01", "nac_role": "SSPLM-DMZ"}},
         {"address": "10.20.0.6/24", "dns_name": "host2", "custom_fields": {}},
         {"address": None, "dns_name": "", "custom_fields": {}},  # nothing to sync → skipped
     ]}}}
@@ -89,8 +90,9 @@ async def test_sync_extracts_and_pushes_replace_true():
     assert cppm_call[2]["tenant_id"] == "acme"
     assert cppm_call[2]["tenant_slug"] == "acme"
     eps = cppm_call[2]["endpoints"]
-    assert {"ip": "10.20.0.5", "mac": "aa:bb:cc:dd:ee:01", "hostname": "host1"} in eps
-    assert {"ip": "10.20.0.6", "mac": "", "hostname": "host2"} in eps
+    assert {"ip": "10.20.0.5", "mac": "aa:bb:cc:dd:ee:01", "hostname": "host1",
+            "nac_role": "SSPLM-DMZ"} in eps
+    assert {"ip": "10.20.0.6", "mac": "", "hostname": "host2", "nac_role": ""} in eps
     assert len(eps) == 2  # the empty record was dropped
 
     assert status["status"] == "success"

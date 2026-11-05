@@ -243,8 +243,11 @@ class EndpointSyncMixin:
                                 "hostname=%s (record has neither an IP nor a mac_address custom field)",
                                 tenant_id, tenant_name, hostname or "<empty>")
                     continue  # nothing to sync
-                # Keep the endpoint.
-                ep = {"ip": address, "mac": mac, "hostname": hostname}
+                # Keep the endpoint. nac_role is always sent ("" = none) so the
+                # CPPM spoke knows LM manages the LM_Role override.
+                cf = (ip or {}).get("custom_fields") or {}
+                ep = {"ip": address, "mac": mac, "hostname": hostname,
+                      "nac_role": str(cf.get("nac_role") or "").strip()}
                 endpoints.append(ep)
             # No endpoints at all for this tenant.
             if not endpoints:

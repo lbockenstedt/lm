@@ -1053,12 +1053,51 @@ function showNetboxAllocateIPModal(prefixHint, editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DNS Name (optional)</label><input id="nb-ip-dns" value="${val(editItem?.dns_name)}" class="${inputCls}" placeholder="host.example.com"></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description (optional)</label><input id="nb-ip-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Gateway VM"></div>
             ${editing ? `<div class="space-y-1 col-span-1 md:col-span-2"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-ip-status" class="${inputCls}">${statusOpts}</select></div>` : ''}
+            ${editing ? `<div class="space-y-1 col-span-1 md:col-span-2"><label class="text-xs text-slate-500 font-bold uppercase">NAC Role Override</label>
+                <div class="flex gap-2"><select id="nb-ip-nac-role" class="${inputCls}"><option value="">Loading…</option></select>
+                <button type="button" id="nb-ip-nac-refresh" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 rounded-md text-sm" title="Re-read the role list from ClearPass">Refresh</button></div>
+                <p id="nb-ip-nac-role-note" class="text-xs text-slate-500">ClearPass role for this device (needs the IP's MAC address). Changing it disconnects the device so it re-authenticates.</p></div>` : ''}
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxAllocateIP()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to IP address' : 'Allocate next available IP address in subnet'}">${editing ? 'Save Changes' : 'Allocate'}</button>
             <button onclick="document.getElementById('nb-ip-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
-    if (editing) modal.dataset.ipId = editItem.id;
+    if (editing) {
+        modal.dataset.ipId = editItem.id;
+        modal.dataset.tenant = editItem.tenant || '';
+        modal.dataset.nacRole = (editItem.custom_fields || {}).nac_role || '';
+        document.getElementById('nb-ip-nac-refresh')?.addEventListener('click', () => loadNacRoleOptions(true));
+        loadNacRoleOptions(false);
+    }
+}
+
+// Fill the NAC role dropdown from the hub's cached ClearPass SSPLM- role list.
+async function loadNacRoleOptions(refresh) {
+    const modal = document.getElementById('nb-ip-modal');
+    const sel = document.getElementById('nb-ip-nac-role');
+    if (!modal || !sel) return;
+    const current = sel.dataset.touched ? sel.value : modal.dataset.nacRole;
+    let roles = [];
+    let note = '';
+    try {
+        const d = refresh
+            ? await apiJson('/api/cppm/role-overrides/refresh', { method: 'POST' })
+            : await apiJson('/api/cppm/role-overrides');
+        roles = d.roles || [];
+        if (d.stale) note = 'ClearPass unreachable — showing the last known role list.';
+    } catch (e) {
+        note = 'Could not load roles from ClearPass: ' + e.message;
+    }
+    const esc = v => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    let opts = '<option value="">— None —</option>' + roles.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join('');
+    if (current && !roles.includes(current)) {
+        opts += `<option value="${esc(current)}">${esc(current)} (not in ClearPass)</option>`;
+    }
+    sel.innerHTML = opts;
+    sel.value = current;
+    sel.onchange = () => { sel.dataset.touched = '1'; };
+    const noteEl = document.getElementById('nb-ip-nac-role-note');
+    if (noteEl && note) noteEl.textContent = note;
 }
 
 async function submitNetboxAllocateIP() {
@@ -1071,6 +1110,13 @@ async function submitNetboxAllocateIP() {
             description: get('nb-ip-desc'),
             status: get('nb-ip-status') || 'active',
         };
+        // Only send the role when it changed, so a save never bounces a device needlessly.
+        const roleSel = document.getElementById('nb-ip-nac-role');
+        if (roleSel && roleSel.dataset.touched && roleSel.value !== modal.dataset.nacRole) {
+            payload.custom_fields = { nac_role: roleSel.value };
+        }
+        // The IP's tenant tells the hub which tenant's ClearPass endpoints to re-sync.
+        if (modal.dataset.tenant) payload.tenant = modal.dataset.tenant;
         try {
             const d = await apiJson(`/api/netbox/ips/${modal.dataset.ipId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
             if (d.status === 'SUCCESS') { modal.remove(); loadNetboxData('IP Addresses'); }
