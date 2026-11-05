@@ -179,12 +179,15 @@ def register(app, hub, ctx):
             # same fallback get_pxmx_vms adds — so an unbound lab hypervisor's
             # VMs still count. A spoke bound to a DIFFERENT tenant is excluded.
             _gs = hub.get_hypervisor_spoke()
-            if _gs and _gs not in hv_spokes and access.spoke_is_unbound(hub, _gs):
+            if (_gs and _gs not in hv_spokes and access.spoke_is_unbound(hub, _gs)
+                    and not access.tenant_has_own_spoke(
+                        hub, _tid, access.spoke_module_type(hub, _gs))):
                 hv_spokes.append(_gs)
         else:
             _gs = hub.get_hypervisor_spoke()
             hv_spokes = [_gs] if access.spoke_is_unbound(hub, _gs) else []
-        spoke_nac        = hub.get_spoke_by_type("nac")
+        # A tenant with its own ClearPass counts only its own sessions.
+        spoke_nac        = access.scoped_spoke_of_type(hub, _tid, "nac")
 
         # Whole-host PINNED-agent ownership. A Proxmox host can dial a SHARED
         # spoke yet be PINNED to one tenant (per-agent Tenant button →
@@ -615,16 +618,19 @@ def register(app, hub, ctx):
         else:
             _gs = hub.get_hypervisor_spoke()
             spoke_hypervisor = _gs if access.spoke_is_unbound(hub, _gs) else None
-        spoke_nac        = hub.get_spoke_by_type("nac")
+        _scoped_t = resolved if resolved and resolved != "default" else None
+        spoke_nac        = access.scoped_spoke_of_type(hub, _scoped_t, "nac")
         # Tenant-bound directory: a non-admin only reaches the LDAP spoke bound
         # to its tenant (None → no user results). The spoke additionally scopes
         # by the tenant's OU base DN (see ldap_spoke SEARCH_USERS), so even a
         # shared directory spoke returns only the tenant's own OU.
         if resolved and resolved != "default":
-            spoke_directory = hub.get_directory_spoke_for_tenant(resolved) or hub.get_spoke_by_type("directory")
+            spoke_directory = (hub.get_directory_spoke_for_tenant(resolved)
+                               or (None if access.tenant_has_own_spoke(hub, resolved, "directory")
+                                   else hub.get_spoke_by_type("directory")))
         else:
             spoke_directory = hub.get_spoke_by_type("directory")
-        spoke_firewall   = hub.get_spoke_by_type("firewall")
+        spoke_firewall   = access.scoped_spoke_of_type(hub, _scoped_t, "firewall")
         _legs = [
             (spoke_ipam,       "NETBOX_SEARCH"),
             (spoke_hypervisor, "SEARCH_VMS"),

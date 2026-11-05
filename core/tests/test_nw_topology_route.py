@@ -61,14 +61,19 @@ def test_admin_acting_as_a_tenant_sees_only_that_tenants_devices(monkeypatch, tm
     tok = _mint(hub, "admin", tenants=[], admin=True)
     r = c.get("/api/nw/topology?tenant=acme", cookies={"lm_session": tok})
     assert r.status_code == 200, r.text
-    assert _names(r.json()) == {"acme", "shared"}   # NOT "other"
+    assert _names(r.json()) == {"acme"}   # NOT "other"; NOT "shared" (acme owns an nw spoke)
+    r = c.get("/api/nw/topology?tenant=beta", cookies={"lm_session": tok})
+    assert _names(r.json()) == {"shared"}
 
 
 def test_a_tenant_user_never_sees_another_tenants_device(monkeypatch, tmp_path):
     c, hub = _build(monkeypatch, tmp_path, shared=True)
     tok = _mint(hub, "u", tenants=["acme"])
     body = c.get("/api/nw/topology", cookies={"lm_session": tok}).json()
-    assert _names(body) == {"acme", "shared"}
+    assert _names(body) == {"acme"}
+    tok = _mint(hub, "b", tenants=["beta"])
+    body = c.get("/api/nw/topology", cookies={"lm_session": tok}).json()
+    assert _names(body) == {"shared"}
 
 
 def test_an_unauthenticated_call_is_rejected(monkeypatch, tmp_path):
@@ -327,7 +332,7 @@ def test_a_shared_switchs_lldp_is_narrowed_to_the_readers_prefixes(monkeypatch, 
     built from a SHARED switch would hand a tenant another tenant's gear."""
     c, hub = _build(monkeypatch, tmp_path, shared=True)
     _seed(hub, {"shared-sw": {"NW_GET_LLDP_NEIGHBORS": _MIXED_LLDP}})
-    tok = _mint(hub, "u", tenants=["acme"])
+    tok = _mint(hub, "u", tenants=["beta"])
     names = _names(c.get("/api/nw/topology?refresh=1",
                          cookies={"lm_session": tok}).json())
     assert "acme-edge-1" in names
@@ -348,6 +353,6 @@ def test_a_dedicated_switchs_lldp_is_not_narrowed(monkeypatch, tmp_path):
 def test_the_per_device_lldp_view_is_filtered_the_same_way(monkeypatch, tmp_path):
     c, hub = _build(monkeypatch, tmp_path, shared=True)
     _seed(hub, {"shared-sw": {"NW_GET_LLDP_NEIGHBORS": _MIXED_LLDP}})
-    tok = _mint(hub, "u", tenants=["acme"])
+    tok = _mint(hub, "u", tenants=["beta"])
     rows = c.get("/api/nw/shared-sw/lldp", cookies={"lm_session": tok}).json()["data"]
     assert [r["remote_name"] for r in rows] == ["acme-edge-1"]

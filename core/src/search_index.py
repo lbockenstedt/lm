@@ -275,7 +275,8 @@ class SearchIndexMixin:
         if scoped:
             hypervisor = self.get_hypervisor_spoke_for_tenant(resolved)
             directory = (self.get_directory_spoke_for_tenant(resolved)
-                         or self.get_spoke_by_type("directory"))
+                         or (None if access.tenant_has_own_spoke(self, resolved, "directory")
+                             else self.get_spoke_by_type("directory")))
         else:
             _gs = self.get_hypervisor_spoke()
             hypervisor = _gs if access.spoke_is_unbound(self, _gs) else None
@@ -283,9 +284,9 @@ class SearchIndexMixin:
         return {
             "NETBOX_SEARCH": self.get_spoke_by_type("ipam"),
             "SEARCH_VMS": hypervisor,
-            "SEARCH_SESSIONS": self.get_spoke_by_type("nac"),
+            "SEARCH_SESSIONS": access.scoped_spoke_of_type(self, resolved if scoped else None, "nac"),
             "SEARCH_USERS": directory,
-            "SEARCH_DHCP": self.get_spoke_by_type("firewall"),
+            "SEARCH_DHCP": access.scoped_spoke_of_type(self, resolved if scoped else None, "firewall"),
         }
 
     async def _search_scope_payload(self, scope: Dict[str, Any]) -> Dict[str, Any]:

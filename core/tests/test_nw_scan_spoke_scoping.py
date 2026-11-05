@@ -54,16 +54,34 @@ def test_choices_exclude_other_tenants_agent():
     assert got[0]["connected"] is False
 
 
-def test_choices_include_shared_agent_alongside_own():
+def test_choices_own_only_when_tenant_has_own_agent():
+    """A tenant with its own nw agent is out of the shared environment: the
+    shared agent is no longer offered."""
     hub = _Hub(
         spokes=["nw-admin", "nw-shared"],
         metadata={"nw-admin": {"tenant_id": "tenant-admin"},
                   "nw-shared": {"tenant_id": SHARED}},
     )
     got = nw_scan_spoke_choices(hub, "tenant-admin", SHARED)
-    # Own first, then shared — so the default pick is the tenant's own agent.
-    assert [(c["spoke_id"], c["scope"]) for c in got] == [
-        ("nw-admin", "own"), ("nw-shared", "shared")]
+    assert [(c["spoke_id"], c["scope"]) for c in got] == [("nw-admin", "own")]
+
+
+def test_choices_offer_shared_when_tenant_has_no_own_agent():
+    hub = _Hub(spokes=["nw-shared"], metadata={"nw-shared": {"tenant_id": SHARED}})
+    got = nw_scan_spoke_choices(hub, "tenant-admin", SHARED)
+    assert [(c["spoke_id"], c["scope"]) for c in got] == [("nw-shared", "shared")]
+
+
+def test_choices_own_offline_agent_not_in_registry_still_hides_shared():
+    """An own nw agent that is offline (so not in the connected registry) but
+    known from module_metadata still takes the tenant out of shared."""
+    hub = _Hub(
+        spokes=["nw-shared"],
+        metadata={"nw-admin": {"tenant_id": "tenant-admin", "module_type": "nw"},
+                  "nw-shared": {"tenant_id": SHARED}},
+    )
+    assert nw_scan_spoke_choices(hub, "tenant-admin", SHARED) == []
+    assert resolve_nw_scan_spoke(hub, "tenant-admin", "", SHARED) == ""
 
 
 def test_choices_prefer_connected_within_a_scope():
@@ -115,13 +133,18 @@ def test_own_agent_wins_over_shared():
     assert resolve_nw_scan_spoke(hub, "tenant-admin", "", SHARED) == "nw-admin"
 
 
-def test_explicit_shared_pick_is_honored():
-    """The tenant may deliberately choose the shared agent over its own."""
+def test_explicit_shared_pick_ignored_when_tenant_has_own():
+    """A tenant with its own agent may not pick the shared one."""
     hub = _Hub(
         spokes=["nw-shared", "nw-admin"],
         metadata={"nw-shared": {"tenant_id": SHARED},
                   "nw-admin": {"tenant_id": "tenant-admin"}},
     )
+    assert resolve_nw_scan_spoke(hub, "tenant-admin", "nw-shared", SHARED) == "nw-admin"
+
+
+def test_explicit_shared_pick_honored_without_own():
+    hub = _Hub(spokes=["nw-shared"], metadata={"nw-shared": {"tenant_id": SHARED}})
     assert resolve_nw_scan_spoke(hub, "tenant-admin", "nw-shared", SHARED) == "nw-shared"
 
 
@@ -136,14 +159,14 @@ def test_requested_foreign_spoke_is_ignored_not_trusted():
     assert resolve_nw_scan_spoke(hub, "tenant-admin", "nw-lrb", SHARED) == "nw-admin"
 
 
-def test_requested_offline_own_spoke_falls_back_to_shared():
+def test_requested_offline_own_spoke_never_falls_back_to_shared():
     hub = _Hub(
         spokes=["nw-admin", "nw-shared"],
         metadata={"nw-admin": {"tenant_id": "tenant-admin"},
                   "nw-shared": {"tenant_id": SHARED}},
         active=["nw-shared"],
     )
-    assert resolve_nw_scan_spoke(hub, "tenant-admin", "nw-admin", SHARED) == "nw-shared"
+    assert resolve_nw_scan_spoke(hub, "tenant-admin", "nw-admin", SHARED) == ""
 
 
 def test_no_shared_tenant_configured_is_safe():

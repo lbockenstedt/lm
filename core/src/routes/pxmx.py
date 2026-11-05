@@ -1463,7 +1463,8 @@ def register(app, hub, ctx):
                 gs = hub.get_hypervisor_spoke()
                 gs_tid = ((hub.state.system_state.get("module_metadata", {}) or {})
                           .get(gs, {}) or {}).get("tenant_id") if gs else None
-                if gs and not gs_tid:
+                if gs and not gs_tid and not access.tenant_has_own_spoke(
+                        hub, tid, access.spoke_module_type(hub, gs)):
                     node_spokes = [gs]
                 else:
                     # No spoke visible to this tenant. If a global spoke exists
@@ -1520,7 +1521,8 @@ def register(app, hub, ctx):
             gs = hub.get_hypervisor_spoke()
             gs_tid = ((hub.state.system_state.get("module_metadata", {}) or {})
                       .get(gs, {}) or {}).get("tenant_id") if gs else None
-            if gs and not gs_tid:
+            if gs and not gs_tid and not access.tenant_has_own_spoke(
+                    hub, tid, access.spoke_module_type(hub, gs)):
                 visible.add(gs)
             return visible
         if admin:

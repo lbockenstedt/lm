@@ -184,7 +184,8 @@ def validate_nw_address(addr):
 
 def nw_scan_spoke_choices(hub, tenant_id, shared_tenant_id):
     """The nw spokes a tenant may run a scan with: the ones BOUND to the tenant
-    ("own") plus the ones bound to the shared tenant ("shared").
+    ("own"), or, only when it has none, the ones bound to the shared tenant
+    ("shared").
 
     This is the whole allowlist — a spoke bound to some OTHER tenant is never
     offered and never resolved. Scanning through another tenant's agent probes
@@ -220,6 +221,9 @@ def nw_scan_spoke_choices(hub, tenant_id, shared_tenant_id):
             "scope": scope,
             "connected": hub._primary_key(sid) in hub.active_connections,
         })
+    # A tenant with its own nw spoke is out of the shared nw environment.
+    if any(c["scope"] == "own" for c in out) or access.tenant_has_own_spoke(hub, tenant_id, "nw"):
+        out = [c for c in out if c["scope"] == "own"]
     out.sort(key=lambda s: (s["scope"] != "own", not s["connected"], s["name"]))
     return out
 
@@ -233,7 +237,8 @@ def resolve_nw_scan_spoke(hub, tenant_id, requested_spoke_id, shared_tenant_id):
     (e.g. a stale global ``nw_scan.spoke_id`` inherited from the admin card that
     points at another tenant's agent) is IGNORED and we fall through to the
     tenant's own/shared preference — never used as-is. With no usable request,
-    prefer the tenant's OWN connected spoke, else a connected shared one.
+    prefer the tenant's OWN connected spoke, else (a tenant with no own spoke)
+    a connected shared one.
 
     There is deliberately no "any connected nw spoke" fallback: it silently ran
     an Admin-tenant scan on whichever single nw agent happened to be online
@@ -555,6 +560,14 @@ def register(app, hub, ctx):
     _is_tenant_admin = ctx._is_tenant_admin
     _filter_nw = ctx._filter_nw
 
+    def _shared_nw_hidden(request, tenant=None):
+        """The viewer's tenant has its own nw spoke, so shared nw devices and
+        the shared nw spoke are hidden from it."""
+        if tenant is None:
+            tenant = request.query_params.get("tenant")
+        return access.tenant_left_shared(
+            hub, access.request_effective_tenant(_session_user(request), request, tenant), "nw")
+
     def _validate_nw_address(addr):
         return validate_nw_address(addr)
 
@@ -633,7 +646,7 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         tid = dev.get("tenant_id", "")
         scope = access.write_scope(sess, tid) if write else access.read_scope(sess, tid)
-        if scope == "deny":
+        if scope == "deny" or (scope == "filtered" and _shared_nw_hidden(request)):
             raise HTTPException(status_code=403,
                                 detail="You do not have access to this network device")
         # Resolve the spoke from the record's spoke_id (per-tenant); if it's
@@ -724,11 +737,15 @@ def register(app, hub, ctx):
             # (plus unassigned and shared), never the cross-tenant firehose.
             acting_tenant = "default"
 
+        hide_shared = _shared_nw_hidden(request, acting_tenant or "")
+
         def _row_visible(tid):
             """Whether an nw_devices row (by ``tenant_id``) is visible to this
             request. Acting-as a specific tenant → only that tenant's dedicated
             devices + shared devices. Otherwise the existing rule: admin → all,
             non-admin → own-tenant + shared (``spoke_visible_to_session``)."""
+            if hide_shared and access.tenant_is_shared(tid):
+                return False
             if acting_tenant is not None:
                 if acting_tenant == "default" and not str(tid or "").strip():
                     return True
@@ -813,7 +830,7 @@ def register(app, hub, ctx):
                 if s:
                     spoke_to_tid[s] = t
             shared_tid = access.shared_tenant_id()
-            if shared_tid:
+            if shared_tid and not hide_shared:
                 s = hub.get_nw_spoke_for_shared()
                 if s:
                     spoke_to_tid[s] = shared_tid
@@ -972,7 +989,11 @@ def register(app, hub, ctx):
             # (plus unassigned and shared), never the cross-tenant firehose.
             acting_tenant = "default"
 
+        hide_shared = _shared_nw_hidden(request, acting_tenant or "")
+
         def _row_visible(tid):
+            if hide_shared and access.tenant_is_shared(tid):
+                return False
             if acting_tenant is not None:
                 if acting_tenant == "default" and not str(tid or "").strip():
                     return True
