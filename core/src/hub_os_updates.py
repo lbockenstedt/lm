@@ -64,6 +64,10 @@ right before it is patched — manual deploy and auto-patch alike — and only t
 last ``keep`` (default 2) pre-patch snapshots are kept. If the snapshot fails
 the node is not patched. Settings: ``global_config["os_updates_snapshot"]``.
 
+Each failed run item carries a ``cause`` worded so that nodes failing for the
+same reason share it ("spoke X is offline", "pre-patch VM snapshot failed: no
+LM agent connected for Proxmox node 'Y'"); the panel groups failed nodes by it.
+
 Fixing access: a non-root node without the lm-os-update helper is "blocked".
 ``osu_fix_access`` relays a root/sudo login typed once in the WebUI to that
 node, which uses it to install the helper (``os_update.fix_access``). The
@@ -675,7 +679,8 @@ class HubOsUpdatesMixin:
         if res.get("status") != "SUCCESS":
             if item:
                 item.update(status="failed", message="pre-patch snapshot failed — not patched: "
-                                                     + res.get("message", ""))
+                                                     + res.get("message", ""),
+                            cause="pre-patch VM snapshot failed: " + res.get("message", ""))
             return False
         if item:
             item["snapshot"] = res["snapshot"]
@@ -1312,6 +1317,7 @@ class HubOsUpdatesMixin:
                     "skipped_packages": (d or {}).get("skipped") or [],
                     "reboot_required": bool((d or {}).get("reboot_required")),
                     "message": (d or {}).get("message", ""),
+                    "cause": "" if ok else self._osu_failure_cause(n, (d or {}).get("message", "")),
                 })
             run["done"] += 1
             self._osu_save()
@@ -1339,6 +1345,18 @@ class HubOsUpdatesMixin:
         except Exception:  # noqa: BLE001
             pass
 
+
+    def _osu_failure_cause(self, n: Dict[str, Any], message: str) -> str:
+        """Why a node's apply failed, worded so nodes failing for the same
+        reason share it: the UI groups failed nodes by this text. A node whose
+        spoke is offline names the spoke; anything else is the error itself."""
+        sid = n.get("spoke_id") or ""
+        conns = getattr(self, "active_connections", {}) or {}
+        pk = getattr(self, "_primary_key", lambda k: k)
+        if sid and pk(sid) not in conns and sid not in conns:
+            md = (self.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
+            return f"spoke {md.get('display_name') or md.get('name') or sid} is offline"
+        return message or "update failed"
 
     async def _osu_maintenance(self, n: Dict[str, Any], action: str) -> Dict[str, Any]:
         """HA maintenance mode on a Proxmox host agent: enable/disable/status."""

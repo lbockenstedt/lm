@@ -107,6 +107,28 @@ def test_failed_prune_does_not_fail_the_snapshot():
     assert res["status"] == "SUCCESS" and "could not delete x-1" in res["message"]
 
 
+def test_vm_on_a_node_without_an_agent_goes_to_the_agent_that_reported_it():
+    """The cluster's only agent sits on another node, on its own spoke; the
+    first hypervisor spoke has none of that cluster's agents."""
+    hub = _Hub()
+    hub.get_spoke_for_agent = lambda aid, fallback_hypervisor=True: \
+        "px-r" if aid == "agent-r05" else None
+    vm = {"unique_id": "R/pve-r06/199", "name": "rsvbe", "vmid": 199, "node": "pve-r06",
+          "type": "qemu", "agent_id": "agent-r05"}
+    res = _run(vm_snapshots.take_snapshot(hub, vm, "lm-prepatch-"))
+    assert res["status"] == "SUCCESS" and hub.calls[0][:2] == ("px-r", "agent-r05")
+
+
+def test_no_agent_for_the_vms_node_names_the_node():
+    class _NoAgents(_Hub):
+        async def request_response(self, spoke, cmd, data, timeout=None):
+            return {"payload": {"data": {"status": "ERROR", "message": "No agents connected"}}}
+    vm = {"unique_id": "P/pxmx/18", "name": "lm-agent", "vmid": 18, "node": "pxmx"}
+    res = _run(vm_snapshots.take_snapshot(_NoAgents(), vm, "lm-prepatch-"))
+    assert res["message"] == ("no LM agent connected for Proxmox node 'pxmx' "
+                              "(No agents connected)")
+
+
 def test_bad_prefix_is_refused():
     res = _run(vm_snapshots.take_snapshot(_Hub(), _VMS[0], "1 bad;", keep=1))
     assert res["status"] == "ERROR"

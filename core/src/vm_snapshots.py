@@ -122,7 +122,8 @@ def find_vm(hub, names: Iterable[str], ips: Iterable[str] = (),
 
 def vm_ref(vm: Dict[str, Any]) -> Dict[str, Any]:
     """The fields needed to act on a VM later (stored on nodes/schedules)."""
-    return {k: vm.get(k) for k in ("unique_id", "name", "vmid", "node", "type", "cluster")}
+    return {k: vm.get(k) for k in ("unique_id", "name", "vmid", "node", "type", "cluster",
+                                   "agent_id")}
 
 
 # ── snapshot + prune ──────────────────────────────────────────────────────────
@@ -132,13 +133,19 @@ def snapshot_name(prefix: str, now: Optional[float] = None) -> str:
 
 def _route(hub, vm: Dict[str, Any]) -> Tuple[Optional[str], str]:
     """``(spoke_id, agent_id)`` for the agent on the VM's own node, so ``qm``
-    runs where the VM lives. Falls back to the hypervisor spoke (it then picks
-    an agent in the VM's cluster)."""
+    runs where the VM lives. Next, the agent that reported the VM: it is in the
+    VM's cluster and the spoke snapshots through the cluster API. Last, any
+    hypervisor spoke (it then picks an agent in the VM's cluster)."""
     node = _short(vm.get("node"))
     for info in (getattr(hub, "agent_info", None) or {}).values():
         if isinstance(info, dict) and info.get("spoke_id") and node and node in (
                 _short(info.get("hostname")), _short(info.get("agent_id"))):
             return info["spoke_id"], str(info.get("agent_id") or "")
+    reporter = str(vm.get("agent_id") or "")
+    if reporter and hasattr(hub, "get_spoke_for_agent"):
+        spoke = hub.get_spoke_for_agent(reporter, fallback_hypervisor=False)
+        if spoke:
+            return spoke, reporter
     return hub.get_hypervisor_spoke(), ""
 
 
@@ -166,8 +173,17 @@ async def _vm_action(hub, vm: Dict[str, Any], action: str, name: str = "",
     try:
         d = _unwrap(await hub.request_response(spoke, "PXMX_VM_ACTION", payload, timeout=timeout))
     except Exception as exc:  # noqa: BLE001 — reported to the caller
-        return {"status": "ERROR", "message": str(exc)}
-    return d if isinstance(d, dict) else {"status": "ERROR", "message": "malformed response"}
+        d = {"status": "ERROR", "message": str(exc)}
+    if not isinstance(d, dict):
+        d = {"status": "ERROR", "message": "malformed response"}
+    msg = str(d.get("message") or "")
+    if not agent and d.get("status") != "SUCCESS" and (
+            "No agents connected" in msg or "not connected" in msg):
+        # No connected agent is on, or reported, this VM's Proxmox node: that
+        # host's agent is offline. Say which host.
+        d = {**d, "message": f"no LM agent connected for Proxmox node "
+                             f"'{vm.get('node')}' ({msg})"}
+    return d
 
 
 async def take_snapshot(hub, vm: Dict[str, Any], prefix: str, keep: int = 0,
