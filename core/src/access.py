@@ -1448,38 +1448,170 @@ def firewall_owner_tenant(hub, firewall_id) -> Optional[str]:
     return spoke_owner_tenant(hub, fw.get("spoke_id"))
 
 
+_MODULE_TYPE_ALIASES = {
+    "client-sim": "simulation", "cs": "simulation",
+    "cppm": "nac", "clearpass": "nac",
+    "pxmx": "hypervisor", "proxmox": "hypervisor",
+    "le": "certificates", "opn": "firewall", "opnsense": "firewall",
+    "netbox": "ipam", "ldap": "directory", "truenas": "storage",
+}
+
+
+def canon_module_type(module_type) -> str:
+    """Canonical module type, so aliases (``Client-Sim``/``simulation``,
+    ``cppm``/``nac``, ...) compare equal."""
+    mt = str(module_type or "").strip().lower()
+    return _MODULE_TYPE_ALIASES.get(mt, mt)
+
+
+def _dict_attr(obj, name) -> dict:
+    val = getattr(obj, name, None)
+    return val if isinstance(val, dict) else {}
+
+
+def _module_metadata(hub) -> dict:
+    ss = _dict_attr(getattr(hub, "state", None), "system_state")
+    md = ss.get("module_metadata")
+    return md if isinstance(md, dict) else {}
+
+
+def spoke_module_type(hub, spoke_id) -> str:
+    """Canonical module type of ``spoke_id``: the live registry, else the type
+    persisted in ``module_metadata`` (covers offline spokes)."""
+    if not spoke_id:
+        return ""
+    try:
+        pk = hub._primary_key(spoke_id)
+    except Exception:  # noqa: BLE001
+        pk = spoke_id
+    pk = pk if isinstance(pk, str) else spoke_id
+    live = _dict_attr(hub, "spoke_module_types")
+    md = _module_metadata(hub)
+    mt = live.get(pk) or live.get(spoke_id)
+    if not mt:
+        meta = md.get(pk) or md.get(spoke_id) or {}
+        mt = meta.get("module_type") if isinstance(meta, dict) else ""
+    return canon_module_type(mt) if isinstance(mt, str) else ""
+
+
+def tenant_has_own_spoke(hub, tenant_id, module_type) -> bool:
+    """``tenant_id`` has at least one spoke of ``module_type`` bound to it
+    (exactly, non-shared; connected or known offline). Such a tenant is out of
+    the shared environment for that module: shared/unassigned spokes of the
+    type are hidden from it, never IP-routed. A group owns only a spoke bound
+    to the group itself. The ADMIN tenant never counts (it is the admin view)."""
+    t = _norm_tenant_id(tenant_id)
+    mt = canon_module_type(module_type)
+    if not t or not mt or t == ADMIN_TENANT_ID or tenant_is_shared(t):
+        return False
+    md = _module_metadata(hub)
+    for sid in set(md) | set(_dict_attr(hub, "spoke_module_types")):
+        meta = md.get(sid)
+        st = meta.get("tenant_id") if isinstance(meta, dict) else None
+        if not st:
+            try:
+                st = hub.state.get_spoke_tenant(sid)
+            except Exception:  # noqa: BLE001
+                st = None
+        if (isinstance(st, str) and _norm_tenant_id(st) == t
+                and spoke_module_type(hub, sid) == mt):
+            return True
+    return False
+
+
+def tenant_has_own_firewall(hub, tenant_id) -> bool:
+    """``tenant_id`` has a dedicated firewall (a ``global_config["firewalls"]``
+    record whose owner — its own tenant_id, else its spoke's — is exactly this
+    tenant) or a firewall spoke of its own. Such a tenant no longer sees
+    shared firewalls."""
+    t = _norm_tenant_id(tenant_id)
+    if not t or t == ADMIN_TENANT_ID or tenant_is_shared(t):
+        return False
+    gc = _dict_attr(getattr(hub, "state", None), "system_state").get("global_config")
+    fws = (gc.get("firewalls") if isinstance(gc, dict) else None) or []
+    for fw in fws:
+        if isinstance(fw, dict):
+            owner = firewall_owner_tenant(hub, fw.get("id")) if fw.get("id") else None
+            if owner and _norm_tenant_id(owner) == t:
+                return True
+    return tenant_has_own_spoke(hub, t, "firewall")
+
+
+def tenant_left_shared(hub, tenant_id, module_type) -> bool:
+    """True when ``tenant_id`` owns its own ``module_type`` (``"firewall"`` →
+    ``tenant_has_own_firewall``), so that module's shared resources are hidden
+    from it. No tenant (Global Admin, nothing selected) → False."""
+    if canon_module_type(module_type) == "firewall":
+        return tenant_has_own_firewall(hub, tenant_id)
+    return tenant_has_own_spoke(hub, tenant_id, module_type)
+
+
+def scoped_spoke_of_type(hub, tenant_id, module_type) -> Optional[str]:
+    """Single-spoke pick for ``module_type``: the tenant's own connected spoke
+    when it owns one (None if all of them are offline — never a shared
+    fallback), else the first connected spoke of that type (legacy)."""
+    if not tenant_has_own_spoke(hub, tenant_id, module_type):
+        return hub.get_spoke_by_type(module_type)
+    t = _norm_tenant_id(tenant_id)
+    want = canon_module_type(module_type)
+    active = getattr(hub, "active_connections", None) or {}
+    approved = _dict_attr(hub, "approved_modules")
+    for sid, mt in list(_dict_attr(hub, "spoke_module_types").items()):
+        if (canon_module_type(mt) == want and sid in active and approved.get(sid, False)
+                and _norm_tenant_id(spoke_owner_tenant(hub, sid)) == t):
+            return sid
+    return None
+
+
+def _shared_spoke_masked(hub, spoke_id, tid, firewall_id=None) -> bool:
+    """A shared/unassigned spoke's (or shared firewall's) data is hidden from
+    ``tid`` because ``tid`` owns its own of that module."""
+    mt = "firewall" if firewall_id else spoke_module_type(hub, spoke_id)
+    return bool(mt) and tenant_left_shared(hub, tid, mt)
+
+
 def _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant=None,
-                         owner=None) -> Optional[bool]:
+                         owner=None, firewall_id=None) -> Optional[bool]:
     """Read visibility of data from a tenant-dedicated spoke: shown when the
     reader's selected/effective tenant is the owner or a group containing it
-    (a Global Admin with no selection sees all), hidden otherwise. None when
-    the spoke isn't dedicated (the IP filter applies)."""
+    (a Global Admin with no selection sees all), hidden otherwise. A shared/
+    unassigned spoke is hidden (False) from a tenant that owns a spoke of the
+    same module type (``tenant_has_own_spoke``). None otherwise (the IP filter
+    applies)."""
     owner = owner or spoke_owner_tenant(hub, spoke_id)
-    if not owner:
+    if not owner and not (spoke_id or firewall_id):
         return None
     sess = session_user(sessions, request)
     if not sess:
-        return False
+        return False if owner else None
     if explicit_tenant is None:
         try:
             explicit_tenant = request.query_params.get("tenant")
         except Exception:  # noqa: BLE001
             explicit_tenant = None
     tid = effective_tenant(sessions, request, explicit_tenant)
+    if not owner:
+        return False if tid and _shared_spoke_masked(hub, spoke_id, tid, firewall_id) else None
     if not tid:
         return is_admin(sess)
     return tenant_in(owner, tid)
 
 
-def _owned_spoke_writable(hub, sess, spoke_id, owner=None) -> Optional[bool]:
+def _owned_spoke_writable(hub, sess, spoke_id, owner=None,
+                          firewall_id=None) -> Optional[bool]:
     """Write/control counterpart of ``_owned_spoke_visible``: any of the
     caller's tenants owns (or is a group containing) the dedicated spoke's
-    tenant. None when the spoke isn't dedicated."""
+    tenant. A shared/unassigned spoke is not writable when every one of the
+    caller's tenants owns its own spoke of that type. None otherwise."""
     owner = owner or spoke_owner_tenant(hub, spoke_id)
-    if not owner:
-        return None
     if is_admin(sess):
-        return True
+        return True if owner else None
+    if not owner:
+        tids = _session_tenants(sess)
+        if (spoke_id or firewall_id) and tids and all(
+                _shared_spoke_masked(hub, spoke_id, t, firewall_id) for t in tids):
+            return False
+        return None
     return any(tenant_in(owner, t) for t in _session_tenants(sess))
 
 
@@ -1650,7 +1782,11 @@ def effective_tenant(sessions: dict, request: "Request", explicit: str = None) -
     non-admin can switch among their own tenants but can never reach another
     tenant's data via a crafted ``?tenant=``.
     """
-    sess = session_user(sessions, request)
+    return session_effective_tenant(session_user(sessions, request), explicit)
+
+
+def session_effective_tenant(sess, explicit: str = None) -> str | None:
+    """``effective_tenant`` for an already-resolved session."""
     if not sess:
         return None
     if is_admin(sess):
@@ -1660,6 +1796,16 @@ def effective_tenant(sessions: dict, request: "Request", explicit: str = None) -
         if allowed and explicit in allowed:
             return explicit
     return sess.get("user", {}).get("tenant_id") or None
+
+
+def request_effective_tenant(sess, request, explicit: str = None) -> str | None:
+    """``session_effective_tenant`` with ``explicit`` defaulting to ``?tenant=``."""
+    if explicit is None:
+        try:
+            explicit = request.query_params.get("tenant")
+        except Exception:  # noqa: BLE001
+            explicit = None
+    return session_effective_tenant(sess, explicit)
 
 
 def acting_tenant(sessions: dict, request: "Request") -> str | None:
@@ -2109,7 +2255,8 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
     if not spec:
         return data  # health / unknown → no IP to filter on
     visible = _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant,
-                                   owner=firewall_owner_tenant(hub, firewall_id))
+                                   owner=firewall_owner_tenant(hub, firewall_id),
+                                   firewall_id=firewall_id)
     if visible is not None:
         return data if visible else _empty_filter_result(data)
     mode, fields = spec
@@ -2188,7 +2335,8 @@ async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload
     if not spec:
         return False
     owned = _owned_spoke_writable(hub, sess, spoke_id,
-                                  owner=firewall_owner_tenant(hub, firewall_id))
+                                  owner=firewall_owner_tenant(hub, firewall_id),
+                                  firewall_id=firewall_id)
     if owned is not None:
         return owned
     mode, fields = spec

@@ -66,6 +66,12 @@ def register(app, hub, ctx):
         await hub.send_to_spoke(msg)
         return True
 
+    def _shared_truenas_hidden(request):
+        """The viewer's tenant has its own storage spoke, so shared appliances
+        and the shared truenas spoke are hidden from it."""
+        tid = access.request_effective_tenant(_session_user(request), request)
+        return access.tenant_left_shared(app.state.hub, tid, "storage")
+
     def _authz_truenas_appliance(request, appliance_id, write=False):
         """Authorize + classify a per-appliance truenas op by the appliance's
         OWNING tenant. Returns ``(appliance, scope, spoke_id)``. Raises 404 /
@@ -83,7 +89,7 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         tid = app_.get("tenant_id", "")
         scope = access.write_scope(sess, tid) if write else access.read_scope(sess, tid)
-        if scope == "deny":
+        if scope == "deny" or (scope in ("filtered", "constrained") and _shared_truenas_hidden(request)):
             raise HTTPException(status_code=403,
                                 detail="You do not have access to this TrueNAS appliance")
         spoke_id = app_.get("spoke_id") or ""
@@ -109,8 +115,14 @@ def register(app, hub, ctx):
         is_admin = _is_admin(sess)
         all_apps = (hub.state.system_state.get("global_config", {}) or {}) \
             .get("truenas_appliances", []) or []
-        visible = [a for a in all_apps if isinstance(a, dict)
-                   and (is_admin or access.spoke_visible_to_session(sess, a.get("tenant_id", "")))]
+        hide_shared = not is_admin and _shared_truenas_hidden(request)
+
+        def _app_visible(tid):
+            if hide_shared and (access.tenant_is_shared(tid) or not str(tid or "").strip()):
+                return False
+            return is_admin or access.spoke_visible_to_session(sess, tid)
+
+        visible = [a for a in all_apps if isinstance(a, dict) and _app_visible(a.get("tenant_id", ""))]
         visible_ids = {a.get("id") for a in visible if a.get("id")}
 
         if is_admin:
@@ -125,7 +137,7 @@ def register(app, hub, ctx):
                 if s:
                     spoke_to_tid[s] = t
             shared_tid = access.shared_tenant_id()
-            if shared_tid:
+            if shared_tid and not hide_shared:
                 s = hub.get_truenas_spoke_for_shared()
                 if s:
                     spoke_to_tid[s] = shared_tid
@@ -136,8 +148,7 @@ def register(app, hub, ctx):
 
         if not spokes:
             cached = hub.truenas_cache_get_fleet_filtered(
-                lambda r: is_admin
-                or access.spoke_visible_to_session(sess, r.get("tenant_id", "")))
+                lambda r: _app_visible(r.get("tenant_id", "")))
             if cached:
                 out = dict((cached.get("appliances") or {}))
                 out["stale"] = True
