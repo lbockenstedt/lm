@@ -120,3 +120,16 @@ ClearPass API Probing (the LM hub's CPPM module exposes this too, per
 diagnostics — use it to confirm the URL + token + JSON path before wiring the
 Enforcement Policy. A successful probe returns a `results[0].tenant.slug`
 matching the LM hub's `netbox_tenant_slug` for that tenant.
+
+---
+
+# NAC role override (`LM_Role` → `SSPLM-` roles)
+
+Lab Manager can set a per-device role override. LM writes the chosen role name to the endpoint attribute **`LM_Role`** and disconnects the device so it re-authenticates. ClearPass then has to turn that attribute into a role and the role into a VLAN or policy. Set this up once per role:
+
+1. **Create the role.** Configuration → Identity → Roles → Add, for example `SSPLM-DMZ`. LM's dropdown lists every role starting with `SSPLM-` (cached, so use **Refresh** to pick it up right away).
+2. **Map the attribute to the role.** In the service's Role Mapping policy, add one rule per role: `Endpoint:LM_Role EQUALS SSPLM-DMZ` → role `SSPLM-DMZ`. LM creates `LM_Role` in the Endpoint dictionary automatically on first use. If it isn't listed yet, add it under Administration → Dictionaries → Attributes (Entity `Endpoint`, type `String`). The service's Authorization tab must include **[Endpoints Repository]**.
+3. **Enforce.** In the Enforcement Policy, map `Tm:Role EQUALS SSPLM-DMZ` to the enforcement profile that returns the VLAN you want (for example `Tunnel-Private-Group-Id` / Aruba VLAN). Put these rules above the generic rules.
+4. **Test.** Pick the role on a device in LM, save it, and watch Access Tracker. The device should drop, re-authenticate with role `SSPLM-DMZ`, and get the new VLAN. Clearing the override removes `LM_Role` and bounces the device back to its normal policy.
+
+The device needs a MAC address in LM, because ClearPass endpoints are keyed by MAC.
