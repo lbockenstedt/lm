@@ -12566,10 +12566,9 @@ async function csRenderSetupDiagnostics() {
                          (a.decision || '').startsWith('SKIP') ? 'text-amber-600' : 'text-slate-500';
         return `<tr class="border-b border-slate-100 hover:bg-slate-50 align-top">
       <td class="px-4 py-2">
-        <div class="font-mono text-xs text-slate-700">${csEscape(a.agent_id || '—')}</div>
-        <div class="font-mono text-[10px] text-slate-400">${csEscape(a.hostname || '—')}</div>
+        <div class="text-xs font-medium text-slate-700" title="${csEscape(a.agent_id || '')}">${csEscape(a.hostname || _spokeLabelFor(a.agent_id || '') || '—')}</div>
       </td>
-      <td class="px-4 py-2 font-mono text-xs text-slate-500">${csEscape(a.host_spoke || '—')}</td>
+      <td class="px-4 py-2 text-xs text-slate-500" title="${csEscape(a.host_spoke || '')}">${csEscape(a.host_spoke ? _spokeLabelFor(a.host_spoke) : '—')}</td>
       <td class="px-4 py-2 text-xs ${_decClass}">${csEscape(a.decision || '—')}</td>
       <td class="px-4 py-2 font-mono text-xs whitespace-nowrap" title="inbox · accepted · re-queued · gave up · completed · failed">
         ${_n(a.last_inbox_count, 'text-slate-600')}<span class="text-slate-300">·</span>${_n(a.accepted, 'text-emerald-600')}<span class="text-slate-300">·</span>${_n(a.requeued, 'text-amber-600')}<span class="text-slate-300">·</span>${_n(a.gave_up, 'text-red-600')}<span class="text-slate-300">·</span>${_n(a.completed, 'text-slate-600')}<span class="text-slate-300">·</span>${_n(a.failed, 'text-red-600')}
@@ -13025,8 +13024,8 @@ async function csRenderSpokeManagement() {
             : '<span class="text-slate-300">—</span>';
         const dataAttrs = `data-cs-spoke="${csEscape(s.spoke_id).toLowerCase()}" data-cs-name="${csEscape((s.display_name || s.spoke_id || '').toLowerCase())}"`;
         return `<tr class="cs-spoke-row" ${dataAttrs}>
-          <td class="px-3 pt-2 pb-1 font-mono text-xs whitespace-nowrap">${csEscape(s.spoke_id)}</td>
           <td class="px-3 pt-2 pb-1 text-sm whitespace-nowrap">${csEscape((s.display_name && s.display_name !== s.spoke_id) ? s.display_name : (s.hostname || '—'))}</td>
+          <td class="px-3 pt-2 pb-1 font-mono text-[10px] text-slate-400 whitespace-nowrap">${csEscape(s.spoke_id)}</td>
           <td class="px-3 pt-2 pb-1 whitespace-nowrap">${typeBadge(s.module_type)}</td>
           <td class="px-3 pt-2 pb-1 whitespace-nowrap">${csOnlineBadge(s.connected)}</td>
           <td class="px-3 pt-2 pb-1 whitespace-nowrap">${s.approved ? '<span class="text-green-600 text-xs font-bold">Approved</span>' : '<span class="text-amber-600 text-xs font-bold">Pending</span>'}</td>
@@ -13044,7 +13043,7 @@ async function csRenderSpokeManagement() {
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes ${helpIcon('cs', null, 'Simulations help')}</h3>
         <span class="text-xs text-slate-400">${admin ? 'All tenants (admin)' : 'Tenant: ' + csEscape(tenant)}</span>
       </div>
-      ${csTable(['Spoke ID', 'Name', 'Type', 'State', 'Approval', 'Tenant', 'VMs'], rows)}
+      ${csTable(['Name', 'Spoke ID', 'Type', 'State', 'Approval', 'Tenant', 'VMs'], rows)}
     </div>`;
 
     const claimCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
@@ -13079,9 +13078,15 @@ window.csSpokeExpandAll = function (open) {
     card.querySelectorAll('details').forEach(d => { d.open = !!open; });
 };
 
+// Friendly name for a Spoke Management row id (confirms/prompts show this, not the UUID).
+function csSpokeLabel(spokeId) {
+    const s = (window._csSpokeRows || []).find(r => r.spoke_id === spokeId);
+    return s ? _spokeName(s) : _spokeLabelFor(spokeId);
+}
+
 window.csSpokeApprove = async function (spokeId, isPending) {
     const action = isPending ? 'approve' : 'unapprove';
-    if (!confirm(`${isPending ? 'Approve' : 'Revoke'} spoke ${spokeId}?`)) return;
+    if (!confirm(`${isPending ? 'Approve' : 'Revoke'} spoke ${csSpokeLabel(spokeId)}?`)) return;
     try {
         await csFetch(`/${csTenant()}/spokes/${encodeURIComponent(spokeId)}/approve`, { method: 'POST', body: JSON.stringify({ action }) });
         if (typeof showToast === 'function') showToast(`Spoke ${action}d`, 'success');
@@ -13090,7 +13095,7 @@ window.csSpokeApprove = async function (spokeId, isPending) {
 };
 
 window.csSpokeEditLabel = async function (spokeId, current) {
-    const label = prompt(`Label for ${spokeId}:`, current);
+    const label = prompt(`Label for ${csSpokeLabel(spokeId)}:`, current);
     if (label === null) return;
     try {
         await csFetch(`/${csTenant()}/spokes/${encodeURIComponent(spokeId)}/label`, { method: 'PATCH', body: JSON.stringify({ label }) });
@@ -13100,7 +13105,7 @@ window.csSpokeEditLabel = async function (spokeId, current) {
 };
 
 window.csSpokePatchConfig = async function (spokeId) {
-    const raw = prompt(`Config JSON to push to ${spokeId} (applied via CS_CONFIG_UPDATE):`, '{\n  \n}');
+    const raw = prompt(`Config JSON to push to ${csSpokeLabel(spokeId)} (applied via CS_CONFIG_UPDATE):`, '{\n  \n}');
     if (raw === null) return;
     let cfg;
     try { cfg = JSON.parse(raw); } catch (e) { console.error('csSpokePatchConfig: invalid JSON', e); if (typeof showToast === 'function') showToast('Invalid JSON: ' + e.message, 'error'); return; }
@@ -13113,7 +13118,7 @@ window.csSpokePatchConfig = async function (spokeId) {
 window.csSpokeDiag = async function (spokeId) {
     try {
         const d = await csFetch(`/${csTenant()}/spokes/${encodeURIComponent(spokeId)}/config-diag`);
-        alert(`Spoke ${spokeId} config-diag:\n\n` +
+        alert(`Spoke ${csSpokeLabel(spokeId)} config-diag:\n\n` +
               `last_seen: ${d.last_seen || '—'}\n` +
               `applied_error: ${d.applied_error || 'none'}\n` +
               `telemetry_keys: ${(d.telemetry_keys || []).join(', ') || '—'}\n\n` +
@@ -13122,7 +13127,7 @@ window.csSpokeDiag = async function (spokeId) {
 };
 
 window.csSpokeDelete = async function (spokeId) {
-    if (!confirm(`Permanently delete spoke ${spokeId}? This closes its connection and wipes its registration + keys. It must fully re-onboard to return.`)) return;
+    if (!confirm(`Permanently delete spoke ${csSpokeLabel(spokeId)}? This closes its connection and wipes its registration + keys. It must fully re-onboard to return.`)) return;
     try {
         await csFetch(`/spokes/${encodeURIComponent(spokeId)}?tenant_id=${csTenant()}`, { method: 'DELETE' });
         if (typeof showToast === 'function') showToast('Spoke deleted', 'success');

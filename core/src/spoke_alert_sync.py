@@ -43,6 +43,7 @@ import asyncio
 import logging
 import time
 
+from display_names import node_name  # sibling leaf
 from sync_loop import run_sync_loop  # sibling leaf
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -292,14 +293,9 @@ class SpokeAlertMixin:
                     continue
             except Exception:  # noqa: BLE001
                 pass
-            name = apk
-            try:
-                name = (getattr(self, "agent_info", {}).get(apk) or {}).get("agent_id") or apk
-            except Exception:  # noqa: BLE001
-                pass
             out.append({
                 "spoke_id": f"agent:{apk}",
-                "name": name,
+                "name": self._alert_display_name(apk),
                 "tier": _TIER_ERROR if age >= error_s else _TIER_WARN,
                 "since_ts": float(last),
                 "duration_s": int(age),
@@ -311,6 +307,10 @@ class SpokeAlertMixin:
         out.sort(key=lambda e: (order.get(e["tier"], 9), e.get("since_ts") or 0))
         return out
 
+    def _alert_display_name(self, sid: str) -> str:
+        """Friendly name for a spoke or relayed-agent id (see display_names)."""
+        return node_name(self.state.system_state, sid, getattr(self, "agent_info", None))
+
     # ── active-alert store (surfaced via the API) ───────────────────────────
 
     def get_active_spoke_alerts(self) -> List[Dict[str, Any]]:
@@ -318,21 +318,12 @@ class SpokeAlertMixin:
         warning), then by ``since_ts`` ascending. Each entry is
         ``{spoke_id, tier, since_ts, duration_s, detail}``."""
         order = {_TIER_ERROR: 0, _TIER_WARN: 1}
-        md = self.state.system_state.get("module_metadata", {}) or {}
         out: List[Dict[str, Any]] = []
         for sid, a in (getattr(self, "_spoke_alerts", {}) or {}).items():
             if a.get("tier") in (_TIER_WARN, _TIER_ERROR):
-                # Resolve a friendly NAME here — these alerts fire for
-                # out-of-contact / offline / never-seen spokes, exactly the ones
-                # the WebUI's live spoke map may not carry, so it would fall back
-                # to the raw UUID. The hub has module_metadata for every approved
-                # spoke; resolve display_name → name → hostname (≠ the id).
-                m = md.get(sid) or {}
-                nm = (m.get("display_name") or m.get("name")
-                      or m.get("hostname") or "").strip()
                 out.append({
                     "spoke_id": sid,
-                    "name": nm if (nm and nm != sid) else sid,
+                    "name": self._alert_display_name(sid),
                     "tier": a.get("tier"),
                     "since_ts": a.get("since_ts"),
                     "duration_s": int(a.get("duration_s", 0) or 0),
@@ -386,12 +377,8 @@ class SpokeAlertMixin:
         display name (or name/hostname) with a short id hint for correlation, so
         the alert reads ``cs-svr-05 (a25e89a6)`` instead of the bare UUID. Falls
         back to the raw id when no name is registered."""
-        try:
-            md = (self.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
-        except Exception:  # noqa: BLE001 — a label must never break the alert loop
-            md = {}
-        name = (md.get("display_name") or md.get("name") or md.get("hostname") or "").strip()
-        return f"{name} ({str(sid)[:8]})" if name and name != sid else str(sid)
+        name = self._alert_display_name(sid)
+        return f"{name} ({str(sid)[:8]})" if name != str(sid) else str(sid)
 
     def _schedule_alert_email(self, sid: str, tier: str, detail: str,
                               since_ts: Optional[float], duration: float) -> None:

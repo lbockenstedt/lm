@@ -1,6 +1,7 @@
 """Dashboard summary/all-tenants + cross-system search routes."""
 import json
 import time
+from display_names import node_name  # sibling leaf
 
 from api import (
     HTTPException, Request, _unwrap_spoke, access, filter_items_by_prefixes, get_tenant_scoping, logger,
@@ -113,8 +114,7 @@ def _spoke_rosters(hub) -> dict:
                 last = hub.heartbeat.last_seen.get(sid)
                 b["down_spokes"].append({
                     "spoke_id": sid,
-                    "name": (meta.get("display_name") or meta.get("name")
-                            or meta.get("hostname") or sid),
+                    "name": node_name(hub.state.system_state, sid),
                     "module_type": (hub.spoke_module_types.get(pk)
                                      or meta.get("module_type") or ""),
                     "last_seen_epoch": last if isinstance(last, (int, float)) else None,
@@ -442,7 +442,7 @@ def register(app, hub, ctx):
                                                agent_last, now)
             items.append({
                 "id": sid,
-                "name": meta.get("display_name") or meta.get("name") or sid,
+                "name": node_name(hub.state.system_state, sid),
                 "type": hub.spoke_module_types.get(hub._primary_key(sid)) or meta.get("module_type") or "",
                 "role": meta.get("role") or "",
                 "tenant": stid or "",

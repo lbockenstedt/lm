@@ -585,7 +585,7 @@ async function loadInstances(productKey) {
         }
         listEl.innerHTML = instances.map(inst => `
             <div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-                <div><span class="text-sm font-medium text-slate-700">${inst.name || inst.id}</span><span class="ml-2 text-xs text-slate-400">${p.rowSummary(inst)}${inst.spoke_id ? ' · ' + inst.spoke_id : ''}</span>${_instanceTenantBadge(inst)}${(inst.vault_credential && inst.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(inst.vault_credential.bucket)} › ${escapeHtml(inst.vault_credential.name)}">🔐 vault</span>` : ''}</div>
+                <div><span class="text-sm font-medium text-slate-700">${inst.name || inst.id}</span><span class="ml-2 text-xs text-slate-400">${p.rowSummary(inst)}${inst.spoke_id ? ' · ' + escapeHtml(_spokeLabelFor(inst.spoke_id)) : ''}</span>${_instanceTenantBadge(inst)}${(inst.vault_credential && inst.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(inst.vault_credential.bucket)} › ${escapeHtml(inst.vault_credential.name)}">🔐 vault</span>` : ''}</div>
                 <div class="flex gap-2">
                     <button onclick="editInstance('${productKey}','${inst.id}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
                     <button onclick="deleteInstance('${productKey}','${inst.id}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
