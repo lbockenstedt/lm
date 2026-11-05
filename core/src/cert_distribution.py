@@ -909,7 +909,8 @@ def build_available_targets(spoke_module_types: Dict[str, str],
         if mt not in capable:
             continue
         aid = a.get("agent_id") or ""
-        label = a.get("display_name") or a.get("hostname") or aid
+        dn = a.get("display_name")
+        label = (dn if dn and dn != aid else None) or a.get("hostname") or aid
         targets.append({"module_type": mt, "identifier": aid,
                         "label": f"{mt}/{label}", "agent_id": aid,
                         "spoke_id": a.get("spoke_id")})

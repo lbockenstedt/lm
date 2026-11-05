@@ -14,6 +14,7 @@ from fastapi import WebSocket, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from typing import Any, Dict, List, Optional
 import asyncio
+from display_names import node_name
 import configparser
 from datetime import datetime, timezone
 import hmac
@@ -3091,7 +3092,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 # reported hostname — and only fall back to the raw guid when
                 # neither exists, so Spoke Management's Name column isn't just the
                 # spoke_id. hostname is also returned so the UI can fall back too.
-                "display_name": m.get("display_name") or m.get("hostname") or sid,
+                "display_name": node_name(hub.state.system_state, sid),
                 "hostname": m.get("hostname") or "",
                 "module_type": _spoke_type(sid, live_types, m),
                 "connected": hub._primary_key(sid) in conns,
@@ -5431,12 +5432,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         hub = app.state.hub
 
         def _name(sid):
-            try:
-                md = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
-            except Exception:  # noqa: BLE001
-                md = {}
-            return (md.get("display_name") or md.get("name")
-                    or md.get("hostname") or "").strip()
+            nm = node_name(hub.state.system_state, sid)
+            return "" if nm == sid else nm
 
         results = await _cs_forward_all(tenant_id, "CS_GET_SIM_TAG_HEALTH", {}, timeout=25.0)
         spokes = []
@@ -5471,12 +5468,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             operator thinks in hostnames — a wall of UUIDs is unreadable when
             the whole point of the panel is "which box is broken". Reuses the
             hub's own labeller so this matches the alert log wording."""
-            try:
-                md = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
-            except Exception:  # noqa: BLE001 — a label must never break the panel
-                md = {}
-            return (md.get("display_name") or md.get("name")
-                    or md.get("hostname") or "").strip()
+            nm = node_name(hub.state.system_state, sid)
+            return "" if nm == sid else nm
 
         results = await _cs_forward_all(tenant_id, "CS_GET_DHCP_HEALTH", {}, timeout=25.0)
         spokes = []

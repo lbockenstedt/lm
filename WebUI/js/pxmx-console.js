@@ -1832,9 +1832,9 @@ function _consoleDiagDebugBanner(dbg) {
         rows.push(`<div class="text-red-700">⛔ No operator credentials saved on the hub — every agent tries only the 9 factory defaults (<span class="font-mono">creds_tried=N/9</span>). Add them via 🔑 Credentials.</div>`);
     for (const [sid, st] of Object.entries(dbg.spokes || {})) {
         const bits = `seeded=${st.seeded} responded=${st.responded} summary=${st.summary_reported}`;
-        rows.push(`<div class="text-slate-500 font-mono text-[10px]">${escapeHtml(sid)}: ${bits}</div>`);
+        rows.push(`<div class="text-slate-500 text-[10px]">${escapeHtml(_spokeLabelFor(sid))}: ${bits}</div>`);
         if (saved && !st.seeded)
-            rows.push(`<div class="text-amber-700">⚠ <b>${escapeHtml(sid)}</b>: creds saved but not yet pushed to this agent — Refresh (or open Console ports) to re-seed.</div>`);
+            rows.push(`<div class="text-amber-700">⚠ <b>${escapeHtml(_spokeLabelFor(sid))}</b>: creds saved but not yet pushed to this agent — Refresh (or open Console ports) to re-seed.</div>`);
     }
     const tone = !saved ? 'bg-red-50 border-red-100' : 'bg-slate-50 border-slate-200';
     return `<div class="mb-3 text-[11px] px-3 py-2 rounded border ${tone} space-y-1">${rows.join('')}</div>`;
