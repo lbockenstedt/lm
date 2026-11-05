@@ -2150,11 +2150,17 @@ function _srdAge(s) {
     return Math.round(s / 86400) + 'd ago';
 }
 
+// spoke_id → hostname from the last registry render (confirm prompts use it).
+let _srdNames = {};
+
 function _spokeRegistryDiagHtml(d) {
     const rows = (d && d.rows) || [];
     const brokers = (d && d.brokers) || {};
     const findings = (d && d.findings) || [];
     if (!rows.length) return `<p class="text-slate-400 italic text-xs">No spoke registrations.</p>`;
+    // Operators know boxes by hostname, never by registration UUID.
+    _srdNames = Object.fromEntries(rows.map(r => [r.spoke_id, r.hostname || _spokeLabelFor(r.spoke_id)]));
+    const nameOf = id => _srdNames[id] || _spokeLabelFor(id);
 
     // Elected brokers first — this is the value that flips, so it leads.
     let html = '';
@@ -2167,7 +2173,7 @@ function _spokeRegistryDiagHtml(d) {
             return `<div class="flex items-start justify-between gap-3 text-xs p-2 rounded ${warn ? 'bg-amber-50 border border-amber-200' : 'bg-slate-50'}">
                 <div><span class="font-bold text-slate-600">${escapeHtml(t)}</span>
                     <span class="text-slate-400"> → </span>
-                    <span class="font-mono text-slate-700">${escapeHtml(b.elected || 'none')}</span></div>
+                    <span class="font-medium text-slate-700">${escapeHtml(b.elected ? nameOf(b.elected) : 'none')}</span></div>
                 <div class="text-right whitespace-nowrap ${warn ? 'text-amber-700' : 'text-slate-400'}">
                     ${(b.candidates || []).length} connected candidate(s)${warn ? ' — pinned to the incumbent' : ''}</div>
             </div>`;
@@ -2212,7 +2218,7 @@ function _spokeRegistryDiagHtml(d) {
         if (r.stuck_never_keyed) badges.push('<span class="px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-bold" title="Approved but never seen and never keyed. Approval only keys a spoke while it is connected, so clicking Approve here never makes it report in. Delete it everywhere, then approve it WHILE it is connected.">stuck — re-approve while connected</span>');
         if (!r.approved && !r.is_relayed_agent) badges.push('<span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">unapproved</span>');
         if (r.admin_only) badges.push('<span class="px-1.5 py-0.5 rounded bg-purple-100 text-purple-700" title="No tenant_id — hidden from a non-admin Spokes list, but still claimable as a tenant broker">hidden</span>');
-        if (r.legacy_twin_of) badges.push('<span class="px-1.5 py-0.5 rounded bg-orange-100 text-orange-700" title="Same box as ' + escapeHtml(r.legacy_twin_of) + ' — registered under the pre-2026-07-20 &quot;-spoke&quot; id. Safe to delete once the twin is connected.">twin of ' + escapeHtml(r.legacy_twin_of) + '</span>');
+        if (r.legacy_twin_of) badges.push('<span class="px-1.5 py-0.5 rounded bg-orange-100 text-orange-700" title="Same box, registered under the pre-2026-07-20 &quot;-spoke&quot; id. Safe to delete once the twin is connected.">twin of ' + escapeHtml(nameOf(r.legacy_twin_of)) + '</span>');
         const del = (r.connected || r.is_relayed_agent)
             ? `<span class="text-slate-300" title="${r.is_relayed_agent ? 'Relayed agent reporting through its parent spoke — not a leftover' : 'Connected — this is a live spoke, not a leftover'}">live</span>`
             : `<button onclick="deleteSpokeRegistration('${escJsAttr(r.spoke_id)}')" class="px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50" title="Delete this spoke registration">Delete</button>`;
@@ -2221,7 +2227,7 @@ function _spokeRegistryDiagHtml(d) {
             `value="${escapeHtml(r.spoke_id)}" onchange="srdSyncCount()" title="Select this spoke registration for deletion">`;
         html += `<tr class="border-b border-slate-100 ${r.connected ? '' : 'bg-slate-50/60'}">
             <td class="py-1.5 pr-2">${sel}</td>
-            <td class="py-1.5 pr-2 font-medium text-slate-700" title="${escapeHtml(r.spoke_id)}">${escapeHtml(r.hostname || _spokeLabelFor(r.spoke_id))}</td>
+            <td class="py-1.5 pr-2 font-medium text-slate-700">${escapeHtml(nameOf(r.spoke_id))}</td>
             <td class="py-1.5 pr-2 text-slate-500">${escapeHtml(r.module_type || '—')}</td>
             <td class="py-1.5 pr-2 text-slate-500">${escapeHtml(r.tenant_id || 'unassigned')}</td>
             <td class="py-1.5 pr-2"><div class="flex flex-wrap gap-1">${badges.join('')}</div></td>
@@ -2321,7 +2327,7 @@ async function srdDeleteSelected() {
     const ids = Array.from(document.querySelectorAll('.srd-sel'))
                      .filter(b => b.checked).map(b => b.value);
     if (!ids.length) return;
-    if (!confirm(`Delete ${ids.length} spoke registration(s)?\n\n` + ids.join('\n')
+    if (!confirm(`Delete ${ids.length} spoke registration(s)?\n\n` + ids.map(i => _srdNames[i] || _spokeLabelFor(i)).join('\n')
                  + `\n\nOnly do this for boxes that are gone, were rebuilt, or are a `
                  + `pre-rename twin. A box that is still running will re-register on its `
                  + `next connect.`)) return;
@@ -2348,11 +2354,11 @@ window.srdDeleteSelected = srdDeleteSelected;
 // deleting a connected spoke would tear down a live one, and the whole point of
 // this card is to remove ghosts without that risk.
 async function deleteSpokeRegistration(spokeId) {
-    if (!confirm(`Delete spoke registration "${_spokeLabelFor(spokeId)}"?\n\nOnly do this if the box is gone or was rebuilt. `
+    if (!confirm(`Delete spoke registration "${_srdNames[spokeId] || _spokeLabelFor(spokeId)}"?\n\nOnly do this if the box is gone or was rebuilt. `
                  + `If it is still running it will re-register on its next connect.`)) return;
     try {
         await apiJson(`/setup/spokes/${encodeURIComponent(spokeId)}`, { method: 'DELETE' });
-        showToast(`Deleted registration ${_spokeLabelFor(spokeId)}`, 'success');
+        showToast(`Deleted registration ${_srdNames[spokeId] || _spokeLabelFor(spokeId)}`, 'success');
     } catch (e) {
         showToast(`Delete failed: ${e.message}`, 'error');
     }
