@@ -12,15 +12,21 @@ catalog supplies per-sim metadata defaults + suggested linkage.
 Keep this file in sync with the cs twin. The schema/validation block is
 intentionally byte-identical so hub and spoke agree on the contract.
 """
+# Postponed annotations: type hints are not evaluated at runtime.
 from __future__ import annotations
 
+# Parses the tenant's simulation.conf INI text.
 import configparser
+# Standard-library logging.
 import logging
+# Type hints only.
 from typing import Any, Dict, List, Optional, Tuple
 
+# Logger for sim-quota parsing and validation.
 logger = logging.getLogger("SimQuota")
 
 # ── Schema (byte-identical to cs/lm-spoke/src/sim_quota.py) ───────────────
+# Every key a sim-quota row may carry.
 SIM_QUOTA_KEYS = ("alert_id", "alert_type", "sim_id", "count", "site",
                   "multi_capable", "rehome", "enabled", "learning", "tier",
                   # Device quota kind (T3 IoT fleet): kind=device + a catalog
@@ -41,6 +47,7 @@ SIM_QUOTA_KEYS = ("alert_id", "alert_type", "sim_id", "count", "site",
                   # adaptive_step's docstring. OFF (or nothing learned yet) falls
                   # back to the stored min/max exactly as before.
                   "inherit_learned_count")
+# Valid kinds of monitored condition.
 ALERT_TYPES = ("alert", "insight")
 # Per-quota client-tier policy (twin of cs sim_quota.QUOTA_TIERS). "best"
 # (default) = prefer T1 (dedicated PCI, most reliable) then fall back to T2 (USB
@@ -76,12 +83,14 @@ def parse_alert_source(alert_id: str) -> Tuple[str, str]:
     ``"DNS Fail"`` (legacy / untethered-display) → ``("central", "DNS Fail")``.
     An unknown/empty prefix falls back to ``central`` (bare). Returns the source
     as the canonical lowercase key (``"central"``/``"mist"``)."""
+    # Split on the first colon when the prefix is a known product.
     aid = str(alert_id or "").strip()
     if ":" in aid:
         prefix, _, rest = aid.partition(":")
         src = _PREFIX_TO_SOURCE.get(prefix.strip().lower())
         if src and rest.strip():
             return src, rest.strip()
+    # No recognised prefix: a bare Central id.
     return "central", aid
 
 
@@ -90,16 +99,21 @@ def prefixed_alert_id(source: str, bare_id: str) -> str:
     ``prefixed_alert_id("mist", "ap_offline")`` → ``"Mist:ap_offline"``.
     An unknown/empty source defaults to Central. A bare_id that is ALREADY
     prefixed is returned unchanged (idempotent)."""
+    # Normalise the source, defaulting unknown ones to Central.
     src = str(source or "central").strip().lower()
     if src not in SOURCE_PREFIXES:
         src = "central"
+    # Check whether the id already carries a prefix.
     bid = str(bare_id or "").strip()
     cur_src, cur_bare = parse_alert_source(bid)
     if cur_src != "central" or bid != cur_bare:
         # already prefixed (and not a bare-that-looks-prefixed) — keep as-is
         return bid
+    # Add the product prefix (empty ids stay empty).
     return f"{SOURCE_PREFIXES[src]}:{bid}" if bid else bid
 
+# Per-sim defaults: whether it is a failure or traffic sim, and if one client may run it alongside
+# others.
 SIM_META: Dict[str, Dict[str, object]] = {
     "dns_fail":    {"category": "failure", "multi_capable": False},
     "dns_latency": {"category": "failure", "multi_capable": False},
@@ -115,6 +129,7 @@ SIM_META: Dict[str, Dict[str, object]] = {
     "iperf":       {"category": "traffic", "multi_capable": True},
 }
 
+# Suggested sim for well-known Central alert types.
 SUGGESTED_ALERT_SIM: Dict[str, str] = {
     "CLIENT_DHCP_FAILURE": "dhcp_fail",
     "CLIENT_ASSOCIATION_FAILURE": "assoc_fail",
@@ -147,9 +162,11 @@ SIM_KNOBS: Dict[str, List[Dict[str, int]]] = {
 
 def knobs_for_sim(sim_id: str) -> List[Dict[str, int]]:
     """The ordered tunable knob specs for a sim (empty list if it has none)."""
+    # Copies, so callers cannot change the module catalog.
     return [dict(k) for k in SIM_KNOBS.get(str(sim_id or "").strip(), [])]
 
 
+# Minimum wait between knob moves.
 KNOB_SETTLE_S = 1800.0  # ≥30 min — Central alert latency floor (see adaptive_step)
 
 
@@ -170,8 +187,10 @@ def knob_step(st: Dict[str, Any], knobs: List[Dict[str, int]], firing,
 
     State shape: ``{values:{key:int}, floors:{key:int|None}, active:int,
     mode:str, last_change:float}``, keyed per quota by the caller."""
+    # No knobs: nothing to change.
     if not knobs:
         return dict(st)
+    # Work on copies of the state and its maps.
     st = dict(st)
     values = dict(st.get("values") or {})
     floors = dict(st.get("floors") or {})
@@ -184,6 +203,7 @@ def knob_step(st: Dict[str, Any], knobs: List[Dict[str, int]], firing,
             floors.setdefault(kn["key"], None)
         return {"values": values, "floors": floors, "active": 0,
                 "mode": "learning", "last_change": now}
+    # Which knob is active, when it last moved, and whether every knob has a floor.
     active = int(st.get("active") or 0) % len(knobs)
     last = float(st.get("last_change") or 0)
     _all_floored = all(floors.get(kn["key"]) is not None for kn in knobs)
@@ -191,10 +211,12 @@ def knob_step(st: Dict[str, Any], knobs: List[Dict[str, int]], firing,
         st.update(values=values, floors=floors, active=active,
                   mode=("stable" if _all_floored else "learning"))
         return st
+    # Bounds and current value of the active knob.
     kn = knobs[active]
     key = kn["key"]
     mn, mx, step = int(kn["min"]), int(kn["max"]), max(1, int(kn["step"]))
     cur = int(values.get(key, kn.get("start", mx)))
+    # Still firing: try one step lower.
     if firing is True:
         nv = cur - step
         if nv < mn:                     # min still fires → that's the floor
@@ -209,6 +231,7 @@ def knob_step(st: Dict[str, Any], knobs: List[Dict[str, int]], firing,
         prev = floors.get(key)
         floors[key] = rv if prev is None else min(int(prev), rv)
         active = (active + 1) % len(knobs)
+    # Save the new values; "stable" once every knob has a floor.
     st.update(values=values, floors=floors, active=active, last_change=now,
               mode=("stable" if all(floors.get(k2["key"]) is not None
                                     for k2 in knobs) else "learning"))
@@ -217,6 +240,8 @@ def knob_step(st: Dict[str, Any], knobs: List[Dict[str, int]], firing,
 
 # ── Coercion + validation (byte-identical to the cs twin) ─────────────────
 def _as_bool(v: Any, default: bool = False) -> bool:
+    """Coerce a config value to bool (common true words), using default for None."""
+    # Real booleans pass straight through.
     if isinstance(v, bool):
         return v
     if v is None:
@@ -225,6 +250,8 @@ def _as_bool(v: Any, default: bool = False) -> bool:
 
 
 def _as_int(v: Any, default: int = 1) -> int:
+    """Coerce a value to a positive int, using default when invalid or below 1."""
+    # Anything that is not a positive integer gives the default.
     try:
         n = int(str(v).strip())
         return n if n >= 1 else default
@@ -240,13 +267,16 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
     the site (re-homing ``wsite`` if ``rehome``). Presence quotas are ALWAYS
     multi-capable (they don't consume the client for sim purposes; other
     stackable sims may pack onto a presence-homed client)."""
+    # Non-dict input normalises to an empty quota.
     if not isinstance(raw, dict):
         return {}
+    # Sim id, its metadata defaults, and the alert type (alert unless insight).
     sim_id = str(raw.get("sim_id") or "").strip()
     meta = SIM_META.get(sim_id, {})
     alert_type = str(raw.get("alert_type") or "alert").strip().lower()
     if alert_type not in ALERT_TYPES:
         alert_type = "alert"
+    # No sim means a presence quota.
     is_presence = not sim_id
     # Device quota (T3 IoT fleet): a catalog ``device_id`` + count + site, no
     # sim/alert. ``kind`` is explicit when the UI sends it, else derived:
@@ -255,6 +285,7 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
     kind = str(raw.get("kind") or "").strip().lower()
     if kind not in ("sim", "presence", "device"):
         kind = "device" if device_id else ("sim" if sim_id else "presence")
+    # Build the canonical quota with every known key coerced.
     q = {
         "kind": kind,
         "device_id": device_id,
@@ -311,13 +342,16 @@ def _learned_knob_floor(learned_value: Any) -> Optional[int]:
     guards the general case). Mirrors _csKnobFloorFromLearned in sim-views.js
     — keep both in sync if this formula changes. Returns None on a
     non-numeric/non-positive input (caller should then skip the key)."""
+    # Local import: only needed here.
     import math
+    # Non-numeric or non-positive values have no floor.
     try:
         n = float(learned_value)
     except (TypeError, ValueError):
         return None
     if n <= 0:
         return None
+    # Learned + 20%, but never more than double.
     return min(math.ceil(n * 1.2), math.ceil(n * 2))
 
 
@@ -333,10 +367,13 @@ def quota_dedup_key(q: Dict[str, Any]) -> str:
     if q.get("kind") == "device" or q.get("device_id"):
         # One quota per device profile per site (last-wins).
         return f"device:{q.get('device_id', '')}:{q.get('site', '')}"
+    # Presence quota: keyed by site only.
     if not q.get("sim_id"):
         return f"presence::{q.get('site', '')}"
+    # Untethered sim quota: keyed by sim and site.
     if not q.get("alert_id"):
         return f"sim:{q.get('sim_id', '')}:{q.get('site', '')}"
+    # Tethered sim quota: keyed by alert type, alert id and site.
     return f"{q.get('alert_type', 'alert')}:{q.get('alert_id', '')}:{q.get('site', '')}"
 
 
@@ -352,11 +389,14 @@ def validate_sim_quotas(
     box off) has no ``alert_id`` and just keeps N clients running the sim at the
     site — like a PRESENCE quota, which needs a ``site`` and NO sim/alert.
     Duplicate keys (``quota_dedup_key``) collapse last-wins."""
+    # Results, errors, and the last row seen per dedup key.
     clean: List[Dict[str, Any]] = []
     errors: List[str] = []
     seen: Dict[str, Dict[str, Any]] = {}
+    # Catalogs to validate against (empty means no check).
     sim_set = set(available_sims or [])
     device_set = set(available_devices or [])
+    # Normalise and validate each row.
     for i, raw in enumerate(quotas or []):
         q = normalize_quota(raw)
         if q["kind"] == "device":
@@ -372,6 +412,7 @@ def validate_sim_quotas(
                 errors.append(f"quota #{i}: device_id '{q['device_id']}' "
                               f"not in the IoT catalog — dropped")
                 continue
+        # Presence quotas need a site.
         elif not q["sim_id"]:
             if not q["site"]:
                 errors.append(f"quota #{i}: presence quota (Clients Associated) "
@@ -384,7 +425,9 @@ def validate_sim_quotas(
                     f"quota #{i} ({q['alert_id']}): sim_id '{q['sim_id']}' "
                     f"not in available sims — dropped")
                 continue
+        # Valid row: later rows with the same key replace earlier ones.
         seen[quota_dedup_key(q)] = q
+    # Return the de-duplicated rows and the errors.
     clean = list(seen.values())
     return clean, errors
 
@@ -412,18 +455,23 @@ def guard_sim_quota_wipe(
     partial drop (some rows survive) is NOT blocked — only a full wipe is.
     Mirrored in the cs spoke twin.
     """
+    # Only a full wipe of a non-empty list is checked.
     had = len(existing_quotas or [])
     if had and not (clean or []):
+        # Honour an explicit force flag; otherwise keep the existing quotas.
         force = body.get("force_sim_quotas_clear") if isinstance(body, dict) else None
         if str(force).strip().lower() in ("1", "true", "yes", "on"):
             return list(clean or []), False
         return list(existing_quotas or []), True
+    # Not a full wipe: persist the new list as is.
     return list(clean or []), False
 
 
 def resolve_effective_quotas(
     tenant_quotas: Any, available_sims: List[str] | None = None,
 ) -> List[Dict[str, Any]]:
+    """Validate a tenant's quotas and return only the enabled ones."""
+    # Validation errors are ignored; invalid rows are simply dropped.
     clean, _ = validate_sim_quotas(tenant_quotas, available_sims)
     return [q for q in clean if q["enabled"]]
 
@@ -452,6 +500,7 @@ def merge_effective_quotas(
     before the merge; the result is enabled-only. The cs spoke's SimQuotaEngine
     consumes the resulting list.
     """
+    # Validate the global defaults against every known sim.
     g_clean, _ = validate_sim_quotas(global_quotas, list(SIM_META.keys()))
     # Tenant side is filtered against the full SIM_META primitive set (NOT the
     # bucket-derived available_sims — a sim not yet placed in any bucket is still
@@ -459,24 +508,30 @@ def merge_effective_quotas(
     # sim_id (typo, or a sim removed from SIM_META) is dropped here, and a
     # sim-config refresh that removes a sim re-merges cleanly without it.
     t_clean, t_errs = validate_sim_quotas(tenant_quotas, list(SIM_META.keys()))
+    # Tenant errors are logged, not raised.
     if t_errs:
         logger.warning("merge_effective_quotas: tenant quota errors: %s", t_errs)
 
     def _grp_sim(qs: List[Dict[str, Any]]) -> Dict[tuple, List[Dict[str, Any]]]:
         # Tethered quotas own their (alert_type, alert_id) across sites; an
         # untethered quota (no alert_id) owns its (sim_id, site) instead.
+        """Group sim quotas by the alert they track (or sim+site when untethered)."""
         m: Dict[tuple, List[Dict[str, Any]]] = {}
+        # Add each quota to its group.
         for q in qs:
             key = ((q["alert_type"], q["alert_id"]) if q.get("alert_id")
                    else ("__sim__", q["sim_id"], q["site"]))
             m.setdefault(key, []).append(q)
         return m
     def _grp_site(qs: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        """Group presence quotas by site."""
+        # Add each quota to its site's list.
         m: Dict[str, List[Dict[str, Any]]] = {}
         for q in qs:
             m.setdefault(q["site"], []).append(q)
         return m
 
+    # Split each side into sim quotas and presence quotas.
     g_sim = [q for q in g_clean if q["sim_id"]]
     g_pres = [q for q in g_clean if not q["sim_id"]]
     t_sim = [q for q in t_clean if q["sim_id"]]
@@ -486,14 +541,17 @@ def merge_effective_quotas(
     # SIM quotas — ownership keyed on ALL rows (enabled+disabled) so a tenant's
     # disabled row suppresses the global default for that alert; enabled-only out.
     gmap_all, tmap_all = _grp_sim(g_sim), _grp_sim(t_sim)
+    # Tenant-owned alerts use the tenant's enabled rows.
     for key, rows in tmap_all.items():
         out.extend(r for r in rows if r.get("enabled"))
+    # Untouched alerts inherit the global enabled rows.
     for key, rows in gmap_all.items():
         if key not in tmap_all:
             out.extend(r for r in rows if r.get("enabled"))
     # PRESENCE quotas — ownership per site (a tenant presence row for a site,
     # enabled or disabled, suppresses the global presence for that site).
     gsite, tsite = _grp_site(g_pres), _grp_site(t_pres)
+    # Tenant-owned sites use the tenant's enabled rows; others inherit the global ones.
     for site, rows in tsite.items():
         out.extend(r for r in rows if r.get("enabled"))
     for site, rows in gsite.items():
@@ -508,6 +566,7 @@ def merge_effective_quotas(
 def adaptive_is_on(q: Dict[str, Any]) -> bool:
     """A quota is adaptive when it declares a max above its min. Fixed-count
     quotas (no min/max, or min==max) are left untouched."""
+    # Adaptive only when max is above min; invalid numbers mean fixed.
     try:
         return int(q.get("max")) > int(q.get("min") or 1)
     except (TypeError, ValueError):
@@ -516,11 +575,13 @@ def adaptive_is_on(q: Dict[str, Any]) -> bool:
 
 def adaptive_key(q: Dict[str, Any]) -> str:
     """The controller-state key for an adaptive quota."""
+    # Alert type, alert id and site.
     return f"{q.get('alert_type', 'alert')}:{q.get('alert_id', '')}:{q.get('site', '')}"
 
 
 def ceil_to_int(x: float) -> int:
     """``ceil`` for positive floats without a math import."""
+    # Round up when there is a fractional part.
     xi = int(x)
     return xi + 1 if x > xi else xi
 
@@ -528,11 +589,13 @@ def ceil_to_int(x: float) -> int:
 def _alert_key(q: Dict[str, Any]) -> str:
     """The per-ALERT key (no site) used to share learned operating points across
     a tenant's sites and the global registry: ``alert_type:alert_id``."""
+    # Alert type and alert id, without the site.
     return f"{q.get('alert_type', 'alert')}:{q.get('alert_id', '')}"
 
 
 def _derived_mode(phase: str) -> str:
     """Map an internal thermostat phase to the UI-facing mode badge."""
+    # Pass through the phases the UI shows; everything else is "learning".
     if phase == "stable":
         return "stable"
     if phase == "at_max":
@@ -597,23 +660,29 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
     A settle window (≥30 min, floored for Central's reporting latency) gates
     every change. Returns the next state dict
     ``{target, floor, phase, learned_op, mode, last_change}``."""
+    # Is this the learning lab, and does it inherit the learned count?
     learning = _as_bool(q.get("learning"), False)
     inherit_count = _as_bool(q.get("inherit_learned_count"), True)
+    # Inheriting consumer: derive min/max from the learned values.
     if not learning and inherit_count and applied_op is not None:
         mn = int(applied_op)
         mx = max(mn, int(applied_floor) * 2) if applied_floor is not None \
             else max(mn, int(q.get("max") or mn))
+    # Otherwise use the stored min/max.
     else:
         mn = int(q.get("min") or 1)
         mx = max(mn, int(q.get("max") or mn))
+    # Step size of at least 1.
     step = max(1, int(q.get("step") or 1))
     # Central reports alerts with LATENCY — often 30+ min. The controller must
     # not change the target (up OR down) faster than that, or it ramps to max
     # long before Central ever confirms firing (the "at max, not firing" false
     # alarm). Floor the settle window at 30 min regardless of the config.
     settle = max(1800.0, float(q.get("settle") or 1800.0))
+    # Operating-point margin above the floor (20% by default).
     buffer = float(q.get("buffer") if q.get("buffer") is not None else 0.20)
 
+    # Load the saved controller state.
     target = st.get("target")
     floor = st.get("floor")
     phase = st.get("phase") or "up_find"
@@ -641,6 +710,7 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
         # Start the settle clock now so even the FIRST change waits a full
         # 30-min window (give Central time to confirm firing at the start level).
         last = now
+    # Keep the target within range.
     target = max(mn, min(mx, int(target)))
     if not learning_started_at:
         learning_started_at = now  # backfill for pre-metadata states
@@ -663,8 +733,10 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
         requested count. ``producing`` reflects reality at the moment of the
         tick that called this, so it's only applied at a firing==True
         recording point (see adaptive_step's docstring)."""
+        # No report: trust the requested count.
         if producing is None:
             return int(count)
+        # Clamp to the producing count, at least 1.
         return max(1, min(int(count), int(producing)))
 
     def _stable_at(fl: int) -> None:
@@ -678,6 +750,7 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
         exhaust the client pool). A stable transition is when the known-good is
         captured."""
         nonlocal floor, learned_op, target, phase, last, stable_since, time_to_stable_s
+        # Record the floor, the operating point, and switch to stable.
         floor = fl
         learned_op = max(mn, ceil_to_int(float(fl) * (1 + buffer)))
         target = fl              # probe baseline = floor (<= max); op pushed separately
@@ -690,6 +763,8 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
             time_to_stable_s = int(max(0.0, now - learning_started_at))
 
     def _ret() -> Dict[str, Any]:
+        """Return the next controller state with the target clamped to range."""
+        # The full state dict the caller stores.
         return {"target": max(mn, min(mx, int(target))), "floor": floor,
                 "phase": phase, "learned_op": learned_op, "learning": learning,
                 "mode": _derived_mode(phase), "last_change": last,
@@ -713,6 +788,7 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
             phase = "stable"
             last = now
 
+    # Only act once the settle window has passed since the last change.
     if (now - last) >= settle:
         if firing is None:
             pass  # unknown → hold
@@ -785,6 +861,7 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
                     target = min(mx, target + step)
                     phase = "up_find"; last = now
 
+    # Return the next state.
     return _ret()
 
 
@@ -798,12 +875,14 @@ def known_good_from_state(q: Dict[str, Any], st: Dict[str, Any],
 
     Shape: ``{alert, alert_type, alert_id, site, count, clients, knobs,
     time_to_stable_s, achieved_at, buffer}``."""
+    # Only a stable state with a learned operating point has a known-good record.
     try:
         if (st or {}).get("phase") != "stable":
             return None
         op = (st or {}).get("learned_op")
         if op is None:
             return None
+        # The record of the count (and knob values) that made the alert fire.
         return {
             "alert":        _alert_key(q),
             "alert_type":   q.get("alert_type"),
@@ -816,6 +895,7 @@ def known_good_from_state(q: Dict[str, Any], st: Dict[str, Any],
             "achieved_at":  st.get("stable_since"),
             "buffer":       float(q.get("buffer") if q.get("buffer") is not None else 0.20),
         }
+    # Any malformed state yields no record.
     except Exception:  # noqa: BLE001
         return None
 
@@ -828,7 +908,9 @@ def seed_state_to_known_good(kg: Dict[str, Any], learning: bool, now: float,
     lab resumes learning from there. ``learning`` OFF → jump to the count and
     hold (consumer; up-only stable). The count is stamped as ``learned_op`` so a
     resumed lab re-probes DOWN from it rather than from min."""
+    # The count to restore (learned op, else 1).
     count = int(kg.get("count") or kg.get("learned_op") or 1)
+    # Learning rows hold for hold_s; consumers go straight to stable.
     return {
         "target":       count,
         "floor":        count,
@@ -874,6 +956,7 @@ def apply_adaptive_targets(quotas: List[Dict[str, Any]],
     exact behavior (stored max is the hard cap).
 
     Non-adaptive quotas are left untouched."""
+    # Only adaptive quotas are changed.
     global_learned = global_learned or {}
     adaptive = [q for q in quotas if adaptive_is_on(q)]
     if not adaptive:
@@ -883,6 +966,7 @@ def apply_adaptive_targets(quotas: List[Dict[str, Any]],
     # global published value). Highest wins across multiple learners.
     applied_op: Dict[str, int] = {}
     applied_floor: Dict[str, int] = {}
+    # Highest stable learned value from this tenant's learning rows.
     for q in adaptive:
         if not _as_bool(q.get("learning"), False):
             continue
@@ -898,6 +982,7 @@ def apply_adaptive_targets(quotas: List[Dict[str, Any]],
                 valf = int(st["floor"])
                 if curf is None or valf > curf:
                     applied_floor[ak] = valf
+    # Raise them with the global published values when higher.
     for ak, gv in global_learned.items():
         if not isinstance(gv, dict):
             continue
@@ -922,6 +1007,7 @@ def apply_adaptive_targets(quotas: List[Dict[str, Any]],
                 if curf is None or gfval > curf:
                     applied_floor[ak] = gfval
 
+    # Set each adaptive quota's count.
     for q in adaptive:
         st = state.get(adaptive_key(q)) or {}
         ak = _alert_key(q)
@@ -947,20 +1033,25 @@ def apply_adaptive_targets(quotas: List[Dict[str, Any]],
                 base = int(op) if op is not None else int(q.get("min") or 1)
             else:
                 base = max(int(tgt), int(op)) if op is not None else int(tgt)
+            # Max: twice the learned floor when inheriting, else the stored max.
             fl = applied_floor.get(ak)
             inherit_count = _as_bool(q.get("inherit_learned_count"), True)
             if inherit_count and fl is not None:
                 mx = max(base, int(fl) * 2)
             else:
                 mx = int(q.get("max") or base)
+            # Run at the lifted target, capped at max.
             q["count"] = min(mx, base)
     return quotas
 
 
 # ── Catalog from raw INI text (hub centralized mode) ──────────────────────
 def _parse_ini(text: str) -> configparser.ConfigParser:
+    """Parse INI text case-preservingly; a parse failure gives an empty parser."""
+    # New parser.
     p = configparser.ConfigParser()
     p.optionxform = str  # preserve key case
+    # Parse the text; errors are logged and leave the parser empty.
     if text:
         try:
             p.read_string(text)
@@ -970,6 +1061,8 @@ def _parse_ini(text: str) -> configparser.ConfigParser:
 
 
 def _bucket_sections(sim_conf: configparser.ConfigParser) -> List[str]:
+    """Return the bucket section names (s followed by digits, e.g. s1, s2)."""
+    # Keep only sN sections.
     return [s for s in (sim_conf.sections() if sim_conf is not None else [])
             if s.startswith("s") and s[1:].isdigit()]
 
@@ -977,16 +1070,20 @@ def _bucket_sections(sim_conf: configparser.ConfigParser) -> List[str]:
 def available_sims_from_ini(sim_conf_text: str) -> List[Dict[str, Any]]:
     """Sims the Sim-Quota UI may offer, derived from the tenant's
     ``simulation.conf`` INI text (bucket sections ∩ runnable SIM_META keys)."""
+    # Known sims, and the parsed config.
     flags = list(SIM_META.keys())
     sim_conf = _parse_ini(sim_conf_text)
     bucket_flags: List[str] = []
     seen = set()
+    # Sims that appear in a bucket section, in first-seen order.
     for sec in _bucket_sections(sim_conf):
         for key in sim_conf.options(sec):
             if key in flags and key not in seen:
                 seen.add(key)
                 bucket_flags.append(key)
+    # Bucket sims first, then the rest of the known sims.
     ordered = bucket_flags + [f for f in flags if f not in seen]
+    # One catalog entry per sim with its metadata.
     return [
         {"sim_id": f,
          "category": SIM_META.get(f, {}).get("category", "failure"),
@@ -999,12 +1096,15 @@ def available_sims_from_ini(sim_conf_text: str) -> List[Dict[str, Any]]:
 def available_sites_from_ini(
     sim_conf_text: str, central_site_mappings: Dict[str, str] | None = None,
 ) -> List[str]:
+    """Return the sorted site names from bucket wsite values and the Central site mappings."""
+    # Collect wireless site names from the buckets.
     sites: set[str] = set()
     sim_conf = _parse_ini(sim_conf_text)
     for sec in _bucket_sections(sim_conf):
         w = sim_conf.get(sec, "wsite", fallback="").strip()
         if w:
             sites.add(w)
+    # Add both sides of each site mapping.
     for k, v in (central_site_mappings or {}).items():
         if k:
             sites.add(str(k))
@@ -1016,6 +1116,8 @@ def available_sites_from_ini(
 def sim_quota_catalog_from_ini(
     sim_conf_text: str, central_site_mappings: Dict[str, str] | None = None,
 ) -> Dict[str, Any]:
+    """Return the Sim-Quota catalog (sims, sites, suggestions, per-sim metadata) for the UI."""
+    # Build the catalog the UI picker needs.
     return {
         "sims": available_sims_from_ini(sim_conf_text),
         "sites": available_sites_from_ini(sim_conf_text, central_site_mappings),

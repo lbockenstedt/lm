@@ -38,11 +38,16 @@ precedence over env for the material paths — see set_runtime_materials):
 A leaf: stdlib only. Audience: transport developers.
 """
 
+# Standard-library logging for trust reload and bundle-building messages.
 import logging
+# os: env-var knobs, file existence checks and path joining.
 import os
+# ssl builds the client/server TLS contexts and verify modes.
 import ssl
+# tempfile locates the temp directory where the combined CA bundle is written.
 import tempfile
 
+# Logger named after this module.
 logger = logging.getLogger(__name__)
 
 
@@ -64,6 +69,7 @@ _runtime_materials = {"ca": None, "client_cert": None, "client_key": None}
 
 def set_runtime_enabled(value) -> None:
     """Hub applies global_config.mtls_enabled here (startup + on the WebUI knob)."""
+    # None clears the override (back to env); anything else becomes a strict bool.
     global _runtime_enabled
     _runtime_enabled = None if value is None else bool(value)
 
@@ -74,7 +80,9 @@ def set_runtime_materials(ca=None, client_cert=None, client_key=None) -> None:
     left None keeps its current value, so a caller can set just the CA bundle
     (the hub — it has no client leg) without clobbering client paths. Pass an
     empty string to explicitly clear a path back to the env fallback."""
+    # Note whether the CA path really changes, so we only hot-reload when needed.
     ca_changed = ca is not None and _runtime_materials.get("ca") != (ca or None)
+    # Update only the paths the caller supplied; "" clears a path back to the env fallback.
     if ca is not None:
         _runtime_materials["ca"] = ca or None
     if client_cert is not None:
@@ -99,6 +107,7 @@ _server_ctx = None
 def register_server_ctx(ctx) -> None:
     """build_server() hands us the listener's SSLContext so we can hot-reload its
     client-verify trust later (see reload_client_ca)."""
+    # Remember the listener's context for later hot reloads.
     global _server_ctx
     _server_ctx = ctx
 
@@ -112,13 +121,16 @@ def reload_client_ca() -> bool:
     trust — a fully-rotated CA leaves the old anchors trusted until the next
     restart, which is safe (old certs simply stay valid)."""
     global _combined_ca_path
+    # Nothing to reload until a listener has registered its context.
     ctx = _server_ctx
     if ctx is None:
         return False
     _combined_ca_path = None  # force a fresh rebuild from current materials
+    # Rebuild the combined bundle; give up if it could not be produced.
     combined = server_client_ca_file()
     if not combined or not os.path.exists(combined):
         return False
+    # Add the new trust anchors to the live context; failures leave the old trust in place.
     try:
         ctx.load_verify_locations(cafile=combined)
         logger.info("[mtls] live listener client-verify trust reloaded from %s "
@@ -139,12 +151,15 @@ def mtls_enabled() -> bool:
     # Fernet-encrypted hub state or reaching the (now-unreachable) WebUI knob.
     if str(os.getenv("LM_MTLS_DISABLE", "")).strip().lower() in ("1", "true", "yes", "on"):
         return False
+    # Next priority: the hub's runtime setting (WebUI knob).
     if _runtime_enabled is not None:
         return _runtime_enabled
+    # Finally the env var; any common "true" spelling turns mTLS on.
     return str(os.getenv("LM_MTLS_ENABLED", "")).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _paths():
+    """Resolve the (CA bundle, client cert, client key) paths; "" for any that is unset."""
     # Runtime registry first (set by distribution at run time), then env (the
     # operator's static knobs). A runtime path wins even if the env is unset, so
     # the readiness check reflects a just-distributed bundle immediately.
@@ -163,12 +178,15 @@ def client_context(is_wss: bool):
     whether to require it — CERT_OPTIONAL). mTLS on: also verify the server against
     the CA (mutual auth), falling back safely if a path is missing so a misconfig
     can't hard-break the transport before activation is complete."""
+    # Plain ws:// has no TLS at all, so no context.
     if not is_wss:
         return None
+    # We can present a client cert only if both the cert and key files exist.
     ca, cert, key = _paths()
     have_client = bool(cert and key and os.path.exists(cert) and os.path.exists(key))
 
     def _present(ctx):
+        """Load our client cert/key into ``ctx`` when available (best effort) and return it."""
         if have_client:
             try:
                 ctx.load_cert_chain(cert, key)   # present our client cert
@@ -176,8 +194,10 @@ def client_context(is_wss: bool):
                 pass
         return ctx
 
+    # mTLS off: encrypt without verifying the server, but still present our cert if any.
     if not mtls_enabled():
         return _present(ssl._create_unverified_context())
+    # mTLS on: verify the server against the configured CA (or system store if none).
     try:
         ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH,
                                          cafile=ca or None)
@@ -202,11 +222,13 @@ def server_verify_mode():
     STRICT (``CERT_REQUIRED``) is opt-in via ``LM_MTLS_STRICT`` — turn it on ONLY
     for a dedicated, non-WebUI listener (a separate spoke-only port), because on
     a shared socket it locks out every cert-less browser. See build_server()."""
+    # Strict mode only when explicitly requested; otherwise permissive.
     if str(os.getenv("LM_MTLS_STRICT", "")).strip().lower() in ("1", "true", "yes", "on"):
         return ssl.CERT_REQUIRED
     return ssl.CERT_OPTIONAL
 
 
+# Whether this process's listener asks clients for certificates.
 _listener_armed = False
 
 
@@ -218,6 +240,7 @@ def mark_listener_client_auth_armed() -> None:
 
 
 def listener_client_auth_armed() -> bool:
+    """True when this process's hub listener has been set up to request client certs."""
     return _listener_armed
 
 
@@ -227,11 +250,14 @@ def apply_server_client_auth(ctx: ssl.SSLContext):
     default (verify-if-presented, fall back otherwise; see server_verify_mode);
     strict is opt-in via LM_MTLS_STRICT. Default (mTLS off): leaves the context
     as-is (no client-cert request). Call after the context loads its cert/key."""
+    # Leave the context untouched when there is none or mTLS is off.
     if ctx is None or not mtls_enabled():
         return ctx
+    # Without a CA bundle there is nothing to verify client certs against.
     ca, _cert, _key = _paths()
     if not ca:
         return ctx
+    # Trust the configured CA for client verification.
     try:
         ctx.load_verify_locations(cafile=ca)
         # Also trust the system store (LE/ISRG roots) so an LE-issued, SAN-pinned
@@ -244,12 +270,14 @@ def apply_server_client_auth(ctx: ssl.SSLContext):
             ctx.load_default_certs(ssl.Purpose.CLIENT_AUTH)
         except Exception:  # noqa: BLE001
             pass
+        # Request (permissive) or require (strict) client certs.
         ctx.verify_mode = server_verify_mode()
     except Exception:  # noqa: BLE001 - don't brick the listener
         pass
     return ctx
 
 
+# Cached path of the combined client-verify bundle once built.
 _combined_ca_path = None
 
 
@@ -270,15 +298,18 @@ def server_client_ca_file():
     trusts system+CA). Returns the raw ``LM_MTLS_CA`` path if the combine fails,
     so a bad system-store read can never brick the listener."""
     global _combined_ca_path
+    # Reuse a previously built bundle while its file still exists.
     if _combined_ca_path and os.path.exists(_combined_ca_path):
         return _combined_ca_path
     ca, _, _ = _paths()
     try:
+        # PEM blocks to concatenate into the combined bundle.
         parts = []
         # Hub Local mTLS CA — the internal CA that mints the clientAuth client certs
         # every spoke (incl. AppBuilder) presents for mTLS (public CAs no longer issue
         # clientAuth). ALWAYS trusted so hub-issued certs verify, even when LM_MTLS_CA
         # (the legacy LE wildcard chain) is unset. Generated on first use.
+        # Import the hub CA module whether the package root or core/src is on sys.path.
         try:
             import mtls_ca as _mtls_ca
         except Exception:  # noqa: BLE001
@@ -287,6 +318,7 @@ def server_client_ca_file():
             except Exception:  # noqa: BLE001
                 _mtls_ca = None
         if _mtls_ca is not None:
+            # Include the hub CA (created on first use).
             try:
                 cap = _mtls_ca.ensure_ca()
                 if cap and cap.strip():
@@ -313,12 +345,14 @@ def server_client_ca_file():
         # single-source lookup silently produced a root-less bundle and every
         # LE-issued client cert got rejected.
         sys_ca = ""
+        # Prefer the certifi bundle when installed.
         try:
             import certifi
             if os.path.exists(certifi.where()):
                 sys_ca = certifi.where()
         except Exception:  # noqa: BLE001
             pass
+        # certifi unavailable: try OpenSSL's configured file, then well-known distro paths.
         if not sys_ca:
             dvp = ssl.get_default_verify_paths()
             for cand in (dvp.cafile, dvp.openssl_cafile,
@@ -328,15 +362,19 @@ def server_client_ca_file():
                 if cand and os.path.exists(cand):
                     sys_ca = cand
                     break
+        # Append the system roots we found.
         if sys_ca:
             with open(sys_ca, "r") as f:
                 parts.append(f.read())
+        # No trust material at all: fall back to the raw CA path (or nothing).
         if not [p for p in parts if p.strip()]:
             return ca or ""   # nothing to trust — leave the listener as-is
+        # Join the non-empty parts and write them to a fixed file in the temp directory.
         combined = "\n".join(p.strip() for p in parts if p.strip()) + "\n"
         out = os.path.join(tempfile.gettempdir(), "lm_mtls_client_ca_combined.pem")
         with open(out, "w") as f:
             f.write(combined)
+        # Cache the path and log how many certificates the bundle trusts.
         _combined_ca_path = out
         n_certs = combined.count("-----BEGIN CERTIFICATE-----")
         logger.info("[mtls] client-verify CA = LM_MTLS_CA + system store (%s): "
@@ -353,17 +391,22 @@ def server_client_ca_file():
 def _parse_pem_certs(path):
     """Subject/issuer/self_signed for every cert in a PEM file (leaf→root),
     for the trust-diagnostic UI. Empty on any read/parse error."""
+    # One summary dict per certificate found.
     certs = []
+    # A missing file yields an empty list.
     if not path or not os.path.exists(path):
         return certs
+    # Read the file and split it on END markers to get each PEM certificate.
     try:
         from cryptography import x509
         with open(path, "rb") as f:
             raw = f.read()
         end = b"-----END CERTIFICATE-----"
         for seg in raw.split(end):
+            # Skip the trailing fragment after the last certificate.
             if b"-----BEGIN CERTIFICATE-----" not in seg:
                 continue
+            # Record subject, issuer and whether the cert signs itself (a root).
             try:
                 c = x509.load_pem_x509_certificate(seg + end)
                 s = c.subject.rfc4514_string()
@@ -383,6 +426,7 @@ def trust_diagnostics() -> dict:
     store (which can COLLIDE with a private root of the same name, e.g. two
     'ISRG Root X1'). LM_MTLS_CA certs are listed in full; the combined bundle is
     summarized by count (it may hold 100+ system roots)."""
+    # Build (or reuse) the combined bundle only when a CA is configured, then parse both.
     ca, _, _ = _paths()
     combined = server_client_ca_file() if (ca and os.path.exists(ca)) else ""
     lm_ca_certs = _parse_pem_certs(ca)
@@ -392,6 +436,7 @@ def trust_diagnostics() -> dict:
     for c in combined_certs:
         subj_counts[c["subject"]] = subj_counts.get(c["subject"], 0) + 1
     collisions = sorted(s for s, n in subj_counts.items() if n > 1)
+    # Summary for the WebUI trust diagnostics panel.
     return {
         "mtls_enabled": mtls_enabled(),
         "lm_mtls_ca_path": ca or "",
@@ -408,8 +453,10 @@ def status() -> dict:
     materials present so it *would* work? The ``*_path`` fields expose the
     resolved paths (runtime registry or env) so an operator can see WHICH file
     each check is looking at, not just whether it exists."""
+    # Resolve material paths and the server certificate path.
     ca, cert, key = _paths()
     server = os.getenv("LM_TLS_CERT", "").strip()
+    # Whether mTLS is on, whether each file exists, and which file each check looked at.
     return {
         "enabled": mtls_enabled(),
         "ca_present": bool(ca and os.path.exists(ca)),

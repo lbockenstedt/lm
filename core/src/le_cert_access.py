@@ -22,22 +22,27 @@ All functions are pure helpers over ``(hub, sess, domain)`` so they can be unit
 tested with a fake hub + monkeypatched ``access``; ``net_services`` wires thin
 route closures onto them.
 """
+# access provides admin checks and the shared-tenant id.
 import access
 
+# global_config key holding the per-domain owner-tenant lists.
 STORE_KEY = "le_cert_tenants"
 
 
 def _global_config(hub):
+    """Return the hub's global_config dict, creating it if missing."""
     return hub.state.system_state.setdefault("global_config", {})
 
 
 def get_tenants(hub, domain):
     """The cleaned, de-duplicated owner-tenant id list for ``domain`` (possibly
     empty). Order-stable."""
+    # Read the stored list for this domain; anything but a list means no owners.
     m = (hub.state.system_state.get("global_config", {}) or {}).get(STORE_KEY) or {}
     v = m.get(domain)
     if not isinstance(v, list):
         return []
+    # Keep trimmed, non-empty, unique ids in their original order.
     out = []
     for t in v:
         if isinstance(t, str) and t.strip() and t.strip() not in out:
@@ -48,12 +53,15 @@ def get_tenants(hub, domain):
 def set_tenants(hub, domain, tenants):
     """Persist ``domain``'s owner list (cleaned/deduped). An empty list removes
     the entry entirely. Returns the stored list."""
+    # Get (or create) the owner map.
     m = _global_config(hub).setdefault(STORE_KEY, {})
+    # Clean and de-duplicate the requested ids.
     clean = []
     for t in tenants or []:
         t = t.strip() if isinstance(t, str) else ""
         if t and t not in clean:
             clean.append(t)
+    # Store the list, or remove the entry when it is empty.
     if clean:
         m[domain] = clean
     else:
@@ -63,9 +71,11 @@ def set_tenants(hub, domain, tenants):
 
 def add_tenant(hub, domain, tid):
     """Add ``tid`` as an owner of ``domain`` (idempotent). Returns the list."""
+    # Normalise the tenant id; with no domain or id there is nothing to add.
     tid = (tid or "").strip() if isinstance(tid, str) else ""
     if not (domain and tid):
         return get_tenants(hub, domain)
+    # Append the tenant only if it is not already an owner.
     cur = get_tenants(hub, domain)
     if tid not in cur:
         cur.append(tid)
@@ -76,6 +86,7 @@ def add_tenant(hub, domain, tid):
 def forget(hub, domain):
     """Drop all ownership for ``domain`` (e.g. on revoke). Returns True if any
     entry was removed."""
+    # Remove the domain's entry if present.
     m = (hub.state.system_state.get("global_config", {}) or {}).get(STORE_KEY)
     if isinstance(m, dict) and domain in m:
         m.pop(domain, None)
@@ -85,6 +96,7 @@ def forget(hub, domain):
 
 def user_tenants(sess):
     """The tenant ids the session user belongs to."""
+    # Keep only non-empty string ids from the user's tenant list.
     return [t for t in ((sess or {}).get("user", {}).get("tenants") or [])
             if isinstance(t, str) and t]
 
@@ -92,21 +104,25 @@ def user_tenants(sess):
 def current_tenant(sess):
     """The user's active/primary tenant id ("myself" — the one auto-assigned on
     create and never removable)."""
+    # Prefer the user's explicit active tenant.
     u = (sess or {}).get("user", {}) or {}
     tid = u.get("tenant_id")
     if isinstance(tid, str) and tid.strip():
         return tid.strip()
+    # Otherwise use their first tenant, or "default" when they have none.
     mine = user_tenants(sess)
     return mine[0] if mine else "default"
 
 
 def has_owners(hub, domain):
+    """True when ``domain`` has any explicit owner tenants."""
     return bool(get_tenants(hub, domain))
 
 
 def is_shared(hub, domain):
     """True when the shared tenant is one of the cert's owners → deployable by
     any user to their own devices."""
+    # Look up the shared tenant id and check it is on the owner list.
     sid = access.shared_tenant_id()
     return bool(sid) and sid in get_tenants(hub, domain)
 
@@ -114,8 +130,10 @@ def is_shared(hub, domain):
 def is_owner(hub, sess, domain):
     """True if the session may CHANGE the cert by virtue of ownership: a Global
     Admin, or a user one of whose tenants is explicitly on the cert."""
+    # Global Admins can always change certs.
     if access.is_admin(sess):
         return True
+    # Otherwise the user must share a tenant with the owner list.
     return bool(set(get_tenants(hub, domain)) & set(user_tenants(sess)))
 
 
@@ -134,13 +152,17 @@ def visible_to(hub, sess, domain, want_tenants, admin_all=True):
     picked tenant — matching the ``nw``/``ipam``/``firewall`` modules — so an
     admin viewing tenant LRB does NOT see certs owned solely by ``default`` or
     another tenant."""
+    # No explicit owners: let the caller use the legacy filter.
     owners = get_tenants(hub, domain)
     if not owners:
         return None
+    # Global Admins see everything unless scoped to a picked tenant.
     if admin_all and access.is_admin(sess):
         return True
+    # Visible when an owner is one of the wanted tenants.
     if set(owners) & set(want_tenants or []):
         return True
+    # Or when the cert is owned by the shared tenant.
     sid = access.shared_tenant_id()
     return bool(sid and sid in owners)
 
@@ -149,10 +171,13 @@ def can_change(hub, sess, domain):
     """Owner-or-admin gate for change ops (renew / revoke / targets / tenant
     list). A legacy cert with no explicit owners is NOT newly restricted (returns
     True) so pre-feature workflows keep working."""
+    # Admins may always change.
     if access.is_admin(sess):
         return True
+    # Legacy certs without owners are not newly restricted.
     if not has_owners(hub, domain):
         return True
+    # Otherwise the user must be an owner.
     return bool(set(get_tenants(hub, domain)) & set(user_tenants(sess)))
 
 
@@ -162,16 +187,19 @@ def can_deploy(hub, sess, domain, device_tenant):
     Admin or an owner may deploy (owner deploy is unchanged from before). A
     non-owner may deploy ONLY a shared cert, and ONLY to a device in one of their
     own tenants."""
+    # Admins and owners may always deploy.
     if access.is_admin(sess):
         return True
     if is_owner(hub, sess, domain):
         return True
+    # Others may deploy only a shared cert to a device in one of their own tenants.
     return bool(is_shared(hub, domain) and device_tenant
                 and device_tenant in user_tenants(sess))
 
 
 def meta(hub, sess, domain):
     """UI/tagging metadata for a cert: its owner list + the caller's rights."""
+    # Owner list, shared flag and the caller's rights for the UI.
     return {
         "tenants": get_tenants(hub, domain),
         "shared": is_shared(hub, domain),
@@ -193,6 +221,7 @@ def validate_tenant_edit(hub, sess, domain, new_tenants, tenant_exists):
       remain, and no currently-owned tenant of theirs may be removed).
 
     Admins may set any existing-tenant list, including removing themselves."""
+    # Clean the requested list, rejecting unknown tenants and skipping blanks/duplicates.
     clean = []
     for t in new_tenants or []:
         t = t.strip() if isinstance(t, str) else ""
@@ -202,12 +231,15 @@ def validate_tenant_edit(hub, sess, domain, new_tenants, tenant_exists):
             raise TenantEditError(f"unknown tenant '{t}'")
         if t not in clean:
             clean.append(t)
+    # Non-admins may not drop any of their own tenants.
     if not access.is_admin(sess):
         mine = set(user_tenants(sess))
         cur = set(get_tenants(hub, domain))
+        # Reject removal of any tenant of theirs that currently owns the cert.
         if (cur & mine) - set(clean):
             raise TenantEditError(
                 "You cannot remove your own tenant from a certificate you own.")
+        # Their active tenant must always stay on the list.
         if current_tenant(sess) not in clean:
             raise TenantEditError(
                 "You cannot remove your own tenant from a certificate you own.")

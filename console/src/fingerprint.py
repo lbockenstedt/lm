@@ -9,17 +9,22 @@ there is no free-form command path here, and every command is a read-only
 ``show``/``display``/``cat``. Pure helpers (:func:`detect_vendor`,
 :func:`parse_identity`) import without pyserial so they are unit-testable.
 """
+# ipaddress: validate device IPs; json: prompt pattern file; logging.
 import ipaddress
 import json
 import logging
+# os: env overrides; re: banners, prompts and field regexes; time: read windows.
 import os
 import re
 import time
+# Path for the pattern file; typing helpers.
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+# VSF stack parsing helpers for Aruba switches.
 from vsf_stack import at_standby_console, parse_show_version, parse_show_vsf
 
+# Module logger (shared with the console spoke).
 logger = logging.getLogger("ConsoleSpoke")
 
 # Terminal escape-sequence strippers, used to turn raw console output (which is
@@ -34,23 +39,34 @@ _CTRL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")     # keep \t \n \
 
 
 
+# Juniper's internal 128.0.0.0/16 network, never a management address.
 _JUNIPER_INTERNAL_NET = ipaddress.IPv4Network("128.0.0.0/16")
 
 
 def is_valid_device_ip(ip: str) -> bool:
+    """Return True if ip is a usable unicast IPv4 device address.
+
+    Rejects invalid, unspecified, loopback, multicast, broadcast, Juniper internal,
+    class E and netmask-shaped values.
+    """
+    # Must parse as IPv4.
     try:
         addr = ipaddress.IPv4Address(ip)
     except ValueError:
         return False
+    # Reject special-purpose addresses.
     if addr.is_unspecified or addr.is_loopback or addr.is_multicast or addr == ipaddress.IPv4Address('255.255.255.255'):
         return False
     # Juniper's internal routing-engine network (e.g. 128.0.0.1 on em/fxp
     # internal links) is never the device's reachable management address.
+    # Reject Juniper's internal network.
     if addr in _JUNIPER_INTERNAL_NET:
         return False
+    # Reject 224.0.0.0 and above (multicast/reserved).
     val = int(addr)
     if val >= 0xE0000000:
         return False
+    # Reject netmask-shaped values (ones followed by zeros).
     inv = (~val) & 0xFFFFFFFF
     if (inv + 1) & inv == 0:
         return False
@@ -62,12 +78,15 @@ def sanitize_console_text(text: str) -> str:
     regions, show/hide-cursor) and bare control bytes from raw console output so
     it is human-readable. Preserves tabs/newlines and normalizes CR/LF. Safe to
     run on partial captures. Used for the Capture view, LLM input and detection."""
+    # Nothing to clean.
     if not text:
         return ""
+    # Remove OSC, CSI and other escapes, then control characters.
     s = _ANSI_OSC.sub("", text)
     s = _ANSI_CSI.sub("", s)
     s = _ANSI_MISC.sub("", s)
     s = _CTRL_CHARS.sub("", s)
+    # Normalise line endings and collapse runs of blank lines.
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     return re.sub(r"\n{3,}", "\n\n", s)
 
@@ -345,9 +364,11 @@ PROFILES: List[Dict[str, Any]] = [
 
 def normalize_mac(mac: str) -> str:
     """Normalize a MAC to lower colon-separated form; '' if not 12 hex digits."""
+    # Keep only hex digits; need exactly 12.
     hexs = re.sub(r"[^0-9A-Fa-f]", "", mac or "")
     if len(hexs) != 12:
         return ""
+    # Lower-case pairs joined by colons.
     return ":".join(hexs[i:i + 2] for i in range(0, 12, 2)).lower()
 
 
@@ -365,6 +386,7 @@ _PLACEHOLDER_HOSTNAMES = frozenset({
 
 def is_placeholder_hostname(name: Any) -> bool:
     """True if ``name`` is empty or a word a parse glitch captures as a name."""
+    # Blank or a known placeholder word.
     h = str(name or "").strip().lower()
     return not h or h in _PLACEHOLDER_HOSTNAMES
 
@@ -380,10 +402,13 @@ def scrub_identity(identity: Dict[str, Any]) -> Dict[str, Any]:
     placeholder hostname or a serial that is not serial-shaped. Applied to new
     results AND to identity loaded from older ports.json/devices.json records,
     so junk stored by earlier versions stops being shown and matched on."""
+    # Work on a copy.
     out = dict(identity or {})
+    # Drop a placeholder hostname.
     host = str(out.get("hostname") or "").strip()
     if "hostname" in out and is_placeholder_hostname(host):
         del out["hostname"]
+    # Drop a serial with characters a serial cannot have.
     serial = str(out.get("serial") or "").strip()
     if serial and not _SERIAL_SHAPE.fullmatch(serial):
         del out["serial"]
@@ -397,12 +422,16 @@ def scrub_identity(identity: Dict[str, Any]) -> Dict[str, Any]:
 # as "linux" from a bare login prompt.
 def vendor_should_replace(current: Optional[str], candidate: Optional[str]) -> bool:
     """True if a new ``candidate`` vendor verdict should replace ``current``."""
+    # No change, or nothing new.
     if not candidate or candidate == current:
         return False
+    # Anything beats unknown.
     if not current:
         return True
+    # Never downgrade to linux.
     if candidate == "linux":
         return False
+    # Never turn aruba-cx into hp-procurve.
     if current == "aruba-cx" and candidate == "hp-procurve":
         return False
     return True
@@ -411,8 +440,10 @@ def vendor_should_replace(current: Optional[str], candidate: Optional[str]) -> b
 def vendor_is_upgrade(current: Optional[str], candidate: Optional[str]) -> bool:
     """True if ``candidate`` is strictly more specific than an unknown/"linux"
     ``current``, so it may correct even a logged-in (authoritative) verdict."""
+    # Linux and empty never count as upgrades.
     if not candidate or candidate == "linux":
         return False
+    # Only an unknown or linux verdict can be upgraded.
     return current in (None, "", "linux")
 
 
@@ -421,6 +452,7 @@ def vendor_is_upgrade(current: Optional[str], candidate: Optional[str]) -> bool:
 # console shows the AOS-CX login-history line. Used to correct ports that an
 # older version stored as hp-procurve (CX also prints "Invalid input:").
 _CX_MODEL = re.compile(r"^\s*(?:JL|R[0-9A-Z]{2})\d{2,3}A\s+(?:6[0-4]\d\d|8[34]\d\d|9300|10000)", re.I)
+# Login-history banner that only AOS-CX prints.
 _CX_LOGIN_HISTORY = re.compile(r"User \"[^\"]+\" has logged in \d+ times? in the past", re.I)
 
 
@@ -428,8 +460,10 @@ def is_cx_misfiled_as_procurve(vendor: Optional[str], identity: Dict[str, Any], 
     """True if a port stored as hp-procurve (or still unknown) is in fact an
     AOS-CX switch, e.g. a CX whose model "JL725A 6200F ..." was read but whose
     vendor was never set."""
+    # Only hp-procurve or unknown ports qualify.
     if vendor not in (None, "", "hp-procurve"):
         return False
+    # CX model in the identity, or CX login history in the text.
     return bool(_CX_MODEL.search(str((identity or {}).get("model") or ""))
                 or _CX_LOGIN_HISTORY.search(sanitize_console_text(text or "")))
 
@@ -441,6 +475,7 @@ def _strip_echo_and_prompts(text: str, cmd: str, prompt_rx: Optional["re.Pattern
     echo of ``hostname`` was stored as the hostname "hostname", and an SSR PCLI
     prompt line "admin@node0.<router>#" after a rejected ``cat`` was stored as
     the serial number."""
+    # Keep each line unless it is the echoed command or a prompt.
     keep = []
     for line in (text or "").splitlines():
         s = line.strip()
@@ -449,6 +484,7 @@ def _strip_echo_and_prompts(text: str, cmd: str, prompt_rx: Optional["re.Pattern
         if s and prompt_rx is not None and prompt_rx.search(s):
             continue
         keep.append(line)
+    # Rejoin the kept lines.
     return "\n".join(keep)
 
 
@@ -456,6 +492,7 @@ def detect_vendor(text: str) -> Optional[Dict[str, Any]]:
     """Return the first profile whose ``match`` hits the banner/prompt text.
     Escape sequences are stripped first so a full-screen menu CLI (e.g. ArubaOS-S,
     whose prompt/errors are interleaved with cursor-move codes) still matches."""
+    # Strip escapes, then return the first profile whose pattern matches.
     clean = sanitize_console_text(text)
     for prof in PROFILES:
         if prof["match"].search(clean):
@@ -480,10 +517,12 @@ _TYPE_BY_MODEL: List[Tuple[Any, str]] = [
 def infer_device_type(model: Optional[str], family_default: Optional[str]) -> str:
     """Map a model string to a concrete device role (Switch/Router/Firewall/
     Access Point/…), falling back to the profile's default family. '' if neither."""
+    # Return the first model rule that matches.
     if model:
         for rx, kind in _TYPE_BY_MODEL:
             if rx.search(model):
                 return kind
+    # Else the profile's family.
     return family_default or ""
 
 
@@ -497,19 +536,23 @@ def _ip_candidates(rx: "re.Pattern", text: str) -> List[Tuple[str, str]]:
     switch with several addressed VLANs/interfaces) is real-world ambiguity. For
     other fields multiple regex hits are a regex-scoping artifact, not competing
     candidates, so they keep plain first-valid-match behavior."""
+    # Results, values already seen, and the text.
     out: List[Tuple[str, str]] = []
     seen = set()
     text = text or ""
+    # Each regex match.
     for m in rx.finditer(text):
         # Same group handling as the first-match loops below.
         val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
         if not val or not is_valid_device_ip(val) or val in seen:
             continue
         seen.add(val)
+        # Line containing the match, whitespace collapsed and capped.
         start = text.rfind("\n", 0, m.start()) + 1
         end = text.find("\n", m.end())
         line = " ".join(text[start:end if end != -1 else len(text)].split())
         out.append((val, line[:160]))
+    # All valid, distinct candidates.
     return out
 
 
@@ -518,8 +561,10 @@ def ip_ambiguity(cands: List[Tuple[str, str]]) -> Dict[str, Any]:
     ``ambiguous_fields: ["ip"]``, ``ip_candidates`` (the distinct values, first =
     the stored ``identity["ip"]``) and ``ip_candidate_context`` (value → source
     line) so the hub can ask the LLM which one is the device's own address."""
+    # 0 or 1 candidates is not ambiguous.
     if len(cands) < 2:
         return {}
+    # Flag ip as ambiguous with its candidates and source lines.
     return {"ambiguous_fields": ["ip"],
             "ip_candidates": [ip for ip, _ in cands],
             "ip_candidate_context": {ip: line for ip, line in cands}}
@@ -543,13 +588,18 @@ def _extract_profile_fields(profile: Dict[str, Any], text: str,
     (a list) is passed, it is filled with every distinct valid ``ip`` candidate
     (see ``_ip_candidates``) for the regex that supplied ``found["ip"]``, so the
     caller can flag a multi-address device instead of trusting the first hit."""
+    # Fields found so far.
     found: Dict[str, str] = {}
+    # Skip the linux profile.
     if not profile or profile.get("name") == "linux":
         return found
+    # Every field regex of every command.
     for spec in profile.get("commands", []):
         for key, rx in (spec.get("fields") or {}).items():
+            # First match per field wins.
             if key in found:
                 continue
+            # IP: collect all valid candidates and keep the first.
             if key == "ip":
                 cands = _ip_candidates(rx, text)
                 if cands:
@@ -557,11 +607,13 @@ def _extract_profile_fields(profile: Dict[str, Any], text: str,
                     if ip_candidates is not None:
                         ip_candidates[:] = cands
                 continue
+            # Other fields: first non-empty match.
             for m in rx.finditer(text or ""):
                 val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
                 if val:
                     found[key] = val
                     break
+    # Normalise the MAC.
     if found.get("mac"):
         found["mac"] = normalize_mac(found["mac"]) or found["mac"]
     return found
@@ -574,14 +626,19 @@ def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str],
     field; MAC is normalized. If ``ip_candidates`` (a list) is passed, it is
     filled with every distinct valid ``ip`` candidate from the command output
     that supplied ``identity["ip"]`` (see ``_extract_profile_fields``)."""
+    # Fields found so far.
     identity: Dict[str, str] = {}
+    # For each command, strip its echo and prompt lines from the output.
     for spec in profile.get("commands", []):
         fields = spec.get("fields") or {}
         text = _strip_echo_and_prompts(outputs.get(spec["cmd"], ""), spec["cmd"],
                                        profile.get("prompt"))
+        # Apply each of the command's field regexes.
         for key, rx in fields.items():
+            # First match per field wins.
             if key in identity:
                 continue
+            # IP: collect all valid candidates and keep the first.
             if key == "ip":
                 cands = _ip_candidates(rx, text)
                 if cands:
@@ -589,6 +646,7 @@ def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str],
                     if ip_candidates is not None:
                         ip_candidates[:] = cands
                 continue
+            # Other fields: first non-empty match.
             for m in rx.finditer(text):
                 # Use the first capturing group, but tolerate alternation branches
                 # where group 1 didn't participate (returns None) — fall back to the
@@ -597,6 +655,7 @@ def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str],
                 if val:
                     identity[key] = val
                     break
+    # Normalise the MAC, then drop junk values.
     if identity.get("mac"):
         identity["mac"] = normalize_mac(identity["mac"]) or identity["mac"]
     return scrub_identity(identity)
@@ -613,18 +672,22 @@ def detect_stack(outputs: Dict[str, str], transcript: str = "") -> Dict[str, Any
     Returns {} for a device that is not stacked, so the field is simply absent
     from the probe rather than carrying a misleading all-empty record.
     """
+    # Use the first non-empty output from a "vsf" command.
     vsf_text = ""
     for cmd, out in (outputs or {}).items():
         if "vsf" in cmd.lower() and (out or "").strip():
             vsf_text = out
             break
+    # Parse its member table.
     info = parse_show_vsf(vsf_text)
     # A bare "standby#" prompt is proof of a stack even when the reduced
     # `show vsf` was rejected or never ran.
+    # A standby member's console also counts as a stack.
     standby = at_standby_console(transcript or "")
     if not info["members"] and not standby:
         return {}
 
+    # Software version: from a version command's output, else from the transcript.
     version = ""
     for cmd, out in (outputs or {}).items():
         if "version" in cmd.lower() and (out or "").strip():
@@ -634,6 +697,7 @@ def detect_stack(outputs: Dict[str, str], transcript: str = "") -> Dict[str, Any
     if not version and transcript:
         version = parse_show_version(transcript)
 
+    # Find the conductor's MAC and this member's MAC.
     conductor_mac = ""
     local_mac = ""
     for member in info["members"]:
@@ -642,6 +706,7 @@ def detect_stack(outputs: Dict[str, str], transcript: str = "") -> Dict[str, Any
         if member["member_id"] == info["local_member_id"]:
             local_mac = member["mac"]
 
+    # The stack record.
     return {
         "is_stack": bool(info["is_stack"] or standby),
         "topology": info["topology"],
@@ -665,10 +730,13 @@ def detect_stack(outputs: Dict[str, str], transcript: str = "") -> Dict[str, Any
 # the hostname in group(1). Order = priority (first pattern that yields a
 # candidate wins), so list the most specific shapes first.
 def _prompt_patterns_path() -> Path:
+    """Return the prompt_patterns.json path (CONSOLE_PROMPT_PATTERNS env or next to this file)."""
+    # Environment override, else the file next to this module.
     return Path(os.environ.get("CONSOLE_PROMPT_PATTERNS")
                 or (Path(__file__).parent / "prompt_patterns.json"))
 
 
+# Built-in hostname prompt regexes (group 1 is the hostname), tried in order.
 _DEFAULT_HOSTNAME_PROMPTS: List[str] = [
     # Linux shell: user@host:~$ / user@host:/path#
     r"(?:^|\r|\n)[\w.\-]+@([\w.\-]+):[\w.\-/~]*[#$]\s*$",
@@ -689,6 +757,7 @@ _DEFAULT_HOSTNAME_PROMPTS: List[str] = [
     # Generic vendor CLI: hostname immediately followed by > or #
     r"(?:^|\r|\n)\s*([\w][\w.\-]{1,62})[>#]\s*$",
 ]
+# Any colon-separated MAC address.
 _GENERIC_MAC = re.compile(r"\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b")
 # Generic-pass IP fallback: an unlabeled bare IPv4 anywhere in scrollback is as
 # likely to be a firmware version, gateway, or syslog server as the device's
@@ -705,7 +774,9 @@ def load_hostname_prompts() -> List["re.Pattern"]:
     group 1), reading them from prompt_patterns.json[``hostname_prompt``] when
     present and falling back to the built-in defaults. Bad file / bad regex →
     defaults, so a malformed edit can never break hostname gleaning."""
+    # Start with the defaults.
     pats: List[str] = list(_DEFAULT_HOSTNAME_PROMPTS)
+    # Use the file's list when it is a non-empty list of strings.
     try:
         loaded = json.loads(_prompt_patterns_path().read_text())
         candidate = loaded.get("hostname_prompt")
@@ -715,15 +786,18 @@ def load_hostname_prompts() -> List["re.Pattern"]:
         pass
     except Exception as e:  # noqa: BLE001 - bad JSON → keep defaults
         logger.warning("console: invalid prompt_patterns.json hostname_prompt (%s) — using defaults", e)
+    # Compile each pattern, skipping bad ones.
     compiled: List["re.Pattern"] = []
     for p in pats:
         try:
             compiled.append(re.compile(p))
         except re.error as e:  # skip a single bad pattern, keep the rest usable
             logger.warning("console: bad hostname_prompt regex %r (%s) — skipping", p, e)
+    # Fall back to the defaults if nothing compiled.
     return compiled or [re.compile(p) for p in _DEFAULT_HOSTNAME_PROMPTS]
 
 
+# Compiled hostname matchers, loaded once at import.
 _HOSTNAME_PROMPTS = load_hostname_prompts()
 
 
@@ -732,13 +806,16 @@ def _prompt_hostname_with(patterns: List["re.Pattern"], text: str) -> str:
     list so it can be unit-tested against an arbitrary (e.g. JSON-overridden)
     pattern set. First pattern that yields a non-placeholder candidate wins;
     within a pattern the LAST (most recent) match is kept."""
+    # Strip escapes first.
     clean = sanitize_console_text(text or "")
+    # Try each pattern; keep its last good match.
     for rx in patterns:
         cand = ""
         for m in rx.finditer(clean):
             c = (m.group(1) or "").strip()
             if c and not is_placeholder_hostname(c):
                 cand = c
+        # First pattern with a match wins.
         if cand:
             return cand
     return ""
@@ -761,6 +838,7 @@ _LOGIN_BANNER_HOST = re.compile(r"(?:^|\s)([A-Za-z0-9][\w.\-]{1,62})[ \t]+login:
 
 def login_banner_hostname(text: str) -> str:
     """Hostname from the last "<host> login:" prompt in ``text``, or ''."""
+    # Strip escapes and keep the last non-placeholder match.
     clean = sanitize_console_text(text or "")
     cand = ""
     for m in _LOGIN_BANNER_HOST.finditer(clean):
@@ -832,8 +910,10 @@ def load_prompt_patterns() -> Dict[str, "re.Pattern"]:
     from prompt_patterns.json when present (falling back to the built-in defaults
     per family). Each family is an OR of its listed regexes, so operators can add
     a newly-observed prompt string to the JSON without touching code."""
+    # Start with a copy of the defaults.
     data: Dict[str, List[str]] = {k: list(v) for k, v in _DEFAULT_PROMPT_PATTERNS.items()}
     path = _prompt_patterns_path()
+    # Override each family whose file entry is a non-empty list of strings.
     try:
         loaded = json.loads(path.read_text())
         for key in _DEFAULT_PROMPT_PATTERNS:
@@ -844,6 +924,7 @@ def load_prompt_patterns() -> Dict[str, "re.Pattern"]:
         pass
     except Exception as e:  # noqa: BLE001 - bad JSON / bad regex list → keep defaults
         logger.warning("console: invalid prompt_patterns.json (%s) — using built-in defaults", e)
+    # Join each family into one alternation regex; bad patterns fall back to defaults.
     compiled: Dict[str, "re.Pattern"] = {}
     for key, pats in data.items():
         try:
@@ -854,7 +935,9 @@ def load_prompt_patterns() -> Dict[str, "re.Pattern"]:
     return compiled
 
 
+# Compiled prompt families, loaded once at import.
 _PROMPTS = load_prompt_patterns()
+# Shortcuts to each family's regex.
 _LOGIN_PROMPT = _PROMPTS["login_prompt"]
 _PASSWORD_PROMPT = _PROMPTS["password_prompt"]
 _SHELL_PROMPT = _PROMPTS["shell_prompt"]
@@ -907,17 +990,22 @@ def _prompt_tail(text: str) -> str:
     Blank trailing lines are dropped too, which the anchored ``\\s*$`` already
     tolerated, so behaviour is unchanged on quiet lines.
     """
+    # Only the last 400 characters matter.
     joined = (text or "")[-400:]
     # Line-based stripping only pops noise that starts its OWN line; an
     # idle-timeout banner can glue directly onto the prompt/prior repeat with no
     # newline at all, so also peel any trailing run of it off as a bare phrase.
     # Iterate until stable: removing either kind of noise can expose the other.
+    # Repeat until nothing more is stripped.
     while True:
+        # Split into lines and drop blank or log-noise lines from the end.
         lines = re.split(r"\r\n|\r|\n", joined)
         while len(lines) > 1 and (not lines[-1].strip()
                                   or _ASYNC_NOISE.match(lines[-1].lstrip())):
             lines.pop()
+        # Remove trailing "console terminated" notices.
         stripped = _TRAILING_NOISE_PHRASE.sub("", "\n".join(lines))
+        # Stable: done.
         if stripped == joined:
             return stripped
         joined = stripped
@@ -927,6 +1015,7 @@ def looks_like_prompt(text: str) -> bool:
     """True if the tail of ``text`` shows a login / password / shell / CLI prompt
     — i.e. the device has finished booting and is ready to talk. Used by the boot
     watcher to decide a boot cycle reached a usable prompt (vs. hung mid-boot)."""
+    # Check the cleaned tail for any kind of prompt.
     tail = _prompt_tail(sanitize_console_text(text or ""))
     return bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)
                 or _SHELL_PROMPT.search(tail) or _SETUP_PROMPT.search(tail)
@@ -962,6 +1051,7 @@ _OS_UP_MARKER = re.compile(
 
 def os_up_marker(text: str) -> str:
     """The first booted-OS marker in ``text`` (see ``_OS_UP_MARKER``), or ''."""
+    # First match, trimmed.
     m = _OS_UP_MARKER.search(sanitize_console_text(text or ""))
     return m.group(0).strip() if m else ""
 
@@ -994,6 +1084,7 @@ _FAULT_REPORT_LINE = re.compile(
 
 def _fault_scan_text(text: str) -> str:
     """Sanitized ``text`` with restart-reason report lines blanked out."""
+    # Strip escapes, then blank out restart-reason lines (same length).
     clean = sanitize_console_text(text or "")
     return _FAULT_REPORT_LINE.sub(lambda m: " " * len(m.group(0)), clean)
 
@@ -1001,6 +1092,7 @@ def _fault_scan_text(text: str) -> str:
 def boot_fault(text: str) -> str:
     """Return the matched boot-fault phrase found in ``text`` (a likely stuck/dead
     boot), or '' if none. Terminal escapes stripped first."""
+    # First fault phrase, if any.
     m = _BOOT_FAULT.search(_fault_scan_text(text))
     return m.group(0).strip() if m else ""
 
@@ -1019,6 +1111,7 @@ def is_recovery_prompt(text: str) -> bool:
     responsive is not booted: a device sitting at its bootloader never reached
     its OS, which is precisely the condition the boot watcher exists to catch.
     Callers deciding boot HEALTH (rather than mere liveness) must consult this."""
+    # Check the cleaned tail.
     return bool(_RECOVERY_PROMPT.search(_prompt_tail(sanitize_console_text(text or ""))))
 
 
@@ -1026,12 +1119,16 @@ def current_boot_fault(text: str) -> str:
     """Like :func:`boot_fault`, but a fault followed later in ``text`` by a
     normal (non-bootloader/recovery) prompt is treated as historical — the
     device recovered/rebooted and reached a prompt, so it's not a current fault."""
+    # Cleaned text without restart-reason lines.
     clean = _fault_scan_text(text)
+    # Find the last fault match.
     last = None
     for m in _BOOT_FAULT.finditer(clean):
         last = m
+    # No fault.
     if last is None:
         return ""
+    # A normal prompt after the fault means the device recovered.
     after = clean[last.end():]
     if looks_like_prompt(after) and not _RECOVERY_PROMPT.search(_prompt_tail(after)):
         return ""
@@ -1042,6 +1139,7 @@ def current_boot_fault(text: str) -> str:
     # above is still right for deciding WHICH fault is current; it is only the
     # reported phrase that must come from the start of that line — which is also
     # what :func:`boot_fault` reports for the same text.
+    # Report the first fault on the same line as the last one.
     nl = max(clean.rfind("\n", 0, last.start()), clean.rfind("\r", 0, last.start()))
     primary = _BOOT_FAULT.search(clean, nl + 1, last.end())
     return (primary or last).group(0).strip()
@@ -1062,6 +1160,7 @@ def count_line_reconnects(text: str) -> int:
     """Count of "Connected at <N> baud" banner replays seen in ``text`` — each
     one marks the start of an independent boot/login cycle (see
     ``_LINE_RECONNECT``)."""
+    # Count banner replays in the cleaned text.
     return len(_LINE_RECONNECT.findall(sanitize_console_text(text or "")))
 
 
@@ -1086,9 +1185,11 @@ def check_line_responsive(read_fn: Callable[[], bytes], write_fn: Callable[[byte
     mid-boot from one already sitting at a live prompt that's merely buried
     behind unrelated console chatter. Returns ``(responsive, transcript)`` where
     ``responsive`` is True if a login/password/shell prompt answered."""
+    # Press Enter once and read until a prompt.
     write_fn(b"\r")
     transcript = _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT,
                                        _SETUP_PROMPT], nudge_secs)
+    # Responsive if the reply looks like a prompt.
     return looks_like_prompt(transcript), transcript
 
 # Console lines are usually silent until they receive a keystroke: a device sits
@@ -1125,17 +1226,21 @@ def set_patience(factor: float) -> float:
     bad config value can't wedge a probe for hours or reduce every window to
     zero."""
     global _PATIENCE
+    # Remember the old value.
     prev = _PATIENCE
+    # Ignore values that are not numbers.
     try:
         f = float(factor)
     except (TypeError, ValueError):
         return prev
+    # Clamp between 0.01 and 10.
     _PATIENCE = min(max(f, 0.01), 10.0)
     return prev
 
 
 def _t(seconds: float) -> float:
     """A read window, scaled by the configured patience."""
+    # Scale by the patience factor.
     return seconds * _PATIENCE
 
 
@@ -1208,8 +1313,10 @@ FACTORY_DEFAULT_CREDENTIALS: List[Dict[str, str]] = [
 def merge_credentials(*groups: Optional[List[Dict[str, str]]]) -> List[Dict[str, str]]:
     """Concatenate credential lists, dropping duplicate ``(username, password)``
     pairs while preserving order (operator creds first, then any fallbacks)."""
+    # Pairs already seen and the result.
     seen = set()
     out: List[Dict[str, str]] = []
+    # Keep the first copy of each pair.
     for g in groups:
         for c in (g or []):
             u, p = str(c.get("username", "")), str(c.get("password", ""))
@@ -1251,6 +1358,7 @@ _MUTATION_WORDS = frozenset({
     "tee", "renew", "release", "ping", "traceroute", "telnet", "ssh", "test",
     "debug", "enable", "disable", "power",
 })
+# Shell characters that could chain, redirect or substitute commands.
 _META_TOKENS = ("\n", "\r", ";", "|", "&", "`", "$(", ">", "<", "\\", "\x00")
 
 
@@ -1259,12 +1367,15 @@ def is_readonly_command(cmd: str) -> bool:
     send to a device we're identifying. Rejects chaining/redirection/substitution
     metacharacters, any mutation keyword, and any verb not on the allowlist.
     Session-local pager controls are explicitly permitted."""
+    # Reject empty commands and shell metacharacters.
     c = (cmd or "").strip()
     if not c or any(t in c for t in _META_TOKENS):
         return False
+    # Pager settings are allowed.
     low = c.lower()
     if low in _SAFE_PAGER_CMDS:
         return True
+    # First word must be a read-only verb; no word may be a mutation keyword.
     words = low.split()
     if words[0] not in _READONLY_VERBS:
         return False
@@ -1285,6 +1396,7 @@ def passive_identify(text: str) -> Dict[str, Any]:
     plus ``ambiguous_fields: ["ip"]`` / ``ip_candidates`` / ``ip_candidate_context``
     ONLY when the profile's ip regex found 2+ distinct valid addresses (see
     ``ip_ambiguity``; the keys are omitted otherwise)."""
+    # Detect the vendor and set up results.
     text = text or ""
     prof = detect_vendor(text)
     identity: Dict[str, str] = {}
@@ -1296,28 +1408,35 @@ def passive_identify(text: str) -> Dict[str, Any]:
     # capture). The linux profile's field regexes are bare ``^(\S+)$`` forms tied
     # to specific command outputs — matching those across arbitrary scrollback
     # yields garbage, so linux/unknown fall to the generic prompt pass below.
+    # Matched vendor (not linux): pull its fields from the capture.
     if prof and prof["name"] != "linux":
         identity.update(_extract_profile_fields(prof, text, ip_cands))
+    # Device type from the model or family.
     if prof and prof.get("family") and prof["name"] != "linux":
         identity["type"] = infer_device_type(identity.get("model"), prof["family"])
+    # No hostname: try the prompt, then the login banner.
     if not identity.get("hostname"):
         # Glean a hostname from the last shell/CLI prompt we saw, else from a
         # "<host> login:" prompt (all a login-locked switch ever shows).
         hn = prompt_hostname(text) or login_banner_hostname(text)
         if hn:
             identity["hostname"] = hn
+    # No MAC: any MAC in the text.
     if not identity.get("mac"):
         mm = _GENERIC_MAC.search(text)
         if mm:
             identity["mac"] = mm.group(1)
+    # No IP: the first valid labelled address.
     if not identity.get("ip"):
         for m in _GENERIC_IP_LABEL.finditer(text):
             cand = m.group(1)
             if is_valid_device_ip(cand):
                 identity["ip"] = cand
                 break
+    # Normalise the MAC.
     if identity.get("mac"):
         identity["mac"] = normalize_mac(identity["mac"]) or identity["mac"]
+    # Result with junk removed, plus IP ambiguity info.
     res: Dict[str, Any] = {"vendor": vendor, "identity": scrub_identity(identity)}
     res.update(ip_ambiguity(ip_cands))
     return res
@@ -1331,21 +1450,27 @@ def _read_until(read_fn: Callable[[], bytes], patterns: List[re.Pattern],
     Both windows are scaled by the module patience (:func:`set_patience`), and
     ``idle`` defaults to ``_IDLE_SECS`` — long enough that a device pausing
     mid-reply isn't mistaken for one that has finished."""
+    # Scale the windows.
     idle = _t(_IDLE_SECS if idle is None else idle)
     timeout = _t(timeout)
+    # Buffer, deadline, and time of the last data.
     buf = b""
     deadline = time.monotonic() + timeout
     last = time.monotonic()
+    # Read until the deadline.
     while time.monotonic() < deadline:
         chunk = read_fn()
+        # Data: add it and stop if the tail matches a pattern.
         if chunk:
             buf += chunk
             last = time.monotonic()
             tail = buf[-400:].decode("utf-8", "replace")
             if any(p.search(tail) for p in patterns):
                 break
+        # No data for too long: stop.
         elif time.monotonic() - last > idle:
             break
+    # Decode what we got.
     return buf.decode("utf-8", "replace")
 
 
@@ -1353,7 +1478,9 @@ def _read_command_output(read_fn: Callable[[], bytes], write_fn: Callable[[bytes
                          until: List[re.Pattern], cmd_secs: float, max_pages: int = 30) -> str:
     """Read one command's output, auto-advancing pagers (``--More--``) by sending
     a space so the full output is captured instead of a single screen."""
+    # First screen.
     out = _read_until(read_fn, until, cmd_secs)
+    # While a pager prompt shows, press space and read the next screen.
     pages = 0
     while pages < max_pages and _PAGER.search(out[-120:]):
         write_fn(b" ")
@@ -1369,10 +1496,13 @@ def _elicit_identity_banner(read_fn: Callable[[], bytes], write_fn: Callable[[by
     banner. Stops as soon as :func:`detect_vendor` recognizes the device. Returns
     ``(transcript, profile, outputs)`` — a direct-console device (no auth) can be
     identified without ever seeing a login/password prompt."""
+    # Outputs and the vendor detected so far.
     outputs: Dict[str, str] = {}
     profile = detect_vendor(transcript)
+    # Already identified: send nothing.
     if profile:  # passive banner/prompt already identifies it — send nothing
         return transcript, profile, outputs
+    # Send each discovery command until the vendor is recognised.
     for cmd in _DISCOVERY_COMMANDS:
         write_fn((cmd + "\r").encode())
         out = _read_command_output(read_fn, write_fn, [_SHELL_PROMPT], cmd_secs)
@@ -1387,9 +1517,11 @@ def _elicit_identity_banner(read_fn: Callable[[], bytes], write_fn: Callable[[by
 def _is_garbled(line: str) -> bool:
     """True if ``line`` is mostly undecodable/non-printable bytes (the U+FFFD
     replacement chars a wrong baud rate produces) rather than readable text."""
+    # Blank lines are not garbled.
     text = line.strip()
     if not text:
         return False
+    # Garbled when over 30% of characters are bad.
     bad = sum(1 for ch in text if ch == "\ufffd" or not ch.isprintable())
     return bad / len(text) > 0.3
 
@@ -1407,11 +1539,13 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
     troubleshooting. This is what lets a device sitting at a bare login prompt —
     which shows no banner/system info until you authenticate — be identified.
     """
+    # Diagnostics for troubleshooting.
     diag: Dict[str, Any] = {"login_prompt_seen": False, "password_prompt_seen": False,
                             "shell_prompt_seen": False, "creds_tried": 0,
                             "bytes": 0, "any_output": False, "nudges": 0}
 
     def _observe(tail: str) -> None:
+        """Record which kinds of prompt appear in tail."""
         if _LOGIN_PROMPT.search(tail):
             diag["login_prompt_seen"] = True
         if _PASSWORD_PROMPT.search(tail):
@@ -1421,13 +1555,16 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
         if _NEW_PASSWORD_PROMPT.search(tail):
             diag["forced_password_prompt_seen"] = True
 
+    # Prompts that end a read.
     prompts = [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT]
 
     def _has_prompt(tail: str) -> bool:
+        """Return True if tail shows any login, password, shell or new-password prompt."""
         return bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)
                     or _SHELL_PROMPT.search(tail) or _NEW_PASSWORD_PROMPT.search(tail))
 
     def _last_line(t: str) -> str:
+        """Return the last non-empty line of t."""
         # The current prompt is always the last non-empty line. new_password_prompt
         # has unanchored alternatives ("change your password"), so match it on the
         # last line only — otherwise a stale hint left earlier in the tail would
@@ -1435,6 +1572,7 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
         return t.replace("\r", "\n").rstrip("\n").rsplit("\n", 1)[-1]
 
     def _at_new_pw(t: str) -> bool:
+        """Return True if the last line is a forced new-password prompt."""
         return bool(_NEW_PASSWORD_PROMPT.search(_last_line(t)))
 
     # Wake the line. A console device typically emits nothing until it receives a
@@ -1442,19 +1580,24 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
     # boot output), then nudge with a bare CR up to _LOGIN_NUDGES more times until
     # a prompt shows. This is what elicits a prompt from an idle, already-booted
     # device instead of sitting forever on a silent line.
+    # Send CRLF and read the banner.
     write_fn(b"\r\n")
     transcript = _read_until(read_fn, prompts, banner_secs)
     _observe(_prompt_tail(transcript))
+    # Press Enter a few more times until some prompt appears.
     while diag["nudges"] < _LOGIN_NUDGES and not _has_prompt(_prompt_tail(transcript)):
         diag["nudges"] += 1
         write_fn(b"\r")
         transcript += _read_until(read_fn, prompts, _NUDGE_SECS)
         _observe(_prompt_tail(transcript))
+    # Record what came back.
     diag["bytes"] = len(transcript)
     diag["any_output"] = bool(transcript.strip())
+    # Is a login, password or new-password prompt showing?
     tail = _prompt_tail(transcript)
     at_login = bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)
                     or _at_new_pw(tail))
+    # No login prompt: report garbled output, or logged in if a shell prompt shows.
     if not at_login:
         # Already at a shell (no auth), or nothing recognizable on the line.
         # Wrong-baud noise can end in '#' or '>' and look like a prompt; that is
@@ -1463,10 +1606,12 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
             diag["garbled"] = True
             return False, None, transcript, diag
         return bool(_SHELL_PROMPT.search(tail)), None, transcript, diag
+    # Login prompt but no credentials to try.
     if not credentials:
         return False, None, transcript, diag
 
     def _shell_ready(t: str) -> bool:
+        """Return True if t shows a shell prompt and no login, password or new-password prompt."""
         return bool(_SHELL_PROMPT.search(t)
                     and not (_LOGIN_PROMPT.search(t) or _PASSWORD_PROMPT.search(t)
                              or _at_new_pw(t)))
@@ -1478,6 +1623,7 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
         we must NEVER set a password — decline by sending a few bare CRs (what an
         operator does to skip), which drops the device to its shell or bounces it
         back to the login prompt. Returns the extended transcript."""
+        # Press Enter (up to the limit) while a new-password prompt shows.
         nonlocal transcript
         sent = 0
         t = _prompt_tail(transcript)
@@ -1489,31 +1635,38 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
                 _NEW_PW_SKIP_SECS)
             t = _prompt_tail(transcript)
             _observe(t)
+        # Record that we skipped it.
         if sent:
             diag["forced_password_skipped"] = True
             diag["forced_password_crs"] = sent
         return transcript
 
+    # Try each credential in turn.
     idx = 0
     n = len(credentials)
     while idx < n:
+        # Current credential and tail.
         cred = credentials[idx]
         tail = _prompt_tail(transcript)
         # Ensure a login/password prompt is actually showing before we SPEND this
         # credential. A device that rate-limits or is slow to re-draw after a
         # failed attempt may not have re-shown its prompt yet; nudge (bounded) and
         # wait so a valid credential later in the list is never silently skipped.
+        # Coax the login prompt back if it is not showing.
         nudged = 0
         while not (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)
                    or _at_new_pw(tail)):
+            # Already at a shell: the previous credential worked.
             if _shell_ready(tail):
                 # A prior attempt actually reached a shell (its own iteration read
                 # window closed before the prompt arrived) — credit that cred.
                 diag["bytes"] = len(transcript)
                 return True, (idx - 1 if idx > 0 else None), transcript, diag
+            # Gave up waiting for the prompt.
             if nudged >= _REPROMPT_NUDGES:
                 diag["bytes"] = len(transcript)   # prompt never came back — stop
                 return False, None, transcript, diag
+            # Press Enter and read.
             nudged += 1
             write_fn(b"\r")
             transcript += _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT,
@@ -1521,13 +1674,16 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
             tail = _prompt_tail(transcript)
             _observe(tail)
 
+        # Count this attempt.
         diag["creds_tried"] = idx + 1
         # Net-new device demanding a password SET/CHANGE (matched BEFORE the
         # ordinary password prompt so we never type a credential into a
         # set-password field): decline via CRs, then re-check for a shell.
+        # Forced password change: decline it.
         if _at_new_pw(tail):
             transcript = _skip_forced_password_change()
             tail = _prompt_tail(transcript)
+        # Otherwise send the username, then the password if asked.
         else:
             if _LOGIN_PROMPT.search(tail):
                 write_fn((cred.get("username", "") + "\r").encode())
@@ -1550,14 +1706,17 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
                 if _at_new_pw(tail):
                     transcript = _skip_forced_password_change()
                     tail = _prompt_tail(transcript)
+        # Shell prompt: logged in with this credential.
         if _shell_ready(tail):
             diag["bytes"] = len(transcript)
             return True, idx, transcript, diag
+        # Next credential, after a short pause.
         idx += 1
         if idx < n:
             # Failed credential: pace the next attempt (see _CRED_RETRY_DELAY)
             # rather than immediately spending another one.
             time.sleep(_t(_CRED_RETRY_DELAY))
+    # No credential worked.
     diag["bytes"] = len(transcript)
     return False, None, transcript, diag
 
@@ -1567,10 +1726,12 @@ def _enable_secrets(credentials: List[Dict[str, str]], cred_idx) -> List[str]:
     just logged us in, then a bare Enter (very common — plenty of devices have
     no separate enable secret). Deduped, so a blank login password doesn't
     burn both attempts."""
+    # The login password first, then blank.
     out: List[str] = []
     if isinstance(cred_idx, int) and 0 <= cred_idx < len(credentials):
         out.append((credentials[cred_idx] or {}).get("password", "") or "")
     out.append("")
+    # Remove duplicates, keeping order.
     seen, uniq = set(), []
     for s in out:
         if s not in seen:
@@ -1598,26 +1759,32 @@ def _escalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes]
     Read-only w.r.t. device config: ``enable`` only changes OUR session's
     privilege level, and ``_logout`` afterwards drops back out. Never raises —
     a dead line must not crash identify. Returns ``(transcript, diag)``."""
+    # Diagnostics.
     diag: Dict[str, Any] = {"attempted": False, "escalated": False,
                             "secrets_tried": 0, "reason": ""}
+    # Already privileged: nothing to do.
     tail = _prompt_tail(transcript)
     if _PRIV_PROMPT.search(tail):
         # Already in enable mode (or a UNIX root shell) — nothing to do.
         diag["escalated"] = True
         diag["reason"] = "already_privileged"
         return transcript, diag
+    # Not a ">" prompt: leave it alone.
     if not _UNPRIV_PROMPT.search(tail):
         # Not a ">" prompt: a $/% shell, or we never reached a prompt at all.
         diag["reason"] = "not_unprivileged"
         return transcript, diag
 
+    # Prompts that end a read during the enable flow.
     patterns = [_PRIV_PROMPT, _PASSWORD_PROMPT, _LOGIN_PROMPT, _UNPRIV_PROMPT]
 
     # Offset of the last thing we wrote, so each pass can tell an empty read
     # window (a line that went quiet) apart from a real refusal.
+    # Transcript length when we last sent something.
     sent_at = len(transcript)
 
     def _send(data: str) -> bool:
+        """Send data plus CR and read the reply; return False if the write fails."""
         nonlocal transcript, sent_at
         try:
             write_fn((data + "\r").encode())
@@ -1627,12 +1794,14 @@ def _escalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes]
         transcript += _read_until(read_fn, patterns, _ENABLE_SECS)
         return True
 
+    # Send "enable".
     enable_at = len(transcript)
     if not _send("enable"):
         diag["reason"] = "no_prompt"
         return transcript, diag
     diag["attempted"] = True
 
+    # Secrets to try and how many were used.
     secrets = _enable_secrets(credentials, cred_idx)
     used = 0
     # `_read_until` also stops on a 0.4s idle gap, and real switches pause
@@ -1640,17 +1809,21 @@ def _escalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes]
     # AOS-S "Your previous successful login ..." notice). A couple of extra
     # passive reads let a slow device finish its reply instead of being written
     # off as unresponsive.
+    # Remaining extra reads for slow devices.
     drains_left = _ENABLE_DRAINS
 
     def _drain() -> None:
+        """Read once more from a slow device."""
         nonlocal transcript, drains_left
         drains_left -= 1
         transcript += _read_until(read_fn, patterns, _ENABLE_SECS)
 
     # Bounded: each pass consumes one read window and either finishes, drains
     # once more, or feeds the device one more answer, so this can never spin.
+    # Bounded loop over the enable dialogue.
     for _ in range(_ENABLE_ATTEMPTS + _ENABLE_DRAINS + 2):
         tail = _prompt_tail(transcript)
+        # "#" prompt: escalated.
         if _PRIV_PROMPT.search(tail):
             diag["escalated"] = True
             diag["reason"] = ""
@@ -1658,6 +1831,7 @@ def _escalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes]
         # Only look at output produced SINCE we sent `enable`, so an error
         # string from earlier in the login flow can't be mistaken for a
         # refusal of this escalation.
+        # Output since "enable", and whether the last send got any reply.
         since = transcript[enable_at:]
         if not transcript[sent_at:].strip():
             # Nothing at all came back. A responsive device echoes at least the
@@ -1668,6 +1842,7 @@ def _escalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes]
                 continue
             diag["reason"] = "no_prompt"
             return transcript, diag
+        # Back at ">": classify why enable failed.
         if _UNPRIV_PROMPT.search(tail):
             # Bounced back to ">". Distinguish the two causes from the error
             # text: no `enable` command at all (retrying is pointless) versus a
@@ -1680,6 +1855,7 @@ def _escalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes]
                 diag["reason"] = ("bad_secret" if diag["secrets_tried"]
                                   else "no_enable_support")
             return transcript, diag
+        # Asked for a username: send the login username.
         if _LOGIN_PROMPT.search(tail):
             # Some devices re-ask for a username during escalation.
             user = ""
@@ -1689,6 +1865,7 @@ def _escalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes]
                 diag["reason"] = "no_prompt"
                 return transcript, diag
             continue
+        # Asked for a password: try the next secret, up to the limit.
         if _PASSWORD_PROMPT.search(tail):
             if used >= len(secrets) or used >= _ENABLE_ATTEMPTS:
                 diag["reason"] = "bad_secret"
@@ -1701,16 +1878,19 @@ def _escalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes]
                 return transcript, diag
             continue
         # Output arrived but it isn't a prompt yet — mid-banner. Keep reading.
+        # Unrecognised output: read more, or give up.
         if drains_left > 0:
             _drain()
             continue
         diag["reason"] = "no_prompt"
         return transcript, diag
 
+    # Ran out of loop iterations.
     diag["reason"] = "bad_secret" if diag["secrets_tried"] else "no_prompt"
     return transcript, diag
 
 
+# Commands that end a session.
 _LOGOUT_COMMANDS = ("exit", "logout")
 
 
@@ -1724,6 +1904,7 @@ def _deescalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[byte
     read-only identify, so put the privilege level back. ``disable`` is the
     Cisco/AOS-S verb; ``exit`` drops a level on CLIs that lack it. Returns True
     once an unprivileged prompt is confirmed."""
+    # Try each command until an unprivileged or login prompt appears.
     for cmd in ("disable", "exit"):
         try:
             write_fn((cmd + "\r").encode())
@@ -1743,12 +1924,15 @@ def _logout(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
     prompt reappears, so profiling never leaves a privileged shell open on the
     shared console line. Read-only w.r.t. device config. Returns True once a
     login prompt is back (i.e. we are confirmed logged out)."""
+    # Logout commands from the profile, else the defaults.
     cmds = list((profile or {}).get("logout") or _LOGOUT_COMMANDS)
+    # Press Enter and wait for any prompt.
     try:
         write_fn(b"\r")
     except Exception:  # noqa: BLE001 - a dead line just means we can't confirm
         return False
     _read_until(read_fn, [_SHELL_PROMPT, _LOGIN_PROMPT, _PASSWORD_PROMPT], 1.0)
+    # Send each logout command until a login or password prompt returns.
     for cmd in cmds:
         try:
             write_fn((cmd + "\r").encode())
@@ -1776,6 +1960,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     asks the LLM which candidate is the device's own address.
     Read-only: only the matched profile's commands are sent.
     """
+    # Result skeleton.
     result: Dict[str, Any] = {"banner": "", "vendor": None, "logged_in": False,
                               "credential_index": None, "identity": {}, "outputs": {},
                               "hostname_source": "", "diag": {}}
@@ -1792,6 +1977,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     #     prompt, so this is safe to call unconditionally.
     transcript, enable_diag = _escalate_privilege(
         read_fn, write_fn, credentials, cred_idx, transcript)
+    # Record login and enable results.
     diag["enable"] = enable_diag
     result["banner"] = transcript[-4000:]
     result["logged_in"] = logged_in
@@ -1799,6 +1985,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     result["diag"] = _login_diag(diag, transcript, credentials)
 
     def _finalize(res: Dict[str, Any], prof: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Log out of our own session (or de-escalate an operator's) and return res."""
         # Cleanly log out of a session WE authenticated (cred_idx set). We never
         # touch an already-open console we merely read from (console_usable path
         # leaves credential_index None), so we don't close an operator's session.
@@ -1818,6 +2005,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         return res
 
     # 2. Detect the vendor from everything seen (pre- and post-login).
+    # Detect the vendor and check for a login prompt.
     profile = detect_vendor(transcript)
     tail = _prompt_tail(transcript)
     at_login_prompt = bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail))
@@ -1827,6 +2015,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     #     login/password prompt) but haven't recognized the vendor, actively run a
     #     few universal read-only discovery commands to coax out an identifying
     #     banner — i.e. try the show commands even without a username/password.
+    # No vendor and no login prompt: send discovery commands.
     if not profile and not at_login_prompt and diag.get("any_output"):
         transcript, profile, disc = _elicit_identity_banner(read_fn, write_fn, transcript)
         result["banner"] = transcript[-4000:]
@@ -1837,6 +2026,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
             diag["discovery_cmds"] = list(disc.keys())
             result["diag"] = _login_diag(diag, transcript, credentials)
 
+    # Standby VSF member console: treat as aruba-cx.
     if not profile and at_standby_console(transcript):
         # A VSF standby member never prints a vendor banner and rejects the
         # usual identity commands, so detect_vendor can't place it. Its bare
@@ -1845,6 +2035,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         # reporting the port as an unknown device forever.
         profile = next((p for p in PROFILES if p["name"] == "aruba-cx"), None)
 
+    # Still unknown: keep a hostname from the prompt and finish.
     if not profile:
         # Unknown vendor, but if we reached a usable shell/CLI prompt (e.g. a
         # logged-in device or an open console) its prompt still names the box —
@@ -1856,6 +2047,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
             result["identity"]["hostname"] = hn
             result["hostname_source"] = "prompt"
         return _finalize(result, None)
+    # Known vendor.
     result["vendor"] = profile["name"]
     if profile.get("family") and profile["name"] != "linux":
         # A recognized network device can report its role (Switch/…) even while
@@ -1864,11 +2056,13 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         result["identity"]["type"] = profile["family"]
 
     # If a login prompt is still showing (couldn't authenticate), stop here.
+    # Stuck at a login prompt: cannot run commands.
     tail = _prompt_tail(transcript)
     if not result["logged_in"] and (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)):
         return _finalize(result, profile)
 
     # 3. Run the read-only identity commands + capture output (pager-aware).
+    # Run each profile command and parse the identity from the outputs.
     outputs: Dict[str, str] = {}
     for spec in profile["commands"]:
         cmd = spec["cmd"]
@@ -1883,18 +2077,22 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     # ``show system`` while rejecting the profile's ``show system-information``),
     # so the data is already captured — just not in this command's own output.
     # Transcript ip candidates only count if the ip was actually taken from it.
+    # Fill missing fields from the whole transcript.
     backfill_ip_cands: List[Tuple[str, str]] = []
     for key, val in _extract_profile_fields(profile, transcript, backfill_ip_cands).items():
         if key not in result["identity"]:
             result["identity"][key] = val
             if key == "ip":
                 ip_cands = backfill_ip_cands
+    # Flag an ambiguous IP.
     result.update(ip_ambiguity(ip_cands))
+    # Device type from the model.
     if profile.get("family"):
         # Concrete role from the model (e.g. Juniper SRX → Firewall), else the
         # profile's default family.
         result["identity"]["type"] = infer_device_type(
             result["identity"].get("model"), profile["family"])
+    # Stack record, when stacked.
     stack = detect_stack(outputs, transcript)
     if stack:
         result["stack"] = stack
@@ -1904,6 +2102,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         if stack.get("local_mac") and not result["identity"].get("mac"):
             result["identity"]["mac"] = stack["local_mac"]
 
+    # Drop junk values; note where the hostname came from.
     result["identity"] = scrub_identity(result["identity"])
     if result["identity"].get("hostname"):
         result["hostname_source"] = "command"  # parsed from a show/display output
@@ -1914,6 +2113,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         if hn:
             result["identity"]["hostname"] = hn
             result["hostname_source"] = "prompt"  # gleaned from the CLI prompt
+    # Log out / de-escalate and return.
     return _finalize(result, profile)
 
 
@@ -1921,6 +2121,7 @@ def _sanitize_tail(text: str, n: int = 240) -> str:
     """A short, printable tail of a transcript for troubleshooting telemetry —
     terminal escapes stripped and remaining control bytes collapsed to spaces so
     it renders safely in the UI/logs."""
+    # Cleaned tail; replace other characters with spaces.
     tail = sanitize_console_text(text or "")[-n:]
     return re.sub(r"[^\x20-\x7e]+", " ", tail).strip()
 
@@ -1928,12 +2129,14 @@ def _sanitize_tail(text: str, n: int = 240) -> str:
 def _login_diag(diag: Dict[str, Any], transcript: str, credentials) -> Dict[str, Any]:
     """Assemble the login telemetry block from a _generic_login diag + transcript.
     Adds a printable tail and a human ``reason`` for why login didn't complete."""
+    # Copy and add credential count and transcript tail.
     d = dict(diag or {})
     d["creds_available"] = len(credentials or [])
     d["tail"] = _sanitize_tail(transcript)
     # Privilege level reached, so an operator can tell "logged in but stuck in
     # user EXEC" apart from a plain login failure — the two look identical in
     # the output otherwise (both leave the identity commands empty).
+    # Privilege level and, if enable failed, why.
     _en = d.get("enable") or {}
     if _en.get("escalated"):
         d["privilege"] = "enable"
@@ -1944,6 +2147,7 @@ def _login_diag(diag: Dict[str, Any], transcript: str, credentials) -> Dict[str,
             "bad_secret": "`enable` rejected the stored credential's password and a blank secret",
             "no_prompt": "`enable` sent but the device never re-prompted",
         }.get(_en.get("reason") or "", _en.get("reason") or "")
+    # Main reason, most specific first.
     if d.get("garbled"):
         d["reason"] = "garbled output (likely wrong baud rate)"
     elif d.get("shell_prompt_seen"):
@@ -1975,22 +2179,27 @@ def run_commands(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     commands are sent. Returns
     ``{banner, logged_in, credential_index, outputs, rejected, diag}``.
     """
+    # Result skeleton.
     result: Dict[str, Any] = {"banner": "", "logged_in": False, "credential_index": None,
                               "outputs": {}, "rejected": [], "diag": {}}
+    # Log in and try to escalate.
     logged_in, cred_idx, transcript, diag = _generic_login(read_fn, write_fn, credentials, banner_secs)
     # A ">" prompt is UNPRIVILEGED — escalate before running the caller's
     # commands, or a device sitting in user EXEC rejects most `show`s.
     # _escalate_privilege no-ops on "#", on $/% shells and at a login prompt.
     transcript, enable_diag = _escalate_privilege(
         read_fn, write_fn, credentials, cred_idx, transcript)
+    # Record the results.
     diag["enable"] = enable_diag
     result["banner"] = transcript[-4000:]
     result["logged_in"] = logged_in
     result["credential_index"] = cred_idx
     result["diag"] = _login_diag(diag, transcript, credentials)
+    # Never send commands into a login prompt.
     tail = _prompt_tail(transcript)
     if not logged_in and (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)):
         return result  # never authenticated — don't send commands into a login prompt
+    # Run each read-only command; record rejected ones.
     outputs: Dict[str, str] = {}
     for raw in (commands or []):
         cmd = str(raw).strip()
@@ -2000,6 +2209,7 @@ def run_commands(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         write_fn((cmd + "\r").encode())
         outputs[cmd] = _read_until(read_fn, [_SHELL_PROMPT], cmd_secs)
     result["outputs"] = outputs
+    # Return an operator's session to unprivileged mode.
     if enable_diag.get("escalated") and enable_diag.get("attempted") and cred_idx is None:
         # Escalated an operator's already-open session (run_commands never logs
         # out) — restore its privilege level instead of leaving enable mode on
@@ -2017,37 +2227,47 @@ def login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
     """Reach an exec prompt on an already-woken line. Returns (logged_in, idx).
     Tries each credential once; no re-hammering."""
     def at_exec(t: str) -> bool:
+        """Return True if t shows the exec prompt and no login or password prompt."""
         return bool(profile["prompt"].search(t) and not (
             profile["login_prompt"].search(t) or profile["password_prompt"].search(t)))
 
+    # Read whatever is showing.
     tail = _prompt_tail(_read_until(read_fn, [profile["login_prompt"], profile["password_prompt"],
                                               profile["prompt"]], sample_secs))
+    # Already at the exec prompt.
     if at_exec(tail):
         return True, None
+    # No prompt: press Enter and check again.
     if not (profile["login_prompt"].search(tail) or profile["password_prompt"].search(tail)):
         write_fn(b"\r")
         tail = _prompt_tail(_read_until(read_fn, [profile["login_prompt"], profile["password_prompt"],
                                                   profile["prompt"]], sample_secs))
         if at_exec(tail):
             return True, None
+    # Try each credential once.
     for idx, cred in enumerate(credentials or []):
+        # Password-only prompt: send just the password.
         if profile["password_prompt"].search(tail) and not profile["login_prompt"].search(tail):
             write_fn((cred.get("password", "") + "\r").encode())
+        # Otherwise send the username, then the password if asked.
         else:
             write_fn((cred.get("username", "") + "\r").encode())
             out = _read_until(read_fn, [profile["password_prompt"], profile["prompt"]], 3.0)
             if profile["password_prompt"].search(_prompt_tail(out)):
                 write_fn((cred.get("password", "") + "\r").encode())
+        # Read the result; stop at the exec prompt.
         tail = _prompt_tail(_read_until(read_fn, [profile["prompt"], profile["login_prompt"],
                                                  profile["password_prompt"]], 4.0))
         if at_exec(tail):
             return True, idx
+    # No credential worked.
     return False, None
 
 
 def _disable_pager(read_fn, write_fn, profile, cmd_secs: float) -> None:
     """Send the profile's pure setup commands (terminal length 0 / no page) so a
     long show doesn't stall on a pager. These are the commands with no `fields`."""
+    # Send each command that has no fields and wait for the prompt.
     for spec in profile.get("commands", []):
         if "fields" not in spec:
             write_fn((spec["cmd"] + "\r").encode())
@@ -2057,20 +2277,24 @@ def _disable_pager(read_fn, write_fn, profile, cmd_secs: float) -> None:
 def read_running_config(read_fn, write_fn, profile, credentials,
                         cmd_secs: float = 20.0) -> Dict[str, Any]:
     """Log in (if needed) and capture the device's running-config (backup/read)."""
+    # Wake the line and log in.
     write_fn(b"\r\n")
     ok, _ = login(read_fn, write_fn, profile, credentials)
     if not ok:
         return {"status": "ERROR", "message": "login failed", "config": ""}
+    # The profile must define a show-running command.
     show = (profile.get("config") or {}).get("show_running")
     if not show:
         return {"status": "ERROR", "message": "no running-config command for this device type",
                 "config": ""}
+    # Disable the pager, send it, and capture until the prompt.
     _disable_pager(read_fn, write_fn, profile, 3.0)
     write_fn((show + "\r").encode())
     cfg = _read_until(read_fn, [profile["prompt"]], cmd_secs)
     return {"status": "SUCCESS", "config": cfg}
 
 
+# Error markers in device replies to config lines.
 _CFG_ERR = re.compile(r"%\s|Invalid input|Unknown command|Incomplete command|syntax error|"
                       r"not found|rejected|Error:", re.I)
 
@@ -2084,27 +2308,33 @@ def push_config(read_fn, write_fn, profile, credentials, config_text: str,
     roll back (``negate`` = ``no <line>`` in reverse, or ``reboot`` = reload the
     unsaved running-config). No post-request approval (decision: transactional).
     """
+    # Config commands and the result skeleton.
     conf = profile.get("config") or {}
     enter, exit_, save_cmd, show = (conf.get("enter"), conf.get("exit"),
                                     conf.get("save"), conf.get("show_running"))
     result: Dict[str, Any] = {"status": "ERROR", "logged_in": False, "applied": [],
                               "errors": [], "verify_ok": False, "saved": False,
                               "rolled_back": False, "baseline": "", "missing": []}
+    # Wake the line and log in.
     write_fn(b"\r\n")
     ok, _ = login(read_fn, write_fn, profile, credentials)
     result["logged_in"] = ok
     if not ok:
         result["message"] = "login failed"
         return result
+    # Need a config mode.
     if not enter:
         result["message"] = "device type has no config mode (read-only)"
         return result
+    # Disable the pager.
     _disable_pager(read_fn, write_fn, profile, 3.0)
     if show:  # 1. pre-verify backup
         write_fn((show + "\r").encode())
         result["baseline"] = _read_until(read_fn, [profile["prompt"]], 12.0)
+    # Split the config into lines.
     lines = [l.rstrip() for l in config_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
     # 2. enter config mode + send line-by-line
+    # Enter config mode, send each line and record errors.
     write_fn((enter + "\r").encode())
     _read_until(read_fn, [profile["prompt"]], cmd_secs)
     for ln in lines:
@@ -2115,10 +2345,12 @@ def push_config(read_fn, write_fn, profile, credentials, config_text: str,
         result["applied"].append(ln)
         if _CFG_ERR.search(out):
             result["errors"].append({"line": ln, "output": out[-160:]})
+    # Leave config mode.
     if exit_:
         write_fn((exit_ + "\r").encode())
         _read_until(read_fn, [profile["prompt"]], cmd_secs)
     # 3. post-verify: pushed (non-comment) lines present in running-config
+    # Read the running config and check every pushed line appears in it.
     running = ""
     if show:
         write_fn((show + "\r").encode())
@@ -2128,12 +2360,14 @@ def push_config(read_fn, write_fn, profile, credentials, config_text: str,
     result["missing"] = missing[:20]
     result["verify_ok"] = (not result["errors"]) and (not missing)
     # 4. save on pass; rollback on fail (never save a failed push)
+    # Passed: save (if asked) and succeed.
     if result["verify_ok"]:
         if save and save_cmd:
             write_fn((save_cmd + "\r").encode())
             _read_until(read_fn, [profile["prompt"]], cmd_secs + 4)
             result["saved"] = True
         result["status"] = "SUCCESS"
+    # Failed: roll back by reloading, or by negating each line in reverse.
     else:
         if rollback == "reboot":
             # running-config is unsaved → a reload reverts to startup.
@@ -2156,4 +2390,5 @@ def push_config(read_fn, write_fn, profile, credentials, config_text: str,
             result["rolled_back"] = True
         result["status"] = "ERROR"
         result["message"] = "verification failed — not saved; rolled back (%s)" % rollback
+    # Push result.
     return result

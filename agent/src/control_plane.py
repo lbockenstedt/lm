@@ -1,3 +1,12 @@
+"""Generic Agent entry point and multi-role hosting.
+
+AgentControlPlane is the base "agent" connection to the hub. Each loaded role
+(proxmox, simulation, dns, dhcp, ...) gets its own RoleConnection sub-spoke with
+its own hub connection, secret and optional /ws/agent listener. Run with
+--spoke-ip/--spoke-url instead of --hub to start the simple device-mode
+SpokeClient.
+"""
+# Standard library: async loop, CLI, JSON, logging, OS, secrets, git subprocesses.
 import asyncio
 import argparse
 import json
@@ -8,6 +17,7 @@ import subprocess
 import sys
 import time
 import uuid
+# Path for repo-relative paths; List for type hints.
 from pathlib import Path
 from typing import List
 
@@ -23,6 +33,7 @@ from typing import List
 # agent crash-loops (the lm-opnsense role-activation saga). Derive the root
 # from this file's location (lm/agent/src/control_plane.py → up three) so the
 # import works regardless of how the process was launched.
+# Put the lm repo root on sys.path so "core.src..." imports resolve.
 _LM_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 if _LM_ROOT not in sys.path:
     sys.path.insert(0, _LM_ROOT)
@@ -38,6 +49,7 @@ if _LM_ROOT not in sys.path:
 # is stdlib-only and core has no heavy __init__, so importing it here is safe
 # even when every third-party dep is absent. Best-effort: never raise — a pip
 # failure surfaces as the real ImportError below, which Restart=always retries.
+# Install missing requirements (agent, then core) before the heavy imports.
 try:
     from core.src.dep_guard import ensure_requirements as _ensure_requirements
     _agent_req = os.path.join(
@@ -50,6 +62,7 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
+# Base hub-connection classes, from whichever package layout is installed.
 try:
     from core.src.messaging.control_plane import BaseControlPlane
     from core.src.messaging.agent_hosting import AgentHostingControlPlane
@@ -57,6 +70,7 @@ except ImportError:
     from messaging.control_plane import BaseControlPlane
     from messaging.agent_hosting import AgentHostingControlPlane
 
+# The agent's command module, role map and per-role logger name prefixes.
 import agent_spoke
 from agent_spoke import GenericAgent, _ROLE_MAP, _ROLE_LOG_PREFIXES
 
@@ -66,6 +80,7 @@ from agent_spoke import GenericAgent, _ROLE_MAP, _ROLE_LOG_PREFIXES
 # handles INSTALL_CERT by invoking it (see GenericAgent.handle_command).
 _NETBOX_INSTALL_CERT_HELPER = "/usr/local/bin/lm-netbox-install-cert"
 
+# Shared logging setup; a minimal fallback if logging_setup is unavailable.
 try:
     from logging_setup import configure_logging
 except ImportError:
@@ -76,16 +91,22 @@ except ImportError:
         _FMT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         _DFMT = '%Y-%m-%d %H:%M:%S'
         def configure_logging(default_level=_logging.INFO, *, log_file=None, **_):
+            """Fallback logging setup: basicConfig with the standard format (and an optional log
+            file).
+            """
+            # Log to the file and stderr when a file is given, else the default handler.
             handlers = ([_logging.FileHandler(log_file), _logging.StreamHandler()]
                         if log_file else None)
             _logging.basicConfig(level=default_level, force=True,
                                  format=_FMT, datefmt=_DFMT, handlers=handlers)
+# Configure logging at import time and get this module's logger.
 configure_logging()
 logger = logging.getLogger("GenericAgentControlPlane")
 
 
 def _lm_root_for(path: str) -> Path:
     """lm repo root from a file path: lm/agent/src/control_plane.py → up three."""
+    # Three directories above the file.
     return Path(path).resolve().parent.parent.parent
 
 
@@ -186,6 +207,16 @@ class RoleConnection(AgentHostingControlPlane):
 
     def __init__(self, role_name: str, base_id: str, hub_url: str,
                  role_instance, secret: str = None):
+        """Create a sub-spoke connection for one role.
+
+        Args:
+            role_name: role key from _ROLE_MAP.
+            base_id: the base agent's spoke id (also the parent id).
+            hub_url: hub WebSocket URL.
+            role_instance: the role module object that handles commands.
+            secret: session secret; None loads the persisted per-role secret.
+        """
+        # Look up the role's module type and build the sub-spoke id.
         _, _, mtype, _ = _ROLE_MAP[role_name]
         sub_id = f"{base_id}-{role_name}"
         # The simulation (cs) role hosts client-sim node-agents on its OWN
@@ -214,7 +245,9 @@ class RoleConnection(AgentHostingControlPlane):
         elif role_name in _CLUSTER_ROLE_LISTENERS:
             for attr, value in _CLUSTER_ROLE_LISTENERS[role_name].items():
                 setattr(self, attr, value)
+        # Run the base set-up with the per-role listener settings in place.
         super().__init__(sub_id, secret, hub_secret="", hub_url=hub_url)
+        # Cluster roles: use the role's coordinator TLS cert/key if both exist.
         if role_name in _CLUSTER_ROLE_LISTENERS:
             tls_dir = Path(f"/etc/lm-{role_name}/tls")
             cert = tls_dir / "coordinator.crt"
@@ -222,6 +255,7 @@ class RoleConnection(AgentHostingControlPlane):
             if cert.is_file() and key.is_file():
                 self._listener_cert = str(cert)
                 self._listener_key = str(key)
+        # Role identity; the base agent is the parent.
         self.role_name = role_name
         self.base_id = base_id
         self.module_type = mtype
@@ -254,6 +288,7 @@ class RoleConnection(AgentHostingControlPlane):
         # carrying the base's own uuid4 — see class docstring. The base uuid is
         # retained for parent linkage (Phase 2). Falls back to "" (legacy) if
         # the base uuid is unset/unparseable.
+        # Remember the base guid as the parent guid.
         base_iu = self.install_uuid  # set by BaseControlPlane.__init__ from .env
         self.parent_install_uuid = base_iu or ""
         if base_iu:
@@ -296,6 +331,7 @@ class RoleConnection(AgentHostingControlPlane):
         # OPNSense and vice versa. _ROLE_LOG_PREFIXES carries each role's
         # logger-name stems; names shared with lm/core (HubDiscovery/DepGuard/
         # UpdateRecovery) are NOT listed and fall through to the base bucket.
+        # Restrict this connection's log relay to the role's own loggers.
         self._log_relay_handler.set_include_prefixes(
             _ROLE_LOG_PREFIXES.get(role_name, ()))
         # Back-reference so the role can push UNSOLICITED signed frames to the hub
@@ -303,6 +339,7 @@ class RoleConnection(AgentHostingControlPlane):
         # (CONSOLE_DATA_UP) from its reader thread, or LE_CERT_RENEWED. Mirrors how
         # LEControlPlane / GenericAgent wire `.control_plane`; harmless for roles
         # that never use it.
+        # Give the role module a back-reference to this connection when it allows one.
         try:
             role_instance.control_plane = self
         except Exception:  # noqa: BLE001 - some inner instances may forbid attrs
@@ -318,12 +355,15 @@ class RoleConnection(AgentHostingControlPlane):
         reliable runtime signal that the hub already owns ``:443`` here — the one
         case where the cs ``/ws/agent`` listener must NOT bind. A standalone
         agent dials a remote hub IP/host, so this is False for it."""
+        # Pull the host out of the hub URL (drop scheme, path and user info).
         url = str(getattr(self, "hub_url", "") or "")
         host = url.split("://", 1)[-1].split("/", 1)[0].rsplit("@", 1)[-1]
+        # Strip [] from IPv6 or the :port from host:port.
         if host.startswith("["):                      # [::1]:443
             host = host[1:].split("]", 1)[0]
         elif host.count(":") == 1:                    # host:port
             host = host.rsplit(":", 1)[0]
+        # Loopback hosts mean the hub runs on this box.
         host = host.strip().lower()
         return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0") or host.startswith("127.")
 
@@ -354,8 +394,10 @@ class RoleConnection(AgentHostingControlPlane):
 
         Every other role (ldap/…) never binds a port.
         """
+        # Proxmox always hosts a listener.
         if self.role_name == "proxmox":
             return True
+        # Simulation: environment override first, else on unless co-located with the hub.
         if self.role_name == "simulation":
             val = str(os.environ.get(self.AGENT_LISTENER_ENV, "")).strip().lower()
             if val in ("1", "true", "yes", "on"):
@@ -363,6 +405,7 @@ class RoleConnection(AgentHostingControlPlane):
             if val in ("0", "false", "no", "off"):
                 return False
             return not self._is_colocated_with_hub()   # default: standalone → on
+        # dns/dhcp: environment override first, else only when a cluster is configured.
         if self.role_name in _CLUSTER_ROLE_LISTENERS:
             val = str(os.environ.get(self.AGENT_LISTENER_ENV, "")).strip().lower()
             if val in ("1", "true", "yes", "on"):
@@ -370,9 +413,11 @@ class RoleConnection(AgentHostingControlPlane):
             if val in ("0", "false", "no", "off"):
                 return False
             return self._cluster_listener_required()
+        # Console: only when the relay listener is explicitly enabled.
         if self.role_name == "console" and str(
                 os.environ.get("LM_CONSOLE_RELAY_LISTENER", "")).strip() in ("1", "true", "yes", "on"):
             return True
+        # All other roles: no listener.
         return False
 
     async def run(self):
@@ -381,12 +426,14 @@ class RoleConnection(AgentHostingControlPlane):
         simulation opt-in), the self-healing /ws/agent listener so pxmx/cs
         node-agents can dial this box (``--spoke-ip <box>``). Mirrors
         PxmxControlPlane.run (pxmx/src/control_plane.py)."""
+        # Start the listener (with a secret) when this role hosts agents.
         if self._agent_listener_enabled():
             # A dns/dhcp cluster role only becomes listener-enabled once its
             # module is registered (which happens at the END of __init__), so
             # the constructor's mint step could not have run for it yet.
             self._ensure_agent_secret()
             self._start_agent_server_task()
+        # Start the role's process-wide services, run the hub connection, then stop them.
         self._start_role_local_services()
         try:
             await super().run()
@@ -406,7 +453,9 @@ class RoleConnection(AgentHostingControlPlane):
         Called by ``GenericAgent._stop_role`` AFTER the run task is awaited, so
         it runs in an un-cancelled context and can actually await the socket
         closing before the unload reports success."""
+        # Stop the client API server.
         self._stop_role_local_services()
+        # Ask the module to stop its background loops; collect the task it returns.
         pending = []
         mod = self.modules.get(self.role_name)
         stop_loops = getattr(mod, "stop_background_loops", None) if mod else None
@@ -418,12 +467,14 @@ class RoleConnection(AgentHostingControlPlane):
             except Exception as e:  # noqa: BLE001 — best-effort teardown
                 logger.debug("role '%s' stop_background_loops failed: %s",
                              self.role_name, e)
+        # Cancel the /ws/agent listener task.
         server = getattr(self, "_agent_server_task", None)
         if server is not None:
             self._agent_server_task = None
             if not server.done():
                 server.cancel()
             pending.append(server)
+        # Wait for each pending task, ignoring errors.
         for task in pending:
             if task is None or task.done():
                 continue
@@ -450,6 +501,7 @@ class RoleConnection(AgentHostingControlPlane):
         so this no-ops for them. Best-effort: a hook failure must never take down
         the role connection.
         """
+        # Nothing to do without the role module.
         mod = self.modules.get(self.role_name)
         if mod is None:
             return
@@ -460,6 +512,7 @@ class RoleConnection(AgentHostingControlPlane):
                 mod.control_plane = self
             except Exception:  # noqa: BLE001
                 pass
+        # Call each startup hook the module provides; failures are only logged.
         for hook_name in ("start_background_loops", "start_client_api_server"):
             hook = getattr(mod, hook_name, None)
             if callable(hook):
@@ -471,6 +524,7 @@ class RoleConnection(AgentHostingControlPlane):
 
     def _stop_role_local_services(self) -> None:
         """Signal the hosted role module's client API server to exit, if any."""
+        # Call the module's stop hook if it has one; failures are only logged.
         mod = self.modules.get(self.role_name)
         stop = getattr(mod, "stop_client_api_server", None) if mod else None
         if callable(stop):
@@ -493,6 +547,7 @@ class RoleConnection(AgentHostingControlPlane):
         the sub-spoke is invisible in the Simulations UI. Best-effort: a
         missing/broken hook must never take down the hub connection.
         """
+        # Base tasks plus any tasks from the module's create_spoke_tasks hook.
         tasks = list(super()._create_spoke_tasks(websocket) or [])
         mod = self.modules.get(self.role_name)
         hook = getattr(mod, "create_spoke_tasks", None)
@@ -508,6 +563,7 @@ class RoleConnection(AgentHostingControlPlane):
 
     def _load_disk_cache(self):
         """Load persisted agent telemetry from disk on startup."""
+        # Read the cache file if present and log its size and age.
         try:
             if os.path.exists(self._disk_cache_path):
                 with open(self._disk_cache_path) as f:
@@ -517,11 +573,13 @@ class RoleConnection(AgentHostingControlPlane):
                 logger.info(
                     f"Loaded agent disk cache: {len(self.disk_cache)} agent(s), "
                     f"{age_h:.1f}h old")
+        # A bad cache is only a warning.
         except Exception as e:
             logger.warning(f"Could not load agent disk cache: {e}")
 
     def _save_disk_cache(self):
         """Persist connected agent telemetry to disk (atomic write)."""
+        # Snapshot the fields we cache for each connected agent.
         try:
             payload = {
                 "saved_at": time.time(),
@@ -537,11 +595,13 @@ class RoleConnection(AgentHostingControlPlane):
                     for aid, info in self.connected_agents.items()
                 },
             }
+            # Write it atomically (temp file, then rename) and keep it in memory.
             tmp = self._disk_cache_path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(payload, f)
             os.replace(tmp, self._disk_cache_path)
             self.disk_cache = payload["agents"]
+        # A failed write is only a warning.
         except Exception as e:
             logger.warning(f"Could not write agent disk cache: {e}")
 
@@ -562,10 +622,13 @@ class RoleConnection(AgentHostingControlPlane):
         binds, agents still connect zero-touch and would re-approve after a
         restart that lost the secret.
         """
+        # Already configured: nothing to do.
         if self.agent_secret:
             return
+        # New random secret and the config file to store it in.
         new_secret = secrets.token_urlsafe(32)
         config_path = self.AGENT_CONFIG_PATH
+        # Merge it into the existing config (if readable).
         try:
             os.makedirs(os.path.dirname(config_path) or ".", exist_ok=True)
             existing: dict = {}
@@ -577,6 +640,7 @@ class RoleConnection(AgentHostingControlPlane):
                     logger.warning(
                         f"Could not read existing {config_path} (will overwrite "
                         f"agent_secret only): {e}")
+            # Write the config atomically with mode 600.
             existing["agent_secret"] = new_secret
             tmp = config_path + ".tmp"
             with open(tmp, "w") as f:
@@ -586,10 +650,12 @@ class RoleConnection(AgentHostingControlPlane):
                 os.chmod(config_path, 0o600)
             except Exception:  # noqa: BLE001
                 pass
+            # Use the new secret and signer.
             self.agent_secret = new_secret
             self.agent_signer = self._build_agent_signer(new_secret)
             self.config = existing
             logger.info(f"Self-provisioned proxmox agent_secret → {config_path}")
+        # Write failed: use it in memory for this session only.
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 f"Could not persist proxmox agent_secret to {config_path} "
@@ -601,6 +667,7 @@ class RoleConnection(AgentHostingControlPlane):
         """Rebuild the agent HMAC signer with ``secret`` (mirrors
         AgentHostingControlPlane.__init__'s ``MessageSigner(self.agent_secret)``).
         Imports MessageSigner the same way agent_hosting does."""
+        # Import the signer from whichever layout is installed.
         try:
             from core.src.security.signer import MessageSigner
         except ImportError:
@@ -614,6 +681,7 @@ class RoleConnection(AgentHostingControlPlane):
         reconnect after a spoke restart picks up its saved config. Parameterized
         by self.role_name (the module is registered under the role name, not the
         hardcoded "pxmx" the standalone PxmxControlPlane uses)."""
+        # Look up the role module for its stored per-agent configs.
         mod = self.modules.get(self.role_name)
         # Only proxmox-style role modules carry per-agent PVE creds in
         # ``agent_configs``. Non-proxmox hosting roles (e.g. the "simulation"
@@ -623,6 +691,7 @@ class RoleConnection(AgentHostingControlPlane):
         # flap → hosted agent never finishes provisioning).
         cfg_map = getattr(mod, "agent_configs", None) if mod else None
         stored_cfg = cfg_map.get(agent_id) if cfg_map else None
+        # Push the stored config back to the agent; failures are only logged.
         if stored_cfg:
             try:
                 await self.send_to_agent("UPDATE_CONFIG", stored_cfg,
@@ -637,6 +706,7 @@ class RoleConnection(AgentHostingControlPlane):
         cache (proxmox role only), and mirror the raw telemetry into the role
         module's telemetry_cache (served for fast UI reads). Parameterized by
         self.role_name — mirrors PxmxControlPlane._on_agent_telemetry."""
+        # Update the agent's record with cluster, nodes, VMs and metrics.
         if rec is not None:
             rec["cluster_name"] = data.get("cluster_name", agent_id)
             rec["nodes"]        = data.get("nodes", {}).get("nodes", [])
@@ -651,11 +721,13 @@ class RoleConnection(AgentHostingControlPlane):
             rec["telemetry_ts"] = time.time()
             if self._agent_listener_enabled():  # proxmox role → persist
                 self._save_disk_cache()
+        # Mirror the raw telemetry into the role module's cache.
         mod = self.modules.get(self.role_name)
         if mod is not None and hasattr(mod, "telemetry_cache"):
             mod.telemetry_cache[agent_id] = data
 
     def get_service_name(self) -> str:
+        """Return the systemd unit name (the shared lm-agent unit)."""
         # Same systemd unit as the base agent (one process hosts all roles).
         return "lm-agent"
 
@@ -667,6 +739,7 @@ class RoleConnection(AgentHostingControlPlane):
         return
 
     def _lm_root(self) -> Path:
+        """Return the lm repo root for this file."""
         return _lm_root_for(__file__)
 
     async def handle_system_command(self, cmd_type: str, data: dict) -> object:
@@ -675,6 +748,7 @@ class RoleConnection(AgentHostingControlPlane):
         CWD and would corrupt the wrong tree. In-repo roles (dns/dhcp, repo_url
         None) delegate to the base handler (their code ships in the lm repo).
         Everything else delegates to base."""
+        # SPOKE_UPDATE for a role with its own repo: update that repo.
         if cmd_type == "SPOKE_UPDATE":
             repo_url = _ROLE_MAP[self.role_name][3]
             if repo_url:
@@ -698,11 +772,14 @@ class RoleConnection(AgentHostingControlPlane):
         exits the whole agent process; the durable LOADED_ROLES set in .env
         (written by GenericAgent on LOAD/UNLOAD_ROLE) re-spawns every loaded
         role's RoleConnection on the next boot."""
+        # Repository path as a string.
         cwd = str(repo_dir)
         try:
+            # The repo must already be cloned.
             if not repo_dir.exists():
                 return {"status": "ERROR",
                         "message": f"role repo not present at {cwd}"}
+            # Point origin at the URL and enable rebase + auto-stash pulls.
             logger.info("SPOKE_UPDATE: pulling role repo %s from %s…", cwd, repo_url)
             subprocess.run(["git", "remote", "set-url", "origin", repo_url],
                            cwd=cwd, check=True)
@@ -710,10 +787,13 @@ class RoleConnection(AgentHostingControlPlane):
                            cwd=cwd, check=True)
             subprocess.run(["git", "config", "rebase.autoStash", "true"],
                            cwd=cwd, check=True)
+            # Clear any half-finished rebase and note the current commit.
             self._run_git(["rebase", "--abort"], cwd)
             head_before = self._run_git(["rev-parse", "HEAD"], cwd).stdout.strip()
+            # Fetch and pull.
             subprocess.run(["git", "fetch", "origin"], cwd=cwd, check=True)
             pull = self._run_git(["pull", "--rebase", "--autostash", "origin"], cwd)
+            # Pull failed: hard-reset to the remote branch.
             if pull.returncode != 0:
                 logger.warning("git pull --rebase failed (rc=%s); resetting hard to origin",
                                pull.returncode)
@@ -722,6 +802,7 @@ class RoleConnection(AgentHostingControlPlane):
                 subprocess.run(["git", "rebase", "--abort"], cwd=cwd, check=False)
                 subprocess.run(["git", "reset", "--hard", f"origin/{branch}"],
                                cwd=cwd, check=True)
+            # Has HEAD moved?
             head_after = self._run_git(["rev-parse", "HEAD"], cwd).stdout.strip()
             if head_after != head_before:
                 # Prefer reloading THIS role only: a process restart here drops
@@ -740,12 +821,15 @@ class RoleConnection(AgentHostingControlPlane):
                     os._exit(3)
                 return {"status": "SUCCESS",
                         "message": f"Updated {cwd} from {repo_url}; restart skipped"}
+            # No change.
             logger.debug("SPOKE_UPDATE: %s already up to date.", cwd)
             return {"status": "SUCCESS", "message": "Already up to date"}
+        # git failures: report stderr/stdout.
         except subprocess.CalledProcessError as e:
             detail = (e.stderr or e.stdout or str(e)).strip() if hasattr(e, "stderr") else str(e)
             logger.error("SPOKE_UPDATE failed for %s: %s", cwd, detail)
             return {"status": "ERROR", "message": f"git operation failed: {detail}"}
+        # Any other failure.
         except Exception as e:
             logger.error("SPOKE_UPDATE failed for %s: %s", cwd, e)
             return {"status": "ERROR", "message": str(e)}
@@ -764,6 +848,7 @@ class RoleConnection(AgentHostingControlPlane):
         1008-fallback in BaseControlPlane.connect, which blanks a stale secret
         the hub rejected) writes the empty value so the next boot reconnects
         zero-touch and the hub re-provisions."""
+        # Write the key to the per-role .env entry.
         self._persist_secret_to_env(self._role_env_key(), new_secret or "")
         # Self-heal LOADED_ROLES: a non-empty secret means this sub-spoke is
         # LIVE and authenticated, so its role MUST be in the durable boot set. If
@@ -773,6 +858,7 @@ class RoleConnection(AgentHostingControlPlane):
         # recurring console/role-vanished outage. Union-only (never shrinks); an
         # explicit UNLOAD_ROLE still removes it (that path blanks the secret, so
         # this only fires while genuinely authenticated).
+        # A real key means the role is live: make sure it is in LOADED_ROLES.
         if new_secret:
             self._selfheal_loaded_role()
 
@@ -781,14 +867,18 @@ class RoleConnection(AgentHostingControlPlane):
         GenericAgent._persist_loaded_roles' union semantics but self-contained
         (a RoleConnection has no back-ref to the base agent). Best-effort."""
         try:
+            # Current LOADED_ROLES set.
             existing = {r for r in self._read_env_value("LOADED_ROLES").split(",")
                         if r.strip()}
+            # Already there.
             if self.role_name in existing:
                 return
+            # Add it and write the set back.
             existing.add(self.role_name)
             self._persist_secret_to_env("LOADED_ROLES", ",".join(sorted(existing)))
             logger.info("self-healed LOADED_ROLES with live role '%s'",
                         self.role_name)
+        # Best effort.
         except Exception as e:  # noqa: BLE001 — best-effort durability top-up
             logger.debug("LOADED_ROLES self-heal for %s failed: %s",
                          self.role_name, e)
@@ -816,7 +906,10 @@ agent_spoke.RoleConnection = RoleConnection
 
 
 class AgentControlPlane(BaseControlPlane):
+    """Base Generic Agent connection (module type "agent") that loads and hosts roles."""
+    # Same systemd unit name as the roles.
     def get_service_name(self) -> str:
+        """Return the systemd unit name."""
         return "lm-agent"
 
     def _extra_auth_fields(self) -> dict:
@@ -825,7 +918,9 @@ class AgentControlPlane(BaseControlPlane):
         installer drops). The hub records it in ``ldap_server_agents`` and routes
         an LE cert for the LDAPS endpoint here (target ``ldap-server``). Emitted
         after a deploy + reconnect."""
+        # Capability flags to add to the auth frame.
         out = {}
+        # LDAPS cert helper installed: this host is an LDAP server.
         try:
             from agent_spoke import _LDAP_INSTALL_CERT_HELPER
             if os.path.exists(_LDAP_INSTALL_CERT_HELPER):
@@ -833,6 +928,7 @@ class AgentControlPlane(BaseControlPlane):
         except Exception:  # noqa: BLE001
             pass
         # Zabbix web frontend host → "zabbix-server" LE cert target.
+        # Zabbix web host: can take a Zabbix cert.
         try:
             from agent_spoke import is_zabbix_web_host
             if is_zabbix_web_host():
@@ -843,6 +939,16 @@ class AgentControlPlane(BaseControlPlane):
 
     def __init__(self, spoke_id, secret, hub_secret="", hub_url="",
                  startup_roles: List[str] = None, startup_role: str = ""):
+        """Create the base agent connection.
+
+        Args:
+            spoke_id: this agent's id.
+            secret / hub_secret: session secret and hub secret.
+            hub_url: hub WebSocket URL.
+            startup_roles: roles to load at boot.
+            startup_role: one extra role (older single-role option).
+        """
+        # Base set-up.
         super().__init__(spoke_id, secret, hub_secret, hub_url)
         # Base agent = process-wide catch-all: relay everything EXCEPT the
         # roles' loggers (each role's own RoleConnection relays those under
@@ -852,9 +958,11 @@ class AgentControlPlane(BaseControlPlane):
         # Shared-infra loggers (HubDiscovery/DepGuard/UpdateRecovery) and
         # third-party libs aren't in any role's list → they land here, which is
         # correct (process-infra, not a sibling role's operational log).
+        # Keep role log lines out of the base agent's log relay.
         self._log_relay_handler.set_exclude_prefixes(
             {p for stems in _ROLE_LOG_PREFIXES.values() for p in stems})
         # --role (single, backward-compat) is an alias for --roles (comma-list).
+        # CLI roles: the list plus the single --role, keeping only known roles.
         cli_roles = list(startup_roles or [])
         if startup_role and startup_role not in cli_roles:
             cli_roles.append(startup_role)
@@ -863,6 +971,7 @@ class AgentControlPlane(BaseControlPlane):
         # agent no longer morphs into a role; it HOSTS role sub-connections
         # (RoleConnection). Routing/approval/signing/SPOKE_UPDATE all key on
         # spoke_id per sub-spoke, so the hub needs no core change.
+        # The base connection registers as an agent.
         self.module_type = "agent"
 
     async def handle_system_command(self, cmd_type: str, data: dict) -> object:
@@ -880,6 +989,7 @@ class AgentControlPlane(BaseControlPlane):
         the hub-side resolver fix, and it drains a poison SPOKE_UPDATE already
         sitting in the durable mailbox: the next delivery becomes a correct
         lm-repo pull (a no-op once current) instead of a re-corruption."""
+        # SPOKE_UPDATE: warn on a non-lm repo URL, then force the lm repo URL.
         if cmd_type == "SPOKE_UPDATE":
             sent = (data.get("repo_url") or "").strip()
             if sent and _LM_REPO_URL.removesuffix(".git") not in sent:
@@ -888,6 +998,7 @@ class AgentControlPlane(BaseControlPlane):
                     "pinning self-update to the lm repo %s (agent checkout is "
                     "always the lm repo).", sent, _LM_REPO_URL)
             data = {**data, "repo_url": _LM_REPO_URL}
+        # Let the base class handle it.
         return await super().handle_system_command(cmd_type, data)
 
     def _resolve_startup_roles(self) -> List[str]:
@@ -923,6 +1034,7 @@ class AgentControlPlane(BaseControlPlane):
         (so it's briefly absent from _ROLE_MAP) must not be permanently
         evicted; it re-seeds once the code settles. The persisted set is only
         ever rewritten to GROW (union with CLI roles), never to shrink."""
+        # Persisted loaded and unloaded role sets.
         raw = [r.strip() for r in self._read_env_value("LOADED_ROLES").split(",")
                if r.strip()]
         unloaded = {r.strip() for r in self._read_env_value("UNLOADED_ROLES").split(",")
@@ -931,11 +1043,14 @@ class AgentControlPlane(BaseControlPlane):
         # Do NOT filter by _ROLE_MAP here: filtering then re-persisting the
         # smaller set is a truncation vector (a transiently unknown role would
         # be dropped from .env for good).
+        # Union with CLI roles (order kept), minus explicitly unloaded roles.
         desired = [r for r in dict.fromkeys([*raw, *self._cli_roles])  # union, order-stable
                   if r not in unloaded]
         # Persist ONLY when the union added something (never a shrink / no-op churn).
+        # Write back only when the set grew.
         if desired and set(desired) != set(raw):
             self._persist_secret_to_env("LOADED_ROLES", ",".join(desired))
+        # Load known roles now; keep unknown ones in .env for a later boot.
         seed = [r for r in desired if r in _ROLE_MAP]
         skipped = [r for r in desired if r not in _ROLE_MAP]
         if skipped:
@@ -944,9 +1059,14 @@ class AgentControlPlane(BaseControlPlane):
         return seed
 
     async def run(self):
+        """Start the agent: register the GenericAgent module, load startup roles, then connect to
+        the hub.
+        """
+        # Work out which roles to load and log it.
         startup_roles = self._resolve_startup_roles()
         logger.info("Starting Generic Agent → %s  (roles=%s)", self.hub_url,
                     ",".join(startup_roles) or "none")
+        # Create the agent command module and register it.
         agent = GenericAgent(self.spoke_id, {})
         # Back-reference so GenericAgent can read hub_url + .env helpers and
         # spawn RoleConnection sub-spokes on this loop on LOAD_ROLE.
@@ -957,8 +1077,10 @@ class AgentControlPlane(BaseControlPlane):
         # RoleConnection sub-spoke. Run as a task so the base connect proceeds
         # concurrently; the hub auto-approves sub-spokes once the base agent is
         # approved (parent-auto-approve handles either connect ordering).
+        # Load startup roles in the background so the hub connection starts right away.
         if startup_roles:
             async def _seed_startup_roles():
+                """Load each startup role in turn, logging success or failure."""
                 for role in startup_roles:
                     try:
                         res = await agent.handle_command("LOAD_ROLE", {"role": role})
@@ -973,10 +1095,12 @@ class AgentControlPlane(BaseControlPlane):
         # The code-drift self-heal is armed by BaseControlPlane.run(); this agent
         # only widens the watch set (see _drift_watched_dirs) to include each
         # loaded role's sibling repo.
+        # Connect to the hub and run.
         await super().run()
 
     def _role_repo_dirs(self) -> dict:
         """``role name -> abspath`` of each loaded role's sibling repo."""
+        # Map each loaded role to the absolute path of its clone directory.
         out = {}
         agent = self.modules.get("agent")
         for role in list(getattr(agent, "_roles", {}) or {}):
@@ -992,6 +1116,7 @@ class AgentControlPlane(BaseControlPlane):
         loaded role's sibling repo, so a role pulled-but-not-restarted also
         self-heals. The base watchdog (BaseControlPlane._code_drift_watchdog)
         calls this every cycle and baselines any repo that first appears here."""
+        # Base dirs plus role repos, keeping only git checkouts.
         dirs = set(super()._drift_watched_dirs())
         dirs.update(self._role_repo_dirs().values())
         return [d for d in dirs if os.path.isdir(os.path.join(str(d), ".git"))]
@@ -1006,13 +1131,16 @@ class AgentControlPlane(BaseControlPlane):
         reload it. Also returns ``None`` when two loaded roles resolve to the
         SAME repo: reloading one would have to purge modules the other is still
         using, so the safe answer is the historical restart."""
+        # Normalised path and the base watch set.
         key = os.path.abspath(str(d))
         try:
             base = {os.path.abspath(str(x)) for x in super()._drift_watched_dirs()}
         except Exception:  # noqa: BLE001
             return None
+        # Base code needs a full restart.
         if key in base:
             return None
+        # Exactly one owning role: reload just that one.
         owners = [r for r, p in self._role_repo_dirs().items() if p == key]
         return owners[0] if len(owners) == 1 else None
 
@@ -1025,7 +1153,9 @@ class AgentControlPlane(BaseControlPlane):
         otherwise splice a new entry module onto stale siblings. Scoped strictly
         to files under this role's own repo, so core and other roles are never
         touched."""
+        # Prefix of files inside the repo.
         root = os.path.abspath(str(repo_dir)) + os.sep
+        # Remove each loaded module whose file lives under it.
         for name, mod in list(sys.modules.items()):
             try:
                 path = getattr(mod, "__file__", None)
@@ -1043,9 +1173,11 @@ class AgentControlPlane(BaseControlPlane):
         executed, then re-issues LOAD_ROLE. Returns ``False`` on any failure so
         the watchdog falls back to the whole-process restart — a role must never
         be left down, and stale code must never keep serving."""
+        # Role must be loaded.
         agent = self.modules.get("agent")
         if agent is None or role not in (getattr(agent, "_roles", {}) or {}):
             return False
+        # Stop it; failure means fall back to a restart.
         logger.info("code-drift: role '%s' repo %s advanced; reloading just that "
                     "role (other roles stay up).", role, d)
         try:
@@ -1053,7 +1185,9 @@ class AgentControlPlane(BaseControlPlane):
         except Exception as e:  # noqa: BLE001
             logger.warning("code-drift: stopping role '%s' failed: %s", role, e)
             return False
+        # Forget its cached modules so the new code runs.
         self._purge_role_modules(d)
+        # Load it again; any failure means fall back to a restart.
         try:
             res = await agent.handle_command("LOAD_ROLE", {"role": role})
         except Exception as e:  # noqa: BLE001
@@ -1065,6 +1199,7 @@ class AgentControlPlane(BaseControlPlane):
         # _stop_role removed the role from the durable LOADED_ROLES set; the
         # successful LOAD_ROLE above re-persisted it (union), so a later restart
         # still re-spawns it.
+        # Reloaded.
         return True
 
     def _schedule_role_reload(self, role: str, repo_dir: str, *, delay_s: float = 2.0):
@@ -1077,12 +1212,16 @@ class AgentControlPlane(BaseControlPlane):
         reload fails for any reason we ``os._exit(3)`` exactly as before, so
         freshly-pulled code never keeps running under the old class."""
         async def _run():
+            """Wait, try the reload, and exit the process if it fails."""
+            # Give the reply time to reach the hub.
             await asyncio.sleep(delay_s)
             ok = False
+            # Try the targeted reload.
             try:
                 ok = await self._reload_role_for_drift(role, repo_dir)
             except Exception as e:  # noqa: BLE001
                 logger.error("Deferred reload of role '%s' raised: %s", role, e)
+            # Failed: flush logs and exit so systemd restarts us.
             if not ok:
                 logger.warning("Targeted reload of role '%s' failed — exiting so "
                                "systemd reloads current code.", role)
@@ -1092,17 +1231,22 @@ class AgentControlPlane(BaseControlPlane):
                     pass
                 os._exit(3)
 
+        # Keep a reference to the task so it is not garbage-collected.
         tasks = getattr(self, "_role_reload_tasks", None)
         if tasks is None:
             tasks = set()
             self._role_reload_tasks = tasks
+        # Start it and drop it from the set when done.
         task = asyncio.create_task(_run())
         tasks.add(task)
         task.add_done_callback(tasks.discard)
         return task
 
+# Command-line entry point.
 if __name__ == "__main__":
+    # Hostname lookup for the default --id.
     import socket as _socket
+    # CLI options.
     parser = argparse.ArgumentParser()
     # --id defaults to this host's short hostname, re-evaluated on every start.
     # A clone-only unit (install_agent.sh --clone) bakes NO --id, so each cloned
@@ -1133,12 +1277,15 @@ if __name__ == "__main__":
                         help="Device mode: dial this spoke's /ws/agent (dumb executor).")
     parser.add_argument("--spoke-url", default=os.environ.get("SPOKE_URL", ""),
                         help="Device mode: fully-pinned ws(s)://host:port/ws/agent.")
+    # Parse them.
     args = parser.parse_args()
 
+    # Default id: the short hostname.
     if not args.id:
         args.id = _socket.gethostname().split(".")[0]
 
     # ── Device mode (dumb executor under a spoke) ──────────────────────────
+    # Device mode when a spoke address is given.
     spoke_target = (args.spoke_url or args.spoke_ip or "").strip()
     if spoke_target:
         from spoke_client import SpokeClient
@@ -1146,6 +1293,7 @@ if __name__ == "__main__":
         asyncio.run(client.run())
     else:
         # ── Hub/role-hosting mode (today's Generic Agent) ──────────────────
+        # Hub mode: needs --hub; start the base agent with the startup roles.
         if not args.hub:
             parser.error("--hub is required unless --spoke-ip/--spoke-url is given")
         startup_roles = [r for r in (args.roles or "").split(",") if r.strip()]

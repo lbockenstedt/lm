@@ -50,13 +50,20 @@ singleton (that requires ``LM_FERNET_KEY``); the singleton is built lazily insid
 ``rotate()`` only after the OLD key has been resolved and placed in the env.
 """
 
+# argparse parses the command-line options.
 import argparse
+# json reads/writes the state documents to re-wrap Credential Vault tokens.
 import json
+# os: env vars, paths and directory listings.
 import os
+# shutil.copy2 makes the .pre-rotate.bak backups (preserving timestamps/permissions).
 import shutil
+# sys.stderr for error output and sys.exit for the exit code.
 import sys
+# Type hints only.
 from typing import List, Optional, Tuple
 
+# Fernet generates the new key and does the encrypt/decrypt work.
 from cryptography.fernet import Fernet
 
 # Mirrors cred_vault's constants. Duplicated (not imported) so this stays a
@@ -68,25 +75,30 @@ _STORE_LOCAL = "local"
 
 def _resolve_old_key(env_file: Optional[str]) -> str:
     """Resolve the CURRENT Fernet key: LM_FERNET_KEY env, else parse --env-file."""
+    # Prefer the key already in the environment.
     key = os.getenv("LM_FERNET_KEY", "").strip()
     if key:
         return key
+    # Otherwise we need a readable .env file to look in.
     if not env_file or not os.path.exists(env_file):
         raise RuntimeError(
             "LM_FERNET_KEY is not set in the environment and no --env-file was "
             "found. Run with LM_FERNET_KEY=<current key> in the env, or pass "
             "--env-file /opt/lm/.env."
         )
+    # Scan the .env file for the LM_FERNET_KEY= line and strip any surrounding quotes.
     with open(env_file, "r") as f:
         for line in f:
             line = line.strip()
             if line.startswith("LM_FERNET_KEY="):
                 return line.split("=", 1)[1].strip().strip('"').strip("'")
+    # The file has no key line at all.
     raise RuntimeError(f"No LM_FERNET_KEY= line found in {env_file}.")
 
 
 def _validate_key(key: str, label: str) -> None:
     """Raise RuntimeError if ``key`` is not a valid base64 Fernet key."""
+    # Constructing a Fernet object validates the key's format.
     try:
         Fernet(key.encode())
     except Exception as e:
@@ -110,16 +122,19 @@ def _build_decryptor(old_key: str):
     # this CLI manages LM_FERNET_KEY deliberately and must not have it dropped by
     # the hub's Tier-0 env-drop hardening (HubEncryption._maybe_drop_env_key).
     os.environ["LM_KEEP_FERNET_KEY_ENV"] = "1"
+    # Import the encryption module from either the package or the script's own directory.
     try:
         from security.encryption import HubEncryption  # pytest / hub (core/src on path)
     except ImportError:
         from encryption import HubEncryption  # standalone CLI (script dir on sys.path[0])
 
+    # The old primary key and the legacy machine-id key, built without the singleton.
     old_fernet = Fernet(old_key.encode())
     helper = HubEncryption.__new__(HubEncryption)  # bypass __init__ (no env needed)
     legacy_fernet = helper._derive_machine_id_fernet()  # noqa: SLF001 — reuse the derivation
 
     def decrypt(content: bytes) -> str:
+        """Decrypt ``content`` with the old primary key, falling back to the legacy key."""
         try:
             return old_fernet.decrypt(content).decode()
         except Exception:
@@ -131,8 +146,10 @@ def _build_decryptor(old_key: str):
 def _iter_state_files(state_dir: str) -> List[str]:
     """Top-level regular files in the state dir (does NOT recurse into
     update-backup/). Sorted for deterministic ordering."""
+    # A missing directory simply contributes no files.
     if not os.path.isdir(state_dir):
         return []
+    # Keep regular files, skipping any backups left by earlier runs.
     out = []
     for name in sorted(os.listdir(state_dir)):
         p = os.path.join(state_dir, name)
@@ -164,42 +181,53 @@ def _rewrap_cred_vault(plaintext: str, decryptor, new_fernet):
 
     Returns ``(plaintext_out, rewrapped, kv_backed, failed)``.
     """
+    # Parse the decrypted text as JSON; non-JSON files have no vault to re-wrap.
     try:
         doc = json.loads(plaintext)
     except Exception:  # noqa: BLE001 - not JSON → not a state doc we own
         return plaintext, 0, 0, 0
     if not isinstance(doc, dict):
         return plaintext, 0, 0, 0
+    # Find the Credential Vault section; nothing to do if it is absent.
     cv = (doc.get("global_config") or {}).get("cred_vault")
     if not isinstance(cv, dict):
         return plaintext, 0, 0, 0
+    # Secret metadata, and the locally stored encrypted blobs keyed by name.
     secrets = cv.get("secrets") or {}
     blobs = cv.get("blobs")
     if not isinstance(blobs, dict):
         blobs = {}
+    # Counters for the summary returned to the caller.
     rewrapped = kv_backed = failed = 0
+    # Walk every secret in every bucket.
     for bucket, entries in secrets.items():
         if not isinstance(entries, dict):
             continue
         for name, sm in entries.items():
+            # Only hub-key secrets are affected by rotation.
             if not isinstance(sm, dict) or sm.get("mode") != _MODE_HUB:
                 continue  # psk-mode: keyed by pass-phrase, untouched by rotation
             # Pre-existing records without an explicit marker were vault-only.
             if (sm.get("store") or _STORE_KV) != _STORE_LOCAL:
                 kv_backed += 1
                 continue
+            # Look up the locally stored token; skip secrets with no local blob.
             kv_name = sm.get("kv_name")
             token = blobs.get(kv_name)
+            # No local blob for this secret: nothing to re-wrap.
             if not token:
                 continue
+            # Decrypt with the old key and re-encrypt under the new one.
             try:
                 inner = decryptor(token.encode("ascii"))
                 blobs[kv_name] = new_fernet.encrypt(inner.encode()).decode("ascii")
                 rewrapped += 1
+            # Already-broken tokens are counted and left as they are.
             except Exception:  # noqa: BLE001
                 failed += 1
                 print(f"  ! could not re-wrap credential {bucket}/{name} — it is "
                       f"already undecryptable under the old key; leaving as-is.")
+    # Only rewrite the document if something actually changed.
     if rewrapped:
         cv["blobs"] = blobs
         return json.dumps(doc), rewrapped, kv_backed, failed
@@ -221,9 +249,12 @@ def _key_vault_source(env_file: Optional[str]) -> Optional[str]:
 
     Checked in the live environment first, then in ``env_file`` -- the rotator
     normally runs with the hub stopped, where the vars are only on disk."""
+    # Check the live environment first.
     secret = os.environ.get("LM_FERNET_KEY_KV_SECRET", "").strip()
     url = os.environ.get("LM_KEYVAULT_URL", "").strip()
+    # Fill in anything missing from the .env file on disk.
     if not (secret and url) and env_file and os.path.exists(env_file):
+        # Collect the two Key Vault variables from the .env file.
         found = {}
         with open(env_file, "r") as f:
             for line in f:
@@ -233,6 +264,7 @@ def _key_vault_source(env_file: Optional[str]) -> Optional[str]:
                         found[var] = line.split("=", 1)[1].strip().strip("'\"")
         secret = secret or found.get("LM_FERNET_KEY_KV_SECRET", "")
         url = url or found.get("LM_KEYVAULT_URL", "")
+    # Only a secret name plus a vault URL means the hub really uses Key Vault.
     return secret if (secret and url) else None
 
 
@@ -250,6 +282,7 @@ def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bo
     Returns (rotated_count, skipped_count, new_key_str). Raises on any error
     before ``.env`` is touched.
     """
+    # Refuse to rotate a vault-backed key unless the operator confirms the vault is updated.
     kv_secret = _key_vault_source(env_file)
     if kv_secret and not allow_key_vault:
         raise RuntimeError(
@@ -261,6 +294,7 @@ def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bo
             "file. Rotate the vault secret to the new key FIRST (or unset "
             "LM_FERNET_KEY_KV_SECRET/LM_KEYVAULT_URL to go env-only), then re-run "
             "with --allow-key-vault to confirm you have done so.")
+    # Find and validate the current key.
     old_key = _resolve_old_key(env_file)
     _validate_key(old_key, "current (old) LM_FERNET_KEY")
 
@@ -270,6 +304,7 @@ def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bo
     # to the wrong key.
     decryptor = _build_decryptor(old_key)
 
+    # Generate the new random key and a Fernet object for it.
     new_key_bytes = Fernet.generate_key()
     new_key = new_key_bytes.decode()
     new_fernet = Fernet(new_key_bytes)
@@ -280,24 +315,30 @@ def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bo
     # so the next hub start couldn't decrypt them (and the plaintext-fallback
     # in load_keys would then read them as plaintext on a botched rotation).
     files = _iter_state_files(state_dir)
+    # Add the KeyManager data dir's files too, unless already listed.
     if keys_dir:
         # De-dup in case keys_dir == state_dir (unusual, but avoid double work).
         state_set = set(files)
         for p in _iter_state_files(keys_dir):
             if p not in state_set:
                 files.append(p)
+    # Counters and the list of (path, plaintext) to rewrite later.
     rotated, skipped = 0, 0
     plan: List[Tuple[str, str]] = []  # (path, plaintext_json) to re-encrypt
 
+    # First pass: read and decrypt every file, without writing anything yet.
     for path in files:
+        # Read the raw file; an unreadable file aborts the rotation.
         try:
             with open(path, "rb") as f:
                 content = f.read()
         except OSError as e:
             raise RuntimeError(f"Could not read {path}: {e}")
+        # Empty files are not encrypted (e.g. marker files).
         if not content:
             skipped += 1  # empty file (e.g. the `healthy` marker) — not encrypted
             continue
+        # Try to decrypt; files that are not ours (plain JSON etc.) are skipped.
         try:
             plaintext = decryptor(content)
         except Exception:
@@ -305,11 +346,13 @@ def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bo
             # recovery file / something we don't own. Leave it untouched.
             skipped += 1
             continue
+        # Decryptable: queue it for re-encryption.
         plan.append((path, plaintext))
         rotated += 1
 
     # Re-wrap the Credential Vault's inner tokens (see _rewrap_cred_vault).
     cv_rewrapped = cv_kv = cv_failed = 0
+    # Re-wrap inner Credential Vault tokens in each queued document, tallying the results.
     for i, (path, plaintext) in enumerate(plan):
         new_text, n_ok, n_kv, n_bad = _rewrap_cred_vault(plaintext, decryptor, new_fernet)
         cv_rewrapped += n_ok
@@ -317,10 +360,12 @@ def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bo
         cv_failed += n_bad
         if new_text is not plaintext:
             plan[i] = (path, new_text)
+    # Summarise Credential Vault results.
     if cv_rewrapped or cv_kv or cv_failed:
         print(f"credential vault: re-wrapped {cv_rewrapped} hub-mode secret(s) "
               f"stored in hub state; {cv_kv} live in the cloud vault; "
               f"{cv_failed} already undecryptable.")
+    # Loudly warn that cloud-stored secrets still need the previous key.
     if cv_kv:
         print(
             "\n  *** WARNING: {n} Credential Vault secret(s) are stored in the "
@@ -337,6 +382,7 @@ def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bo
             "permanently\n"
             "      undecryptable.\n".format(n=cv_kv))
 
+    # Dry run: report and stop before writing anything.
     if dry_run:
         print(f"[dry-run] would re-encrypt {rotated} file(s) under a new key; "
               f"skipped {skipped} plain/empty file(s).")
@@ -344,11 +390,13 @@ def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bo
 
     # Re-encrypt each file under the new key (backup first).
     for path, plaintext in plan:
+        # Back up the original, then write the new ciphertext over it.
         bak = path + ".pre-rotate.bak"
         try:
             shutil.copy2(path, bak)
             with open(path, "wb") as f:
                 f.write(new_fernet.encrypt(plaintext.encode()))
+        # Stop immediately on a write failure, before .env is touched.
         except OSError as e:
             raise RuntimeError(
                 f"Failed re-encrypting {path} (backup at {bak}): {e}. "
@@ -360,10 +408,12 @@ def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bo
     # key as LM_FERNET_KEY_PREVIOUS so any blob the walk did not reach stays
     # decryptable; clear it once the hub is confirmed up under the new key.
     if apply_env:
+        # Writing .env needs a path to write to.
         if not env_file:
             raise RuntimeError("--apply-env requires --env-file (or a default path).")
         _write_env_key(env_file, new_key, previous_key=old_key)
 
+    # Report counts and the new key to the caller.
     return rotated, skipped, new_key
 
 
@@ -371,6 +421,7 @@ def _write_env_key(env_file: str, new_key: str, previous_key: Optional[str] = No
     """Backup env_file to .pre-rotate.bak, set LM_FERNET_KEY=<new_key>, and
     (if ``previous_key`` is given) set LM_FERNET_KEY_PREVIOUS=<previous_key>
     as a decrypt-only fallback for any blob the rotation walk did not reach."""
+    # Existing .env: back it up and read every line.
     if os.path.exists(env_file):
         shutil.copy2(env_file, env_file + ".pre-rotate.bak")
         with open(env_file, "r") as f:
@@ -378,6 +429,7 @@ def _write_env_key(env_file: str, new_key: str, previous_key: Optional[str] = No
         # Replace LM_FERNET_KEY and LM_FERNET_KEY_PREVIOUS in place; append
         # whichever is missing. Track each independently.
         replaced_new = replaced_prev = False
+        # Replace existing key lines in place.
         for i, line in enumerate(lines):
             if line.startswith("LM_FERNET_KEY_PREVIOUS=") and previous_key:
                 lines[i] = f"LM_FERNET_KEY_PREVIOUS={previous_key}\n"
@@ -385,12 +437,15 @@ def _write_env_key(env_file: str, new_key: str, previous_key: Optional[str] = No
             elif line.startswith("LM_FERNET_KEY=") and not line.startswith("LM_FERNET_KEY_PREVIOUS="):
                 lines[i] = f"LM_FERNET_KEY={new_key}\n"
                 replaced_new = True
+        # Append any key line that was not already present.
         if not replaced_new:
             lines.append(f"LM_FERNET_KEY={new_key}\n")
         if previous_key and not replaced_prev:
             lines.append(f"LM_FERNET_KEY_PREVIOUS={previous_key}\n")
+        # Write the updated lines back.
         with open(env_file, "w") as f:
             f.writelines(lines)
+    # No .env yet: create it with just the key line(s).
     else:
         with open(env_file, "w") as f:
             f.write(f"LM_FERNET_KEY={new_key}\n")
@@ -399,6 +454,8 @@ def _write_env_key(env_file: str, new_key: str, previous_key: Optional[str] = No
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    """Command-line entry point; returns the process exit code."""
+    # Define the command-line options and their defaults.
     p = argparse.ArgumentParser(
         description="Rotate the hub LM_FERNET_KEY in place (decrypt + re-encrypt state).")
     p.add_argument("--state-dir", default="/var/lib/lm/state",
@@ -418,8 +475,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "NEW key in the vault secret — otherwise the hub will load the "
                         "old key from the vault and every rotated file becomes "
                         "undecryptable.")
+    # Parse the provided (or real) command-line arguments.
     args = p.parse_args(argv)
 
+    # Run the rotation; known failures print an error and exit with code 2.
     try:
         rotated, skipped, new_key = rotate(args.state_dir, args.env_file, args.apply_env,
                                            args.dry_run, keys_dir=args.keys_dir or None,
@@ -428,12 +487,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
 
+    # Tell the operator what happened and what to do next.
     print(f"Rotated {rotated} encrypted file(s) under the new LM_FERNET_KEY; "
           f"skipped {skipped} plain/empty file(s).")
+    # Explain where the new key went and that the old one is kept as a fallback.
     if args.apply_env:
         print(f"New LM_FERNET_KEY written to {args.env_file} (backup at {args.env_file}.pre-rotate.bak).")
         print("The OLD key was also recorded as LM_FERNET_KEY_PREVIOUS as a decrypt "
               "fallback — clear it once the hub is confirmed up under the new key.")
+    # Without --apply-env, show the line the operator must add by hand.
     else:
         print("Apply the new key to your hub .env (then restart the hub):")
         print(f"  LM_FERNET_KEY={new_key}")
@@ -442,5 +504,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     return 0
 
 
+# Run main() and use its return value as the exit status when executed as a script.
 if __name__ == "__main__":
     sys.exit(main())

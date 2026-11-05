@@ -44,15 +44,22 @@ The service being unreachable, slow or wrong must never change how the local
 install handles its own traffic — the local sensors and threat monitor are the
 authority for this install, and the feed is an enrichment.
 """
+# Allows modern type-hint syntax regardless of the running Python version.
 from __future__ import annotations
 
+# ipaddress classifies addresses to decide whether they may be published.
 import ipaddress
+# Standard-library logging for withheld records and request failures.
 import logging
+# time.time() is the default first-seen timestamp of a report.
 import time
+# Type hints only.
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+# httpx is the async HTTPS client used to talk to the service.
 import httpx
 
+# Share the "Security" logger with the other security modules.
 logger = logging.getLogger("Security")
 
 # The one address of the exchange. Deliberately not read from global_config:
@@ -71,8 +78,10 @@ CHANNEL_DECOYS = "decoys"
 # probe is a statistic, so it is published only after it has already earned a
 # local block, and consumers are expected to treat it as observation.
 TIERS = ("bait_used", "extra_path", "default_decoy", "http_probe")
+# Map each tier to its position (0 = strongest) so tiers can be compared.
 _TIER_RANK = {t: i for i, t in enumerate(TIERS)}
 
+# Seconds to wait for the service before giving up on a request.
 _DEFAULT_TIMEOUT = 10.0
 
 
@@ -100,13 +109,16 @@ def is_publishable(ip: str,
     Fails CLOSED: anything unparseable is refused. A malformed address in a
     report helps nobody and could carry an injection into a consumer's blocklist.
     """
+    # Trim the input; an empty string can never be published.
     raw = (ip or "").strip()
     if not raw:
         return False, "empty address"
+    # Parse the address; anything unparseable is refused (fail closed).
     try:
         addr = ipaddress.ip_address(raw)
     except ValueError:
         return False, "unparseable address"
+    # Refuse each class of address that does not mean the same thing everywhere.
     if addr.is_unspecified:
         return False, "unspecified address"
     if addr.is_loopback:
@@ -121,15 +133,20 @@ def is_publishable(ip: str,
         return False, "private address (means something different at every site)"
     if addr.is_reserved:
         return False, "reserved"
+    # 100.64.0.0/10 is carrier-grade NAT space shared by many unrelated customers.
     if addr.version == 4 and addr in ipaddress.ip_network("100.64.0.0/10"):
         return False, "carrier-grade NAT (shared by unrelated subscribers)"
+    # Refuse anything inside an operator never-publish address or CIDR.
     for entry in (never_publish or ()):
+        # Skip entries that are not valid networks rather than failing the whole check.
         try:
             net = ipaddress.ip_network(str(entry).strip(), strict=False)
         except ValueError:
             continue
+        # Only compare like with like (IPv4 vs IPv6).
         if addr.version == net.version and addr in net:
             return False, f"operator never-publish entry {net}"
+    # Passed every check: safe to publish.
     return True, ""
 
 
@@ -141,7 +158,9 @@ def build_report(ip: str, tier: str, *, first_seen: Optional[float] = None,
     confidence — which is the part a consumer needs — without disclosing the
     sensor that produced it.
     """
+    # Unknown tiers are downgraded to the weakest one.
     t = tier if tier in _TIER_RANK else "http_probe"
+    # The record: address, tier, first-seen time (default now) and a count of at least 1.
     return {
         "ip": (ip or "").strip(),
         "tier": t,
@@ -160,23 +179,31 @@ def filter_reports(records: Sequence[Dict[str, Any]],
     attacker inflate its own corroboration count, and the strongest signal is
     the one a consumer should act on.
     """
+    # Publishable records keyed by IP, plus the (ip, reason) list of refusals.
     keep: Dict[str, Dict[str, Any]] = {}
     refused: List[Tuple[str, str]] = []
     for rec in (records or ()):
+        # Extract the address and check whether it may be published.
         ip = str((rec or {}).get("ip", "")).strip()
         ok, why = is_publishable(ip, never_publish)
+        # Record the refusal and move on.
         if not ok:
             refused.append((ip, why))
             continue
+        # First time we see this address: keep a copy of the record.
         cur = keep.get(ip)
         if cur is None:
             keep[ip] = dict(rec)
             continue
+        # Duplicate: add the counts together.
         cur["count"] = int(cur.get("count", 1)) + int(rec.get("count", 1))
+        # Keep the stronger (lower-ranked) tier of the two.
         if _TIER_RANK.get(str(rec.get("tier")), 99) < _TIER_RANK.get(str(cur.get("tier")), 99):
             cur["tier"] = rec["tier"]
+        # Keep the earliest first-seen time (ignoring missing zeros where possible).
         cur["first_seen"] = min(float(cur.get("first_seen", 0) or 0),
                                 float(rec.get("first_seen", 0) or 0)) or cur.get("first_seen")
+    # Return the merged publishable records and the refusals.
     return list(keep.values()), refused
 
 
@@ -200,6 +227,7 @@ class TMClient:
                  verify: bool = True,
                  enabled: bool = True,
                  base_url: str = SERVICE_URL) -> None:
+        """Store identity, credential and connection settings for talking to the service."""
         # Opting in used to be expressed by leaving the service URL empty. With
         # one hardcoded endpoint there is no such thing as an unconfigured URL,
         # so the opt-in has to be stated outright: an install that has not
@@ -211,10 +239,12 @@ class TMClient:
         # deployment that overrode it would be sending its sensor data
         # somewhere other than the exchange.
         self.base_url = (base_url or SERVICE_URL).rstrip("/")
+        # Normalise the identifiers and secrets by trimming whitespace.
         self.tenant_id = (tenant_id or "").strip()
         self.install_uuid = (install_uuid or "").strip()
         self.credential = (credential or "").strip()
         self.enrollment_psk = (enrollment_psk or "").strip()
+        # Operator addresses/CIDRs that must never be reported, and the request timeout.
         self.never_publish = list(never_publish or ())
         self.timeout = float(timeout)
         # Exposed for tests/pinning only. Never default this to False: the
@@ -224,18 +254,23 @@ class TMClient:
     # -- plumbing ---------------------------------------------------------
 
     def _headers(self) -> Dict[str, str]:
+        """HTTP headers identifying this install, plus the bearer credential when we have one."""
+        # Every request says which install and tenant it comes from.
         h = {"Content-Type": "application/json",
              "X-SS-Install": self.install_uuid,
              "X-SS-Tenant": self.tenant_id}
+        # Only enrolled installs have a credential to send.
         if self.credential:
             h["Authorization"] = f"Bearer {self.credential}"
         return h
 
     async def _post(self, path: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Send a POST with a JSON body; returns the decoded reply or None."""
         return await self._call("POST", path, payload)
 
     async def _get(self, path: str,
                    params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Send a GET with optional query parameters; returns the decoded reply or None."""
         return await self._call("GET", path, None, params)
 
     async def _call(self, method: str, path: str,
@@ -247,17 +282,23 @@ class TMClient:
         outage, a timeout or a malformed reply must leave this install behaving
         exactly as it would with no service configured at all.
         """
+        # Not subscribed: never contact the service.
         if not self.enabled or not self.base_url:
             return None
+        # Full request URL.
         url = f"{self.base_url}{path}"
+        # Make the request in a short-lived client using the configured timeout and TLS checks.
         try:
             async with httpx.AsyncClient(timeout=self.timeout, verify=self.verify) as c:
                 r = await c.request(method, url, json=payload, params=params,
                                     headers=self._headers())
+            # HTTP errors are logged and treated as "no answer".
             if r.status_code >= 400:
                 logger.warning("tm_client: %s %s returned %s", method, path, r.status_code)
                 return None
+            # Success: decode the JSON body.
             return r.json()
+        # Network errors, timeouts and bad JSON are logged and treated as "no answer".
         except Exception as e:  # noqa: BLE001
             logger.warning("tm_client: %s %s failed: %s", method, path, e)
             return None
@@ -282,6 +323,7 @@ class TMClient:
         approval the credential is stored on the instance; the CALLER is
         responsible for persisting it, since this module owns no storage.
         """
+        # Send our identity, optional PSK, contact details and desired channels.
         body = await self._post("/v1/enroll", {
             "tenant_id": self.tenant_id,
             "install_uuid": self.install_uuid,
@@ -291,12 +333,15 @@ class TMClient:
             "contact_message": contact_message or "",
             "subscriptions": list(subscriptions or ()),
         })
+        # No reply at all: report an error status to the caller.
         if not body:
             return {"status": "error", "reason": "service unreachable"}
+        # On approval, keep the issued credential for later requests.
         status = str(body.get("status") or "").lower()
         cred = str(body.get("credential") or "").strip()
         if status == "approved" and cred:
             self.credential = cred
+        # Return the service's full answer.
         return body
 
     async def report(self, records: Sequence[Dict[str, Any]],
@@ -311,14 +356,19 @@ class TMClient:
         The service re-validates everything published; this filter is not a
         substitute for that, it is the part the service cannot do.
         """
+        # Drop unpublishable addresses and merge duplicates.
         keep, refused = filter_reports(records, self.never_publish)
+        # Tell the operator what was withheld and why (first five shown).
         if refused:
             logger.info("tm_client: withheld %d record(s) from publication (%s)",
                         len(refused),
                         "; ".join(f"{ip}: {why}" for ip, why in refused[:5]))
+        # Nothing left to send.
         if not keep:
             return {"status": "SKIPPED", "published": 0, "withheld": len(refused)}
+        # Publish the remaining records to the chosen channel.
         body = await self._post(f"/v1/publish/{channel}", {"records": keep})
+        # The request failed.
         if body is None:
             return {"status": "ERROR", "published": 0, "withheld": len(refused)}
         # The service reports what it actually stored. Trusting the local count
@@ -342,9 +392,12 @@ class TMClient:
         failure must not disarm a working sensor), while ``[]`` is a deliberate
         instruction to stand down.
         """
+        # Fetch this install's decoy subset.
         body = await self._get(f"/v1/feed/{CHANNEL_DECOYS}")
+        # Fetch failed: None tells the caller to keep its current set.
         if body is None:
             return None
+        # A list of records; any other shape means an empty set.
         records = body.get("records")
         return list(records) if isinstance(records, list) else []
 
@@ -357,9 +410,12 @@ class TMClient:
         the reporters, so a consumer gets the confidence signal without learning
         who else participates or what they are being hit by.
         """
+        # Fetch the channel feed, optionally only records newer than ``since``.
         body = await self._get(f"/v1/feed/{channel}",
                                {"since": since} if since else None)
+        # Fetch failed.
         if body is None:
             return None
+        # A list of records; any other shape means an empty feed.
         records = body.get("records")
         return list(records) if isinstance(records, list) else []

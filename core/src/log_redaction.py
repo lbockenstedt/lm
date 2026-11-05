@@ -15,11 +15,16 @@ Pure, framework-free helpers extracted verbatim from ``main.py`` (no ``self``):
 These are imported back into ``main.py`` so behavior is unchanged.
 """
 
+# json measures how large a log payload is when serialised.
 import json
+# logging reports helper failures.
 import logging
+# time drives the token bucket's refill calculation.
 import time
+# Type hints for payload dicts.
 from typing import Dict, Any
 
+# Share the hub's logger so these messages appear with other hub logs.
 logger = logging.getLogger("Hub")
 
 # Secret-hygiene for DEBUG-mode ``request_response`` logging. ``_redact`` is
@@ -68,6 +73,7 @@ _LOGSAFE_COMMANDS = frozenset({
 _FULLY_REDACT_COMMANDS = frozenset({
     "SET_PASSWORD", "SET_USER_PASSWORD", "RESET_PASSWORD", "CONSOLE_PUSH_CONFIG",
 })
+# Command-name fragments that also trigger full redaction (catches user-supplied types).
 _FULLY_REDACT_SUBSTRINGS = ("PASSWORD", "PUSH_CONFIG")
 
 # Known secret-bearing command types (kept for documentation + the secret-
@@ -109,15 +115,18 @@ _SECRET_SUBSTRINGS = ("token", "secret", "password", "passwd", "pw",
 def _is_secret_field(key: str) -> bool:
     """True if ``key`` names a secret-bearing field (exact ``_REDACT_FIELDS``
     match OR a ``_SECRET_SUBSTRINGS`` substring). Case-insensitive."""
+    # Compare case-insensitively; an empty name is never secret.
     k = (key or "").lower()
     if not k:
         return False
+    # Exact known field name, or any secret-ish substring.
     return k in _REDACT_FIELDS or any(s in k for s in _SECRET_SUBSTRINGS)
 
 
 def _scrub_secret_fields(d: Dict[str, Any]) -> Dict[str, Any]:
     """Return a shallow copy of ``d`` with every secret-bearing field removed.
     Non-mutating (the caller may forward the original to the spoke)."""
+    # Copy, then drop every secret-bearing key from the copy.
     out = dict(d or {})
     for k in list(out.keys()):
         if _is_secret_field(k):
@@ -141,11 +150,15 @@ def _redact(command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         "data":{…}}}``; the secret lives at ``payload.data.<field>``, NOT at top
         level — so the response side reaches it here). The value is still
         forwarded to the spoke — only the log line is redacted."""
+    # Compare command names in upper case.
     ct = (command_type or "").upper()
+    # Allow-listed, secret-free commands are logged as-is.
     if ct in _LOGSAFE_COMMANDS:
         return data
+    # Commands whose secrets may hide anywhere are replaced entirely by a marker.
     if ct in _FULLY_REDACT_COMMANDS or any(s in ct for s in _FULLY_REDACT_SUBSTRINGS):
         return {"<redacted>": True}
+    # Everything else: copy and drop secret-bearing top-level fields.
     safe = dict(data or {})
     for k in list(safe.keys()):
         if _is_secret_field(k):
@@ -183,8 +196,10 @@ def _project_nw_devices(devices):
     shape on push so the on-connect push and a manual Save push identical
     payloads (mirrors the _INSTANCE_CONFIG_SOURCES project contract).
     """
+    # Anything that is not a list becomes an empty list.
     if not isinstance(devices, list):
         return []
+    # Keep only dict entries (drops malformed rows).
     return [d for d in devices if isinstance(d, dict)]
 
 
@@ -211,12 +226,15 @@ def _request_subject(command_type: str, data: Any) -> str:
     ``"<field>=<value>"`` for the first matching allowlist field in ``data``,
     or ``""`` when no subject is derivable (the caller falls back to a short
     ``msg_id`` prefix). Never raises."""
+    # Only dict payloads can carry subject fields.
     if not isinstance(data, dict):
         return ""
+    # Return the first allow-listed field that has a non-empty value.
     for k in _REQUEST_SUBJECT_FIELDS:
         v = data.get(k)
         if v not in (None, "", []):
             return f"{k}={v}"
+    # No subject found; the caller falls back to a short request id.
     return ""
 
 
@@ -229,6 +247,8 @@ class TokenBucket:
     """
 
     def __init__(self, capacity: float, fill_rate: float):
+        """Start with a full bucket that refills at ``fill_rate`` tokens per second."""
+        # Maximum tokens, refill rate, current tokens, and when tokens were last updated.
         self.capacity = capacity
         self.fill_rate = fill_rate
         self.tokens = capacity
@@ -236,10 +256,12 @@ class TokenBucket:
 
     def consume(self, amount: float = 1.0) -> bool:
         """Return True and debit ``amount`` tokens if available, else False."""
+        # Add tokens for the time elapsed since the last update, capped at capacity.
         now = time.time()
         delta = now - self.last_update
         self.tokens = min(self.capacity, self.tokens + delta * self.fill_rate)
         self.last_update = now
+        # Spend the tokens if enough are available.
         if self.tokens >= amount:
             self.tokens -= amount
             return True
@@ -261,31 +283,42 @@ def _tail_lines(path: str, n: int, _block: int = 65536) -> list:
     oldest→newest, matching the old deque semantics.
     """
     try:
+        # os provides the SEEK_END constant for seeking from the end of the file.
         import os
+        # Open in binary mode so seeking by byte offset is exact.
         with open(path, "rb") as f:
+            # Find the file size; an empty file has no lines.
             f.seek(0, os.SEEK_END)
             end = f.tell()
             if end == 0:
                 return []
+            # Bytes read so far (from the end) and the current read position.
             data = b""
             pos = end
+            # Read blocks backwards until we have more than n newlines or reach the start.
             while pos > 0 and data.count(b"\n") <= n:
                 read = min(_block, pos)
                 pos -= read
                 f.seek(pos)
                 data = f.read(read) + data
+            # Drop the trailing newline so it does not produce an empty last line.
             if data.endswith(b"\n"):
                 data = data[:-1]
+            # Split into lines and keep only the last n.
             lines = data.split(b"\n")
             tail = lines[-n:] if len(lines) > n else lines
+            # Decode each line as UTF-8 (replacing bad bytes) and trim it.
             out = []
             for raw in tail:
                 try:
                     out.append(raw.decode("utf-8", "replace").strip())
                 except Exception:  # noqa: BLE001
+                    # Fallback representation if decoding somehow fails.
                     out.append(str(raw).strip())
+            # Drop blank lines.
             return [ln for ln in out if ln]
     except Exception as e:  # noqa: BLE001
+        # Unreadable file: log and return nothing.
         logger.warning(f"_tail_lines({path}) failed: {e}")
         return []
 
@@ -301,16 +334,21 @@ def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
     event loop on every AppBuilder poll). Keeps the newest entries (drops oldest).
     """
     try:
+        # Everything already fits: return as-is.
         if len(json.dumps({"logs": all_logs})) <= max_bytes:
             return all_logs
+        # Binary-search the largest number of newest entries that still fit.
         lo, hi = 0, len(all_logs)
         while lo < hi:
+            # Try keeping "mid" newest entries; grow or shrink the range based on the size.
             mid = (lo + hi + 1) // 2
             if len(json.dumps({"logs": all_logs[-mid:]})) <= max_bytes:
                 lo = mid
             else:
                 hi = mid - 1
+        # Return the newest entries that fit (none if even one does not).
         return all_logs[-lo:] if lo else []
     except Exception as e:
+        # Serialisation failure: fall back to the newest 1000 entries.
         logger.warning(f"_fit_log_payload size-cap failed: {e}")
         return all_logs[-1000:]  # safe fallback

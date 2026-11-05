@@ -39,17 +39,24 @@ Two failure modes drove the shape of this module
    exempt from being reported as an attacker. That preserves a safe local test
    path without making loopback a bypass an attacker could reach.
 """
+# Allows modern type-hint syntax regardless of the running Python version.
 from __future__ import annotations
 
+# ipaddress recognises loopback peers.
 import ipaddress
+# Standard-library logging for set changes and skipped entries.
 import logging
+# re compiles fallback route-matching regexes.
 import re
+# Type hints only.
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
+# Share the "Security" logger with the other security modules.
 logger = logging.getLogger("Security")
 
 # Applied to every candidate path so a set pushed with trivial casing/slash
 # variation matches the same way the probe/canary matchers normalise.
+# Largest decoy body we will serve (64 KiB).
 _MAX_BODY_BYTES = 64 * 1024
 
 
@@ -57,7 +64,9 @@ def normalize_path(path: str) -> str:
     """Normalise a request path for matching: drop the query, lowercase, strip a
     trailing slash. Mirrors ``node_canary._norm`` so a path behaves identically
     whether it is served at the edge or at the hub."""
+    # Keep only the part before "?", trim spaces and lowercase it.
     p = (path or "").split("?", 1)[0].strip().lower()
+    # Remove a trailing slash, but keep the root path "/" itself intact.
     if len(p) > 1 and p.endswith("/"):
         p = p.rstrip("/")
     return p
@@ -66,8 +75,10 @@ def normalize_path(path: str) -> str:
 def _is_loopback(host: Optional[str]) -> bool:
     """True for a loopback peer. Best-effort: an unparseable/absent host is NOT
     treated as loopback, so an odd transport can never win the exemption."""
+    # No host at all is never treated as loopback.
     if not host:
         return False
+    # Parse it as an IP; a non-IP string only counts if it is literally "localhost".
     try:
         return ipaddress.ip_address(host.strip()).is_loopback
     except ValueError:
@@ -83,16 +94,20 @@ def routable_matchers(app: Any) -> List[Any]:
     escape of ``path`` for anything without a compiled regex (mounts, static).
     Never raises: a route object that does not look the way we expect is skipped
     rather than taking down config application."""
+    # Collect one matcher per application route.
     out: List[Any] = []
     for route in (getattr(app, "routes", None) or ()):
+        # Prefer Starlette's compiled regex, which also covers templated paths.
         try:
             rx = getattr(route, "path_regex", None)
             if rx is not None and hasattr(rx, "match"):
                 out.append(rx)
                 continue
+            # Otherwise match the literal path exactly (with an optional trailing slash).
             raw = getattr(route, "path", None) or getattr(route, "path_format", None)
             if raw:
                 out.append(re.compile("^" + re.escape(str(raw)) + "/?$"))
+        # Skip routes we cannot interpret instead of failing the whole build.
         except Exception:  # noqa: BLE001 — one odd route must not block the set
             logger.debug("decoy_engine: skipped unreadable route", exc_info=True)
     return out
@@ -107,9 +122,11 @@ class DecoyEngine:
     """
 
     def __init__(self, name: str = "hub") -> None:
+        """Create an empty (inert) engine; ``name`` labels its log messages."""
         self._name = name
         # normalised path -> {"status", "ctype", "body", "tier"}
         self._entries: Dict[str, Dict[str, Any]] = {}
+        # (path, reason) pairs refused by the last set_config call.
         self._rejected: List[Tuple[str, str]] = []
 
     # ── configuration ────────────────────────────────────────────────────────
@@ -127,22 +144,30 @@ class DecoyEngine:
         :meth:`rejected`; one bad entry must not discard the rest of the set,
         and a bad push must never brick the request path.
         """
+        # Build the new set and rejection list separately, then swap them in at the end.
         built: Dict[str, Dict[str, Any]] = {}
         rejected: List[Tuple[str, str]] = []
+        # Materialise the reserved-route regexes so they can be reused for every entry.
         matchers = list(reserved or ())
+        # Validate each candidate entry independently.
         for raw in (entries or ()):
             try:
+                # Normalise the path the same way incoming requests are.
                 path = normalize_path(str((raw or {}).get("path", "")))
+                # Only absolute paths can be decoys.
                 if not path or not path.startswith("/"):
                     rejected.append((path or "<empty>", "not an absolute path"))
                     continue
+                # Ignore a repeated path; the first one wins.
                 if path in built:
                     rejected.append((path, "duplicate in set"))
                     continue
+                # Refuse paths the real app can serve, so a decoy never hides a working endpoint.
                 shadowed = self._shadows_real_route(path, matchers)
                 if shadowed:
                     rejected.append((path, "would shadow a real route"))
                     continue
+                # Store the (size-capped) body and response details, with sensible defaults.
                 body = self._coerce_body(raw.get("body", ""))
                 built[path] = {
                     "status": int(raw.get("status", 200) or 200),
@@ -150,9 +175,11 @@ class DecoyEngine:
                     "body": body,
                     "tier": str(raw.get("tier", "decoy") or "decoy"),
                 }
+            # A malformed entry is skipped and recorded rather than aborting the set.
             except Exception:  # noqa: BLE001
                 logger.debug("decoy_engine: skipped malformed entry", exc_info=True)
                 rejected.append((str((raw or {}).get("path", "?")), "malformed"))
+        # Publish the new set.
         self._entries = built
         self._rejected = rejected
         if rejected:
@@ -163,63 +190,77 @@ class DecoyEngine:
                 "decoy_engine[%s]: %d decoy(s) active, %d refused (%s)",
                 self._name, len(built), len(rejected),
                 "; ".join(f"{p}: {why}" for p, why in rejected[:10]))
+        # Everything was accepted: a normal info message.
         else:
             logger.info("decoy_engine[%s]: %d decoy(s) active", self._name, len(built))
+        # Report how many decoys are live.
         return len(built)
 
     @staticmethod
     def _shadows_real_route(path: str, matchers: Iterable[Any]) -> bool:
         """True when the application can route ``path`` — i.e. serving it as a
         decoy would take a working endpoint away from real clients."""
+        # Test the path with and without a trailing slash against every route regex.
         for rx in matchers:
             try:
                 if rx.match(path) or rx.match(path + "/"):
                     return True
+            # A broken matcher is ignored rather than treated as a match.
             except Exception:  # noqa: BLE001
                 continue
+        # No route matched, so the path is safe to use as a decoy.
         return False
 
     @staticmethod
     def _coerce_body(body: Any) -> bytes:
         """Bodies arrive from a feed, so cap them: an oversized body would let a
         bad or hostile push turn every scan into an amplification response."""
+        # Convert text, bytes, or anything else into bytes.
         if isinstance(body, str):
             out = body.encode("utf-8", "replace")
         elif isinstance(body, (bytes, bytearray)):
             out = bytes(body)
         else:
             out = str(body).encode("utf-8", "replace")
+        # Truncate to the maximum body size.
         return out[:_MAX_BODY_BYTES]
 
     def clear(self) -> None:
         """Drop all decoys (teardown / disable). Returns the engine to inert."""
+        # Empty both the decoy set and the rejection record.
         self._entries = {}
         self._rejected = []
 
     # ── introspection ────────────────────────────────────────────────────────
 
     def is_active(self) -> bool:
+        """True when at least one decoy is configured."""
         return bool(self._entries)
 
     def count(self) -> int:
+        """Number of decoys currently live."""
         return len(self._entries)
 
     def rejected(self) -> List[Tuple[str, str]]:
         """(path, reason) for every entry refused by the last ``set_config`` —
         surfaced so a shadowing collision is diagnosable rather than mysterious."""
+        # Return a copy so callers cannot modify the internal list.
         return list(self._rejected)
 
     def paths(self) -> Set[str]:
         """The live decoy paths. For hub-side bookkeeping only — never serialise
         this to a participant or into a published feed record; the decoy set is
         the sensor, and disclosing it burns it."""
+        # A copy of the keys, so callers cannot modify the live set.
         return set(self._entries)
 
     def match(self, path: str) -> Optional[Dict[str, Any]]:
         """The response spec for ``path`` if it is a decoy, else ``None``.
         Cheap dict lookup; empty set → always ``None`` (inert)."""
+        # Empty set: nothing can match.
         if not self._entries:
             return None
+        # Look up the normalised path.
         return self._entries.get(normalize_path(path))
 
 
@@ -243,13 +284,17 @@ def register_decoy_middleware(app: Any, engine: DecoyEngine,
 
     @app.middleware("http")
     async def _decoy_mw(request, call_next):  # noqa: ANN001
+        """Serve the decoy response for decoy paths and report the trip; pass everything else on."""
+        # Look up the request path; any lookup error is treated as "not a decoy".
         try:
             spec = engine.match(request.url.path)
         except Exception:  # noqa: BLE001 — never break real traffic
             spec = None
+        # Not a decoy: hand the request to the rest of the app unchanged.
         if spec is None:
             return await call_next(request)
 
+        # Find the client IP (best effort) and whether it is loopback.
         peer_ip = None
         try:
             peer_ip = request.client.host if request.client else None
@@ -257,6 +302,7 @@ def register_decoy_middleware(app: Any, engine: DecoyEngine,
             peer_ip = None
         loopback = _is_loopback(peer_ip)
 
+        # Report the trip; a failing reporter must not change the response.
         if on_trip is not None:
             try:
                 on_trip(path=request.url.path, peer_ip=peer_ip,
@@ -264,5 +310,6 @@ def register_decoy_middleware(app: Any, engine: DecoyEngine,
             except Exception:  # noqa: BLE001
                 logger.debug("decoy_engine: trip sink raised", exc_info=True)
 
+        # Answer with the configured plausible body rather than an error or reset.
         return Response(content=spec["body"], status_code=spec["status"],
                         media_type=spec["ctype"])

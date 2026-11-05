@@ -1,8 +1,12 @@
 """VNC + serial console relay routes and helpers."""
+# Logging (a dedicated "Console" logger, set up below).
 import logging
+# Environment/file access used by some helpers.
 import os
+# Wall-clock timestamps for sessions and caches.
 import time
 
+# Shared Hub helpers: websocket types, tenant access rules and common stdlib modules.
 from api import (
     HTTPException, Request, WebSocket, WebSocketDisconnect, WebSocketState, access, asyncio,
     base64, json, secrets, uuid,
@@ -25,6 +29,7 @@ _CONSOLE_WS_PING_SECS = 20.0
 def _console_tenant_in(eff, tid) -> bool:
     """Whether a port's effective tenant ``eff`` belongs to tenant ``tid``: the
     same tenant, or a member of ``tid`` when it is a tenant group (SSPLM)."""
+    # Normalise both ids; match the same tenant, or a member of the tenant group.
     e, t = access._norm_tenant_id(eff), access._norm_tenant_id(tid)
     return bool(e) and (e == t or e in access._GROUP_MEMBERS.get(t, set()))
 
@@ -68,8 +73,10 @@ def _console_port_disposition(admin: bool, visible: bool, eff: str, sel, shared:
     dedicated ports. Same rule routes/nw.py names "ADMIN(default) must not
     accumulate across tenants".
     """
+    # Not visible at all -> hide.
     if not visible:
         return "hide"
+    # An admin with no tenant picked (or the ADMIN tenant) sees the admin scope.
     admin_scope = admin and (sel is None or sel == access.ADMIN_TENANT_ID)
     if not eff:                              # unassigned holding state
         return "show" if admin_scope else "hide"
@@ -84,6 +91,7 @@ def console_port_search_blob(p: dict) -> str:
     """Lower-cased haystack of a console port's identifiers, for substring
     search matching (hostname, alias, vendor, model, device path, port_id,
     agent name, and the identified device IP)."""
+    # Gather the identifying fields from the port and its probe/identity data.
     probe = p.get("probe") or {}
     ident = probe.get("identity") or {}
     parts = [
@@ -93,6 +101,7 @@ def console_port_search_blob(p: dict) -> str:
         ident.get("serial") or probe.get("serial"),
         ident.get("mac") or probe.get("mac"),
     ]
+    # Join the non-empty ones into one lower-case string.
     return " ".join(str(x) for x in parts if x).lower()
 
 
@@ -106,6 +115,7 @@ def console_port_result(p: dict) -> dict:
     """Shape a tenant-scoped console port into a global-search / device-detail
     result row carrying everything the WebUI needs to connect
     (``openConsoleTerminal(spoke_id, port_id)``)."""
+    # Pull identity details from the probe and build the result row.
     probe = p.get("probe") or {}
     ident = probe.get("identity") or {}
     return {
@@ -145,7 +155,9 @@ def _correlate_stacks(ports: list) -> None:
     first because the warm cache hands out shared references that are reused
     across requests.
     """
+    # Index every visible port by its device MAC and its stack local MAC.
     by_mac = {}
+    # Annotate each stack member (copying the shared dicts before changing them).
     for port in ports:
         probe = port.get("probe") or {}
         for mac in ((probe.get("identity") or {}).get("mac"),
@@ -165,6 +177,7 @@ def _correlate_stacks(ports: list) -> None:
         # A stable key so the UI can group the chassis of one stack together,
         # even when they hang off different console agents.
         stack["stack_id"] = (stack.get("stack_mac") or stack.get("conductor_mac") or "")
+        # If another visible port is this stack's conductor, link to it.
         conductor_mac = str(stack.get("conductor_mac") or "").lower()
         peer = by_mac.get(conductor_mac) if conductor_mac else None
         if peer is not None and peer is not port:
@@ -174,12 +187,14 @@ def _correlate_stacks(ports: list) -> None:
             stack["conductor_hostname"] = (
                 peer.get("alias")
                 or ((peer_probe.get("identity") or {}).get("hostname") or ""))
+        # Put the updated copies back on the port.
         probe["stack"] = stack
         port["probe"] = probe
 
 
 def register(app, hub, ctx):
     """Register console routes on the Hub app."""
+    # Session, admin/console-access and tenant helpers from the shared route context.
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
     _is_tenant_admin = getattr(ctx, "_is_tenant_admin", lambda s: False)
@@ -189,6 +204,7 @@ def register(app, hub, ctx):
     _effective_tenant = getattr(ctx, "_effective_tenant",
                                 lambda req, explicit=None: None)
 
+    # Browser websocket for a Proxmox VNC console.
     @app.websocket("/ws/console/{session_id}")
     async def pxmx_console_ws(websocket: WebSocket, session_id: str):
         """Browser↔Proxmox VNC byte relay (agent-terminates-WSS).
@@ -201,6 +217,7 @@ def register(app, hub, ctx):
         (VNC_READY / VNC_ERROR / VNC_DISCONNECT) from _handle_agent_relay_up.
         On any exit, sends VNC_DISCONNECT down so the agent closes the Proxmox
         WSS and drops the session."""
+        # Look up the VNC session; a missing session or wrong token is closed with 4401.
         token = websocket.query_params.get("token") or ""
         hub = app.state.hub
         sess = hub.get_vnc_session(session_id)
@@ -208,6 +225,7 @@ def register(app, hub, ctx):
             await websocket.accept()
             await websocket.close(code=4401, reason="invalid or expired console session")
             return
+        # Pull the agent, frame queue and VM id from the session.
         spoke_id = sess["spoke_id"]
         queue = sess["queue"]
         unique_id = str(sess.get("unique_id") or "")
@@ -217,11 +235,14 @@ def register(app, hub, ctx):
         import time as _time
         sess["connected"] = True
         sess["connected_at"] = _time.time()
+        # Accept the browser connection and start the two relay directions.
         await websocket.accept()
         relay_tasks: list = []
         try:
             async def browser_to_spoke():
+                """Forward browser input bytes to the agent (only while we hold the write lock)."""
                 while True:
+                    # Read the next frame; stop on disconnect and turn text frames into bytes.
                     msg = await websocket.receive()
                     if msg.get("type") == "websocket.disconnect":
                         raise WebSocketDisconnect(code=msg.get("code", 1000))
@@ -239,18 +260,22 @@ def register(app, hub, ctx):
                     # this session's input immediately, without a reconnect.
                     if unique_id and not hub.vnc_is_writer(unique_id, session_id):
                         continue
+                    # Send the bytes to the agent (base64-encoded).
                     await hub.send_to_spoke_command(spoke_id, "VNC_FRAME_DOWN", {
                         "session_id": session_id,
                         "data": base64.b64encode(raw).decode(),
                     })
 
             async def spoke_to_browser():
+                """Forward queued VNC frames to the browser and act on control messages."""
                 while True:
+                    # Raw bytes go straight to the browser; tuples are control messages.
                     item = await queue.get()
                     if isinstance(item, (bytes, bytearray)):
                         await websocket.send_bytes(bytes(item))
                     elif isinstance(item, tuple) and item:
                         kind = item[0]
+                        # An agent error closes the browser socket with 1011.
                         if kind == "error":
                             await websocket.close(code=1011, reason=str(item[1]))
                             return
@@ -276,9 +301,11 @@ def register(app, hub, ctx):
                         # VNC_READY, so the RFB handshake never reached the browser
                         # and noVNC timed out → "Disconnected: closed" / blank screen.
                         continue
+                    # Anything else ends the relay.
                     else:
                         return
 
+            # Run both directions until one ends, then cancel the other.
             relay_tasks = [asyncio.create_task(browser_to_spoke()),
                            asyncio.create_task(spoke_to_browser())]
             done, pending = await asyncio.wait(relay_tasks,
@@ -286,15 +313,18 @@ def register(app, hub, ctx):
             for task in pending:
                 task.cancel()
             await asyncio.gather(*relay_tasks, return_exceptions=True)
+            # Re-raise a real error from a finished task (disconnects/cancels are normal).
             for task in done:
                 exc = task.exception()
                 if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
                     raise exc
+        # A browser disconnect is normal; other errors are logged.
         except WebSocketDisconnect:
             pass
         except Exception as exc:
             logger.warning("console ws %s relay failed: %s", session_id, exc)
         finally:
+            # Always clean up: drop the session, tell the agent, stop the tasks, close the socket.
             hub.unregister_vnc_session(session_id)
             try:
                 await hub.send_to_spoke_command(spoke_id, "VNC_DISCONNECT",
@@ -312,12 +342,14 @@ def register(app, hub, ctx):
                 except Exception:
                     pass
 
+    # Browser websocket for a host shell (xterm) session.
     @app.websocket("/ws/console-shell/{session_id}")
     async def pxmx_shell_ws(websocket: WebSocket, session_id: str):
         """Browser↔host-PTY byte relay (agent-terminates-PTY) — the xterm terminal.
         Mirrors /ws/console (VNC): browser keystrokes → SHELL_IN; PTY output
         (SHELL_OUT, queued via _handle_agent_relay_up) → browser bytes. A JSON text
         frame ``{"resize":{"rows","cols"}}`` becomes SHELL_RESIZE. ws_token gated."""
+        # Look up the shell session; a missing session or wrong token is closed with 4401.
         token = websocket.query_params.get("token") or ""
         hub = app.state.hub
         sess = hub.get_shell_session(session_id)
@@ -325,6 +357,7 @@ def register(app, hub, ctx):
             await websocket.accept()
             await websocket.close(code=4401, reason="invalid or expired shell session")
             return
+        # Mark the session connected, accept the browser and start the two relay directions.
         spoke_id = sess["spoke_id"]
         queue = sess["queue"]
         sess["connected"] = True
@@ -332,7 +365,9 @@ def register(app, hub, ctx):
         relay_tasks: list = []
         try:
             async def browser_to_spoke():
+                """Forward browser keystrokes (and resize requests) to the agent's shell."""
                 while True:
+                    # Read the next frame; stop on disconnect.
                     msg = await websocket.receive()
                     if msg.get("type") == "websocket.disconnect":
                         raise WebSocketDisconnect(code=msg.get("code", 1000))
@@ -354,14 +389,18 @@ def register(app, hub, ctx):
                                 "rows": r.get("rows", 24), "cols": r.get("cols", 80),
                             })
                             continue
+                        # Plain text is keystrokes.
                         raw = text.encode()
+                    # Send the bytes to the agent (base64-encoded).
                     await hub.send_to_spoke_command(spoke_id, "SHELL_IN", {
                         "session_id": session_id,
                         "data": base64.b64encode(raw).decode(),
                     })
 
             async def spoke_to_browser():
+                """Forward queued shell output to the browser and act on control messages."""
                 while True:
+                    # Raw bytes go straight to the browser; error/disconnect close the socket.
                     item = await queue.get()
                     if isinstance(item, (bytes, bytearray)):
                         await websocket.send_bytes(bytes(item))
@@ -377,21 +416,25 @@ def register(app, hub, ctx):
                     else:
                         return
 
+            # Run both directions until one ends, then cancel the other.
             relay_tasks = [asyncio.create_task(browser_to_spoke()),
                            asyncio.create_task(spoke_to_browser())]
             done, pending = await asyncio.wait(relay_tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in pending:
                 task.cancel()
             await asyncio.gather(*relay_tasks, return_exceptions=True)
+            # Re-raise a real error from a finished task (disconnects/cancels are normal).
             for task in done:
                 exc = task.exception()
                 if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
                     raise exc
+        # A browser disconnect is normal; other errors are logged.
         except WebSocketDisconnect:
             pass
         except Exception as exc:
             logger.warning("shell ws %s relay failed: %s", session_id, exc)
         finally:
+            # Always clean up: drop the session, tell the agent, stop the tasks, close the socket.
             hub.unregister_shell_session(session_id)
             try:
                 await hub.send_to_spoke_command(spoke_id, "SHELL_DISCONNECT", {"session_id": session_id})
@@ -416,6 +459,7 @@ def register(app, hub, ctx):
         other non-dict result — ``.get("data", result)`` only defaults on an
         ABSENT key, so a null used to leak out as a literal JSON ``null`` body
         that the WebUI then dereferenced."""
+        # Prefer payload.data when present, else the dict itself; non-dicts become {}.
         if isinstance(result, dict):
             data = result.get("payload", {}).get("data")
             if data is not None:
@@ -432,6 +476,7 @@ def register(app, hub, ctx):
         console servers only: shared-infra ports are never IP-routed to it, so
         shared stays shared, not a mix. Exact match: one group member owning a
         console must not cut the shared ports of the group's other members."""
+        # Look at every console spoke (connected or cached) for one dedicated to this tenant.
         if not tid:
             return False
         sids = set(hub.get_all_spokes_by_type("console") or [])
@@ -451,10 +496,12 @@ def register(app, hub, ctx):
         ``console`` subnet-filter), fail-closed when the tenant has no prefixes or
         the device has no IP. Unassigned / other tenant → no. (Admin bypasses at
         the call site.)"""
+        # Must be visible at all; a dedicated tenant's port is fine as is.
         if not access.spoke_visible_to_session(sess, eff):
             return False
         if not access.tenant_is_shared(eff):
             return True                      # dedicated to a tenant the caller owns
+        # Shared port: only the caller's tenants that don't have their own console count.
         user = (sess or {}).get("user", {}) or {}
         tids = [t for t in dict.fromkeys((user.get("tenants") or []) + [user.get("tenant_id")])
                 if t and not _tenant_has_own_console(t)]
@@ -462,6 +509,7 @@ def register(app, hub, ctx):
             return False                     # the caller's tenants all have their own consoles
         if not access.filter_enabled(hub, "console"):
             return True                      # subnet mask off → shared is open to all
+        # Collect those tenants' prefixes; the device IP must fall inside one.
         prefixes = []
         for t in tids:
             try:
@@ -480,11 +528,13 @@ def register(app, hub, ctx):
         bypasses. The port's effective tenant + device IP are resolved from
         CONSOLE_LIST_PORTS (best-effort: a fetch failure falls back to the
         agent's whole-agent tenant, fail-closed if that isn't accessible)."""
+        # Must be logged in; admins can act on any port.
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
         if _is_admin(sess):
             return
+        # Look up the port's tenant override and device IP from the agent (best effort).
         pid = str(port_id or "").strip()
         override, device_ip = "", None
         if pid:
@@ -496,6 +546,7 @@ def register(app, hub, ctx):
                 device_ip = ((match or {}).get("probe") or {}).get("identity", {}).get("ip")
             except Exception:  # noqa: BLE001
                 pass
+        # The port's tenant (override, else the agent's) must pass the tenant check.
         eff = override or (hub.state.get_spoke_tenant(sid) or "")
         if not await _console_tenant_ok(sess, sid, eff, device_ip):
             raise HTTPException(status_code=403,
@@ -508,6 +559,7 @@ def register(app, hub, ctx):
         ``global_config["console_credentials_ref"]``. A value like
         ``kv:console-auto-credentials`` (or a bare secret name) names a Key Vault
         secret holding the JSON credential list."""
+        # The env var wins, then the global config setting.
         gc = hub.state.system_state.get("global_config", {}) or {}
         return (os.environ.get("LM_CONSOLE_CREDENTIALS_REF")
                 or (gc.get("console_credentials_ref") if isinstance(gc, dict) else "")
@@ -521,11 +573,13 @@ def register(app, hub, ctx):
         """Resolve + parse the JSON credential list from the credential store
         (Key Vault). Returns a normalised ``[{username,password}]`` list, or
         ``None`` if the secret can't be fetched/parsed (caller fails closed)."""
+        # Fetch the secret text from the credential store.
         from security.credential_store import get_credential_provider, resolve_secret_text
         gc = hub.state.system_state.get("global_config", {}) or {}
         raw = resolve_secret_text(ref, get_credential_provider(gc))
         if not raw:
             return None
+        # Parse the JSON; keep only entries with a username.
         try:
             data = json.loads(raw)
         except Exception:  # noqa: BLE001
@@ -545,6 +599,7 @@ def register(app, hub, ctx):
         :func:`_console_credentials_ref`. The hub no longer keeps console
         passwords in its own state — see
         :func:`_console_purge_legacy_credentials`."""
+        # No reference -> no credentials; an unresolvable one is logged and treated as none.
         ref = _console_credentials_ref(hub)
         if not ref:
             return []
@@ -562,6 +617,7 @@ def register(app, hub, ctx):
         migration endpoint, which is the only way an operator can actually
         move this blob's contents into the Credential Vault — it predates
         the vault and is never written there by anything else."""
+        # Decrypt and parse the blob; any problem means "no credentials".
         try:
             state = hub.state.system_state
             blob = state.get("console_credentials_enc")
@@ -571,6 +627,7 @@ def register(app, hub, ctx):
             parsed = json.loads(hub_encryption.decrypt(blob.encode()))
         except Exception:  # noqa: BLE001 — no state / undecryptable / malformed
             return []
+        # Keep only entries with a username.
         return [{"username": str(c.get("username", "")), "password": str(c.get("password", ""))}
                 for c in (parsed or []) if isinstance(c, dict) and c.get("username")]
 
@@ -611,6 +668,7 @@ def register(app, hub, ctx):
 
         Never raises: this also runs on the seed path, and credential hygiene
         must not be able to break credential delivery."""
+        # Nothing to do if the blob isn't in state.
         try:
             state = hub.state.system_state
             if "console_credentials_enc" not in state:
@@ -618,6 +676,7 @@ def register(app, hub, ctx):
         except Exception:  # noqa: BLE001 — no/odd state object (early boot)
             return False
 
+        # A readable blob is kept unless every login in it is already in the vault.
         blob_creds = _console_load_legacy_blob_credentials(hub)
         if blob_creds:
             try:
@@ -636,6 +695,7 @@ def register(app, hub, ctx):
                     "will be dropped automatically.")
                 return False
 
+        # Purge (best effort), mark state for saving and log it.
         try:
             state.pop("console_credentials_enc", None)
         except Exception:  # noqa: BLE001
@@ -668,6 +728,7 @@ def register(app, hub, ctx):
         Recording an empty selection clears it back to ``None`` rather than
         "select nothing" (see :func:`_console_set_selection`), so a bucket can
         never be silently swept with zero credentials."""
+        # A stored list becomes a set; anything else means "no selection recorded".
         gc = hub.state.system_state.get("global_config", {}) or {}
         sel = (gc.get("console_credential_selection") or {}).get(bucket)
         return set(sel) if isinstance(sel, list) else None
@@ -676,6 +737,7 @@ def register(app, hub, ctx):
         """Persist ``bucket``'s console auto-identify selection. An empty/falsy
         ``names`` clears the bucket's entry entirely (reverting to "use every
         candidate") instead of storing an empty list."""
+        # Store the sorted names, or drop the entry when the list is empty; mark state for saving.
         gc = hub.state.system_state.setdefault("global_config", {})
         store = gc.setdefault("console_credential_selection", {})
         if names:
@@ -690,6 +752,7 @@ def register(app, hub, ctx):
         deselected via :func:`_console_set_selection`. Buckets with no recorded
         selection are unaffected (every candidate still counts)."""
         out = []
+        # Skip secrets the bucket has a selection for but didn't select.
         for rec in recs:
             sel = _console_get_selection(hub, rec.get("bucket"))
             if sel is not None and rec.get("name") not in sel:
@@ -706,12 +769,14 @@ def register(app, hub, ctx):
         ``{"username","password"}`` (a ``console``-type secret, one login each)."""
         d = creds_dict or {}
         out = []
+        # Multi-login list shape first.
         items = d.get("credentials")
         if isinstance(items, list):
             for c in items:
                 if isinstance(c, dict) and c.get("username"):
                     out.append({"username": str(c.get("username", "")),
                                 "password": str(c.get("password", ""))})
+        # Otherwise a single flat login.
         if not out and d.get("username"):
             out.append({"username": str(d.get("username", "")),
                         "password": str(d.get("password", ""))})
@@ -736,6 +801,7 @@ def register(app, hub, ctx):
         API-key-shaped ``login`` holding client_id/client_secret). The seed path
         uses it to explain WHY a console spoke got no logins instead of
         retrying silently forever."""
+        # Collected logins and the (username, password) pairs already seen; set up stats.
         creds, seen = [], set()
         if stats is not None:
             stats.setdefault("buckets", [])
@@ -743,12 +809,14 @@ def register(app, hub, ctx):
             stats.setdefault("unusable", 0)
 
         def _add(items):
+            """Append logins we haven't seen yet."""
             for c in items:
                 key = (c["username"], c["password"])
                 if key not in seen:
                     seen.add(key)
                     creds.append(c)
 
+        # Search the admin bucket plus the tenant's own bucket.
         try:
             import cred_vault as _cv
             buckets = [_cv.ADMIN_BUCKET]
@@ -756,6 +824,7 @@ def register(app, hub, ctx):
                 buckets.append(tenant)
             if stats is not None:
                 stats["buckets"] = list(buckets)
+            # Read console/login secrets (minus deselected ones); count candidates/unusable.
             recs = _console_selection_filter(
                 hub, await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, buckets))
             for rec in recs:
@@ -786,15 +855,18 @@ def register(app, hub, ctx):
         ``__admin__`` fallback and no legacy list secret. Used to show a tenant
         admin exactly the logins it manages (its own tenant bucket), kept
         separate from the inherited global logins it may not enumerate."""
+        # Collected logins and the pairs already seen.
         creds, seen = [], set()
 
         def _add(items):
+            """Append logins we haven't seen yet."""
             for c in items:
                 key = (c["username"], c["password"])
                 if key not in seen:
                     seen.add(key)
                     creds.append(c)
 
+        # Read console/login secrets from just this bucket (minus deselected ones).
         try:
             import cred_vault as _cv
             recs = _console_selection_filter(
@@ -819,15 +891,18 @@ def register(app, hub, ctx):
         matching the diagnostics banner which counts the same set. The per-spoke
         SEED stays tenant-scoped via ``_console_creds_for_tenant`` — only this
         Global-Admin *display* is fleet-wide."""
+        # Collected logins and the pairs already seen.
         creds, seen = [], set()
 
         def _add(items):
+            """Append logins we haven't seen yet."""
             for c in items:
                 key = (c["username"], c["password"])
                 if key not in seen:
                     seen.add(key)
                     creds.append(c)
 
+        # Read console/login secrets from every bucket (minus deselected ones).
         try:
             import cred_vault as _cv
             recs = _console_selection_filter(
@@ -857,6 +932,7 @@ def register(app, hub, ctx):
         (the per-spoke seed passes the spoke's tenant); ``None`` aggregates every
         reachable console/login secret (used by diagnostics/reporting).
         ``stats`` is forwarded to :func:`_console_creds_for_tenant`."""
+        # Prefer the Credential Vault; fall back to the Key Vault reference list.
         try:
             creds = await _console_creds_for_tenant(hub, tenant, stats=stats)
             if creds:
@@ -866,6 +942,7 @@ def register(app, hub, ctx):
         return _console_load_credentials(hub)
 
     def _cv_admin_bucket():
+        """Return the vault's admin bucket name ("__admin__" if cred_vault can't be loaded)."""
         try:
             import cred_vault as _cv
             return _cv.ADMIN_BUCKET
@@ -907,6 +984,7 @@ def register(app, hub, ctx):
         block (tells an operator whether the HUB — where the console seed /
         self-update logic lives — is actually on the latest code). '' on any
         failure; never raises."""
+        # Ask git for the short HEAD of the repo three levels up (5s timeout).
         try:
             repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
             proc = await asyncio.create_subprocess_exec(
@@ -918,6 +996,7 @@ def register(app, hub, ctx):
             return ""
 
     def _console_mark_seeded(hub, sid):
+        """Remember that spoke ``sid`` has been sent its credentials this process."""
         s = getattr(hub, "_console_creds_seeded", None)
         if s is None:
             s = set()
@@ -936,6 +1015,7 @@ def register(app, hub, ctx):
         between "you never added a console login" and "the login you added is
         the wrong shape" (e.g. an API-key secret typed ``login`` holding
         client_id/client_secret), which otherwise looks identical from the UI."""
+        # Warn only once per spoke.
         warned = getattr(hub, "_console_creds_warned", None)
         if warned is None:
             warned = set()
@@ -943,6 +1023,7 @@ def register(app, hub, ctx):
         if sid in warned:
             return
         warned.add(sid)
+        # Explain why: secrets with no usable login, or no console/login secrets at all.
         buckets = ", ".join(stats.get("buckets") or []) or "(vault unavailable)"
         cand = stats.get("candidates") or 0
         unusable = stats.get("unusable") or 0
@@ -974,6 +1055,7 @@ def register(app, hub, ctx):
         each resolve pulls from the Credential Vault (a per-spoke network
         round-trip), so a serial loop made the console page's seed step scale
         linearly with the number of console agents."""
+        # Only spokes not yet seeded; drop the legacy blob first.
         seeded = getattr(hub, "_console_creds_seeded", None) or set()
         todo = [sid for sid in spokes if sid not in seeded]
         if not todo:
@@ -981,6 +1063,8 @@ def register(app, hub, ctx):
         await _console_purge_legacy_credentials(hub)
 
         async def _seed_one(sid):
+            """Resolve the logins for one spoke's tenant and send them to it."""
+            # Look up the spoke's tenant (none if that fails) and resolve its logins.
             try:
                 tenant = hub.state.get_spoke_tenant(sid) or ""
             except Exception:  # noqa: BLE001
@@ -996,6 +1080,7 @@ def register(app, hub, ctx):
                 # hub-local store) leaving the operator nothing to act on.
                 _console_warn_no_credentials(hub, sid, tenant, stats)
                 return
+            # Send them to the spoke; on success mark it seeded and clear any old warning.
             try:
                 await hub.send_to_spoke_command(sid, "CONSOLE_SET_CREDENTIALS", {"credentials": creds})
                 _console_mark_seeded(hub, sid)
@@ -1003,6 +1088,7 @@ def register(app, hub, ctx):
             except Exception:  # noqa: BLE001
                 pass
 
+        # Seed all of them at once.
         await asyncio.gather(*(_seed_one(sid) for sid in todo))
 
     async def _console_push_llm_flag(hub, spokes, enabled):
@@ -1048,6 +1134,7 @@ def register(app, hub, ctx):
                 sid, "CONSOLE_AUTOPROBE", {"port_id": port_id}, timeout=90.0))
         except Exception:  # noqa: BLE001
             r = {}
+        # A fingerprint hit: build the result; resolve an ambiguous IP with the LLM if needed.
         if r and (r.get("vendor") or r.get("identity")):
             out = {"status": "OK", "identified": True, "source": "fingerprint",
                    "vendor": r.get("vendor"), "identity": dict(r.get("identity") or {}),
@@ -1089,6 +1176,7 @@ def register(app, hub, ctx):
           * ``resolved``        — the pick was adopted
         ``out["ip_resolution_confidence"]`` carries the score whenever the model
         reported one."""
+        # Pair each candidate IP with where it was seen.
         ctx_map = fp.get("ip_candidate_context") or {}
         cands = [{"ip": ip, "source": ctx_map.get(ip) or ""}
                  for ip in (fp.get("ip_candidates") or []) if ip]
@@ -1096,10 +1184,12 @@ def register(app, hub, ctx):
         # ambiguous" with no list left the UI with nothing to show.
         if cands:
             out["ip_candidates"] = [c["ip"] for c in cands]
+        # No AppBuilder agent or fewer than 2 candidates -> nothing to ask.
         agent = llm.find_ab(hub)
         if not agent or len(cands) < 2:
             out["ip_resolution"] = "not_asked"
             return
+        # Ask the LLM, giving it the vendor/model/type as context; a failure keeps the best guess.
         ident = out["identity"]
         context = ", ".join(str(v) for v in (out.get("vendor"), ident.get("model"),
                                              ident.get("type")) if v)
@@ -1110,6 +1200,7 @@ def register(app, hub, ctx):
                            sid, port_id, e)
             out["ip_resolution"] = "failed"
             return
+        # No answer is "unknown".
         if not pick or not pick.get("ip"):
             out["ip_resolution"] = "unknown"
             return
@@ -1119,12 +1210,14 @@ def register(app, hub, ctx):
             out["ip_resolution"] = "low_confidence"
             out["ip_resolution_confidence"] = conf
             return
+        # Adopt the pick and record how it was resolved.
         ident["ip"] = pick["ip"]
         out["source"] = "fingerprint+llm"
         out["llm_resolved_fields"] = ["ip"]
         out["ip_resolution"] = "resolved"
         if conf is not None:
             out["ip_resolution_confidence"] = conf
+        # The IP is no longer ambiguous; drop it from the lists.
         out.pop("ip_candidates", None)
         remaining = [f for f in out["ambiguous_fields"] if f != "ip"]
         if remaining:
@@ -1134,6 +1227,7 @@ def register(app, hub, ctx):
         # The spoke stored the fingerprint's first-candidate ip on AUTOPROBE;
         # store the merged identity over it (CONSOLE_LLM_STORE needs the flag).
         await _console_push_llm_flag(hub, [sid], True)
+        # Fetch the port's capture text and store the merged result.
         try:
             cap = _console_unwrap(await hub.request_response(
                 sid, "CONSOLE_GET_CAPTURE", {"port_id": port_id}, timeout=15.0))
@@ -1164,6 +1258,7 @@ def register(app, hub, ctx):
 
         Visibility mirrors ``access.spoke_visible_to_session`` +
         ``filter_record_by_prefixes`` (see ``_console_port_disposition``)."""
+        # Who is asking, and which tenant they picked.
         sess = _session_user(request)
         admin = _is_admin(sess)
         explicit = str(request.query_params.get("tenant") or "").strip()
@@ -1179,16 +1274,19 @@ def register(app, hub, ctx):
         # tenant owns no NetBox prefixes, so never mask against it.
         mask_scope = (None if sel == access.ADMIN_TENANT_ID else sel) \
             or (None if admin else (sess or {}).get("user", {}).get("tenant_id") or None)
+        # Is the console subnet filter on?
         hub = app.state.hub
         console_filter_on = access.filter_enabled(hub, "console")
         # A tenant with its own console agent never gets shared ports by IP.
         mask_own_console = _tenant_has_own_console(mask_scope)
+        # Fetch the masking tenant's prefixes (an error means none, so shared ports hide).
         mask_prefixes = None
         if mask_scope and console_filter_on:
             try:
                 mask_prefixes = await access.resolve_prefixes_for_tenant(hub, mask_scope)
             except Exception:  # noqa: BLE001 - prefix fetch best-effort; fail closed below
                 mask_prefixes = []
+        # Connected console spokes; make sure each has its credentials. Set up the outputs.
         spokes = hub.get_all_spokes_by_type("console") or []
         await _console_seed_credentials(hub, spokes)  # ensure new console spokes have creds
         ports, errors, visible_spokes = [], {}, set()
@@ -1202,6 +1300,7 @@ def register(app, hub, ctx):
             served from the last-known snapshot. Each port dict is COPIED before
             enrichment so the persisted warm-cache list is never mutated in place
             (it's reused across requests)."""
+            # The agent's tenant and friendly name.
             stenant = hub.state.get_spoke_tenant(sid) or ""
             agent_name = hub.state.get_module_name(sid)  # friendly name, not the UUID
             # A dedicated agent bound to the selected tenant is "present" for it
@@ -1213,6 +1312,7 @@ def register(app, hub, ctx):
                     or (_console_tenant_in(stenant, sel) and not access.tenant_is_shared(stenant))
                     or (admin_scope and not stenant)):
                 visible_spokes.add(sid)
+            # Copy each port and tag it with spoke, agent and tenant details.
             for src in (raw_ports or []):
                 p = dict(src)
                 override = p.get("tenant_id") or ""
@@ -1224,6 +1324,7 @@ def register(app, hub, ctx):
                 p["agent_tenant"] = stenant      # the whole-agent binding
                 if stale:
                     p["stale"] = True            # served from warm cache (spoke offline)
+                # Decide show / mask / hide for this caller.
                 shared = access.tenant_is_shared(eff)
                 visible = access.spoke_visible_to_session(sess, eff)
                 disp = _console_port_disposition(admin, visible, eff, sel, shared,
@@ -1242,6 +1343,7 @@ def register(app, hub, ctx):
                         if access.filter_record_by_prefixes(
                                 {"ip": device_ip}, mask_prefixes, ("ip",)) is None:
                             continue
+                # Passed: keep the port and count its spoke as visible.
                 ports.append(p)
                 visible_spokes.add(sid)
 
@@ -1259,6 +1361,7 @@ def register(app, hub, ctx):
         stale_after = getattr(hub, "CONSOLE_PORTS_STALE_AFTER", 120.0)
         _fetched_at = getattr(hub, "warm_fetched_at", None)
         now = time.time()
+        # Serve each spoke from cache; note ones never fetched (cold) or due a refresh (aging).
         cold, aging = [], []
         for sid in spokes:
             cached = hub.warm_get("console_ports", sid)
@@ -1282,6 +1385,7 @@ def register(app, hub, ctx):
         # loop made the first page load scale linearly with the number of console
         # agents (a wedged one stacking its full 60s onto every other's wait).
         async def _cold_fetch(sid):
+            """Fetch one spoke's ports live and cache them; return (sid, ports, error)."""
             try:
                 r = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=60.0)
                 raw_ports = _console_unwrap(r).get("ports") or []
@@ -1290,6 +1394,7 @@ def register(app, hub, ctx):
             except Exception as e:  # noqa: BLE001 - one dead console shouldn't blank the rest
                 return sid, None, str(e)
 
+        # Fetch all cold spokes at once; record errors, emit the rest.
         if cold:
             for sid, raw_ports, err in await asyncio.gather(*(_cold_fetch(s) for s in cold)):
                 if err is not None:
@@ -1318,18 +1423,21 @@ def register(app, hub, ctx):
         # so the conductor lookup runs once over the fully-assembled visible list.
         _correlate_stacks(ports)
 
+        # Console servers to report: all of them unscoped, else only those visible to the tenant.
         all_spokes = list(spokes) + [s for s in stale_spokes if s not in spokes]
         consoles = all_spokes if sel is None else [s for s in all_spokes if s in visible_spokes]
         if sel is not None:
             # errors / stale_spokes name console servers, so scope them like the
             # ports: a tenant must not see another tenant's servers here.
             def _for_sel(sid):
+                """Whether console server ``sid`` should be named to the selected tenant."""
                 st = hub.state.get_spoke_tenant(sid) or ""
                 return (sid in visible_spokes
                         or (_console_tenant_in(st, sel) and not access.tenant_is_shared(st))
                         or (admin_scope and not st))
             errors = {s: e for s, e in errors.items() if _for_sel(s)}
             stale_spokes = {s for s in stale_spokes if _for_sel(s)}
+        # Build the response.
         out = {"consoles": consoles, "ports": ports, "errors": errors,
                "stale_spokes": sorted(stale_spokes)}
         # DPA is configured per console server: admins get every connected
@@ -1342,6 +1450,7 @@ def register(app, hub, ctx):
                                    for sid in dpa]
         return out
 
+    # List the console ports the caller can see.
     @app.get("/api/console/ports")
     async def console_ports(request: Request):
         """Serial ports across every connected Console spoke (tenant-scoped)."""
@@ -1359,24 +1468,32 @@ def register(app, hub, ctx):
     # per-tenant last-sync status, mirroring the other discovery-sync cards.
     @app.get("/setup/console-netbox-sync")
     async def get_console_netbox_sync(request: Request):
+        """Return the Console -> NetBox sync config and whether NetBox is connected."""
+        # Admins only.
         hub = app.state.hub
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Return the config and whether an IPAM (NetBox) spoke is connected.
         cfg = hub.state.system_state.get("global_config", {}).get("console_netbox_device_sync", {}) or {}
         return {"config": cfg, "netbox_connected": bool(hub.get_spoke_by_type("ipam"))}
 
+    # Save the Console -> NetBox sync config.
     @app.post("/setup/console-netbox-sync")
     async def set_console_netbox_sync(request: Request):
+        """Merge the posted config into the stored Console -> NetBox sync config."""
+        # Admins only.
         hub = app.state.hub
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Read the JSON body (defaulting to {}) and take its "config" dict.
         try:
             data = await request.json()
         except Exception:
             data = {}
         cfg = (data or {}).get("config", {}) if isinstance(data, dict) else {}
+        # Merge it over the old config, store it and mark state for saving.
         gc = hub.state.system_state.get("global_config", {}) or {}
         old = gc.get("console_netbox_device_sync", {}) or {}
         merged = {**old, **cfg}
@@ -1385,12 +1502,16 @@ def register(app, hub, ctx):
         hub.state._mark_dirty()
         return {"status": "ok", "config": merged}
 
+    # Per-tenant status of the Console -> NetBox sync.
     @app.get("/setup/console-netbox-sync/status")
     async def console_netbox_sync_status(request: Request):
+        """Return the last sync status for each tenant."""
+        # Admins only.
         hub = app.state.hub
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Reshape each tenant's status row for the UI.
         rows = hub.console_netbox_sync_status()
         tenants = [{
             "tenant_id": r.get("tenant_id"),
@@ -1404,56 +1525,69 @@ def register(app, hub, ctx):
         } for r in rows]
         return {"tenants": tenants}
 
+    # Change a port's settings or alias.
     @app.post("/api/console/settings")
     async def console_settings(request: Request):
         """Set per-port settings (baud/parity/flow) or alias on a Console spoke."""
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Find the console spoke and check the caller may act on this port.
         sid = _console_spoke_or_none(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No spoke connected")
         await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
+        # An "alias" key sets the alias; otherwise it's a settings change.
         cmd = "CONSOLE_SET_ALIAS" if "alias" in body else "CONSOLE_SET_SETTINGS"
         r = await hub.request_response(sid, cmd, body or {}, timeout=15.0)
         return _console_unwrap(r)
 
+    # Detect a port's baud rate.
     @app.post("/api/console/detect-baud")
     async def console_detect_baud(request: Request):
         """Auto-detect + lock a port's baud rate (sweeps candidates; up to ~45s)."""
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Find the console spoke and check the caller may act on this port.
         sid = _console_spoke_or_none(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No spoke connected")
         await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
+        # Ask the spoke to sweep baud rates (allow up to 45s).
         r = await hub.request_response(sid, "CONSOLE_DETECT_BAUD",
                                        {"port_id": (body or {}).get("port_id")}, timeout=45.0)
         return _console_unwrap(r)
 
+    # Run the fingerprint identify on one port.
     @app.post("/api/console/identify")
     async def console_identify(request: Request):
         """Manually trigger the read-only auto-identify (fingerprint) on a port.
         Seeds credentials first so the login step can succeed."""
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Find the console spoke and check the caller may act on this port.
         sid = _console_spoke_or_none(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No spoke connected")
         await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
+        # Make sure the spoke has its logins, then run the probe (up to 90s).
         await _console_seed_credentials(hub, [sid])
         r = await hub.request_response(sid, "CONSOLE_AUTOPROBE",
                                        {"port_id": (body or {}).get("port_id")}, timeout=90.0)
         return _console_unwrap(r)
 
+    # Profile one device (fingerprint first, then the LLM).
     @app.post("/api/console/identify-llm")
     async def console_identify_llm(request: Request):
         """Profile ONE device (on-demand). Fingerprint-first: a device the
@@ -1466,10 +1600,12 @@ def register(app, hub, ctx):
         ``/api/console/identify`` fingerprint action; the per-port
         ``_assert_port_tenant`` guard then confines a non-admin to a port it can
         see (own-dedicated, or a shared device in its subnet)."""
+        # Needs console view access.
         sess = _session_user(request)
         if not (_is_admin(sess) or _has_console_access(sess)):
             raise HTTPException(status_code=403, detail="Console access required")
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}); spoke and port are required.
         try:
             body = await request.json()
         except Exception:
@@ -1478,7 +1614,9 @@ def register(app, hub, ctx):
         port_id = (body or {}).get("port_id")
         if not sid or not port_id:
             raise HTTPException(status_code=400, detail="spoke_id/port_id required")
+        # Check the caller may act on this port.
         await _assert_port_tenant(request, sid, port_id)
+        # Profile it; an error is a 502, and no LLM agent available is a 409.
         try:
             res = await _console_profile_one(hub, sid, port_id)
         except Exception as e:  # noqa: BLE001
@@ -1487,6 +1625,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=409, detail=res.get("message"))
         return res
 
+    # Profile every visible port in the background.
     @app.post("/api/console/identify-llm-all")
     async def console_identify_llm_all(request: Request):
         """Profile EVERY visible console port at once (on-demand). Each port is
@@ -1499,10 +1638,12 @@ def register(app, hub, ctx):
         list is the caller's tenant-scoped visible ports
         (``_list_visible_console_ports``), so a non-admin only profiles the ports
         it can see."""
+        # Needs console view access.
         sess = _session_user(request)
         if not (_is_admin(sess) or _has_console_access(sess)):
             raise HTTPException(status_code=403, detail="Console access required")
         hub = app.state.hub
+        # Targets are the visible ports nobody has open; count the ones skipped.
         data = await _list_visible_console_ports(request)  # tenant-scoped like the list view
         all_ports = data.get("ports") or []
         targets = [(p.get("spoke_id"), p.get("port_id")) for p in all_ports
@@ -1517,6 +1658,7 @@ def register(app, hub, ctx):
         sem = asyncio.Semaphore(2)  # single AppBuilder agent → keep it gentle
 
         async def _run_one(sid, pid):
+            """Profile one port (at most 2 at a time); a failure is only logged."""
             async with sem:
                 try:
                     await _console_profile_one(hub, sid, pid)
@@ -1524,16 +1666,20 @@ def register(app, hub, ctx):
                     logger.warning("bulk profiling failed for %s/%s: %s", sid, pid, e)
 
         async def _run_all():
+            """Profile every target port."""
             await asyncio.gather(*[_run_one(sid, pid) for sid, pid in targets])
 
+        # Start them in the background and return straight away.
         asyncio.create_task(_run_all())  # fire-and-forget; survives this request
         return {"queued": len(targets), "skipped_in_use": skipped_in_use}
 
+    # Read the LLM-identify toggle.
     @app.get("/api/console/llm-identify")
     async def console_llm_identify_get(request: Request):
         """Current state of the LLM-assisted identify toggle (admin). Reports
         whether it's enabled and whether the AppBuilder LLM agent is connected."""
         from routes import console_llm_identify as llm
+        # Admins only.
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
@@ -1541,20 +1687,24 @@ def register(app, hub, ctx):
         return {"enabled": llm.hub_llm_identify_enabled(hub),
                 "available": llm.find_ab(hub) is not None}
 
+    # Turn LLM-identify on or off.
     @app.post("/api/console/llm-identify")
     async def console_llm_identify_set(request: Request):
         """Enable/disable LLM-assisted identify (admin). Persists the hub setting
         and pushes the runtime gate to every connected Console spoke."""
         from routes import console_llm_identify as llm
+        # Admins only.
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}) for the new setting.
         try:
             body = await request.json()
         except Exception:
             body = {}
         enabled = bool((body or {}).get("enabled"))
+        # Save it and push it to every console spoke.
         hub.state.system_state["console_llm_identify_enabled"] = enabled
         hub.state._mark_dirty()
         await _console_push_llm_flag(hub, hub.get_all_spokes_by_type("console") or [], enabled)
@@ -1565,6 +1715,7 @@ def register(app, hub, ctx):
         """Global Admin: any console server. Tenant admin: only a server bound
         to one of its own (non-shared) tenants — DPA is a whole-server setting,
         so a shared server stays Global-Admin-only."""
+        # Admins can manage any server; tenant admins only one dedicated to their own tenant.
         if _is_admin(sess):
             return True
         if not _is_tenant_admin(sess):
@@ -1575,6 +1726,7 @@ def register(app, hub, ctx):
     def _console_dpa_spoke(hub, body):
         """The console spoke named by body["spoke_id"] (or the first one), only
         if it really is a connected console spoke."""
+        # Use the requested (or first) spoke only if it is a connected console spoke.
         sid = _console_spoke_or_none(hub, body)
         consoles = hub.get_all_spokes_by_type("console") or []
         return sid if sid and sid in consoles else None
@@ -1582,6 +1734,7 @@ def register(app, hub, ctx):
     def _console_dpa_result(r):
         """Unwrap a DPA command reply, turning a spoke-side validation ERROR
         into an HTTP 400 so the WebUI shows the reason."""
+        # A spoke-side ERROR becomes a 400; non-dict replies become {}.
         data = _console_unwrap(r)
         if isinstance(data, dict) and data.get("status") == "ERROR":
             raise HTTPException(status_code=400, detail=data.get("message") or "DPA request failed")
@@ -1592,6 +1745,7 @@ def register(app, hub, ctx):
         page is served from the warm cache (refreshed every ~30s), so without
         this the reload that follows a save keeps showing rows without the
         DPA badge. Best-effort: a slow spoke just falls back to the loop."""
+        # Refresh just this spoke's cached ports (15s limit); a failure is only logged.
         refresh = getattr(hub, "refresh_console_ports_cache", None)
         if refresh is None:
             return
@@ -1600,10 +1754,12 @@ def register(app, hub, ctx):
         except Exception as exc:  # noqa: BLE001
             logger.debug("console DPA: port cache refresh for %s failed: %s", sid, exc)
 
+    # Read the DPA config for one console server.
     @app.get("/api/console/dpa")
     async def console_dpa_get(request: Request):
         """Direct Port Access config + status for one console spoke (admin, or a
         tenant admin on a server dedicated to its tenant)."""
+        # Find the console spoke named in ?spoke_id= and check the caller may manage it.
         sess = _session_user(request)
         hub = app.state.hub
         body = {"spoke_id": request.query_params.get("spoke_id", "")}
@@ -1612,15 +1768,18 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="No spoke connected")
         if not _dpa_manageable(sess, sid):
             raise HTTPException(status_code=403, detail="admin only")
+        # Ask the spoke for its DPA config.
         r = await hub.request_response(sid, "CONSOLE_GET_DPA", {}, timeout=15.0)
         return {"spoke_id": sid, **_console_dpa_result(r)}
 
+    # Update the DPA config on one console server.
     @app.post("/api/console/dpa")
     async def console_dpa_set(request: Request):
         """Update the persisted DPA knob on a console spoke (admin, or a tenant
         admin on a server dedicated to its tenant); applied
         live. The SSH password is forwarded once to the spoke (stored there only
         as a hash) and never logged or echoed."""
+        # Who is asking; read the JSON body (a bad or non-dict body becomes {}).
         sess = _session_user(request)
         hub = app.state.hub
         try:
@@ -1629,36 +1788,44 @@ def register(app, hub, ctx):
             body = {}
         if not isinstance(body, dict):
             body = {}
+        # Find the console spoke and check the caller may manage it.
         sid = _console_dpa_spoke(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No spoke connected")
         if not _dpa_manageable(sess, sid):
             raise HTTPException(status_code=403, detail="admin only")
+        # Forward only the known DPA fields.
         payload = {
             k: v for k, v in body.items()
             if k in ("enabled", "ssh_enabled", "telnet_enabled", "ssh_bind", "ssh_base",
                      "telnet_bind", "telnet_base", "allow", "advertise_host",
                      "authorized_keys", "password", "clear_password")
         }
+        # Apply it, then refresh the cached port list so the change shows straight away.
         r = await hub.request_response(sid, "CONSOLE_SET_DPA", payload, timeout=60.0)
         result = {"spoke_id": sid, **_console_dpa_result(r)}
         await _console_dpa_refresh_ports(hub, sid)
         return result
 
+    # Pin or clear one port's DPA TCP port.
     @app.post("/api/console/dpa-port")
     async def console_dpa_port(request: Request):
         """Pin (or clear, with port null) the DPA TCP port for one serial port."""
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Anything that isn't a dict becomes {}.
         if not isinstance(body, dict):
             body = {}
+        # Find the console spoke and check the caller may act on this port.
         sid = _console_dpa_spoke(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No spoke connected")
         await _assert_port_tenant(request, sid, body.get("port_id"))
+        # Send the pin (default protocol ssh), then refresh the cached port list.
         payload = {
             "port_id": body.get("port_id"),
             "proto": body.get("proto") or "ssh",
@@ -1669,35 +1836,42 @@ def register(app, hub, ctx):
         await _console_dpa_refresh_ports(hub, sid)
         return result
 
+    # Read a port's recent captured output.
     @app.post("/api/console/capture")
     async def console_capture(request: Request):
         """Return the recent passive-capture buffer for a port — whatever the
         device has emitted (banner/boot/log/prompt), even with no user attached.
         Tenant-guarded exactly like the other per-port actions."""
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Find the console spoke and check the caller may act on this port.
         sid = _console_spoke_or_none(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No spoke connected")
         await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
+        # Ask the spoke for the capture buffer (optionally just the last N bytes).
         r = await hub.request_response(sid, "CONSOLE_GET_CAPTURE", {
             "port_id": (body or {}).get("port_id"),
             "bytes": (body or {}).get("bytes"),
         }, timeout=15.0)
         return _console_unwrap(r)
 
+    # Set or clear a port's tenant override.
     @app.post("/api/console/tenant")
     async def console_set_tenant(request: Request):
         """Bind a single PORT to a tenant (per-port override). Admin-only, like the
         whole-agent tenant assignment. Empty tenant_id clears the override so the
         port falls back to the agent's tenant."""
+        # Admins only.
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}); spoke and port are required.
         try:
             body = await request.json()
         except Exception:
@@ -1705,11 +1879,13 @@ def register(app, hub, ctx):
         sid = _console_spoke_or_none(hub, body)
         if not sid or not (body or {}).get("port_id"):
             raise HTTPException(status_code=400, detail="spoke_id/port_id required")
+        # Tell the spoke the new tenant ("" clears the override).
         r = await hub.request_response(sid, "CONSOLE_SET_TENANT", {
             "port_id": body.get("port_id"), "tenant_id": body.get("tenant_id", ""),
         }, timeout=15.0)
         return _console_unwrap(r)
 
+    # Serial-connection health report.
     @app.get("/api/console/diagnostics")
     async def console_diagnostics(request: Request):
         """Serial-connection health report across every Console spoke: ports that
@@ -1719,6 +1895,7 @@ def register(app, hub, ctx):
         ports it can see (tenant-scoped exactly like the ports list), while a
         Global Admin sees the infra-wide report in the "All" view and a single
         tenant's report when that tenant is selected in the picker."""
+        # Needs console view access.
         sess = _session_user(request)
         if not (_is_admin(sess) or _has_console_access(sess)):
             raise HTTPException(status_code=403, detail="Console access required")
@@ -1735,10 +1912,12 @@ def register(app, hub, ctx):
         explicit = str(request.query_params.get("tenant") or "").strip()
         tid = _resolve_tenant(request, explicit or None)
         sel = tid if (tid and tid not in ("all", "__all__")) else None
+        # Unscoped admin: every spoke, no per-row filtering.
         if admin and sel is None:
             spokes = all_spokes
             ded_visible = set(all_spokes)   # every spoke fully visible
             visible_keys = None             # None == no per-row filtering
+        # Otherwise only the visible ports and the spokes dedicated to a visible tenant.
         else:
             vis = await _list_visible_console_ports(request)
             visible_keys = {(p.get("spoke_id"), p.get("port_id"))
@@ -1762,6 +1941,7 @@ def register(app, hub, ctx):
         # fresh process regains its creds instead of the operator having to open
         # the ports tab to trigger it. See _forget_console_creds_seed / #275.
         await _console_seed_credentials(hub, spokes)
+        # Ask each spoke for its diagnostics (a failure is recorded per spoke).
         rows, errors, summaries = [], {}, {}
         for sid in spokes:
             agent_name = hub.state.get_module_name(sid)
@@ -1771,6 +1951,7 @@ def register(app, hub, ctx):
             except Exception as e:  # noqa: BLE001 - one dead console shouldn't blank the rest
                 errors[sid] = str(e)
                 continue
+            # Keep the spoke's summary, then tag and keep each visible row.
             payload = _console_unwrap(r)
             summ = payload.get("summary")
             if summ:
@@ -1783,6 +1964,7 @@ def register(app, hub, ctx):
                 d["agent_name"] = agent_name
                 d["tenant_id"] = d.get("tenant_id") or stenant  # per-port override else agent binding
                 rows.append(d)
+        # Worst first: currently failing, then most failures/disconnects.
         rows.sort(key=lambda d: (d.get("currently_failing", False),
                                  d.get("open_failures", 0) + d.get("disconnects", 0)), reverse=True)
         # Hub-side credential/seed debug — visible even when a console agent's own
@@ -1804,19 +1986,23 @@ def register(app, hub, ctx):
         # _console_seed_credentials pushes, so the banner never falsely warns
         # "0 saved / factory defaults only" when the creds live in the vault.
         # Counts only — never values.
+        # Collect the deduped logins the caller can reach, and whether any came from the vault.
         saved_creds, _seen_c, vault_present = [], set(), False
         try:
             import cred_vault as _cv
+            # Unscoped admin: every bucket.
             if admin and sel is None:
                 _recs = await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, None)
             elif admin:
                 # Scoped to the picked tenant: its bucket + the shared admin slot.
                 _buckets = list(dict.fromkeys([_cv.ADMIN_BUCKET, sel]))
                 _recs = await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, _buckets)
+            # Non-admin: the admin slot plus the caller's own tenants.
             else:
                 _reach = list((sess or {}).get("user", {}).get("tenants") or [])
                 _buckets = list(dict.fromkeys([_cv.ADMIN_BUCKET] + _reach))
                 _recs = await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, _buckets)
+            # Add each secret's logins (deduped).
             for _rec in _recs:
                 _cc = _console_creds_from_cred_vault(_rec.get("value"))
                 if _cc:
@@ -1844,18 +2030,21 @@ def register(app, hub, ctx):
             _legacy = _console_load_credentials(hub)
         except Exception:  # noqa: BLE001 - debug must never blank the report
             _legacy = []
+        # Add the legacy logins too (deduped).
         legacy_present = bool(_legacy)
         for c in _legacy:
             k = (c.get("username"), c.get("password"))
             if k not in _seen_c:
                 _seen_c.add(k)
                 saved_creds.append(c)
+        # Say where the logins came from.
         if vault_present:
             cred_source = "credential vault" + (" + legacy" if legacy_present else "")
         elif _console_creds_keyvault_backed(hub):
             cred_source = "keyvault:" + _console_credentials_ref(hub)
         else:
             cred_source = "none"
+        # Debug block: login count/source, hub version, and per-spoke seed/response state.
         debug = {
             "hub_credentials_saved": len(saved_creds),
             "hub_credentials_source": cred_source,
@@ -1870,20 +2059,24 @@ def register(app, hub, ctx):
                 for sid in spokes
             },
         }
+        # Return the report.
         return {"diagnostics": rows, "errors": errors, "consoles": spokes,
                 "summaries": summaries, "debug": debug}
 
+    # Clear the collected diagnostics on every console spoke.
     @app.post("/api/console/diagnostics/purge")
     async def console_diagnostics_purge(request: Request):
         """Purge ALL collected serial-health / identify telemetry across every
         Console spoke (failure/disconnect counts, identify attempts, transcript
         tails). Live 'currently failing' state re-derives on the next probe cycle.
         Admin-gated, like the diagnostics report itself."""
+        # Admins only.
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
         spokes = hub.get_all_spokes_by_type("console") or []
+        # Ask each spoke to purge; count what was purged and record failures.
         purged, errors = 0, {}
         for sid in spokes:
             try:
@@ -1893,6 +2086,7 @@ def register(app, hub, ctx):
                 errors[sid] = str(e)
         return {"purged": purged, "errors": errors, "consoles": spokes}
 
+    # List the console auto-login credentials (passwords masked).
     @app.get("/api/console/credentials")
     async def console_get_credentials(request: Request):
         """Return the auto-identify credential list with passwords MASKED
@@ -1910,6 +2104,7 @@ def register(app, hub, ctx):
         or manage the global LOCAL legacy passwords — deletion (the POST) stays
         Global-Admin-only; a tenant admin manages its own console logins in the
         Credential Vault (their tenant bucket)."""
+        # Global admins and tenant admins only.
         sess = _session_user(request)
         is_global = _is_admin(sess)
         is_ta = (not is_global) and _is_tenant_admin(sess)
@@ -1932,6 +2127,7 @@ def register(app, hub, ctx):
         else:
             scoped_tenant = (req_tenant
                              if req_tenant not in ("", "all", "__all__") else None)
+        # A specific tenant: show its own logins plus a count of the shared ones.
         if scoped_tenant:
             tenant = scoped_tenant
             # Show ONLY the tenant's own vault-bucket logins (the ones actually
@@ -1954,6 +2150,7 @@ def register(app, hub, ctx):
             shared_global_count = sum(
                 1 for c in combined
                 if (c.get("username", ""), c.get("password", "")) not in own_keys)
+            # Return the tenant-scoped (editable) view.
             return {"credentials": [{"username": c.get("username", ""),
                                      "has_password": bool(c.get("password"))} for c in own],
                     "source": "cred_vault", "read_only": False, "creation_disabled": False,
@@ -1965,9 +2162,11 @@ def register(app, hub, ctx):
                     "vault_bucket": tenant, "vault_secret": _CONSOLE_VAULT_SECRET}
         # Global Admin, no specific tenant selected: the fleet-wide inventory of
         # every tenant's console logins (all buckets), not just ``__admin__``.
+        # Every bucket; fall back to the Key Vault reference list if empty.
         creds = await _console_creds_all_buckets(hub)
         if not creds:
             creds = _console_load_credentials(hub)
+        # Note whether logins live in the vault and whether the vault is usable.
         vault_backed = await _console_vault_secret_present(hub)
         vault_on = _vault_enabled(hub)
         # The retired hub-local password blob is dropped on sight (see
@@ -1978,6 +2177,7 @@ def register(app, hub, ctx):
         await _console_purge_legacy_credentials(hub)
         # Console logins are edited in the Credential Library
         # (POST /api/console/credentials/set), never here.
+        # Return the read-only, fleet-wide view (usernames only).
         kv_backed = _console_creds_keyvault_backed(hub)
         return {"credentials": [{"username": c.get("username", ""),
                                  "has_password": bool(c.get("password"))} for c in creds],
@@ -1989,6 +2189,7 @@ def register(app, hub, ctx):
                 "local_credentials": [],
                 "vault_bucket": _cv_admin_bucket(), "vault_secret": _CONSOLE_VAULT_SECRET}
 
+    # Retired: always 409 (admins only).
     @app.post("/api/console/credentials")
     async def console_post_credentials(request: Request):
         """Retired. Admin only.
@@ -2000,6 +2201,7 @@ def register(app, hub, ctx):
         the Credential Vault on every deployment, so there is nothing here left
         to write. Always 409 with a pointer to the supported endpoint rather
         than accepting a write the hub would silently drop."""
+        # Admins only; drop the legacy blob if it can be, then refuse.
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
@@ -2009,6 +2211,7 @@ def register(app, hub, ctx):
             "auto-identify logins in the Credential Library (they are read from "
             "the Credential Vault); this endpoint is retired."))
 
+    # Copy the legacy credential list into the Credential Vault.
     @app.post("/api/console/credentials/to-vault")
     async def console_creds_to_vault(request: Request):
         """Migrate the current auto-identify credential list into the Credential
@@ -2024,18 +2227,22 @@ def register(app, hub, ctx):
         :func:`_console_purge_legacy_credentials` refuses to purge until a
         migration happens; without this fallback that guard's own advice
         ("run this endpoint first") was unusable for those installs."""
+        # Admins only.
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}) for the admin-slot pass-phrase.
         try:
             body = await request.json()
         except Exception:
             body = {}
         psk = str((body or {}).get("psk") or "")
+        # Take the Key Vault reference list, else the legacy blob; nothing to copy is a 400.
         creds = _console_load_credentials(hub) or _console_load_legacy_blob_credentials(hub)
         if not creds:
             raise HTTPException(status_code=400, detail="no console credentials to migrate")
+        # Write the list as one console secret in the admin slot; a vault error is a 400.
         import cred_vault as _cv
         try:
             await _cv.put_secret(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET,
@@ -2044,11 +2251,13 @@ def register(app, hub, ctx):
                                  psk=psk, actor=(sess.get("user", {}) or {}).get("username", "?"))
         except _cv.CredVaultError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        # Log it and return what was written.
         logger.info("console: %d credential(s) migrated into the Credential Vault by %s",
                     len(creds), (sess.get("user", {}) or {}).get("username", "?"))
         return {"status": "ok", "count": len(creds), "bucket": _cv.ADMIN_BUCKET,
                 "name": _CONSOLE_VAULT_SECRET}
 
+    # Set the console login list for one vault bucket.
     @app.post("/api/console/credentials/set")
     async def console_set_credentials(request: Request):
         """Set the console auto-identify (device scan) login list for a bucket the
@@ -2066,17 +2275,20 @@ def register(app, hub, ctx):
         username's currently-stored password; an empty list clears the bucket's
         console logins. Scoped re-seed pushes the change to the affected console
         spokes immediately."""
+        # Global admins and tenant admins only.
         sess = _session_user(request)
         is_global = _is_admin(sess)
         is_ta = (not is_global) and _is_tenant_admin(sess)
         if not is_global and not is_ta:
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
         import cred_vault as _cv
+        # Pick the bucket: a tenant admin's own tenant, else the posted tenant or the admin slot.
         if is_ta:
             # A tenant admin is locked to their own tenant bucket — never the
             # privileged __admin__ slot, never a sibling tenant.
@@ -2089,6 +2301,7 @@ def register(app, hub, ctx):
         psk = str((body or {}).get("psk") or "")
         # Merge blank passwords with the currently-stored login (a kept row
         # submits an empty password because secrets are never echoed back).
+        # Build the new list: one row per username, blank passwords keep the stored one.
         existing = await _console_creds_in_bucket(hub, bucket)
         existing_pw = {c.get("username", ""): c.get("password", "") for c in existing}
         creds, seen = [], set()
@@ -2103,6 +2316,7 @@ def register(app, hub, ctx):
             if p == "" and u in existing_pw:
                 p = existing_pw[u]
             creds.append({"username": u, "password": str(p)})
+        # Save the list, or delete the secret when the list is empty; a vault error is a 400.
         actor = (sess.get("user", {}) or {}).get("username", "?")
         try:
             if creds:
@@ -2123,6 +2337,7 @@ def register(app, hub, ctx):
         # Re-seed console spokes so the change lands immediately. A tenant bucket
         # only re-seeds that tenant's console spokes; __admin__ re-seeds all
         # (its logins are shared across every tenant's console spoke).
+        # Forget who's been seeded; push the new logins to each affected spoke (best effort).
         hub._console_creds_seeded = set()
         for sid in (hub.get_all_spokes_by_type("console") or []):
             try:
@@ -2138,11 +2353,13 @@ def register(app, hub, ctx):
                 _console_mark_seeded(hub, sid)
             except Exception:  # noqa: BLE001
                 pass
+        # Log it and return the summary.
         logger.info("console: %d scan credential(s) set in vault bucket %s by %s",
                     len(creds), bucket, actor)
         return {"status": "ok", "count": len(creds), "bucket": bucket,
                 "name": _CONSOLE_VAULT_SECRET}
 
+    # List the vault secrets the console sweep can use, with their include flag.
     @app.get("/api/console/credentials/candidates")
     async def console_credentials_candidates(request: Request):
         """List every automation-readable ``console``/``login`` vault secret in
@@ -2152,6 +2369,7 @@ def register(app, hub, ctx):
         in the Credential Library — without this, the sweep blindly tries every
         such secret in the bucket (still the default when nothing is
         deselected here). Usernames only; passwords are never returned."""
+        # Global admins and tenant admins only.
         sess = _session_user(request)
         is_global = _is_admin(sess)
         is_ta = (not is_global) and _is_tenant_admin(sess)
@@ -2159,6 +2377,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
         import cred_vault as _cv
+        # Pick the bucket: a tenant admin's own tenant, else ?tenant or the admin slot.
         req_tenant = (request.query_params.get("tenant") or "").strip()
         if is_ta:
             bucket = _effective_tenant(request, req_tenant or None)
@@ -2167,9 +2386,11 @@ def register(app, hub, ctx):
                                     detail="no tenant scope — select one of your tenants")
         else:
             bucket = req_tenant or _cv.ADMIN_BUCKET
+        # Read the bucket's candidates and its current selection.
         recs = await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, [bucket])
         selection = _console_get_selection(hub, bucket)
         candidates = []
+        # Report each secret's name, first username and whether it is selected.
         for r in recs:
             v = r.get("value") or {}
             items = v.get("credentials") if isinstance(v.get("credentials"), list) else None
@@ -2178,6 +2399,7 @@ def register(app, hub, ctx):
                                "selected": True if selection is None else (r.get("name") in selection)})
         return {"bucket": bucket, "candidates": candidates, "selection_active": selection is not None}
 
+    # Save which vault secrets the console sweep may use.
     @app.post("/api/console/credentials/selection")
     async def console_set_credentials_selection(request: Request):
         """Persist which of the bucket's vault-backed ``console``/``login``
@@ -2186,17 +2408,20 @@ def register(app, hub, ctx):
         behavior. A non-null ``selected`` naming zero VALID candidates in the
         bucket is rejected — a silent all-off sweep is almost certainly a
         mistake; clear the selection explicitly instead."""
+        # Global admins and tenant admins only.
         sess = _session_user(request)
         is_global = _is_admin(sess)
         is_ta = (not is_global) and _is_tenant_admin(sess)
         if not is_global and not is_ta:
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
         import cred_vault as _cv
+        # Pick the bucket: a tenant admin's own tenant, else the posted tenant or the admin slot.
         if is_ta:
             bucket = _effective_tenant(request, (body or {}).get("tenant"))
             if not bucket:
@@ -2204,11 +2429,13 @@ def register(app, hub, ctx):
                                     detail="no tenant scope — select one of your tenants")
         else:
             bucket = str((body or {}).get("tenant") or "").strip() or _cv.ADMIN_BUCKET
+        # No selection clears it back to "use everything".
         selected = body.get("selected", None)
         if selected is None:
             _console_set_selection(hub, bucket, [])
             hub._console_creds_seeded = set()
             return {"status": "ok", "bucket": bucket, "selection_active": False}
+        # Keep only names that are real candidates; a list with none valid is a 400.
         if not isinstance(selected, list):
             raise HTTPException(status_code=400, detail="selected must be a list of secret names")
         recs = await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, [bucket])
@@ -2221,6 +2448,7 @@ def register(app, hub, ctx):
         _console_set_selection(hub, bucket, names)
         # Re-seed this bucket's console spokes so the narrowed/widened selection
         # takes effect immediately (same pattern as /api/console/credentials/set).
+        # Forget who's been seeded; push the new logins to each affected spoke (best effort).
         hub._console_creds_seeded = set()
         for sid in (hub.get_all_spokes_by_type("console") or []):
             try:
@@ -2238,6 +2466,7 @@ def register(app, hub, ctx):
                 pass
         return {"status": "ok", "bucket": bucket, "selected": names, "selection_active": True}
 
+    # Open a serial console session on a port.
     @app.post("/api/console/open")
     async def console_open(request: Request):
         """Mint a console session + ws_token and open the serial handle on the
@@ -2246,6 +2475,7 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         admin = _is_admin(sess)
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}); get the spoke, port and mode (default "rw").
         try:
             body = await request.json()
         except Exception:
@@ -2274,6 +2504,7 @@ def register(app, hub, ctx):
             if not await _console_tenant_ok(sess, sid, eff, device_ip):
                 raise HTTPException(status_code=403,
                                     detail="not authorized for this console port's tenant")
+        # Create the session id and tokens, and register the session on the hub.
         session_id = str(uuid.uuid4())
         ws_token = secrets.token_urlsafe(32)
         relay_token = secrets.token_urlsafe(32)   # edge-proxy relay leg (Phase 2)
@@ -2282,6 +2513,7 @@ def register(app, hub, ctx):
             "spoke_id": sid, "tenant_id": tenant_id, "ws_token": ws_token,
             "relay_token": relay_token, "port_id": port_id,
         })
+        # Ask the spoke to open the port; on failure drop the session and return a 502.
         try:
             r = await hub.request_response(sid, "CONSOLE_OPEN", {
                 "session_id": session_id, "port_id": port_id, "mode": mode,
@@ -2290,11 +2522,13 @@ def register(app, hub, ctx):
         except Exception as e:
             hub.unregister_console_session(session_id)
             raise HTTPException(status_code=502, detail=f"failed to open console: {e}")
+        # The spoke must report success, otherwise drop the session and return a 502.
         data = _console_unwrap(r)
         if data.get("status") not in ("SUCCESS", "OK"):
             hub.unregister_console_session(session_id)
             raise HTTPException(status_code=502,
                                 detail=data.get("message") or "console spoke refused CONSOLE_OPEN")
+        # Return the session, its token, the port settings and the relay details.
         return {"session_id": session_id, "ws_token": ws_token,
                 "settings": data.get("settings", {}), "read_only": bool(data.get("read_only")),
                 "writer": data.get("writer"), "expires_in": 60,
@@ -2310,12 +2544,14 @@ def register(app, hub, ctx):
                           "spoke_id": sid, "kind": "serial",
                           "tenant_id": hub.state.get_spoke_tenant(sid) or ""}}
 
+    # Take over write access on an open console session.
     @app.post("/api/console/{session_id}/takeover")
     async def console_takeover(session_id: str, request: Request):
         """Forcibly become the writer for an already-open, read-only serial
         console session, evicting whoever currently holds it. Requires
         edit-tier access — a stronger action than opening a plain ``rw``
         session, which /api/console/open does not itself gate."""
+        # Must be logged in, the session must exist, and the caller needs edit access.
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
@@ -2325,16 +2561,19 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=404, detail="console session not found or expired")
         if not access.has_edit_access(sess):  # covers admin/tenant-admin too
             raise HTTPException(status_code=403, detail="write access required to take over a console")
+        # The session must be bound to a port the caller may act on.
         spoke_id = csess.get("spoke_id")
         port_id = csess.get("port_id")
         if not spoke_id or not port_id:
             raise HTTPException(status_code=400, detail="console session has no port bound")
         await _assert_port_tenant(request, spoke_id, port_id)
+        # Ask the spoke to hand over the write lock; a failure is a 502.
         try:
             r = await hub.request_response(spoke_id, "CONSOLE_TAKEOVER",
                                            {"session_id": session_id}, timeout=15.0)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"takeover failed: {e}")
+        # The spoke must report success; return who held it before.
         data = _console_unwrap(r)
         if data.get("status") not in ("SUCCESS", "OK"):
             raise HTTPException(status_code=502,
@@ -2342,38 +2581,46 @@ def register(app, hub, ctx):
         return {"status": "ok", "session_id": session_id,
                 "previous_writer": data.get("previous_writer")}
 
+    # Read a device's running config through its console port.
     @app.post("/api/console/config/get")
     async def console_config_get(request: Request):
         """Read/back up a port's running-config. Gated by console_write (middleware)."""
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Find the console spoke and check the caller may act on this port.
         sid = _console_spoke_or_none(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No spoke connected")
         await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
+        # Make sure the spoke has its logins, then fetch the config (up to 90s).
         await _console_seed_credentials(hub, [sid])
         r = await hub.request_response(sid, "CONSOLE_GET_CONFIG",
                                        {"port_id": (body or {}).get("port_id")}, timeout=90.0)
         return _console_unwrap(r)
 
+    # Push config to a device through its console port.
     @app.post("/api/console/config/push")
     async def console_config_push(request: Request):
         """Transactional config push (verify → save-on-pass → rollback-on-fail).
         No post-request approval. Gated by console_write (middleware)."""
         hub = app.state.hub
+        # Read the JSON body (defaulting to {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Need a console spoke and some config, and the caller must be allowed on this port.
         sid = _console_spoke_or_none(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No spoke connected")
         if not str((body or {}).get("config", "")).strip():
             raise HTTPException(status_code=400, detail="config is required")
         await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
+        # Make sure the spoke has its logins, then push (save by default; up to 180s).
         await _console_seed_credentials(hub, [sid])
         r = await hub.request_response(sid, "CONSOLE_PUSH_CONFIG", {
             "port_id": body.get("port_id"), "config": body.get("config"),
@@ -2382,6 +2629,7 @@ def register(app, hub, ctx):
         }, timeout=180.0)
         return _console_unwrap(r)
 
+    # Browser websocket for a serial console session.
     @app.websocket("/ws/console-serial/{session_id}")
     async def console_serial_ws(websocket: WebSocket, session_id: str):
         """Browser↔serial byte relay for the Console role. Gated by the one-shot
@@ -2389,6 +2637,7 @@ def register(app, hub, ctx):
         (fire-and-forget); queued device output → browser bytes, with
         ready/error/disconnect control tuples (ready must CONTINUE, not return —
         the VNC relay bug). On exit: CONSOLE_CLOSE down + unregister."""
+        # Look up the console session; a missing session or wrong token is closed with 4401.
         token = websocket.query_params.get("token") or ""
         hub = app.state.hub
         sess = hub.get_console_session(session_id)
@@ -2396,6 +2645,7 @@ def register(app, hub, ctx):
             await websocket.accept()
             await websocket.close(code=4401, reason="invalid or expired console session")
             return
+        # Mark the session connected, accept the browser and start the two relay directions.
         spoke_id = sess["spoke_id"]
         queue = sess["queue"]
         sess["connected"] = True  # long-lived interactive session; TTL no longer applies
@@ -2403,7 +2653,9 @@ def register(app, hub, ctx):
         relay_tasks: list = []
         try:
             async def browser_to_spoke():
+                """Forward browser keystrokes to the serial port."""
                 while True:
+                    # Read the next frame; stop on disconnect and turn text frames into bytes.
                     msg = await websocket.receive()
                     if msg.get("type") == "websocket.disconnect":
                         raise WebSocketDisconnect(code=msg.get("code", 1000))
@@ -2413,12 +2665,14 @@ def register(app, hub, ctx):
                         if not text:
                             continue
                         raw = text.encode()
+                    # Send the bytes to the agent (base64-encoded).
                     await hub.send_to_spoke_command(spoke_id, "CONSOLE_DATA", {
                         "session_id": session_id,
                         "data": base64.b64encode(raw).decode(),
                     })
 
             async def spoke_to_browser():
+                """Forward device output to the browser, sending pings while idle."""
                 while True:
                     # Idle keepalive: if no device output arrives for the ping
                     # interval, send a control "ping" frame to the browser. A
@@ -2435,10 +2689,12 @@ def register(app, hub, ctx):
                     except asyncio.TimeoutError:
                         await websocket.send_text(json.dumps({"type": "ping"}))
                         continue
+                    # Raw bytes go straight to the browser; tuples are control messages.
                     if isinstance(item, (bytes, bytearray)):
                         await websocket.send_bytes(bytes(item))
                     elif isinstance(item, tuple) and item:
                         kind = item[0]
+                        # Error/disconnect close the browser socket.
                         if kind == "error":
                             await websocket.close(code=1011, reason=str(item[1]))
                             return
@@ -2455,24 +2711,29 @@ def register(app, hub, ctx):
                                 pass
                             continue
                         continue  # "ready": keep the consumer alive (VNC ready-return bug)
+                    # Anything else ends the relay.
                     else:
                         return
 
+            # Run both directions until one ends, then cancel the other.
             relay_tasks = [asyncio.create_task(browser_to_spoke()),
                            asyncio.create_task(spoke_to_browser())]
             done, pending = await asyncio.wait(relay_tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in pending:
                 task.cancel()
             await asyncio.gather(*relay_tasks, return_exceptions=True)
+            # Re-raise a real error from a finished task (disconnects/cancels are normal).
             for task in done:
                 exc = task.exception()
                 if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
                     raise exc
+        # A browser disconnect is normal; other errors are logged.
         except WebSocketDisconnect:
             pass
         except Exception as exc:  # noqa: BLE001
             logger.warning("console-serial ws %s relay failed: %s", session_id, exc)
         finally:
+            # Always clean up: drop the session, close the port, stop the tasks, close the socket.
             hub.unregister_console_session(session_id)
             try:
                 await hub.send_to_spoke_command(spoke_id, "CONSOLE_CLOSE", {"session_id": session_id})

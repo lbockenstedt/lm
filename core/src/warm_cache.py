@@ -52,6 +52,7 @@ Audience: Hub developers.
 
 from __future__ import annotations
 
+# asyncio; logging; os paths; time; zlib CRC jitter; dataclasses; type hints.
 import asyncio
 import logging
 import os
@@ -60,8 +61,10 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
+# Cache file and staleness helpers.
 from cache_core import JsonCacheFile, ShardedCacheFile, StalenessPolicy
 
+# Log to the hub's logger.
 logger = logging.getLogger("Hub")
 
 # ── tuning (fixed by design; the admin page shows them, it does not edit them) ──
@@ -77,11 +80,14 @@ RECENT_READ_ACTIVE_S = 600.0   # a tenant read this recently counts as active
 DETAIL_EVICT_S = 7 * 86400.0   # drop read-only (non-feed) entries unread this long
 EVICT_EVERY_S = 3600.0
 
+# Scope marker for data visible to any logged-in user.
 ALL_SCOPE = "*"                # "any logged-in user" marker for shared data
 
+# A fetch is an async callable that returns raw spoke data.
 Fetch = Callable[[], Awaitable[Any]]
 
 
+# Dataclass for job fields.
 @dataclass
 class CacheJob:
     """One thing the refresher can refresh.
@@ -90,6 +96,7 @@ class CacheJob:
     admin/shared data (active whenever ANYONE is logged in).
     ``lane``    — concurrency bucket (usually the spoke id or module name).
     """
+    # Namespace, key, fetch, visibility, lane, origin flags, jitter.
     ns: str
     key: str
     fetch: Fetch
@@ -101,10 +108,14 @@ class CacheJob:
 
 
 def _norm_tenants(tenants) -> Optional[Tuple[str, ...]]:
+    """Normalise tenants to a non-empty tuple of ids, or None for shared data."""
+    # None: shared data.
     if tenants is None:
         return None
+    # A single string becomes a 1-tuple; an empty one becomes None.
     if isinstance(tenants, str):
         return (tenants,) if tenants else None
+    # Iterable: string ids without blanks; empty becomes None.
     t = tuple(str(x) for x in tenants if x)
     return t or None
 
@@ -112,12 +123,14 @@ def _norm_tenants(tenants) -> Optional[Tuple[str, ...]]:
 def _jitter_for(ns: str, key: str) -> float:
     """Stable per-entry offset in [0, JITTER_S) so a fleet of keys that were
     all fetched at startup don't all come due in the same tick forever."""
+    # CRC of ns|key scaled into [0, JITTER_S).
     return (zlib.crc32(("%s|%s" % (ns, key)).encode()) % 1000) / 1000.0 * JITTER_S
 
 
 class WarmCacheMixin:
     """Unified hub data cache (store + reads + refresher + disk)."""
 
+    # Legacy file name and current directory name.
     WARM_CACHE_FILE = "warm_cache.json"     # legacy single plaintext file (migrated)
     WARM_CACHE_DIR = "warm"                 # per-namespace encrypted files
 
@@ -129,16 +142,19 @@ class WarmCacheMixin:
 
         ``encrypt``/``decrypt`` are the hub's Fernet byte functions; without
         them files are compressed but NOT encrypted (tests only)."""
+        # Store, staleness policy and file writer.
         self.warm_cache: Dict[str, Dict[str, Any]] = {}
         self.warm_policy = StalenessPolicy()
         self._warm_cache_file = ShardedCacheFile(
             "hub cache", self._warm_cache_dir, self._warm_ns_snapshot,
             encrypt=encrypt, decrypt=decrypt)
+        # Feeds, read jobs, in-flight tasks and semaphores.
         self._cache_feeds: Dict[str, Callable[[Any], Iterable[CacheJob]]] = {}
         self._cache_read_jobs: Dict[Tuple[str, str], CacheJob] = {}
         self._cache_inflight: Dict[Tuple[str, str], asyncio.Task] = {}
         self._cache_lane_sems: Dict[str, asyncio.Semaphore] = {}
         self._cache_global_sem: Optional[asyncio.Semaphore] = None
+        # Tenant activity, kicks, wake event and timers.
         self._cache_recent_tenant: Dict[str, float] = {}
         self._cache_kicked: Dict[str, float] = {}     # tenant (or ALL_SCOPE) → kick time
         self._cache_wake: Optional[asyncio.Event] = None
@@ -150,15 +166,19 @@ class WarmCacheMixin:
             self.cache_active_scopes_fn: Optional[Callable[[], set]] = None
 
     def _warm_cache_dir(self) -> str:
+        """Directory for the per-namespace encrypted cache files."""
+        # cache_dir/warm, or ./warm when cache_dir is unset.
         return os.path.join(getattr(self, "cache_dir", "."), self.WARM_CACHE_DIR)
 
     def _warm_cache_path(self) -> str:
         """Legacy single-file path (only read once, for migration)."""
+        # cache_dir/warm_cache.json.
         return os.path.join(getattr(self, "cache_dir", "."), self.WARM_CACHE_FILE)
 
     def _warm_ns_snapshot(self, ns: str) -> Dict[str, Any]:
         """What gets written for one namespace: data + timestamps only (the
         in-memory error/read bookkeeping is rebuilt at runtime)."""
+        # Copy persistable fields from entries that have data.
         out = {}
         for k, e in list((self.warm_cache.get(ns) or {}).items()):
             if not isinstance(e, dict) or "data" not in e:
@@ -173,19 +193,23 @@ class WarmCacheMixin:
         Also performs the one-time migration from the legacy plaintext
         ``warm_cache.json``: its namespaces are loaded, written out as
         encrypted per-namespace files, and the plaintext file is deleted."""
+        # Load all namespaces from disk.
         loaded = self._warm_cache_file.load_all()
         self.warm_cache = {str(ns): {str(k): v for k, v in (entries or {}).items()
                                      if isinstance(v, dict)}
                            for ns, entries in loaded.items()}
+        # Migrate the legacy file if present.
         legacy = self._warm_cache_path()
         if os.path.exists(legacy):
             data = JsonCacheFile("legacy warm cache", lambda: legacy, dict).load() or {}
+            # Copy namespaces not already loaded.
             migrated = []
             for ns, entries in data.items():
                 if isinstance(entries, dict) and str(ns) not in self.warm_cache:
                     self.warm_cache[str(ns)] = {str(k): v for k, v in entries.items()
                                                 if isinstance(v, dict)}
                     migrated.append(str(ns))
+            # Write them encrypted, then delete the legacy file.
             self._warm_cache_file.write_all_sync(migrated)
             try:
                 os.remove(legacy)
@@ -193,6 +217,7 @@ class WarmCacheMixin:
                             len(migrated), legacy)
             except OSError as exc:
                 logger.warning("hub cache: could not delete legacy %s: %s", legacy, exc)
+        # Log what was restored.
         total = sum(len(e) for e in self.warm_cache.values())
         logger.info("hub cache: restored %d namespace(s) / %d key(s) from %s",
                     len(self.warm_cache), total, self._warm_cache_dir())
@@ -201,12 +226,14 @@ class WarmCacheMixin:
 
     def warm_get(self, namespace: str, key: str = "_") -> Optional[Any]:
         """Last-known raw envelope for ``(namespace, key)``, or None."""
+        # Data from the entry, or None.
         entry = self.warm_cache.get(namespace, {}).get(str(key))
         return entry.get("data") if isinstance(entry, dict) and "data" in entry else None
 
     def warm_fetched_at(self, namespace: str, key: str = "_") -> Optional[float]:
         """Epoch seconds when ``(namespace, key)`` was last stored, or None
         (also None/0 right after ``warm_invalidate``)."""
+        # Valid fetched_at, or None.
         entry = self.warm_cache.get(namespace, {}).get(str(key))
         ts = entry.get("fetched_at") if isinstance(entry, dict) else None
         return ts if isinstance(ts, (int, float)) else None
@@ -214,6 +241,7 @@ class WarmCacheMixin:
     def warm_state(self, namespace: str, key: str = "_",
                    policy: Optional[StalenessPolicy] = None) -> str:
         """``cache_core`` staleness verdict for one entry."""
+        # Classify the entry's age.
         return (policy or self.warm_policy).classify(
             self.warm_fetched_at(namespace, key))
 
@@ -221,24 +249,30 @@ class WarmCacheMixin:
                        tenants=None, detail: bool = False) -> None:
         """Store a fresh envelope for ``(namespace, key)`` and schedule a
         (debounced) write of that namespace's file."""
+        # String key; any existing entry.
         key = str(key)
         old = self.warm_cache.get(namespace, {}).get(key)
+        # New entry with the current timestamp.
         entry = {"data": data, "fetched_at": time.time()}
+        # Tenants: given, or kept from the old entry.
         t = _norm_tenants(tenants)
         if t is None and isinstance(old, dict) and old.get("tenants"):
             t = tuple(old["tenants"])
         if t is not None:
             entry["tenants"] = list(t)
+        # Detail flag and read time carry over.
         if detail or (isinstance(old, dict) and old.get("detail")):
             entry["detail"] = True
         if isinstance(old, dict) and old.get("read_at"):
             entry["read_at"] = old["read_at"]
+        # Store it and schedule a save.
         self.warm_cache.setdefault(namespace, {})[key] = entry
         self._warm_cache_file.schedule_save(namespace)
 
     def warm_drop(self, ns_prefix: str, key_prefixes: tuple) -> int:
         """Delete entries (namespace starts ``ns_prefix``, key starts with any of
         ``key_prefixes``). Returns the count dropped."""
+        # Drop matching keys and their read jobs from matching namespaces; save each changed one.
         n = 0
         for ns, entries in self.warm_cache.items():
             if not ns.startswith(ns_prefix):
@@ -257,6 +291,7 @@ class WarmCacheMixin:
         ``fetched_at`` becomes 0 (the next read waits briefly for a refresh)
         and the original time moves to ``stale_from`` so the badge stays
         honest if that refresh fails."""
+        # Zero fetched_at on matching entries (kept in stale_from) and save changed namespaces.
         n = 0
         for ns, entries in self.warm_cache.items():
             if not ns.startswith(ns_prefix):
@@ -274,6 +309,7 @@ class WarmCacheMixin:
 
     def warm_last_fetched_at(self, namespace: str, key: str = "_") -> Optional[float]:
         """Epoch of the data actually held, even if the entry was invalidated."""
+        # Current or pre-invalidation timestamp.
         entry = self.warm_cache.get(namespace, {}).get(str(key))
         if not isinstance(entry, dict):
             return None
@@ -282,6 +318,7 @@ class WarmCacheMixin:
 
     async def warm_cache_flush_now(self) -> None:
         """Write every dirty namespace now (shutdown path)."""
+        # Flush pending writes.
         await self._warm_cache_file.flush_now()
 
     # ── the page read ────────────────────────────────────────────────────────
@@ -297,15 +334,19 @@ class WarmCacheMixin:
         ``detail``  — True for drill-down data (one VM, one device): it is
         refreshed only while its tenant is active and evicted after a week
         unread."""
+        # Register the read job and look up the entry.
         key = str(key)
         job = self._cache_remember(ns, key, fetch, tenants, lane, detail)
         entry = self.warm_cache.get(ns, {}).get(key)
         now = time.time()
+        # Note the read time.
         if isinstance(entry, dict):
             entry["read_at"] = now
+        # Missing: fetch and wait.
         if not isinstance(entry, dict) or "data" not in entry:
             # Nothing to show yet — this one read must wait.
             return await asyncio.shield(self._cache_spawn(job, foreground=True))
+        # Invalidated: wait briefly for a refresh.
         fetched = entry.get("fetched_at") or 0
         if not fetched:
             # Invalidated by a write: give the refresh a moment so the user
@@ -315,8 +356,10 @@ class WarmCacheMixin:
                 return await asyncio.wait_for(asyncio.shield(task), INVALIDATED_WAIT_S)
             except Exception:  # noqa: BLE001 - timeout or spoke error → serve old data
                 return self.warm_get(ns, key)
+        # Old entry: refresh in the background.
         if now - fetched >= self._cache_interval(job):
             self._cache_spawn(job)
+        # Return cached data.
         return entry["data"]
 
     async def cache_fetch_now(self, ns: str, key: str, fetch: Fetch, *, tenants=None,
@@ -324,19 +367,24 @@ class WarmCacheMixin:
         """Fetch live NOW (joining any in-flight fetch), store, and return it.
         For security checks that must not trust a possibly-old copy (e.g. a
         write's ownership guard after a cache miss). Errors propagate."""
+        # Register and fetch in the foreground.
         job = self._cache_remember(ns, str(key), fetch, tenants, lane, detail)
         return await asyncio.shield(self._cache_spawn(job, foreground=True))
 
     def cache_meta(self, ns: str, key: str) -> Dict[str, Any]:
         """Badge info for a response: ``cached_at`` (epoch of the data shown),
         ``age`` (s), ``stale`` (bool) and ``error`` (last refresh failure)."""
+        # No entry: blank metadata.
         entry = self.warm_cache.get(ns, {}).get(str(key))
         if not isinstance(entry, dict):
             return {"cached_at": None, "age": None, "stale": False, "error": None}
+        # Age of the held data.
         held = entry.get("fetched_at") or entry.get("stale_from") or 0
         age = max(0.0, time.time() - held) if held else None
+        # Failing if the last error is no older than the last success.
         err_at = entry.get("error_at") or 0
         failing = bool(err_at and err_at >= (entry.get("fetched_at") or 0))
+        # Stale if too old or failing.
         stale = bool((age is not None and age > STALE_AFTER_S) or failing)
         return {"cached_at": held or None, "age": age, "stale": stale,
                 "error": entry.get("error") if failing else None}
@@ -345,8 +393,10 @@ class WarmCacheMixin:
         """Add ``stale``/``cached_at`` to a dict response (the WebUI's existing
         "cached data" badge reads these). Non-dicts are returned unchanged.
         Returns a shallow copy — the cached object itself is never mutated."""
+        # Non-dict responses pass through.
         if not isinstance(resp, dict):
             return resp
+        # Copy and add the badge fields.
         m = self.cache_meta(ns, key)
         out = dict(resp)
         out["cached_at"] = m["cached_at"]
@@ -357,9 +407,14 @@ class WarmCacheMixin:
     # ── single-flight fetch ──────────────────────────────────────────────────
 
     def _cache_remember(self, ns, key, fetch, tenants, lane, detail) -> CacheJob:
+        """Return the read job for (ns, key), creating or updating it; marks its tenants as recently
+        active.
+        """
+        # Tenants count as active as of now.
         t = _norm_tenants(tenants)
         for tid in t or ():
             self._cache_recent_tenant[tid] = time.time()
+        # Create the job if it is new.
         job = self._cache_read_jobs.get((ns, key))
         if job is None:
             job = CacheJob(ns, key, fetch, t, lane or ns, False, detail, _jitter_for(ns, key))
@@ -375,14 +430,18 @@ class WarmCacheMixin:
 
         Foreground fetches (a user is waiting on a missing entry) skip the
         lane limits; background refreshes queue behind them."""
+        # Join any fetch already in flight.
         k = (job.ns, job.key)
         task = self._cache_inflight.get(k)
         if task is not None and not task.done():
             return task
+        # Otherwise start and track one.
         task = asyncio.ensure_future(self._cache_run(job, foreground))
         self._cache_inflight[k] = task
 
         def _done(t, k=k):
+            """Clear the in-flight slot and mark any exception as retrieved."""
+            # Clear only our own slot.
             if self._cache_inflight.get(k) is t:
                 self._cache_inflight.pop(k, None)
             if not t.cancelled():
@@ -391,26 +450,35 @@ class WarmCacheMixin:
         return task
 
     def _cache_sems(self, lane: str):
+        """Return the global semaphore and the lane's, creating them lazily."""
+        # Global semaphore, created on first use inside the loop.
         if self._cache_global_sem is None:
             self._cache_global_sem = asyncio.Semaphore(GLOBAL_CONCURRENCY)
+        # Lane semaphore, created on demand.
         sem = self._cache_lane_sems.get(lane)
         if sem is None:
             sem = self._cache_lane_sems[lane] = asyncio.Semaphore(LANE_CONCURRENCY)
         return self._cache_global_sem, sem
 
     async def _cache_run(self, job: CacheJob, foreground: bool) -> Any:
+        """Fetch and store a job; background runs wait for the global and lane semaphores."""
+        # Foreground: no limits.
         if foreground:
             return await self._cache_fetch_store(job)
+        # Background: hold both semaphores.
         g, lane = self._cache_sems(job.lane or job.ns)
         async with g, lane:
             return await self._cache_fetch_store(job)
 
     async def _cache_fetch_store(self, job: CacheJob) -> Any:
+        """Fetch the job's data and store it; on failure record the error and re-raise."""
+        # Fetch; cancellation propagates.
         try:
             data = await job.fetch()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            # Failure: record it on the existing entry.
             entry = self.warm_cache.get(job.ns, {}).get(job.key)
             if isinstance(entry, dict):
                 entry["error"] = str(exc)[:300] or exc.__class__.__name__
@@ -421,12 +489,15 @@ class WarmCacheMixin:
                 self._cache_read_jobs.pop((job.ns, job.key), None)
             logger.debug("hub cache: refresh %s/%s failed: %s", job.ns, job.key, exc)
             raise
+        # Success: store it.
         await self.warm_set(job.ns, job.key, data, tenants=job.tenants, detail=job.detail)
         return data
 
     # ── activity (who is logged in) ──────────────────────────────────────────
 
     def _cache_active_scopes(self) -> set:
+        """Return the active scopes: logged-in tenants plus tenants read recently."""
+        # Scopes from the injected session callback; its errors are logged.
         scopes = set()
         fn = getattr(self, "cache_active_scopes_fn", None)
         if fn is not None:
@@ -434,6 +505,7 @@ class WarmCacheMixin:
                 scopes |= set(fn() or ())
             except Exception as exc:  # noqa: BLE001
                 logger.debug("hub cache: active-scopes fn failed: %s", exc)
+        # Plus tenants read recently.
         cutoff = time.time() - RECENT_READ_ACTIVE_S
         scopes |= {t for t, at in self._cache_recent_tenant.items() if at >= cutoff}
         return scopes
@@ -441,6 +513,7 @@ class WarmCacheMixin:
     def _cache_is_active(self, tenants, scopes: Optional[set] = None) -> bool:
         """Is someone who can see this data logged in? Shared/admin data
         (``tenants`` None) is active whenever anyone is."""
+        # Active if anyone is logged in and the data is shared or one of its tenants is active.
         scopes = self._cache_active_scopes() if scopes is None else scopes
         if not scopes:
             return False
@@ -449,11 +522,13 @@ class WarmCacheMixin:
         return any(t in scopes for t in tenants)
 
     def _cache_interval(self, job: CacheJob, scopes: Optional[set] = None) -> float:
+        """Return the job's refresh interval: active or idle."""
         return ACTIVE_INTERVAL_S if self._cache_is_active(job.tenants, scopes) else IDLE_INTERVAL_S
 
     def cache_kick_tenant(self, tenant_id: Optional[str]) -> None:
         """Login hook: refresh everything this tenant (None → admin) can see on
         the next refresher tick, so the pages they open are current."""
+        # Record the kick, mark the tenant active, wake the refresher.
         now = time.time()
         scope = tenant_id or ALL_SCOPE
         self._cache_kicked[scope] = now
@@ -467,9 +542,12 @@ class WarmCacheMixin:
     def cache_register_feed(self, name: str, fn: Callable[[Any], Iterable[CacheJob]]) -> None:
         """Register a feed: ``fn(hub)`` yields the ``CacheJob``s that must
         always be warm (called every tick — keep it cheap, no I/O)."""
+        # Store the feed callable.
         self._cache_feeds[name] = fn
 
     def _cache_collect_jobs(self) -> List[CacheJob]:
+        """Return the feed jobs plus page-read jobs, deduplicated by (ns, key)."""
+        # Normalise feed jobs; a broken feed is logged and skipped.
         jobs: Dict[Tuple[str, str], CacheJob] = {}
         for name, fn in list(self._cache_feeds.items()):
             try:
@@ -482,6 +560,7 @@ class WarmCacheMixin:
                     jobs[(j.ns, j.key)] = j
             except Exception as exc:  # noqa: BLE001 - one bad feed must not stop the rest
                 logger.warning("hub cache: feed %s failed: %s", name, exc)
+        # Add read jobs not already covered by a feed.
         for k, j in self._cache_read_jobs.items():
             jobs.setdefault(k, j)
         return list(jobs.values())
@@ -491,39 +570,50 @@ class WarmCacheMixin:
         is kicked by any login; tenant data only by a login of one of its
         tenants (an admin login kicks ``ALL_SCOPE`` + the admin tenant — it
         does NOT force-refresh every tenant in the fleet)."""
+        # Shared: latest kick; tenant data: its tenants' latest kick.
         if job.tenants is None:
             return max(self._cache_kicked.values(), default=0.0)
         return max((self._cache_kicked.get(t, 0.0) for t in job.tenants), default=0.0)
 
     def _cache_job_due(self, job: CacheJob, now: float, scopes: set) -> bool:
+        """Return True when the job should be refreshed on this tick."""
+        # Not while a fetch is running.
         k = (job.ns, job.key)
         task = self._cache_inflight.get(k)
         if task is not None and not task.done():
             return False
+        # Read-only jobs only refresh while active.
         active = self._cache_is_active(job.tenants, scopes)
         if not job.from_feed and not active:
             return False   # read-only scopes refresh only while someone is looking
+        # Entry times and the relevant kick.
         entry = self.warm_cache.get(job.ns, {}).get(job.key)
         fetched = (entry or {}).get("fetched_at") or 0
         kicked = self._cache_kicked_at(job)
+        # Kicked since the last attempt: due.
         if kicked > fetched and kicked > ((entry or {}).get("error_at") or 0):
             return True
+        # Never fetched and never failed: due.
         if not fetched and not (entry or {}).get("error_at"):
             return True
+        # Otherwise due once the interval plus jitter has passed since the last attempt.
         interval = ACTIVE_INTERVAL_S if active else IDLE_INTERVAL_S
         last_try = max(fetched, (entry or {}).get("error_at") or 0)
         return now - last_try >= interval + job._jitter
 
     async def cache_refresh_tick(self) -> int:
         """One refresher pass. Returns the number of refreshes started."""
+        # Record the tick and active scopes.
         now = time.time()
         self._cache_last_tick = now
         scopes = self._cache_active_scopes()
         started = 0
+        # Start each due job.
         for job in self._cache_collect_jobs():
             if self._cache_job_due(job, now, scopes):
                 self._cache_spawn(job)
                 started += 1
+        # Run eviction at most once per EVICT_EVERY_S.
         if now - self._cache_last_evict >= EVICT_EVERY_S:
             self._cache_last_evict = now
             self.cache_evict_idle(now)
@@ -531,9 +621,11 @@ class WarmCacheMixin:
 
     def cache_evict_idle(self, now: Optional[float] = None) -> int:
         """Drop non-feed entries nobody has read for ``DETAIL_EVICT_S``."""
+        # Feed keys are never evicted.
         now = now or time.time()
         feed_keys = {(j.ns, j.key) for j in self._cache_collect_jobs() if j.from_feed}
         n = 0
+        # Evict detail entries idle past DETAIL_EVICT_S.
         for ns, entries in self.warm_cache.items():
             for k in list(entries):
                 e = entries[k]
@@ -550,8 +642,10 @@ class WarmCacheMixin:
     async def run_cache_refresher_loop(self) -> None:
         """Background loop: refresh due entries every ``TICK_S`` (or right away
         after a login kick)."""
+        # Wake event for login kicks.
         self._cache_wake = asyncio.Event()
         logger.info("hub cache: refresher started (%d feed(s))", len(self._cache_feeds))
+        # Run a tick (errors logged), then wait for TICK_S or a kick.
         while True:
             try:
                 await self.cache_refresh_tick()
@@ -574,13 +668,16 @@ class WarmCacheMixin:
         and refresh them NOW. Readers in the next few seconds wait for the new
         data. Returns refreshes started."""
         def match(k: str) -> bool:
+            """Return True if key k matches, exactly or by prefix."""
             return k in key_prefixes if exact else k.startswith(tuple(key_prefixes))
 
+        # Invalidate matching entries, keeping their data.
         entries = self.warm_cache.get(ns) or {}
         for k, e in entries.items():
             if match(k) and isinstance(e, dict) and e.get("fetched_at"):
                 e["stale_from"] = e["fetched_at"]
                 e["fetched_at"] = 0
+        # Start refreshes for matching jobs; no running loop stops early.
         n = 0
         for job in self._cache_collect_jobs():
             if job.ns == ns and match(job.key):
@@ -595,15 +692,18 @@ class WarmCacheMixin:
         """Wait (up to ``timeout``) for the fetches running right now to finish
         — e.g. a "refresh" button that reloads the page afterwards. Returns
         True when everything finished in time."""
+        # In-flight tasks; none means idle.
         tasks = [t for t in self._cache_inflight.values() if not t.done()]
         if not tasks:
             return True
+        # Wait; True when none are left pending.
         _done, pending = await asyncio.wait(tasks, timeout=timeout)
         return not pending
 
     def cache_purge(self, tenant_id: Optional[str] = None) -> int:
         """Drop cached data (all of it, or everything visible to one tenant)
         and refresh it. Returns entries dropped."""
+        # Delete matching entries and save each changed namespace.
         n = 0
         for ns, entries in self.warm_cache.items():
             hit = False
@@ -615,16 +715,19 @@ class WarmCacheMixin:
                     hit = True
             if hit:
                 self._warm_cache_file.schedule_save(ns)
+        # Refresh what was purged.
         self.cache_kick_tenant(tenant_id)
         return n
 
     def cache_status(self) -> Dict[str, Any]:
         """Read-only snapshot for the admin Cache page."""
+        # Time, active scopes, jobs and file stats.
         now = time.time()
         scopes = self._cache_active_scopes()
         jobs = {(j.ns, j.key): j for j in self._cache_collect_jobs()}
         f = self._warm_cache_file
         namespaces = []
+        # One row per entry or job, per namespace.
         for ns in sorted(set(self.warm_cache) | {k[0] for k in jobs}):
             rows = []
             for key in sorted(set(self.warm_cache.get(ns, {})) | {k[1] for k in jobs if k[0] == ns}):
@@ -647,6 +750,7 @@ class WarmCacheMixin:
                 "file_bytes": f.last_size.get(ns),
                 "written_at": f.last_write_at.get(ns),
             })
+        # Summary snapshot.
         return {
             "now": now,
             "intervals": {"active_s": ACTIVE_INTERVAL_S, "idle_s": IDLE_INTERVAL_S,

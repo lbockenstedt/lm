@@ -11,15 +11,23 @@ PSKs, per-tenant GitHub tokens, and Central API cluster creds, so it must not
 sit on disk in cleartext. A pre-encryption plaintext file is migrated on the
 first load (accepted once, then re-encrypted on the next save).
 """
+# asyncio lock for safe concurrent writes and thread offloading.
 import asyncio
+# JSON serialisation of the store.
 import json
+# Standard-library logging.
 import logging
+# File paths and atomic file replacement.
 import os
+# Timestamps for status and learned-value records.
 import time
+# Type hints only.
 from typing import Any, Dict, List, Optional
 
+# Fernet encryption for the store at rest.
 from security.encryption import hub_encryption
 
+# Logger for this store.
 logger = logging.getLogger("SimulationsStore")
 
 
@@ -103,6 +111,8 @@ class SimulationsStore:
     """
 
     def __init__(self, data_dir: str):
+        """Load the store from simulations_store.json in data_dir."""
+        # Path of the encrypted store file.
         self._path = os.path.join(data_dir, "simulations_store.json")
         # MUST be an asyncio.Lock, never a threading.Lock. Every setter holds
         # this across ``await self._asave()`` (which yields via
@@ -115,6 +125,7 @@ class SimulationsStore:
         # branch, so several ``set_endpoint_sync_status`` calls overlapped.
         # asyncio.Lock makes a contending setter YIELD instead of blocking.
         self._lock = asyncio.Lock()
+        # Tenant data (tenant id -> config) and re-encryption flag.
         self._data: Dict[str, Dict[str, Any]] = {}
         self._needs_rekey = False  # set when loaded via a fallback (plaintext) path
         # Set when the on-disk file EXISTED but could not be decrypted/parsed (bad
@@ -131,22 +142,26 @@ class SimulationsStore:
         # returns None (no vault / not found), the stored value is used as-is —
         # so a self-hosted deployment with an inline token is unaffected.
         self._secret_resolver = None
+        # Load existing data now.
         self._load()
 
     def set_secret_resolver(self, resolver) -> None:
         """Install the async ``github_token`` secret-reference resolver."""
+        # Store the resolver.
         self._secret_resolver = resolver
 
     # ── persistence ────────────────────────────────────────────────────────
     def _load(self) -> None:
         """Load + decrypt the store. A pre-encryption plaintext file is accepted
         once as a migration and flagged for re-encryption on the next save."""
+        # Read the raw file bytes; an empty file means an empty store.
         try:
             with open(self._path, "rb") as f:
                 content = f.read()
             if not content:
                 self._data = {}
                 return
+            # Decrypt and parse the JSON.
             try:
                 decrypted, used_primary = hub_encryption.decrypt_with_meta(content)
                 if not used_primary:
@@ -179,6 +194,7 @@ class SimulationsStore:
                     self._load_failed = True
                     self._backup_undecryptable()
                     return
+                # Plaintext fallback allowed: try reading the file as plain JSON.
                 try:
                     with open(self._path, "r") as pf:
                         self._data = json.load(pf) or {}
@@ -186,6 +202,7 @@ class SimulationsStore:
                     logger.warning("SimulationsStore: %s was plaintext "
                                    "(pre-encryption); migrating to Fernet on next "
                                    "save.", self._path)
+                # Not plaintext either: start empty and protect the file.
                 except Exception as exc:
                     logger.error("SimulationsStore: load failed (%s): %s — starting "
                                  "empty AND refusing to overwrite the file",
@@ -193,6 +210,7 @@ class SimulationsStore:
                     self._data = {}
                     self._load_failed = True
                     self._backup_undecryptable()
+        # No file yet: start empty.
         except FileNotFoundError:
             self._data = {}  # fresh install — legitimately absent, safe to save
         except Exception as exc:  # unreadable file, etc. — do NOT clobber it
@@ -207,11 +225,14 @@ class SimulationsStore:
         parsed, so an operator can recover after fixing the key. Writes a one-time
         ``.undecryptable`` sidecar (never overwritten on repeated failed loads, so
         the FIRST-captured copy is kept)."""
+        # Sidecar path for the copy.
         bak = self._path + ".undecryptable"
         try:
+            # Copy the file once, if it exists and no copy exists yet.
             if os.path.exists(self._path) and not os.path.exists(bak):
                 with open(self._path, "rb") as src, open(bak, "wb") as dst:
                     dst.write(src.read())
+                # Restrict the copy to the owner.
                 try:
                     os.chmod(bak, 0o600)
                 except OSError:
@@ -223,6 +244,7 @@ class SimulationsStore:
                            "store (%s): %s", self._path, exc)
 
     def _save(self) -> None:
+        """Encrypt and atomically write the store, unless the load failed."""
         if self._load_failed:
             # The on-disk store existed but could not be decrypted/parsed at load.
             # Overwriting it now would re-encrypt the empty in-memory store on top
@@ -233,18 +255,22 @@ class SimulationsStore:
                          "(%s). Restore LM_FERNET_KEY / the file, then restart.",
                          self._path)
             return
+        # Encrypt the JSON and write it to a temporary file first.
         try:
             tmp = self._path + ".tmp"
             encrypted = hub_encryption.encrypt(
                 json.dumps(self._data, indent=2, default=str))
             with open(tmp, "wb") as f:
                 f.write(encrypted)
+            # Keep the encrypted file private to the owner.
             try:
                 os.chmod(tmp, 0o600)  # encrypted simulations store: not world-readable
             except OSError:
                 pass
+            # Atomically swap the new file into place; the key migration is now done.
             os.replace(tmp, self._path)
             self._needs_rekey = False
+        # A failed save is logged; the in-memory data is kept.
         except Exception as exc:
             logger.warning("SimulationsStore: save failed (%s): %s", self._path, exc)
 
@@ -262,9 +288,12 @@ class SimulationsStore:
         ``asyncio.Lock`` — a contending setter yields instead of blocking the
         event-loop thread. Making it a ``threading.Lock`` deadlocks the entire
         hub (see the ``__init__`` comment)."""
+        # Run the blocking save in a worker thread.
         await asyncio.to_thread(self._save)
 
     def _tenant(self, tenant_id: str) -> Dict[str, Any]:
+        """Return the tenant's data dict, creating an empty one if needed."""
+        # Create the tenant entry on first write.
         t = self._data.get(tenant_id)
         if t is None:
             t = {}
@@ -274,10 +303,12 @@ class SimulationsStore:
     # ── simulation / user overrides (legacy buckets, kept for compat) ──────
     async def get_user_overrides(self, tenant_id: str) -> Dict[str, Any]:
         """Return the tenant's legacy user-override bucket (empty if unset)."""
+        # Missing tenant or bucket gives an empty dict.
         return self._data.get(tenant_id, {}).get("user_overrides", {})
 
     async def set_user_overrides(self, tenant_id: str, overrides: Dict[str, Any]) -> None:
         """Replace the tenant's user-override bucket and persist."""
+        # Update under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["user_overrides"] = overrides
             await self._asave()
@@ -285,12 +316,14 @@ class SimulationsStore:
     # ── simulation.conf override content (raw INI pushed as sim_conf_override) ──
     async def set_sim_conf_content(self, tenant_id: str, content: str) -> None:
         """Store the raw simulation.conf override INI for the tenant and persist."""
+        # Update under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["sim_conf_content"] = content
             await self._asave()
 
     async def get_sim_conf_content(self, tenant_id: str) -> str:
         """Return the stored raw simulation.conf override INI ('' if unset)."""
+        # Missing content gives an empty string.
         return self._data.get(tenant_id, {}).get("sim_conf_content", "") or ""
 
     # ── user-overrides.conf override content (raw INI pushed as user_conf_override) ──
@@ -300,17 +333,20 @@ class SimulationsStore:
     # repo's user-overrides.conf by sim_config.load_configs).
     async def set_user_overrides_content(self, tenant_id: str, content: str) -> None:
         """Store the raw user-overrides.conf override INI for the tenant and persist."""
+        # Update under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["user_overrides_content"] = content
             await self._asave()
 
     async def get_user_overrides_content(self, tenant_id: str) -> str:
         """Return the stored raw user-overrides.conf override INI ('' if unset)."""
+        # Missing content gives an empty string.
         return self._data.get(tenant_id, {}).get("user_overrides_content", "") or ""
 
     # JSON-list fields that hold real certified/ignored data — PRESERVED across
     # a "reset to default" (resetting the knobs must NOT de-certify the tenant's
     # dongles or wipe the ignored-host list; those are managed on the USB page).
+    # Hub-config keys kept when the knobs are reset.
     _HUB_CONFIG_PRESERVE_ON_RESET = (
         "usb_vidpids", "usb_ignored_vidpids", "ignored_hostnames",
     )
@@ -323,16 +359,19 @@ class SimulationsStore:
         new tenant sees the details (stored values win). Display-only — not
         persisted here; the first save's GET-merge-PUT persists the full set.
         """
+        # Defaults first, then the tenant's stored values on top.
         t = self._data.get(tenant_id, {})
         stored = t.get("hub_config") or {}
         merged = dict(_DEFAULT_HUB_CONFIG)
         merged.update(stored)
+        # Return the enabled flag and merged knobs.
         return {"hub_config_enabled": bool(t.get("hub_config_enabled", False)),
                 "hub_config": merged}
 
     async def set_hub_config(self, tenant_id: str, enabled: bool,
                              hub_config: Dict[str, Any]) -> None:
         """Set the hub-config enabled flag + knob dict for the tenant and persist."""
+        # Update both fields under the lock and save.
         async with self._lock:
             t = self._tenant(tenant_id)
             t["hub_config_enabled"] = bool(enabled)
@@ -343,6 +382,7 @@ class SimulationsStore:
         """Setup → Hypervisors config for the tenant (backup/snapshot/per-host/
         confirm). Seeds ``_DEFAULT_HYPERVISORS_CONFIG`` for unset fields (stored
         values win). ``effective_for(hostname)`` merge happens at command time."""
+        # Defaults first, then stored values; per-host overrides are copied.
         t = self._data.get(tenant_id, {})
         stored = t.get("hypervisors_config") or {}
         merged = dict(_DEFAULT_HYPERVISORS_CONFIG)
@@ -357,10 +397,13 @@ class SimulationsStore:
         acting under a different tenant (e.g. an all-tenants admin view). Sync
         + unlocked read mirrors ``get_hypervisors_config``; the set is small
         and deletes are rare."""
+        # Collect protected VM ids from every tenant's config.
         protected: set = set()
         for t in self._data.values():
+            # Skip malformed tenant entries.
             if not isinstance(t, dict):
                 continue
+            # The tenant's protected list, if present and well-formed.
             cfg = t.get("hypervisors_config") or {}
             vms = cfg.get("protected_vms") if isinstance(cfg, dict) else None
             if isinstance(vms, list):
@@ -369,6 +412,7 @@ class SimulationsStore:
 
     async def set_hypervisors_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
         """Persist the tenant's Hypervisors config (full GET-merge-PUT from the UI)."""
+        # Replace the config under the lock and save.
         async with self._lock:
             t = self._tenant(tenant_id)
             t["hypervisors_config"] = cfg or {}
@@ -384,6 +428,7 @@ class SimulationsStore:
         user values too — the spoke's _apply_hub_config only sets present keys,
         so absent keys would otherwise linger. Returns
         ``{hub_config_enabled, hub_config}`` for the caller to push."""
+        # Under the lock: keep the preserved lists and start from the defaults.
         async with self._lock:
             t = self._tenant(tenant_id)
             stored = t.get("hub_config") or {}
@@ -396,19 +441,23 @@ class SimulationsStore:
                 "repo_branch": "",
                 "reclone_schedule_cron": "",
             })
+            # Put the preserved lists back, store and save.
             new_cfg.update(preserved)
             t["hub_config"] = new_cfg
             await self._asave()
+            # Return the new config for pushing to the spoke.
             return {"hub_config_enabled": bool(t.get("hub_config_enabled", False)),
                     "hub_config": dict(new_cfg)}
 
     # ── central API config (mode + cluster creds) ──────────────────────────
     async def get_central_config(self, tenant_id: str) -> Dict[str, Any]:
         """Return the tenant's Central API config (mode + cluster creds)."""
+        # Missing config gives an empty dict.
         return self._data.get(tenant_id, {}).get("central_config", {})
 
     async def set_central_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
         """Replace the tenant's Central API config and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["central_config"] = cfg or {}
             await self._asave()
@@ -416,10 +465,12 @@ class SimulationsStore:
     # ── central sites config (Setup → Central API / Central) ────────────────
     async def get_central_sites_config(self, tenant_id: str) -> Dict[str, Any]:
         """Return the tenant's Central sites config."""
+        # Missing config gives an empty dict.
         return self._data.get(tenant_id, {}).get("central_sites_config", {})
 
     async def set_central_sites_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
         """Replace the tenant's Central sites config and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["central_sites_config"] = cfg or {}
             await self._asave()
@@ -431,10 +482,12 @@ class SimulationsStore:
 
     async def get_mist_config(self, tenant_id: str) -> Dict[str, Any]:
         """Return the tenant's Mist API config (token + org id + host)."""
+        # Missing config gives an empty dict.
         return self._data.get(tenant_id, {}).get("mist_config", {})
 
     async def set_mist_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
         """Replace the tenant's Mist API config and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["mist_config"] = cfg or {}
             await self._asave()
@@ -445,10 +498,12 @@ class SimulationsStore:
 
     async def get_mist_sites_config(self, tenant_id: str) -> Dict[str, Any]:
         """Return the tenant's Mist sites config."""
+        # Missing config gives an empty dict.
         return self._data.get(tenant_id, {}).get("mist_sites_config", {})
 
     async def set_mist_sites_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
         """Replace the tenant's Mist sites config and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["mist_sites_config"] = cfg or {}
             await self._asave()
@@ -460,10 +515,12 @@ class SimulationsStore:
     # reads this slot and writes hub.central_on_prem_hub_status.
     async def get_central_on_prem_config(self, tenant_id: str) -> Dict[str, Any]:
         """Return the tenant's Central On-Prem API config (mode + cluster creds)."""
+        # Missing config gives an empty dict.
         return self._data.get(tenant_id, {}).get("central_on_prem_config", {})
 
     async def set_central_on_prem_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
         """Replace the tenant's Central On-Prem API config and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["central_on_prem_config"] = cfg or {}
             await self._asave()
@@ -474,10 +531,12 @@ class SimulationsStore:
     # the cloud Central sites config so the two instances don't share mappings.
     async def get_central_on_prem_sites_config(self, tenant_id: str) -> Dict[str, Any]:
         """Return the tenant's Central On-Prem sites config."""
+        # Missing config gives an empty dict.
         return self._data.get(tenant_id, {}).get("central_on_prem_sites_config", {})
 
     async def set_central_on_prem_sites_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
         """Replace the tenant's Central On-Prem sites config and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["central_on_prem_sites_config"] = cfg or {}
             await self._asave()
@@ -486,10 +545,14 @@ class SimulationsStore:
     # Per-tenant {quota_key: {target, floor, mode, last_change}} — the running
     # state of the min/max ramp-decay-learn controller. Small (tens of quotas).
     async def get_adaptive_state(self, tenant_id: str) -> Dict[str, Any]:
+        """Return a copy of the tenant's adaptive-controller state per quota."""
+        # Copy so callers cannot change the stored state; non-dicts give an empty dict.
         v = self._data.get(tenant_id, {}).get("adaptive_quota_state")
         return dict(v) if isinstance(v, dict) else {}
 
     async def set_adaptive_state(self, tenant_id: str, state: Dict[str, Any]) -> None:
+        """Replace the tenant's adaptive-controller state and persist it."""
+        # Store a copy under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["adaptive_quota_state"] = dict(state) if isinstance(state, dict) else {}
             await self._asave()
@@ -500,10 +563,14 @@ class SimulationsStore:
     # [simulation] intensity knobs (SIM_KNOBS). Separate from adaptive_state so
     # the count controller and the knob learner never clobber each other.
     async def get_knob_learn_state(self, tenant_id: str) -> Dict[str, Any]:
+        """Return a copy of the tenant's knob-learner state per quota."""
+        # Copy so callers cannot change the stored state; non-dicts give an empty dict.
         v = self._data.get(tenant_id, {}).get("knob_learn_state")
         return dict(v) if isinstance(v, dict) else {}
 
     async def set_knob_learn_state(self, tenant_id: str, state: Dict[str, Any]) -> None:
+        """Replace the tenant's knob-learner state and persist it."""
+        # Store a copy under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["knob_learn_state"] = dict(state) if isinstance(state, dict) else {}
             await self._asave()
@@ -517,10 +584,14 @@ class SimulationsStore:
     # phase==stable; a copy is proposed to the global pending queue for admin
     # approval.
     async def get_known_good(self, tenant_id: str) -> Dict[str, Any]:
+        """Return a copy of the tenant's known-good records, keyed per alert."""
+        # Copy so callers cannot change the stored state; non-dicts give an empty dict.
         v = self._data.get(tenant_id, {}).get("known_good")
         return dict(v) if isinstance(v, dict) else {}
 
     async def set_known_good(self, tenant_id: str, mapping: Dict[str, Any]) -> None:
+        """Replace the tenant's known-good records and persist them."""
+        # Store a copy under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["known_good"] = dict(mapping) if isinstance(mapping, dict) else {}
             await self._asave()
@@ -530,9 +601,12 @@ class SimulationsStore:
         """[{id, name, source, recipients:[...], enabled}] — the tenant's realtime
         alert-routing rules (dashboard_check / vm_offline / quota_unmet /
         spoke_offline → recipients)."""
+        # Copy of the list (empty if unset).
         return list(self._data.get(tenant_id, {}).get("alert_rules", []) or [])
 
     async def set_alert_rules(self, tenant_id: str, rules: List[Dict[str, Any]]) -> None:
+        """Replace the tenant's realtime alert rules and persist them."""
+        # Store a copy under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["alert_rules"] = list(rules or [])
             await self._asave()
@@ -552,9 +626,11 @@ class SimulationsStore:
         entries written before ``count`` existed default to 1; entries written
         before ``source`` existed (all pre-Mist rows are Aruba Central) default
         to ``source="central"`` so the picker can prefix them ``Central:``."""
+        # No history yet: empty list.
         hist = self._data.get(self._AIH_KEY)
         if not isinstance(hist, dict):
             return []
+        # Copy each valid entry, filling defaults for older entries.
         out = []
         for v in hist.values():
             if not isinstance(v, dict):
@@ -573,24 +649,32 @@ class SimulationsStore:
         the count of NEW entries. Persists only when a new entry is added or a
         name/source changes (last_seen alone updates in memory), so routine
         browse polls don't rewrite the store."""
+        # Nothing to record.
         if not items:
             return 0
+        # Timestamp and new-entry counter.
         now = time.time()
         added = 0
+        # Under the lock, get or create the shared history dict.
         async with self._lock:
             hist = self._data.get(self._AIH_KEY)
             if not isinstance(hist, dict):
                 hist = {}
                 self._data[self._AIH_KEY] = hist
+            # Only save when something meaningful changed.
             changed = False
+            # Upsert each observed item.
             for it in items:
                 try:
+                    # Normalise the type (alert unless insight).
                     typ = str((it or {}).get("type") or "alert").strip().lower()
                     if typ not in ("alert", "insight"):
                         typ = "alert"
+                    # Identifier (id or name); skip items without one.
                     ident = str((it or {}).get("id") or (it or {}).get("name") or "").strip()
                     if not ident:
                         continue
+                    # Display name, site and source (central unless mist).
                     name = str((it or {}).get("name") or ident).strip()
                     site = str((it or {}).get("site") or "").strip()
                     source = str((it or {}).get("source") or "central").strip().lower()
@@ -604,8 +688,10 @@ class SimulationsStore:
                         val = str((it or {}).get(fld) or "").strip()
                         if val:
                             extra[fld] = val
+                    # History key, and any existing entry for it.
                     key = f"{typ}:{ident}"
                     entry = hist.get(key)
+                    # New item: add it with first/last seen times and a count of 1.
                     if entry is None:
                         hist[key] = {"type": typ, "id": ident, "name": name,
                                      "site": site, "source": source,
@@ -621,6 +707,7 @@ class SimulationsStore:
                         # change) rather than triggering one itself, so a steady
                         # poll adds no disk churn. Approximate across restarts.
                         entry["count"] = int(entry.get("count") or 1) + 1
+                        # Save a name change.
                         if name and entry.get("name") != name:
                             entry["name"] = name
                             changed = True
@@ -635,8 +722,10 @@ class SimulationsStore:
                             if entry.get(fld) != val:
                                 entry[fld] = val
                                 changed = True
+                # A malformed item is skipped.
                 except Exception:  # noqa: BLE001 — never let telemetry recording throw
                     continue
+            # Save once if anything changed.
             if changed:
                 await self._asave()
         return added
@@ -654,21 +743,26 @@ class SimulationsStore:
         vault, not found), the stored value is returned unchanged so nothing
         breaks, and an inline token (self-hosted, no vault) is always returned
         as-is."""
+        # The stored config; without resolve, return it as is.
         cfg = self._data.get(tenant_id, {}).get("github_config", {})
         if not resolve:
             return cfg
+        # Resolve a Key Vault reference when a resolver is installed.
         tok = (cfg or {}).get("github_token") or ""
         if tok.startswith("kv:") and self._secret_resolver is not None:
             try:
                 resolved = await self._secret_resolver(tok)
+            # Resolver failures leave the reference in place.
             except Exception:  # noqa: BLE001
                 resolved = None
+            # Return a copy with the real token (the stored config keeps the reference).
             if resolved:
                 cfg = {**cfg, "github_token": resolved}
         return cfg
 
     async def set_github_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
         """Replace the tenant's GitHub config and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["github_config"] = cfg or {}
             await self._asave()
@@ -681,11 +775,13 @@ class SimulationsStore:
         'github' = the GitHub repo is authoritative; edits require an API key and
                  are committed+pushed back. Default 'github' (preserves the
                  pre-feature behavior where the repo file is the base)."""
+        # Anything other than "hub" means GitHub.
         val = self._data.get(tenant_id, {}).get("source_of_truth")
         return "hub" if val == "hub" else "github"
 
     async def set_source_of_truth(self, tenant_id: str, source: str) -> None:
         """Persist the tenant's config source of truth ('hub' | 'github')."""
+        # Store the normalised value under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["source_of_truth"] = "hub" if source == "hub" else "github"
             await self._asave()
@@ -693,10 +789,12 @@ class SimulationsStore:
     # ── security config (Setup → Security: spoke-local dashboard auth) ──────
     async def get_security_config(self, tenant_id: str) -> Dict[str, Any]:
         """Return the tenant's spoke-local dashboard security config."""
+        # Missing config gives an empty dict.
         return self._data.get(tenant_id, {}).get("security_config", {})
 
     async def set_security_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
         """Replace the tenant's security config and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["security_config"] = cfg or {}
             await self._asave()
@@ -708,11 +806,13 @@ class SimulationsStore:
     # last_sync_ts, tenant_name, endpoints_total}.
     async def get_endpoint_sync_status(self, tenant_id: str) -> Dict[str, Any]:
         """Return the tenant's last endpoint-sync status (empty if never run)."""
+        # Copy; missing status gives an empty dict.
         return dict(self._data.get(tenant_id, {}).get("endpoint_sync", {}))
 
     async def set_endpoint_sync_status(self, tenant_id: str,
                                        status: Dict[str, Any]) -> None:
         """Replace the tenant's endpoint-sync status and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["endpoint_sync"] = status or {}
             await self._asave()
@@ -724,6 +824,7 @@ class SimulationsStore:
         call it directly without ``await``; persistence already happened on
         each ``set_endpoint_sync_status`` write.
         """
+        # Collect status from every tenant, skipping the global entry.
         out: Dict[str, Dict[str, Any]] = {}
         for tid, t in self._data.items():
             if tid == self._GLOBAL_KEY:
@@ -736,6 +837,7 @@ class SimulationsStore:
     async def set_vm_sync_status(self, tenant_id: str,
                                  status: Dict[str, Any]) -> None:
         """Replace the tenant's VM-sync status and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["vm_sync"] = status or {}
             await self._asave()
@@ -745,6 +847,7 @@ class SimulationsStore:
 
         Synchronous — persistence happened on each ``set_vm_sync_status`` write.
         """
+        # Collect status from every tenant, skipping the global entry.
         out: Dict[str, Dict[str, Any]] = {}
         for tid, t in self._data.items():
             if tid == self._GLOBAL_KEY:
@@ -757,6 +860,7 @@ class SimulationsStore:
     async def set_fw_discovery_sync_status(self, tenant_id: str,
                                             status: Dict[str, Any]) -> None:
         """Replace the tenant's firewall-discovery-sync status and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["fw_discovery_sync"] = status or {}
             await self._asave()
@@ -766,6 +870,7 @@ class SimulationsStore:
 
         Synchronous — persistence happened on each ``set_fw_discovery_sync_status`` write.
         """
+        # Collect status from every tenant, skipping the global entry.
         out: Dict[str, Dict[str, Any]] = {}
         for tid, t in self._data.items():
             if tid == self._GLOBAL_KEY:
@@ -790,26 +895,32 @@ class SimulationsStore:
     async def get_fw_discovery_last_nonzero_tenants(self, source_label: str) -> List[str]:
         """Tenant ids this source pushed a NON-EMPTY device set for, as of its
         last successful (no pull errors) cycle."""
+        # Tracked map per source; copy this source's list.
         tracked = self._global().get("fw_discovery_last_nonzero_tenants") or {}
         return list(tracked.get(source_label) or [])
 
     async def set_fw_discovery_last_nonzero_tenants(self, source_label: str,
                                                     tenant_ids: List[str]) -> None:
+        """Record which tenants this source last pushed a non-empty device set for, and persist."""
+        # Under the lock, get or create the tracking map in the global section.
         async with self._lock:
             g = self._global()
             tracked = g.setdefault("fw_discovery_last_nonzero_tenants", {})
+            # Store the de-duplicated, sorted tenant list and save.
             tracked[source_label] = sorted(set(tenant_ids or []))
             await self._asave()
 
     async def set_nw_discovery_sync_status(self, tenant_id: str,
                                            status: Dict[str, Any]) -> None:
         """Replace the tenant's nw-discovery-sync status and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["nw_discovery_sync"] = status or {}
             await self._asave()
 
     def get_all_nw_discovery_sync_status(self) -> Dict[str, Dict[str, Any]]:
         """Return {tenant_id: status} for every tenant with a recorded nw-discovery sync."""
+        # Collect status from every tenant, skipping the global entry.
         out: Dict[str, Dict[str, Any]] = {}
         for tid, t in self._data.items():
             if tid == self._GLOBAL_KEY:
@@ -822,12 +933,14 @@ class SimulationsStore:
     async def set_truenas_discovery_sync_status(self, tenant_id: str,
                                                 status: Dict[str, Any]) -> None:
         """Replace the tenant's truenas-discovery-sync status and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["truenas_discovery_sync"] = status or {}
             await self._asave()
 
     def get_all_truenas_discovery_sync_status(self) -> Dict[str, Dict[str, Any]]:
         """Return {tenant_id: status} for every tenant with a recorded truenas-discovery sync."""
+        # Collect status from every tenant, skipping the global entry.
         out: Dict[str, Dict[str, Any]] = {}
         for tid, t in self._data.items():
             if tid == self._GLOBAL_KEY:
@@ -840,6 +953,7 @@ class SimulationsStore:
     async def set_realtime_nac_sync_status(self, tenant_id: str,
                                            status: Dict[str, Any]) -> None:
         """Replace the tenant's realtime-NAC-sync status and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["realtime_nac_sync"] = status or {}
             await self._asave()
@@ -849,6 +963,7 @@ class SimulationsStore:
 
         Synchronous — persistence happened on each ``set_realtime_nac_sync_status`` write.
         """
+        # Collect status from every tenant, skipping the global entry.
         out: Dict[str, Dict[str, Any]] = {}
         for tid, t in self._data.items():
             if tid == self._GLOBAL_KEY:
@@ -861,10 +976,12 @@ class SimulationsStore:
     # ── onboarding PSKs (hub mints; the active one is pushed to the spoke) ──
     async def get_psks(self, tenant_id: str) -> List[str]:
         """Return a copy of the tenant's onboarding PSK list."""
+        # Copy so callers cannot change the stored list.
         return list(self._data.get(tenant_id, {}).get("onboarding_psks", []))
 
     async def add_psk(self, tenant_id: str, psk: str) -> None:
         """Add an onboarding PSK to the tenant (idempotent) and persist."""
+        # Under the lock, append the PSK if missing and save.
         async with self._lock:
             t = self._tenant(tenant_id)
             psks = list(t.get("onboarding_psks", []))
@@ -875,6 +992,7 @@ class SimulationsStore:
 
     async def remove_psk(self, tenant_id: str, psk: str) -> bool:
         """Remove an onboarding PSK from the tenant; return True if it was present."""
+        # Under the lock, remove the PSK if present and save.
         async with self._lock:
             t = self._tenant(tenant_id)
             psks = list(t.get("onboarding_psks", []))
@@ -883,15 +1001,19 @@ class SimulationsStore:
                 t["onboarding_psks"] = psks
                 await self._asave()
                 return True
+            # The PSK was not stored.
             return False
 
     def tenant_ids(self) -> list:
         """Every tenant id with a record in the store — used by the hub-side
         Central poller to find centralized-mode tenants to poll."""
+        # Every top-level key, as a list.
         return list(self._data.keys())
 
     # ── processing modes (central_api / teams / email → centralized|distributed) ──
     async def get_processing_modes(self, tenant_id: str) -> Dict[str, str]:
+        """Return a copy of the tenant's processing modes (feature -> centralized/distributed)."""
+        # Copy; missing modes give an empty dict.
         return dict(self._data.get(tenant_id, {}).get("processing_modes", {}))
 
     @staticmethod
@@ -901,6 +1023,7 @@ class SimulationsStore:
         explicit ``central_api == "distributed"`` opts out (a spoke holds the creds
         and does the polling). Unset / blank / unknown → centralized, so a hub with
         a Central config shows its checks with zero spokes assigned."""
+        # Anything other than "distributed" counts as centralized.
         return str((modes or {}).get("central_api") or "").strip().lower() != "distributed"
 
     @staticmethod
@@ -911,6 +1034,7 @@ class SimulationsStore:
         opts out (a spoke holds the token/org and does the polling). Unset / blank /
         unknown → centralized, so a hub with a Mist config shows its checks with
         zero spokes assigned."""
+        # Anything other than "distributed" counts as centralized.
         return str((modes or {}).get("mist_api") or "").strip().lower() != "distributed"
 
     @staticmethod
@@ -920,9 +1044,12 @@ class SimulationsStore:
         DEFAULTS to centralized, mirroring ``central_api_is_centralized``: only an
         explicit ``central_on_prem_api == "distributed"`` opts out (a spoke holds
         the creds and does the polling). Unset / blank / unknown → centralized."""
+        # Anything other than "distributed" counts as centralized.
         return str((modes or {}).get("central_on_prem_api") or "").strip().lower() != "distributed"
 
     async def set_processing_mode(self, tenant_id: str, feature: str, value: str) -> None:
+        """Set one feature's processing mode for the tenant and persist."""
+        # Under the lock, update a copy of the modes and save.
         async with self._lock:
             t = self._tenant(tenant_id)
             modes = dict(t.get("processing_modes", {}))
@@ -934,19 +1061,26 @@ class SimulationsStore:
     async def get_email_report(self, tenant_id: str) -> Dict[str, Any]:
         """{enabled, sections:{checks,clients}, schedule:{freq,dow,dom,hour},
         recipients:[...], last_sent} — the scheduled health-report config."""
+        # Copy; missing config gives an empty dict.
         return dict(self._data.get(tenant_id, {}).get("email_report", {}))
 
     # ── notifications (smtp / teams / email) ───────────────────────────────
     async def get_notifications(self, tenant_id: str) -> Dict[str, Any]:
+        """Return a copy of the tenant's notification config (SMTP / Teams / email)."""
+        # Copy; missing config gives an empty dict.
         return dict(self._data.get(tenant_id, {}).get("notifications", {}))
 
     async def set_notifications(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
+        """Replace the tenant's notification config and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             self._tenant(tenant_id)["notifications"] = cfg or {}
             await self._asave()
 
     # ── /settings bundle (processing_modes + notifications) ────────────────
     async def get_settings(self, tenant_id: str) -> Dict[str, Any]:
+        """Return the tenant's processing modes and notifications together."""
+        # Combine both getters into one bundle.
         return {"processing_modes": await self.get_processing_modes(tenant_id),
                 "notifications": await self.get_notifications(tenant_id)}
 
@@ -954,9 +1088,12 @@ class SimulationsStore:
     # Stored under a reserved "__global__" key so it sits alongside (but never
     # collides with) the per-tenant dicts. Mirrors the cs source store.py
     # _load_global_config / get_global_usb_vidpids (superadmin.py:589-658).
+    # Reserved top-level key for platform-wide settings.
     _GLOBAL_KEY = "__global__"
 
     def _global(self) -> Dict[str, Any]:
+        """Return the global settings dict, creating it if needed."""
+        # Create the global entry on first use.
         g = self._data.get(self._GLOBAL_KEY)
         if g is None:
             g = {}
@@ -969,10 +1106,13 @@ class SimulationsStore:
         site is optional (blank = "all sites"). A tenant's enabled sim_quotas
         override these per ``alert_type:alert_id:site``; the engine (Chunk 2)
         merges global defaults + tenant overrides."""
+        # Copies of each valid default row.
         return [dict(d) for d in (self._global().get("sim_quota_defaults") or [])
                 if isinstance(d, dict)]
 
     async def set_sim_quota_defaults(self, quotas: List[Dict[str, Any]]) -> None:
+        """Replace the platform-wide Sim-Quota defaults and persist."""
+        # Store copies of valid rows under the lock and save.
         async with self._lock:
             self._global()["sim_quota_defaults"] = [
                 dict(d) for d in (quotas or []) if isinstance(d, dict)]
@@ -987,12 +1127,16 @@ class SimulationsStore:
     # pushes this global default down on every sim-quota push); a tenant csc
     # ``qt_exclude_sims`` overrides it per-tenant. Default = the locked decision set.
     async def get_qt_exclude_sims(self) -> List[str]:
+        """Return the global list of sim ids that never trigger a dongle quarantine."""
+        # Non-list values give an empty list; blank ids are dropped.
         v = self._global().get("qt_exclude_sims")
         if not isinstance(v, list):
             return []
         return [str(s) for s in v if str(s).strip()]
 
     async def set_qt_exclude_sims(self, sims: List[str]) -> None:
+        """Replace the global quarantine-exclusion sim list and persist."""
+        # Store trimmed, non-blank ids under the lock and save.
         async with self._lock:
             self._global()["qt_exclude_sims"] = [
                 str(s).strip() for s in (sims or []) if str(s).strip()]
@@ -1006,10 +1150,14 @@ class SimulationsStore:
     # from it via apply_adaptive_targets (applied_op = max(own, global)). Lives
     # under ``__global__`` so it's shared by every tenant.
     async def get_global_learned_values(self) -> Dict[str, Any]:
+        """Return a copy of the published global learned values, keyed per alert."""
+        # Copy; non-dicts give an empty dict.
         v = self._global().get("global_learned_values")
         return dict(v) if isinstance(v, dict) else {}
 
     async def set_global_learned_values(self, mapping: Dict[str, Any]) -> None:
+        """Replace the published global learned values and persist them."""
+        # Store a copy under the lock and save.
         async with self._lock:
             self._global()["global_learned_values"] = (
                 dict(mapping) if isinstance(mapping, dict) else {})
@@ -1024,6 +1172,8 @@ class SimulationsStore:
     # global_learned_values) is the "admin must approve before it goes to every
     # tenant" gate the operator asked for.
     async def get_global_learned_pending(self) -> Dict[str, Any]:
+        """Return a copy of the learned values awaiting admin approval, keyed per alert."""
+        # Copy; non-dicts give an empty dict.
         v = self._global().get("global_learned_pending")
         return dict(v) if isinstance(v, dict) else {}
 
@@ -1033,19 +1183,27 @@ class SimulationsStore:
     # any tenant's SimQuotaEngine. Lives under ``__global__`` and is pushed to
     # every tenant's spoke as CS_CONFIG_UPDATE.sim_shareable.
     async def get_sim_shareable_global(self) -> Dict[str, Any]:
+        """Return a copy of the global per-sim shareable (stackable) map."""
+        # Copy; non-dicts give an empty dict.
         v = self._global().get("sim_shareable")
         return dict(v) if isinstance(v, dict) else {}
 
     async def set_sim_shareable_global(self, mapping: Dict[str, Any]) -> None:
+        """Replace the global shareable map and persist it."""
+        # Store a copy under the lock and save.
         async with self._lock:
             self._global()["sim_shareable"] = dict(mapping) if isinstance(mapping, dict) else {}
             await self._asave()
 
     async def get_sim_na_global(self) -> Dict[str, Any]:
+        """Return a copy of the global per-sim N/A (hidden in the UI) map."""
+        # Copy; non-dicts give an empty dict.
         v = self._global().get("sim_na")
         return dict(v) if isinstance(v, dict) else {}
 
     async def set_sim_na_global(self, mapping: Dict[str, Any]) -> None:
+        """Replace the global N/A map and persist it."""
+        # Store a copy under the lock and save.
         async with self._lock:
             self._global()["sim_na"] = dict(mapping) if isinstance(mapping, dict) else {}
             await self._asave()
@@ -1056,21 +1214,29 @@ class SimulationsStore:
     # = max sims/client; stack_rotation_s = re-shuffle cadence. See SimQuotaEngine
     # ._reconcile_stacked.
     async def get_sim_weights_global(self) -> Dict[str, Any]:
+        """Return a copy of the global per-sim stacking weights."""
+        # Copy; non-dicts give an empty dict.
         v = self._global().get("sim_weights")
         return dict(v) if isinstance(v, dict) else {}
 
     async def set_sim_weights_global(self, mapping: Dict[str, Any]) -> None:
+        """Replace the global stacking weights and persist them."""
+        # Store a copy under the lock and save.
         async with self._lock:
             self._global()["sim_weights"] = dict(mapping) if isinstance(mapping, dict) else {}
             await self._asave()
 
     async def get_stack_cap_global(self) -> int:
+        """Return the global max sims per client (default 3)."""
+        # Invalid stored values fall back to 3.
         try:
             return int(self._global().get("stack_cap", 3))
         except (TypeError, ValueError):
             return 3
 
     async def set_stack_cap_global(self, n: Any) -> None:
+        """Set the global max sims per client (at least 0, invalid means 3) and persist."""
+        # Under the lock, store the clamped value and save.
         async with self._lock:
             try:
                 self._global()["stack_cap"] = max(0, int(n))
@@ -1079,12 +1245,16 @@ class SimulationsStore:
             await self._asave()
 
     async def get_stack_rotation_s_global(self) -> int:
+        """Return the global stack re-shuffle interval in seconds (default 600)."""
+        # Invalid stored values fall back to 600.
         try:
             return int(self._global().get("stack_rotation_s", 600))
         except (TypeError, ValueError):
             return 600
 
     async def set_stack_rotation_s_global(self, s: Any) -> None:
+        """Set the stack re-shuffle interval (at least 30s, invalid means 600) and persist."""
+        # Under the lock, store the clamped value and save.
         async with self._lock:
             try:
                 self._global()["stack_rotation_s"] = max(30, int(s))
@@ -1093,12 +1263,16 @@ class SimulationsStore:
             await self._asave()
 
     async def get_harvest_cooldown_s_global(self) -> int:
+        """Return the global harvest cooldown in seconds (default 14400 = 4 hours)."""
+        # Invalid stored values fall back to 4 hours.
         try:
             return int(self._global().get("harvest_cooldown_s", 14400))
         except (TypeError, ValueError):
             return 14400
 
     async def set_harvest_cooldown_s_global(self, s: Any) -> None:
+        """Set the global harvest cooldown (at least 0, invalid means 4 hours) and persist."""
+        # Under the lock, store the clamped value and save.
         async with self._lock:
             try:
                 self._global()["harvest_cooldown_s"] = max(0, int(s))
@@ -1109,10 +1283,13 @@ class SimulationsStore:
     async def get_global_usb_vidpids(self) -> List[Dict[str, Any]]:
         """Platform-wide (superadmin-certified) USB device list —
         {vidpid, type, label} dicts (the cs-spoke re-filter shape)."""
+        # Copies of each valid device dict.
         return [dict(d) for d in (self._global().get("usb_vidpids") or [])
                 if isinstance(d, dict)]
 
     async def set_global_usb_vidpids(self, devices: List[Dict[str, Any]]) -> None:
+        """Replace the global certified USB device list and persist it."""
+        # Store copies of valid dicts under the lock and save.
         async with self._lock:
             g = self._global()
             g["usb_vidpids"] = [dict(d) for d in (devices or []) if isinstance(d, dict)]
@@ -1120,8 +1297,10 @@ class SimulationsStore:
 
     async def get_global_usb_ignored_vidpids(self) -> List[str]:
         """Platform-wide ignored USB VID:PIDs — bare lowercased vidpid strings."""
+        # Stored entries (dicts or strings).
         raw = self._global().get("usb_ignored_vidpids") or []
         out: List[str] = []
+        # Reduce each entry to a unique lowercased VID:PID string.
         for d in raw:
             vp = (d.get("vidpid") if isinstance(d, dict) else d)
             vp = str(vp or "").strip().lower()
@@ -1130,6 +1309,8 @@ class SimulationsStore:
         return out
 
     async def set_global_usb_ignored_vidpids(self, vidpids: List[Any]) -> None:
+        """Replace the global ignored USB VID:PID list and persist it."""
+        # Store the normalised list under the lock and save.
         async with self._lock:
             g = self._global()
             g["usb_ignored_vidpids"] = self._bare_vidpid_list(vidpids)
@@ -1142,6 +1323,8 @@ class SimulationsStore:
     # lists. Bare lowercased ``vid:pid`` strings.
     @staticmethod
     def _bare_vidpid_list(vidpids: List[Any]) -> List[str]:
+        """Normalise dicts or strings into a unique list of lowercased VID:PID strings."""
+        # Keep each non-empty VID:PID once, in order.
         out: List[str] = []
         for d in (vidpids or []):
             vp = (d.get("vidpid") if isinstance(d, dict) else d)
@@ -1151,17 +1334,25 @@ class SimulationsStore:
         return out
 
     async def get_global_t1_pci_vidpids(self) -> List[str]:
+        """Return the global T1 PCI VID:PID list."""
+        # Normalised copy of the stored list.
         return self._bare_vidpid_list(self._global().get("t1_pci_vidpids"))
 
     async def set_global_t1_pci_vidpids(self, vidpids: List[Any]) -> None:
+        """Replace the global T1 PCI VID:PID list and persist it."""
+        # Store the normalised list under the lock and save.
         async with self._lock:
             self._global()["t1_pci_vidpids"] = self._bare_vidpid_list(vidpids)
             await self._asave()
 
     async def get_global_t3_pci_vidpids(self) -> List[str]:
+        """Return the global T3 PCI VID:PID list."""
+        # Normalised copy of the stored list.
         return self._bare_vidpid_list(self._global().get("t3_pci_vidpids"))
 
     async def set_global_t3_pci_vidpids(self, vidpids: List[Any]) -> None:
+        """Replace the global T3 PCI VID:PID list and persist it."""
+        # Store the normalised list under the lock and save.
         async with self._lock:
             self._global()["t3_pci_vidpids"] = self._bare_vidpid_list(vidpids)
             await self._asave()
@@ -1173,10 +1364,12 @@ class SimulationsStore:
     # deleted, ip_freed, errors, message, per_tenant, last_sync_ts}.
     async def get_staleness_sweep_status(self) -> Dict[str, Any]:
         """Return the last cluster-wide staleness-sweep status (empty if never run)."""
+        # Copy; missing status gives an empty dict.
         return dict(self._global().get("staleness_sweep", {}))
 
     async def set_staleness_sweep_status(self, status: Dict[str, Any]) -> None:
         """Replace the cluster-wide staleness-sweep status and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             g = self._global()
             g["staleness_sweep"] = status or {}
@@ -1190,10 +1383,12 @@ class SimulationsStore:
     # message}.
     async def get_repo_sync_status(self) -> Dict[str, Any]:
         """Return the last GitHub repo-sync status (empty if never run)."""
+        # Copy; missing status gives an empty dict.
         return dict(self._global().get("repo_sync", {}))
 
     async def set_repo_sync_status(self, status: Dict[str, Any]) -> None:
         """Replace the GitHub repo-sync status and persist."""
+        # Replace under the lock and save.
         async with self._lock:
             g = self._global()
             g["repo_sync"] = status or {}

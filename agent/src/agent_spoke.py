@@ -1,3 +1,12 @@
+"""Generic agent spoke for lm.
+
+Loads role spokes (in-repo or from role repos), runs deploy roles (install,
+unload, uninstall, self-heal of their services), installs certificates for
+NetBox, LDAP and Zabbix web hosts, and manages NetBox SSO settings. Also holds
+the helpers for apt lock waits, deploy-role detection and service worker
+restarts used by the agent.
+"""
+# asyncio, importlib, network, JSON, logging, OS, shell-quoting, file and process modules.
 import asyncio
 import importlib.util
 import ipaddress
@@ -12,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+# Path for files; typing helpers.
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -37,12 +47,14 @@ _ZABBIX_WEB_KEY = "/etc/zabbix/tls/web.key"
 
 
 def is_zabbix_web_host() -> bool:
+    """Return True if this host runs the Zabbix server with its nginx web config."""
     return os.path.exists(_ZABBIX_SERVER_BIN) and os.path.exists(_ZABBIX_NGINX_CONF)
 
 
 def _zabbix_nginx_cert_paths(conf_text: str):
     """(cert, key) paths from the Zabbix nginx vhost, or (None, None) when the
     vhost doesn't terminate TLS."""
+    # Find the ssl_certificate and ssl_certificate_key lines.
     import re as _re
     crt = _re.search(r"^\s*ssl_certificate\s+([^;\s]+)\s*;", conf_text, _re.M)
     key = _re.search(r"^\s*ssl_certificate_key\s+([^;\s]+)\s*;", conf_text, _re.M)
@@ -51,6 +63,7 @@ def _zabbix_nginx_cert_paths(conf_text: str):
 # NetBox app layout on a netbox-server host (deployed by netbox/install.sh
 # --infra-only). Used by the NETBOX_APPLY_SSO handler to apply Entra SSO live
 # (the agent runs as root here) without a full installer re-run.
+# NetBox install paths, SSO files and config markers.
 _NETBOX_APP_DIR = "/opt/netbox-app"
 _NETBOX_CONFIG_PY = "/opt/netbox-app/netbox/netbox/configuration.py"
 _NETBOX_SSO_PIPELINE = "/opt/netbox-app/netbox/lm_sso_pipeline.py"
@@ -100,18 +113,21 @@ def ensure_apt_lock_timeout(path: str = _APT_CONF_DROPIN,
     install time so nodes provisioned before this existed self-heal as soon as
     the agent restarts, which it does on every SPOKE_UPDATE.
     """
+    # The wanted drop-in content.
     desired = (
         "// Managed by LM GenericAgent — do not edit.\n"
         "// Wait for the dpkg/apt lock instead of failing with rc=100 when a\n"
         "// role deploy collides with unattended-upgrades or an LM OS update.\n"
         f'DPkg::Lock::Timeout "{timeout_s}";\n'
     )
+    # Already in place: done.
     try:
         p = Path(path)
         if p.read_text() == desired:
             return True
     except (OSError, UnicodeDecodeError):
         pass
+    # Write it if the apt config folder exists.
     try:
         p = Path(path)
         if not p.parent.is_dir():
@@ -131,11 +147,13 @@ def ensure_apt_lock_timeout(path: str = _APT_CONF_DROPIN,
         logger.warning("Could not configure the apt lock timeout at %s: %s", path, exc)
         return False
 
+# Spoke base class, from whichever layout is installed.
 try:
     from base_spoke import BaseSpoke
 except ImportError:
     from core.src.base_spoke import BaseSpoke
 
+# Module logger.
 logger = logging.getLogger("GenericAgent")
 
 
@@ -153,6 +171,7 @@ def _is_base_spoke(obj) -> bool:
     ``control_plane`` None — so its SPOKE_RELAY handler can never
     ``approve_pending_agent`` (hosted agents flap in "pending" forever). Match
     by isinstance first, then fall back to a name check across the MRO."""
+    # Real isinstance first, then match by class name.
     if isinstance(obj, BaseSpoke):
         return True
     return any(getattr(c, "__name__", "") == "BaseSpoke" for c in type(obj).__mro__)
@@ -247,10 +266,12 @@ def _infra_install_cmd(installer_url: str) -> list:
     (the same shape the netbox-server deploy role uses inline). Kept as a helper
     so a new deploy role is one line + a URL. ``_build_deploy_cmd`` appends the
     per-load flags after ``--infra-only``."""
+    # Fetch the installer and run it with --infra-only.
     fetch = "exec </dev/null; curl -sSL " + shlex.quote(installer_url) + " "
     return ["bash", "-c", fetch + "| bash -s -- --infra-only"]
 
 
+# Installer URLs for LDAP, Zabbix and in-repo DNS/DHCP roles.
 _LDAP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/ldap/main/install_ldap.sh"
 # dns/dhcp installers live IN the lm repo (in-repo modules), so their deploy-role
 # installer URL is the lm raw path (not a sibling repo like netbox/ldap).
@@ -260,6 +281,7 @@ _ZBX_AGENT_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbi
 _DNS_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dns/install_dns.sh"
 _DHCP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dhcp/install_dhcp.sh"
 
+# Deploy roles: install command and module type per role.
 _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
     "ab": {
         "cmd": ["bash", "-c",
@@ -330,11 +352,13 @@ _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Command flags whose values are secrets.
 _SECRET_FLAGS = ("--db-pass", "--admin-password", "--tls-key", "--password")
 
 
 def _redact_cmd(cmd: list) -> str:
     """Command line for logs with secret flag values masked."""
+    # Mask the value after each secret flag.
     out = []
     for part in cmd:
         toks = shlex.split(part) if isinstance(part, str) and "--" in part else None
@@ -347,6 +371,7 @@ def _redact_cmd(cmd: list) -> str:
 
 def _deploy_host_facts() -> str:
     """OS / arch / disk facts that commonly explain an installer failure."""
+    # Distro ID and version from os-release.
     facts = {}
     try:
         for line in Path("/etc/os-release").read_text().splitlines():
@@ -355,6 +380,7 @@ def _deploy_host_facts() -> str:
                 facts[k] = v.strip('"')
     except OSError:
         pass
+    # CPU arch and free disk space.
     facts["arch"] = os.uname().machine
     try:
         facts["free_gb"] = round(shutil.disk_usage("/").free / 1e9, 1)
@@ -364,6 +390,14 @@ def _deploy_host_facts() -> str:
 
 
 def _tcp_check(host: str, port: int, timeout: float = 5.0) -> str:
+    """Return a text line saying whether host:port accepts a TCP connection.
+
+    Args:
+        host: host name or address.
+        port: TCP port.
+        timeout: connect timeout in seconds.
+    """
+    # Try to connect.
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return f"{host}:{port} reachable"
@@ -373,7 +407,9 @@ def _tcp_check(host: str, port: int, timeout: float = 5.0) -> str:
 
 def _zbxproxy_preflight(cmd: list) -> list:
     """Connectivity the proxy installer needs: the Zabbix repo and the server's trapper port."""
+    # Check the Zabbix repo and GitHub.
     lines = [_tcp_check("repo.zabbix.com", 443), _tcp_check("raw.githubusercontent.com", 443)]
+    # Check the --server target if the command has one.
     joined = " ".join(str(c) for c in cmd)
     toks = shlex.split(joined) if "--server" in joined else []
     if "--server" in toks:
@@ -385,6 +421,7 @@ def _zbxproxy_preflight(cmd: list) -> list:
     return lines
 
 
+# Marker file per deploy role that shows it is installed.
 _DEPLOY_ROLE_MARKERS = {
     "ab": "/etc/systemd/system/ab.service",
     "netbox-server": "/opt/netbox-app/venv/bin/python3",
@@ -410,9 +447,12 @@ _DEPLOY_ROLE_OWNERSHIP = {
 
 
 def _deploy_role_installed(role_name: str) -> bool:
+    """Return True if the role's marker exists and, when needed, an LM-owned file too."""
+    # Need the marker file.
     marker = _DEPLOY_ROLE_MARKERS.get(role_name)
     if not marker or not os.path.exists(marker):
         return False
+    # Some roles also need an LM-owned file.
     owned_by = _DEPLOY_ROLE_OWNERSHIP.get(role_name)
     if owned_by:
         return any(os.path.exists(path) for path in owned_by)
@@ -420,6 +460,7 @@ def _deploy_role_installed(role_name: str) -> bool:
 
 
 def _installed_deploy_roles() -> list:
+    """Return the deploy roles installed on this host."""
     return [role for role in _DEPLOY_ROLE_MARKERS if _deploy_role_installed(role)]
 
 
@@ -427,6 +468,7 @@ def _deploy_role_foreign(role_name: str) -> bool:
     """The role's software is present but NOT LM-owned (e.g. the Kea a client-
     simulation node needs running for its sim DHCP). Unload/uninstall of the
     LM role must leave such software untouched."""
+    # Marker present but not owned by LM.
     marker = _DEPLOY_ROLE_MARKERS.get(role_name)
     return bool(marker and os.path.exists(marker)
                 and role_name in _DEPLOY_ROLE_OWNERSHIP
@@ -434,6 +476,12 @@ def _deploy_role_foreign(role_name: str) -> bool:
 
 
 def _foreign_deploy_role_reply(role_name: str, action: str) -> dict:
+    """Return a SUCCESS reply saying the role's software is not LM-managed and was left alone.
+
+    Args:
+        role_name: deploy role name.
+        action: what was asked, for the message.
+    """
     return {
         "status": "SUCCESS",
         "role": role_name,
@@ -442,6 +490,7 @@ def _foreign_deploy_role_reply(role_name: str, action: str) -> dict:
                     f"not LM-managed (e.g. client-simulation Kea) and was left running"),
     }
 
+# Primary systemd units per deploy role.
 _DEPLOY_ROLE_UNITS = {
     "dns-server": ("unbound",),
     "dhcp-server": ("kea-dhcp4-server", "kea-ctrl-agent"),
@@ -476,6 +525,7 @@ _DEPLOY_ROLE_EXTRA_UNITS = {
 # installer that dpkg does not track. Only roles listed here can be
 # uninstalled; anything else is refused rather than guessed at.
 _SYSTEMD_UNIT_DIR = "/etc/systemd/system"
+# Packages, unit files and paths removed by an uninstall.
 _DEPLOY_ROLE_PURGE = {
     "dns-server": {
         "packages": ("unbound", "unbound-anchor"),
@@ -509,6 +559,7 @@ _DEPLOY_ROLE_PURGE = {
 
 def _configured_service_workers() -> list:
     """Non-secret identity for configured DNS/DHCP worker sidecars."""
+    # Read member id and coordinator from each worker's env file.
     out = []
     for role, path, prefix in (
         ("dns-server", "/etc/lm-dns-worker/worker.env", "LM_DNS"),
@@ -535,6 +586,7 @@ def _configured_service_workers() -> list:
 
 def _local_service_addresses() -> list:
     """Private IPv4 addresses this agent can advertise to managed services."""
+    # Collect candidate addresses.
     candidates = []
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -546,6 +598,7 @@ def _local_service_addresses() -> list:
             probe.close()
     except OSError:
         pass
+    # Plus every global IPv4 address from "ip -j".
     try:
         result = subprocess.run(
             ["ip", "-j", "-4", "address", "show", "up"],
@@ -559,6 +612,7 @@ def _local_service_addresses() -> list:
     except (OSError, subprocess.SubprocessError, ValueError, TypeError):
         pass
 
+    # Keep private, non-loopback, non-link-local addresses once each.
     addresses = []
     for value in candidates:
         try:
@@ -593,10 +647,12 @@ def _heal_deploy_role_sidecars(installed_roles: list) -> list:
     AND the primary units are present (``LoadState=loaded``) — never installs
     or enables anything that isn't already part of a deployed role. Returns
     the repair actions taken, for logging."""
+    # Actions taken.
     actions = []
 
     def _unit_healthy(u):
         """True/False when determinable; None if the query itself failed."""
+        # Enabled and active.
         try:
             enabled = subprocess.run(
                 ["systemctl", "is-enabled", "--quiet", u],
@@ -611,6 +667,7 @@ def _heal_deploy_role_sidecars(installed_roles: list) -> list:
         except (OSError, subprocess.SubprocessError):
             return None
 
+    # For each installed role with sidecars and healthy primary units.
     for role, extras in _DEPLOY_ROLE_EXTRA_UNITS.items():
         if role not in installed_roles:
             continue
@@ -621,6 +678,7 @@ def _heal_deploy_role_sidecars(installed_roles: list) -> list:
         primaries = _DEPLOY_ROLE_UNITS.get(role, ())
         if not primaries or not all(_unit_healthy(p) is True for p in primaries):
             continue
+        # Check each sidecar unit.
         for unit in extras:
             try:
                 loaded = subprocess.run(
@@ -631,12 +689,14 @@ def _heal_deploy_role_sidecars(installed_roles: list) -> list:
                 loaded = False
             if not loaded:
                 continue  # not installed on this host — nothing to heal
+            # Skip unknown state and healthy units.
             healthy = _unit_healthy(unit)
             if healthy is None:
                 logger.warning("self-heal: could not query %s state; skipping", unit)
                 continue
             if healthy:
                 continue
+            # Enable and start it.
             try:
                 result = subprocess.run(
                     ["systemctl", "enable", "--now", unit],
@@ -661,19 +721,23 @@ def _heal_deploy_role_sidecars(installed_roles: list) -> list:
 # sent KEAW_PACKET_TRACE and both Kea nodes answered "unsupported worker
 # operation" — lm-dhcp-worker had been up for two days across several pulls.
 # (kea-ha-agent is Kea's own kea-ctrl-agent, not LM code, so it is not here.)
+# Python worker sidecars per role.
 _PY_WORKER_SIDECARS = {
     "dhcp-server": "lm-dhcp-worker",
     "dns-server": "lm-dns-worker",
 }
 # Don't restart while a pull may still be writing files.
+# Wait this long after a code change before restarting.
 _STALE_WORKER_SETTLE_S = 10.0
 # unit -> code mtime we already restarted for, so a restart that doesn't take
 # (or a clock oddity) can never turn into a restart loop.
+# Code version each unit was last restarted for.
 _stale_worker_restarted_for: dict = {}
 
 
 def _proc_start_epoch(pid: int):
     """Wall-clock start time of ``pid`` from /proc, or None."""
+    # Boot time plus the process start ticks.
     try:
         with open("/proc/stat", encoding="ascii") as f:
             btime = next(int(line.split()[1]) for line in f if line.startswith("btime "))
@@ -688,6 +752,7 @@ def _proc_start_epoch(pid: int):
 def _worker_code_mtime(workdir: str):
     """Newest *.py mtime across the worker's own src dir and the shared
     core/src/messaging (service_cluster.ServiceWorkerClient), or None."""
+    # Newest .py file in the worker and shared messaging folders.
     repo_root = os.path.dirname(os.path.dirname(os.path.normpath(workdir)))
     newest = None
     for d in (workdir, os.path.join(repo_root, "core", "src", "messaging")):
@@ -711,11 +776,13 @@ def _restart_stale_service_workers(installed_roles: list, now: float = None) -> 
     than its running process (see ``_PY_WORKER_SIDECARS``). Never starts a
     stopped/unloaded worker — that stays ``_heal_deploy_role_sidecars``' call.
     Returns the actions taken."""
+    # Check each installed role's worker.
     now = time.time() if now is None else now
     actions = []
     for role, unit in _PY_WORKER_SIDECARS.items():
         if role not in installed_roles:
             continue
+        # Read state, PID and work folder.
         try:
             out = subprocess.run(
                 ["systemctl", "show", "-p", "ActiveState", "-p", "MainPID",
@@ -730,16 +797,20 @@ def _restart_stale_service_workers(installed_roles: list, now: float = None) -> 
         except ValueError:
             pid = 0
         workdir = props.get("WorkingDirectory") or ""
+        # Only active workers with a PID and folder.
         if props.get("ActiveState") != "active" or pid <= 0 or not workdir:
             continue
+        # Compare process start time with code time.
         started = _proc_start_epoch(pid)
         code = _worker_code_mtime(workdir)
         if started is None or code is None:
             continue
+        # Skip if not newer, too fresh, or already restarted for this version.
         if code <= started + 1 or now - code < _STALE_WORKER_SETTLE_S:
             continue
         if _stale_worker_restarted_for.get(unit) == code:
             continue
+        # Note it and restart.
         _stale_worker_restarted_for[unit] = code
         try:
             result = subprocess.run(["systemctl", "restart", unit],
@@ -760,6 +831,8 @@ def _restart_stale_service_workers(installed_roles: list, now: float = None) -> 
 
 
 def _active_deploy_roles(installed_roles: list) -> list:
+    """Return installed deploy roles whose units are all enabled, after running self-heal."""
+    # Heal sidecars and restart stale workers; never fail here.
     try:
         _heal_deploy_role_sidecars(installed_roles)
     except Exception as e:  # noqa: BLE001 — self-heal must never break role reporting
@@ -768,6 +841,7 @@ def _active_deploy_roles(installed_roles: list) -> list:
         _restart_stale_service_workers(installed_roles)
     except Exception as e:  # noqa: BLE001 — self-heal must never break role reporting
         logger.warning("self-heal (stale service workers) failed: %s", e)
+    # A role is active when all its units are enabled.
     active = []
     for role, units in _DEPLOY_ROLE_UNITS.items():
         if role not in installed_roles:
@@ -800,6 +874,7 @@ def _purge_deploy_role(role_name: str) -> dict:
     Returns a report; the caller decides SUCCESS vs PARTIAL from
     ``marker_before``/``marker_after``.
     """
+    # Role's purge spec, marker and report.
     spec = _DEPLOY_ROLE_PURGE[role_name]
     marker = _DEPLOY_ROLE_MARKERS.get(role_name)
     report = {
@@ -813,9 +888,11 @@ def _purge_deploy_role(role_name: str) -> dict:
     }
 
     def _run(cmd, timeout):
+        """Run a command and capture its output."""
         return subprocess.run(cmd, capture_output=True, text=True,
                               check=False, timeout=timeout)
 
+    # Stop and disable primary and extra units.
     units = list(_DEPLOY_ROLE_UNITS.get(role_name, ()))
     units += [u for u in _DEPLOY_ROLE_EXTRA_UNITS.get(role_name, ())
               if u not in units]
@@ -826,6 +903,7 @@ def _purge_deploy_role(role_name: str) -> dict:
         except (OSError, subprocess.SubprocessError) as e:
             report["errors"].append(f"stopping units: {e}")
 
+    # Remove LM-authored unit files.
     for unit_file in spec.get("unit_files", ()):
         path = Path(_SYSTEMD_UNIT_DIR) / unit_file
         try:
@@ -835,6 +913,7 @@ def _purge_deploy_role(role_name: str) -> dict:
         except OSError as e:
             report["errors"].append(f"removing {path}: {e}")
 
+    # Purge packages one by one, then autoremove.
     packages = list(spec.get("packages", ()))
     if packages:
         env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
@@ -863,6 +942,7 @@ def _purge_deploy_role(role_name: str) -> dict:
         except (OSError, subprocess.SubprocessError) as e:
             report["errors"].append(f"apt purge: {e}")
 
+    # Remove config and data paths.
     for raw in spec.get("paths", ()):
         path = Path(raw)
         try:
@@ -875,12 +955,14 @@ def _purge_deploy_role(role_name: str) -> dict:
         except OSError as e:
             report["errors"].append(f"removing {raw}: {e}")
 
+    # Reload systemd.
     try:
         _run(["systemctl", "daemon-reload"], 60)
         _run(["systemctl", "reset-failed"], 60)
     except (OSError, subprocess.SubprocessError) as e:
         report["errors"].append(f"daemon-reload: {e}")
 
+    # Marker state after the purge.
     report["marker_after"] = bool(marker and os.path.exists(marker))
     return report
 class _RoleAdapter(BaseSpoke):
@@ -890,6 +972,12 @@ class _RoleAdapter(BaseSpoke):
     so GenericAgent.get_status() delegation never AttributeErrors."""
 
     def __init__(self, inner):
+        """Wrap a non-BaseSpoke spoke object.
+
+        Args:
+            inner: the spoke to wrap.
+        """
+        # Base set-up with the inner spoke's id and config.
         super().__init__(getattr(inner, "spoke_id", "role"), getattr(inner, "config", {}))
         self._inner = inner
 
@@ -902,11 +990,13 @@ class _RoleAdapter(BaseSpoke):
     # _is_base_spoke (which avoids wrapping genuine BaseSpokes in the first place).
     @property
     def control_plane(self):
+        """The inner spoke's control plane, or None."""
         inner = getattr(self, "_inner", None)
         return getattr(inner, "control_plane", None) if inner is not None else None
 
     @control_plane.setter
     def control_plane(self, value):
+        """Set the control plane on the inner spoke (ignored if it refuses)."""
         if hasattr(self, "_inner"):
             try:
                 self._inner.control_plane = value
@@ -914,12 +1004,15 @@ class _RoleAdapter(BaseSpoke):
                 pass
 
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Pass the command to the inner spoke and return its reply."""
         return await self._inner.handle_command(command_type, data)
 
     def get_version(self) -> str:
+        """Return the inner spoke's version."""
         return self._inner.get_version()
 
     async def get_status(self) -> Dict[str, Any]:
+        """Return the inner spoke's status, or a basic READY status if it has none."""
         try:
             return await self._inner.get_status()
         except AttributeError:
@@ -946,6 +1039,13 @@ class GenericAgent(BaseSpoke):
     """
 
     def __init__(self, spoke_id: str, config: Dict[str, Any]):
+        """Set up role, deploy and install tracking, and make apt wait for its lock.
+
+        Args:
+            spoke_id: this agent's id.
+            config: agent configuration.
+        """
+        # Base set-up.
         super().__init__(spoke_id, config)
         # Multi-role: the agent HOSTS zero or more role sub-spokes concurrently.
         # Each entry: {"instance": BaseSpoke, "conn": RoleConnection, "task": asyncio.Task}.
@@ -970,14 +1070,25 @@ class GenericAgent(BaseSpoke):
         self._role_installs_inflight: set = set()
         # Make apt wait for the dpkg lock rather than failing a deploy that
         # merely collided with another apt run. Cheap, idempotent, best-effort.
+        # Make apt wait for the dpkg lock on this node.
         ensure_apt_lock_timeout()
 
     # ── Role loading ──────────────────────────────────────────────────────────
 
     def _lm_root(self) -> Path:
+        """Return the lm repo root (three levels up from this file)."""
         return Path(__file__).parent.parent.parent
 
     def _load_role_class(self, role_name: str) -> Optional[type]:
+        """Import a role's spoke class from its file.
+
+        Args:
+            role_name: key in _ROLE_MAP.
+
+        Returns:
+            the class, or None if unknown, missing or failing to import.
+        """
+        # Known role with an existing file.
         if role_name not in _ROLE_MAP:
             return None
         rel_path, cls_name, _, _ = _ROLE_MAP[role_name]
@@ -987,6 +1098,7 @@ class GenericAgent(BaseSpoke):
             return None
         # Put the role's src dir on sys.path so FLAT imports resolve (e.g.
         # cppm's `from queries import CPPMQueries` / `from client import ...`).
+        # Let the role's own modules import each other.
         role_src = str(role_file.parent)
         if role_src not in sys.path:
             sys.path.insert(0, role_src)
@@ -995,6 +1107,7 @@ class GenericAgent(BaseSpoke):
         # __init__.py — e.g. ldap's `from .ldap_manager import LdapManager`.
         # Registering the package in sys.modules BEFORE exec_module is what
         # lets `from .helper import X` find its sibling during exec.
+        # Import the file as a package so relative imports work.
         pkg_name = f"lm_role_{role_name}"
         spec = importlib.util.spec_from_file_location(
             pkg_name, role_file, submodule_search_locations=[role_src])
@@ -1017,6 +1130,7 @@ class GenericAgent(BaseSpoke):
         (``{base}-{role}``) so its get_status / reporting carries the right
         identity — NOT the base agent's spoke_id (multi-role: the base stays
         "agent" and the role lives on its own connection)."""
+        # Load and create the role spoke.
         cls = self._load_role_class(role_name)
         if cls is None:
             return None
@@ -1026,6 +1140,7 @@ class GenericAgent(BaseSpoke):
         # dual-import-safe check so a genuine BaseSpoke subclass (cs's CSSpoke,
         # built against core.src.base_spoke) is NOT needlessly wrapped — which
         # would strand its control_plane on the adapter (see _is_base_spoke).
+        # Wrap spokes that are not BaseSpoke subclasses.
         if not _is_base_spoke(inst):
             inst = _RoleAdapter(inst)
         logger.info("Role loaded: %s (sub-spoke %s)", role_name,
@@ -1040,11 +1155,13 @@ class GenericAgent(BaseSpoke):
         heartbeats) for up to 600s on heavy roles. An in-progress guard rejects
         a second install of the same role while one runs (the offload means a
         concurrent LOAD_ROLE can now actually interleave here)."""
+        # Known role, not already installing.
         if role_name not in _ROLE_MAP:
             return {"status": "ERROR", "message": f"Unknown role '{role_name}'"}
         if role_name in self._role_installs_inflight:
             return {"status": "ERROR",
                     "message": f"Install of role '{role_name}' already in progress"}
+        # Mark in progress for the duration.
         self._role_installs_inflight.add(role_name)
         try:
             return await self._install_role_inner(role_name)
@@ -1052,6 +1169,15 @@ class GenericAgent(BaseSpoke):
             self._role_installs_inflight.discard(role_name)
 
     async def _install_role_inner(self, role_name: str) -> dict:
+        """Clone the role repo if needed and install its packages, OS config and Python deps.
+
+        Args:
+            role_name: key in _ROLE_MAP.
+
+        Returns:
+            dict with status SUCCESS, or ERROR and a message.
+        """
+        # Role file location.
         rel_path, _, _, repo_url = _ROLE_MAP[role_name]
         role_file = self._lm_root() / rel_path
 
@@ -1059,6 +1185,7 @@ class GenericAgent(BaseSpoke):
         #    Clone shallowly into <lm-root>/<first-path-segment> on first use so
         #    the spoke code is present on a bare generic node; idempotent on
         #    re-load (skips if the dir already exists).
+        # External role: clone its repo if missing.
         if repo_url:
             clone_dir = self._lm_root() / rel_path.split("/")[0]
             if not clone_dir.exists():
@@ -1078,6 +1205,7 @@ class GenericAgent(BaseSpoke):
         # 2. System packages. Management-only roles such as dns/dhcp do not
         # install the services they coordinate; those belong to the separate
         # dns-server/dhcp-server deploy roles.
+        # System packages some roles need.
         install_cmds = {
             "le":   ["apt-get", *_APT_LOCK_FLAGS, "install", "-y", "-qq", "certbot",
                      "python3-certbot-dns-cloudflare", "python3-certbot-dns-route53",
@@ -1090,6 +1218,7 @@ class GenericAgent(BaseSpoke):
             "ldap": ["apt-get", *_APT_LOCK_FLAGS, "install", "-y", "-qq",
                      "libldap2-dev", "libsasl2-dev"],
         }
+        # Install them in a thread.
         cmds = install_cmds.get(role_name)
         if cmds:
             logger.info("Installing system packages for role '%s'…", role_name)
@@ -1103,10 +1232,12 @@ class GenericAgent(BaseSpoke):
         #     local infrastructure.
         #     Idempotent + best-effort; a config hiccup must not fail the load.
         #     Offloaded whole: it shells out (up to 600s for --infra-only).
+        # Role-specific OS set-up.
         await asyncio.to_thread(self._role_post_install, role_name)
 
         # 3. Python deps. requirements.txt sits at role_file.parent.parent for
         #    every role (repo root for most; cs/lm-spoke/ for simulation).
+        # Python deps from the role's requirements file.
         req_file = role_file.parent.parent / "requirements.txt"
         if req_file.exists():
             logger.info("Installing Python deps for role '%s'…", role_name)
@@ -1128,7 +1259,9 @@ class GenericAgent(BaseSpoke):
         Pure management/API roles (dns/dhcp/opnsense/netbox/cppm/ldap/le/nw/
         pxmx) need nothing here.
         Runs as root (the lm-agent unit is User=root)."""
+        # Best-effort; failures are only logged.
         try:
+            # DNS/DHCP: make a self-signed coordinator cert if missing.
             if role_name in ("dns", "dhcp"):
                 tls_dir = Path(f"/etc/lm-{role_name}/tls")
                 cert = tls_dir / "coordinator.crt"
@@ -1179,7 +1312,9 @@ class GenericAgent(BaseSpoke):
         as install.sh args (shlex.quoted so any characters are safe). Without a
         password the installer auto-generates one, as before.
         """
+        # Start from the role's base command.
         cmd = list(spec["cmd"])
+        # NetBox: add admin user and password flags.
         if role_name == "netbox-server" and config:
             extra = ""
             user = config.get("admin_user") or config.get("admin_username")
@@ -1205,6 +1340,7 @@ class GenericAgent(BaseSpoke):
         return cmd
 
     @staticmethod
+    # Make the TLS files and use their paths.
     def _write_zabbix_tls(config: dict) -> dict:
         """Persist hub-issued PEMs under /etc/zabbix/tls (so the key never appears
         on a command line) and point the installer flags at the files."""
@@ -1212,6 +1348,7 @@ class GenericAgent(BaseSpoke):
                 "tls_key": config.pop("tls_key_pem", None)}
         if not all(pems.values()):
             return config
+        # Write each PEM; the key is private.
         d = Path("/etc/zabbix/tls")
         d.mkdir(parents=True, exist_ok=True)
         for key, pem in pems.items():
@@ -1224,6 +1361,7 @@ class GenericAgent(BaseSpoke):
     @staticmethod
     def _zabbix_install_args(role_name: str, config: dict) -> str:
         """Project LOAD_ROLE config into zabbix installer flags (shlex-quoted)."""
+        # Config key to installer flag, per role.
         flags = {"zabbix-server": (("db_host", "db-host"), ("db_port", "db-port"),
                                    ("db_name", "db-name"), ("db_user", "db-user"),
                                    ("db_pass", "db-pass"), ("server_name", "server-name"),
@@ -1235,10 +1373,12 @@ class GenericAgent(BaseSpoke):
                  "zbxagent": (("proxy", "proxy"), ("hostname", "hostname"),
                               ("tls_ca", "tls-ca"), ("tls_cert", "tls-cert"),
                               ("tls_key", "tls-key"))}[role_name]
+        # Write TLS files, then warn if the proxy has no server.
         config = GenericAgent._write_zabbix_tls(dict(config))
         if role_name == "zbxproxy" and not config.get("server"):
             logger.error("zbxproxy: LOAD_ROLE config has no 'server'; the hub should supply it "
                          "from the Monitoring page setting")
+        # Build the flags from set values.
         return "".join(" --" + flag + " " + shlex.quote(str(config[key]))
                        for key, flag in flags if config.get(key))
 
@@ -1252,20 +1392,24 @@ class GenericAgent(BaseSpoke):
         listener, which is what turns two independently-deployed service hosts
         into one managed cluster. Absent (the pre-existing single-host flow) →
         nothing is appended and the deploy is byte-identical to before."""
+        # Old call style: only config was passed.
         if config is None:
             config = role_name
             role_name = "dns-server"
+        # Need member id, coordinator and secret.
         member_id = config.get("member_id") or config.get("id")
         coordinator = config.get("coordinator") or config.get("coordinator_url")
         secret = config.get("worker_secret") or config.get("secret")
         if not (member_id and coordinator and secret):
             return ""
+        # Base worker flags.
         parts = ["", *(" --" + flag + " " + shlex.quote(str(value))
                        for flag, value in (("member-id", member_id),
                                            ("coordinator", coordinator),
                                            ("worker-secret", secret)))]
         # Coordinator trust anchor: the worker VERIFIES the coordinator's cert
         # before sending its secret, so the installer refuses to run without one.
+        # Coordinator CA: use the given path or write the PEM to a file.
         ca = config.get("ca_cert") or config.get("coordinator_ca")
         ca_pem = str(config.get("coordinator_ca_pem") or "").strip()
         if ca_pem:
@@ -1281,11 +1425,13 @@ class GenericAgent(BaseSpoke):
             os.chmod(tmp, 0o644)
             os.replace(tmp, ca_path)
             ca = str(ca_path)
+        # Add the CA flag.
         if ca:
             parts.append(" --ca-cert " + shlex.quote(str(ca)))
         # Kea HA channel: credentials + peer scope + mutual-TLS material. These
         # are per-node install-time inputs; without forwarding them the deploy
         # role produced a node that could never join its pair.
+        # Write HA TLS PEMs and point config at them.
         if role_name == "dhcp-server":
             ha_tls_dir = Path(str(
                 config.get("ha_tls_dir") or "/etc/kea/ha-tls"))
@@ -1313,12 +1459,14 @@ class GenericAgent(BaseSpoke):
                 config["ha_cert"] = str(ha_tls_dir / "node.crt")
             if config.get("ha_key_pem"):
                 config["ha_key"] = str(ha_tls_dir / "node.key")
+        # HA flags from set values.
         for flag, key in (("ha-user", "ha_user"), ("ha-password", "ha_password"),
                           ("ha-port", "ha_port"), ("ha-ca", "ha_ca"),
                           ("ha-cert", "ha_cert"), ("ha-key", "ha_key")):
             value = config.get(key)
             if value:
                 parts.append(" --" + flag + " " + shlex.quote(str(value)))
+        # HA peers (list or comma-separated).
         peers = config.get("ha_peers") or config.get("ha_peer") or []
         if isinstance(peers, str):
             peers = [p.strip() for p in peers.split(",") if p.strip()]
@@ -1337,12 +1485,15 @@ class GenericAgent(BaseSpoke):
         --entra-tenant --entra-client --entra-cert --entra-key --entra-scope
         (default "openid") --server-url. Auto-generates --admin-pw when the WebUI
         didn't collect one. All values shlex-quoted."""
+        # Flag parts.
         parts = []
 
         def _flag(name, value):
+            """Add a quoted flag when the value is set."""
             if value not in (None, "", []):
                 parts.append("--" + name + " " + shlex.quote(str(value)))
 
+        # Base DN, admin DN and password (generated if missing), server id.
         _flag("base-dn", config.get("base_dn"))
         _flag("admin-dn", config.get("admin_dn"))
         pw = config.get("admin_pw") or config.get("admin_password")
@@ -1352,11 +1503,13 @@ class GenericAgent(BaseSpoke):
         _flag("admin-pw", pw)
         _flag("server-id", config.get("server_id"))
         # --peer is repeatable, one per mirror peer (the OTHER node's ldaps:// URL).
+        # Peer URLs.
         peers = config.get("peers") or config.get("peer") or []
         if isinstance(peers, str):
             peers = [peers]
         for p in peers:
             _flag("peer", p)
+        # Server URL and Entra settings.
         _flag("server-url", config.get("server_url"))
         _flag("entra-tenant", config.get("entra_tenant"))
         _flag("entra-client", config.get("entra_client"))
@@ -1373,6 +1526,7 @@ class GenericAgent(BaseSpoke):
         keyed by ``role_name`` in ``_deploy_status_by_role`` so concurrent
         deploy roles (e.g. dns-server + dhcp-server) never clobber each other.
         """
+        # Mark running and log the command and host facts.
         started = time.time()
         log_path = f"/var/log/lm/deploy-{role_name}.log"
         self._deploy_status_by_role[role_name] = {"state": "running", "role": role_name,
@@ -1382,9 +1536,11 @@ class GenericAgent(BaseSpoke):
         # from the agent log alone.
         logger.info("deploy[%s] cmd: %s", role_name, _redact_cmd(cmd))
         logger.info("deploy[%s] host: %s", role_name, await asyncio.to_thread(_deploy_host_facts))
+        # Proxy: log connectivity checks first.
         if role_name == "zbxproxy":
             for line in await asyncio.to_thread(_zbxproxy_preflight, cmd):
                 logger.info("deploy[%s] preflight: %s", role_name, line)
+        # Run the installer and collect output.
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -1396,12 +1552,14 @@ class GenericAgent(BaseSpoke):
             full = (stdout or b"").decode(errors="replace")
             tail = full[-6000:]
             duration = round(time.time() - started, 1)
+            # Save the full output to the log file.
             try:
                 os.makedirs(os.path.dirname(log_path), exist_ok=True)
                 with open(log_path, "w") as fh:
                     fh.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} rc={rc} duration={duration}s\n{full}")
             except OSError as e:
                 logger.warning("deploy[%s] could not write %s: %s", role_name, log_path, e)
+            # Record success or failure.
             if rc == 0:
                 logger.info("Deployment of '%s' completed successfully in %ss.", role_name, duration)
                 self._deploy_status_by_role[role_name] = {"state": "completed", "role": role_name,
@@ -1417,10 +1575,12 @@ class GenericAgent(BaseSpoke):
                 self._deploy_status_by_role[role_name] = {"state": "failed", "role": role_name,
                                        "returncode": rc, "tail": tail, "duration": duration,
                                        "log_path": log_path}
+        # Record an exception.
         except Exception as e:
             logger.exception("Deployment of '%s' raised: %s", role_name, e)
             self._deploy_status_by_role[role_name] = {"state": "error", "role": role_name, "error": str(e),
                                                       "log_path": log_path}
+        # Drop the task either way.
         finally:
             self._deploy_tasks.pop(role_name, None)
 
@@ -1437,10 +1597,12 @@ class GenericAgent(BaseSpoke):
         afterward. Only called on the rare missing-helper path, not every
         cert install — so the GitHub-fetch dependency is the same as the
         initial role deploy, not on the hot path."""
+        # Installer command for the helper only.
         cmd = ["bash", "-c",
                "exec </dev/null; curl -sSL "
                "https://raw.githubusercontent.com/lbockenstedt/netbox/main/install.sh "
                "| bash -s -- --provision-cert-helper"]
+        # Run it with a time limit; check the helper exists after.
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -1461,6 +1623,7 @@ class GenericAgent(BaseSpoke):
         """Install an LE cert onto this host's NetBox nginx via the root helper.
         Mirrors netbox_spoke's INSTALL_CERT: validate the fullchain+privkey pair
         in-process, then run /usr/local/bin/lm-netbox-install-cert <crt> <key>."""
+        # Read and check the cert parts.
         domain = data.get("domain", "") or ""
         fullchain = data.get("fullchain", "") or ""
         privkey = data.get("privkey", "") or ""
@@ -1474,6 +1637,7 @@ class GenericAgent(BaseSpoke):
         # and requiring a manual reinstall. The generic agent unit is User=root
         # (install_agent.sh:476) so this can write /usr/local/bin + /etc/sudoers.d
         # directly — no sudo needed. Only hit on the rare missing-helper path.
+        # Provision the helper if missing.
         if not os.path.exists(_NETBOX_INSTALL_CERT_HELPER):
             logger.info("[cert] %s → netbox-server: helper %s missing — "
                         "self-provisioning…", domain, _NETBOX_INSTALL_CERT_HELPER)
@@ -1484,6 +1648,7 @@ class GenericAgent(BaseSpoke):
                 return {"status": "ERROR",
                         "message": ("cert helper missing and self-provision failed "
                                     "(re-load the netbox-server role)")}
+        # Write the PEMs to private temp files.
         crt_tmp = key_tmp = None
         try:
             with tempfile.NamedTemporaryFile("w", suffix=".crt.pem", delete=False) as cf:
@@ -1491,6 +1656,7 @@ class GenericAgent(BaseSpoke):
             with tempfile.NamedTemporaryFile("w", suffix=".key.pem", delete=False) as kf:
                 kf.write(privkey); key_tmp = kf.name
             os.chmod(crt_tmp, 0o600); os.chmod(key_tmp, 0o600)
+            # Check the cert and key load together.
             try:
                 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 ctx.load_cert_chain(crt_tmp, key_tmp)
@@ -1499,6 +1665,7 @@ class GenericAgent(BaseSpoke):
                 return {"status": "ERROR", "message": f"cert validation failed (helper not called): {e}"}
             # sudo -n works whether the agent runs as root or an unprivileged
             # user with the netbox sudoers grant; the helper re-validates + swaps.
+            # Run the helper with sudo and a time limit.
             try:
                 proc = await asyncio.create_subprocess_exec(
                     "sudo", "-n", _NETBOX_INSTALL_CERT_HELPER, crt_tmp, key_tmp,
@@ -1510,6 +1677,7 @@ class GenericAgent(BaseSpoke):
                 return {"status": "ERROR", "message": "cert-install helper timed out"}
             except Exception as e:  # noqa: BLE001
                 return {"status": "ERROR", "message": f"cert-install helper invocation failed: {e}"}
+            # OK output means installed; anything else is an error.
             out = (out_b or b"").decode(errors="replace").strip()
             err = (err_b or b"").decode(errors="replace").strip()
             if proc.returncode == 0 and out.startswith("OK"):
@@ -1519,6 +1687,7 @@ class GenericAgent(BaseSpoke):
             logger.warning("[cert] %s → netbox-server: FAILED — %s", domain, msg)
             return {"status": "ERROR", "message": msg}
         finally:
+            # Always remove the temp files.
             for p in (crt_tmp, key_tmp):
                 if p:
                     try: os.unlink(p)
@@ -1530,6 +1699,7 @@ class GenericAgent(BaseSpoke):
         :meth:`_install_netbox_cert`: validate the fullchain+privkey pair
         in-process, then run ``sudo -n /usr/local/bin/lm-ldap-install-cert
         <crt> <key>`` which atomically swaps the slapd TLS material + reloads."""
+        # Read and check the cert parts.
         domain = data.get("domain", "") or ""
         fullchain = data.get("fullchain", "") or ""
         privkey = data.get("privkey", "") or ""
@@ -1537,11 +1707,13 @@ class GenericAgent(BaseSpoke):
             return {"status": "ERROR", "message": "missing cert material"}
         if "BEGIN CERTIFICATE" not in fullchain or "PRIVATE KEY" not in privkey:
             return {"status": "ERROR", "message": "fullchain/privkey not PEM"}
+        # The helper must exist.
         if not os.path.exists(_LDAP_INSTALL_CERT_HELPER):
             return {"status": "ERROR",
                     "message": (f"cert helper {_LDAP_INSTALL_CERT_HELPER} missing — "
                                 "is this the ldap-server host? (re-load the "
                                 "ldap-server role)")}
+        # Write the PEMs to private temp files.
         crt_tmp = key_tmp = None
         try:
             with tempfile.NamedTemporaryFile("w", suffix=".crt.pem", delete=False) as cf:
@@ -1549,12 +1721,14 @@ class GenericAgent(BaseSpoke):
             with tempfile.NamedTemporaryFile("w", suffix=".key.pem", delete=False) as kf:
                 kf.write(privkey); key_tmp = kf.name
             os.chmod(crt_tmp, 0o600); os.chmod(key_tmp, 0o600)
+            # Check the cert and key load together.
             try:
                 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 ctx.load_cert_chain(crt_tmp, key_tmp)
             except Exception as e:  # noqa: BLE001
                 logger.warning("[cert] %s → ldap-server: FAILED — validation: %s", domain, e)
                 return {"status": "ERROR", "message": f"cert validation failed (helper not called): {e}"}
+            # Run the helper with sudo and a time limit.
             try:
                 proc = await asyncio.create_subprocess_exec(
                     "sudo", "-n", _LDAP_INSTALL_CERT_HELPER, crt_tmp, key_tmp,
@@ -1566,6 +1740,7 @@ class GenericAgent(BaseSpoke):
                 return {"status": "ERROR", "message": "cert-install helper timed out"}
             except Exception as e:  # noqa: BLE001
                 return {"status": "ERROR", "message": f"cert-install helper invocation failed: {e}"}
+            # OK output means installed; anything else is an error.
             out = (out_b or b"").decode(errors="replace").strip()
             err = (err_b or b"").decode(errors="replace").strip()
             if proc.returncode == 0 and out.startswith("OK"):
@@ -1575,6 +1750,7 @@ class GenericAgent(BaseSpoke):
             logger.warning("[cert] %s → ldap-server: FAILED — %s", domain, msg)
             return {"status": "ERROR", "message": msg}
         finally:
+            # Always remove the temp files.
             for p in (crt_tmp, key_tmp):
                 if p:
                     try: os.unlink(p)
@@ -1585,6 +1761,7 @@ class GenericAgent(BaseSpoke):
         root: validate the pair, back up the current files, write the new ones
         (keeping owner/group/mode), ``nginx -t`` (roll back on failure), then
         reload nginx."""
+        # Read and check the cert parts.
         domain = data.get("domain", "") or ""
         fullchain = data.get("fullchain", "") or ""
         privkey = data.get("privkey", "") or ""
@@ -1592,10 +1769,12 @@ class GenericAgent(BaseSpoke):
             return {"status": "ERROR", "message": "missing cert material"}
         if "BEGIN CERTIFICATE" not in fullchain or "PRIVATE KEY" not in privkey:
             return {"status": "ERROR", "message": "fullchain/privkey not PEM"}
+        # Must be the Zabbix web host.
         if not is_zabbix_web_host():
             return {"status": "ERROR",
                     "message": (f"{_ZABBIX_NGINX_CONF} missing — is this the Monitoring "
                                 "server host? (re-load the zabbix-server role)")}
+        # Find the cert and key paths in the nginx config.
         try:
             conf = Path(_ZABBIX_NGINX_CONF).read_text()
         except OSError as e:
@@ -1605,11 +1784,13 @@ class GenericAgent(BaseSpoke):
             return {"status": "ERROR",
                     "message": (f"{_ZABBIX_NGINX_CONF} has no ssl_certificate — the web UI "
                                 "is HTTP-only (re-load zabbix-server with self_signed)")}
+        # Write the PEMs to a private temp folder.
         tmpdir = tempfile.mkdtemp(prefix="lm-zbxcert-")
         try:
             tc, tk = os.path.join(tmpdir, "c.pem"), os.path.join(tmpdir, "k.pem")
             Path(tc).write_text(fullchain); Path(tk).write_text(privkey)
             os.chmod(tk, 0o600)
+            # Check the cert and key load together.
             try:
                 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 ctx.load_cert_chain(tc, tk)
@@ -1618,6 +1799,16 @@ class GenericAgent(BaseSpoke):
                 return {"status": "ERROR", "message": f"cert validation failed: {e}"}
 
             def _swap(path, content, default_mode):
+                """Back up and replace a file, keeping its owner and mode.
+
+                Args:
+                    path: file to replace.
+                    content: new text.
+                    default_mode: mode used when the file did not exist.
+
+                Returns:
+                    True if the file existed before.
+                """
                 st = os.stat(path) if os.path.exists(path) else None
                 if st:
                     shutil.copy2(path, path + ".lm-bak")
@@ -1631,14 +1822,17 @@ class GenericAgent(BaseSpoke):
                 return st is not None
 
             def _restore():
+                """Put the backed-up cert and key files back."""
                 for pth in (crt_path, key_path):
                     if os.path.exists(pth + ".lm-bak"):
                         os.replace(pth + ".lm-bak", pth)
 
+            # Swap in the new files, then test the nginx config.
             had_crt = _swap(crt_path, fullchain, 0o644)
             had_key = _swap(key_path, privkey, 0o640)
             test = await asyncio.to_thread(
                 subprocess.run, ["nginx", "-t"], capture_output=True, text=True, timeout=30)
+            # Test failed: restore the old files.
             if test.returncode != 0:
                 if had_crt and had_key:
                     _restore()
@@ -1646,6 +1840,7 @@ class GenericAgent(BaseSpoke):
                 logger.warning("[cert] %s → zabbix-server: FAILED — nginx -t: %s (rolled back)",
                                domain, msg)
                 return {"status": "ERROR", "message": f"nginx -t failed (rolled back): {msg}"}
+            # Reload nginx.
             rl = await asyncio.to_thread(
                 subprocess.run, ["systemctl", "reload", "nginx"],
                 capture_output=True, text=True, timeout=30)
@@ -1660,6 +1855,7 @@ class GenericAgent(BaseSpoke):
         except Exception as e:  # noqa: BLE001
             logger.exception("[cert] %s → zabbix-server: FAILED", domain)
             return {"status": "ERROR", "message": f"install failed: {e}"}
+        # Always remove the temp folder.
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1674,6 +1870,7 @@ class GenericAgent(BaseSpoke):
         ``SOCIAL_AUTH_*`` names because NetBox only forwards those (plus its
         own parameters) from configuration.py into Django settings."""
         import json as _json
+        # Entra endpoint, group mapping, redirect URI and button label.
         tenant = str(d.get("tenant") or "")
         endpoint = "https://login.microsoftonline.com/%s/v2.0" % tenant
         group_map = d.get("group_map") or {}
@@ -1683,6 +1880,7 @@ class GenericAgent(BaseSpoke):
         su_groups = [str(g) for g in (d.get("superuser_groups") or []) if str(g).strip()]
         redirect_uri = str(d.get("redirect_uri") or "")
         label = str(d.get("login_button_label") or _NETBOX_SSO_LOGIN_LABEL)
+        # Base settings.
         lines = [
             _NB_SSO_BEGIN,
             "# Do not edit by hand — managed by Lab Manager (Settings → Azure → NetBox SSO).",
@@ -1694,11 +1892,13 @@ class GenericAgent(BaseSpoke):
             "SOCIAL_AUTH_OIDC_KEY = %s" % repr(str(d.get("client_id") or "")),
             "SOCIAL_AUTH_OIDC_SECRET = %s" % repr("" if cert_files else str(d.get("client_secret") or "")),
         ]
+        # Cert file paths in cert mode.
         if cert_files:
             lines += [
                 "SOCIAL_AUTH_OIDC_CLIENT_CERT_FILE = %s" % repr(cert_files[0]),
                 "SOCIAL_AUTH_OIDC_CLIENT_KEY_FILE = %s" % repr(cert_files[1]),
             ]
+        # Scope, user name key, button label and group settings.
         lines += [
             "SOCIAL_AUTH_OIDC_SCOPE = ['openid', 'profile', 'email', 'offline_access']",
             "SOCIAL_AUTH_OIDC_USERNAME_KEY = 'preferred_username'",
@@ -1707,12 +1907,14 @@ class GenericAgent(BaseSpoke):
             "SOCIAL_AUTH_LM_ALLOWED_GROUP = %s" % repr(str(d.get("allowed_group") or "")),
             "SOCIAL_AUTH_LM_SUPERUSER_GROUPS = %s" % _json.dumps(su_groups),
         ]
+        # Note the redirect URI; HTTPS URIs need the HTTPS flag.
         if redirect_uri:
             lines.append("# Redirect URI registered in Entra: %s" % redirect_uri)
             if redirect_uri.lower().startswith("https://"):
                 # NetBox sits behind nginx TLS; build https:// redirect URIs so
                 # they match the one registered in Entra.
                 lines.append("SOCIAL_AUTH_REDIRECT_IS_HTTPS = True")
+        # Auth pipeline, then the end marker.
         lines += [
             "SOCIAL_AUTH_PIPELINE = (",
             "    'social_core.pipeline.social_auth.social_details',",
@@ -1734,6 +1936,7 @@ class GenericAgent(BaseSpoke):
     def _netbox_owner() -> tuple:
         """uid/gid NetBox runs as — taken from configuration.py's owner (the
         installer chowns the app tree to the service user)."""
+        # Owner of configuration.py.
         st = os.stat(_NETBOX_CONFIG_PY)
         return st.st_uid, st.st_gid
 
@@ -1741,6 +1944,7 @@ class GenericAgent(BaseSpoke):
         """Copy the backend module into NetBox and (when the hub sent its Entra
         cert) write the cert + key readable only by the NetBox user. Returns
         ``(cert_path, key_path)`` in cert mode, else ``None``. Raises OSError."""
+        # Copy the backend module into NetBox, owned by the NetBox user.
         uid, gid = self._netbox_owner()
         with open(_NETBOX_SSO_BACKEND_SRC, "rb") as f:
             src = f.read()
@@ -1751,13 +1955,16 @@ class GenericAgent(BaseSpoke):
         os.chown(tmp, uid, gid)
         os.replace(tmp, _NETBOX_SSO_BACKEND)
 
+        # No cert sent: secret mode.
         cert_pem = str(data.get("client_cert_pem") or "")
         key_pem = str(data.get("client_key_pem") or "")
         if not (cert_pem.strip() and key_pem.strip()):
             return None
+        # Private cert folder owned by the NetBox user.
         os.makedirs(_NETBOX_SSO_CERT_DIR, mode=0o700, exist_ok=True)
         os.chmod(_NETBOX_SSO_CERT_DIR, 0o700)
         os.chown(_NETBOX_SSO_CERT_DIR, uid, gid)
+        # Write the cert and key files.
         paths = (os.path.join(_NETBOX_SSO_CERT_DIR, "client-cert.pem"),
                  os.path.join(_NETBOX_SSO_CERT_DIR, "client-key.pem"))
         for path, body in zip(paths, (cert_pem, key_pem)):
@@ -1777,11 +1984,13 @@ class GenericAgent(BaseSpoke):
         Auth: the hub's Entra certificate (``client_cert_pem`` +
         ``client_key_pem``) when sent — the same app + cert the hub logs in
         with — else ``client_secret``. Older hubs send only a secret."""
+        # Must be a NetBox host.
         enabled = bool(data.get("enabled", True))
         if not os.path.exists(_NETBOX_CONFIG_PY):
             return {"status": "ERROR",
                     "message": f"{_NETBOX_CONFIG_PY} not found — is this the netbox-server host?"}
         cert_files = None
+        # Enabling: check fields and credentials, install files.
         if enabled:
             for f in ("tenant", "client_id"):
                 if not str(data.get(f) or "").strip():
@@ -1796,6 +2005,7 @@ class GenericAgent(BaseSpoke):
             except OSError as e:
                 return {"status": "ERROR", "message": f"cannot install SSO backend/cert: {e}"}
             # Ensure the OIDC extra is present (idempotent, best-effort).
+            # Make sure the OIDC extra is installed.
             try:
                 proc = await asyncio.create_subprocess_exec(
                     _NETBOX_VENV_PIP, "install", "social-auth-core[openidconnect]", "--no-cache-dir",
@@ -1803,12 +2013,14 @@ class GenericAgent(BaseSpoke):
                 await asyncio.wait_for(proc.wait(), timeout=120.0)
             except Exception as e:  # noqa: BLE001
                 logger.warning("netbox-sso: pip extra install failed (continuing): %s", e)
+        # Read the current config.
         try:
             with open(_NETBOX_CONFIG_PY, "r") as f:
                 cur = f.read()
         except OSError as e:
             return {"status": "ERROR", "message": f"cannot read configuration.py: {e}"}
         # Splice out any existing sentinel block first.
+        # Remove any existing SSO block.
         b = cur.find(_NB_SSO_BEGIN)
         without = cur
         if b != -1:
@@ -1817,6 +2029,7 @@ class GenericAgent(BaseSpoke):
                 e_end = cur.find("\n", e)
                 e_end = len(cur) if e_end == -1 else e_end + 1
                 without = cur[:b].rstrip("\n") + "\n" + cur[e_end:]
+        # Add the new block, or remove cert files when disabling.
         if enabled:
             new = without.rstrip() + "\n\n" + self._render_netbox_sso_block(data, cert_files)
         else:
@@ -1826,10 +2039,12 @@ class GenericAgent(BaseSpoke):
                     os.unlink(os.path.join(_NETBOX_SSO_CERT_DIR, name))
                 except OSError:
                     pass
+        # No change: done.
         mode = "certificate" if cert_files else ("secret" if enabled else "off")
         if new == cur:
             return {"status": "SUCCESS", "message": "SSO config unchanged", "changed": False,
                     "auth_mode": mode}
+        # Write the config, keeping owner and mode.
         try:
             st = os.stat(_NETBOX_CONFIG_PY)
             tmp = _NETBOX_CONFIG_PY + ".lmtmp"
@@ -1840,6 +2055,7 @@ class GenericAgent(BaseSpoke):
             os.replace(tmp, _NETBOX_CONFIG_PY)
         except OSError as e:
             return {"status": "ERROR", "message": f"cannot write configuration.py: {e}"}
+        # Restart NetBox.
         try:
             proc = await asyncio.create_subprocess_exec(
                 "systemctl", "restart", "netbox", "netbox-rq",
@@ -1850,6 +2066,7 @@ class GenericAgent(BaseSpoke):
                         "message": f"config written but restart failed: {(err_b or b'').decode(errors='replace')[:200]}"}
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "message": f"config written but restart failed: {e}"}
+        # Done.
         logger.info("netbox-sso: %s SSO on this NetBox host (auth=%s) + restarted.",
                     "ENABLED" if enabled else "DISABLED", mode)
         return {"status": "SUCCESS",
@@ -1861,6 +2078,7 @@ class GenericAgent(BaseSpoke):
         confirm it redirects to Entra with the expected params. No browser / no
         real auth — just proves the backend is wired and the app values match."""
         import urllib.parse as _up
+        # Must be a NetBox host; read expected values.
         if not os.path.exists(_NETBOX_CONFIG_PY):
             return {"status": "ERROR", "message": "not the netbox-server host"}
         exp_tenant = str(data.get("tenant") or "")
@@ -1868,6 +2086,7 @@ class GenericAgent(BaseSpoke):
         exp_redirect = str(data.get("redirect_uri") or "")
         # Use the configured redirect host as the Host header so ALLOWED_HOSTS +
         # the generated redirect_uri match what a real login would produce.
+        # Host header from the redirect URI.
         host_hdr = ""
         try:
             if exp_redirect:
@@ -1876,14 +2095,24 @@ class GenericAgent(BaseSpoke):
             host_hdr = ""
 
         def _probe():
+            """Request the OIDC begin URL locally without following redirects.
+
+            Returns:
+                dict with HTTP code, Location header and any error.
+            """
+            # Imports and a context that skips cert checks for localhost.
             import ssl as _ssl, urllib.request as _ur, urllib.error as _ue
             ctx = _ssl._create_unverified_context()
 
             class _NoRedirect(_ur.HTTPRedirectHandler):
+                """URL opener handler that does not follow redirects."""
                 def redirect_request(self, *a, **k):  # noqa: ANN001
+                    """Return None so the redirect is not followed."""
                     return None
+            # Opener with no redirects; keep the Host header.
             opener = _ur.build_opener(_NoRedirect, _ur.HTTPSHandler(context=ctx))
             headers = {"Host": host_hdr} if host_hdr else {}
+            # Try HTTPS then HTTP.
             for base in ("https://127.0.0.1", "http://127.0.0.1"):
                 url = base + "/oauth/login/oidc/"
                 try:
@@ -1900,13 +2129,16 @@ class GenericAgent(BaseSpoke):
                 except Exception as ex:  # noqa: BLE001
                     last = {"code": 0, "location": "", "error": str(ex)}
                     continue
+            # Last error, if any.
             return locals().get("last", {"code": 0, "location": "", "error": "no response"})
 
+        # Run the probe in a thread.
         try:
             r = await asyncio.to_thread(_probe)
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "message": f"probe failed: {e}"}
 
+        # Pull tenant, client and redirect URI from the Location header.
         loc = r.get("location") or ""
         to_entra = "login.microsoftonline.com" in loc
         found = {"authorize_url": loc.split("?")[0] if loc else "",
@@ -1920,11 +2152,13 @@ class GenericAgent(BaseSpoke):
                 found["redirect_uri"] = (q.get("redirect_uri") or [""])[0]
             except Exception:  # noqa: BLE001
                 pass
+        # Compare with expected values.
         matches = {
             "tenant": bool(exp_tenant) and found["tenant"] == exp_tenant,
             "client_id": bool(exp_client) and found["client_id"] == exp_client,
             "redirect_uri": (not exp_redirect) or found["redirect_uri"] == exp_redirect,
         }
+        # Pick the message.
         ok = to_entra and matches["tenant"] and matches["client_id"] and matches["redirect_uri"]
         if ok:
             msg = "OK — NetBox redirects to Entra with the expected tenant, client ID and redirect URI."
@@ -1940,12 +2174,24 @@ class GenericAgent(BaseSpoke):
             msg = "HTTP 400 (ALLOWED_HOSTS?) — NetBox rejected the Host; add the redirect host to ALLOWED_HOSTS."
         else:
             msg = r.get("error") or f"unexpected response (HTTP {r.get('code')})"
+        # Reply.
         return {"status": "SUCCESS", "ok": ok, "redirects_to_entra": to_entra,
                 "http_code": r.get("code"), "found": found, "matches": matches, "message": msg}
 
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Dispatch an agent command (roles, deploys, certs, SSO, files) and return its reply.
+
+        Args:
+            command_type: command name (case-insensitive).
+            data: command payload.
+
+        Returns:
+            reply dict with status and command-specific fields.
+        """
+        # Normalise the command.
         cmd = command_type.upper()
 
+        # Version query.
         if cmd == "GET_VERSION":
             return {"status": "SUCCESS", "version": self.get_version()}
 
@@ -1954,6 +2200,7 @@ class GenericAgent(BaseSpoke):
         # spoke holds the logic; these are the hands. RUN_COMMAND (allowlist, or
         # allow_shell for spoke-trusted commands) + WRITE_FILE (place a file, e.g.
         # a TLS cert). Both return the raw runner/writer dict as ``result``.
+        # Run a local command.
         if cmd == "RUN_COMMAND":
             from command_runner import run_local_command
             res = await asyncio.to_thread(
@@ -1964,6 +2211,7 @@ class GenericAgent(BaseSpoke):
             return {"status": "SUCCESS" if res.get("ok") else "ERROR",
                     "result": res, "message": res.get("error", "")}
 
+        # Write a local file.
         if cmd == "WRITE_FILE":
             from command_runner import write_local_file
             res = await asyncio.to_thread(
@@ -1977,6 +2225,7 @@ class GenericAgent(BaseSpoke):
             return {"status": "SUCCESS" if res.get("ok") else "ERROR",
                     "result": res, "message": res.get("error", "")}
 
+        # Install a cert for LDAP, Zabbix or NetBox.
         if cmd == "INSTALL_CERT":
             # A generic agent host that ran a *-server deploy role holds the root
             # cert helper for that service. The hub tags the target service in the
@@ -1990,6 +2239,7 @@ class GenericAgent(BaseSpoke):
                 return await self._install_zabbix_cert(data)
             return await self._install_netbox_cert(data)
 
+        # Test NetBox SSO.
         if cmd == "NETBOX_TEST_SSO":
             # Verify the SSO wiring without a browser: hit NetBox's OIDC begin
             # URL on localhost and confirm it 302s to Entra with the expected
@@ -1998,6 +2248,7 @@ class GenericAgent(BaseSpoke):
             # real user auth.
             return await self._test_netbox_sso(data)
 
+        # Apply NetBox SSO settings.
         if cmd == "NETBOX_APPLY_SSO":
             # Apply (or remove) Entra ID OIDC SSO on this host's NetBox live —
             # the agent is root here and the netbox-server deploy already placed
@@ -2007,6 +2258,7 @@ class GenericAgent(BaseSpoke):
             # client_id) with a client secret the hub supplies.
             return await self._apply_netbox_sso(data)
 
+        # Available, installed and active roles and deploy status.
         if cmd == "GET_AVAILABLE_ROLES":
             installed_deploy_roles = _installed_deploy_roles()
             active_deploy_roles = await asyncio.to_thread(
@@ -2028,6 +2280,7 @@ class GenericAgent(BaseSpoke):
                                 "module_type": e["conn"].module_type}
                                for r, e in self._roles.items()]}
 
+        # Confirm a sub-spoke id belongs to this agent.
         if cmd == "VOUCH_SUBSPOKE":
             # Parent attestation for parent-auto-approve (H3). The hub asks this
             # base agent — over the signed request_response channel — whether
@@ -2051,13 +2304,16 @@ class GenericAgent(BaseSpoke):
             return {"status": "SUCCESS",
                     "data": {"vouched": vouched, "sub_spoke_id": sub_id}}
 
+        # Load a role.
         if cmd == "LOAD_ROLE":
+            # Need a role name.
             role_name = data.get("role")
             if not role_name:
                 return {"status": "ERROR", "message": "role is required"}
             # Deploy roles: run an external install script in the background.
             # The agent does not host a sub-spoke; the deployed service connects
             # separately under its own spoke_id.
+            # Deploy role: refuse if running or already installed (unless forced), else start it.
             if role_name in _DEPLOY_ROLES:
                 existing_task = self._deploy_tasks.get(role_name)
                 if existing_task and not existing_task.done():
@@ -2085,16 +2341,19 @@ class GenericAgent(BaseSpoke):
                 return {"status": "SUCCESS", "role": role_name,
                         "module_type": spec["module_type"], "deploy": True,
                         "message": f"Deployment of '{role_name}' started in background"}
+            # Unknown role.
             if role_name not in _ROLE_MAP:
                 return {"status": "ERROR", "message": f"Unknown role '{role_name}'",
                         "available": list(_ROLE_MAP.keys()) + list(_DEPLOY_ROLES.keys())}
             # Idempotent: re-loading an already-hosted role is a no-op success
             # (boot _seed + a runtime LOAD could otherwise double-spawn).
+            # Already loaded.
             if role_name in self._roles:
                 return {"status": "SUCCESS", "role": role_name,
                         "sub_spoke_id": self._roles[role_name]["conn"].spoke_id,
                         "module_type": _ROLE_MAP[role_name][2],
                         "message": f"Role '{role_name}' already loaded"}
+            # Install, then load the role class.
             install_result = await self._install_role(role_name)
             if install_result["status"] != "SUCCESS":
                 return install_result
@@ -2103,12 +2362,14 @@ class GenericAgent(BaseSpoke):
             inst = self._sync_load_role(role_name, role_config, sub_spoke_id)
             if inst is None:
                 return {"status": "ERROR", "message": f"Could not load role '{role_name}'"}
+            # Module type for the role.
             _, _, mtype, _ = _ROLE_MAP[role_name]
             # Spawn a RoleConnection sub-spoke: an independent hub connection
             # under {base}-{role} with the role's module_type. The hub routes
             # role commands to it via get_spoke_by_type and auto-approves it via
             # the parent agent (parent_spoke_id). The base agent does NOT morph
             # — it stays "agent" and hosts this sub-spoke alongside any others.
+            # Need the control plane and RoleConnection.
             cp = getattr(self, "control_plane", None)
             if cp is None:
                 return {"status": "ERROR",
@@ -2117,6 +2378,7 @@ class GenericAgent(BaseSpoke):
                 return {"status": "ERROR",
                         "message": "RoleConnection unavailable — control_plane module "
                                    "not fully loaded"}
+            # Start the role's own hub connection and remember it.
             conn = RoleConnection(role_name, base_id=self.spoke_id,
                                   hub_url=cp.hub_url, role_instance=inst)
             # Back-reference so this role's SPOKE_UPDATE handler can reload just
@@ -2129,6 +2391,7 @@ class GenericAgent(BaseSpoke):
                     "sub_spoke_id": sub_spoke_id,
                     "message": f"Role '{role_name}' hosted as sub-spoke {sub_spoke_id} ({mtype})"}
 
+        # Deploy status.
         if cmd == "GET_DEPLOY_STATUS":
             # netbox_installed survives an agent reload (which clears the live
             # in-memory statuses), so the WebUI can persistently offer the
@@ -2143,6 +2406,7 @@ class GenericAgent(BaseSpoke):
             # "roles:" badge line only ever showed the last one installed.
             # ``deploy``/``active_role`` are kept (most-recent-by-start) for
             # back-compat with any caller still reading the singular shape.
+            # Latest deploy plus all deploy and role state.
             installed_deploy_roles = _installed_deploy_roles()
             deploys = list(self._deploy_status_by_role.values())
             last = deploys[-1] if deploys else {"state": "idle"}
@@ -2155,6 +2419,7 @@ class GenericAgent(BaseSpoke):
                         _active_deploy_roles, installed_deploy_roles),
                     "netbox_installed": "netbox-server" in installed_deploy_roles}
 
+        # Clear a finished deploy's status.
         if cmd == "CLEAR_DEPLOY_STATUS":
             # Dismiss a stuck "failed"/"error"/"completed" badge for one deploy
             # role. Only ever removes the IN-MEMORY tracking entry — it does
@@ -2162,6 +2427,7 @@ class GenericAgent(BaseSpoke):
             # acknowledgement, not a retry or uninstall. A "running" deploy
             # can't be cleared (nothing to acknowledge yet; wait for it to
             # finish). Re-loading the role starts a fresh entry regardless.
+            # Need a role; refuse while it is still running.
             role_name = (data or {}).get("role")
             if not role_name:
                 return {"status": "ERROR", "message": "role is required"}
@@ -2171,23 +2437,28 @@ class GenericAgent(BaseSpoke):
             if entry.get("state") == "running":
                 return {"status": "ERROR",
                         "message": f"Deploy of '{role_name}' is still running — wait for it to finish."}
+            # Drop the entry.
             del self._deploy_status_by_role[role_name]
             return {"status": "SUCCESS", "message": f"Cleared deploy status for '{role_name}'."}
 
+        # Reset the NetBox admin password.
         if cmd == "NETBOX_RESET_ADMIN_PASSWORD":
             # Reset the admin password on the NetBox app this agent deployed
             # (netbox-server role). Runs install.sh's fast --reset-admin-password
             # path (no reinstall) and returns the result inline for the WebUI.
+            # Password and user name from the payload.
             pw = data.get("password") or (data.get("config") or {}).get("admin_password")
             user = (data.get("username") or (data.get("config") or {}).get("admin_user")
                     or "admin")
             if not pw:
                 return {"status": "ERROR", "message": "password is required"}
+            # Run the installer's reset option.
             reset_cmd = ["bash", "-c",
                          "exec </dev/null; curl -sSL "
                          "https://raw.githubusercontent.com/lbockenstedt/netbox/main/install.sh "
                          "| bash -s -- --reset-admin-password " + shlex.quote(str(pw))
                          + " --admin-user " + shlex.quote(str(user))]
+            # Run it and report the result.
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *reset_cmd, stdout=asyncio.subprocess.PIPE,
@@ -2207,19 +2478,23 @@ class GenericAgent(BaseSpoke):
                 logger.error("NetBox admin password reset raised: %s", e)
                 return {"status": "ERROR", "message": str(e)}
 
+        # This host's primary IP and short host name.
         if cmd == "GET_PRIMARY_IP":
             # Address other hosts on this node's LAN reach it at (the hub uses it
             # to point a tenant's monitoring agents at the local proxy).
             def _primary_ip():
+                """Return the local address used for outbound traffic (no packets are sent)."""
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
                     sk.connect(("192.0.2.1", 9))
                     return sk.getsockname()[0]
+            # Run it in a thread.
             try:
                 return {"status": "SUCCESS", "ip": await asyncio.to_thread(_primary_ip),
                         "hostname": socket.gethostname().split(".")[0]}
             except OSError as e:
                 return {"status": "ERROR", "message": str(e)}
 
+        # Uninstall a deploy role.
         if cmd == "UNINSTALL_ROLE":
             # The true inverse of a deploy-role install. UNLOAD_ROLE only stops
             # and disables the units, which leaves the node reporting the role
@@ -2227,6 +2502,7 @@ class GenericAgent(BaseSpoke):
             # is driven by the service binary still being present. This removes
             # the packages, LM-authored sidecar units and config/state trees so
             # a decommissioned node stops advertising a role it no longer runs.
+            # Only roles with a purge spec.
             role_name = data.get("role")
             if role_name not in _DEPLOY_ROLE_PURGE:
                 return {
@@ -2236,12 +2512,14 @@ class GenericAgent(BaseSpoke):
                         f"(supported: {', '.join(sorted(_DEPLOY_ROLE_PURGE))})."
                     ),
                 }
+            # Leave non-LM software alone.
             if _deploy_role_foreign(role_name):
                 self._deploy_status_by_role.pop(role_name, None)
                 return _foreign_deploy_role_reply(role_name, "uninstalled")
             # Same guards as UNLOAD_ROLE, and for the same reasons — purging the
             # server out from under a live management sub-spoke or a running
             # deploy would leave both in an undefined state.
+            # Refuse while the management role is loaded or a deploy runs.
             module_role = role_name.removesuffix("-server")
             if module_role in self._roles:
                 return {
@@ -2257,8 +2535,10 @@ class GenericAgent(BaseSpoke):
                     "status": "ERROR",
                     "message": f"Deployment of '{role_name}' is still running.",
                 }
+            # Purge in a thread and drop its deploy status.
             report = await asyncio.to_thread(_purge_deploy_role, role_name)
             self._deploy_status_by_role.pop(role_name, None)
+            # Marker still there: report a partial uninstall.
             if report.get("marker_after"):
                 # The binary surviving the purge is the one outcome we must not
                 # report as success: the hub would drop the role assignment
@@ -2275,6 +2555,7 @@ class GenericAgent(BaseSpoke):
                            or "the package may be held or owned by another source.")
                     ),
                 }
+            # Report success.
             removed = ", ".join(report.get("packages_purged") or []) or "no packages"
             return {
                 "status": "SUCCESS",
@@ -2287,7 +2568,9 @@ class GenericAgent(BaseSpoke):
                 ),
             }
 
+        # Unload a role.
         if cmd == "UNLOAD_ROLE":
+            # Deploy roles without units: just forget them (the software stays).
             role_name = data.get("role")
             if role_name in _DEPLOY_ROLES and role_name not in _DEPLOY_ROLE_UNITS:
                 # Deploy roles with no managed units (netbox-server, ldap-server,
@@ -2316,10 +2599,13 @@ class GenericAgent(BaseSpoke):
                         f"deploy it to this host (installed software left in place)"
                     ),
                 }
+            # Leave non-LM software alone.
             if role_name in _DEPLOY_ROLE_UNITS and _deploy_role_foreign(role_name):
                 self._deploy_status_by_role.pop(role_name, None)
                 return _foreign_deploy_role_reply(role_name, "unloaded")
+            # Deploy roles with units: stop and disable them.
             if role_name in _DEPLOY_ROLE_UNITS:
+                # Refuse while the management role is loaded or a deploy runs.
                 module_role = role_name.removesuffix("-server")
                 if module_role in self._roles:
                     return {
@@ -2335,6 +2621,7 @@ class GenericAgent(BaseSpoke):
                         "status": "ERROR",
                         "message": f"Deployment of '{role_name}' is still running.",
                     }
+                # Stop extra units, then the primary units.
                 units = _DEPLOY_ROLE_UNITS[role_name]
                 # Stop the cluster sidecars first (best-effort: a single-host
                 # node has none). Leaving lm-*-worker running would keep a
@@ -2352,12 +2639,14 @@ class GenericAgent(BaseSpoke):
                     ["systemctl", "disable", "--now", *units],
                     capture_output=True, text=True, check=False, timeout=60,
                 )
+                # Report a stop failure.
                 if result.returncode != 0:
                     error = (result.stderr or result.stdout or "").strip()
                     return {
                         "status": "ERROR",
                         "message": error or f"Could not stop '{role_name}'.",
                     }
+                # Mark it unloaded.
                 self._deploy_status_by_role[role_name] = {"state": "unloaded", "role": role_name}
                 return {
                     "status": "SUCCESS",
@@ -2369,6 +2658,7 @@ class GenericAgent(BaseSpoke):
                     ),
                 }
             # Backward-compat: no role arg + exactly one loaded role → that one.
+            # No role given: use the only loaded one.
             if not role_name:
                 if len(self._roles) == 1:
                     role_name = next(iter(self._roles))
@@ -2378,6 +2668,7 @@ class GenericAgent(BaseSpoke):
                     return {"status": "ERROR",
                             "message": "Multiple roles loaded; specify 'role' to unload",
                             "active": list(self._roles.keys())}
+            # Must be loaded; stop it.
             if role_name not in self._roles:
                 return {"status": "ERROR", "message": f"Role '{role_name}' is not loaded",
                         "active": list(self._roles.keys())}
@@ -2385,6 +2676,7 @@ class GenericAgent(BaseSpoke):
             return {"status": "SUCCESS", "role": role_name,
                     "message": f"Role '{role_name}' unloaded (sub-spoke disconnected)"}
 
+        # Replace the agent config.
         if cmd == "UPDATE_CONFIG":
             self.config = data
             return {"status": "SUCCESS"}
@@ -2393,6 +2685,7 @@ class GenericAgent(BaseSpoke):
         # RoleConnection (routed by module_type), not on the base agent. The
         # base handles only its own commands above (+ deploy roles).
 
+        # Anything else.
         return {"status": "ERROR",
                 "message": f"Unknown agent command '{command_type}'. "
                            f"Loaded roles: {list(self._roles.keys()) or 'none'}"}
@@ -2402,9 +2695,11 @@ class GenericAgent(BaseSpoke):
         async-with websockets.connect closes the socket on CancelledError),
         await cleanup, drop it from the registry, and persist LOADED_ROLES so
         the role is not re-spawned on the next boot."""
+        # Remove it from the registry; nothing to do if absent.
         entry = self._roles.pop(role_name, None)
         if entry is None:
             return
+        # Close its hub socket.
         conn = entry["conn"]
         task = entry["task"]
         try:
@@ -2413,6 +2708,7 @@ class GenericAgent(BaseSpoke):
                 await ws.close()
         except Exception as e:
             logger.debug("close on unload of %s failed: %s", role_name, e)
+        # Cancel and wait for its task.
         task.cancel()
         try:
             await task
@@ -2422,12 +2718,14 @@ class GenericAgent(BaseSpoke):
         # (dns/dhcp) also holds a /ws/agent listener + module background loops
         # on separate tasks; without this the port stays bound and the role
         # cannot be re-loaded. Awaited here, outside the cancelled context.
+        # Run its shutdown hook if it has one.
         shutdown = getattr(conn, "shutdown", None)
         if callable(shutdown):
             try:
                 await shutdown()
             except Exception as e:  # noqa: BLE001 — teardown is best-effort
                 logger.warning("shutdown of role '%s' raised: %s", role_name, e)
+        # Log and update the saved role list.
         logger.info("Role unloaded: %s (sub-spoke %s)", role_name, conn.spoke_id)
         self._persist_loaded_roles(remove={role_name})
 
@@ -2458,14 +2756,17 @@ class GenericAgent(BaseSpoke):
         any host whose CLI roles still list it. A fresh explicit LOAD (the
         no-``remove`` call) clears the role back out of ``UNLOADED_ROLES`` —
         reloading a role is a deliberate override of any earlier exclusion."""
+        # Need the control plane.
         cp = getattr(self, "control_plane", None)
         if cp is None:
             return
+        # Save loaded roles: existing plus current, minus removed.
         try:
             existing = {r for r in cp._read_env_value("LOADED_ROLES").split(",")
                         if r.strip()}
             roles = (existing | set(self._roles.keys())) - (remove or set())
             cp._persist_secret_to_env("LOADED_ROLES", ",".join(sorted(roles)))
+            # Save unloaded roles: add removed, drop loaded ones.
             unloaded = {r for r in cp._read_env_value("UNLOADED_ROLES").split(",")
                         if r.strip()}
             if remove:
@@ -2476,6 +2777,8 @@ class GenericAgent(BaseSpoke):
             logger.warning("Could not persist LOADED_ROLES: %s", e)
 
     async def get_status(self) -> Dict[str, Any]:
+        """Return agent status: hosted roles and their connection state, plus deploy status."""
+        # One entry per hosted role.
         roles_status = []
         for role_name, entry in self._roles.items():
             conn = entry["conn"]
@@ -2485,6 +2788,7 @@ class GenericAgent(BaseSpoke):
                 "module_type": conn.module_type,
                 "connected": getattr(conn, "_hub_ws", None) is not None,
             })
+        # Reply.
         return {
             "spoke_id": self.spoke_id,
             "module":   "generic-agent",
@@ -2494,6 +2798,7 @@ class GenericAgent(BaseSpoke):
         }
 
     def get_version(self) -> str:
+        """Return the agent version from its VERSION file, or "unknown"."""
         try:
             return (self._lm_root() / "agent" / "VERSION").read_text().strip()
         except Exception:

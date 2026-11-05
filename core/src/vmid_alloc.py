@@ -30,16 +30,20 @@ Audience: Hub developers.
 
 from __future__ import annotations
 
+# logging; type hints.
 import logging
 from typing import Any, Dict, Optional
 
+# Log to the hub's logger.
 logger = logging.getLogger("Hub")
 
+# Config key for the feature flag.
 _VMID_ALLOC_CFG_KEY = "pxmx_auto_allocate_vmid"
 
 
 def vmid_alloc_cfg(hub) -> Dict[str, Any]:
     """Read the auto-allocate config fresh (``{enabled: bool}``; default off)."""
+    # The config block from global_config, or {}.
     return (hub.state.system_state.get("global_config", {})
             .get(_VMID_ALLOC_CFG_KEY, {})) or {}
 
@@ -52,17 +56,21 @@ async def allocate_vmid(hub, tenant_id: str) -> Optional[int]:
     possible (no tenant slug, no range set, range exhausted, or a spoke
     unavailable) so the caller falls back to Proxmox ``/cluster/nextid``.
     """
+    # No tenant: no allocation.
     if not tenant_id:
         return None
+    # Tenant config; a lookup error gives None.
     try:
         tcfg = hub.state.get_tenant(tenant_id) or {}
     except Exception:
         return None
+    # Tenant needs a NetBox slug.
     slug = str(tcfg.get("netbox_tenant_slug") or "").strip()
     if not slug:
         logger.debug("vmid-alloc tenant=%s: no netbox_tenant_slug — skip", tenant_id)
         return None
 
+    # NetBox and hypervisor spokes must both be connected.
     netbox = hub.get_spoke_by_type("ipam")
     if not netbox:
         logger.debug("vmid-alloc tenant=%s: NetBox spoke down — skip", tenant_id)
@@ -80,25 +88,30 @@ async def allocate_vmid(hub, tenant_id: str) -> Optional[int]:
     except Exception as e:
         logger.debug("vmid-alloc tenant=%s: range read failed: %s", tenant_id, e)
         return None
+    # NetBox returned an error or a malformed reply.
     if not isinstance(rd, dict) or str(rd.get("status", "")).upper() == "ERROR":
         logger.debug("vmid-alloc tenant=%s: range read ERROR: %s", tenant_id,
                      rd.get("message") if isinstance(rd, dict) else rd)
         return None
+    # Range bounds; missing means fall back.
     start = rd.get("vmid_start")
     end = rd.get("vmid_end")
     if start is None or end is None:
         logger.info("vmid-alloc tenant=%s: no VMID range set in NetBox — "
                     "falling back to Proxmox nextid", tenant_id)
         return None
+    # Bounds must be integers.
     try:
         start = int(start)
         end = int(end)
     except (TypeError, ValueError):
         logger.debug("vmid-alloc tenant=%s: non-integer range (%r-%r)", tenant_id, start, end)
         return None
+    # Range must be ordered.
     if start > end:
         logger.debug("vmid-alloc tenant=%s: range start>end (%d>%d)", tenant_id, start, end)
         return None
+    # VMIDs NetBox already assigns to this tenant; bad values ignored.
     used_nb = set()
     for v in (rd.get("used_vmids") or []):
         try:
@@ -125,12 +138,14 @@ async def allocate_vmid(hub, tenant_id: str) -> Optional[int]:
         return None
 
     # 3) Lowest free in range not claimed by NetBox and not in cluster use.
+    # Return the first free VMID.
     for candidate in range(start, end + 1):
         if candidate in used_nb or candidate in used_cluster:
             continue
         logger.info("vmid-alloc tenant=%s: allocated vmid=%d (range %d-%d)",
                     tenant_id, candidate, start, end)
         return candidate
+    # Range exhausted.
     logger.info("vmid-alloc tenant=%s: range %d-%d exhausted — falling back to Proxmox nextid",
                 tenant_id, start, end)
     return None

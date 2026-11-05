@@ -1,9 +1,13 @@
 """Hub Setup routes: spokes, sync loops, module configs, metadata."""
+# asyncio provides the per-event-loop lock for the spokes cache.
 import asyncio
+# Hub-wide helpers: HTTP errors, hub message builder, logger, time and reply unwrapping.
 from api import (
     HTTPException, Request, _hub_msg, logger, time, _unwrap_spoke,
 )
+# Tenant helpers: is a tenant shared, and may this session see a given spoke.
 from access import tenant_is_shared as _tenant_is_shared, spoke_visible_to_session as _spoke_visible
+# Ids of spokes that connect directly to the hub (not relayed through another spoke).
 from spoke_alert_sync import direct_module_ids as _direct_module_ids
 
 # ── /setup/pending_spokes cache (stale-while-revalidate) ─────────────────────
@@ -26,6 +30,8 @@ _spokes_locks: dict = {}
 
 
 def _spokes_lock() -> "asyncio.Lock":
+    """Return the spokes-cache lock for the current event loop, creating it on first use."""
+    # Key the lock by the running loop so each loop gets its own.
     loop = asyncio.get_running_loop()
     lk = _spokes_locks.get(id(loop))
     if lk is None:
@@ -51,12 +57,15 @@ def _module_type_for(hub, sid: str):
     persisted read is what lets a disconnected generic agent (module_type
     "agent") or a role sub-spoke "{base}-{role}" keep its category instead of
     falling through to "—" or a wrong prefix guess."""
+    # Live registration first.
     mt = hub.spoke_module_types.get(hub._primary_key(sid))
     if mt:
         return mt
+    # Then the type saved at registration.
     meta = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
     if meta.get("module_type"):
         return meta["module_type"]
+    # Finally guess from the spoke id prefix.
     for prefix, fallback in _PREFIX_MODULE.items():
         if sid == prefix or sid.startswith(prefix + "-"):
             return fallback
@@ -71,7 +80,9 @@ def _identity_change_for(hub, sid: str, meta: dict):
     amber "renamed" banner until an admin dismisses it. Mirrored for agents
     via the parent spoke's event timeline.
     """
+    # Time of the last admin acknowledgement (0 if never).
     acked_ts = float(meta.get("change_acked_ts") or 0.0)
+    # Return the newest rename/reimage event after that time.
     for ev in hub.get_spoke_events(sid, limit=20):
         if ev.get("event") in ("identity_changed", "hostname_changed", "reimaged"):
             if ev.get("ts", 0) > acked_ts:
@@ -85,6 +96,7 @@ async def _aggregate_spokes(hub):
     a route closure) so it depends only on ``hub`` and is unit-testable with a
     stub hub. Does not itself catch exceptions — ``_maybe_refresh_spokes``
     serves stale on failure rather than blanking the tile."""
+    # Known spokes plus their stored names and metadata.
     known_spokes = list(hub.state.system_state.get("known_modules", []) or [])
     module_names = hub.state.system_state.get("module_names", {})
     module_metadata = hub.state.system_state.get("module_metadata", {})
@@ -99,7 +111,9 @@ async def _aggregate_spokes(hub):
     # row. Relayed pxmx node-agents that leaked into approved_modules are
     # excluded (they render in the Agents table, keyed by composite id — the
     # same set the alert loop skips via _selfheal_leaked_agents).
+    # Primary keys already in the list.
     _covered = {hub._primary_key(sid) for sid in known_spokes}
+    # Relayed agent ids and direct-connect ids; a lookup failure means none.
     try:
         _relay_ids = hub._relayed_agent_ids()
     except Exception:
@@ -108,11 +122,13 @@ async def _aggregate_spokes(hub):
         _direct_ids = _direct_module_ids(hub.state.system_state)
     except Exception:
         _direct_ids = set()
+    # Add approved spokes missing from the list, skipping relayed agents.
     for pk, ap in (hub.approved_modules or {}).items():
         if (ap and pk not in _covered
                 and (pk not in _relay_ids or pk in _direct_ids)):
             known_spokes.append(pk)
 
+    # Build one row per spoke.
     spokes_status = []
     for sid in known_spokes:
         meta = module_metadata.get(sid, {}) or {}
@@ -164,11 +180,14 @@ async def _maybe_refresh_spokes(hub, force=False):
     ``force`` means "the caller already decided the cache is unservable" — it
     does NOT bypass a genuinely-fresh result (if a concurrent caller refreshed
     while this one waited on the lock, serving it is the whole point)."""
+    # Only one refresh runs at a time.
     async with _spokes_lock():
+        # Serve the cache if it is fresh enough.
         cached = _SPOKES_CACHE["data"]
         age = (time.time() - _SPOKES_CACHE["ts"]) if cached is not None else None
         if cached is not None and age is not None and age < _SPOKES_FRESH_S:
             return cached
+        # Recompute and store the new payload.
         _SPOKES_CACHE["refreshing"] = True
         try:
             result = await _aggregate_spokes(hub)
@@ -178,6 +197,7 @@ async def _maybe_refresh_spokes(hub, force=False):
         except Exception:
             logger.exception("spokes cache refresh failed")
             return cached  # serve stale rather than blanking the tile
+        # Always clear the refreshing flag.
         finally:
             _SPOKES_CACHE["refreshing"] = False
 
@@ -200,8 +220,10 @@ def _agent_last_seen_for(relayed_last, *keys):
     """Freshest relay timestamp for a registry row, trying every key the
     agent's state may live under (spoke alias, agent alias/guid, raw id).
     ``None`` when none has ever relayed. Pure for unit tests."""
+    # Look up every non-empty key and keep only real positive timestamps.
     vals = [relayed_last.get(k) for k in keys if k]
     vals = [v for v in vals if isinstance(v, (int, float)) and v > 0]
+    # Return the newest one, or None.
     return max(vals) if vals else None
 
 
@@ -211,23 +233,30 @@ def _agent_name_to_guid(agent_config, agent_info):
     Only keys whose own id differs from the name (i.e. guid-migrated) count,
     and a name claimed by two different guids is dropped as ambiguous rather
     than guessed. Pure for unit tests."""
+    # Name -> guid map, plus names seen with more than one guid.
     found = {}
     ambiguous = set()
 
     def _add(name, guid):
+        """Record ``name`` -> ``guid``, marking the name ambiguous if it maps to another guid."""
+        # Ignore empty values and ids that are not migrated (name equals guid).
         if not name or not guid or name == guid:
             return
+        # A second, different guid for the same name makes it ambiguous.
         if found.get(name, guid) != guid:
             ambiguous.add(name)
         found[name] = guid
 
+    # Names from persisted agent config.
     for guid, cfg in (agent_config or {}).items():
         if isinstance(cfg, dict):
             for field in ("agent_id", "hostname", "display_name"):
                 _add(cfg.get(field), guid)
+    # Names from live agent info.
     for guid, info in (agent_info or {}).items():
         if isinstance(info, dict):
             _add(info.get("agent_id"), guid)
+    # Drop ambiguous names.
     return {n: g for n, g in found.items() if n not in ambiguous}
 
 
@@ -253,14 +282,18 @@ def _dhcp_ha_member_count(status):
 
     Module-level + pure so it is unit-testable (mirrors
     ``_is_stuck_never_keyed``)."""
+    # Anything but a dict is unknown.
     if not isinstance(status, dict):
         return None
+    # Prefer the members list: count entries with an id.
     members = status.get("members")
     if isinstance(members, list):
         return sum(1 for m in members if isinstance(m, dict) and m.get("id"))
+    # Otherwise use member_count; a bool is not a valid count.
     raw = status.get("member_count")
     if isinstance(raw, bool):
         return None
+    # A non-number count is unknown.
     try:
         return max(0, int(raw))
     except (TypeError, ValueError):
@@ -281,6 +314,7 @@ def _dhcp_spokes_without_cluster(status_by_spoke):
     look completely down.
 
     Module-level + pure so it is unit-testable."""
+    # Spokes whose reported cluster has exactly zero members.
     return {sid for sid, st in (status_by_spoke or {}).items()
             if _dhcp_ha_member_count(st) == 0}
 
@@ -328,15 +362,18 @@ async def _deliver_agent_approval(hub, target_spoke: str, agent_id: str) -> str:
     Redelivery is safe: ``approve_pending_agent`` is idempotent (an already
     approved/connected agent no-ops), and an admin deny/delete calls
     ``mailbox.clear_spoke`` which purges any still-queued approval."""
+    # Wrap APPROVAL_SUCCESS in a relay message addressed to the agent.
     pk = hub._primary_key(target_spoke)
     msg = _hub_msg(target_spoke, "SPOKE_RELAY", {
         "target_agent_id": hub._agent_relay_name(agent_id),
         "command": "APPROVAL_SUCCESS",
         "payload": {},
     })
+    # Online: push through the mailbox (retried until acked).
     if pk in hub.active_connections:
         await hub.mailbox.push(msg, hub.send_to_spoke)
         return "pushed"
+    # Offline: queue it for delivery when the spoke reconnects.
     await hub.mailbox.queue_for_spoke(pk, msg)
     return "queued"
 
@@ -380,6 +417,7 @@ async def _perform_agent_approval(hub, spoke_id: str, agent_id: str,
     # heard of this agent_id, leaving it pending forever). Falls back
     # to the path param when agent_info has no entry yet (e.g.
     # approving before the first relayed frame has arrived).
+    # Find the spoke the agent actually connects through, or use the given one.
     _resolved = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
     target_spoke = _resolved or spoke_id
     logger.info(
@@ -403,6 +441,7 @@ async def _perform_agent_approval(hub, spoke_id: str, agent_id: str,
     # to route explicitly.
     if explicit_tenant:
         tenant_to_bind = explicit_tenant
+    # No explicit tenant: inherit the spoke's tenant unless it is the shared tenant.
     else:
         spoke_tenant = hub.state.get_spoke_tenant(target_spoke)
         from access import tenant_is_shared  # lazy: avoid import cycle
@@ -419,14 +458,17 @@ async def _perform_agent_approval(hub, spoke_id: str, agent_id: str,
     spoke_pk = hub._primary_key(target_spoke)
     spoke_module_type = (getattr(hub, "spoke_module_types", {}) or {}).get(spoke_pk) \
         or hub.state.system_state.get("module_metadata", {}).get(target_spoke, {}).get("module_type")
+    # Agents approved through a simulation spoke get Client-Simulation turned on.
     auto_enable_cs = (spoke_module_type == "simulation")
 
+    # Store the tenant and/or CS flag in the agent's saved config.
     cs_cfg = None
     if tenant_to_bind or auto_enable_cs:
         agent_cfg_store = hub.state.system_state.setdefault("agent_config", {})
         agent_pk = hub._agent_primary_key(agent_id)
         entry = dict(agent_cfg_store.get(agent_pk, {}))
         cs_cfg = dict(entry.get("client_simulation") or {})
+        # Set the tenant when explicit, or when the agent has none yet.
         if tenant_to_bind and (explicit_tenant or not cs_cfg.get("tenant_id")):
             cs_cfg["tenant_id"] = tenant_to_bind
         if auto_enable_cs:
@@ -435,6 +477,7 @@ async def _perform_agent_approval(hub, spoke_id: str, agent_id: str,
         agent_cfg_store[agent_pk] = entry
         hub.state._mark_dirty()
 
+    # Push the new CS config to the agent now; on failure it still applies on reconnect.
     if auto_enable_cs:
         from routes.pxmx import push_pxmx_agent_config  # lazy: avoid import cycle
         try:
@@ -454,6 +497,7 @@ async def _perform_agent_approval(hub, spoke_id: str, agent_id: str,
     from routes.pxmx import bust_pxmx_agents_cache  # lazy: avoid import cycle
     bust_pxmx_agents_cache()
 
+    # Deliver the approval, then log whether it was pushed or queued.
     connected = hub._primary_key(target_spoke) in hub.active_connections
     _disp = await _deliver_agent_approval(hub, target_spoke, agent_id)
     if connected:
@@ -475,6 +519,7 @@ async def _perform_agent_approval(hub, spoke_id: str, agent_id: str,
             "(no longer dropped). If the agent stays pending, verify the "
             "agent-hosting spoke (hypervisor/simulation) comes back online.",
             target_spoke, agent_id, _disp)
+    # Summary for the caller.
     return {"agent_id": agent_id, "target_spoke": target_spoke,
             "spoke_connected": connected, "disposition": _disp,
             "tenant_inherited": tenant_to_bind or None,
@@ -492,10 +537,13 @@ def _bust_spokes_cache():
     without thrash. A cold cache (data is None) still forced-refreshes on the
     next GET (the age check requires a servable payload). Also busts the
     /setup/diagnostics cache — the same mutations surface there too."""
+    # Keep data but mark it just past fresh, so the next GET refreshes in the background.
     if _SPOKES_CACHE.get("data") is not None:
         _SPOKES_CACHE["ts"] = min(_SPOKES_CACHE["ts"], time.time() - _SPOKES_FRESH_S)
+    # No cached data: force a refresh on the next GET.
     else:
         _SPOKES_CACHE["ts"] = 0.0
+    # Also refresh the diagnostics cache, if that module is loaded.
     try:
         from routes import setup_admin  # lazy: avoid any import-cycle at load
         setup_admin._bust_diag_cache()
@@ -514,16 +562,20 @@ async def _purge_spoke_from_dhcp_dns_clusters(hub, spoke_id: str):
     the trimmed member list. Never raises — this is best-effort cleanup, not
     a precondition for the delete itself; a spoke that is offline, errors, or
     simply doesn't reference the id is skipped silently."""
+    # Check DHCP HA pairs and DNS resolver clusters the same way.
     for module_type, status_cmd, config_cmd in (
             ("dhcp", "DHCP_HA_STATUS", "DHCP_HA_CONFIG"),
             ("dns", "DNS_CLUSTER_STATUS", "DNS_CLUSTER_CONFIG")):
+        # All spokes of this type; a lookup failure means none.
         try:
             candidates = hub.get_all_spokes_by_type(module_type) or []
         except Exception:  # noqa: BLE001
             candidates = []
+        # Check each cluster spoke for the deleted member.
         for cluster_spoke_id in candidates:
             if hub._primary_key(cluster_spoke_id) == hub._primary_key(spoke_id):
                 continue  # the deleted spoke can't purge itself
+            # Ask the spoke for its current members; any failure is logged and skipped.
             try:
                 status = await hub.request_response(
                     cluster_spoke_id, status_cmd, {}, timeout=15.0)
@@ -531,11 +583,13 @@ async def _purge_spoke_from_dhcp_dns_clusters(hub, spoke_id: str):
                            if isinstance(status, dict) else status)
                 members = [m for m in (payload or {}).get("members") or []
                            if isinstance(m, dict)]
+                # Members left after removing the deleted spoke (by raw id or primary key).
                 remaining = [m for m in members
                              if str(m.get("id") or "") != str(spoke_id)
                              and hub._primary_key(str(m.get("id") or "")) != hub._primary_key(spoke_id)]
                 if len(remaining) == len(members):
                     continue  # this cluster never referenced the deleted spoke
+                # Send the trimmed member list back to the spoke.
                 await hub.request_response(
                     cluster_spoke_id, config_cmd, {"members": remaining},
                     timeout=30.0)
@@ -563,6 +617,7 @@ async def hard_delete_spoke(hub, spoke_id: str):
     evicts the per-spoke runtime caches. The spoke must fully re-onboard to
     return. Also busts the spokes cache so the change surfaces immediately.
     """
+    # Close the spoke's live connection, if any.
     pk = hub._primary_key(spoke_id)
     ws = hub.active_connections.get(pk)
     if ws is not None:
@@ -581,6 +636,7 @@ async def hard_delete_spoke(hub, spoke_id: str):
     # never raises; a spoke that is offline or doesn't recognize the member
     # is simply skipped (nothing to clean up there).
     await _purge_spoke_from_dhcp_dns_clusters(hub, spoke_id)
+    # Forget the approval, the stored registration and its keys.
     hub.approved_modules.pop(pk, None)
     hub.state.remove_module(spoke_id)
     hub.key_manager.delete_spoke_key(pk)
@@ -592,6 +648,7 @@ async def hard_delete_spoke(hub, spoke_id: str):
     # active_connections/spoke_module_types, so without this the per-spoke dicts
     # grow unbounded as spokes are deleted/recreated over time.
     hub._evict_spoke(spoke_id)
+    # Make the Spokes view refresh soon.
     _bust_spokes_cache()
 
 
@@ -612,6 +669,8 @@ _status_locks: dict = {}
 
 
 def _status_lock() -> "asyncio.Lock":
+    """Return the /status cache lock for the current event loop, creating it on first use."""
+    # Key the lock by the running loop so each loop gets its own.
     loop = asyncio.get_running_loop()
     lk = _status_locks.get(id(loop))
     if lk is None:
@@ -624,6 +683,7 @@ async def _aggregate_status(hub):
     """Recompute the authenticated /status body from live hub state. Byte-for-byte
     the same dict the handler used to build inline; module-level (not a closure)
     so it depends only on ``hub`` and is unit-testable with a stub hub."""
+    # Hub system metrics.
     metrics = await hub.get_system_metrics()
     # Operator alerts surfaced in the header badge: spoke out-of-contact +
     # fleet-availability (per-tenant client-sim health) + out-of-dongles (per
@@ -641,8 +701,10 @@ async def _aggregate_status(hub):
     # this field; entries from an older hub carry no source and are treated as
     # spoke out-of-contact (the previous behaviour).
     def _tag(alerts, source):
+        """Return copies of ``alerts`` tagged with their producer ``source``."""
         return [{**a, "source": source} for a in (alerts or [])]
 
+    # All active alerts from every producer.
     active_alerts = (
         _tag(hub.get_active_spoke_alerts(), "spoke_out_of_contact")
         + _tag(hub.get_fleet_alerts() if hasattr(hub, "get_fleet_alerts") else [],
@@ -652,6 +714,7 @@ async def _aggregate_status(hub):
         # whole fleet of dead agents raised NO alert and the tray stayed green.
         + _tag(hub.get_agent_alerts() if hasattr(hub, "get_agent_alerts") else [],
                "agent_out_of_contact"))
+    # The full status body.
     return {
         "ready": True,
         "active_connections": list(hub.active_connections.keys()),
@@ -669,11 +732,14 @@ async def _maybe_refresh_status(hub, force=False):
     """Under ``_status_lock``: serve the cached body if fresh (unless ``force``);
     otherwise recompute and store. Serializes concurrent first-loaders into a
     single recompute; serves stale on failure. Mirrors _maybe_refresh_spokes."""
+    # Only one refresh runs at a time.
     async with _status_lock():
+        # Serve the cache if it is fresh enough.
         cached = _STATUS_CACHE["data"]
         age = (time.time() - _STATUS_CACHE["ts"]) if cached is not None else None
         if cached is not None and age is not None and age < _STATUS_FRESH_S:
             return cached
+        # Recompute and store the new body.
         _STATUS_CACHE["refreshing"] = True
         try:
             result = await _aggregate_status(hub)
@@ -683,12 +749,14 @@ async def _maybe_refresh_status(hub, force=False):
         except Exception:
             logger.exception("status cache refresh failed")
             return cached  # serve stale rather than blanking the WebUI
+        # Always clear the refreshing flag.
         finally:
             _STATUS_CACHE["refreshing"] = False
 
 
 def register(app, hub, ctx):
     """Register setup routes on the Hub app."""
+    # Short names for the shared auth helpers.
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
 
@@ -697,11 +765,14 @@ def register(app, hub, ctx):
         """Return the remote IP for each connected spoke, keyed by module_type.
         Used by the WebUI to auto-populate service URL fields."""
         hub = app.state.hub
+        # Map module type -> IP of a connected spoke of that type.
         result = {}
         for spoke_id, telemetry in hub.spoke_telemetry.items():
+            # Skip spokes with no known IP.
             ip = telemetry.get("remote_ip")
             if not ip:
                 continue
+            # Record the IP under the spoke's module type.
             module_type = hub.spoke_module_types.get(spoke_id)
             if module_type:
                 result[module_type] = {"ip": ip, "spoke_id": spoke_id}
@@ -715,11 +786,14 @@ def register(app, hub, ctx):
         that won't drain (e.g. undeliverable SPOKE_UPDATE to a flapping spoke)
         without deleting/re-approving the spoke. Admin only."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Optional message type filter, and the backlog size before purging.
         msg_type = request.query_params.get("type") or None
         before = hub.mailbox.backlog_stats().get("total", 0)
+        # Drop the messages and log who did it.
         dropped = await hub.mailbox.purge_all(msg_type=msg_type)
         logger.warning("[diag] Hub backlog purge by %s: dropped %d%s (was %d)",
                        (sess.get("username") if isinstance(sess, dict) else "?"),
@@ -733,14 +807,17 @@ def register(app, hub, ctx):
         shown in System → Hub Status). Otherwise they only reset on a hub
         restart. Admin only."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Count the spokes being reset, then clear the counters.
         n = len(getattr(hub, "rate_limit_drops", {}) or {})
         try:
             hub.rate_limit_drops.clear()
         except Exception:  # noqa: BLE001
             hub.rate_limit_drops = {}
+        # Audit log.
         logger.info("[diag] rate-limit drop counters reset (%d spoke(s)) by %s", n,
                     (sess.get("username") if isinstance(sess, dict) else "?"))
         return {"status": "ok", "cleared_spokes": n}
@@ -754,15 +831,18 @@ def register(app, hub, ctx):
         ~3s later (outside lm's cgroup), so this response returns first. Spokes
         reconnect automatically. Admin only."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # The restart helper must exist on this deployment.
         restart = getattr(hub, "_hub_self_restart", None)
         if restart is None:
             raise HTTPException(status_code=503,
                                 detail="hub self-restart is unavailable on this deployment")
         logger.warning("[diag] Hub service restart requested by %s",
                        (sess.get("username") if isinstance(sess, dict) else "?"))
+        # Schedule the restart; a failure is reported as 502.
         try:
             msg = await restart()
         except Exception as e:  # noqa: BLE001
@@ -773,6 +853,12 @@ def register(app, hub, ctx):
 
     @app.get("/status")
     async def get_status(request: Request):
+        """Hub status for the WebUI and health probes.
+
+        Anonymous callers get readiness and a connection count only; signed-in users get the full
+        (cached) status body.
+        """
+        # 503 until the hub's WebSocket server is up.
         hub = app.state.hub
         if not getattr(hub, "is_ready", False):
             raise HTTPException(status_code=503, detail="Hub is not yet ready (WebSocket server starting)")
@@ -796,6 +882,7 @@ def register(app, hub, ctx):
         # WebUI colours tiles from ``in_contact`` (connected now OR seen within
         # the grace window), so a transient loop stall / brief reconnect doesn't
         # flip a module offline — only genuine long absence does.
+        # Read the cached body and its age.
         cached = _STATUS_CACHE["data"]
         age = (time.time() - _STATUS_CACHE["ts"]) if cached is not None else None
         if cached is not None and age is not None and age < _STATUS_STALE_S:
@@ -813,6 +900,7 @@ def register(app, hub, ctx):
         ownership check a non-admin enumerating vm_id could read another tenant's
         firewall rules. (Per-tenant VM detail uses /vm/{vm_id}/details which is
         tenant-scoped; this endpoint is not used by the WebUI.)"""
+        # Signed in and Global Admin only.
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
@@ -836,7 +924,9 @@ def register(app, hub, ctx):
         # 3. Use the async bridge to request rules from the spoke
         try:
             result = await hub.request_response(opn_spoke, "OPNSENSE_GET_RULES_BY_IP", {"ip": ip})
+            # Return the spoke's rule data.
             return result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
+        # Any failure is reported as a 500.
         except Exception as e:
             logger.exception("get_vm_firewall failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -844,6 +934,8 @@ def register(app, hub, ctx):
     # ── Setup: spoke approval / secrets / agents (/setup/spokes/*) ───────────
     @app.post("/setup/spokes/{spoke_id}/reset-secret")
     async def reset_spoke_secret(spoke_id: str):
+        """Delete a spoke's secret so it can be onboarded again (Global Admin, via /setup gate)."""
+        # Delete the key; any failure is reported as a 500.
         hub = app.state.hub
         try:
             hub.key_manager.delete_spoke_key(hub._primary_key(spoke_id))
@@ -863,11 +955,13 @@ def register(app, hub, ctx):
         the pre-rotation secret. For suspected compromise where the OLD secret
         must stop working immediately, use /revoke or /reset-secret instead."""
         hub = app.state.hub
+        # Rotate now; an ERROR result means the spoke was not found.
         try:
             result = await hub.rotate_spoke_secret_now(spoke_id)
             if result.get("status") == "ERROR":
                 raise HTTPException(status_code=404, detail=result.get("message"))
             return result
+        # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -880,6 +974,7 @@ def register(app, hub, ctx):
         (item 9b) — the "rotate everything after an incident" lever. Admin only.
         Each spoke is rotated non-disruptively via rotate_spoke_secret_now."""
         hub = app.state.hub
+        # Rotate every spoke; any failure is reported as a 500.
         try:
             return await hub.rotate_all_spoke_secrets_now()
         except Exception as e:
@@ -895,6 +990,7 @@ def register(app, hub, ctx):
         + re-approve the same id. For a full wipe (remove the record too), use
         DELETE /setup/spokes/{id} instead."""
         hub = app.state.hub
+        # Revoke, then refresh the Spokes view soon.
         try:
             res = await hub.revoke_spoke(spoke_id)
             _bust_spokes_cache()
@@ -914,6 +1010,7 @@ def register(app, hub, ctx):
         (current key + history). The spoke must fully re-onboard to return.
         """
         hub = app.state.hub
+        # Run the shared hard-delete; any failure is reported as a 500.
         try:
             await hard_delete_spoke(hub, spoke_id)
             return {"status": "ok", "message": f"Spoke '{spoke_id}' removed."}
@@ -928,6 +1025,7 @@ def register(app, hub, ctx):
         out-of-contact alert loop skips it and the UI badged it grey. Reversible
         via /setup/spokes/{id}/restore. For a full wipe use DELETE instead."""
         hub = app.state.hub
+        # Flag the spoke as decommissioned (``changed`` is False if it already was).
         try:
             pk = hub._primary_key(spoke_id)
             changed = hub.state.decommission_module(pk)
@@ -940,6 +1038,7 @@ def register(app, hub, ctx):
                 hub._spoke_absent_since.pop(pk, None)
             except Exception:  # noqa: BLE001 — alert state is best-effort
                 pass
+            # Log only a real change, then refresh the Spokes view soon.
             if changed:
                 logger.info("Spoke '%s' decommissioned (soft-retire, alerts suppressed).", spoke_id)
             _bust_spokes_cache()
@@ -953,6 +1052,7 @@ def register(app, hub, ctx):
         """Un-decommission a soft-retired spoke/generic-agent (re-enables
         out-of-contact alerting). The record was never removed."""
         hub = app.state.hub
+        # Clear the decommission flag (``changed`` is False if it was not set).
         try:
             pk = hub._primary_key(spoke_id)
             changed = hub.state.restore_module(pk)
@@ -971,20 +1071,24 @@ def register(app, hub, ctx):
         each. For cleaning up synthetic load-test spokes in one shot / resetting
         between runs. Admin only."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # The id prefix to purge (default "loadtest-"); it must not be empty.
         prefix = (request.query_params.get("prefix") or "loadtest-").strip()
         if not prefix:
             raise HTTPException(status_code=400, detail="prefix required")
 
         def _mid(m):
+            """Return the spoke id from a known_modules entry (string or dict), or None."""
             if isinstance(m, str):
                 return m
             if isinstance(m, dict):
                 return m.get("id") or m.get("spoke_id")
             return None
 
+        # Collect ids from known_modules that match the prefix.
         targets = set()
         for m in list(hub.state.system_state.get("known_modules", []) or []):
             mid = _mid(m)
@@ -995,15 +1099,18 @@ def register(app, hub, ctx):
             if isinstance(mid, str) and mid.startswith(prefix):
                 targets.add(mid)
 
+        # Tear down each target; one failure does not stop the rest.
         removed = 0
         for spoke_id in sorted(targets):
             try:
+                # Close its live connection, if any.
                 ws = hub.active_connections.get(hub._primary_key(spoke_id))
                 if ws is not None:
                     try:
                         await ws.close(code=1008, reason="load-test purge")
                     except Exception:
                         pass
+                # Forget approval, registration, keys, queued messages and runtime caches.
                 hub.approved_modules.pop(hub._primary_key(spoke_id), None)
                 hub.state.remove_module(spoke_id)
                 hub.key_manager.delete_spoke_key(hub._primary_key(spoke_id))
@@ -1012,6 +1119,7 @@ def register(app, hub, ctx):
                 removed += 1
             except Exception as e:  # noqa: BLE001 — best-effort per spoke
                 logger.warning("purge_spokes_prefix: %s failed: %s", spoke_id, e)
+        # Audit log, then refresh the Spokes view soon.
         logger.warning("[diag] purged %d spoke(s) with prefix '%s' by %s",
                        removed, prefix,
                        (sess.get("username") if isinstance(sess, dict) else "?"))
@@ -1027,6 +1135,7 @@ def register(app, hub, ctx):
         event until a newer one arrives. Idempotent.
         """
         hub = app.state.hub
+        # Stamp the acknowledgement time and mark state for saving.
         try:
             hub.state.update_module_metadata(
                 spoke_id, {"change_acked_ts": time.time()}
@@ -1061,8 +1170,10 @@ def register(app, hub, ctx):
             new_key = hub.key_manager.rotate_key(hub._primary_key(spoke_id))
             new_secret = new_key.secret
 
+            # Push the new key if the spoke is connected; otherwise it is used on next connect.
             spoke_conn = hub.active_connections.get(hub._primary_key(spoke_id))
             if spoke_conn:
+                # Push it; failure leaves the new key stored but not pushed.
                 try:
                     result = await hub.request_response(
                         spoke_id, "SPOKE_UPDATE_SESSION_KEY", {"secret": new_secret},
@@ -1088,6 +1199,8 @@ def register(app, hub, ctx):
 
     @app.get("/setup/spokes/{spoke_id}/agents")
     async def get_spoke_agents(spoke_id: str):
+        """List the other known spokes, reported as the agents of ``spoke_id``."""
+        # Every known spoke except this one.
         hub = app.state.hub
         known_spokes = hub.state.system_state.get("known_modules", [])
         agents = [sid for sid in known_spokes if sid != spoke_id]
@@ -1095,7 +1208,9 @@ def register(app, hub, ctx):
 
     @app.post("/setup/spokes/{spoke_id}/agents/{agent_id}/approve")
     async def approve_agent_under_spoke(spoke_id: str, agent_id: str):
+        """Approve a relayed agent under a spoke (see _perform_agent_approval)."""
         hub = app.state.hub
+        # Approve; any failure is reported as a 500.
         try:
             await _perform_agent_approval(hub, spoke_id, agent_id)
         except Exception as e:
@@ -1108,6 +1223,11 @@ def register(app, hub, ctx):
 
     @app.get("/setup/pending_spokes")
     async def get_all_spokes_status():
+        """List every spoke with its approval, type, tenant and revoke details (cached).
+
+        Returns {"spokes": [...]}.
+        """
+        # Read the cached payload and its age.
         hub = app.state.hub
 
         # Serves a stale-while-revalidate cache (``_SPOKES_CACHE``): fresh
@@ -1133,6 +1253,12 @@ def register(app, hub, ctx):
 
     @app.post("/setup/approve_spoke")
     async def approve_spoke(request: Request):
+        """Approve or un-approve a spoke and optionally bind it to a tenant.
+
+        Expects JSON {"spoke_id", "action": "approve"|"unapprove", "tenant_id"?}; a connected spoke
+        is told at once.
+        """
+        # Read the spoke id and action; the id is required.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -1142,6 +1268,7 @@ def register(app, hub, ctx):
             if not spoke_id:
                 raise HTTPException(status_code=400, detail="Missing spoke_id")
 
+            # Un-approve: store the flag and drop queued messages.
             if action == "unapprove":
                 hub.state.register_module(spoke_id, approved=False)
                 hub.approved_modules[hub._primary_key(spoke_id)] = False
@@ -1149,6 +1276,7 @@ def register(app, hub, ctx):
                 # outbound commands; drop queued messages so they don't retry
                 # against it. Re-approval generates a fresh key + pushes.
                 await hub.mailbox.clear_spoke(hub._primary_key(spoke_id))
+            # Approve: store the flag.
             else:
                 hub.state.register_module(spoke_id, approved=True)
                 hub.approved_modules[hub._primary_key(spoke_id)] = True
@@ -1167,8 +1295,10 @@ def register(app, hub, ctx):
             if tenant_id is not None:
                 hub.state.set_spoke_tenant(spoke_id, tenant_id)
 
+            # Save state immediately.
             await hub.state.save_state_now()
 
+            # Tell a connected spoke the result right away.
             if hub._primary_key(spoke_id) in hub.active_connections:
                 if action != "unapprove":
                     # Generate a session secret for the spoke (idempotent — reuses existing key if present).
@@ -1179,10 +1309,12 @@ def register(app, hub, ctx):
                     key_msg = _hub_msg(spoke_id, "SPOKE_UPDATE_SESSION_KEY", {"secret": session_secret})
                     await hub.send_to_spoke(key_msg, signing_secret=prev_secret)
 
+                # Send APPROVED or DENIED.
                 msg_type = "APPROVED" if action != "unapprove" else "DENIED"
                 approval_msg = _hub_msg(spoke_id, msg_type, {})
                 await hub.send_to_spoke(approval_msg)
 
+                # After approval, push its config and ask for its version.
                 if action != "unapprove":
                     await hub.push_config_to_spoke(spoke_id)
                     # Query the spoke's version now that it's approved + keyed,
@@ -1196,6 +1328,7 @@ def register(app, hub, ctx):
                         logger.error(f"Failed to request version from {spoke_id}: {e}")
 
             return {"status": "ok", "message": f"Spoke {spoke_id} {'approved' if action != 'unapprove' else 'un-approved'}."}
+        # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
             raise  # 4xx must propagate as-is, not be re-wrapped as 500
         except Exception as e:
@@ -1209,22 +1342,28 @@ def register(app, hub, ctx):
     # ── Product config pairs: cppm/pxmx/ldap/dns/dhcp (/setup/*-config) ───────
     @app.get("/setup/cppm-config")
     async def get_cppm_config():
+        """Return the stored ClearPass (CPPM) settings."""
+        # Read the cppm section of the global config.
         hub = app.state.hub
         config = hub.state.system_state.get("global_config", {}).get("cppm", {})
         return {"config": config}
 
     @app.post("/setup/cppm-config")
     async def update_cppm_config(request: Request):
+        """Save the ClearPass (CPPM) settings and push them to the NAC spoke if connected."""
+        # Read the new settings.
         hub = app.state.hub
         try:
             data = await request.json()
             config = data.get("config", {})
 
+            # Store them in the global config and mark state for saving.
             global_config = hub.state.system_state.get("global_config", {})
             global_config["cppm"] = config
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
 
+            # Push to the NAC spoke if connected; otherwise report a partial success.
             cppm_spoke = hub.get_spoke_by_type("nac")
             if cppm_spoke:
                 msg = _hub_msg(cppm_spoke, "update_config", config)
@@ -1232,6 +1371,7 @@ def register(app, hub, ctx):
                 return {"status": "ok", "message": "Configuration updated and pushed to spoke.", "pushed": True}
             else:
                 return {"status": "partial_success", "message": "Configuration saved, but CPPM spoke is not connected.", "pushed": False}
+        # Any failure is reported as a 500.
         except Exception as e:
             logger.exception("update_cppm_config failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -1252,19 +1392,23 @@ def register(app, hub, ctx):
         all tenants bound to NetBox. Returns per-tenant results + a summary.
         """
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # A missing or invalid JSON body is treated as empty.
         try:
             data = await request.json()
         except Exception:
             data = {}
+        # Sync one tenant if given, otherwise every NetBox-bound tenant.
         target = (data or {}).get("tenant_id") if isinstance(data, dict) else None
         if target:
             results = [await hub.sync_tenant_endpoints(target)]
         else:
             results = [await hub.sync_tenant_endpoints(tid)
                        for tid in hub._endpoint_sync_tenants()]
+        # Totals across tenants.
         pushed = sum(int(r.get("pushed", 0)) for r in results)
         errors = sum(int(r.get("errors", 0)) for r in results)
         return {"results": results,
@@ -1274,9 +1418,11 @@ def register(app, hub, ctx):
     async def endpoint_sync_status(request: Request):
         """Per-tenant last-sync status for the Setup → NAC card."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Build one status row per tenant.
         statuses = hub.simulations_store.get_all_endpoint_sync_status()
         tenants = []
         for tid, st in statuses.items():
@@ -1302,9 +1448,11 @@ def register(app, hub, ctx):
         change and the WebUI dropdown picks it up with no client change.
         """
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # The source in use, plus every registered source and whether its spoke is connected.
         active = hub._endpoint_sync_source().get("module_type")
         sources = []
         for name, se in hub.IPAM_SOURCES.items():
@@ -1332,19 +1480,23 @@ def register(app, hub, ctx):
         per-tenant results + a summary.
         """
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # A missing or invalid JSON body is treated as empty.
         try:
             data = await request.json()
         except Exception:
             data = {}
+        # One tenant's row if given; otherwise run the full sync and return every row.
         target = (data or {}).get("tenant_id") if isinstance(data, dict) else None
         if target:
             results = [await hub.sync_tenant_vms(target)]
         else:
             agg = await hub.sync_all_vms()
             results = agg.get("results", []) or []
+        # Totals across rows.
         pushed = sum(int(r.get("pushed", 0)) for r in results)
         errors = sum(int(r.get("errors", 0)) for r in results)
         deleted = sum(int(r.get("deleted", 0)) for r in results)
@@ -1356,9 +1508,11 @@ def register(app, hub, ctx):
     async def vm_sync_status(request: Request):
         """Per-tenant last-VM-sync status for the Setup → IPAM card."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Build one status row per tenant.
         statuses = hub.simulations_store.get_all_vm_sync_status()
         tenants = []
         for tid, st in statuses.items():
@@ -1387,9 +1541,11 @@ def register(app, hub, ctx):
         admin pick one instead of just the generic source type.
         """
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # The source in use, plus every registered source and whether its spoke is connected.
         active = hub._vm_sync_source().get("module_type")
         sources = []
         for name, se in hub.HYPERVISOR_SOURCES.items():
@@ -1400,10 +1556,12 @@ def register(app, hub, ctx):
         # when the hypervisor spoke is down (sources[*].connected already flags
         # that; agents just enriches with the per-server detail).
         agents: list = []
+        # Ask the hypervisor spoke for its agents; a failure leaves the list empty.
         pxmx_spoke = hub.get_hypervisor_spoke()
         if pxmx_spoke:
             try:
                 r = await hub.request_response(pxmx_spoke, "GET_AGENTS", {}, timeout=30.0)
+                # Unwrap the reply and keep the fields the UI shows.
                 d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else r
                 for a in (d or {}).get("agents", []) if isinstance(d, dict) else []:
                     agents.append({
@@ -1433,13 +1591,16 @@ def register(app, hub, ctx):
         skipped/dropped_unattributed/discovered_total).
         """
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # A missing or invalid JSON body is treated as empty.
         try:
             data = await request.json()
         except Exception:
             data = {}
+        # One tenant if given (its own counts), otherwise every tenant (aggregate counts).
         target = (data or {}).get("tenant_id") if isinstance(data, dict) else None
         if target:
             results = [await hub.sync_tenant_devices(target)]
@@ -1450,6 +1611,7 @@ def register(app, hub, ctx):
             results = agg.get("results", [])
             dropped = int(agg.get("dropped_unattributed", 0) or 0)
             discovered = int(agg.get("discovered_total", 0) or 0)
+        # Totals across tenants.
         pushed = sum(int(r.get("pushed", 0)) for r in results)
         errors = sum(int(r.get("errors", 0)) for r in results)
         skipped = sum(int(r.get("skipped", 0)) for r in results)
@@ -1463,9 +1625,11 @@ def register(app, hub, ctx):
     async def fw_discovery_sync_status(request: Request):
         """Per-tenant last firewall-discovery-sync status for the Setup → Sync card."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Build one status row per tenant.
         statuses = hub.simulations_store.get_all_fw_discovery_sync_status()
         tenants = []
         for tid, st in statuses.items():
@@ -1501,18 +1665,22 @@ def register(app, hub, ctx):
         the live config (one name when pinned, every connected one for auto).
         """
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Sources the current config resolves to, and which registered sources are connected.
         active = [name for name, _ in hub._fw_discovery_sources()]
         connected_names = [name for name, se in hub.FIREWALL_DISCOVERY_SOURCES.items()
                            if hub.get_all_spokes_by_type(se.get("module_type", ""))]
+        # The synthetic "auto" choice comes first, then each registered source.
         sources = [{"name": "auto", "label": "Auto (every connected source)",
                    "module_type": "", "connected": bool(connected_names)}]
         for name, se in hub.FIREWALL_DISCOVERY_SOURCES.items():
             sources.append({"name": name, "label": se.get("label", name),
                             "module_type": se.get("module_type", ""),
                             "connected": bool(hub.get_all_spokes_by_type(se.get("module_type", "")))})
+        # Each configured firewall with its spoke and whether that spoke is connected.
         firewalls = []
         for fw in hub.state.system_state.get("global_config", {}).get("firewalls", []) or []:
             sid = fw.get("spoke_id") if isinstance(fw, dict) else None
@@ -1542,13 +1710,16 @@ def register(app, hub, ctx):
         deleted/dropped_unattributed/sessions_total).
         """
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # A missing or invalid JSON body is treated as empty.
         try:
             data = await request.json()
         except Exception:
             data = {}
+        # One tenant if given (its own counts), otherwise every tenant (aggregate counts).
         target = (data or {}).get("tenant_id") if isinstance(data, dict) else None
         if target:
             results = [await hub.sync_tenant_realtime(target)]
@@ -1559,6 +1730,7 @@ def register(app, hub, ctx):
             results = agg.get("results", [])
             dropped = int(agg.get("dropped_unattributed", 0) or 0)
             sessions_total = int(agg.get("sessions_total", 0) or 0)
+        # Totals across tenants.
         pushed = sum(int(r.get("pushed", 0)) for r in results)
         errors = sum(int(r.get("errors", 0)) for r in results)
         skipped = sum(int(r.get("skipped", 0)) for r in results)
@@ -1573,9 +1745,11 @@ def register(app, hub, ctx):
     async def realtime_nac_sync_status(request: Request):
         """Per-tenant last realtime-NAC-sync status for the Setup → Sync card."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Build one status row per tenant.
         statuses = hub.simulations_store.get_all_realtime_nac_sync_status()
         tenants = []
         for tid, st in statuses.items():
@@ -1598,6 +1772,7 @@ def register(app, hub, ctx):
         """Connection state for the realtime reverse-sync card: whether the NAC
         (CPPM) pull source and the IPAM (netbox) push sink are connected."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
@@ -1618,9 +1793,11 @@ def register(app, hub, ctx):
         freed. Returns the spoke's result + a summary.
         """
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Run the sweep and summarise the result.
         result = await hub.run_staleness_sweep_all()
         return {"result": result,
                 "summary": {"scanned": result.get("scanned", 0),
@@ -1634,6 +1811,7 @@ def register(app, hub, ctx):
     async def staleness_sweep_status(request: Request):
         """Last cluster-wide staleness-sweep status for the Setup → Sync card."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
@@ -1652,20 +1830,25 @@ def register(app, hub, ctx):
         Scope to one tenant via ``tenant_slug`` (empty = all).
         """
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # A missing or invalid JSON body is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Dry run unless apply is true; optional tenant scope.
         apply = bool(body.get("apply", False))
         tenant_slug = str(body.get("tenant_slug") or "").strip()
+        # NetBox must be connected.
         ipam = hub.get_spoke_by_type("ipam")
         if not ipam:
             return {"result": {"status": "error", "groups": [], "scanned": 0,
                                "merged": 0, "applied": apply,
                                "message": "NetBox spoke not connected"}}
+        # Ask NetBox to find/merge duplicates (up to 3 minutes); failures are returned as errors.
         try:
             rr = await hub.request_response(
                 ipam, "NETBOX_DEDUPE_DEVICES",
@@ -1675,11 +1858,13 @@ def register(app, hub, ctx):
             logger.warning("[sync-error] netbox-dedupe failed: %s", e)
             return {"result": {"status": "error", "groups": [], "scanned": 0,
                                "merged": 0, "applied": apply, "message": str(e)}}
+        # Log a warning when the run reported errors.
         if int((rd or {}).get("errors", 0) or 0) > 0:
             logger.warning("[sync-error] netbox-dedupe status=%s groups=%d merged=%d errors=%d — %s",
                            (rd or {}).get("status"), len((rd or {}).get("groups", [])),
                            (rd or {}).get("merged", 0), (rd or {}).get("errors", 0),
                            (rd or {}).get("message", ""))
+        # Return NetBox's result.
         return {"result": rd or {}}
 
     # ── GitHub repo sync (Setup → Sync, replaces the old autoupdate loop) ───
@@ -1701,9 +1886,11 @@ def register(app, hub, ctx):
         sync (already current, not stale) restarts nothing.
         """
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Run the full sync now and summarise per-repo outcomes.
         result = await hub.run_repo_sync_all(force=True)
         prov = result.get("provisioning_repos", []) or []
         return {"result": result,
@@ -1719,6 +1906,7 @@ def register(app, hub, ctx):
     async def repo_sync_status(request: Request):
         """Last GitHub repo-sync status for the Setup → Sync card."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
@@ -1736,6 +1924,7 @@ def register(app, hub, ctx):
         Setup → Sync card. Each entry: {spoke_id, tier, since_ts, duration_s,
         detail}."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
@@ -1774,21 +1963,25 @@ def register(app, hub, ctx):
         broker-election facts needed to tell a live spoke from a leftover.
         Admin only."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
 
         def _safe_tenant(h, sid):
+            """Return the tenant bound to spoke ``sid``, or "" on any error."""
             try:
                 return h.state.get_spoke_tenant(sid) or ""
             except Exception:                       # noqa: BLE001 — diag never 500s
                 return ""
 
+        # Snapshot every store a registration can live in.
         now = time.time()
         md = (hub.state.system_state.get("module_metadata", {}) or {})
         approved = hub.approved_modules or {}
         conns = getattr(hub, "active_connections", {}) or {}
         types = getattr(hub, "spoke_module_types", {}) or {}
+        # Ids that hold a session key, and last heartbeat times; errors mean empty.
         try:
             keys = set((hub.key_manager.keys or {}).keys())
         except Exception:                               # noqa: BLE001 — diag never 500s
@@ -1803,6 +1996,7 @@ def register(app, hub, ctx):
         # looking for.
         ids = set(md) | set(approved) | set(conns) | set(types)
 
+        # One output row per registration.
         rows = []
         # Liveness for RELAYED node agents, keyed by agent primary key. Same
         # source the alert producer uses, so the two can never disagree.
@@ -1833,13 +2027,17 @@ def register(app, hub, ctx):
             hub.state.system_state.get("agent_config") or {},
             getattr(hub, "agent_info", {}) or {})
 
+        # Build a row for each registration.
         for sid in sorted(ids):
+            # Stored metadata and tenant for this id.
             meta = md.get(sid) or {}
             tenant = meta.get("tenant_id") or ""
+            # Resolve the primary key; on error use the raw id.
             try:
                 pk = hub._primary_key(sid)
             except Exception:                           # noqa: BLE001
                 pk = sid
+            # Last heartbeat and whether it holds a socket now.
             seen = last_seen.get(pk) or last_seen.get(sid)
             connected = sid in conns
             # RELAYED node agents (pxmx/cs) are never in active_connections and
@@ -1855,21 +2053,25 @@ def register(app, hub, ctx):
             # registered under its raw name ("mipbe-ssplm-pxmx01") found no
             # relay traffic via pk/sid and read "offline · no key · never"
             # (the dashboard tile had the same bug, fixed with this lookup).
+            # Resolve the agent key, falling back to the durable name -> guid map.
             try:
                 apk = hub._agent_primary_key(sid)
             except Exception:                           # noqa: BLE001
                 apk = sid
             if apk == sid:
                 apk = _agent_name_guid.get(sid, sid)
+            # Latest relay time, and whether this id is a relayed agent.
             _agent_last = _agent_last_seen_for(_relayed_last, pk, apk, sid)
             is_relayed_agent = bool(_agent_last) or any(
                 _is_relayed_agent(k, _relay_ids, _direct_ids) for k in {sid, pk, apk})
+            # For relayed agents, use relay traffic as last-seen and liveness.
             if is_relayed_agent:
                 if _agent_last and (not seen or _agent_last > seen):
                     seen = _agent_last
                 # Fresh relay traffic IS the agent's liveness — it has no socket
                 # of its own to be "connected" on.
                 connected = connected or bool(_agent_last and (_now - _agent_last) < _RELAY_LIVE_S)
+            # Whether a session key exists under either id.
             has_key = sid in keys or pk in keys
             # "Approve → never reports in": an APPROVED registration that has
             # NEVER been seen, holds NO session key, is NOT connected and is NOT
@@ -1887,6 +2089,7 @@ def register(app, hub, ctx):
             stuck_never_keyed = _is_stuck_never_keyed(
                 approved.get(sid, False), connected, has_key,
                 is_relayed_agent, seen)
+            # Human-readable reasons this row may be a ghost.
             reasons = []
             if not connected:
                 reasons.append("not connected")
@@ -1901,6 +2104,7 @@ def register(app, hub, ctx):
             if stuck_never_keyed:
                 reasons.append("approved but never seen / never keyed — "
                                "delete everywhere and re-approve while connected")
+            # Add the row.
             rows.append({
                 "spoke_id": sid,
                 "module_type": types.get(sid) or meta.get("module_type") or "",
@@ -1945,6 +2149,7 @@ def register(app, hub, ctx):
         # looks like it is fighting over ownership. Name the pair here; the
         # operator decides, we never auto-delete a registration.
         _by_id = {r["spoke_id"] for r in rows}
+        # Mark "<name>-spoke" rows whose bare "<name>" row also exists.
         for r in rows:
             sid = r["spoke_id"]
             if sid.endswith("-spoke") and sid[: -len("-spoke")] in _by_id:
@@ -1954,17 +2159,22 @@ def register(app, hub, ctx):
         # Broker election per tenant, using the SAME helper the cs bridge calls,
         # so the page shows what the bridge will actually pick — not a re-derived
         # guess that could disagree with it.
+        # Client-sim spokes and the tenants they are bound to.
         cs_ids = {r["spoke_id"] for r in rows
                   if (r["module_type"] or "").lower() in ("client-sim", "simulation")}
         brokers = {}
         tenants = {r["tenant_id"] for r in rows if r["spoke_id"] in cs_ids}
+        # Tenantless spokes are not a tenant.
         tenants.discard("")
+        # For each tenant, record the elected broker and the eligible connected candidates.
         for t in sorted(tenants):
+            # Ask the same election the cs bridge uses; a failure means none elected.
             try:
                 elected = hub.get_client_sim_spoke(t)
             except Exception as e:                      # noqa: BLE001
                 logger.debug("[registry-diag] election for %s failed: %s", t, e)
                 elected = None
+            # Connected, approved cs spokes bound to this tenant or to no tenant.
             cands = [r["spoke_id"] for r in rows
                      if r["spoke_id"] in cs_ids and r["connected"]
                      and r["approved"] and (r["tenant_id"] == t or not r["tenant_id"])]
@@ -1977,7 +2187,9 @@ def register(app, hub, ctx):
                 "multiple": len(cands) > 1,
             }
 
+        # Plain-English findings for the operator.
         findings = []
+        # Several eligible brokers for one tenant.
         for t, b in brokers.items():
             if b["multiple"]:
                 findings.append(
@@ -1985,18 +2197,21 @@ def register(app, hub, ctx):
                     f"The broker is pinned to {b['elected']} and only moves if that spoke "
                     f"stops being connected/approved/bound — a reconnect elsewhere no longer "
                     f"reassigns it. Extra spokes are still worth pruning if they are leftovers.")
+        # Registrations with no tenant (visible to Global Admins only).
         hidden = [r["spoke_id"] for r in rows if r["admin_only"]]
         if hidden:
             findings.append(
                 f"{len(hidden)} registration(s) have no tenant_id — invisible in a "
                 f"non-admin Spokes list, yet still claimable as a tenant's broker. "
                 f"They can only be found and deleted from an admin session.")
+        # Disconnected Client-Sim registrations.
         ghosts = [r["spoke_id"] for r in rows if r["ghost_candidate"] and r["spoke_id"] in cs_ids]
         if ghosts:
             findings.append(
                 f"{len(ghosts)} Client-Sim registration(s) are not connected — the usual "
                 f"signature of a rebuilt box whose old id was never deregistered. "
                 f"Confirm the box is gone, then delete.")
+        # Pre-rename twins.
         twins = [r for r in rows if r["legacy_twin_of"]]
         if twins:
             findings.append(
@@ -2006,6 +2221,7 @@ def register(app, hub, ctx):
                 "of these is the SAME box as the id on the right, registered twice. The old "
                 "record still holds host/USB telemetry, so hosts show up under a spoke that "
                 "no longer runs them. Delete the '-spoke' side once its twin is connected.")
+        # Approved-but-never-keyed registrations.
         stuck = [r["spoke_id"] for r in rows if r.get("stuck_never_keyed")]
         if stuck:
             findings.append(
@@ -2016,6 +2232,7 @@ def register(app, hub, ctx):
                 f"nothing and it stays offline / no key / never — clicking Approve never makes it "
                 f"report in. Delete each one everywhere, then let the box reconnect and approve it "
                 f"WHILE it is connected.")
+        # Say so when nothing was found.
         if not findings:
             findings.append("No duplicate-registration or visibility problems detected.")
 
@@ -2030,10 +2247,13 @@ def register(app, hub, ctx):
         # hosts render under a spoke that no longer runs them and the fleet
         # looks like it is fighting over ownership. Surface them separately —
         # they are NOT spokes and must not be mixed into the rows above.
+        # Cached telemetry whose id is not any registration.
         orphans = []
         for sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
+            # Skip ids that are real registrations.
             if sid in ids:
                 continue
+            # List the hostnames this orphan still claims.
             data = data or {}
             hosts = data.get("proxmox_hosts")
             hostnames = ([(h or {}).get("hostname") or "?" for h in hosts]
@@ -2044,6 +2264,7 @@ def register(app, hub, ctx):
                 "host_count": len(hostnames),
                 "tenant_id": _safe_tenant(hub, sid),
             })
+        # Sort orphans by id and report them.
         orphans.sort(key=lambda o: o["spoke_id"])
         if orphans:
             findings.append(
@@ -2054,6 +2275,7 @@ def register(app, hub, ctx):
                 "hosts they claim keep rendering under an id that no longer runs them. "
                 "Purge them below.")
 
+        # Return everything for the diagnostics page.
         return {"generated": now, "rows": rows, "brokers": brokers,
                 "orphan_telemetry": orphans, "findings": findings}
 
@@ -2065,19 +2287,23 @@ def register(app, hub, ctx):
         for a real spoke, and this route exists only to reap the unreachable
         leftovers. Admin only."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Read the ids to purge; at least one is required.
         body = await request.json()
         want = [str(x) for x in (body.get("ids") or [])]
         if not want:
             raise HTTPException(status_code=400, detail="ids required")
 
+        # Every id that is a real registration in any store.
         md = (hub.state.system_state.get("module_metadata", {}) or {})
         known = (set(md) | set(hub.approved_modules or {})
                  | set(getattr(hub, "active_connections", {}) or {})
                  | set(getattr(hub, "spoke_module_types", {}) or {}))
         cache = getattr(hub, "simulations_cache", {}) or {}
+        # Drop each orphan from the cache; refuse real registrations.
         purged, refused = [], []
         for sid in want:
             if sid in known:
@@ -2085,6 +2311,7 @@ def register(app, hub, ctx):
                 continue
             if cache.pop(sid, None) is not None:
                 purged.append(sid)
+        # Save the cache to disk if anything changed; failure only logs.
         if purged:
             try:
                 await asyncio.to_thread(hub._save_simulations_cache)
@@ -2101,17 +2328,20 @@ def register(app, hub, ctx):
         filter compare against, and computed ``findings`` naming any false
         positive / stale-state condition. Admin only."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
 
         def _safe(fn, default):
+            """Call ``fn()`` and return its result, or ``default`` if it raises."""
             try:
                 return fn()
             except Exception as e:                      # noqa: BLE001 — diag never 500s
                 logger.debug("[alert-diag] %s failed: %s", getattr(fn, "__name__", fn), e)
                 return default
 
+        # Snapshot the approval, relay-agent and alert state the alert loop reads.
         now = time.time()
         approved = {s for s, a in (hub.approved_modules or {}).items() if a}
         relay_ids = _safe(hub._relayed_agent_ids, set())
@@ -2134,6 +2364,7 @@ def register(app, hub, ctx):
         persisted = {s for s, a in ((hub.state.system_state.get("approved_modules") or {})
                                     ).items() if a}
 
+        # Alert thresholds (warn/error seconds) and alert config.
         warn_s, error_s = _safe(hub._spoke_alert_thresholds, (300, 1800))
         cfg = _safe(hub._spoke_alert_cfg, {})
 
@@ -2146,6 +2377,7 @@ def register(app, hub, ctx):
             s for s in _safe(lambda: hub.get_all_spokes_by_type("dhcp") or [], [])
             if hub._primary_key(s) in (getattr(hub, "active_connections", {}) or {})
             and (hub.approved_modules or {}).get(s, False))
+        # Ask every connected dhcp spoke in parallel; failures become None (unknown).
         dhcp_ha = {}
         if dhcp_spokes:
             replies = await asyncio.gather(*[
@@ -2157,12 +2389,14 @@ def register(app, hub, ctx):
                     dhcp_ha[sid] = None
                 else:
                     dhcp_ha[sid] = _unwrap_spoke(reply)
+        # Spokes reporting an empty Kea cluster.
         clusterless = _dhcp_spokes_without_cluster(dhcp_ha)
         # The spoke a tenantless admin read actually lands on.
         default_dhcp = _safe(lambda: hub.get_spoke_by_type("dhcp"), None)
 
         # Composite heartbeat keys, grouped by the agent-id tail the alert loop
         # FAILS to match (the bare id) — the direct evidence for a false positive.
+        # Group composite heartbeat keys by agent id.
         composite = {}
         for k in last_seen:
             if ":" in k:
@@ -2172,6 +2406,7 @@ def register(app, hub, ctx):
                      "age_s": int(max(0.0, now - (last_seen.get(k) or now)))})
 
         # Every active alert, tagged with the module that produced it.
+        # Collect alerts from each producer that exists on this hub.
         alerts = []
         for src, getter in (("spoke_out_of_contact", "get_active_spoke_alerts"),
                             # Relayed node agents — the producer the spoke sweep
@@ -2187,6 +2422,7 @@ def register(app, hub, ctx):
 
         # Per-alert forensics for the spoke producer only (fleet/dongle alerts
         # are synthetic keys with no heartbeat/approval to cross-check).
+        # One forensics row per spoke out-of-contact alert.
         rows = []
         for sid, a in spoke_alerts.items():
             rows.append({
@@ -2202,12 +2438,15 @@ def register(app, hub, ctx):
                 "absent_since": absent.get(sid),
                 "latched_tier": tier_map.get(sid),
             })
+        # Errors first, then by id.
         rows.sort(key=lambda r: (r["tier"] != "error", r["spoke_id"]))
 
         # ── verdicts ─────────────────────────────────────────────────────────
         findings = []
 
         def _add(code, severity, detail, ids):
+            """Add a finding with ``code``, ``severity`` and ``detail`` when ``ids`` is non-empty.
+            """
             if ids:
                 findings.append({"code": code, "severity": severity,
                                  "detail": detail, "ids": sorted(ids)})
@@ -2274,6 +2513,7 @@ def register(app, hub, ctx):
             shown.update(f["ids"])
         names = {s: _safe(lambda s=s: name_of(s), s) for s in shown if s}
 
+        # Return the alerts, forensics rows, findings and supporting evidence.
         return {
             "generated_ts": now,
             "names": names,
@@ -2316,13 +2556,16 @@ def register(app, hub, ctx):
         deleted/dropped_unattributed/discovered_total).
         """
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # A missing or invalid JSON body is treated as empty.
         try:
             data = await request.json()
         except Exception:
             data = {}
+        # One tenant if given (its own counts), otherwise every tenant (aggregate counts).
         target = (data or {}).get("tenant_id") if isinstance(data, dict) else None
         if target:
             results = [await hub.sync_tenant_nw_devices(target)]
@@ -2333,6 +2576,7 @@ def register(app, hub, ctx):
             results = agg.get("results", [])
             dropped = int(agg.get("dropped_unattributed", 0) or 0)
             discovered = int(agg.get("discovered_total", 0) or 0)
+        # Totals across tenants.
         pushed = sum(int(r.get("pushed", 0)) for r in results)
         errors = sum(int(r.get("errors", 0)) for r in results)
         skipped = sum(int(r.get("skipped", 0)) for r in results)
@@ -2347,9 +2591,11 @@ def register(app, hub, ctx):
     async def nw_discovery_sync_status(request: Request):
         """Per-tenant last nw-discovery-sync status for the Setup → Sync card."""
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Build one status row per tenant.
         statuses = hub.simulations_store.get_all_nw_discovery_sync_status()
         tenants = []
         for tid, st in statuses.items():
@@ -2379,15 +2625,18 @@ def register(app, hub, ctx):
         ``netbox_connected`` flags whether the IPAM sink is up.
         """
         hub = app.state.hub
+        # Only Global Admins may do this.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # The source in use, plus every registered source and whether its spokes are connected.
         active = hub._nw_discovery_source().get("module_type")
         sources = []
         for name, se in hub.NW_DISCOVERY_SOURCES.items():
             sources.append({"name": name, "label": se.get("label", name),
                             "module_type": se.get("module_type", ""),
                             "connected": bool(hub.get_all_spokes_by_type(se.get("module_type", "")))})
+        # Each configured network device with its spoke and whether that spoke is connected.
         devices = []
         for d in hub.state.system_state.get("global_config", {}).get("nw_devices", []) or []:
             sid = d.get("spoke_id") if isinstance(d, dict) else None
@@ -2402,6 +2651,8 @@ def register(app, hub, ctx):
 
     @app.get("/setup/pxmx-config")
     async def get_pxmx_config():
+        """Return the stored Proxmox settings, or defaults when unset."""
+        # Read the pxmx section of the global config, with defaults.
         hub = app.state.hub
         config = hub.state.system_state.get("global_config", {}).get("pxmx", {
             "default_node": "pve",
@@ -2411,16 +2662,20 @@ def register(app, hub, ctx):
 
     @app.post("/setup/pxmx-config")
     async def update_pxmx_config(request: Request):
+        """Save the Proxmox settings and push them to the hypervisor spoke if connected."""
+        # Read the new settings.
         hub = app.state.hub
         try:
             data = await request.json()
             config = data.get("config", {})
 
+            # Store them in the global config and mark state for saving.
             global_config = hub.state.system_state.get("global_config", {})
             global_config["pxmx"] = config
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
 
+            # Push to the hypervisor spoke if connected; otherwise report a partial success.
             pxmx_spoke = hub.get_hypervisor_spoke()
             if pxmx_spoke:
                 msg = _hub_msg(pxmx_spoke, "update_config", config)
@@ -2428,6 +2683,7 @@ def register(app, hub, ctx):
                 return {"status": "ok", "message": "Configuration updated and pushed to spoke.", "pushed": True}
             else:
                 return {"status": "partial_success", "message": "Configuration saved, but Proxmox spoke is not connected.", "pushed": False}
+        # Any failure is reported as a 500.
         except Exception as e:
             logger.exception("update_pxmx_config failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -2442,12 +2698,15 @@ def register(app, hub, ctx):
     @app.get("/setup/dns-config")
     async def get_dns_config():
         """Return the stored DNS/Unbound configuration (global_config.dns)."""
+        # Read the dns section of the global config.
         hub = app.state.hub
         config = hub.state.system_state.get("global_config", {}).get("dns", {})
         return {"config": config}
 
     @app.post("/setup/dns-config")
     async def update_dns_config(request: Request):
+        """Save the DNS settings in the global config (not pushed to spokes here)."""
+        # Read the new settings, store them and mark state for saving.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -2457,6 +2716,7 @@ def register(app, hub, ctx):
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
             return {"status": "ok"}
+        # Any failure is reported as a 500.
         except Exception as e:
             logger.exception("update_dns_config failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -2464,12 +2724,15 @@ def register(app, hub, ctx):
     @app.get("/setup/dhcp-config")
     async def get_dhcp_config():
         """Return the stored DHCP/Kea configuration (global_config.dhcp)."""
+        # Read the dhcp section of the global config.
         hub = app.state.hub
         config = hub.state.system_state.get("global_config", {}).get("dhcp", {})
         return {"config": config}
 
     @app.post("/setup/dhcp-config")
     async def update_dhcp_config(request: Request):
+        """Save the DHCP settings in the global config (not pushed to spokes here)."""
+        # Read the new settings, store them and mark state for saving.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -2479,12 +2742,18 @@ def register(app, hub, ctx):
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
             return {"status": "ok"}
+        # Any failure is reported as a 500.
         except Exception as e:
             logger.exception("update_dhcp_config failed")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/setup/spoke-metadata")
     async def update_spoke_metadata(request: Request):
+        """Merge new metadata (e.g. display name, hostname) into a known spoke's record.
+
+        Expects JSON {"spoke_id": ..., "metadata": {...}}.
+        """
+        # Read the spoke id and metadata; the id is required.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -2494,14 +2763,17 @@ def register(app, hub, ctx):
             if not spoke_id:
                 raise HTTPException(status_code=400, detail="Missing spoke_id")
 
+            # The spoke must be known.
             known_modules = hub.state.system_state.get("known_modules", [])
             if spoke_id not in known_modules:
                 raise HTTPException(status_code=404, detail=f"Spoke '{spoke_id}' not found in known_modules: {known_modules}")
 
+            # Merge the metadata and mark state for saving.
             hub.state.update_module_metadata(spoke_id, metadata)
             hub.state._mark_dirty()
 
             return {"status": "ok", "message": f"Metadata for spoke {spoke_id} updated."}
+        # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -2513,6 +2785,8 @@ def register(app, hub, ctx):
 
     @app.get("/setup/spoke-metadata/{spoke_id}")
     async def get_spoke_metadata(spoke_id: str):
+        """Return the stored metadata for one spoke, or 404."""
+        # Read the spoke's metadata.
         hub = app.state.hub
         metadata = hub.state.system_state.get("module_metadata", {}).get(spoke_id, {})
         if not metadata:
@@ -2521,6 +2795,11 @@ def register(app, hub, ctx):
 
     @app.get("/setup/firewalls")
     async def get_firewalls(request: Request):
+        """List configured firewalls the caller may see.
+
+        Global Admins see all; others see their own tenants' and shared firewalls.
+        """
+        # Read every configured firewall.
         hub = app.state.hub
         firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
         # Tenant-scope the DEVICE list: a non-admin sees firewalls in the shared
@@ -2532,9 +2811,11 @@ def register(app, hub, ctx):
             firewalls = [f for f in firewalls
                          if _spoke_visible(sess, (f or {}).get("tenant_id", ""))]
             # A tenant with its own firewall no longer sees the shared ones.
+            # access holds the tenant/firewall ownership helpers.
             import access
             tid = access.request_effective_tenant(sess, request)
             if access.tenant_has_own_firewall(hub, tid):
                 firewalls = [f for f in firewalls
                              if access.firewall_owner_tenant(hub, (f or {}).get("id"))]
+        # Return the filtered list.
         return {"firewalls": firewalls}

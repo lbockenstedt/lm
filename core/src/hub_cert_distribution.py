@@ -1,17 +1,28 @@
 """Certificate distribution for the LM Hub (le → target spokes, hub-brokered)."""
 
+# Postpone evaluation of type hints (Optional/Dict/Any are referenced only in annotations).
 from __future__ import annotations
 
+# asyncio runs the restart subprocess and queries spokes concurrently.
 import asyncio
+# Standard-library logging.
 import logging
+# os reads env paths and does file operations.
 import os
+# pwd turns uids into user names for permission-error hints.
 import pwd
+# ssl validates a new cert before it goes live.
 import ssl
+# subprocess is imported for helper commands.
 import subprocess
+# tempfile makes scratch files for validation and atomic writes.
 import tempfile
+# time.time() stamps when an in-flight install started.
 import time
+# Type hints.
 from typing import Tuple
 
+# Shared periodic-loop runner (stagger, delay, error handling).
 from sync_loop import run_sync_loop  # sibling leaf
 
 # Pure transport helpers live in cert_distribution.py (no heavy imports, so they
@@ -30,6 +41,7 @@ from cert_distribution import (
     distribute_mtls_materials_to_all_spokes as _distribute_mtls_materials_impl,
 )
 
+# Hub logger for non-cert lines.
 logger = logging.getLogger("Hub")
 # Cert-distribution activity (the hub-brokered transport: per-target push
 # outcomes, hub self-install) is logged to the "le.distribution" logger so it
@@ -66,10 +78,13 @@ def _spoke_mtls_ready(module_type, online, ca_present, client_cert_present,
     CLIENT-ONLY agent (see CLIENT_ONLY_MTLS_TYPES) is ready on client cert + key
     alone — it never holds a CA bundle by design, so requiring one would block
     fleet readiness forever without adding any real safety."""
+    # Must be connected and hold a client cert and key.
     if not (online and client_cert_present and client_key_present):
         return False
+    # Client-only agents never get a CA bundle, so don't require one.
     if module_type in CLIENT_ONLY_MTLS_TYPES:
         return True
+    # Full spokes also need the CA.
     return bool(ca_present)
 
 
@@ -93,8 +108,10 @@ def _diagnose_self_restart_failure(detail: str) -> str:
     * helper missing — ``lm-self-restart`` renamed to ``.off`` disables the
       restart path deliberately; say so rather than reporting "exited 1".
     """
+    # Normalise the text and lower-case it for matching.
     d = (detail or "").strip()
     low = d.lower()
+    # sudo can't become root: lm.service's capability bounding set is too narrow.
     if "unable to change to root gid" in low or "operation not permitted" in low \
             or "audit plugin" in low:
         return (f"{d} — lm.service's CapabilityBoundingSet is missing "
@@ -105,15 +122,18 @@ def _diagnose_self_restart_failure(detail: str) -> str:
                 f"(install_all.sh already ships the corrected line — self-update "
                 f"does NOT rewrite unit files), then systemctl daemon-reload && "
                 f"systemctl restart lm.")
+    # The helper script is missing (possibly disabled on purpose).
     if "no such file" in low or "command not found" in low:
         return (f"{d} — {_LM_SELF_RESTART} is missing (check for a "
                 f"{_LM_SELF_RESTART}.off: the helper is renamed to disable "
                 f"self-restart deliberately). Restore it, or restart the hub "
                 f"out-of-band with systemctl restart lm.")
+    # sudoers doesn't allow the helper.
     if "a password is required" in low or "not allowed to execute" in low:
         return (f"{d} — /etc/sudoers.d/lm does not grant this helper NOPASSWD "
                 f"to the hub's service user. Re-run install_all.sh to reinstate "
                 f"the sudoers rule.")
+    # Unknown failure: return the raw text.
     return d
 
 
@@ -141,6 +161,7 @@ class HubCertDistributionMixin:
         When ``mtls.auto_provision`` is ON and ``domain`` is a wildcard, ALSO
         fan the mTLS materials (CA + client cert/key) to every connected primary
         spoke + the hub (see _distribute_mtls_materials)."""
+        # Push to the cert's explicit targets first.
         explicit = await _distribute_cert_to_targets(
             self._inflight_rr(self.request_response), self._cert_target_spoke,
             self.CERT_CAPABLE_MODULES, le_spoke_id, domain, targets,
@@ -148,8 +169,10 @@ class HubCertDistributionMixin:
             device_tracker=(self._cert_device_tracker()
                             if hasattr(self, "_cert_device_tracker") else None),
             target_payload=getattr(self, "_cert_target_payload", None))
+        # Collect results; note whether push state changed.
         out = list(explicit or [])
         pushed_state = False
+        # Wildcard fan-out to every cert-capable spoke when enabled.
         if self._wildcard_all_spokes_enabled() and _is_wildcard(domain):
             wc = await _distribute_wildcard_to_all_spokes(
                 self.request_response, self.get_all_spokes_by_type,
@@ -158,12 +181,15 @@ class HubCertDistributionMixin:
                 install_on_hub=self._install_cert_on_hub)
             out += (wc or [])
             pushed_state = True
+        # mTLS materials fan-out when auto-provision is on.
         if self._mtls_auto_provision_enabled() and _is_wildcard(domain):
             mtls = await self._distribute_mtls_materials(le_spoke_id, domain, material_hash)
             out += (mtls or [])
             pushed_state = True
+        # Save push state only if a fan-out ran.
         if pushed_state:
             self._save_wildcard_push_state()
+        # Keep per-device breakdowns for the WebUI.
         self._stash_cert_device_reports(out)
         return out
 
@@ -171,15 +197,20 @@ class HubCertDistributionMixin:
         """Fingerprint of the device(s) behind a cert target — today the
         firewall(s) bound to an OPNsense spoke (sorted host:port). ``None`` for
         types without a hub-side device record (not tracked)."""
+        # Only firewalls have a hub-side device record.
         if module_type != "firewall":
             return None
+        # Find the spoke behind the target.
         sid = identifier or self._cert_target_spoke(module_type, identifier)
         if not sid:
             return None
+        # Sorted host:port list of its firewalls.
         return ",".join(sorted(f"{(f.get('host') or '').strip()}:{f.get('port') or ''}"
                                for f in self._firewalls_for_spoke(sid)))
 
     def _firewalls_for_spoke(self, spoke_id: str) -> list:
+        """Firewalls in global_config bound to this spoke (matched by primary key)."""
+        # Compare primary keys so name and guid forms both match.
         pk = self._primary_key(spoke_id)
         gc = self.state.system_state.get("global_config", {}) or {}
         return [f for f in (gc.get("firewalls") or [])
@@ -190,21 +221,29 @@ class HubCertDistributionMixin:
         """INSTALL_CERT extras: for a firewall target, EVERY firewall bound to
         the spoke (vault-resolved creds) so each box — e.g. both HA members —
         gets the cert directly. Empty dict = spoke uses its own connection."""
+        # Only firewall targets get extra payload.
         if module_type != "firewall":
             return {}
+        # Vault lookup for firewall credentials.
         import instance_vault
         devices = []
+        # One entry per firewall, with credentials filled from the vault.
         for fw in self._firewalls_for_spoke(target_sid):
             r = await instance_vault.overlay(self, fw, "firewalls")
             devices.append({"name": r.get("name") or r.get("host"), "host": r.get("host"),
                             "port": r.get("port"), "api_key": r.get("api_key"),
                             "api_secret": r.get("api_secret")})
+        # Empty dict means the spoke uses its own connection.
         return {"devices": devices} if devices else {}
 
     def _cert_device_tracker(self):
+        """Build the tracker that notices when the device behind a target changes, or None on
+        stub hubs.
+        """
         state = getattr(self, "state", None)
         if state is None or not hasattr(self, "_cert_target_spoke"):
             return None  # minimal/stub hubs: hash-only skip (previous behavior)
+        # Persisted device fingerprints; changes mark state for saving.
         store = state.system_state.setdefault("cert_target_devices", {})
         return _TargetDeviceTracker(self._cert_target_device_key, store,
                                     on_change=state._mark_dirty)
@@ -217,16 +256,21 @@ class HubCertDistributionMixin:
         records the old device as current and the sweep would skip it until
         the next renewal. Targets are sent without their ledger hash, so
         distribute_cert_to_targets never short-circuits."""
+        # Need the le (certificates) spoke.
         le_sid = self.get_spoke_by_type("certificates")
         if not le_sid:
             return []
+        # Ask le for every managed cert.
         ret = _unwrap_spoke(await self.request_response(le_sid, "LE_LIST_CERTS", {}, timeout=15.0))
         if not (isinstance(ret, dict) and ret.get("status") == "SUCCESS"):
             cert_log.warning("[cert] %s/%s re-deploy: LE_LIST_CERTS failed", module_type, spoke_id)
             return []
+        # Some replies wrap the data; unwrap if so.
         inner = ret.get("data") if isinstance(ret.get("data"), dict) else ret
+        # This spoke's primary key, for matching.
         pk = self._primary_key(spoke_id)
         out: list = []
+        # Re-push every cert target that points at this spoke (or any spoke of the type).
         for cert in inner.get("certs") or []:
             for t in (cert or {}).get("targets") or []:
                 ident = (t or {}).get("identifier") or ""
@@ -244,6 +288,7 @@ class HubCertDistributionMixin:
         wildcard fan-out params (gated by the hub flag — OFF by default →
         no-op while the operator is testing) and the mTLS-materials fan-out
         params (gated by ``mtls.auto_provision`` — OFF by default)."""
+        # Run the full sweep with all fan-out options.
         out = await _distribute_all_certs_impl(
             self._inflight_rr(self.request_response), self._cert_target_spoke,
             self.CERT_CAPABLE_MODULES, le_spoke_id,
@@ -256,6 +301,7 @@ class HubCertDistributionMixin:
             push=self.push_or_queue_to_spoke,
             device_tracker=self._cert_device_tracker(),
             target_payload=self._cert_target_payload)
+        # Save push state and stash device breakdowns.
         self._save_wildcard_push_state()
         self._stash_cert_device_reports(out)
         return out
@@ -282,6 +328,7 @@ class HubCertDistributionMixin:
         gets ONE push (to its base spoke_id), not one per loaded role (each of
         which would os._exit(3) the shared agent). Returns ``[(spoke_id,
         module_type)]``."""
+        # Connected spokes that have no parent (i.e. not role sub-spokes).
         out = []
         for sid, mt in getattr(self, "spoke_module_types", {}).items():
             if sid in getattr(self, "active_connections", {}) and not getattr(
@@ -294,6 +341,7 @@ class HubCertDistributionMixin:
         auto-deploying the LE wildcard + CA bundle to the hub + every primary
         spoke (and, in Phase B, auto-enabling mTLS once the fleet is ready).
         Default OFF; the operator turns it on from System → Hub Status."""
+        # Read the flag; default off.
         gc = (self.state.get_global_config() or {}).get("mtls", {}) or {}
         return bool(gc.get("auto_provision", False))
 
@@ -304,6 +352,8 @@ class HubCertDistributionMixin:
     # In-memory (repopulated by the hourly distribution loop) — the target's
     # aggregate status/message still lives in the persistent le ledger.
     def _cert_device_reports(self) -> Dict[str, Dict[str, Any]]:
+        """In-memory per-device cert reports, created on first use."""
+        # Create the dict lazily.
         d = getattr(self, "cert_device_reports", None)
         if d is None:
             d = {}
@@ -311,24 +361,30 @@ class HubCertDistributionMixin:
         return d
 
     def _stash_cert_device_reports(self, summary: list) -> None:
+        """Save per-device breakdowns from a distribution summary, then persist them."""
         import datetime as _dt
+        # Only entries with a device breakdown are stored.
         store = self._cert_device_reports()
         for e in (summary or []):
             if not isinstance(e, dict) or e.get("devices") is None:
                 continue
+            # Key matches the le ledger identity.
             key = f"{e.get('domain','')}|{e.get('module_type','')}|{e.get('identifier','')}"
             store[key] = {"devices": e.get("devices"), "message": e.get("message", ""),
                           "status": e.get("status", ""),
                           "at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+        # Persist so a restart doesn't blank the drill-down.
         self._persist_cert_device_reports()
 
     def _cert_reports_path(self) -> str:
+        """Path of the snapshot file for per-device cert reports."""
         import os as _os
         return _os.path.join(self.state.data_dir, "le", "cert_device_reports.json")
 
     def _persist_cert_device_reports(self) -> None:
         """Snapshot the per-device cert reports so the cert drill-down survives a
         restart instead of blanking until the hourly distribution loop repopulates."""
+        # Encrypted snapshot save; failures are ignored (best-effort).
         try:
             from tenant_sharded import snapshot_save
             from security.encryption import hub_encryption
@@ -339,6 +395,7 @@ class HubCertDistributionMixin:
 
     def warm_load_cert_device_reports(self) -> None:
         """Warm-start the per-device cert reports on boot (best-effort)."""
+        # Load the encrypted snapshot; ignore any failure.
         try:
             from tenant_sharded import snapshot_load
             from security.encryption import hub_encryption
@@ -350,6 +407,7 @@ class HubCertDistributionMixin:
             pass
 
     def cert_device_report(self, domain: str, module_type: str, identifier: str = "") -> Dict[str, Any]:
+        """Stored per-device report for one cert target, or an empty dict."""
         return self._cert_device_reports().get(f"{domain}|{module_type}|{identifier}") or {}
 
     def update_cert_device_status(self, domain: str, module_type: str, identifier: str,
@@ -357,10 +415,12 @@ class HubCertDistributionMixin:
         """Merge a SINGLE device's install result into the stashed report (used by
         the per-device deploy button in the cert drill-down)."""
         import datetime as _dt
+        # Find or create the report for this target.
         store = self._cert_device_reports()
         rep = store.setdefault(f"{domain}|{module_type}|{identifier}",
                                {"devices": [], "message": "", "status": "", "at": ""})
         devs = rep.setdefault("devices", [])
+        # Update the matching device, or add it if new.
         st = (result or {}).get("status", "")
         msg = (result or {}).get("message", "")
         for d in devs:
@@ -369,6 +429,7 @@ class HubCertDistributionMixin:
                 break
         else:
             devs.append({"device_id": device_id, "status": st, "message": msg})
+        # Stamp the time and persist.
         rep["at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
         self._persist_cert_device_reports()
 
@@ -378,6 +439,7 @@ class HubCertDistributionMixin:
     # spoke + the hub, not just its explicit targets. See
     # distribute_wildcard_to_all_spokes in cert_distribution.py.
     def _wildcard_all_spokes_enabled(self) -> bool:
+        """Whether wildcard certs fan out to every cert-capable spoke (default off)."""
         gc = (self.state.get_global_config() or {}).get("certs", {}) or {}
         return bool(gc.get("wildcard_all_spokes", False))
 
@@ -390,13 +452,16 @@ class HubCertDistributionMixin:
         re-pushed on every sweep — this knob sets how soon that retry happens.
         Clamp to >= 60s so a typo can't turn the loop into a tight retry storm;
         a non-numeric/missing/zero/negative value falls back to the 1h default."""
+        # Parse hours; bad values fall back to 1 hour.
         gc = (self.state.get_global_config() or {}).get("certs", {}) or {}
         try:
             hours = float(gc.get("distribution_retry_hours", 1))
         except (TypeError, ValueError):
             return 3600.0
+        # Zero or negative: default.
         if hours <= 0:
             return 3600.0
+        # Never faster than once a minute.
         return max(hours * 3600.0, 60.0)
 
     # ── in-flight distribution tracking (yellow target badge + live timer) ───
@@ -408,6 +473,8 @@ class HubCertDistributionMixin:
     # last_status. Tracked hub-side (where the loop lives) and keyed by
     # domain|module_type|identifier — the same identity the le ledger uses.
     def _cert_inflight(self) -> Dict[str, Dict[str, Any]]:
+        """In-memory map of in-flight cert installs, created on first use."""
+        # Create the dict lazily.
         d = getattr(self, "cert_dist_inflight", None)
         if d is None:
             d = {}
@@ -421,9 +488,12 @@ class HubCertDistributionMixin:
         the await and clear it in a finally so the badge transitions the moment
         the push returns (SUCCESS or ERROR). Non-INSTALL_CERT rr calls
         (LE_GET_CERT / LE_MARK_DISTRIBUTED) pass through untouched."""
+        # Keep a reference for the closure.
         hub = self
 
         async def _wrapped(spoke_id, command, data=None, timeout=None):
+            """request_response wrapper that tracks INSTALL_CERT calls as in flight."""
+            # Only INSTALL_CERT is tracked.
             if command == "INSTALL_CERT" and isinstance(data, dict):
                 key = f"{data.get('domain', '')}|{data.get('module_type', '')}|{data.get('identifier', '')}"
                 hub._cert_inflight()[key] = {
@@ -432,10 +502,12 @@ class HubCertDistributionMixin:
                     "identifier": data.get("identifier", ""),
                     "since": time.time(),
                 }
+                # Clear the entry when the call ends, success or failure.
                 try:
                     return await rr(spoke_id, command, data, timeout=timeout)
                 finally:
                     hub._cert_inflight().pop(key, None)
+            # Other commands pass straight through.
             return await rr(spoke_id, command, data, timeout=timeout)
         return _wrapped
 
@@ -446,6 +518,7 @@ class HubCertDistributionMixin:
         return self.state.system_state.setdefault("wildcard_push_state", {})
 
     def _save_wildcard_push_state(self) -> None:
+        """Mark state dirty so wildcard push state is saved; never raise."""
         try:
             self.state._mark_dirty()
         except Exception as e:  # never block distribution on a state-save
@@ -464,6 +537,7 @@ class HubCertDistributionMixin:
         operator-facing target status: a failure here is almost always a
         filesystem permission problem on the cert directory, and "see cert log"
         gave the operator nothing to act on."""
+        # Prefer the loopback hub-self agent.
         hub_self = getattr(self, "_hub_self", None)
         if hub_self is not None:
             try:
@@ -492,7 +566,9 @@ class HubCertDistributionMixin:
         the hub runs as an unprivileged service user therefore fails even though
         the existing cert files look writable, which is exactly how this
         presented in the field."""
+        # Directory the temp file is created in.
         d = os.path.dirname(os.path.abspath(path)) or "."
+        # Permission error: name the directory owner and the hub user, and give a chown fix.
         if isinstance(exc, PermissionError):
             try:
                 owner = pwd.getpwuid(os.stat(d).st_uid).pw_name
@@ -506,6 +582,7 @@ class HubCertDistributionMixin:
                     f"'{owner}'. An atomic write needs write permission on the "
                     f"DIRECTORY (the temp file is created there), not just on "
                     f"the cert file. Fix with: chown -R {me} {d}")
+        # Other errors: message plus path.
         return f"{exc} (writing {path})"
 
     async def _hub_self_restart(self) -> str:
@@ -535,35 +612,43 @@ class HubCertDistributionMixin:
         command it ran actually exited 0. The real result lives nested at
         ``resp["result"]["rc"]``/``["stderr"]`` (see
         ``command_runner.run_local_command``), which is what's checked below."""
+        # Try the loopback hub-self agent first.
         hub_self = getattr(self, "_hub_self", None)
         if hub_self is not None:
             try:
                 resp = await hub_self.run_command(f"sudo -n {_LM_SELF_RESTART}",
                                                   allow_shell=True, timeout=10.0)
+                # Success needs transport OK and a zero exit code.
                 result = resp.get("result") or {}
                 if resp.get("status") == "SUCCESS" and result.get("ok") and result.get("rc") == 0:
                     return "lm.service restarting to apply"
+                # Explain the failure, then fall back to a direct call.
                 detail = (result.get("stderr") or result.get("error")
                          or result.get("stdout") or "no output").strip()[:300]
                 cert_log.warning("[cert] hub-self restart command failed (rc=%s): %s → direct fallback",
                                  result.get("rc"), _diagnose_self_restart_failure(detail))
             except Exception as e:  # noqa: BLE001
                 cert_log.warning("[cert] hub-self RUN_COMMAND restart error → direct fallback: %s", e)
+        # Direct fallback: run the helper via sudo.
         try:
             proc = await asyncio.create_subprocess_exec(
                 "sudo", "-n", _LM_SELF_RESTART,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            # Wait up to 10s for it to schedule the restart.
             try:
                 out, err = await asyncio.wait_for(proc.communicate(), timeout=10.0)
             except asyncio.TimeoutError:
                 proc.kill()
                 raise RuntimeError("self-restart command timed out after 10s "
                                   "waiting for sudo/systemd-run to schedule it")
+            # Exit 0 means the restart is scheduled.
             if proc.returncode == 0:
                 return "lm.service restarting to apply"
+            # Otherwise raise with a diagnosed reason.
             detail = (err or out or b"").decode(errors="replace").strip()[:300]
             raise RuntimeError(f"self-restart exited {proc.returncode}: "
                                f"{_diagnose_self_restart_failure(detail) or 'no output captured'}")
+        # Let our own RuntimeErrors through; wrap anything else.
         except RuntimeError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -598,6 +683,7 @@ class HubCertDistributionMixin:
         missing or sudo denies, the cert is still written (next hub restart
         picks it up) and the message notes the restart didn't schedule.
         ``identifier`` is ignored (there's only one hub TLS endpoint)."""
+        # Hub TLS cert/key paths from the environment.
         cert_path = os.environ.get("LM_TLS_CERT", "").strip()
         key_path = os.environ.get("LM_TLS_KEY", "").strip()
         if not cert_path or not key_path:
@@ -642,6 +728,7 @@ class HubCertDistributionMixin:
                           "server cert (the hub keeps its own cert; no restart)", domain)
             return {"status": "SKIPPED",
                     "message": "wildcard not installed on the hub (hub keeps its own cert)"}
+        # Need both cert and key.
         if not fullchain or not privkey:
             cert_log.warning("[cert] %s → hub: FAILED — missing cert material", domain)
             return {"status": "ERROR", "message": "missing cert material"}
@@ -689,6 +776,7 @@ class HubCertDistributionMixin:
         # makes the readiness check see it immediately, no restart required.
         # A best-effort write: a missing/empty chain leaves the existing CA (if
         # any) untouched — the server cert install above still succeeds.
+        # CA result text added to the final message.
         ca_msg = ""
         if chain and "BEGIN CERTIFICATE" in chain:
             ca_path = os.path.join(os.path.dirname(os.path.abspath(cert_path)),
@@ -708,6 +796,7 @@ class HubCertDistributionMixin:
                 ca_msg = "; CA bundle write FAILED"
                 cert_log.warning("[cert] %s → hub: CA bundle write to %s failed",
                                  domain, ca_path)
+        # A chain that isn't PEM: skip the CA write.
         elif chain:
             cert_log.debug("[cert] %s → hub: chain present but not PEM — CA bundle not written", domain)
 
@@ -730,12 +819,14 @@ class HubCertDistributionMixin:
         persist it into ``global_config["mtls"]`` so a hub restart re-registers
         it (mirrors mtls.set_runtime_enabled). Best-effort persistence: a state
         save failure is logged but never blocks the cert install."""
+        # Register the CA at runtime.
         try:
             from security import mtls
             mtls.set_runtime_materials(ca=ca_path)
         except Exception as e:  # noqa: BLE001
             cert_log.warning("[cert] hub: mtls.set_runtime_materials failed: %s", e)
             return
+        # Persist the CA path into global_config.
         try:
             gc = (self.state.get_global_config() or {})
             mtls_cfg = gc.get("mtls", {}) or {}
@@ -757,14 +848,18 @@ class HubCertDistributionMixin:
         Creates the parent directory when missing: a cert target whose cert dir
         has never been provisioned (nothing in the installers creates it) would
         otherwise fail every sweep forever with a bare FileNotFoundError."""
+        # Make the directory if missing.
         d = os.path.dirname(os.path.abspath(path)) or "."
         os.makedirs(d, exist_ok=True)
+        # Temp file in the same directory.
         fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        # Write, set mode, then rename into place.
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(content)
             os.chmod(tmp, mode)
             os.replace(tmp, path)
+        # On failure remove the temp file and re-raise.
         except Exception:
             try:
                 os.unlink(tmp)
@@ -780,6 +875,8 @@ class HubCertDistributionMixin:
         fired inline on /api/le/issue + /api/le/renew for immediate effect after
         a (re)issue. See _distribute_one_cert / _distribute_all_certs."""
         async def _body():
+            """One sweep: distribute certs, refresh the cache, maybe enable mTLS."""
+            # Need the le (certificates) spoke.
             le_sid = self.get_spoke_by_type("certificates")
             if not le_sid:
                 return
@@ -808,8 +905,10 @@ class HubCertDistributionMixin:
         failed-issue entry / per-target last_status promptly (within the 60s
         alert tick) instead of waiting up to 1h for the next sweep."""
         try:
+            # Fetch the list and unwrap the payload.
             rr = await self.request_response(le_sid, "LE_LIST_CERTS", {})
             certs = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else rr
+            # Cache unless le reported an error.
             if isinstance(certs, dict) and str(certs.get("status", "SUCCESS")).upper() != "ERROR":
                 await self.le_cache_set("certs", certs)
         except Exception as e:  # noqa: BLE001
@@ -823,6 +922,7 @@ class HubCertDistributionMixin:
         /api/le/issue + /api/le/renew path (_distribute_one_cert). The hourly
         loop is the fallback if this races a disconnect."""
         try:
+            # Push now and log how many targets succeeded.
             summary = await self._distribute_one_cert(le_spoke_id, domain, targets)
             ok = sum(1 for s in (summary or []) if s.get("status") == "SUCCESS")
             logger.info("[cert] LE_CERT_RENEWED %s from %s: %d/%d target(s) pushed",
@@ -851,16 +951,21 @@ class HubCertDistributionMixin:
         This removes the human checkpoint the operator opted out of by turning
         auto-provision on; the auto_enabled_at timestamp is persisted for audit.
         """
+        # Only when auto-provision is on.
         if not self._mtls_auto_provision_enabled():
             return
+        # mTLS module must import.
         try:
             from security import mtls as _mtls
         except Exception:  # noqa: BLE001
             return
+        # Already enabled: nothing to do.
         if _mtls.mtls_enabled():
             return
+        # Fleet must be ready.
         if not await self._mtls_fleet_ready():
             return
+        # Set the flag, stamp when, and save immediately.
         try:
             gc = self.state.system_state.get("global_config", {}) or {}
             gc["mtls_enabled"] = True
@@ -900,6 +1005,7 @@ class HubCertDistributionMixin:
         mid-reconnect (no reply) is NOT ready — it must have the materials before
         mTLS is armed, else enabling would orphan it. An empty fleet is ready
         (mTLS on a hub with zero spokes can't orphan anyone)."""
+        # mTLS module may be missing; then use an all-false status.
         try:
             from security import mtls as _mtls
         except Exception:  # noqa: BLE001
@@ -910,9 +1016,11 @@ class HubCertDistributionMixin:
             "ca_path": "", "client_cert_path": "", "client_key_path": "",
             "server_cert_path": ""}
 
+        # Connected primary spokes.
         primary = self._get_primary_spokes()
 
         async def _query(sid):
+            """Ask one spoke for its mTLS status; None if it doesn't answer."""
             try:
                 rr = await self.request_response(sid, "SPOKE_GET_MTLS_STATUS",
                                                 {}, timeout=4.0)
@@ -923,6 +1031,7 @@ class HubCertDistributionMixin:
                 pass
             return None
 
+        # Query all spokes in parallel.
         results = (await asyncio.gather(*[_query(sid) for sid, _ in primary])
                    if primary else [])
         # Friendly name per spoke: module_names defaults display_name to the sid
@@ -933,7 +1042,9 @@ class HubCertDistributionMixin:
         _meta_all = self.state.system_state.get("module_metadata", {}) or {}
         spoke_status = []
         spokes_ready = True
+        # Build per-spoke status rows.
         for (sid, mt), mstat in zip(primary, results):
+            # No reply means offline.
             online = isinstance(mstat, dict)
             ca = bool(mstat.get("ca_present")) if online else False
             cc = bool(mstat.get("client_cert_present")) if online else False
@@ -951,6 +1062,7 @@ class HubCertDistributionMixin:
                           else ("offline" if not online else "missing materials"),
             })
 
+        # Reasons the fleet isn't ready.
         blockers = []
         if not st["ca_present"]:
             blockers.append("no CA bundle (LM_MTLS_CA) — distribute the LE wildcard chain")
@@ -959,8 +1071,10 @@ class HubCertDistributionMixin:
         if primary and not spokes_ready:
             not_ready = sum(1 for s in spoke_status if not s["ready"])
             blockers.append(f"{not_ready} connected spoke(s) missing mTLS materials")
+        # Hub needs CA and server cert; spokes must all be ready (if any).
         hub_ready = bool(st["ca_present"] and st["server_cert_present"])
         ready = hub_ready and (spokes_ready if primary else True)
+        # Return the full readiness report.
         gc_mtls = ((self.state.get_global_config() or {}).get("mtls", {}) or {})
         return {"enabled": st["enabled"], "ready": ready,
                 "auto_provision": bool(gc_mtls.get("auto_provision", False)),

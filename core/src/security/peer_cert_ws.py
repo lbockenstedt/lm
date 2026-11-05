@@ -26,11 +26,15 @@ renewal-stable identity — the cert's SAN DNS names (subject-CN fallback) — f
 the parsed ``getpeercert()`` dict.
 """
 
+# Allows modern type-hint syntax regardless of the running Python version.
 from __future__ import annotations
 
+# Standard-library logging for the import-failure warning.
 import logging
+# Type hints only; describe the cert dict and the returned identity tuple.
 from typing import Any, Optional, Tuple
 
+# Use the hub's logger so this warning appears in the hub log stream.
 logger = logging.getLogger("Hub")
 
 # The uvicorn ws-protocol class is an internal API (not part of uvicorn's public
@@ -39,6 +43,7 @@ logger = logging.getLogger("Hub")
 # boot. The H1 gate then simply sees no peer cert → denies HUB_REQUEST until the
 # import path is restored.
 _PeerCertProtocol: Optional[type] = None
+# Try to import uvicorn's internal WebSocket protocol class to subclass it.
 try:
     from uvicorn.protocols.websockets.websockets_impl import (
         WebSocketProtocol as _UvicornWebSocketProtocol,
@@ -58,29 +63,38 @@ try:
         """
 
         async def run_asgi(self) -> None:  # type: ignore[override]
+            """Stash the peer cert (parsed dict + DER bytes) on scope, then run the app."""
             # Fail-safe prelude: never let extraction raise into the app dispatch
             # (an exception before super().run_asgi() would drop the connection).
             try:
+                # Get the TLS object from the transport; plaintext connections have none.
                 transport = getattr(self, "transport", None)
                 ssl_obj = transport.get_extra_info("ssl_object") if transport else None
+                # Parsed form of the verified client cert (None when no cert or no TLS).
                 peer_cert = ssl_obj.getpeercert() if ssl_obj is not None else None
                 # DER of the same cert: lets the hub cryptographically check the
                 # leaf was issued by ITS mTLS CA (not merely some trusted CA) and
                 # read the serial for revocation (see mtls_ca.inspect_client_cert).
                 peer_der = (ssl_obj.getpeercert(binary_form=True)
                             if ssl_obj is not None else None)
+            # Any extraction error means "no cert", which the H1 gate treats as deny.
             except Exception:  # noqa: BLE001 - extraction is best-effort, fail-closed
                 peer_cert = None
                 peer_der = None
+            # Publish both forms of the cert under scope["extensions"] for the route to read.
             try:
                 _ext = self.scope.setdefault("extensions", {})
                 _ext["x_peer_cert"] = peer_cert
                 _ext["x_peer_cert_der"] = peer_der
+            # An unusual scope shape must not break the connection.
             except Exception:  # noqa: BLE001 - scope may be absent in odd paths
                 pass
+            # Hand the (now enriched) scope to the normal uvicorn/ASGI processing.
             await super().run_asgi()
 
+    # Export the subclass so the server setup can pass it as the ws protocol.
     _PeerCertProtocol = PeerCertWebSocketProtocol
+# Import failed (uvicorn internals moved): keep the default protocol and warn.
 except Exception:  # noqa: BLE001 - never brick the boot on an internal-API move
     logger.warning(
         "[H1] could not import uvicorn WebSocketProtocol; peer-cert extraction "
@@ -107,9 +121,12 @@ def peer_cert_identity_from_getpeercert(d: Any) -> Optional[Tuple[str, ...]]:
     presented cert that fails verification is rejected at handshake, so a
     non-empty dict here implies the cert was CA-verified.
     """
+    # Absent or empty (unverified) cert dicts carry no identity.
     if not isinstance(d, dict) or not d:
         return None
+    # Collect identity names here; DNS SANs are preferred.
     names: list = []
+    # Read every DNS-type Subject Alternative Name from the cert.
     try:
         san = d.get("subjectAltName") or ()
         for entry in san:
@@ -118,11 +135,14 @@ def peer_cert_identity_from_getpeercert(d: Any) -> Optional[Tuple[str, ...]]:
                 val = entry[1]
                 if isinstance(val, str) and val:
                     names.append(val)
+    # A malformed SAN list yields no names rather than an exception.
     except Exception:  # noqa: BLE001 - never raise on a malformed dict
         names = []
+    # No DNS SANs: fall back to the subject's commonName attribute(s).
     if not names:
         # Fallback to the subject commonName when there are no DNS SANs.
         try:
+            # The subject is a tuple of RDNs, each a tuple of (attribute, value) pairs.
             for rdn in d.get("subject") or ():
                 for attr in rdn or ():
                     if (
@@ -133,6 +153,8 @@ def peer_cert_identity_from_getpeercert(d: Any) -> Optional[Tuple[str, ...]]:
                         and attr[1]
                     ):
                         names.append(attr[1])
+        # A malformed subject yields no names rather than an exception.
         except Exception:  # noqa: BLE001
             names = []
+    # Return the names as an immutable tuple, or None when nothing usable was found.
     return tuple(names) if names else None

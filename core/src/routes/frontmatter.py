@@ -25,10 +25,13 @@ metadata" and the document is still returned intact. Losing a keyword boost
 degrades ranking slightly; raising an exception would take the docs offline.
 """
 
+# Regex for finding the header.
 import re
 
+# The public helpers.
 __all__ = ["parse", "strip", "split", "keywords_of", "stem", "matches", "match_score"]
 
+# Matches a "---" ... "---" header at the start of the text (group 1 is the inside).
 _FM_RE = re.compile(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.DOTALL)
 
 
@@ -39,8 +42,10 @@ def _parse_block(block):
     ``key: [a, b, c]`` -- so no YAML library is needed.
     """
     def unquote(v):
+        """Remove one pair of matching single or double quotes around ``v``."""
         return v[1:-1] if len(v) > 1 and v[0] == v[-1] and v[0] in "'\"" else v
 
+    # Read each "key: value" line, skipping blanks, comments and lines without a colon.
     out = {}
     for line in block.splitlines():
         line = line.strip()
@@ -50,6 +55,7 @@ def _parse_block(block):
         key, val = key.strip(), val.strip()
         if not key:
             continue
+        # "[a, b]" becomes a list; anything else is a plain string.
         if val.startswith("[") and val.endswith("]"):
             out[key] = [unquote(v.strip()) for v in val[1:-1].split(",") if v.strip()]
         else:
@@ -63,6 +69,7 @@ def split(text):
     ``body`` is always safe to render. When there is no front-matter the text is
     returned unchanged with empty metadata, so callers never need to branch.
     """
+    # Empty text has no metadata.
     if not text:
         return {}, text or ""
     # lstrip only leading blank lines: a header is only a header at the very
@@ -72,6 +79,7 @@ def split(text):
     m = _FM_RE.match(text[lead:])
     if not m:
         return {}, text
+    # Parse the header (non-dict results count as no metadata).
     meta = _parse_block(m.group(1))
     if not isinstance(meta, dict):
         return {}, text
@@ -98,6 +106,7 @@ def keywords_of(meta):
     docs drift toward the latter and silently losing those keywords would be
     worse than accepting both.
     """
+    # Accept a list or a comma-separated string; lower-case and drop blanks.
     kw = meta.get("keywords") or []
     if isinstance(kw, str):
         kw = [k.strip() for k in kw.split(",")]
@@ -114,11 +123,14 @@ def stem(word):
     aggressive stemmer would collide unrelated terms, and a false keyword match
     is heavily weighted and therefore costly.
     """
+    # Lower-case it; short words are left alone.
     w = str(word).lower().strip()
     if len(w) < 4:
         return w
+    # "-ies" becomes "-y".
     if w.endswith("ies") and len(w) > 4:
         return w[:-3] + "y"
+    # Drop "-ing".
     if w.endswith("ing") and len(w) > 5:
         base = w[:-3]
         # "logging" -> "logg" -> "log": the doubled consonant is an artifact of
@@ -143,9 +155,11 @@ def match_score(word, keyword):
     still worth keeping -- it is what lets "dns" find ``dns_fail`` -- just not at
     the same confidence.
     """
+    # Same word (or same stem) is a full match.
     w, k = str(word).lower(), str(keyword).lower()
     if w == k or stem(w) == stem(k):
         return 1.0
+    # Matching one part of a multi-part keyword is a half match.
     parts = k.replace("_", " ").replace("-", " ").split()
     if len(parts) > 1 and stem(w) in {stem(p) for p in parts}:
         return 0.5

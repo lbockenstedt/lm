@@ -27,60 +27,95 @@ plumbing. Audience: Hub developers.
 # install, wiped venv), install it now so the `import httpx`/`import psutil`/
 # `import websockets` lines below don't crash at import time. Cheap when all deps
 # are present (no I/O); best-effort never-raises. See dep_guard.py.
+# Private alias for os used only by the dependency self-heal below.
 import os as _os
+# Installer that adds any missing requirement to the venv.
 from dep_guard import ensure_requirements as _ensure_requirements
+# Install anything listed in requirements.txt that is missing.
 _ensure_requirements(_os.path.join(_os.path.dirname(__file__), "..", "requirements.txt"))
+# Drop the temporary names so they do not leak into the module namespace.
 del _os, _ensure_requirements
 
+# asyncio drives every long-running hub coroutine.
 import asyncio
+# base64, hashlib, hmac: encoding, hashing and HMAC signing for spoke auth.
 import base64
+# Aliased datetime for timezone-aware timestamps.
 import datetime as _dt
 import hashlib
 import hmac
+# json (de)serialises frames and state; logging for diagnostics.
 import json
 import logging
+# re for log-line normalisation; time for timestamps and timeouts.
 import re
 import time
+# sys and psutil for process and host resource info.
 import sys
 import psutil
+# os, socket, ipaddress, ssl: environment, networking, IP checks and TLS.
 import os
 import socket
 import ipaddress
 import ssl
+# uuid and secrets mint identifiers and random tokens.
 import uuid
 import secrets
+# shutil for file and disk operations.
 import shutil
+# deque holds bounded in-memory buffers.
 from collections import deque
+# Type hints used throughout.
 from typing import Dict, Any, Optional, List, Tuple, Set
+# dataclass helpers for structured auth frames.
 from dataclasses import asdict, dataclass
+# websockets is the spoke control-plane transport.
 import websockets
+# Raised when a Starlette-served WebSocket disconnects.
 from starlette.websockets import WebSocketDisconnect
 
+# Signed message envelope types.
 from messaging.protocol import Message, MessageHeader, MessagePayload, Acknowledgement
+# Per-spoke outbound mailbox.
 from messaging.mailbox import Mailbox
+# Tracks spoke heartbeats.
 from messaging.heartbeat import HeartbeatManager
+# Key storage and frame signing helpers.
 from security.key_manager import KeyManager
 from security.signer import split_frame
+# Persistent JSON state store.
 from state.manager import StateManager
+# Simulation broadcasting, storage and pollers for Central and Mist.
 from simulations.broadcaster import SimulationsBroadcaster
 from simulations.store import SimulationsStore
 from simulations.central_hub_poller import CentralHubPoller
 from simulations.mist_hub_poller import MistHubPoller
+# User authentication and LDAP provider.
 from security.auth_manager import AuthManager, LDAPAuthProvider
+# Threat monitoring and edge scanner-probe detection.
 from security.threat_monitor import ThreatMonitor
 from security.probe_signatures import looks_like_probe as _edge_looks_like_probe
+# Alert evaluation engine and its background loop.
 from alert_engine import AlertEngine, run_alert_loop
+# Friendly display names for nodes.
 from display_names import node_name
+# Listener-port role helpers for deployable roles.
 from role_listeners import LISTENER_PORT_ROLES, listener_conflict, is_deploy_role
+# App-layer frame encryption (H4) helpers.
 from security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
                                    encryption_enabled, is_encrypted, wrap)
+# Raised when AEAD decryption fails.
 from cryptography.exceptions import InvalidTag
+# HTTP/WS API server builder and module refresh helper.
 from api import build_server, _refresh_module_all_tenants
+# Hub behaviour mixins, each contributing a feature area to LabManagerHub.
 from hub_os_updates import HubOsUpdatesMixin
+# VM snapshot helpers.
 import vm_snapshots
 from hub_mtls_enforcement import HubMtlsEnforcementMixin
 from update_pipeline import UpdatePipelineMixin
 from endpoint_sync import EndpointSyncMixin
+# 802.1X just-in-time helpers.
 import dot1x_jit
 from vm_sync import VmSyncMixin
 from fw_discovery_sync import FwDiscoverySyncMixin
@@ -91,6 +126,7 @@ from truenas_cache import TruenasCacheMixin
 from le_cache import LeCacheMixin
 from warm_cache import WarmCacheMixin
 from dns_dhcp_sync import DnsDhcpSyncMixin
+# Background sync loop runner.
 from sync_loop import run_sync_loop
 from henet_sync import HenetSyncMixin
 from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
@@ -111,12 +147,16 @@ from hub_statuspage import StatusPageMixin
 
 # Shared logging config (lm/core/src/logging_setup.py): one source of truth for
 # format/level/destination across every hub/spoke/agent entrypoint.
+# Import the shared logging setup, falling back to the package path.
 try:
     from logging_setup import configure_logging, truncate_log_files
 except ImportError:
+    # Fallback when running from the repo root as a package.
     from core.src.logging_setup import configure_logging, truncate_log_files
 
+# Configure logging for the hub process.
 configure_logging()
+# Main hub logger.
 logger = logging.getLogger("Hub")
 
 # Internal / non-routable IP ranges that an edge scanner-probe report must never
@@ -125,6 +165,7 @@ logger = logging.getLogger("Hub")
 # link-local handled inline. NSG-denying one of our own internal ranges would
 # sever internal control-plane paths — a self-inflicted outage. Documentation
 # (TEST-NET) ranges are deliberately NOT listed so they behave as public IPs.
+# Internal IP ranges that must never be treated as an attacker.
 _INTERNAL_NETS = tuple(ipaddress.ip_network(c) for c in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
 ))
@@ -132,6 +173,7 @@ _INTERNAL_NETS = tuple(ipaddress.ip_network(c) for c in (
 # How long version drift (pull available, or a restart pending) may persist
 # before the footer dot escalates from amber "pending" to red "stuck". Long
 # enough that a routine pull + watchdog restart never trips it.
+# Seconds before version drift is reported as "stuck".
 _UPDATE_STUCK_S = float(os.environ.get("LM_UPDATE_STUCK_S", "3600") or 3600)
 
 # request_response wakes the moment its reply arrives (an asyncio.Event set by
@@ -139,6 +181,7 @@ _UPDATE_STUCK_S = float(os.environ.get("LM_UPDATE_STUCK_S", "3600") or 3600)
 # also re-checks response_cache and its deadline on its own, for writers that
 # fill the cache without setting the event (test harnesses) and so a
 # SPOKE_PROGRESS deadline extension is noticed. It does not delay replies.
+# Safety-net poll interval for request_response waiters.
 _RESPONSE_FALLBACK_POLL_S = 1.0
 
 # Dedicated channel for generic-agent lifecycle diagnostics — the
@@ -148,12 +191,14 @@ _RESPONSE_FALLBACK_POLL_S = 1.0
 # named logger keeps them distinguishable from generic hub noise so the
 # WebUI logs view / grep can surface "agent won't adopt its key" events
 # without re-deriving them from Hub WARNING spam.
+# Logger for generic-agent lifecycle diagnostics.
 genAgentLogger = logging.getLogger("GenericAgent")
 
 # Log-redaction helpers + the per-connection TokenBucket rate limiter live in
 # log_redaction.py (pure, framework-free, no ``self``); imported back here so
 # behavior is unchanged. ``_redact``/``_REDACT_COMMANDS`` gate secret-hygiene
 # for DEBUG request_response logging; see that module for the full policy.
+# Redaction helpers and the rate limiter, re-exported from log_redaction.
 from log_redaction import (_redact, _REDACT_COMMANDS, _REDACT_FIELDS,
                            _LOGSAFE_COMMANDS, _FULLY_REDACT_COMMANDS,
                            _FULLY_REDACT_SUBSTRINGS, _SECRET_SUBSTRINGS,
@@ -166,6 +211,7 @@ from log_redaction import (_redact, _REDACT_COMMANDS, _REDACT_FIELDS,
 # under the key that HMAC-verified it (tamper / wrong key) or a marked-encrypted
 # frame the hub has no secret to decrypt with. The receive loop treats identity
 # with this object as "do not dispatch ciphertext"; compared with ``is``.
+# Sentinel returned to mean "drop this frame".
 _H4_DROP = object()
 
 
@@ -179,6 +225,7 @@ _H4_DROP = object()
 # manual Save push identical shapes. Keyed by the module_key used in
 # push_config_to_spoke (the _type_to_key map: nac→"cppm", ipam→"netbox",
 # directory→"ldap").
+# Per-module instance list key plus a projection to the spoke payload.
 _INSTANCE_CONFIG_SOURCES = {
     "cppm": ("nac_instances", lambda i: {
         "host": i.get("host"),
@@ -232,6 +279,7 @@ _INSTANCE_CONFIG_SOURCES = {
 
 # module_type → push_config branch tag (key space #1). NOTE "firewall" → "opn"
 # here, NOT "opnsense". See _UPDATE_SOURCE_MODULE_KEY for the config-key space.
+# Module type to push_config branch tag.
 _PUSH_CONFIG_MODULE_KEY = {
     "hypervisor": "pxmx",
     "firewall":   "opn",
@@ -251,6 +299,7 @@ _PUSH_CONFIG_MODULE_KEY = {
 # ("opn" → "opn") purely so a reader isn't misled into thinking a firewall prefix
 # resolves to the "opnsense" update-source config key (see _UPDATE_SOURCE_PREFIX_MAP,
 # where "opn" → "opnsense" IS a real, used value).
+# Spoke ID prefix to push_config branch tag.
 _PUSH_CONFIG_PREFIX_MAP = {
     'pxmx': 'pxmx', 'opn': 'opn', 'cs': 'cs',
     'cppm': 'cppm', 'netbox': 'netbox', 'ldap': 'ldap', 'nw': 'nw',
@@ -281,10 +330,13 @@ def _mdns_hub_properties(version_str: str, agent_port: int,
     standalone pxmx box (separate from the hub) serves ``/ws/agent`` on its own
     :443 and agents pin ``--spoke-url`` to it.
     """
+    # Always advertise the version and agent port.
     props = {"version": str(version_str),
              "agent_port": str(agent_port)}
+    # Only advertise the TLS port when TLS is offered.
     if advertise_tls:
         props["tls_port"] = str(tls_port)
+    # Return the TXT properties.
     return props
 
 
@@ -302,19 +354,26 @@ def _log_source_label(hub, sid: str) -> str:
     ``hub`` state defensively so it never breaks log collection. Mirrors
     ``SpokeAlertSync._spoke_label``.
     """
+    # Normalise the source id to a string.
     sid = str(sid or "")
+    # Look up the friendly name; never let a lookup error break logging.
     try:
         name = node_name(hub.state.system_state, sid, getattr(hub, "agent_info", None))
     except Exception:  # noqa: BLE001 — a label must never break log collection
+        # Lookup failed: fall back to the raw id.
         name = sid
+    # Show the name with a short id when they differ.
     if name != sid:
         return f"{name} ({sid[:8]})"
+    # Otherwise just the id.
     return sid
 
 
 
+# Matches UUIDs so they survive normalisation.
 _SENTINEL_UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+# Regex/replacement pairs for volatile tokens (timestamps, ids, durations, addresses, numbers).
 _SENTINEL_VOLATILE = (
     # Full datestamp first: the bare-clock rule below would otherwise consume
     # only the time half and leave the date behind, which is exactly the bug
@@ -344,15 +403,20 @@ def _sentinel_normalize_line(line):
     swapped out for unique NUL-delimited placeholders only so the numeric rules
     below cannot chew into them, then restored verbatim.
     """
+    # Trim the line; empty lines normalise to "".
     line = (line or "").strip()
     if not line:
         return ""
+    # Protect UUIDs with placeholders so the number rules do not mangle them.
     uuids = _SENTINEL_UUID_RE.findall(line)
     for i, u in enumerate(uuids):
         line = line.replace(u, "\x00U%d\x00" % i, 1)
+    # Replace each volatile token.
     for rx, repl in _SENTINEL_VOLATILE:
         line = rx.sub(repl, line)
+    # Collapse whitespace.
     line = re.sub(r"\s+", " ", line).strip()
+    # Restore the protected UUIDs.
     for i, u in enumerate(uuids):
         line = line.replace("\x00U%d\x00" % i, u, 1)
     return line
@@ -366,13 +430,16 @@ def _sentinel_fingerprint(errs):
     window, must not read as a new condition. Returns "" when nothing survives
     normalization, which callers treat as "no errors".
     """
+    # Collect distinct normalised lines.
     norm = set()
     for line in errs or ():
         n = _sentinel_normalize_line(line)
         if n:
             norm.add(n)
+    # No errors: empty fingerprint.
     if not norm:
         return ""
+    # Hash the sorted lines.
     return hashlib.sha256("\n".join(sorted(norm)).encode("utf-8", "ignore")).hexdigest()
 
 
@@ -385,8 +452,10 @@ def _sentinel_volume_lines(lines, threshold, minutes):
     with every id and number blanked out; the reported count is rounded down
     to threshold x 10^k so the fingerprint stays stable while the rate is
     roughly unchanged."""
+    # Disabled threshold: no synthetic lines.
     if threshold <= 0:
         return []
+    # Count normalised WARNING messages.
     counts = {}
     for line in lines or ():
         if " - WARNING - " not in line:
@@ -395,15 +464,18 @@ def _sentinel_volume_lines(lines, threshold, minutes):
         msg = _SENTINEL_UUID_RE.sub("<ID>", msg)
         msg = re.sub(r"\d+", "N", msg)[:160].strip()
         counts[msg] = counts.get(msg, 0) + 1
+    # Emit one line per message at or over the threshold, most frequent first.
     out = []
     for msg, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         if n < threshold:
             break
+        # Round the count down to a power-of-ten bucket so the line stays stable.
         bucket = threshold
         while bucket * 10 <= n:
             bucket *= 10
         out.append(f"[log-volume] ERROR - at least {bucket} WARNING lines "
                    f"in {minutes}m: {msg}")
+    # Return the synthetic lines.
     return out
 
 
@@ -413,13 +485,17 @@ def _log_cs_op_failure(source: str, cs_type: str, data: Dict[str, Any]) -> None:
     has its reason on the hub instead of only on the Proxmox host's
     pxmx-agent.log. Only whitelisted, non-secret fields are logged (never the
     raw ``data``), and only on failure — successes stay silent."""
+    # Ignore non-dict payloads.
     if not isinstance(data, dict):
         return
+    # Only log when status or result says failed/error.
     status = str(data.get("status") or "").lower()
     result = str(data.get("result") or "").lower()
     if "failed" not in (status, result) and "error" not in (status, result):
         return
+    # Pick the best available reason text.
     reason = str(data.get("error") or data.get("message") or "no reason given")
+    # Log the failure with its identifying fields.
     logger.warning(
         "CS op failed: %s %s action=%s vmid=%s name=%s cs_cmd_id=%s reason=%s",
         source, cs_type, data.get("action"), data.get("vmid"),
@@ -430,12 +506,14 @@ def _log_cs_op_failure(source: str, cs_type: str, data: Dict[str, Any]) -> None:
 def _update_gate_local_hour(tz_name: str) -> int:
     """Current hour in ``tz_name`` (IANA) for the update_gate window; the hub's
     system local time when empty or invalid."""
+    # Use the configured timezone when it is valid.
     if tz_name:
         try:
             from zoneinfo import ZoneInfo
             return _dt.datetime.now(ZoneInfo(tz_name)).hour
         except Exception as e:  # noqa: BLE001 — bad zone → system local
             logger.debug("update_gate: invalid timezone %r (%s) — using system local", tz_name, e)
+    # Fall back to system local time.
     return _dt.datetime.now().hour
 
 
@@ -447,6 +525,7 @@ class _SpokeHello:
     non-string ``install_uuid``) raises at the same point it always has,
     ending the connection through handle_connection's error handler.
     """
+    # Spoke identity, secret and module type.
     spoke_id: object
     secret: object
     module_type: object
@@ -476,19 +555,25 @@ class _SpokeHello:
 
     @classmethod
     def from_auth_frame(cls, auth_data):
+        """Parse a spoke's first (auth) frame into a _SpokeHello."""
+        # Read the identity fields straight from the frame.
         spoke_id = auth_data.get("spoke_id")
         secret = auth_data.get("secret")
         module_type = auth_data.get("module_type")
+        # Read optional string fields, trimmed, defaulting to "".
         onboarding_psk = (auth_data.get("onboarding_psk") or "").strip()
         tenant_id_hint = (auth_data.get("tenant_id_hint") or "").strip()
         install_uuid = (auth_data.get("install_uuid") or "").strip()
         hostname = (auth_data.get("hostname") or "").strip()
         parent_spoke_id = (auth_data.get("parent_spoke_id") or "").strip()
+        # Read the capability flags as booleans.
         netbox_server = bool(auth_data.get("netbox_server"))
         ldap_server = bool(auth_data.get("ldap_server"))
         zabbix_server = bool(auth_data.get("zabbix_server"))
+        # Encryption only counts when the spoke asked for it and the hub has it enabled.
         enc_capable = bool(auth_data.get("enc") == ENC_MARKER) and encryption_enabled()
         mtls_csr_capable = bool(auth_data.get("mtls_csr"))
+        # Build the hello record.
         return cls(spoke_id, secret, module_type, onboarding_psk, tenant_id_hint,
                    install_uuid, hostname, parent_spoke_id, netbox_server,
                    ldap_server, zabbix_server, enc_capable, mtls_csr_capable)
@@ -502,6 +587,7 @@ class _SpokeConn:
     reconciliation (it may be the install guid rather than ``spoke_id``) —
     every per-spoke state op keys through it.
     """
+    # The socket, spoke id, primary key, peer address and verified secret.
     websocket: object
     spoke_id: str
     pk: str
@@ -524,6 +610,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     """
 
     def __init__(self, host="0.0.0.0", port=8765):
+        """Set up all hub state: networking, TLS, stores, caches and diagnostics buffers."""
+        # Address and port the plaintext control plane listens on.
         self.host = host
         self.port = port
         # TLS for remote spokes/agents. When a cert is configured the hub serves
@@ -538,6 +626,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # binds this; 8443 by default so an all-in-one doesn't collide with the
         # hub's 443; a standalone pxmx spoke sets 443).
         self.pxmx_agent_port = int(os.environ.get("LM_PXMX_AGENT_PORT", "8443"))
+        # TLS is on only when both cert and key paths are set.
         self.tls_enabled = bool(self.tls_cert_path and self.tls_key_path)
         # "The hub owns a TLS cert" (tls_enabled → it serves wss itself) is
         # distinct from "callers reach the hub over TLS" (advertise_tls → the
@@ -551,6 +640,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # LM_HUB_ADVERTISE_TLS=1 for that deployment shape.
         self.advertise_tls = self.tls_enabled or os.environ.get(
             "LM_HUB_ADVERTISE_TLS", "").strip() in ("1", "true", "yes")
+        # Messaging, heartbeat, key and state stores.
         self.mailbox = Mailbox()
         self.heartbeat = HeartbeatManager()
         self.key_manager = KeyManager()
@@ -563,6 +653,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self.auth = AuthManager(LDAPAuthProvider({"server": "ldap://localhost", "hub": self}))
 
         # State is now managed via StateManager methods
+        # Load approved and known modules from persisted state.
         self.approved_modules = self.state.get_approved_modules()
         self.known_modules = self.state.system_state.get("known_modules", [])
         # Re-seed the in-memory heartbeat last-seen from the persisted copy so
@@ -573,6 +664,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # granularity of the persisted copy (set via _mark_dirty, flushed by the
         # 60s persistence_loop). See state/manager.set_spoke_last_seen.
         for sid, ts in (self.state.get_spoke_last_seen() or {}).items():
+            # Ignore malformed persisted timestamps.
             try:
                 self.heartbeat.last_seen[sid] = float(ts)
             except (TypeError, ValueError):
@@ -582,6 +674,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # a clone-and-rename (same install UUID, new spoke/agent id) and carry over
         # approval/tenant binding/config instead of treating it as a stranger.
         self.install_uuid_index: Dict[str, str] = {}
+        # Build the install-UUID index from persisted state.
         self._rebuild_install_uuid_index()
         # Per-IP budget for the approved-install reconnect exemption (see
         # _is_approved_install_reconnect / _within_reconnect_exemption_budget):
@@ -647,6 +740,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self.zabbix_server_agents: set = set()
 
         # --- System Diagnostics ---
+        # Hub log ring buffer and per-agent log buffers.
         self.logs = deque(maxlen=500)
         self.agent_logs = {} # { agent_id: deque(logs) }
         # Per-(tenant, hostname) remote client debug-log ring buffers — populated
@@ -684,6 +778,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Mirrors cert_dist_logs → Certificates / cs_bridge_logs → Simulations.
         # See ConsoleLogHandler below + setup_admin.get_module_logs (== "console").
         self.console_logs = deque(maxlen=500)
+        # Maximum stored log lines.
         self.max_log_size = 1000
         # Per-host cap for client_debug_logs rings (see init near agent_logs
         # above). Advanced level (journal+dmesg) is chatty; the deque cap is the
@@ -712,6 +807,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # self-update" / "auth failed" — all of which previously collapsed to a
         # single "OFFLINE / Never connected" string. Ring buffer per spoke.
         self.spoke_events: Dict[str, deque] = {}
+        # Maximum lifecycle events kept per spoke.
         self.spoke_event_limit = 100
         # Per-spoke recovery state for the watchdog (run_spoke_recovery_loop):
         # { spoke_id: {attempts, last_attempt_ts, next_retry_ts, gave_up,
@@ -744,11 +840,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # ab to enumerate via GET_BUG_REPORTS. The [bug-report] marker line
         # in the hub log is what ab filters on; the index avoids re-filing.
         self.bug_reports: Dict[str, Dict[str, Any]] = {}
+        # Maximum bug reports kept in memory.
         self.bug_report_limit = 50
+        # Counter of messages handled in the current window.
         self.message_count = 0
         # Per-spoke count of messages dropped by the rate limiter (surfaced in
         # System → Hub Status so an aggressive limiter is visible, not silent).
         self.rate_limit_drops: Dict[str, int] = {}
+        # Messages per second, computed periodically.
         self.mps = 0.0
         self.bytes_count = 0 # Total bytes sent/received in the current window
         self.throughput_mbps = 0.0 # Throughput in Mbps (or MB/s)
@@ -756,15 +855,22 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Per-spoke inbound message rate: raw count in the current 1s window,
         # a 10s history deque per spoke, and the computed msg/s — surfaced in
         # the Spokes/Agents tiles alongside tenant + online/offline.
+        # Per-spoke message counters, history and computed rates.
         self.spoke_msg_count: Dict[str, int] = {}
         self.spoke_msg_history: Dict[str, deque] = {}
         self.spoke_mps: Dict[str, float] = {}
 
+        # Handler that copies hub log records into the in-memory buffer.
         class HubLogHandler(logging.Handler):
+            """Logging handler that appends formatted records to ``hub.logs``."""
             def __init__(self, hub):
+                """Remember the hub whose buffer receives records."""
+                # Initialise the base handler.
                 super().__init__()
                 self.hub = hub
+            # Append each formatted record to the hub log buffer.
             def emit(self, record):
+                """Append the formatted record to the hub log buffer."""
                 # Canonical format (asctime + name + level + message) so the
                 # in-memory hub log buffer is byte-identical in shape to the
                 # /var/log/lm/hub.log stderr capture — uniform in the WebUI Logs
@@ -772,6 +878,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # collect_error_logs/collect_all_logs (same record, same line).
                 self.hub.logs.append(self.format(record))
 
+        # Attach the handler to the Hub logger with the canonical format.
         log_handler = HubLogHandler(self)
         log_handler.setFormatter(logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -786,14 +893,21 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # relay (agent_logs[le_sid]); this handler puts the hub's transport
         # activity in the same view. Same canonical format as HubLogHandler.
         class CertDistLogHandler(logging.Handler):
+            """Logging handler that appends formatted records to ``hub.cert_dist_logs``."""
             def __init__(self, hub):
+                """Remember the hub whose buffer receives records."""
+                # Initialise the base handler.
                 super().__init__()
                 self.hub = hub
+            # Append each formatted record to the cert-distribution buffer.
             def emit(self, record):
+                """Append the formatted record; never raise from logging."""
+                # A failed append must not break the caller's logging.
                 try:
                     self.hub.cert_dist_logs.append(self.format(record))
                 except Exception:  # noqa: BLE001 — never block a log emit
                     pass
+        # Create the handler with the canonical format.
         cert_dist_handler = CertDistLogHandler(self)
         cert_dist_handler.setFormatter(logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -817,19 +931,28 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # the Simulations tab. Same canonical format as HubLogHandler. Pin the
         # logger to INFO so decisions/outcomes are ALWAYS captured regardless of
         # the root level (mirrors the le.distribution pin above).
+        # Handler that copies CS-bridge records into the Simulations buffer.
         class CSBridgeLogHandler(logging.Handler):
+            """Logging handler that appends formatted records to ``hub.cs_bridge_logs``."""
             def __init__(self, hub):
+                """Remember the hub whose buffer receives records."""
+                # Initialise the base handler.
                 super().__init__()
                 self.hub = hub
+            # Append each formatted record to the CS-bridge buffer.
             def emit(self, record):
+                """Append the formatted record; never raise from logging."""
+                # A failed append must not break the caller's logging.
                 try:
                     self.hub.cs_bridge_logs.append(self.format(record))
                 except Exception:  # noqa: BLE001 — never block a log emit
                     pass
+        # Create the handler with the canonical format.
         cs_bridge_handler = CSBridgeLogHandler(self)
         cs_bridge_handler.setFormatter(logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'))
+        # Pin the CSBridge logger to INFO and attach the handler.
         _cs_bridge_log = logging.getLogger("CSBridge")
         _cs_bridge_log.setLevel(logging.INFO)
         _cs_bridge_log.addHandler(cs_bridge_handler)
@@ -839,6 +962,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # only the general Hub log. Reuses the CSBridge handler/deque — these are
         # all hub-side Simulations activity. (Verbose per-cycle diagnostics in
         # these modules are logged at DEBUG so they don't flood either view.)
+        # Also send the simulation engine loggers to the same buffer.
         for _sim_logger_name in ("SimRoutes", "SimQuota", "CentralHubPoller", "MistHubPoller"):
             logging.getLogger(_sim_logger_name).addHandler(cs_bridge_handler)
 
@@ -851,19 +975,28 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # as HubLogHandler; pin the logger to INFO so setup/teardown + outcome
         # lines are ALWAYS captured regardless of the root level (mirrors the
         # le.distribution / CSBridge pins above).
+        # Handler that copies Console-module records into the Console buffer.
         class ConsoleLogHandler(logging.Handler):
+            """Logging handler that appends formatted records to ``hub.console_logs``."""
             def __init__(self, hub):
+                """Remember the hub whose buffer receives records."""
+                # Initialise the base handler.
                 super().__init__()
                 self.hub = hub
+            # Append each formatted record to the Console buffer.
             def emit(self, record):
+                """Append the formatted record; never raise from logging."""
+                # A failed append must not break the caller's logging.
                 try:
                     self.hub.console_logs.append(self.format(record))
                 except Exception:  # noqa: BLE001 — never block a log emit
                     pass
+        # Create the handler with the canonical format.
         console_handler = ConsoleLogHandler(self)
         console_handler.setFormatter(logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'))
+        # Pin the Console logger to INFO and attach the handler.
         _console_log = logging.getLogger("Console")
         _console_log.setLevel(logging.INFO)
         _console_log.addHandler(console_handler)
@@ -872,15 +1005,21 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # self.logs → Error Log tab (collect_error_logs) + AppBuilder, instead of
         # only local stderr. The asyncio-task counterpart is set at the top of
         # start(). See logging-observability-contract.md req 4.
+        # Keep the previous hook so it still runs after ours.
         _prev_excepthook = sys.excepthook
 
+        # Hook that logs uncaught exceptions to the Hub logger.
         def _hub_excepthook(exc_type, exc, tb):
+            """Log an uncaught exception (except Ctrl-C), then defer to the previous hook."""
+            # Log anything other than a keyboard interrupt.
             try:
                 if not issubclass(exc_type, KeyboardInterrupt):
                     logger.error("Uncaught exception", exc_info=(exc_type, exc, tb))
             finally:
+                # Always run the previous hook too.
                 _prev_excepthook(exc_type, exc, tb)
 
+        # Install the hook.
         sys.excepthook = _hub_excepthook
 
         # { spoke_id: websocket_connection } — StarletteWSAdapter wrapping a
@@ -982,10 +1121,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Hard-ceiling multiplier for the above (base timeout × this). Env-
         # overridable so an operator can widen the window for a very large
         # cluster without a code change. Default 6× (e.g. 30s base → up to 180s).
+        # Read the hard-ceiling multiplier from env, at least 1.0.
         try:
             self._request_progress_hard_mult = max(
                 1.0, float(os.environ.get("LM_REQUEST_PROGRESS_HARD_MULT", "6") or 6))
         except (TypeError, ValueError):
+            # Invalid value: use 6x.
             self._request_progress_hard_mult = 6.0
         # Default per-request base window when a caller does not pass an explicit
         # `timeout=`. Historically 5s, which is wrong for a cloud fleet: a live
@@ -999,10 +1140,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # DISCONNECTED spoke still fails fast (send_to_spoke raises
         # ConnectionError immediately), so this only extends patience for a
         # connected-but-slow spoke. Env-overridable.
+        # Read the default request timeout from env, at least 1.0 second.
         try:
             self._default_request_timeout = max(
                 1.0, float(os.environ.get("LM_REQUEST_DEFAULT_TIMEOUT_S", "60") or 60))
         except (TypeError, ValueError):
+            # Invalid value: use 60 seconds.
             self._default_request_timeout = 60.0
         # request_response msg_ids whose waiter already returned without a reply
         # (timeout or cancel), retained briefly (TTL below) so a late ack arriving
@@ -1018,6 +1161,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # instead of grepping logs. Total request-timeout events since boot too.
         self._loop_lag: float = 0.0
         self._loop_lag_hist: "deque" = deque(maxlen=60)   # ~60s of samples
+        # Total number of request timeouts since start.
         self._request_timeouts_total: int = 0
         # Aligned with DRAIN_WINDOW_S (a spoke mid self-update can take up to
         # ~180s to git-pull, os._exit, relaunch, then flush its late FAILED
@@ -1040,6 +1184,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # like _recent_request_timeouts; pruned on each new registration.
         # { msg_id: expire_ts }
         self._pending_broadcast_ids: Dict[str, float] = {}
+        # How long a broadcast id waits for its acknowledgement.
         self._BROADCAST_ACK_TTL = 60.0
         # Spokes currently DRAINING (mid self-update — git pull then os._exit +
         # systemd relaunch). While draining the hub does NOT fire request/reply
@@ -1056,6 +1201,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # ``draining: false`` after its restart, or by the window expiring.
         # { spoke_id: drain_until_ts }
         self._draining_spokes: Dict[str, float] = {}
+        # How long a spoke counts as draining.
         self.DRAIN_WINDOW_S = 180.0
         # Outstanding app-layer liveness probes (HUB_PING message_ids awaiting a
         # HUB_PONG). The inbound dispatch resolves the sending adapter's ping
@@ -1082,6 +1228,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # (macOS), so a 0.0 seed would gate off every prune in the process's
         # first second.
         self._seen_prune_last_mono = float("-inf")  # monotonic ts of last seen-set prune
+        # Freshness window for inbound signed frames, from env.
         self._REPLAY_WINDOW_S = float(os.environ.get("LM_REPLAY_WINDOW_S", "120"))
         # Max clock skew (seconds) a signed frame's timestamp may be into the
         # future before it's dropped as forged. Env-configurable like the replay
@@ -1092,10 +1239,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # but no serial ports". Replay is still bounded by _REPLAY_WINDOW_S +
         # message_id dedupe; this only caps forged-future timestamps.
         self._REPLAY_FUTURE_SKEW_S = float(os.environ.get("LM_REPLAY_FUTURE_SKEW_S", "15"))
+        # Seen message ids live for the replay window.
         self._REPLAY_SEEN_TTL = self._REPLAY_WINDOW_S  # seen-set lives for the window
         # Per-spoke throttle for replay/stale warnings so a replay flood doesn't
         # spam the log: { spoke_id: last_warn_ts }.
         self._replay_warn_last: Dict[str, float] = {}
+        # Minimum seconds between replay warnings for one spoke.
         self._REPLAY_WARN_INTERVAL_S = 10.0
         # VNC console sessions (agent-terminates-WSS): session_id →
         # {queue, expires, ws_token, spoke_id, tenant_id, vmid, node, unique_id}.
@@ -1133,6 +1282,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # connect-phase deferral marker (spoke_id -> (marked_at, due)), and
         # strong refs for the fire-and-forget push tasks.
         self._cs_full_push_ts: Dict[str, float] = {}
+        # Connect-time deferrals and in-flight push tasks for the cs full-config sync.
         self._cs_connect_defer: Dict[str, list] = {}
         self._cs_push_tasks: set = set()
         # Warm-load persistence for the Client-Sim telemetry cache: on a hub
@@ -1143,6 +1293,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # parity with nw_cache_load() below and the mailbox warm start. Reloaded
         # rows read OFFLINE (spoke_online = not-in-active_connections) until the
         # spoke reconnects, so stale data is visibly stale, never shown as live.
+        # Where the simulations cache is persisted, a dirty flag, and the initial load.
         self._sim_cache_path = os.path.join(self.state.data_dir, "simulations_cache.json")
         self._sim_cache_dirty = False
         self._load_simulations_cache()
@@ -1155,19 +1306,25 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self._migrate_persisted_blobs_to_guid()
         # Simulations module: tenant-scoped browser broadcast + slim cs-config store.
         self.simulations_broadcaster = SimulationsBroadcaster()
+        # Persisted simulation runs and settings.
         self.simulations_store = SimulationsStore(self.state.data_dir)
         # Resolve a tenant github_token stored as a cloud vault reference
         # (``kv:<name>``) at read time, so the token can live in whichever
         # vault (Azure Key Vault or OCI Vault) is enabled instead of on disk.
         # No-op for inline tokens / no vault (self-hosted).
+        # Install a resolver for vault-referenced GitHub tokens, best-effort.
         try:
             import cloud_vault as _kv
 
+            # Resolver that looks up a vault reference.
             async def _gh_token_resolver(ref):
+                """Resolve a cloud-vault reference to its secret value."""
                 return await _kv.resolve_ref(self, ref)
 
+            # Register the resolver with the store.
             self.simulations_store.set_secret_resolver(_gh_token_resolver)
         except Exception:  # noqa: BLE001 — resolver is optional
+            # The resolver is optional; log and continue.
             logger.debug("github_token KV resolver not installed", exc_info=True)
         # audit log, and (opt-in) Azure NSG deny-rule auto-block.
         self.threat_monitor = ThreatMonitor(self)
@@ -1175,16 +1332,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # anomalies (vault-contract breaches, canary trips, read-volume spikes)
         # into the threat monitor's audit + NSG-response pipeline. See
         # security/sentinel.py and docs/security-pentest.md §5J.
+        # Wire the in-process sentinel to report anomalies to the threat monitor.
         try:
             from security import sentinel as _sentinel
             _sentinel.set_reporter(self.threat_monitor.note_anomaly)
         except Exception:
+            # Log wiring failures without stopping startup.
             logger.exception("failed to wire security sentinel reporter")
         # Realtime alert engine (edge-triggered per-tenant alert-rule routing).
         self.alert_engine = AlertEngine(self)
         # Hub-local Proxmox template-backup repository (vzdump archives + metadata
         # on the hub's own disk). Populated by a Global-Admin-triggered backup
         # that the owning node's agent streams up. See routes/templates.py.
+        # Load the template-backup repository.
         from template_repo import TemplateRepo
         self.template_repo = TemplateRepo(self.state.data_dir)
         # Hub-side Aruba Central status for CENTRALIZED processing mode, keyed by
@@ -1201,6 +1361,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # immediately (the block carries fetched_at so staleness is visible), then
         # the poller refreshes it. The 1h client-count baseline persists separately
         # in ClientCountTracker (client_count_*.json).
+        # Path of the persisted Central status, then load it and start the poller.
         self._central_status_path = os.path.join(self.state.data_dir, "central_hub_status.json")
         self._load_central_hub_status()
         self.central_hub_poller = CentralHubPoller(self)
@@ -1219,6 +1380,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # last-known data immediately, then the poller refreshes it. The 1h
         # client-count baseline persists separately in MistClientCountTracker
         # (mist_client_count_*.json).
+        # Path of the persisted Mist status, then load it and start the poller.
         self._mist_status_path = os.path.join(self.state.data_dir, "mist_hub_status.json")
         self._load_mist_hub_status()
         self.mist_hub_poller = MistHubPoller(self)
@@ -1236,25 +1398,30 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # blank until the first 5-min poll completes. Persisted encrypted each
         # poll cycle (separate shard file) and reloaded here so the dashboards
         # seed from last-known data immediately, then the poller refreshes it.
+        # Path of the persisted Central On-Prem status, then load it and start its poller.
         self._central_on_prem_status_path = os.path.join(self.state.data_dir, "central_on_prem_hub_status.json")
         self._load_central_on_prem_hub_status()
         self.central_on_prem_hub_poller = CentralHubPoller(self, instance="central_on_prem")
+        # Directory for on-disk caches.
         self.cache_dir = os.path.join(self.state.data_dir, "cache")
         # Network Devices (nw) module: in-memory fleet + per-device cache,
         # persisted to cache/nw_data.json and reloaded on startup so the
         # Network Devices UI seeds from last-known data on a restart instead
         # of 503-ing until the nw spoke reconnects. See nw_cache.NwCacheMixin.
+        # Initialise and load the network-devices cache.
         self.nw_cache_init()
         self.nw_cache_load()
         # Fleet OS updates: last check + run survive a restart (HubOsUpdatesMixin).
         self.osu_load_state()
         # TrueNAS (storage) cache twin — same atomic-persist + warm-start shape
         # as nw_cache (serves last-known data when the truenas spoke is offline).
+        # Initialise and load the TrueNAS cache.
         self.truenas_cache_init()
         self.truenas_cache_load()
         # Certificates warm cache — same pattern as nw_cache so the Certificates
         # page renders last-known certs instantly (stale) instead of blocking on
         # a live LE_LIST_CERTS round-trip or 503-ing until the le spoke reconnects.
+        # Initialise and load the certificates cache.
         self.le_cache_init()
         self.le_cache_load()
         # The hub data cache (warm_cache.WarmCacheMixin): every page reads from
@@ -1262,45 +1429,55 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # is logged in, 5 min otherwise). Persisted per namespace to
         # cache/warm/<ns>.bin as Fernet(zlib(json)) with the hub key — it holds
         # tenant data, so it is encrypted at rest like system.json.
+        # Use hub encryption for cache files when available.
         try:
             from security.encryption import hub_encryption as _he
             _cache_enc, _cache_dec = _he.encrypt_bytes, _he.decrypt_bytes
         except Exception as e:  # noqa: BLE001 - hub_encryption is fail-closed in prod
+            # No encryption available: cache files are stored plain.
             logger.warning("hub cache: encryption unavailable (%s) — files not encrypted", e)
             _cache_enc = _cache_dec = None
+        # Initialise and load the warm cache.
         self.warm_cache_init(encrypt=_cache_enc, decrypt=_cache_dec)
         self.warm_cache_load()
         # In-memory global-search index (SearchIndexMixin): keeps the full
         # spoke-scoped result set per observed scope so /api/search serves from
         # memory instead of a live 5-spoke fan-out (+ the 30s prefix pre-fetch).
+        # Build the search index.
         self.search_index_init()
         # Warm-start the per-device cert reports so the cert drill-down survives a
         # restart instead of blanking until the hourly distribution loop repopulates.
         try:
+            # Warm-load per-device cert reports; skip on failure.
             self.warm_load_cert_device_reports()
         except Exception as e:  # noqa: BLE001
             logger.debug("cert_device_reports warm load skipped: %s", e)
         # Apply the configured session idle-timeout (minutes → seconds). Unset
         # leaves access.py's 60-minute default; 0 disables. A WebUI change
         # (/setup/session-timeout) re-applies this live.
+        # Apply the saved session idle timeout, converted to seconds.
         try:
             import access as _access
             _mins = (self.state.get_global_config() or {}).get("session_idle_timeout_minutes")
             if _mins is not None:
                 _access.set_session_idle_timeout(float(_mins) * 60)
         except Exception as _e:  # noqa: BLE001 - never block startup on this
+            # Startup continues if this fails.
             logger.debug("apply session idle timeout at startup: %s", _e)
         # Apply the mTLS master switch from config (plumbed, default-off).
+        # Turn mTLS on or off from saved config.
         try:
             from security import mtls as _mtls
             _mtls.set_runtime_enabled(
                 (self.state.get_global_config() or {}).get("mtls_enabled"))
         except Exception as _e:  # noqa: BLE001
+            # Startup continues if this fails.
             logger.debug("apply mtls_enabled at startup: %s", _e)
         # Re-register the hub's mTLS material paths written by cert distribution
         # (the CA bundle path persisted into global_config["mtls"] by
         # _install_cert_on_hub) so the readiness check sees them immediately
         # after a restart, without waiting for the next distribution sweep.
+        # Re-register saved mTLS cert/key paths, if any.
         try:
             from security import mtls as _mtls
             _mcfg = ((self.state.get_global_config() or {}).get("mtls", {}) or {})
@@ -1310,22 +1487,27 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     client_cert=_mcfg.get("client_cert_path"),
                     client_key=_mcfg.get("client_key_path"))
         except Exception as _e:  # noqa: BLE001
+            # Startup continues if this fails.
             logger.debug("re-register mtls materials at startup: %s", _e)
         # File-a-Bug artifact store: each report's console.log / dom.html /
         # screenshot.png / report.json live under data_dir/bugs/<id>/ so the
         # large payloads never bloat the 500-line self.logs deque or the hub
         # log file. AppBuilder pulls them back via GET_BUG_REPORT for fix context.
+        # Create the bug-report directory.
         self.bug_dir = os.path.join(self.state.data_dir, "bugs")
         try:
             os.makedirs(self.bug_dir, exist_ok=True)
         except Exception as e:
+            # Log and continue if it cannot be created.
             logger.warning(f"[bug-report] could not create bug_dir {self.bug_dir}: {e}")
         # Rebuild the bug-report index from disk so GET_BUG_REPORTS isn't empty
         # after a restart (artifacts persist under bug_dir; the index didn't).
         try:
+            # Rebuild the bug-report index; skip on failure.
             self.warm_load_bug_reports()
         except Exception as e:  # noqa: BLE001
             logger.debug("bug_reports warm load skipped: %s", e)
+        # The hub is not ready until startup completes.
         self.is_ready = False
         # Overload self-protection: when memory (or, later, loop-lag) crosses a
         # watermark the hub enters PROTECT MODE — it sheds heavy read endpoints
@@ -1333,6 +1515,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # connections, instead of paging to death or hanging. Cleared with
         # hysteresis. Threshold configurable via global_config["protect"].
         self._protect_mode = False
+        # Why protect mode is on, for diagnostics.
         self._protect_reason = ""
         # In protect mode, shed inbound frames LARGER than this (bytes) BEFORE
         # the JSON parse — the parse of big telemetry frames is the CPU cost that
@@ -1346,10 +1529,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Hub-process CPU sampler (its own state, independent of the box-wide
         # psutil.cpu_percent() in get_system_metrics). ~100%/core when the loop
         # is pegged — the direct "loop saturated" signal for protect mode.
+        # Sample this process's CPU usage; prime the first reading.
         try:
             self._proc = psutil.Process()
             self._proc.cpu_percent(interval=None)  # prime the baseline
         except Exception:
+            # psutil unavailable: no CPU sampling.
             self._proc = None
         self._proc_cpu = 0.0   # last hub-process CPU% (set each tick; ladder reads it)
 
@@ -1369,6 +1554,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Levels 0..3 map to "normal / offenders-throttled / fleet-throttled /
         # hub-coalescing". Signals are sent only on state CHANGE (hysteresis in
         # run_backpressure_loop) so we never spam LM_BACKPRESSURE every tick.
+        # Current degradation level (0 = normal).
         self._load_level = 0
         self._spoke_backoff = set()       # spoke_ids currently told to slow down
         self._fleet_backoff = False       # rung-2 broadcast active
@@ -1408,6 +1594,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # to disconnect. _spoke_recv accumulates; run_mps_loop snapshots it into
         # _spoke_offered each tick for the protect source-shed.
         self._spoke_recv = {}
+        # Frames offered per spoke.
         self._spoke_offered = {}
         # Rung-3 receiver-side coalesce: latest-wins telemetry buffer, drained at
         # a bounded cadence by run_coalesce_drain_loop. Superseded snapshots are
@@ -1424,6 +1611,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # timestamps for the rate cap that stops a compromised edge from flooding
         # forged reports to poison the NSG blocklist. See _handle_edge_probe_report.
         self._edge_probe_reports = {}     # reporter spoke_id -> [ts, ...]
+        # Maximum edge probe reports accepted per reporter per 10 minutes.
         self._EDGE_PROBE_MAX = 60         # max edge probe reports per reporter / 600s
         # App-edge login failures (APP_LOGIN_FAILURE): a rejected credential
         # against an app spoke's OWN WebUI login (currently just AppBuilder),
@@ -1449,6 +1637,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # tenant's fleet. These high-confidence signatures never fire on normal
         # SPA/API/agent traffic, so a trip means a real recon attempt.
         self._tenant_probe_trips = {}     # tenant_id -> {node_pk -> last_ts}
+        # Distinct nodes needed to escalate a tenant probe, and the window they must fall in.
         self._TENANT_PROBE_ESCALATE_NODES = max(
             2, int(os.environ.get("LM_TENANT_PROBE_ESCALATE_NODES", "2") or 2))
         self._TENANT_PROBE_WINDOW_S = float(
@@ -1474,6 +1663,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         assign none). ``push_config_to_spoke`` calls it on every (re)connect and
         pushes the result as ``NODE_CANARY_SET``. No provider registered → the
         push is skipped entirely."""
+        # Store the provider.
         self._node_canary_provider = provider
 
     # Message classes for the escalation ladder. Config-overridable via
@@ -1504,22 +1694,29 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         must → never dropped/coalesced (acks, replies, probes).
         coalesce → latest-wins, mergeable under pressure (telemetry, logs).
         skippable → a few may be dropped under pressure (heartbeats)."""
+        # Requests awaiting a reply must always be processed.
         if has_corr:
             return "must"
+        # Read any configured overrides for message classes.
         try:
             classes = (self.state.get_global_config() or {}).get(
                 "backpressure", {}).get("classes", {}) or {}
         except Exception:
+            # Config unavailable: no overrides.
             classes = {}
+        # Use the override, then the default, then "coalesce".
         return classes.get(payload_type) or self._MSG_CLASS_DEFAULT.get(payload_type, "coalesce")
 
     def _backpressure_params(self) -> dict:
         """Live knobs for the ladder (Setup → General later). Soft marks sit
         BELOW the protect hard watermarks so we throttle gracefully first."""
+        # Read the backpressure config section.
         try:
             cfg = (self.state.get_global_config() or {}).get("backpressure", {}) or {}
         except Exception:
+            # Config unavailable: use all defaults.
             cfg = {}
+        # Return each knob with its default.
         return {
             "enabled": bool(cfg.get("enabled", True)),
             # A single spoke over this msg/s is an "offender" (rung 1).
@@ -1619,16 +1816,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         push and permanently desync. When None, sign with the spoke's current
         key as usual.
         """
+        # Find the destination and its live connection.
         spoke_id = message.header.destination_id
         pk = self._primary_key(spoke_id)  # state key (guid once 2b2 migrates; == spoke_id until then)
         ws = self.active_connections.get(pk)
 
+        # Only send if the spoke is connected.
         if ws:
             # Sign the message before sending
             header_dict = asdict(message.header)
+            # Round the timestamp so both sides sign the same value.
             if "timestamp" in header_dict:
                 header_dict["timestamp"] = round(header_dict["timestamp"], 6)
 
+            # Payload as a dict.
             payload_dict = asdict(message.payload)
 
             # H4: AEAD-encrypt payload.data of secret-bearing frames to a
@@ -1643,25 +1844,31 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # non-capable (legacy / kill-switch) spoke, or when encryption is off
             # — the gate is cheap (a frozenset membership + dict get) and the hot
             # path (heartbeats/commands/replies) is untouched on the wire.
+            # Encrypt secret-bearing payloads for spokes that support it.
             _ptype = payload_dict.get("type")
             if (encryption_enabled() and self.spoke_enc_capable.get(pk)
                     and _ptype in ENCRYPTED_TYPES):
+                # A session-key push uses the explicit secret only.
                 if _ptype == "SPOKE_UPDATE_SESSION_KEY":
                     _aead_secret = signing_secret  # None on first-ever push → skip
                 else:
+                    # Otherwise use the given secret or the spoke's current key.
                     _aead_secret = (signing_secret if signing_secret is not None
                                     else self.key_manager.current_session_secret(pk))
+                # Encrypt in place when a key is available.
                 if _aead_secret is not None:
                     wrap(_aead_secret, payload_dict)
 
             # Encode to the wire form <sig>.<body> (body serialized ONCE, signed
             # over those exact bytes) so the spoke verifies received bytes without
             # re-serializing. signing_secret path = SPOKE_UPDATE_SESSION_KEY.
+            # Sign and encode with the explicit secret if given, else the spoke's key.
             body = {"header": header_dict, "payload": payload_dict}
             if signing_secret is not None:
                 wire = self.key_manager.encode_frame_with_secret(signing_secret, body)
             else:
                 wire = self.key_manager.encode_frame(pk, body)
+            # Count bytes for throughput stats.
             self.bytes_count += len(wire.encode())
             try:
                 # Bound the send: a half-open (black-holed ESTAB) socket makes
@@ -1692,17 +1899,22 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # that already replaced the slot is NOT evicted (we drop only OUR
                 # dead ws); handle_connection's finally then sees owns_slot=False
                 # and leaves the live replacement's sibling state intact.
+                # Drop the connection only if it is still the current one.
                 if self.active_connections.get(pk) is ws:
                     self.active_connections.pop(pk, None)
                     self.active_connection_key_ids.pop(pk, None)
+                    # Close it, ignoring errors.
                     try:
                         await ws.close()
                     except Exception:
                         pass
+                # Tell the caller the send failed.
                 raise ConnectionError(
                     f"Spoke {spoke_id} connection closed/blocked mid-send: {e}") from e
+            # Count the sent message.
             self.message_count += 1
         else:
+            # Not connected: fail the send.
             raise ConnectionError(f"Spoke {spoke_id} is not connected")
 
     def _arm_liveness_probe(self, spoke_id: str, websocket) -> None:
@@ -1715,9 +1927,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         this socket can ping it. Best-effort: a non-adapter websocket (the test
         fakes define their own ``ping()``) is left untouched.
         """
+        # Only connections that support probing get a sender.
         if hasattr(websocket, "set_probe_sender"):
+            # Sender that pings the spoke with a nonce.
             async def _sender(nonce):
+                """Send a liveness ping carrying ``nonce``."""
                 await self._send_liveness_ping(spoke_id, nonce)
+            # Install the sender; failures are only logged.
             try:
                 websocket.set_probe_sender(_sender)
             except Exception:  # noqa: BLE001 — never break install over probe wiring
@@ -1730,6 +1946,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         inbound dispatch resolves the adapter's ping waiter via
         ``resolve_pong(nonce)``. Raises if the spoke is not connected so the
         caller's probe treats it as dead."""
+        # Build a signed HUB_PING carrying the nonce as its id.
         msg = Message(
             header=MessageHeader(
                 message_id=nonce,
@@ -1739,7 +1956,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             ),
             payload=MessagePayload(type="HUB_PING", data={"nonce": nonce}),
         )
+        # Remember the nonce so the reply can be matched.
         self._pending_liveness_nonces.add(nonce)
+        # Send it; on failure forget the nonce and re-raise.
         try:
             await self.send_to_spoke(msg)
         except Exception:
@@ -1777,16 +1996,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Config pushes never reach here draining: ``_drain_aware_config_push`` /
         ``push_if_live_or_queue`` queue to the durable mailbox first.
         """
+        # No timeout given: use the default.
         if timeout is None:
             timeout = self._default_request_timeout
+        # A draining spoke would not answer; return a timeout-shaped reply at once.
         if signing_secret is None and self.is_draining(spoke_id):
             logger.debug("%s draining (updating) — skipped live %s query",
                          spoke_id, command_type)
             return {"status": "ERROR",
                     "message": "Timed out waiting for spoke response",
                     "updating": True, "draining": True}
+        # New message id; log the request with secrets redacted.
         msg_id = str(uuid.uuid4())
         logger.debug(f"Request: {msg_id} -> {spoke_id} [{command_type}] data={_redact(command_type, data)}")
+        # Build the request message.
         msg = Message(
             header=MessageHeader(
                 message_id=msg_id,
@@ -1832,26 +2055,33 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # SPOKE_PROGRESS frame pushes it to now + timeout, never past "hard"
         # (timeout x _request_progress_hard_mult). See the
         # _progress_deadlines init.
+        # Get the waiter map, creating it on hub objects built without __init__.
         waiters = getattr(self, "_response_waiters", None)
         if waiters is None:  # hub object built without __init__ (tests)
             waiters = self._response_waiters = {}
+        # Wake-up event, start time and soft/hard deadlines.
         wake = asyncio.Event()
         start_time = time.time()
         prog = {"soft": start_time + timeout,
                 "hard": start_time + timeout * self._request_progress_hard_mult,
                 "grace": timeout}
+        # Register the request as outstanding.
         self._outstanding_requests.add(msg_id)
         self._progress_deadlines[msg_id] = prog
         waiters[msg_id] = wake
+        # Track whether a reply arrived and whether the send happened.
         settled = False
         sent = False
+        # Send, then wait for the reply.
         try:
             # A send failure (spoke not connected, socket closed mid-send)
             # raises ConnectionError to the caller exactly as before; the
             # finally below unregisters everything.
             await self.send_to_spoke(msg, signing_secret=signing_secret)
+            # Poll until a reply arrives or the deadline passes.
             sent = True
             while True:
+                # Reply arrived: take it, log it and return it.
                 if msg_id in self.response_cache:
                     result = self.response_cache.pop(msg_id)
                     logger.debug(f"Response: {msg_id} received from {spoke_id}: {_redact(command_type, result)}")
@@ -1864,6 +2094,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     # sub-spoke is re-pushed on the agent's next reconnect.
                     self._track_role_rpc(spoke_id, command_type, data, result)
                     return result
+                # Stop waiting once the earlier deadline passes.
                 now = time.time()
                 deadline = min(prog["soft"], prog["hard"])
                 if now >= deadline:
@@ -1872,6 +2103,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # into a busy loop. Nothing is lost: the cache was just
                 # checked, and a reply arriving from here on sets it again.
                 wake.clear()
+                # Wait for the wake-up or the fallback poll interval.
                 try:
                     await asyncio.wait_for(
                         wake.wait(),
@@ -1884,19 +2116,24 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # of a name" complaint. Falls back to a short req=<first8> hint for
             # correlation with the DEBUG request/response lines (full msg_id
             # stays there) when no subject is derivable from the payload.
+            # Timed out: log what was asked and how long it waited.
             _subject = _request_subject(command_type, data) or f"req={msg_id[:8]}"
             _elapsed = round(time.time() - start_time, 1)
             logger.error(f"Request Timeout: [{command_type}] {_subject} from {self._spoke_label(spoke_id)} after {_elapsed}s")
+            # Count the timeout.
             try:
                 self._request_timeouts_total += 1
             except Exception:  # noqa: BLE001
                 pass
+            # Return a timeout error.
             return {"status": "ERROR", "message": "Timed out waiting for spoke response"}
         finally:
             # Drop the waiter so a late ack can't leak a response_cache entry.
+            # Remove the request from all tracking maps.
             self._outstanding_requests.discard(msg_id)
             self._progress_deadlines.pop(msg_id, None)
             waiters.pop(msg_id, None)
+            # Remember timed-out ids so late replies are recognised.
             if sent and not settled:
                 # Waiter returned without a reply (timeout or cancel). A late ack
                 # may still arrive from the spoke; remember the id briefly so the
@@ -1933,12 +2170,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Callers should surface ``queued`` distinctly (e.g. "queued — applies
         on reconnect") rather than claiming the change is live immediately.
         """
+        # Try a live request first.
         try:
             result = await self.request_response(spoke_id, command_type, data, timeout=timeout)
             # A timeout return (no reply at all) means "unreachable", not "the
             # spoke rejected it" — queue it. A real ERROR reply from the spoke
             # is a genuine refusal; queuing that would just repeat the same
             # rejection forever, so only the timeout shape falls through.
+            # A plain timeout is treated as "spoke unreachable".
             if (isinstance(result, dict) and result.get("status") == "ERROR"
                     and result.get("message") == "Timed out waiting for spoke response"):
                 # A timeout means "no reply" — the spoke is likely mid self-update
@@ -1950,15 +2189,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # Only on a REAL timeout: re-marking on the draining short-circuit
                 # itself would refresh the window forever (every 45s reconcile
                 # tick < 90s window) and the spoke could never be live-pushed again.
+                # Assume the spoke is restarting unless already known to be draining.
                 if not result.get("draining"):
                     self.mark_draining(spoke_id, window=90.0)
                 raise TimeoutError("no reply — spoke may be reconnecting")
+            # Live push succeeded.
             return {"status": "ok", "queued": False, "result": result}
         except Exception as exc:
+            # Live push failed: log it and queue the command in the mailbox.
             logger.warning(
                 f"push_or_queue_to_spoke: live push of {command_type} to {spoke_id} "
                 f"failed ({exc}); queuing for delivery on reconnect."
             )
+            # Build the queued message.
             msg = Message(
                 header=MessageHeader(
                     message_id=str(uuid.uuid4()), timestamp=time.time(),
@@ -1966,6 +2209,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 ),
                 payload=MessagePayload(type=command_type, data=data),
             )
+            # Queue for delivery when the spoke reconnects.
             await self.mailbox.push(msg, self.send_to_spoke)
             return {
                 "status": "ok", "queued": True,
@@ -1975,6 +2219,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     def _prune_recent_timeouts(self) -> None:
         """Drop expired entries from ``_recent_request_timeouts`` (called on each
         new addition so the dict stays bounded)."""
+        # Keep only entries that have not expired.
         now = time.time()
         self._recent_request_timeouts = {k: v for k, v in self._recent_request_timeouts.items()
                                          if v > now}
@@ -1985,8 +2230,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ID" (WARNING) by mailbox.acknowledge — broadcast sends go through the
         low-level send_to_spoke, NOT mailbox.push, so the id is never in
         pending_ack. TTL-bounded + pruned on each call."""
+        # Ignore empty ids.
         if not msg_id:
             return
+        # Record the id with its expiry, then prune expired ids.
         now = time.time()
         self._pending_broadcast_ids[msg_id] = now + self._BROADCAST_ACK_TTL
         self._pending_broadcast_ids = {k: v for k, v in self._pending_broadcast_ids.items()
@@ -2000,10 +2247,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         time out when the spoke exits mid-reply. Idempotent + refreshes the
         window on each call (a spoke reporting ``draining: true`` every 10s
         keeps the window extended across a long git pull)."""
+        # Ignore empty ids; default the window.
         if not spoke_id:
             return
         if window is None:
             window = self.DRAIN_WINDOW_S
+        # Record when draining ends.
         self._draining_spokes[self._drain_key(spoke_id)] = time.time() + window
 
     def _drain_key(self, spoke_id: str) -> str:
@@ -2012,6 +2261,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         (push fan-out / SPOKE_UPDATE: ``a1e70438-…``); without normalizing, the
         telemetry ``draining: false`` clear never matched the guid mark and a
         drained cs spoke stayed short-circuited forever."""
+        # Map to the primary key; fall back to the raw id.
         try:
             return self._primary_key(spoke_id)
         except Exception:  # noqa: BLE001
@@ -2019,23 +2269,28 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     def is_draining(self, spoke_id: str) -> bool:
         """True if the spoke is within its drain window (mid self-update)."""
+        # Ignore empty ids.
         if not spoke_id:
             return False
+        # Look up when draining ends.
         spoke_id = self._drain_key(spoke_id)
         until = self._draining_spokes.get(spoke_id)
         if until is None:
             return False
+        # Expired: clear the entry.
         if time.time() > until:
             # Window expired — the spoke never reported ``draining: false`` (e.g.
             # the update failed and it restarted on the old code, or it's gone).
             # Drop the entry so the hub resumes normal live pushes.
             self._draining_spokes.pop(spoke_id, None)
             return False
+        # Still draining.
         return True
 
     def clear_draining(self, spoke_id: str) -> None:
         """Clear drain state (the spoke reported ``draining: false`` after its
         restart — it's back for good)."""
+        # Remove the drain entry.
         if spoke_id:
             self._draining_spokes.pop(self._drain_key(spoke_id), None)
 
@@ -2045,12 +2300,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ...). End the drain now instead of short-circuiting every request to it
         as a timeout for the rest of DRAIN_WINDOW_S. Two replies still mean a
         restart/reload is under way and keep the drain."""
+        # Only act on replies to a pending SPOKE_UPDATE.
         pending = self.mailbox.pending_ack.get(corr_id)
         if not pending or getattr(pending[0].payload, "type", None) != "SPOKE_UPDATE":
             return
+        # "Already in progress" or "reloading" mean it really is restarting.
         message = str((reply or {}).get("message") or "") if isinstance(reply, dict) else ""
         if "already in progress" in message or "reloading" in message:
             return
+        # Otherwise it is not restarting: clear draining.
         self.clear_draining(spoke_id)
 
     async def _drain_aware_config_push(self, spoke_id: str, command_type: str,
@@ -2072,6 +2330,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         When NOT draining, a normal push_or_queue_to_spoke (live attempt with a
         queue-on-unreachable fallback)."""
+        # Draining: queue the push instead of a live request.
         if self.is_draining(spoke_id):
             msg = Message(
                 header=MessageHeader(
@@ -2084,6 +2343,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             logger.info("%s draining — %s queued (skipped live request_response)",
                         spoke_id, command_type)
             return {"status": "ok", "queued": True, "draining": True}
+        # Not draining: push live, queuing on failure.
         return await self.push_or_queue_to_spoke(spoke_id, command_type, data, timeout=timeout)
 
     def _prune_seen_message_ids(self) -> None:
@@ -2095,10 +2355,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ran on the event loop for every inbound signed frame, which at scale
         was pure per-frame overhead. Worst case the set now carries one extra
         second of expired ids; replay-dedupe semantics are unchanged."""
+        # Prune at most once per second.
         now = time.monotonic()
         if now - self._seen_prune_last_mono < 1.0:
             return
         self._seen_prune_last_mono = now
+        # Keep only ids whose expiry is in the future.
         wall = time.time()
         self._seen_message_ids = {k: v for k, v in self._seen_message_ids.items()
                                   if v > wall}
@@ -2106,9 +2368,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     def _replay_warn(self, spoke_id: str, reason: str) -> None:
         """Emit a replay/stale WARNING at most once per
         ``_REPLAY_WARN_INTERVAL_S`` per spoke so a replay flood doesn't spam."""
+        # Throttle per spoke.
         now = time.time()
         sid = self._primary_key(spoke_id)
         last = self._replay_warn_last.get(sid, 0.0)
+        # Warn when the interval has passed; otherwise log at debug.
         if now - last >= self._REPLAY_WARN_INTERVAL_S:
             self._replay_warn_last[sid] = now
             logger.warning("Dropping frame from %s: %s", spoke_id, reason)
@@ -2133,13 +2397,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         Both are cheap (dict ops) and the seen-set is pruned each add so it's
         bounded by the distinct-id count within the window."""
+        # Read the frame timestamp, if present.
         header = msg_data.get("header") or {}
         ts = header.get("timestamp")
         if ts is not None:
+            # Parse it as a number; unparsable means no timestamp.
             try:
                 ts_f = float(ts)
             except (TypeError, ValueError):
                 ts_f = None
+            # Reject frames older than the replay window.
             if ts_f is not None:
                 now = time.time()
                 age = now - ts_f
@@ -2148,23 +2415,29 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                       f"stale timestamp (age {age:.0f}s > "
                                       f"{self._REPLAY_WINDOW_S:.0f}s window) — replay")
                     return False
+                # Reject frames stamped too far in the future.
                 if ts_f - now > self._REPLAY_FUTURE_SKEW_S:
                     self._replay_warn(spoke_id,
                                       f"future timestamp (skew {ts_f - now:.0f}s) — forged/skew")
                     return False
             else:
+                # Unparsable timestamp: skip the freshness check.
                 logger.debug("Signed frame from %s has non-numeric timestamp %r — "
                              "skipping freshness check", spoke_id, ts)
         else:
+            # No timestamp: skip the freshness check.
             logger.debug("Signed frame from %s has no timestamp — skipping "
                          "freshness check", spoke_id)
+        # Reject a message id already seen within the window.
         msg_id = header.get("message_id")
         if msg_id:
             if msg_id in self._seen_message_ids:
                 self._replay_warn(spoke_id, f"duplicate message_id {msg_id} — replay")
                 return False
+            # Remember this id until the window passes, then prune.
             self._seen_message_ids[msg_id] = time.time() + self._REPLAY_SEEN_TTL
             self._prune_seen_message_ids()
+        # Frame is fresh and new.
         return True
 
     async def send_to_spoke_command(self, spoke_id: str, command_type: str,
@@ -2175,6 +2448,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         not in ``_outstanding_requests``). Used for VNC down-frames + control
         (VNC_FRAME_DOWN / VNC_START / VNC_DISCONNECT) where awaiting an ack
         would stall the browser WS. Never raises — a failed send just logs."""
+        # Build a signed command message.
         msg_id = str(uuid.uuid4())
         msg = Message(
             header=MessageHeader(
@@ -2185,6 +2459,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             ),
             payload=MessagePayload(type=command_type, data=data),
         )
+        # Send it; failures are only logged.
         try:
             await self.send_to_spoke(msg)
         except Exception as e:
@@ -2212,6 +2487,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         (same as before this helper existed) rather than tearing down a working
         live connection.
         """
+        # Look up the current connection and whether it is authenticated.
         pk = self._primary_key(spoke_id)
         prior_authed = self.spoke_authenticated.get(pk, False)
         prior_ws = self.active_connections.get(pk)
@@ -2220,16 +2496,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # pending ws runs on as a ghost (no slot); it can't receive hub
             # pushes but won't disrupt the live connection.
             return
+        # Replace an older pending connection: log, record and close it.
         if prior_ws is not None and prior_ws is not websocket:
             logger.info(
                 f"Replacing prior pending connection for {spoke_id} with a "
                 f"newer connection (the prior never authenticated).")
             self.record_spoke_event(spoke_id, "replaced_pending",
                                     "newer connection took over the unauthenticated slot")
+            # Close the older socket, ignoring errors.
             try:
                 await prior_ws.close(1008, "Replaced by a newer connection")
             except Exception:
                 pass
+        # Install the new connection with no key id yet.
         self.active_connections[pk] = websocket
         self.active_connection_key_ids[pk] = None
 
@@ -2262,6 +2541,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         "delete_vm", "reclone_vm", "clone_lxc", "provision_unassigned",
     })
     # Coalesce VM-cache refreshes to at most one per tenant per this interval.
+    # Minimum seconds between VM-cache refreshes for one tenant.
     _VM_REFRESH_MIN_INTERVAL = 5.0
 
     # ── VM Server live-state overlay ─────────────────────────────────────────
@@ -2270,6 +2550,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     # Values match the prov_status vocabulary the pxmx agent already stamps and
     # the WebUI badge (csVmStatusBadge) already renders — tearing_down => "Deleting…",
     # recloning => "Recloning…", provisioning => "Provisioning/Configuring".
+    # Agent action to the transient state shown while it runs.
     _VM_ACTION_STATE = {
         "delete_vm": "tearing_down",
         "reclone_vm": "recloning",
@@ -2281,6 +2562,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     @staticmethod
     def _vmid_key(vmid) -> str:
+        """Normalise a vmid to a string key, using its integer form when possible."""
+        # Use the integer form when possible, otherwise the raw string.
         try:
             return str(int(vmid))
         except (TypeError, ValueError):
@@ -2288,15 +2571,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     def _vm_live_set(self, tenant_id, vmid, state) -> None:
         """Stamp a transient state for one vmid (best-effort; no-op on bad input)."""
+        # Ignore missing tenant or vmid.
         if not tenant_id or vmid in (None, ""):
             return
+        # Record the state with the current time.
         self._vm_live_state.setdefault(str(tenant_id), {})[self._vmid_key(vmid)] = {
             "state": state, "ts": time.time()}
 
     def _vm_live_clear(self, tenant_id, vmid) -> None:
+        """Remove the transient state for one vmid, dropping the tenant map when empty."""
+        # Nothing recorded for this tenant.
         t = self._vm_live_state.get(str(tenant_id))
         if not t:
             return
+        # Remove the vmid; drop the tenant map when it becomes empty.
         t.pop(self._vmid_key(vmid), None)
         if not t:
             self._vm_live_state.pop(str(tenant_id), None)
@@ -2305,12 +2593,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """TTL-pruned {vmid_str: state} overlay for a tenant — read by
         service._build_proxmox_data to stamp/prune VM rows. Expired entries are
         dropped here so a missed terminal frame can never wedge a stale state."""
+        # Nothing recorded for this tenant.
         t = self._vm_live_state.get(str(tenant_id))
         if not t:
             return {}
+        # Collect live states and note expired ones.
         now = time.time()
         out: Dict[str, str] = {}
         expired = []
+        # Each state has its own TTL ("deleted" is shorter).
         for k, v in t.items():
             state = (v or {}).get("state")
             ts = float((v or {}).get("ts", 0) or 0)
@@ -2319,6 +2610,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 expired.append(k)
             elif state:
                 out[k] = state
+        # Remove expired entries; drop the tenant map when empty.
         for k in expired:
             t.pop(k, None)
         if not t:
@@ -2335,11 +2627,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         timestamp that still carries that vmid; a stale pre-delete cached frame
         (timestamp older than the deletion stamp) does NOT clear the overlay, so
         the bridge-prune of a genuinely-deleted vmid is preserved."""
+        # Need a tenant and some timestamps.
         if not tenant_id or not present_ts:
             return
         t = self._vm_live_state.get(str(tenant_id))
         if not t:
             return
+        # For each "deleted" vmid, drop it when a newer telemetry frame shows it again.
         for vmid, frame_ts in present_ts.items():
             key = self._vmid_key(vmid)
             entry = t.get(key)
@@ -2350,6 +2644,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     t.pop(key, None)
             except (TypeError, ValueError):
                 continue
+        # Drop the tenant map when empty.
         if not t:
             self._vm_live_state.pop(str(tenant_id), None)
 
@@ -2374,6 +2669,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         unhandled exception there would only surface as a noisy "Task exception
         was never retrieved" warning.
         """
+        # Run the relay; log and swallow any error.
         try:
             await self._relay_cs_event_inner(spoke_id, agent_id, cs_type, data)
         except Exception as exc:  # noqa: BLE001 — never let a background relay task raise
@@ -2384,19 +2680,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                     cs_type: str, data: Dict[str, Any]) -> None:
         """Guts of ``_relay_cs_event`` — see its docstring. Split so the outer
         wrapper can guarantee never-raises for the fire-and-forget caller."""
+        # Map the event type to the cs spoke command; unmapped events are dropped.
         mapped = self._CS_INGEST_MAP.get(cs_type)
         if not mapped:
             logger.debug("CS_* relay: no mapping for %s from %s — dropping", cs_type, agent_id)
             return
+        # Hostname, falling back to the agent id.
         hostname = (data or {}).get("hostname") or agent_id
         # Resolve tenant: per-agent store first, then the relaying spoke's binding.
         tenant_id = None
+        # Look up the tenant in the agent's config.
         try:
             ac = (self.state.system_state.get("agent_config", {}) or {}).get(
                 self._agent_primary_key(agent_id), {})
             tenant_id = (ac.get("client_simulation") or {}).get("tenant_id")
         except Exception:
             tenant_id = None
+        # Fall back to the relaying spoke's tenant.
         if not tenant_id:
             try:
                 tenant_id = self.state.get_spoke_tenant(self._primary_key(spoke_id))
@@ -2410,19 +2710,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # or a UI-initiated delete never shows "Deleting…" and the VM table
         # doesn't refresh until the next telemetry poll. Terminals are owned by
         # the CS_COMMAND_RESULT block below (delete completed => prune).
+        # Log failed operations.
         if cs_type in ("CS_PROGRESS", "CS_COMMAND_RESULT"):
             _log_cs_op_failure(f"agent={agent_id}", cs_type, data)
+        # Progress events: update the VM live state and notify browsers.
         if cs_type == "CS_PROGRESS":
             _pact = (data or {}).get("action")
             _pstat = str((data or {}).get("status") or "").lower()
             _pvmid = (data or {}).get("vmid")
             _pstate = self._VM_ACTION_STATE.get(_pact)
+            # Only set an in-progress state while the action is still running.
             if tenant_id and _pstate and _pvmid not in (None, "") \
                     and _pstat not in ("completed", "failed", "error"):
                 try:
                     self._vm_live_set(tenant_id, _pvmid, _pstate)
                 except Exception:  # noqa: BLE001 — overlay is best-effort
                     pass
+            # Broadcast the progress to browsers.
             try:
                 await self.simulations_broadcaster.broadcast(
                     spoke_id, {"type": "cs_progress", "data": data or {}}, tenant_id)
@@ -2437,6 +2741,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # to the acting tenant + coalesced to ≤1 refresh / 5s (trailing refresh
         # after a burst). Skipped on explicit failures (status == "failed"):
         # a failed delete changed nothing, so a refresh would be wasted work.
+        # Command results: unpack action and status.
         if cs_type == "CS_COMMAND_RESULT" and tenant_id:
             action = (data or {}).get("action")
             status = (data or {}).get("status")
@@ -2446,8 +2751,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # in-progress state so the row reverts to its real telemetry status.
             _vmid = (data or {}).get("vmid")
             _st = str(status or "").lower()
+            # Update the live state for VM-mutating actions.
             if action in self._VM_MUTATING_ACTIONS and _vmid not in (None, ""):
                 try:
+                    # Mark completed deletes as "deleted"; clear on any other terminal status.
                     if action == "delete_vm" and _st == "completed":
                         self._vm_live_set(tenant_id, _vmid, "deleted")
                     elif _st in ("completed", "failed", "error"):
@@ -2458,11 +2765,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # Server table re-fetches NOW (csHandleLiveOp treats completed/
                 # failed as terminal → prompt refresh) — a completed delete's row
                 # drops immediately instead of waiting for the ~15s op-burst tick.
+                # Broadcast the result to browsers.
                 try:
                     await self.simulations_broadcaster.broadcast(
                         spoke_id, {"type": "cs_progress", "data": data or {}}, tenant_id)
                 except Exception:  # noqa: BLE001 — live feed is best-effort
                     pass
+            # Refresh the tenant's VM caches after a successful mutation.
             if action in self._VM_MUTATING_ACTIONS and status != "failed":
                 try:
                     self._schedule_vm_cache_refresh(tenant_id)
@@ -2487,14 +2796,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # A pxmx-DIALED agent (relayed by a pxmx spoke, which cannot ingest CS_*)
         # still falls back to the tenant's cs spoke, which is the original
         # behaviour for that path.
+        # Prefer the relaying spoke if it is itself a client-sim spoke.
         cs_spoke = None
         try:
             if spoke_id and self._is_client_sim_spoke(spoke_id):
                 cs_spoke = spoke_id
         except Exception:  # noqa: BLE001 — fall back rather than drop the event
             cs_spoke = None
+        # Otherwise use the tenant's client-sim spoke.
         if not cs_spoke:
             cs_spoke = self.get_client_sim_spoke(tenant_id)
+        # No cs spoke: drop the event.
         if not cs_spoke:
             logger.debug("CS_* relay: no cs spoke for tenant=%s (agent=%s, %s) — dropping",
                          tenant_id, agent_id, cs_type)
@@ -2512,13 +2824,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # verify error/timeout fall through to ack (never wedge a delete on a
         # verify failure). delete_vm only — reclone's "completed" means a new VM
         # exists, not an absence to verify.
+        # Completed delete results get a defense-in-depth check before forwarding.
         if cs_type == "CS_COMMAND_RESULT":
             action = (data or {}).get("action")
             status = str((data or {}).get("status") or "").lower()
             if action == "delete_vm" and status == "completed":
                 vmid = (data or {}).get("vmid")
                 cs_cmd_id = (data or {}).get("cs_cmd_id")
+                # Ask the hypervisor whether the VM is really gone.
                 gone = await self._verify_delete_vm_gone(tenant_id, agent_id, vmid)
+                # Still present: re-run the delete once.
                 if gone is False and cs_cmd_id is not None:
                     reran = await self._rerun_delete_if_needed(
                         cs_spoke, agent_id, hostname, vmid, cs_cmd_id)
@@ -2530,6 +2845,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         "re-enqueue on agent=%s — accepting completed (bound)",
                         cs_cmd_id, vmid, agent_id)
                 # gone True/None or accepted-above → fall through to ack.
+        # Forward the event to the cs spoke, adding the hostname.
         payload = {"hostname": hostname, **(data or {})}
         try:
             # 30s (not the 5s default): the cs spoke processes commands inline on
@@ -2538,9 +2854,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # load — a too-tight timeout produces late replies the hub then warns
             # about as "unknown message ID". See request_response / dispatch.
             await self.request_response(cs_spoke, mapped, payload, timeout=30.0)
+            # Log success at debug.
             logger.debug("CS_* relay: %s -> %s for %s (tenant=%s)",
                          cs_type, mapped, hostname, tenant_id)
         except Exception as exc:
+            # Log failure at debug.
             logger.debug("CS_* relay: %s -> %s failed for %s: %s",
                          cs_type, mapped, hostname, exc)
 
@@ -2557,6 +2875,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         live relay) sees the new state immediately instead of waiting for the
         next refresh cycle.
         """
+        # Refresh the module for all tenants; failures are only logged.
         try:
             _refresh_module_all_tenants(self, key)
         except Exception as e:  # noqa: BLE001 — never let a cache refresh kill a sync loop
@@ -2571,6 +2890,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     # the acting tenant (pxmx_vms + netbox_vms) and coalesced to ≤1 / 5s with a
     # trailing refresh after a burst. See _VM_MUTATING_ACTIONS.
     def _schedule_vm_cache_refresh(self, tenant_id: str) -> None:
+        """Schedule a debounced VM-cache refresh for ``tenant_id``."""
+        # Ignore an empty tenant.
         if not tenant_id:
             return
         if tenant_id in self._vm_refresh_inflight:
@@ -2583,14 +2904,18 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # sees inflight set and coalesces into pending instead of spawning a
         # second task. Without this, a tight burst of N schedules would spawn N
         # tasks (each marks inflight only once its coroutine runs).
+        # Start the refresh task.
         self._vm_refresh_inflight.add(tenant_id)
         asyncio.create_task(self._run_vm_cache_refresh(tenant_id))
 
     async def _run_vm_cache_refresh(self, tenant_id: str) -> None:
+        """Refresh the tenant's VM caches, rate-limited, until no more are requested."""
+        # Always clear the in-flight flag when finished.
         try:
             while True:
                 # Rate-limit: never refresh more often than the min interval. The
                 # first call (last unset) waits 0 → leading-edge immediate refresh.
+                # Wait out the minimum interval since the last refresh.
                 now = time.time()
                 wait = self._VM_REFRESH_MIN_INTERVAL - (now - self._vm_refresh_last.get(tenant_id, 0.0))
                 if wait > 0:
@@ -2599,7 +2924,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     # This tenant's VM lists + the admin (all-tenant) view.
                     self.cache_refresh("pxmx_vms", (f"{tenant_id}|", "_all_|"))
                 except Exception as e:  # noqa: BLE001 — best-effort, never break the loop
+                    # Log refresh failures and continue.
                     logger.debug("vm cache refresh %s failed: %s", tenant_id, e)
+                # Record when this refresh happened.
                 self._vm_refresh_last[tenant_id] = time.time()
                 # Trailing edge: if another mutating result arrived during this
                 # refresh, loop once more (rate-limited by the interval above) so
@@ -2616,12 +2943,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         if still present, ``None`` on error/timeout (caller falls through to ack
         so a verify failure never wedges a delete). Scoped to the owning agent
         via PXMX_LIST_VMS{agent_id} — sim VMIDs can collide across hosts."""
+        # No vmid: cannot verify.
         if vmid is None or vmid == "":
             return None
+        # The vmid must be numeric.
         try:
             vid = int(vmid)
         except (TypeError, ValueError):
             return None
+        # Find the tenant's hypervisor spoke, falling back to any hypervisor spoke.
         pxmx_spoke = None
         try:
             pxmx_spoke = self.get_hypervisor_spoke_for_tenant(tenant_id)
@@ -2632,24 +2962,30 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 pxmx_spoke = self.get_hypervisor_spoke()
             except Exception:
                 pxmx_spoke = None
+        # No hypervisor spoke: cannot verify.
         if not pxmx_spoke:
             return None
+        # List the agent's VMs with a short timeout.
         try:
             raw = await asyncio.wait_for(
                 self.request_response(pxmx_spoke, "PXMX_LIST_VMS",
                                       {"agent_id": agent_id}),
                 timeout=10.0)
         except Exception as exc:  # noqa: BLE001
+            # Query failed: unknown.
             logger.debug("delete verify PXMX_LIST_VMS agent=%s failed: %s",
                          agent_id, exc)
             return None
+        # Unwrap the reply data.
         data = raw.get("payload", {}).get("data", raw) if isinstance(raw, dict) else {}
+        # If the vmid is still listed, the delete did not happen.
         for v in (data or {}).get("vms") or []:
             try:
                 if int(v.get("vmid")) == vid:
                     return False
             except (TypeError, ValueError):
                 continue
+        # Not listed: the VM is gone.
         return True
 
     # One defense-in-depth re-enqueue per (agent, vmid) per TTL so a genuinely
@@ -2666,24 +3002,31 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         original command FAILED and enqueue a FRESH delete_vm. Returns True if a
         fresh command was enqueued (caller skips the completed ack); False if
         already re-enqueued within the TTL (caller accepts the completed)."""
+        # The vmid must be numeric.
         try:
             vid = int(vmid)
         except (TypeError, ValueError):
             return False
+        # Key for this agent and vmid.
         key = f"{agent_id}|{vid}"
         now = time.time()
+        # Get the re-run map, creating it on first use.
         reran = getattr(self, "_delete_verify_reran", None)
         if reran is None:
             reran = self._delete_verify_reran = {}
+        # Drop expired entries.
         for k in [k for k, ts in reran.items() if now - ts > self._DELETE_RERUN_TTL]:
             reran.pop(k, None)
+        # Already re-run recently: do not repeat.
         if key in reran:
             return False
+        # Record this re-run and log it.
         reran[key] = now
         logger.warning(
             "delete_vm cs_cmd_id=%s vmid=%s reported completed but still present "
             "on agent=%s — acking original failed + enqueuing fresh delete_vm",
             cs_cmd_id, vid, agent_id)
+        # Acknowledge the original command as failed.
         try:
             await self.request_response(
                 cs_spoke, "CS_ACK_COMMAND",
@@ -2692,6 +3035,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 timeout=5.0)
         except Exception as exc:  # noqa: BLE001
             logger.debug("delete verify ack-failed %s failed: %s", cs_cmd_id, exc)
+        # Queue a fresh delete for the same VM.
         try:
             await self.request_response(
                 cs_spoke, "CS_QUEUE_COMMAND",
@@ -2701,13 +3045,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         except Exception as exc:  # noqa: BLE001
             logger.warning("delete verify fresh enqueue vmid=%s failed: %s",
                            vid, exc)
+        # A re-run was queued.
         return True
 
     async def push_config_to_spoke(self, spoke_id: str):
         """Pushes the module-specific configuration from global state to the spoke."""
+        # Every step is wrapped so one failure does not stop the others.
         try:
             # Always push the hub secret first so mutual auth works even when there
             # is no module config to send (e.g. cs-spoke before it is configured).
+            # Build and send the current hub secret.
             hub_secret = self.key_manager.hub_secrets[0]
             secret_msg = Message(
                 header=MessageHeader(
@@ -2729,6 +3076,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # that bricked cs-svr-0* until they were physically reinstalled.
             # Best-effort: a failure here must never cost us the hub-secret push
             # or the config push below.
+            # Push the recovery PSK; failures are only logged.
             try:
                 await self.send_to_spoke(Message(
                     header=MessageHeader(
@@ -2755,6 +3103,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # dedicated modules) BEFORE the module_key early-return below (that
             # return is what otherwise skips agents, which have no module_key).
             try:
+                # Re-push the hub URL when one is configured.
                 hub_url = self.state.get_global_config().get("hub", {}).get("url")
                 if hub_url:
                     url_msg = Message(
@@ -2777,6 +3126,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # agents). The spoke persists it locally so it still applies when the
             # hub is later unreachable — the exact case the watchdog recovers from.
             try:
+                # Push the watchdog config when one is configured.
                 wd = self.state.get_global_config().get("hub_contact_watchdog")
                 if wd is not None:
                     wd_msg = Message(
@@ -2798,6 +3148,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # (restarts only when its effective mode changes). Role sub-spokes
             # share the parent's connection and are skipped.
             try:
+                # Push the TLS-verify policy to non-role spokes when set.
                 tv = self.state.get_global_config().get("hub_tls_verify")
                 if tv and not self._is_role_subspoke(spoke_id):
                     await self.send_to_spoke(Message(
@@ -2820,6 +3171,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # stays inert. Runs before the module_key early-return so agents (no
             # module_key) receive it too. Fire-and-forget; never blocks the loop.
             try:
+                # Push canary endpoints when a provider is registered and returns any.
                 provider = getattr(self, "_node_canary_provider", None)
                 if callable(provider):
                     pk_c = self._primary_key(spoke_id)
@@ -2850,6 +3202,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # HE account login re-pushed from the vault the moment it reconnects,
             # so autonomous renewals keep working with no operator action.
             try:
+                # For the certificates spoke, sync DNS credentials in the background.
                 if self.spoke_module_types.get(self._primary_key(spoke_id)) == "certificates":
                     # Background it: the sync waits for the spoke to become
                     # command-ready and does a 60s request/response, neither of
@@ -2862,6 +3215,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # first, then fall back to a spoke_id prefix match for legacy spokes.
             # See _PUSH_CONFIG_MODULE_KEY / _PUSH_CONFIG_PREFIX_MAP (branch-tag
             # space — NOT the update-source config-key space).
+            # Resolve the spoke's module type.
             pk = self._primary_key(spoke_id)
             mtype = self.spoke_module_types.get(pk, "")
 
@@ -2872,6 +3226,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # module_key, so this must precede the early-return below) so the
             # proxy always reflects its current assignment after a restart.
             if mtype == "proxy":
+                # Build and send the proxy's tenant config.
                 try:
                     import access as _access
                     ptenant = self.state.get_spoke_tenant(pk) or ""
@@ -2892,6 +3247,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 except Exception as e:
                     logger.warning(f"Failed to push tenant to proxy {spoke_id}: {e}")
 
+            # Map the module type to a branch tag.
             module_key = _PUSH_CONFIG_MODULE_KEY.get(mtype)
             if not module_key:
                 # Legacy prefix-based fallback: module_key = the matching KEY in
@@ -2901,6 +3257,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         module_key = key
                         break
 
+            # No branch tag: nothing to push.
             if not module_key:
                 return
 
@@ -2925,21 +3282,26 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # existed, so its request_response could never see the reply →
                 # always a 30s timeout → spoke marked draining → push queued, and
                 # stale queued CS_CONFIG_UPDATEs then flushed on top of it.
+                # During the connect-time deferral window, just flag that a push is wanted.
                 _defer = self._cs_connect_defer.get(spoke_id)
                 if _defer is not None and (time.time() - _defer[0]) < 120:
                     _defer[1] = True
                     return
+                # Otherwise push the full cs config now.
                 await self.push_cs_full_config(spoke_id, reason="config")
                 return
 
             # Handle Firewall multi-instance config
             if module_key == 'opn':
+                # Load the configured firewalls.
                 firewalls = self.state.get_global_config().get("firewalls", [])
                 # Match through _primary_key on both sides (see the nw branch):
                 # a binding saved before/after the guid-identity migration must
                 # still resolve to this spoke.
                 fw_config = next((f for f in firewalls if isinstance(f, dict) and f.get("spoke_id")
                                   and self._primary_key(f.get("spoke_id")) == pk), None)
+                # Use this spoke's firewall; otherwise fall back to the first OPNsense entry and
+                # warn.
                 if fw_config:
                     config = fw_config
                 else:
@@ -2954,6 +3316,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # vault-backed firewall still authenticates after a spoke
                 # reconnect (hourly self-update, reboot, …) — mirrors the nw
                 # branch below.
+                # Overlay vault secrets and warn about missing required fields.
                 if config:
                     import instance_vault as _instance_vault
                     config = await _instance_vault.overlay(self, config, "firewalls")
@@ -2979,6 +3342,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # moment the two sides are on different identity generations
                 # — this spoke would then get ZERO devices (no fallback saves
                 # it, since it isn't unbound either), not a wrong spoke's.
+                # Pick the devices bound to this spoke, else the unbound ones.
                 devices = self.state.get_global_config().get("nw_devices", []) or []
                 mine = [d for d in devices if isinstance(d, dict)
                         and self._primary_key(d.get("spoke_id") or "") == pk]
@@ -2990,12 +3354,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # tenant filter (Stage 1) returns shared devices to ANY tenant
                 # reader (shared-tenant-flag invariant). Read via access (cached
                 # at startup + tenant writes) to avoid a circular import here.
+                # Overlay vault secrets onto the devices.
                 import access as _access
                 import instance_vault as _instance_vault
                 mine = await _instance_vault.overlay_many(self, mine, "nw_devices")
                 # Per-tenant poll knobs (jitter/caps/cadence): overlay the
                 # owning tenant's overrides on the global admin defaults so each
                 # tenant's spoke self-schedules with that tenant's settings.
+                # Per-tenant poll settings, then the payload.
                 _poll_cfg = _access.nw_poll_cfg_for_tenant(
                     self, _access.nw_spoke_tenant(self, spoke_id))
                 config = {"devices": _project_nw_devices(mine),
@@ -3006,12 +3372,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # appliances. Push the appliances bound to this spoke; fall back
                 # to unbound appliances (single-product deployments). Mirrors
                 # the nw branch.
+                # Pick the appliances bound to this spoke, else the unbound ones.
                 import access as _access
                 import copy as _copy
                 appliances = self.state.get_global_config().get("truenas_appliances", []) or []
                 mine = [a for a in appliances if isinstance(a, dict) and a.get("spoke_id") == spoke_id]
                 if not mine:
                     mine = [a for a in appliances if isinstance(a, dict) and not a.get("spoke_id")]
+                # Build the payload with deep copies, the shared tenant and default poll interval.
                 config = {"appliances": [_copy.deepcopy(a) for a in mine],
                           "shared_tenant_id": _access.shared_tenant_id() or "",
                           "default_poll_interval":
@@ -3026,6 +3394,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # projects the LDAP_* base fields) because it needs hub-global
                 # OIDC config + every instance to compute the peer list. Handled
                 # BEFORE the generic instance branch (ldap is also a key there).
+                # Directory spoke: build the merged LDAP and Entra config.
                 config = self._ldap_config_for_spoke(spoke_id)
             elif module_key in _INSTANCE_CONFIG_SOURCES:
                 # NAC / IPAM / Directory migrated to multi-instance storage
@@ -3062,6 +3431,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # stops matching the moment the two sides are on different
                 # identity generations, and with the "never guess" fallback
                 # above that means NO config at all (not a wrong spoke's).
+                # Find the instance bound to this spoke, else an unbound one.
                 storage_key, project = _INSTANCE_CONFIG_SOURCES[module_key]
                 gc = self.state.get_global_config()
                 instances = gc.get(storage_key, []) or []
@@ -3071,6 +3441,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 if inst is None:
                     inst = next((x for x in instances
                                  if isinstance(x, dict) and not x.get("spoke_id")), None)
+                # Overlay vault secrets and project the instance into the payload.
                 if inst is not None:
                     import instance_vault as _instance_vault
                     inst = await _instance_vault.overlay(self, inst, storage_key)
@@ -3083,6 +3454,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     # nothing here is this spoke's to receive.
                     config = {}
             else:
+                # Any other module: use its global config section.
                 config = self.state.get_global_config().get(module_key, {})
 
             # NAC/CPPM config-delivery gate. A connected-but-unconfigured CPPM
@@ -3095,6 +3467,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # UPDATE_CONFIG (which would only keep the spoke returning the same
             # error). Clear the flag only when a host-bearing config is pushed.
             if module_key == "cppm":
+                # A CPPM config without a host is not pushed; warn once.
                 cppm_host = (config or {}).get("host") if isinstance(config, dict) else None
                 if not cppm_host:
                     if spoke_id not in self._nac_unconfigured_spokes:
@@ -3110,11 +3483,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             # the spoke returning "CPPM host not configured"
                 # A usable host is available — clear any prior unconfigured flag
                 # so the query loops resume on the next cycle.
+                # Configured now: clear the warned flag.
                 self._nac_unconfigured_spokes.discard(spoke_id)
 
+            # Nothing to push.
             if not config:
                 return
 
+            # Send the config as UPDATE_CONFIG.
             msg = Message(
                 header=MessageHeader(
                     message_id=str(uuid.uuid4()),
@@ -3127,6 +3503,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             await self.send_to_spoke(msg)
             logger.info(f"Pushed {module_key} config to {spoke_id}")
         except Exception as e:
+            # Log any failure in the push.
             logger.error(f"Failed to push config to {spoke_id}: {e}")
 
     def _ldap_config_for_spoke(self, spoke_id: str):
@@ -3150,12 +3527,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
           ref works too.
 
         Returns None when no ldap instance is configured (nothing to push)."""
+        # Read the global config.
         gc = self.state.get_global_config()
         # Setup → Directory (LDAP) SERVER config (global_config["ldap"]) is the
         # Global-Admin-set source of truth. It takes PRECEDENCE over the legacy
         # ldap_instances entry (and the dc=example,dc=org install default) per
         # field via merge_ldap_connection, so the Setup values actually flow to
         # the spoke instead of the install-time fallback.
+        # Global LDAP server config and the instance list.
         gldap = gc.get("ldap") or {}
         instances = gc.get("ldap_instances", []) or []
         # Match through _primary_key on BOTH sides, not raw string equality —
@@ -3168,6 +3547,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # ANOTHER spoke's directory server/credentials onto this one; gldap
         # (the global Setup source, not a specific spoke's secret) is the
         # only safe fallback, handled by the empty-check right below.
+        # Find the instance bound to this spoke, else an unbound one.
         pk = self._primary_key(spoke_id)
         inst = next((x for x in instances
                      if isinstance(x, dict) and self._primary_key(x.get("spoke_id") or "") == pk), None)
@@ -3177,7 +3557,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Nothing to push only when BOTH sources are empty.
         if inst is None and not gldap:
             return None
+        # Merge the server config with the instance's connection settings.
         from routes.ldap import merge_ldap_connection, normalize_mirror_peers
+        # Fill the server id.
         inst = inst or {}
         cfg = merge_ldap_connection(gldap, inst)
         cfg["LDAP_SERVER_ID"] = str(gldap.get("server_id") or inst.get("server_id")
@@ -3185,6 +3567,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Mirror peers: the Setup panel's list wins; otherwise derive the peer set
         # from the OTHER ldap_instances (legacy 2-node mirror wiring).
         gpeers = normalize_mirror_peers(gldap.get("mirror_peers"))
+        # Use the Setup panel's peers, else derive peers from the other instances.
         if gpeers:
             peers = gpeers
         else:
@@ -3198,7 +3581,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         "server_id": str(other.get("server_id") or other.get("id") or ""),
                         "url": purl,
                     })
+        # Serialise the peers.
         cfg["LDAP_MIRROR_PEERS"] = json.dumps(peers)
+        # Add Entra credentials from the OIDC config.
         try:
             from security.oidc import get_oidc_config
             from security.credential_store import resolve_private_key_material
@@ -3212,11 +3597,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             cfg["ENTRA_ROPC_SCOPE"] = ((gc.get("oidc") or {}).get("ropc_scope")
                                        or "openid")
         except Exception as e:  # noqa: BLE001 — Entra optional; push LDAP anyway
+            # Missing OIDC config: log and fill blanks.
             logger.warning("ldap config: could not source Entra creds from OIDC: %s", e)
             for k in ("ENTRA_TENANT_ID", "ENTRA_CLIENT_ID",
                       "ENTRA_CLIENT_CERT", "ENTRA_CLIENT_KEY"):
                 cfg.setdefault(k, "")
             cfg.setdefault("ENTRA_ROPC_SCOPE", "openid")
+        # Return the payload.
         return cfg
 
     async def push_ldap_config_all(self) -> None:
@@ -3225,10 +3612,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Entra creds immediately instead of waiting for a reconnect. Multi-instance
         aware — ``push_config_to_spoke`` resolves each node to its own instance
         (its ``LDAP_SERVER_ID`` + peer list)."""
+        # List directory spokes.
         try:
             spokes = self.get_all_spokes_by_type("directory") or []
         except Exception:  # noqa: BLE001
             spokes = []
+        # Push to each; failures are only logged.
         for sid in spokes:
             try:
                 await self.push_config_to_spoke(sid)
@@ -3242,14 +3631,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         OU from its peer (or on the next touch). The spoke's
         ``LDAP_PROVISION_TENANT_OU`` is idempotent case-insensitively so a repeat
         never creates both ``LRB`` and ``lrb``."""
+        # Find the tenant's LDAP slug; none means nothing to do.
         from access import ldap_tenant_slug
         slug = ldap_tenant_slug(self, tenant_id)
         if not slug:
             return
+        # List directory spokes.
         try:
             spokes = self.get_all_spokes_by_type("directory") or []
         except Exception:  # noqa: BLE001
             spokes = []
+        # Ask each one to provision the OU; failures are only logged.
         for sid in spokes:
             try:
                 await self.request_response(sid, "LDAP_PROVISION_TENANT_OU",
@@ -3262,6 +3654,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     _CS_FULL_PUSH_DEDUP_S = 60.0
 
     def _spawn_cs_push(self, coro) -> None:
+        """Start a cs push task and keep a reference until it finishes."""
+        # Keep a reference so the task is not garbage-collected mid-run.
         t = asyncio.create_task(coro)
         self._cs_push_tasks.add(t)
         t.add_done_callback(self._cs_push_tasks.discard)
@@ -3274,18 +3668,22 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         save routes. Falls back to the legacy reconnect push
         (``push_cs_hub_config``) when the simulations routes aren't registered
         or the full push fails. Never raises."""
+        # Record when this push happened.
         try:
             self._cs_full_push_ts[self._primary_key(spoke_id)] = time.time()
         except Exception:  # noqa: BLE001
             pass
+        # Use the full-config push when available; it returns True on success.
         full = getattr(self, "_cs_full_config_push", None)
         if callable(full):
             try:
                 if await full(spoke_id, reason=reason):
                     return
             except Exception as exc:  # noqa: BLE001
+                # Fall back to the legacy push on failure.
                 logger.warning("cs full-config push (%s) to %s failed, falling back "
                                "to legacy re-push: %s", reason, spoke_id, exc)
+        # Legacy re-push of the hub-owned config.
         try:
             await self.push_cs_hub_config(spoke_id)
         except Exception as exc:  # noqa: BLE001
@@ -3295,10 +3693,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """CS_CONFIG_REQUEST: the spoke asks for config after connecting. Push the
         full config unless its hash already matches, or a full push to it went
         out within the dedup window (the reconnect push is usually in flight)."""
+        # Skip if a full push just happened.
         try:
             pk = self._primary_key(spoke_id)
             if (time.time() - self._cs_full_push_ts.get(pk, 0.0)) < self._CS_FULL_PUSH_DEDUP_S:
                 return
+            # Skip if the spoke's config hash already matches.
             expected_fn = getattr(self, "_cs_expected_config_hash", None)
             if spoke_hash and callable(expected_fn):
                 try:
@@ -3306,22 +3706,27 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         return
                 except Exception:  # noqa: BLE001 — unknown expected hash → push
                     pass
+            # Otherwise push the full config.
             await self.push_cs_full_config(spoke_id, reason="request")
         except Exception as exc:  # noqa: BLE001
+            # Log any failure.
             logger.warning("CS_CONFIG_REQUEST from %s failed: %s", spoke_id, exc)
 
     async def _cs_github_pull_if_empty(self, tenant_id: str) -> None:
         """Hub is the sole GitHub client: for a github-managed tenant whose config
         the hub hasn't pulled yet, pull it NOW so a push delivers the real config
         (not an empty hub-owned override). Best-effort."""
+        # Read the tenant's source of truth and whether config is already stored.
         try:
             _sot = await self.simulations_store.get_source_of_truth(tenant_id)
             _have = bool((await self.simulations_store.get_sim_conf_content(tenant_id) or "").strip())
+            # GitHub-managed but empty: pull from GitHub if configured.
             if _sot == "github" and not _have:
                 from simulations import github_config_client as _ghc
                 _gh_cfg = await self.simulations_store.get_github_config(tenant_id, resolve=True) or {}
                 if _ghc.is_configured(_gh_cfg):
                     _pulled = await _ghc.pull(_gh_cfg)
+                    # Store the pulled sim config and user overrides.
                     if _pulled:
                         if _pulled.get("sim_conf") is not None:
                             await self.simulations_store.set_sim_conf_content(
@@ -3330,6 +3735,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             await self.simulations_store.set_user_overrides_content(
                                 tenant_id, _pulled["user_overrides"])
         except Exception as exc:  # noqa: BLE001 — best-effort pull, never block a push
+            # Log and continue on failure.
             logger.debug("cs github pull-if-empty for %s failed: %s", tenant_id, exc)
 
     async def push_cs_hub_config(self, spoke_id: str) -> None:
@@ -3355,6 +3761,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         isn't enabled, so an unbound/non-cs spoke is left untouched. Best-effort:
         a transport failure is logged, not raised (the spoke retries on the next
         reconnect and the cs_bridge still re-syncs usb_config every cycle)."""
+        # Find the spoke's tenant; none means nothing to push.
         try:
             tenant_id = self.state.get_spoke_tenant(spoke_id)
         except Exception:
@@ -3364,11 +3771,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Hub is the sole GitHub client: pull a github-managed tenant's config
         # now if the hub doesn't have it yet. Called unbound so the stub hubs in
         # the unit tests (which only carry the attributes used here) still work.
+        # Pull from GitHub first if needed.
         await LabManagerHub._cs_github_pull_if_empty(self, tenant_id)
         # Advertise follower mode to the (re)connecting spoke: 'hub' once the hub
         # has the config (hub-owned, or github pulled above) so repo_sync no-ops
         # and the spoke serves hub-delivered files as its whole config; 'github'
         # only in the brief bootstrap window before the hub's first pull lands.
+        # Decide whether the spoke follows the hub or GitHub.
         try:
             _sot2 = await self.simulations_store.get_source_of_truth(tenant_id)
             _have2 = bool((await self.simulations_store.get_sim_conf_content(tenant_id) or "").strip())
@@ -3382,6 +3791,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # that restarts (hourly self-update, reboot, fresh-install base_spoke
         # crash) drops the override until an admin re-saves the Sim Config tab.
         # Independent of hub_config_enabled — overrides are their own bucket.
+        # Read the stored sim and user overrides.
         try:
             sim_override = await self.simulations_store.get_sim_conf_content(tenant_id)
             user_override = await self.simulations_store.get_user_overrides_content(tenant_id)
@@ -3389,6 +3799,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             logger.debug("push_cs_hub_config: override read for %s failed: %s",
                          spoke_id, exc)
             sim_override = user_override = ""
+        # Collect the overrides to push.
         override_cfg: dict = {}
         if sim_override:
             override_cfg["sim_conf_override"] = sim_override
@@ -3403,6 +3814,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # to every (re)connecting cs spoke so its SPOKE_RELAY forward uses the
         # configured long-op / fast windows (WAN + busy-agent tuning). Global
         # for now; a per-tenant override can override these later.
+        # Copy any relay timeout settings.
         try:
             _gc = self.state.get_global_config() or {}
             for _rk in ("agent_relay_timeout_long_s", "agent_relay_timeout_fast_s"):
@@ -3415,10 +3827,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # the hub is the sole GitHub client, so an attached spoke neither pulls
         # nor commits; the creds ride along only for the brief 'github' bootstrap
         # window (before the hub's first pull) and for repo_url/branch display.
+        # Read the tenant's GitHub config.
         try:
             _gh = await self.simulations_store.get_github_config(tenant_id, resolve=True) or {}
         except Exception as exc:  # noqa: BLE001 — best-effort
             _gh = {}
+        # Include it, without the token for hub-following spokes.
         if _gh:
             # Follower spoke: strip the PAT — the hub is the sole GitHub client,
             # so an attached spoke must never pull/push GitHub. Kept only during
@@ -3430,6 +3844,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # with tenant overrides, enabled-only) so a reconnecting cs spoke's
         # SimQuotaEngine reconciles immediately instead of waiting for the next
         # Config → Sim Quotas save. Mirrors the effective-USB re-push above.
+        # Compute the tenant's effective sim quotas.
         try:
             from simulations.routes import _effective_sim_quotas as _eff_sq
             eff_sq = await _eff_sq(tenant_id)
@@ -3437,12 +3852,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             eff_sq = []
             logger.debug("push_cs_hub_config: effective_sim_quotas for %s failed: %s",
                          spoke_id, exc)
+        # Include them when present.
         if eff_sq:
             override_cfg["effective_sim_quotas"] = eff_sq
+        # Push the overrides, queued if the spoke is draining or offline.
         if override_cfg:
             try:
                 outcome = await self._drain_aware_config_push(
                     spoke_id, "CS_CONFIG_UPDATE", override_cfg, timeout=30.0)
+                # Log whether the push was queued or delivered.
                 if outcome.get("queued"):
                     logger.info("CS override re-push to %s %s (tenant %s)",
                                 spoke_id,
@@ -3454,12 +3872,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             except Exception as exc:  # noqa: BLE001
                 logger.warning("CS override re-push to %s failed: %s",
                                spoke_id, exc)
+        # Read the tenant's hub config.
         try:
             hc = await self.simulations_store.get_hub_config(tenant_id)
         except Exception as exc:  # noqa: BLE001
             logger.debug("push_cs_hub_config: hub_config read for %s failed: %s",
                          spoke_id, exc)
             return
+        # Treat a non-dict as empty.
         hc = hc if isinstance(hc, dict) else {}
         if not hc.get("hub_config_enabled"):
             # Hub-owned sim config is OFF for this tenant — but GLOBAL USB dongle
@@ -3472,11 +3892,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # picks up a global dongle cert after a restart, so its pxmx agent
             # won't provision that dongle ("no eligible dongles" for a dongle the
             # admin approved globally).
+            # Hub config off: still push the effective USB lists.
             try:
                 from simulations.routes import (_normalize_usb_vidpids,
                                                 _normalize_usb_ignored)
             except Exception:  # noqa: BLE001 — lazy import; routes pulls FastAPI
                 return
+            # Tenant config and global approved/ignored USB lists.
             thc = dict(hc.get("hub_config") or {})
             try:
                 g_cert = await self.simulations_store.get_global_usb_vidpids()
@@ -3486,6 +3908,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 g_ign = await self.simulations_store.get_global_usb_ignored_vidpids()
             except Exception:  # noqa: BLE001
                 g_ign = []
+            # Merge global and tenant approved devices, deduplicated by vidpid.
             seen: set = set()
             cert: list = []
             for d in (_normalize_usb_vidpids(g_cert)
@@ -3494,15 +3917,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 if vp and vp not in seen:
                     seen.add(vp)
                     cert.append(d)
+            # Merge the ignored lists.
             ign = sorted(set(_normalize_usb_ignored(g_ign))
                         | set(_normalize_usb_ignored(thc.get("usb_ignored_vidpids"))))
+            # Nothing to push.
             if not cert and not ign:
                 return
+            # Push only the USB lists.
             usb_only = {"usb_vidpids": json.dumps(cert),
                         "usb_ignored_vidpids": json.dumps(ign)}
             try:
                 outcome = await self._drain_aware_config_push(
                     spoke_id, "CS_CONFIG_UPDATE", usb_only, timeout=30.0)
+                # Log whether the push was queued or delivered.
                 if outcome.get("queued"):
                     logger.info("CS effective-USB re-push to %s %s (tenant %s, "
                                 "hub_config off)", spoke_id,
@@ -3515,16 +3942,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 logger.warning("CS effective-USB re-push to %s failed: %s",
                                spoke_id, exc)
             return
+        # Hub config on: start from the tenant's hub config.
         cfg = dict(hc.get("hub_config") or {})
         # Effective USB lists (global + tenant, deduped) — the cs speak
         # re-filters dongles on these, so a global-only certification still
         # reaches a spoke whose tenant hub_config.usb_vidpids is empty.
+        # Import the USB normalisers lazily.
         try:
             from simulations.routes import (_normalize_usb_vidpids,
                                             _normalize_usb_ignored)
         except Exception:  # noqa: BLE001  (lazy import; routes pulls FastAPI)
             _normalize_usb_vidpids = None
             _normalize_usb_ignored = None
+        # Merge global and tenant USB lists into the config.
         if _normalize_usb_vidpids is not None:
             try:
                 g_cert = await self.simulations_store.get_global_usb_vidpids()
@@ -3546,11 +3976,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         | set(_normalize_usb_ignored(cfg.get("usb_ignored_vidpids"))))
             cfg["usb_vidpids"] = json.dumps(cert)
             cfg["usb_ignored_vidpids"] = json.dumps(ign)
+        # Nothing to push.
         if not cfg:
             return
+        # Push the config, queued if needed.
         try:
             outcome = await self._drain_aware_config_push(
                 spoke_id, "CS_CONFIG_UPDATE", cfg, timeout=30.0)
+            # Log whether the push was queued or delivered.
             if outcome.get("queued"):
                 logger.info("CS hub config re-push to %s %s (tenant %s)",
                             spoke_id,
@@ -3565,6 +3998,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     async def broadcast_log_level(self, enabled: bool):
         """Broadcasts the desired logging level to all connected spokes."""
+        # Log the change and build a template message.
         logger.info(f"Broadcasting debug mode: {'ENABLED' if enabled else 'DISABLED'}")
         msg_id = str(uuid.uuid4())
         msg = Message(
@@ -3578,6 +4012,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         )
 
         # We iterate over active connections and send to each specifically
+        # Send a separate message to each connected spoke.
         tasks = []
         for sid in list(self.active_connections.keys()):
             # Create a copy of the message for each spoke with the correct destination_id
@@ -3594,9 +4029,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # and register the id so the spoke's COMMAND_RESULT ack is recognized
             # as an expected broadcast ack (DEBUG) instead of "unknown message ID"
             # (WARNING) — see the COMMAND_RESULT dispatch in handle_connection.
+            # Track the id for acknowledgement and queue the send.
             self._register_broadcast_ack(spoke_msg.header.message_id)
             tasks.append(self.send_to_spoke(spoke_msg))
 
+        # Send them all in parallel, ignoring individual failures.
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -3607,6 +4044,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         its OWN in-memory view synchronously in ``clear_all_logs`` before this,
         so the UI is empty the instant the route returns; the spoke-side disk
         truncation lands whenever each spoke dispatches the command."""
+        # Send CLEAR_LOGS to each connected spoke.
         logger.info("Broadcasting CLEAR_LOGS to connected spokes/agents")
         tasks = []
         for sid in list(self.active_connections.keys()):
@@ -3623,8 +4061,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # so the spoke's COMMAND_RESULT ack is recognized as an expected
             # broadcast ack (DEBUG) instead of "unknown message ID" (WARNING) —
             # which fired on every Clear-Logs click before this.
+            # Track the id for acknowledgement and queue the send.
             self._register_broadcast_ack(spoke_msg.header.message_id)
             tasks.append(self.send_to_spoke(spoke_msg))
+        # Send them all in parallel, ignoring individual failures.
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -3653,6 +4093,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self.cs_bridge_logs.clear()
         console_lines = len(self.console_logs)
         self.console_logs.clear()
+        # Clear each relayed agent buffer, counting lines.
         agent_counts = {}
         for aid, dq in list(self.agent_logs.items()):
             agent_counts[aid] = len(dq)
@@ -3668,12 +4109,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         spoke_count = len(self.active_connections)
         await self.broadcast_clear_logs()
 
+        # Log a summary of what was cleared.
         logger.warning(
             "[diag] Clear Logs: hub deque %d + cert-dist %d + cs-bridge %d + "
             "console %d + agent/spoke %d lines across %d buffer(s); truncated %d "
             "on-disk file(s) on hub; broadcast to %d connected spoke(s)",
             hub_lines, cert_dist_lines, cs_bridge_lines, console_lines, agent_lines,
             len(agent_counts), len(files), spoke_count)
+        # Return the counts.
         return {
             "status": "ok",
             "hub_lines": hub_lines,
@@ -3693,11 +4136,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ``/setup/approve_spoke`` flow and the PSK claim flow
         (``/sim/api/tenant/{t}/spokes/{id}/claim``). Mirrors the connected-push
         in api.py approve_spoke (561-592)."""
+        # Approve and bind in state, then persist immediately.
         pk = self._primary_key(spoke_id)
         self.state.register_module(pk, approved=True)
         self.state.set_spoke_tenant(pk, tenant_id)
         self.approved_modules[pk] = True
         await self.state.save_state_now()
+        # If connected, provision a fresh session key, approve and push config.
         if pk in self.active_connections:
             session_secret = self.key_manager.generate_first_secret(pk)
             # Zero-touch provisioning MUST be plaintext. A newly-approved spoke
@@ -3720,6 +4165,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # connect that stalls push_config and flaps the WS. The spoke-side
             # deferral (_drain_pending_encrypted) closes the back-to-back
             # encrypted UPDATE_CONFIG race without the await.
+            # Sign the key push with the previous secret only if the spoke is already authenticated.
             prev_secret = self.key_manager.current_session_secret(pk)
             key_sign = None if not self.spoke_authenticated.get(pk) else prev_secret
             key_msg = Message(
@@ -3728,13 +4174,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     sender_id="hub", destination_id=spoke_id),
                 payload=MessagePayload(
                     type="SPOKE_UPDATE_SESSION_KEY", data={"secret": session_secret}))
+            # Send the new key.
             await self.send_to_spoke(key_msg, signing_secret=key_sign)
+            # Tell the spoke it is approved.
             approval_msg = Message(
                 header=MessageHeader(
                     message_id=str(uuid.uuid4()), timestamp=time.time(),
                     sender_id="hub", destination_id=spoke_id),
                 payload=MessagePayload(type="APPROVED", data={}))
             await self.send_to_spoke(approval_msg)
+            # Push its module config.
             await self.push_config_to_spoke(spoke_id)
         # Multi-role generic agent: when a base agent (module_type "agent") gets
         # approved — by admin, PSK, or a connect-with-secret — sweep up any of
@@ -3765,14 +4214,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         is accepted via the history window, then is pushed the new key). Returns
         ``{"status", "spoke_id", "connected", "pushed", "message"}``.
         """
+        # Unknown spoke: nothing to rotate.
         pk = self._primary_key(spoke_id)
         if pk not in self.key_manager.keys:
             return {"status": "ERROR", "spoke_id": spoke_id, "connected": False,
                     "pushed": False, "message": "no key for this spoke — nothing to rotate"}
+        # Rotate the key, keeping the previous secret to sign the push.
         prev_secret = self.key_manager.current_session_secret(pk)
         new_key = self.key_manager.rotate_key(pk)
         connected = pk in self.active_connections
         pushed = False
+        # Push the new key to a connected spoke, signed with the old one.
         if connected and prev_secret:
             msg = Message(
                 header=MessageHeader(
@@ -3785,10 +4237,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 pushed = True
             except Exception as e:  # noqa: BLE001
                 logger.error(f"On-demand rotation: failed to push new key to {spoke_id}: {e}")
+        # Record and log the rotation.
         self.record_spoke_event(spoke_id, "secret_rotated",
                                 f"on-demand; connected={connected} pushed={pushed}")
         logger.info(f"On-demand secret rotation for {spoke_id} "
                     f"(connected={connected} pushed={pushed}).")
+        # Report the result.
         return {"status": "SUCCESS", "spoke_id": spoke_id, "connected": connected,
                 "pushed": pushed,
                 "message": f"secret rotated; {'new key pushed to spoke' if pushed else 'new key active on next connect'}"}
@@ -3813,16 +4267,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         by a later rotation, or wiped), auth would have failed and the spoke
         would self-heal via 1008 → zero-touch instead.
         """
+        # At most once a minute per spoke.
         now = time.time()
         if now - self._rotation_repush_at.get(spoke_id, 0.0) < 60:
             return
+        # Only for connected spokes.
         pk = self._primary_key(spoke_id)
         if pk not in self.active_connections:
             return
+        # Need both current and previous secrets.
         current = self.key_manager.current_session_secret(pk)
         prev = self.key_manager.previous_session_secret(pk)
         if not current or not prev:
             return
+        # Record the attempt and build the key message.
         self._rotation_repush_at[spoke_id] = now
         msg = Message(
             header=MessageHeader(
@@ -3830,6 +4288,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 sender_id="hub", destination_id=spoke_id),
             payload=MessagePayload(
                 type="SPOKE_UPDATE_SESSION_KEY", data={"secret": current}))
+        # Send it signed with the previous secret.
         try:
             await self.send_to_spoke(msg, signing_secret=prev)
             logger.info(f"Re-delivered current session key to {spoke_id} "
@@ -3837,6 +4296,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             self.record_spoke_event(spoke_id, "session_key_redelivered",
                                     "spoke on previous key — current key re-pushed")
         except Exception as e:  # noqa: BLE001
+            # Log failures.
             logger.error(f"Re-deliver session key to {spoke_id} failed: {e}")
 
     async def _maybe_reprovision_hub_secret(self, spoke_id: str) -> None:
@@ -3869,12 +4329,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         this is a narrow, best-effort top-up for one spoke that's behind, not
         a rotation trigger — it never calls ``rotate_hub_secret()``.
         """
+        # At most once a minute per spoke.
         now = time.time()
         if now - self._hub_secret_repush_at.get(spoke_id, 0.0) < 60:
             return
+        # Only for connected spokes.
         pk = self._primary_key(spoke_id)
         if pk not in self.active_connections:
             return
+        # Record the attempt and build the hub-secret message.
         self._hub_secret_repush_at[spoke_id] = now
         current_root_secret = self.key_manager.hub_secrets[0]
         msg = Message(
@@ -3883,6 +4346,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 sender_id="hub", destination_id=spoke_id),
             payload=MessagePayload(
                 type="SPOKE_SET_HUB_SECRET", data={"hub_secret": current_root_secret}))
+        # Send it.
         try:
             await self.send_to_spoke(msg)
             logger.info(f"Re-provisioned current hub root secret to {spoke_id} "
@@ -3890,6 +4354,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             self.record_spoke_event(spoke_id, "hub_secret_reprovisioned",
                                     "spoke verified via an older retained hub secret — current root re-pushed")
         except Exception as e:  # noqa: BLE001
+            # Log failures.
             logger.error(f"Re-provision hub secret to {spoke_id} failed: {e}")
 
     async def rotate_all_spoke_secrets_now(self) -> Dict[str, Any]:
@@ -3898,10 +4363,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Reuses ``rotate_spoke_secret_now`` per spoke (concurrent pushes), so each
         is non-disruptive and the old secret stays briefly valid via history.
         Returns ``{"status", "rotated": [...], "failed": [...]}``."""
+        # Approved spokes that have a key.
         targets = [sid for sid, ap in self.approved_modules.items() if ap
                    and sid in self.key_manager.keys]
 
+        # Rotate one spoke, returning its id on success.
         async def _one(sid):
+            """Rotate one spoke's secret; return its id on success or None."""
             try:
                 r = await self.rotate_spoke_secret_now(sid)
                 return sid if r.get("status") == "SUCCESS" else None
@@ -3909,6 +4377,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 logger.error(f"rotate-all: failed for {sid}: {e}")
                 return None
 
+        # Rotate all in parallel and summarise.
         results = await asyncio.gather(*(_one(sid) for sid in targets)) if targets else []
         rotated = [r for r in results if r]
         failed = [sid for sid in targets if sid not in rotated]
@@ -3925,9 +4394,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         idempotent handler no-ops (it's already on the new URL) and clears the
         ack. Loopback/auto spokes skip in-handler, so the fan-out is safe to
         send to everyone. Returns ``{"status","pushed","queued","failed"}``."""
+        # Every approved spoke.
         targets = [sid for sid, ap in self.approved_modules.items() if ap]
 
+        # Push to one spoke and report how it went.
         async def _one(sid):
+            """Push the hub URL to one spoke; return (id, "pushed"|"queued"|"failed")."""
             try:
                 r = await self.push_or_queue_to_spoke(
                     sid, "SPOKE_SET_HUB_URL", {"hub_url": hub_url})
@@ -3938,6 +4410,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 logger.error(f"push-hub-url: failed for {sid}: {e}")
                 return sid, "failed"
 
+        # Push to all in parallel and summarise.
         results = await asyncio.gather(*(_one(sid) for sid in targets)) if targets else []
         pushed = [sid for sid, kind in results if kind == "pushed"]
         queued = [sid for sid, kind in results if kind == "queued"]
@@ -3953,9 +4426,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         so an offline spoke gets it from the durable mailbox on next connect. The
         handler is idempotent (just rewrites the local config file), so the fan-out
         is safe for everyone. Returns ``{"status","pushed","queued","failed"}``."""
+        # Every approved spoke.
         targets = [sid for sid, ap in self.approved_modules.items() if ap]
 
+        # Push to one spoke and report how it went.
         async def _one(sid):
+            """Push the watchdog config to one spoke; return (id, "pushed"|"queued"|"failed")."""
             try:
                 r = await self.push_or_queue_to_spoke(sid, "SPOKE_SET_WATCHDOG", wd_cfg)
                 return sid, ("queued" if r.get("queued") else "pushed")
@@ -3963,6 +4439,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 logger.error(f"push-watchdog: failed for {sid}: {e}")
                 return sid, "failed"
 
+        # Push to all in parallel and summarise.
         results = await asyncio.gather(*(_one(sid) for sid in targets)) if targets else []
         pushed = [sid for sid, kind in results if kind == "pushed"]
         queued = [sid for sid, kind in results if kind == "queued"]
@@ -3975,27 +4452,35 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         save-time path; ``push_config_to_spoke`` reconciles on every connect).
         Returns pushed/queued/failed plus ``refused`` — nodes that declined
         ``on`` because the hub cert does not verify from them."""
+        # Approved spokes, excluding role sub-spokes.
         targets = [sid for sid, ap in self.approved_modules.items()
                    if ap and not self._is_role_subspoke(sid)]
 
+        # Push to one spoke and report how it went.
         async def _one(sid):
+            """Push the TLS-verify mode to one spoke; return (id, outcome, message)."""
             try:
                 r = await self.push_or_queue_to_spoke(sid, "SPOKE_SET_TLS_VERIFY", {"mode": mode})
+                # Queued for later delivery.
                 if r.get("queued"):
                     return sid, "queued", ""
+                # Unwrap the reply; an ERROR status means the spoke refused.
                 res = r.get("result") or {}
                 res = (res.get("payload") or {}).get("data", res) if isinstance(res, dict) else {}
                 if isinstance(res, dict) and res.get("status") == "ERROR":
                     return sid, "refused", str(res.get("message") or "")
+                # Delivered.
                 return sid, "pushed", ""
             except Exception as e:  # noqa: BLE001
                 logger.error(f"push-tls-verify: failed for {sid}: {e}")
                 return sid, "failed", str(e)
 
+        # Push to all in parallel and group by outcome.
         results = await asyncio.gather(*(_one(sid) for sid in targets)) if targets else []
         out = {"status": "SUCCESS", "pushed": [], "queued": [], "failed": [], "refused": []}
         for sid, kind, msg in results:
             out[kind].append({"spoke_id": sid, "message": msg} if kind == "refused" else sid)
+        # Log and return the summary.
         logger.info("Hub-TLS-verify fan-out (%s): %d pushed, %d queued, %d refused, %d failed.",
                     mode, len(out["pushed"]), len(out["queued"]), len(out["refused"]),
                     len(out["failed"]))
@@ -4022,6 +4507,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         threat response), and survive a hub restart. Returns ``{"status",
         "spoke_id", "was_connected", "message"}``.
         """
+        # Close any live connection.
         pk = self._primary_key(spoke_id)
         was_connected = pk in self.active_connections
         ws = self.active_connections.get(pk)
@@ -4030,6 +4516,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 await ws.close(code=1008, reason="Revoked by admin")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"revoke_spoke: could not close live WS for {spoke_id}: {e}")
+        # Mark the spoke as not approved.
         self.approved_modules[pk] = False
         self.state.register_module(pk, approved=False)
         # Persist the revoke reason so both the spokes/agents module and the
@@ -4043,16 +4530,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 "revoked_by": source or "admin",
             })
         except Exception as e:  # noqa: BLE001
+            # Log and continue if the metadata cannot be saved.
             logger.warning(f"revoke_spoke: could not stamp revoke metadata for {spoke_id}: {e}")
+        # Persist, then delete the spoke's key.
         await self.state.save_state_now()
         self.key_manager.delete_spoke_key(pk)
         # Mailbox is guid-keyed after arm — clear by pk so a revoked armed
         # spoke's stranded queue/pending-ack (under its guid) is actually dropped.
         await self.mailbox.clear_spoke(pk)
+        # Record and log the revocation.
         self.record_spoke_event(spoke_id, "revoked",
                                 (reason or f"admin revoke; was_connected={was_connected}"))
         logger.warning(f"Spoke {spoke_id} revoked ({source}); was_connected={was_connected}; "
                        f"reason={reason or 'admin revoke'}; re-onboard + re-approve to return.")
+        # Report the result.
         return {"status": "SUCCESS", "spoke_id": spoke_id,
                 "was_connected": was_connected,
                 "reason": reason or "admin revoke", "source": source,
@@ -4071,6 +4562,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Stores the offending IP pair + timestamp so a recurrence within
         ``_CLONE_WATCH_WINDOW`` (``_clone_watch_confirms``) escalates to a
         confirmed compromise. Re-arming refreshes the timestamp/pair."""
+        # Record when the watch started and which two IPs were involved.
         self._clone_watch[pk] = {
             "since": time.time(),
             "ips": {current_ip, backup_ip},
@@ -4086,12 +4578,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         the pair never matches and the (expired) watch is dropped. Consumes the
         watch on a confirmed match; refreshes it for a different IP pair (still
         strike 1)."""
+        # No watch: not confirmed.
         w = self._clone_watch.get(pk)
         if not w:
             return False
+        # Expired watch: drop it and treat this as a new first strike.
         if time.time() - w.get("since", 0.0) > self._CLONE_WATCH_WINDOW:
             self._clone_watch.pop(pk, None)  # aged out — treat as a fresh strike 1
             return False
+        # Same IP pair again: confirmed clone.
         if {current_ip, backup_ip} == w.get("ips"):
             self._clone_watch.pop(pk, None)
             return True
@@ -4121,6 +4616,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             session's IP (a harvested BACKUP key is the intruder), which is the
             same conclusion in the common case.
         """
+        # The IP this spoke normally connects from.
         historical_ip = self._known_ip(pk) or current_ip
         # Block every offending IP that is NOT the historical/known-good one.
         to_block = sorted({ip for ip in (current_ip, backup_ip)
@@ -4133,6 +4629,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         # 1. FLAG immediately — CRITICAL audit line + spoke event + a persisted
         #    marker the WebUI surfaces so the operator acts now.
+        # Log a critical audit line and record a spoke event.
         logger.critical(
             "KEY-CLONE COMPROMISE: spoke %s used its CURRENT key from %s and a "
             "BACKUP key from %s concurrently (historical/known-good IP=%s). "
@@ -4146,6 +4643,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             f"current-key@{current_ip} + backup-key@{backup_ip}; "
             f"historical={historical_ip}; both killed, creds invalidated; "
             f"NSG-blocked new source(s)={to_block or '[]'}")
+        # Persist the compromise details.
         try:
             self.state.system_state.setdefault("key_clone_compromise", {})[pk] = {
                 "spoke_id": spoke_id,
@@ -4166,10 +4664,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # 3. revoke_spoke closes the still-active session, wipes ALL session keys
         #    (current + history), drops approval (re-onboard required), and clears
         #    the mailbox. Then revoke the mTLS cert so a harvested cert is dead too.
+        # Revoke the spoke.
         try:
             await self.revoke_spoke(spoke_id)
         except Exception as e:  # noqa: BLE001
             logger.error(f"key-clone: revoke_spoke({spoke_id}) failed: {e}")
+        # Revoke its mTLS certificate.
         try:
             await self._revoke_spoke_mtls_cert(spoke_id)
         except Exception as e:  # noqa: BLE001
@@ -4177,6 +4677,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # 4. NSG-block ONLY the new source(s) immediately — never the historical
         #    IP (it may front other legitimate spokes). reconcile_nsg() pushes the
         #    deny now rather than waiting for the periodic sweep.
+        # Block each new source IP, then reconcile the NSG.
         tm = getattr(self, "threat_monitor", None)
         if tm and to_block:
             for ip in to_block:
@@ -4185,6 +4686,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                                f"from a new IP (historical={historical_ip})")
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"key-clone: NSG block {ip} failed: {e}")
+            # Apply the blocks to the NSG.
             try:
                 await tm.reconcile_nsg()
             except Exception as e:  # noqa: BLE001
@@ -4241,6 +4743,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ok, reason = self.spoke_can_accept_commands(parent_spoke_id)
         if not ok:
             return False, reason  # "not_connected" or "unauthenticated"
+        # Ask the parent to sign a vouch for this sub-spoke.
         try:
             res = await self.request_response(
                 parent_spoke_id, "VOUCH_SUBSPOKE",
@@ -4256,9 +4759,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # never replied) vs a real spoke ERROR reply (payload present, status
         # ERROR — e.g. a handler that ran but refused). unwrap_spoke extracts
         # payload.data (the handler's return dict) when the envelope is present.
+        # No payload means no real reply.
         has_payload = isinstance(res, dict) and isinstance(res.get("payload"), dict)
         if not has_payload:
             return False, "timeout"
+        # Unwrap the reply body.
         try:
             import access as _access
             body = _access.unwrap_spoke(res)
@@ -4267,9 +4772,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         if not isinstance(body, dict) or body.get("status") != "SUCCESS":
             # Older agent without a VOUCH_SUBSPOKE handler → ERROR → pending.
             return False, "denied"
+        # Vouched only if the parent confirms this exact sub-spoke.
         d = body.get("data") or {}
         if d.get("vouched") is True and d.get("sub_spoke_id") == spoke_id:
             return True, ""
+        # Reply named a different sub-spoke.
         return False, "mismatch"
 
     async def _auto_approve_pending_subspokes(self, parent_spoke_id: str) -> None:
@@ -4290,8 +4797,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         covers sub-before-parent connect order AND boot-seeded roles (the parent
         re-spawns roles at boot without a hub ``LOAD_ROLE`` — the live round-trip
         handles these with no prior hub state)."""
+        # The parent's primary key and tenant.
         parent_pk = self._primary_key(parent_spoke_id)
         tenant = self.state.get_spoke_tenant(parent_pk) or ""
+        # Check every connected, not-yet-approved sub-spoke of this parent.
         for sid in list(self.active_connections.keys()):
             if sid == parent_pk:
                 continue
@@ -4299,16 +4808,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 continue
             if self._primary_key(self.spoke_parent_map.get(sid, "")) != parent_pk:
                 continue
+            # Ask the parent to vouch; record a failure and skip if it does not.
             vouched, reason = await self._parent_vouches(sid, parent_spoke_id)
             if not vouched:
                 self.record_spoke_event(sid, "parent_vouch_failed",
                                         f"parent={parent_spoke_id} reason={reason}")
                 continue
+            # Vouched: log, approve, bind and record it.
             logger.info(f"Parent auto-approve (sweep): {sid} via parent "
                         f"{parent_spoke_id} (tenant={tenant or 'unassigned'}).")
             await self.approve_and_bind_spoke(sid, tenant)
             self.record_spoke_event(sid, "parent_auto_approve",
                                     f"parent={parent_spoke_id}")
+        # Refresh the cached known-module list.
         self.known_modules = self.state.system_state["known_modules"]
 
     async def _readopt_agent_roles(self, agent_spoke_id: str) -> None:
@@ -4324,10 +4836,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         (bounded) for the agent to prove its session key so ``LOAD_ROLE`` won't
         503, then re-pushes the missing roles one at a time. Best-effort and
         single-flight per agent; a role already running is skipped."""
+        # Roles assigned to this agent; none means nothing to do.
         roles = self.agent_assigned_roles(agent_spoke_id)
         if not roles:
             return
         pushed = []  # roles re-pushed this pass (they now own their port)
+        # Guard against concurrent re-adoption for the same agent.
         inflight = getattr(self, "_readopt_inflight", None)
         if inflight is None:
             inflight = self._readopt_inflight = set()
@@ -4335,9 +4849,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         if pk in inflight:
             return
         inflight.add(pk)
+        # Always clear the in-flight flag when done.
         try:
             # The agent authenticates a beat after the connect handler pushes its
             # session key; give it up to ~10s to become command-ready.
+            # Wait up to 10 s for the agent to be ready for commands.
             for _ in range(20):
                 ok, _reason = self.spoke_can_accept_commands(agent_spoke_id)
                 if ok:
@@ -4347,6 +4863,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 logger.info("readopt[%s]: agent never became command-ready; "
                             "skipping role re-adoption this connect", agent_spoke_id)
                 return
+            # Re-push each role whose sub-spoke is offline.
             for role in roles:
                 # Deploy roles are INSTALLS, not hosted sub-spokes: the software
                 # they stand up runs as a system service (or dials in under its
@@ -4361,6 +4878,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                  "(install, not a hosted sub-spoke)",
                                  agent_spoke_id, role)
                     continue
+                # Skip roles whose sub-spoke is already connected.
                 sub_pk = self._primary_key(f"{agent_spoke_id}-{role}")
                 if sub_pk in self.active_connections:
                     continue  # role sub-spoke already live — nothing to heal
@@ -4370,6 +4888,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # re-pushed on EVERY reconnect, silently stealing the port back
                 # from whichever role actually serves traffic. Roles already
                 # live win; otherwise the first in registry order wins.
+                # Skip roles that would clash on a listener port with one already live.
                 effective = [r for r in roles
                              if self._primary_key(f"{agent_spoke_id}-{r}")
                              in self.active_connections] + pushed
@@ -4385,6 +4904,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         agent_spoke_id, "role_readopt_conflict",
                         f"role={role} conflicts_with={clash}")
                     continue
+                # Re-push the role and record it.
                 try:
                     logger.info("readopt[%s]: re-pushing LOAD_ROLE %s "
                                 "(sub-spoke offline)", agent_spoke_id, role)
@@ -4397,6 +4917,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     logger.exception("readopt[%s]: LOAD_ROLE %s failed",
                                      agent_spoke_id, role)
         finally:
+            # Clear the in-flight flag.
             inflight.discard(pk)
 
     # Reasons returned by spoke_can_accept_commands for the False cases.
@@ -4426,11 +4947,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         key + send its first signed frame before we declare it unauthenticated,
         so a just-approved spoke isn't falsely rejected.
         """
+        # Not connected: commands cannot be delivered.
         pk = self._primary_key(spoke_id)
         if pk not in self.active_connections:
             return False, self._CMD_NOT_CONNECTED
+        # Authenticated: commands can be delivered.
         if self.spoke_authenticated.get(pk):
             return True, ""
+        # Work out how long ago the spoke connected.
         tel = self.spoke_telemetry.get(pk) or {}
         last_attempt = tel.get("last_attempt")
         if last_attempt is None:
@@ -4438,10 +4962,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # NOT time.time() - 0 (which would look ancient and falsely fail-fast).
             conn_age = 0.0
         else:
+            # Parse the connect time; bad values count as fresh.
             try:
                 conn_age = time.time() - float(last_attempt)
             except (TypeError, ValueError):
                 conn_age = 0.0
+        # Connected over 10 s without authenticating: refuse.
         if conn_age > 10.0:
             return False, self._CMD_UNAUTHENTICATED
         # Fresh connection still warming up — give it the benefit of the doubt
@@ -4454,6 +4980,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     # slow-but-healthy agent isn't falsely flagged. The lm-opnsense saga ran
     # for hours in this state; 30s catches it on the first diagnostic tick
     # without racing a legitimate cold start.
+    # Seconds a spoke must stay unauthenticated before it is diagnosed.
     _UNAUTH_DIAGNOSIS_THRESHOLD_S = 30.0
 
     def _maybe_log_unauthenticated_agent(self, spoke_id: str) -> None:
@@ -4483,19 +5010,24 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ``GenericAgent`` logger (``genAgentLogger``) so it's distinguishable
         from generic Hub WARNING noise and surfaceable in the WebUI logs view.
         """
+        # Diagnose each spoke only once.
         pk = self._primary_key(spoke_id)
         if pk in self._unauth_warned_spokes:
             return
+        # Need a connect time.
         tel = self.spoke_telemetry.get(pk) or {}
         last_attempt = tel.get("last_attempt")
         if last_attempt is None:
             return
+        # Work out how long it has been connected.
         try:
             conn_age = time.time() - float(last_attempt)
         except (TypeError, ValueError):
             return
+        # Too soon to diagnose.
         if conn_age < self._UNAUTH_DIAGNOSIS_THRESHOLD_S:
             return
+        # Mark it diagnosed and log the remediation hint.
         self._unauth_warned_spokes.add(pk)
         genAgentLogger.error(
             f"Agent {spoke_id} has been connected for {int(conn_age)}s without "
@@ -4520,15 +5052,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         proof in ``handle_connection`` (which must decide whether to sign the
         challenge with the PSK BEFORE any approval happens). Constant-time
         compare; never logs the PSK."""
+        # Need both a tenant and a PSK.
         if not tenant_hint or not psk:
             return False
+        # Read the tenant's stored PSKs.
         try:
             psks = await self.simulations_store.get_psks(tenant_hint)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"PSK check: could not read PSKs for tenant {tenant_hint}: {e}")
             return False
+        # No stored PSKs: invalid.
         if not psks:
             return False
+        # Constant-time compare against each one.
         return any(hmac.compare_digest(str(p), psk) for p in psks)
 
     async def _try_psk_self_provision(self, spoke_id: str, tenant_hint: str, psk: str) -> bool:
@@ -4544,21 +5080,25 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         valid PSK. Idempotent: re-presenting a valid PSK re-affirms the same
         binding. Returns True on success, False on any mismatch/failure (the
         caller falls through to pending admin approval — never hard-closes)."""
+        # Read the tenant's stored PSKs.
         try:
             psks = await self.simulations_store.get_psks(tenant_hint)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"PSK self-provision: could not read PSKs for tenant {tenant_hint}: {e}")
             return False
+        # No stored PSKs: cannot self-provision.
         if not psks:
             return False
         # Constant-time compare against each stored PSK for the tenant.
         if not any(hmac.compare_digest(str(p), psk) for p in psks):
             return False
+        # Approve, bind and persist the spoke.
         pk = self._primary_key(spoke_id)
         self.state.register_module(pk, approved=True)
         self.state.set_spoke_tenant(pk, tenant_hint)
         self.approved_modules[pk] = True
         await self.state.save_state_now()
+        # Log and record the self-provision.
         logger.info(f"PSK self-provision: {spoke_id} auto-approved + bound to tenant {tenant_hint}.")
         self.record_spoke_event(spoke_id, "psk_self_provision", f"tenant={tenant_hint}")
         return True
@@ -4573,11 +5113,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         raises, never replies on this channel — the only signal the agent
         gets is the eventual APPROVAL_SUCCESS relay on success, identical to
         an admin-triggered approval."""
+        # Read the agent id, tenant hint and PSK; all are required.
         agent_id = (data.get("agent_id") or "").strip()
         tenant_hint = (data.get("tenant_hint") or "").strip()
         psk = data.get("psk") or ""
         if not agent_id or not tenant_hint or not psk:
             return
+        # Try auto-approval; log any error.
         try:
             await self._try_psk_agent_auto_approve(spoke_id, agent_id, tenant_hint, psk)
         except Exception:
@@ -4593,8 +5135,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         spoke). Returns True on success, False on any mismatch/failure (the
         agent stays pending for manual admin approval — never a hard-close,
         matching the zero-touch contract). The PSK itself is never logged."""
+        # PSK must be valid.
         if not await self._psk_is_valid(tenant_hint, psk):
             return False
+        # Approve the agent via the setup route helper.
         from routes.setup import _perform_agent_approval  # lazy: avoid import cycle
         try:
             await _perform_agent_approval(self, spoke_id, agent_id,
@@ -4604,6 +5148,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 f"PSK agent auto-approve: _perform_agent_approval failed for "
                 f"agent={agent_id} tenant={tenant_hint}")
             return False
+        # Log and record the approval.
         logger.info(
             f"PSK agent auto-approve: agent={agent_id} auto-approved + bound "
             f"to tenant {tenant_hint} via spoke {spoke_id}.")
@@ -4625,14 +5170,18 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         tenant_id. Returns a tenant only when EXACTLY one distinct tenant is found
         (a shared spoke aggregating mixed tenants → ``None``, left for the
         operator); ``None`` on no match so the caller leaves the spoke unbound."""
+        # No hosts: no tenant.
         if not isinstance(proxmox_hosts, list) or not proxmox_hosts:
             return None
+        # Collect tenants from CS-enabled agents behind each host.
         store = agent_config if isinstance(agent_config, dict) else {}
         tenants = set()
         for h in proxmox_hosts:
+            # Normalise the hostname; skip blanks.
             hn = str((h or {}).get("hostname") or "").strip().lower()
             if not hn:
                 continue
+            # Find the agent config by key, else by hostname or display name.
             entry = store.get(hn) if isinstance(store.get(hn), dict) else None
             if entry is None:
                 for v in store.values():
@@ -4642,9 +5191,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     if alt and alt == hn:
                         entry = v
                         break
+            # Note the tenant when client simulation is enabled for it.
             cs = (entry or {}).get("client_simulation") or {}
             if cs.get("enabled") and cs.get("tenant_id"):
                 tenants.add(cs.get("tenant_id"))
+        # Return a tenant only if exactly one was found.
         return next(iter(tenants)) if len(tenants) == 1 else None
 
     async def _handle_cs_telemetry(self, spoke_id: str, cs_data) -> None:
@@ -4660,6 +5211,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         dropped before dispatch). The inner ``continue`` belongs to the
         ``for hh in proxmox_hosts`` loop, not the message loop.
         """
+        # Ignore non-dict frames.
         if not isinstance(cs_data, dict):
             return
         pk = self._primary_key(spoke_id)
@@ -4679,6 +5231,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # cache-clear would refresh. A per-frame rebuild is cheap for this fleet;
         # correctness beats the saved CPU. (The spoke still stamps ``_content_sig``;
         # the hub just no longer gates on it.)
+        # Cache the frame and mark the snapshot dirty.
         self.simulations_cache[pk] = cs_data
         self._sim_cache_dirty = True  # warm-load snapshot flushed by run_sim_cache_flush_loop
         # Self-heal an UNBOUND simulation spoke's tenant from its backing agent's
@@ -4692,6 +5245,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # inherit it onto the spoke. Never overrides an existing binding; only
         # fires when the backing agents agree on ONE tenant (a shared spoke with
         # mixed tenants is left for the operator). Best-effort — never break ingest.
+        # Bind an unbound spoke to the one tenant its agents imply.
         try:
             if not self.state.get_spoke_tenant(pk):
                 _tid = self._infer_sim_spoke_tenant(
@@ -4708,6 +5262,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # os._exit+relaunch (config pushes queue to the mailbox instead). A
         # spoke that just restarted reports ``draining: false`` on its first
         # tick → clear drain so the hub resumes normal live pushes.
+        # Track drain state from the frame.
         try:
             if cs_data.get("draining"):
                 self.mark_draining(spoke_id)
@@ -4717,6 +5272,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             pass
         # Fan out to browsers subscribed on /sim/ws (tenant-scoped) on EVERY frame —
         # same rationale as the per-frame memo rebuild: never strand an update.
+        # Broadcast to browsers.
         try:
             await self.simulations_broadcaster.broadcast(
                 spoke_id, cs_data, self.state.get_spoke_tenant(spoke_id))
@@ -4727,8 +5283,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Simulations/VM Server view can be localized to the spoke payload shape
         # vs. the hub mapping. Keys + counts only — never values (a CS payload
         # may carry Proxmox tokens in other frames).
+        # Log a USB availability summary at debug.
         try:
+            # Count USB fields in one host's data.
             def _usb_sum(px):
+                """Count the USB-related fields in one host's telemetry."""
+                # Not a dict: no counts.
                 if not isinstance(px, dict):
                     return {}
                 return {
@@ -4737,6 +5297,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     "usb_state": len(px.get("usb_state") or []) if isinstance(px.get("usb_state"), list) else px.get("usb_state"),
                     "usb_count": px.get("usb_count"),
                 }
+            # Multi-host frame: summarise each host.
             ph = cs_data.get("proxmox_hosts")
             if isinstance(ph, list) and ph:
                 per = []
@@ -4751,6 +5312,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     })
                 logger.debug("CS_TELEMETRY cached for %s (multi-host usb=%s)", spoke_id, per)
             else:
+                # Legacy single-host frame.
                 logger.debug("CS_TELEMETRY cached for %s (legacy usb=%s top.usb_devices=%s)",
                              spoke_id, _usb_sum(cs_data.get("proxmox")),
                              len(cs_data.get("usb_devices") or []) if isinstance(cs_data.get("usb_devices"), list) else cs_data.get("usb_devices"))
@@ -4777,8 +5339,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         is inside the entry text), and the deque caps total volume per spoke so a
         chatty spoke can't starve memory at 10k-client scale.
         """
+        # Read the log entries.
         log_data = payload.get("data", {})
         entries = log_data.get("entries") if isinstance(log_data, dict) else None
+        # Store string entries in this spoke's buffer, creating it if needed.
         if isinstance(entries, list):
             pk = self._primary_key(spoke_id)
             if pk not in self.agent_logs:
@@ -4815,10 +5379,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         route), new frames are dropped so a client that drops and re-streams past
         the window can't keep filling the buffer.
         """
+        # Read the frame data; a hostname is required.
         data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
         hostname = data.get("hostname")
         if not hostname:
             return
+        # Key the buffer by tenant and hostname.
         try:
             tenant = self.state.get_spoke_tenant(self._primary_key(spoke_id)) or "default"
         except Exception:  # noqa: BLE001 — tenant resolution is best-effort
@@ -4833,9 +5399,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         if isinstance(enabled_at, (int, float)) and time.time() - float(enabled_at) > 30 * 60:
             return
 
+        # Ignore frames without lines.
         lines = data.get("lines") if isinstance(data.get("lines"), list) else []
         if not lines:
             return
+        # Create the host's buffer if needed.
         if key not in self.client_debug_logs:
             self.client_debug_logs[key] = deque(maxlen=self.client_debug_size)
         # Stamp each line with the hub receive time + originating level so the
@@ -4845,6 +5413,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         for line in lines:
             if isinstance(line, str):
                 self.client_debug_logs[key].append({"ts": _ts, "level": _lvl, "line": line})
+        # Log the count at debug.
         logger.debug("CS_DEBUG_LOG: stored %d lines for %s/%s", len(lines), tenant, hostname)
 
     def _inherit_agent_tenant(self, agent_id: str, spoke_id: str) -> None:
@@ -4865,14 +5434,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ``_relay_cs_event_inner`` / cs_bridge. A no-op when the spoke has no
         tenant (unassigned spoke) or the agent's tenant is pinned. Persisted via
         ``save_state``. Best-effort: never raises into the relay path."""
+        # Need an agent id.
         if not agent_id:
             return
+        # Find the spoke's tenant; none means nothing to inherit.
         try:
             spoke_tenant = self.state.get_spoke_tenant(self._primary_key(spoke_id))
         except Exception:
             spoke_tenant = None
         if not spoke_tenant:
             return
+        # Get or create the agent's config entry.
         try:
             store = self.state.system_state.setdefault("agent_config", {})
             agent_pk = self._agent_primary_key(agent_id)
@@ -4880,17 +5452,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             if not isinstance(entry, dict):
                 entry = {"display_name": agent_id}
                 store[agent_pk] = entry
+            # Copy its client-simulation settings.
             cs_cfg = dict(entry.get("client_simulation") or {})
             # Operator pinned a manual tenant → never roll it back to the spoke's
             # (shared) tenant. Clearing the override in the UI unpins it, so
             # inheritance resumes for a genuinely auto-assigned agent.
             if cs_cfg.get("tenant_pinned"):
                 return
+            # Update the tenant if it differs and mark state dirty.
             if cs_cfg.get("tenant_id") != spoke_tenant:
                 cs_cfg["tenant_id"] = spoke_tenant
                 entry["client_simulation"] = cs_cfg
                 self.state._mark_dirty()
         except Exception as _e:  # noqa: BLE001 — best-effort; never break relay
+            # Failures are only logged.
             logger.debug("agent tenant-inheritance write failed: %s", _e)
 
     async def _decrypt_inbound_payload(self, spoke_id: str, src: Optional[str],
@@ -4916,6 +5491,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         A frame that won't AEAD-decrypt under the key that HMAC-verified it is
         corrupted or hostile — it is dropped, never dispatched as ciphertext.
         """
+        # Pick the decrypt key: previous secret if the frame verified with it, else current.
         from security.frame_crypto import unwrap
         payload = msg_data.get("payload", {})
         pk = self._primary_key(spoke_id)
@@ -4923,16 +5499,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             dec_secret = self.key_manager.previous_session_secret(pk)
         else:
             dec_secret = self.key_manager.current_session_secret(pk)
+        # Plaintext frame: return the key unchanged.
         if not is_encrypted(payload):
             return dec_secret  # plaintext / legacy passthrough (may be None)
+        # Encrypted but no key: drop.
         if dec_secret is None:
             logger.warning("Encrypted frame from %s but no decrypt key on record — dropping", spoke_id)
             return _H4_DROP
+        # Decrypt in place; drop on failure.
         try:
             unwrap(dec_secret, payload)
         except (InvalidTag, ValueError) as e:
             logger.warning("Dropping tampered/undecryptable frame from %s: %s", spoke_id, e)
             return _H4_DROP
+        # Return the key used.
         return dec_secret
 
     def _relay_session_owner_ok(self, sess, sender_spoke_id: str, *,
@@ -4948,12 +5528,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         emits a critical ``spoke_session_pivot`` anomaly (→ NSG response when an
         IP is attributable) and refuses. Never raises — a guard bug must not
         break a legitimate relay."""
+        # No owner or sender recorded: allow.
         try:
             owner = (sess or {}).get("spoke_id") or ""
             if not owner or not sender_spoke_id:
                 return True
+            # Same spoke owns the session: allow.
             if self._primary_key(owner) == self._primary_key(sender_spoke_id):
                 return True
+            # Different owner: report a critical anomaly (or log) and refuse.
             tm = getattr(self, "threat_monitor", None)
             if tm is not None:
                 tm.note_anomaly(
@@ -4965,6 +5548,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                kind, owner, sender_spoke_id)
             return False
         except Exception:
+            # Errors fail open so relays never crash.
             return True
 
     async def _handle_agent_relay_up(self, spoke_id: str, msg_data, payload,
@@ -4986,6 +5570,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 always continue), unmatched AGENT_RELAY_UP frames are intentionally
                 allowed to fall through — do not change this.
         """
+        # Unpack the relay envelope.
         relay_data = payload.get("data", {})
         agent_id = relay_data.get("agent_id")
         original_msg = relay_data.get("original_payload", {})
@@ -4994,6 +5579,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # per-agent processing, so a renamed node's agent_config/heartbeat/telemetry
         # are re-keyed to the new agent_id here. install_uuid/hostname ride the
         # relay envelope from the pxmx spoke's _relay_agent_msg_up.
+        # Reconcile the agent's identity.
         self._reconcile_spoke_identity(
             agent_id,
             (relay_data.get("install_uuid") or "").strip(),
@@ -5037,6 +5623,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # agent's REAL last-seen age after a disconnect/hub-restart instead of
             # "Never connected". get_status derives GREEN/YELLOW/RED from this age,
             # so a genuinely-dead agent still ages out.
+            # Update the agent's in-memory and persisted last-seen.
             _hb_key = f"{_spk_pk}:{agent_pk}"
             self.heartbeat.last_seen[_hb_key] = _now
             try:
@@ -5047,12 +5634,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Inherit the spoke's tenant onto the agent's client_simulation.tenant_id
         # so a pxmx server attached to a tenant-assigned cs spoke carries that
         # tenant — the agent's own config can drift from the spoke's binding.
+        # Inherit the spoke's tenant onto the agent.
         self._inherit_agent_tenant(agent_id, spoke_id)
 
+        # Log the relay at debug.
         logger.debug(f"Relayed message from Agent {agent_id} via Spoke {spoke_id}: {original_msg.get('payload', {}).get('type')}")
 
         # Handle Agent Logs
         if original_msg.get("payload", {}).get("type") == "AGENT_LOG":
+            # Store the agent's log line in its buffer.
             log_data = original_msg.get("payload", {}).get("data", {})
             # The agent's WebSocketLogHandler sends ``message`` already
             # canonical-formatted (``<asctime> - <name> - <levelname> - <msg>``)
@@ -5074,6 +5664,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # specific agent (keyed spoke_pk:agent_pk — both guid-primary post-B2).
         # pxmx unified agents emit "AGENT_HEARTBEAT" (30s); accept the legacy
         # "HEARTBEAT" type too.
+        # Heartbeats update the agent's heartbeat.
         _orig_type = original_msg.get("payload", {}).get("type")
         if _orig_type in ("HEARTBEAT", "AGENT_HEARTBEAT"):
             self.heartbeat.update_heartbeat(f"{self._primary_key(spoke_id)}:{agent_pk}")
@@ -5081,6 +5672,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         # Otherwise, process the original payload as if it came from the agent
         if original_msg.get("payload", {}).get("type") == "AGENT_TELEMETRY":
+            # Telemetry is stored under the spoke and agent.
             pk = self._primary_key(spoke_id)
             if pk not in self.spoke_telemetry:
                 self.spoke_telemetry[pk] = {}
@@ -5106,6 +5698,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # Decrypt the inner payload (with the same verify-source secret)
             # BEFORE reading _cs_data — a tampered/undecryptable inner is dropped
             # (return True: AGENT_RELAY_UP matched, do not fall through).
+            # Decrypt an encrypted nested payload; drop it if that fails.
             _inner_payload = original_msg.get("payload")
             if is_encrypted(_inner_payload):
                 if _dec_secret is None:
@@ -5117,7 +5710,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 except (InvalidTag, ValueError) as e:
                     logger.warning("Dropping tampered/undecryptable nested CS payload from %s: %s", spoke_id, e)
                     return True
+                # Use the decrypted type.
                 _orig_type = _inner_payload.get("type", _orig_type)
+            # The event data.
             _cs_data = original_msg.get("payload", {}).get("data", {}) or {}
             # Fire-and-forget — do NOT ``await``. ``_relay_cs_event`` dispatches to
             # the tenant's cs spoke via ``request_response`` (up to 30s) and a cs
@@ -5145,11 +5740,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # bytes off the queue and sends them to the client. Control signals are
         # tuples so the WS loop can distinguish them from frame bytes.
         if _orig_type and _orig_type.startswith("VNC_"):
+            # Find the VNC session, refusing if the sender does not own it.
             _vnc_data = original_msg.get("payload", {}).get("data", {}) or {}
             _sid = _vnc_data.get("session_id")
             _sess = self.get_vnc_session(_sid) if _sid else None
             if _sess and not self._relay_session_owner_ok(_sess, spoke_id, kind="vnc"):
                 _sess = None  # sender does not own this session — refuse (surface K)
+            # Queue screen data, ready, error or disconnect for the session.
             if _orig_type == "VNC_FRAME_UP" and _sess:
                 try:
                     raw = base64.b64decode(_vnc_data.get("data") or "")
@@ -5168,11 +5765,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Same shape as VNC: SHELL_OUT (PTY→browser bytes, b64), SHELL_READY
         # (PTY up), SHELL_ERROR, SHELL_DISCONNECT (bash exited / torn down).
         if _orig_type and _orig_type.startswith("SHELL_"):
+            # Find the shell session, refusing if the sender does not own it.
             _sh_data = original_msg.get("payload", {}).get("data", {}) or {}
             _sid = _sh_data.get("session_id")
             _sess = self.get_shell_session(_sid) if _sid else None
             if _sess and not self._relay_session_owner_ok(_sess, spoke_id, kind="shell"):
                 _sess = None  # sender does not own this session — refuse (surface K)
+            # Queue output, ready, error or disconnect for the session.
             if _orig_type == "SHELL_OUT" and _sess:
                 try:
                     await _sess["queue"].put(base64.b64decode(_sh_data.get("data") or ""))
@@ -5206,9 +5805,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         names) captured for this connection by the ``/ws/spoke`` route (H1); it
         is the only thing ``handle_hub_request`` authorizes the channel on.
         """
+        # Read the request and its id, and run the handler.
         req = payload.get("data", {}) or {}
         req_id = msg_data.get("header", {}).get("message_id")
         result = await self.handle_hub_request(spoke_id, req, peer_cert_identity)
+        # Build the signed HUB_RESPONSE carrying the request id.
         resp_msg = Message(
             header=MessageHeader(
                 message_id=str(uuid.uuid4()),
@@ -5221,6 +5822,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 data={"correlation_id": req_id, "result": result},
             ),
         )
+        # Send it; failures are only logged.
         try:
             await self.send_to_spoke(resp_msg)
         except Exception as e:
@@ -5235,9 +5837,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         marker would suppress the re-push and auto-login would fall back to
         factory-default creds only. Safe no-op if seeding was never used.
         """
+        # No cache: nothing to forget.
         seeded = getattr(self, "_console_creds_seeded", None)
         if not seeded:
             return
+        # Forget both the raw id and the primary key.
         seeded.discard(spoke_id)
         try:
             seeded.discard(self._primary_key(spoke_id))
@@ -5259,6 +5863,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Returns True if ``websocket`` is now the active connection, False if it
         was rejected as a stale-key reconnect (caller should return).
         """
+        # Primary key for this spoke.
         pk = self._primary_key(spoke_id)
         # A newly-installed socket means a FRESH spoke process. A console spoke
         # keeps its auto-login credential list in memory only, so a restart
@@ -5269,8 +5874,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # correct. Forget the marker on (re)connect so the next console API touch
         # re-seeds the credentials into the fresh process.
         self._forget_console_creds_seed(spoke_id)
+        # Another socket already holds the slot.
         existing = self.active_connections.get(pk)
         if existing is not None and existing is not websocket:
+            # Which key each side authenticated with.
             current = self.key_manager.keys.get(pk)
             current_kid = current.key_id if current else None
             new_is_current = key_id is not None and key_id == current_kid
@@ -5299,6 +5906,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             #     the keys → CONFIRMED clone → fail-closed nuke (kill both,
             #     invalidate keys + mTLS cert + approval/PSK, NSG-block the
             #     non-historical IP only).
+            # One side on the current key and the other on a backup key looks like a clone.
             old_kid = self.active_connection_key_ids.get(pk)
             hist_kids = {k.key_id for k in self.key_manager.history.get(pk, [])}
             one_current_other_backup = (
@@ -5306,6 +5914,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 or (old_is_current and key_id in hist_kids)
             )
             if one_current_other_backup:
+                # Only meaningful when the two sockets come from different IPs.
                 new_ip = self._peer_ip(websocket)
                 old_ip = self._peer_ip(existing)
                 if new_ip and old_ip and new_ip != old_ip:
@@ -5317,6 +5926,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     else:
                         current_ip, backup_ip = old_ip, new_ip
                         ws_current, ws_backup = existing, websocket
+                    # Second strike: handle the compromise and reject.
                     if self._clone_watch_confirms(pk, current_ip, backup_ip):
                         # Strike 2 — both clients returned reusing the keys.
                         await self._handle_key_clone_compromise(
@@ -5326,6 +5936,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     # Strike 1 — could be a real clone OR a legit DHCP move that
                     # left a stale unclosed session. Arm the watch, kill both,
                     # and recheck: only a clone re-creates this exact conflict.
+                    # First strike: arm the watch, log, record and close both.
                     self._arm_clone_watch(pk, current_ip, backup_ip)
                     logger.warning(
                         "KEY-REUSE PROBE: spoke %s used its CURRENT key from %s "
@@ -5338,6 +5949,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         f"current-key@{current_ip} + backup-key@{backup_ip} from "
                         f"two IPs — killed both, watching for reappearance "
                         f"(DHCP-move vs clone)")
+                    # Close both sockets, ignoring errors.
                     for ws in (ws_backup, ws_current):
                         try:
                             await ws.close(
@@ -5349,6 +5961,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             if old_is_current and not new_is_current:
                 # Live current-key connection already active; this socket auth'd
                 # with a stale history key — reject so the zombie can't take over.
+                # Log, record and reject the stale-key connection.
                 logger.warning(
                     f"Spoke {spoke_id} connected with a stale session key while a "
                     f"current-key connection is active; closing stale connection."
@@ -5357,6 +5970,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     spoke_id, "stale_key_rejected",
                     "history-key connect while current-key connection active",
                 )
+                # Close it, ignoring errors.
                 try:
                     await websocket.close(1008, "Stale session key — current connection active")
                 except Exception:
@@ -5408,17 +6022,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # which is what replacing a host under the same name, or cloning a
             # spoke, creates. Bare-id fallback mirrors routes/setup.py:1407 for
             # spokes that are still name-keyed.
+            # Treat the existing socket as alive if it was heard from recently.
             last_seen = (self.heartbeat.last_seen.get(pk)
                          or self.heartbeat.last_seen.get(spoke_id))
             if last_seen is not None and (time.time() - last_seen) < 30.0:
                 alive = True
             else:
+                # Otherwise ping it with a short timeout.
                 try:
                     pong_waiter = await existing.ping()
                     await asyncio.wait_for(pong_waiter, timeout=2.0)
                     alive = True
                 except Exception:
                     alive = False
+            # Existing is alive: log, record and reject the new one.
             if alive:
                 logger.warning(
                     f"Spoke {spoke_id} connected but an existing live connection "
@@ -5433,6 +6050,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     "existing connection is live — rejecting duplicate connect "
                     "(likely a second spoke process / clone sharing the secret)",
                 )
+                # Close the new socket, ignoring errors.
                 try:
                     await websocket.close(1008, "Duplicate connection — existing is live")
                 except Exception:
@@ -5445,19 +6063,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # closes the read-then-send TOCTOU that surfaced as
             # "WebSocket is not connected. Need to call 'accept' first" errors
             # during the swap window.
+            # Existing is a zombie: log, record and take over the slot.
             logger.warning(f"Spoke {spoke_id} reconnected; closing previous (zombie) connection.")
             self.record_spoke_event(
                 spoke_id, "replaced_connection",
                 "newer connection took over (previous was unresponsive)",
             )
+            # Install the new socket and arm its liveness probe.
             self.active_connections[pk] = websocket
             self.active_connection_key_ids[pk] = key_id
             self._arm_liveness_probe(spoke_id, websocket)
+            # Close the old socket, ignoring errors.
             try:
                 await existing.close(1008, "Replaced by newer connection")
             except Exception:
                 pass
             return True
+        # Slot was free: install the new socket.
         self.active_connections[pk] = websocket
         self.active_connection_key_ids[pk] = key_id
         self._arm_liveness_probe(spoke_id, websocket)
@@ -5551,6 +6173,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # Read spoke_id FIRST and on its own: if a later field is malformed
             # and parsing raises, the error handlers must still know the id.
             spoke_id = auth_data.get("spoke_id")
+            # Parse the hello and authenticate.
             hello = _SpokeHello.from_auth_frame(auth_data)
             conn = await self._authenticate_spoke(websocket, hello, peer_ip)
             if conn is None:
@@ -5568,10 +6191,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 await self._handle_spoke_frame(conn, message_json)
 
         except (websockets.ConnectionClosed, WebSocketDisconnect):
+            # Clean disconnect.
             self._on_spoke_connection_closed(spoke_id, websocket)
         except Exception as e:
+            # Unexpected error.
             self._on_spoke_connection_error(spoke_id, websocket, e)
         finally:
+            # Always release the slot.
             self._release_spoke_slot(spoke_id, websocket)
 
     # ── Phase 1: the auth frame ─────────────────────────────────────────
@@ -5580,6 +6206,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     def _ws_peer_ip(websocket):
         """The socket's remote IP, or None. Never raises — a connect is never
         blocked on IP capture."""
+        # Remote address, or None if unavailable.
         try:
             return websocket.remote_address[0] if websocket.remote_address else None
         except Exception:  # noqa: BLE001 — never block a connect on IP capture
@@ -5592,7 +6219,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         non-object fails later on ``.get`` exactly as it always has — or
         ``(False, None)`` after closing the socket on undecodable input.
         """
+        # Read the first frame.
         auth_json = await websocket.recv()
+        # Decode it as JSON.
         try:
             return True, json.loads(auth_json)
         except (ValueError, TypeError):
@@ -5613,6 +6242,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         must not: missing id, quarantined, identity mismatch, wrong secret, or
         the spoke rejected the hub's identity proof.
         """
+        # Unpack the identity and secret.
         spoke_id, secret = hello.spoke_id, hello.secret
 
         # DEBUG-only + length-only: a 64-char session key's 4+4 prefix/suffix
@@ -5624,23 +6254,27 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                      f"secret={'<%d chars>' % len(secret) if secret else '***'}")
         self.record_spoke_event(spoke_id, "auth_attempt", f"secret={'yes' if secret else 'no'} module_type={hello.module_type}")
 
+        # No spoke id: record a failure and reject.
         if not spoke_id:
             self._record_spoke_auth_failure(peer_ip, None, "missing_spoke_id")
             await websocket.close(1008, "Missing spoke_id")
             return None
 
+        # Resolve the primary key.
         pk = self._primary_key(spoke_id)
 
         # DDoS quarantine: a spoke disconnected for ignoring the slow-down
         # signal and flooding is refused reconnect until its cooldown expires
         # — so it can't just reconnect and immediately resume the flood. 1013
         # = Try Again Later (the spoke's reconnect backoff honors it).
+        # Reject quarantined spokes for now.
         if self._is_quarantined(spoke_id):
             self.record_spoke_event(spoke_id, "quarantine_reject",
                                     "reconnect refused — still in DDoS quarantine")
             await websocket.close(1013, "Quarantined (flooding) — retry later")
             return None
 
+        # Settle install identity; stop if rejected.
         if not await self._settle_spoke_identity(websocket, hello, pk, peer_ip):
             return None
         # Re-resolve the primary key: _reconcile_spoke_identity may have
@@ -5650,6 +6284,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # guid (the stable primary key) instead of the connect-id name.
         pk = self._primary_key(spoke_id)
 
+        # Verify the secret: take the slot on success, otherwise hold the spoke as pending.
         key_id = self._verify_spoke_secret(hello, pk, peer_ip)
         if key_id:
             if not await self._take_spoke_slot(websocket, hello, pk, key_id, peer_ip):
@@ -5657,8 +6292,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         elif not await self._hold_unauthenticated_spoke(websocket, hello, pk, peer_ip):
             return None
 
+        # Prove the hub's identity to the spoke.
         if not await self._prove_hub_identity(websocket, hello, pk):
             return None
+        # Return the connection state.
         return _SpokeConn(websocket=websocket, spoke_id=spoke_id, pk=pk,
                           peer_ip=peer_ip, secret=secret)
 
@@ -5672,6 +6309,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Everything before the reconcile call is read-only on purpose — see
         the ordering rules in the lifecycle banner (1d2f5aae, CC2).
         """
+        # Unpack identity fields.
         spoke_id, secret, install_uuid = hello.spoke_id, hello.secret, hello.install_uuid
 
         # Detect a clone-and-rename (same install UUID, new id) and migrate
@@ -5687,6 +6325,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # inheritance. get_valid_key is a pure constant-time compare — safe
         # to call on old_id as a proof check without consuming/rotating it.
         rename_proven = False
+        # A valid secret under the old id proves a rename.
         if install_uuid and secret:
             _old_id = self.install_uuid_index.get(install_uuid)
             if _old_id and _old_id != spoke_id \
@@ -5706,6 +6345,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # is verified only once a mismatch actually needs adjudicating.
         # get_valid_key is a pure constant-time compare — safe to call as a
         # proof check without consuming or rotating the key.
+        # Reject a valid secret presented from a different, unproven install.
         prev_install_uuid = self._recorded_install_uuid(pk)
         if secret and not rename_proven and prev_install_uuid \
                 and install_uuid != prev_install_uuid \
@@ -5719,6 +6359,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             await websocket.close(
                 1008, "Identity mismatch — re-approval required")
             return False
+        # Record the identity, migrating on a proven rename.
         self._reconcile_spoke_identity(spoke_id, install_uuid, hello.hostname,
                                        migrate_if=rename_proven)
         return True
@@ -5730,24 +6371,28 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         authenticated), else None — for both a wrong secret and no secret at
         all; the caller tells those apart via ``hello.secret``.
         """
+        # No secret: zero-touch pending negotiation.
         spoke_id, secret = hello.spoke_id, hello.secret
         if not secret:
             logger.info(f"Spoke {spoke_id} connected without secret. Entering pending-negotiation state.")
             self.record_spoke_event(spoke_id, "pending_negotiation", "no secret — zero-touch")
             return None
 
+        # Check the secret; reject if invalid.
         key_id = self.key_manager.get_valid_key(pk, secret)
         if not key_id:
             logger.warning(f"Authentication failed for spoke {spoke_id}: Invalid secret.")
             self.record_spoke_event(spoke_id, "auth_failed", "invalid secret — spoke will retry / fall back to zero-touch")
             return None
 
+        # Mark the spoke authenticated.
         self.spoke_authenticated[pk] = True
         # It adopted its key — clear any prior "never authenticated"
         # diagnosis so a future regression re-triggers a fresh ERROR.
         self._unauth_warned_spokes.discard(pk)
         # Established-good IP: shield it from a false-positive
         # threat block if it later glitches during a key rotation.
+        # Tell the threat monitor this IP authenticated.
         if peer_ip:
             tm = getattr(self, "threat_monitor", None)
             if tm:
@@ -5755,6 +6400,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     tm.record_success(peer_ip)
                 except Exception:  # noqa: BLE001
                     pass
+        # Log and record success, returning the key id.
         logger.info(f"Spoke {spoke_id} authenticated successfully with secret.")
         self.record_spoke_event(spoke_id, "auth_ok", "secret verified")
         return key_id
@@ -5767,6 +6413,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         it (returns False), counting it as an attack signal unless the peer
         proves it is an already-approved install.
         """
+        # Unpack identity fields.
         spoke_id, secret = hello.spoke_id, hello.secret
         # Register as known if not already
         if pk not in self.known_modules:
@@ -5782,6 +6429,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         # If they provided a secret and it was wrong, we close.
         # If they provided no secret, we KEEP the connection open to negotiate one.
+        # No secret: keep the connection open as pending.
         if not secret:
             return True
 
@@ -5796,6 +6444,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # approved identity, so this exempts the reboot/rotation glitch
         # without weakening detection of a real guessing source (which
         # has no such identity proof and still trips the block).
+        # A stale secret from a known, approved install is treated as a glitch.
         if (self._is_approved_install_reconnect(spoke_id, hello.install_uuid)
                 and self._within_reconnect_exemption_budget(peer_ip)):
             self.record_spoke_event(
@@ -5813,6 +6462,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # sustained stale-secret stream, i.e. not a bounded reboot) —
             # trips the block at threshold.
             self._record_spoke_auth_failure(peer_ip, spoke_id, "invalid_secret")
+        # Close the connection.
         await websocket.close(1008, "Authentication failed")
         return False
 
@@ -5823,14 +6473,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         history-key reconnect must not evict a live current-key connection —
         it has already closed this socket).
         """
+        # Log success.
         spoke_id = hello.spoke_id
         logger.info(f"Spoke {spoke_id} authenticated successfully.")
         # Evict any prior connection for this spoke_id (e.g. a zombie
         # left over from a prior outage / port-move crash-loop). A stale
         # (history-key) reconnect that would evict a live current-key
         # connection is rejected instead — see _install_active_connection.
+        # Install the socket; stop if rejected.
         if not await self._install_active_connection(spoke_id, websocket, key_id):
             return False
+        # Record the connection.
         self.record_spoke_event(spoke_id, "connected", "authenticated with secret")
         # Persist this source IP as the spoke's HISTORICAL (known-good)
         # location — but ONLY when it authenticated on its CURRENT key
@@ -5838,6 +6491,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # the key-clone response can trust known_ip to spare the real
         # spoke's IP (and follow it across a legit DHCP move) while
         # NSG-blocking the intruder's IP. See _handle_key_clone_compromise.
+        # Remember this IP when the spoke used its current key and is approved.
         try:
             _cur = self.key_manager.keys.get(pk)
             if (peer_ip and _cur and key_id == _cur.key_id
@@ -5849,6 +6503,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # is re-synced by _maybe_redeliver_session_key on the first
         # history-signed frame in the message loop (_verify_signed_frame) —
         # no connect-time push needed here.
+        # Slot taken.
         return True
 
     async def _prove_hub_identity(self, websocket, hello, pk):
@@ -5860,26 +6515,32 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         the socket is closed: the spoke rejected the hub, timed out while
         holding a secret, closed on us, or anything here raised.
         """
+        # Unpack identity fields.
         spoke_id, secret = hello.spoke_id, hello.secret
+        # Send a signed challenge proof.
         try:
             challenge = secrets.token_urlsafe(32)
             proof = await self._build_hub_proof(hello, challenge)
             await websocket.send(json.dumps(proof))
 
             # If the spoke has a secret, it will respond. If not, it might just ignore or respond HUB_OK.
+            # Wait briefly for the spoke's verdict.
             try:
                 hub_response_json = await asyncio.wait_for(websocket.recv(), timeout=2.0)
                 hub_response = json.loads(hub_response_json)
 
+                # Spoke rejected the hub: record and close.
                 if hub_response.get("status") != "HUB_OK":
                     logger.warning(f"Mutual auth failed: Spoke {spoke_id} rejected Hub identity.")
                     self.record_spoke_event(spoke_id, "mutual_auth_failed", "spoke rejected hub identity — likely stale HUB_SECRET after hub restart")
                     await websocket.close(1008, "Hub identity rejected")
                     return False
+                # Accepted: log, record and re-provision the hub secret if behind.
                 logger.info(f"Mutual authentication complete for {spoke_id}.")
                 self.record_spoke_event(spoke_id, "mutual_auth_complete", "")
                 await self._reprovision_if_behind_on_hub_secret(spoke_id, hub_response)
             except asyncio.TimeoutError:
+                # No reply is expected from secret-less spokes; otherwise it is a failure.
                 if not secret:
                     logger.info(f"No response for Hub proof from {spoke_id} (expected for secret-less connection).")
                     self.record_spoke_event(spoke_id, "mutual_auth_skipped", "no secret — HUB_OK not required (zero-touch)")
@@ -5907,6 +6568,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # _record_hub_identity_rejection (rather than kept inline)
                 # so it's unit-testable without driving a full fake-
                 # websocket handshake through this method.
+                # Read the close code and reason; record identity rejections.
                 close_code = e.rcvd.code if getattr(e, "rcvd", None) else None
                 close_reason = ((e.rcvd.reason if getattr(e, "rcvd", None) else "") or "")
                 identity_rejected = self._record_hub_identity_rejection(
@@ -5922,9 +6584,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         pass
                 return False
         except Exception as e:
+            # Any other error fails mutual auth.
             logger.error(f"Mutual authentication error for {spoke_id}: {e}")
             await websocket.close(1008, "Mutual authentication failed")
             return False
+        # Mutual auth succeeded or was skipped.
         return True
 
     async def _build_hub_proof(self, hello, challenge):
@@ -5937,9 +6601,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         this dict — so adding fields is signature-safe and legacy spokes
         ignore the ones they don't know.
         """
+        # Sign the challenge with the current hub secret.
         spoke_id = hello.spoke_id
         signature = self.key_manager.sign_hub_challenge(challenge.encode())
 
+        # The base proof.
         proof = {
             "status": "HUB_VERIFIED",
             "challenge": challenge,
@@ -5957,6 +6623,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # ``signature`` above. Additive field — the spoke verifies
         # over ``challenge`` only (see the ``enc`` comment below), so
         # a legacy spoke that only reads ``signature`` is unaffected.
+        # Add signatures from every retained hub secret.
         try:
             proof["signatures"] = self.key_manager.sign_hub_challenge_all(
                 challenge.encode())
@@ -5973,6 +6640,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # per spoke_id and one-way, so a stranger claiming some other
         # spoke's id learns nothing it can replay. Additive — verified
         # over ``challenge`` only, so legacy spokes ignore it.
+        # Add the per-spoke recovery signature.
         try:
             if spoke_id:
                 proof["recovery_signature"] = self.key_manager.sign_hub_challenge_recovery(
@@ -6001,6 +6669,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Validated against the tenant's stored PSKs first so the hub
         # never signs with attacker-supplied material.
         if hello.onboarding_psk and hello.tenant_id_hint:
+            # Add the PSK-bound signature when the presented PSK is valid.
             try:
                 if await self._psk_is_valid(hello.tenant_id_hint, hello.onboarding_psk):
                     proof["psk_signature"] = hmac.new(
@@ -6009,6 +6678,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             except Exception:  # noqa: BLE001 — never block connect on this
                 logger.debug("PSK-bound hub proof skipped (psk check failed)",
                              exc_info=True)
+        # Return the proof.
         return proof
 
     async def _reprovision_if_behind_on_hub_secret(self, spoke_id, hub_response):
@@ -6026,11 +6696,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         unverified-hub refusal this whole feature exists to prevent. A legacy
         spoke omits the field entirely and this is a no-op.
         """
+        # A match on an older hub secret (index above 0) means the spoke is behind.
         try:
             matched_index = hub_response.get("hub_secret_index")
             if isinstance(matched_index, int) and matched_index > 0:
                 await self._maybe_reprovision_hub_secret(spoke_id)
         except Exception:  # noqa: BLE001 — best-effort, never break the handshake
+            # Failures are only logged.
             logger.debug("hub_secret reprovision check failed for %s", spoke_id, exc_info=True)
 
     # ── Phase 3: admission ──────────────────────────────────────────────
@@ -6042,6 +6714,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         False only when the approved-spoke mTLS gate refuses the connection
         (the socket is already closed).
         """
+        # Unpack the connection.
         spoke_id, pk, websocket = conn.spoke_id, conn.pk, conn.websocket
 
         # Ensure connection is tracked even if not fully auth'd (for negotiation).
@@ -6073,6 +6746,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # this bucket. See docs/backpressure-throttling.md §4.
         _rl_cap, _rl_rate = self._rate_limit_params()
         self.rate_limiters[pk] = TokenBucket(capacity=_rl_cap, fill_rate=_rl_rate)
+        # Record the module type when given.
         if hello.module_type:
             self._record_spoke_module_type(spoke_id, pk, hello.module_type)
 
@@ -6087,6 +6761,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         if hello.onboarding_psk and hello.tenant_id_hint:
             await self._psk_auto_approve(conn, hello)
 
+        # Record advertised capabilities and link role sub-spokes to their parent.
         self._record_spoke_capabilities(pk, hello)
         if hello.parent_spoke_id:
             await self._link_role_subspoke(conn, hello.parent_spoke_id)
@@ -6097,6 +6772,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # except heartbeats until an admin approves the spoke.
             await self._send_approval_required(conn)
             return True
+        # Approved: greet the spoke.
         return await self._greet_approved_spoke(conn, hello)
 
     def _record_spoke_module_type(self, spoke_id, pk, module_type):
@@ -6117,6 +6793,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         reconnecting spoke re-registers its type anyway. Only log/event on a
         genuinely NEW type so a reconnect storm doesn't spam either.
         """
+        # Store the type and update metadata, logging only on change.
         self.spoke_module_types[pk] = module_type
         _prev_type = self.state.system_state.get("module_metadata", {}).get(
             pk, {}).get("module_type")
@@ -6133,10 +6810,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         a legit zero-touch spoke sends none, so a wrong one is an unambiguous
         guessing signal and repeats from one IP trip the NSG block.
         """
+        # Try self-provisioning; on success refresh the known-module list.
         spoke_id, tenant_id_hint = conn.spoke_id, hello.tenant_id_hint
         if await self._try_psk_self_provision(spoke_id, tenant_id_hint, hello.onboarding_psk):
             self.known_modules = self.state.system_state["known_modules"]
             return
+        # Invalid PSK: log, record and count an auth failure.
         logger.warning(
             f"PSK self-provision failed for {spoke_id} "
             f"(tenant_hint={tenant_id_hint}): invalid/missing PSK — pending admin approval.")
@@ -6156,6 +6835,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
           and its outbound frames stay plaintext.
         * mTLS CSR — the spoke can generate its own key + CSR.
         """
+        # Track netbox-server, ldap-server and zabbix-server capabilities.
         if hello.netbox_server:
             self.netbox_server_agents.add(pk)
         else:
@@ -6171,6 +6851,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             self.zabbix_server_agents.add(pk)
         else:
             self.zabbix_server_agents.discard(pk)
+        # Record encryption and CSR capabilities.
         self.spoke_enc_capable[pk] = hello.enc_capable
         self.spoke_mtls_csr_capable[pk] = hello.mtls_csr_capable
 
@@ -6192,6 +6873,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         prefix mismatch) falls through to pending admin approval; the
         connection is NOT closed.
         """
+        # Remember the parent.
         spoke_id, pk = conn.spoke_id, conn.pk
         self.spoke_parent_map[pk] = parent_spoke_id
         # B4: persist the parent linkage + role name into the sub-spoke's
@@ -6205,13 +6887,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # as ``spoke_id`` (guid once armed, raw until then). Persisted →
         # the linkage survives the sub-spoke going offline (the in-memory
         # ``spoke_parent_map`` does not).
+        # Persist the parent and role names.
         if spoke_id.startswith(parent_spoke_id + "-"):
             self.state.update_module_metadata(pk, {
                 "parent_name": parent_spoke_id,
                 "role_name": spoke_id[len(parent_spoke_id) + 1:],
             })
+        # Already approved: nothing more to do.
         if self.approved_modules.get(pk, False):
             return
+        # Ask the parent to vouch; approve and bind to its tenant on success.
         vouched, reason = await self._parent_vouches(spoke_id, parent_spoke_id)
         if vouched:
             tenant = self.state.get_spoke_tenant(self._primary_key(parent_spoke_id)) or ""
@@ -6222,11 +6907,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             self.record_spoke_event(spoke_id, "parent_auto_approve",
                                     f"parent={parent_spoke_id}")
         else:
+            # Record the failed vouch.
             self.record_spoke_event(spoke_id, "parent_vouch_failed",
                                     f"parent={parent_spoke_id} reason={reason}")
 
     async def _send_approval_required(self, conn):
         """Tell a not-yet-approved spoke to wait for admin approval."""
+        # Log, record and build the APPROVAL_REQUIRED frame.
         spoke_id, pk = conn.spoke_id, conn.pk
         logger.info(f"Module {spoke_id} is pending approval.")
         self.record_spoke_event(spoke_id, "pending_approval", "awaiting admin approval")
@@ -6244,6 +6931,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         except Exception:
             approval_msg["signature"] = None
 
+        # Send it.
         await conn.websocket.send(json.dumps(approval_msg))
 
     async def _greet_approved_spoke(self, conn, hello):
@@ -6254,6 +6942,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         (``conn.mtls_enroll_only``): no config push and no mailbox flush,
         only the CSR exchange, until it reconnects presenting its cert.
         """
+        # Secret-less spoke: push it a session key first.
         spoke_id, pk = conn.spoke_id, conn.pk
         if not conn.secret:
             await self._push_zero_touch_session_key(spoke_id, pk)
@@ -6261,24 +6950,29 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # hub-CA cert to this spoke, refuse revoked / foreign certs and
         # bound spokes that show up cert-less, and hold a cert-less spoke
         # in enrollment-only mode until it presents its issued cert.
+        # Run the mTLS connect gate; errors fall back to "ok".
         try:
             _mtls_gate, _mtls_why = self._mtls_connect_gate(
                 spoke_id, pk, conn.websocket, hello.module_type or "")
         except Exception as e:  # noqa: BLE001 - never block connect on a gate bug
             logger.warning(f"[mtls] connect gate for {spoke_id} errored: {e}")
             _mtls_gate, _mtls_why = "ok", "gate-error"
+        # Reject when the gate says so.
         if _mtls_gate == "reject":
             await self._mtls_reject(spoke_id, pk, conn.websocket, _mtls_why)
             return False
+        # Note spokes that never completed mTLS enrollment.
         if _mtls_why == "enroll-exhausted":
             logger.warning(f"[mtls] {spoke_id} never presented its hub-CA cert "
                            f"after repeated enrollment — allowing degraded "
                            f"cert-less operation (set mtls_require_cert to forbid)")
             self.record_spoke_event(spoke_id, "mtls_enroll_exhausted", "")
+        # Enrollment-only mode: start enrollment and stop here.
         if _mtls_gate == "enroll":
             conn.mtls_enroll_only = True
             await self._mtls_begin_enrollment(spoke_id, pk, conn.websocket)
             return True
+        # Otherwise push the connect-time config.
         await self._push_connect_config(spoke_id, hello.module_type)
         return True
 
@@ -6299,6 +6993,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         The spoke-side deferral closes the back-to-back encrypted
         UPDATE_CONFIG race.
         """
+        # Mint the first secret and push it unsigned.
         session_secret = self.key_manager.generate_first_secret(pk)
         key_msg = Message(
             header=MessageHeader(
@@ -6314,6 +7009,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Arm the cs reconnect push; _flush_spoke_backlog fires it after the
         # mailbox so it lands AFTER any queued (older) CS_CONFIG_UPDATE.
         self._cs_connect_defer[spoke_id] = [time.time(), False]
+        # Push the module config.
         await self.push_config_to_spoke(spoke_id)
 
         # Role self-heal (hub half): if this is a base agent, re-push
@@ -6332,6 +7028,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # spoke (mtls_revoked set) is skipped until manually re-issued.
         # Run as a task: a CSR-capable spoke answers SPOKE_MTLS_CSR over
         # request_response, which needs the message loop running.
+        # Provision an mTLS client cert in the background when enabled and not revoked.
         try:
             _gc = self.state.system_state.get("global_config", {}) or {}
             _revoked = self.state.system_state.get("mtls_revoked", {}) or {}
@@ -6369,6 +7066,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         flush must read the guid-keyed queue or a reconnecting spoke's
         pending messages would be stranded under the stale name.
         """
+        # Normal connections get their queued mail.
         spoke_id = conn.spoke_id
         if not conn.mtls_enroll_only:
             # A fresh connection is a fresh spoke process, so any self-update
@@ -6377,6 +7075,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # request short-circuited as a timeout for the full DRAIN_WINDOW_S
             # (3 min) after each hub restart's SPOKE_UPDATE fan-out.
             self.clear_draining(conn.pk)
+            # Deliver queued mail; queued updates mean the spoke will restart soon.
             updates_sent = await self.mailbox.flush_mailbox(conn.pk, self.send_to_spoke)
             if updates_sent:
                 self.mark_draining(conn.pk)
@@ -6405,6 +7104,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ends the connection via handle_connection's ``except Exception`` —
         the long-standing behavior, preserved deliberately.
         """
+        # Unpack the connection.
         spoke_id, pk = conn.spoke_id, conn.pk
         # TRUE offered-rate tally (before ANY shed) so the protect
         # source-shed can find the loudest talkers to disconnect. One
@@ -6412,6 +7112,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # spoke_msg_count (which is post-shed). (spoke_id is always set here:
         # _authenticate_spoke refuses a connection without one.)
         self._spoke_recv[pk] = self._spoke_recv.get(pk, 0) + 1
+        # Drop oversized frames early in protect mode.
         if self._protect_shed_oversized(pk, message_json):
             return
 
@@ -6420,6 +7121,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # dominated ingest CPU is gone), and parse the body ONCE. sig == ""
         # means unsigned (a bootstrap heartbeat before the spoke has a key).
         sig, body_str = split_frame(message_json)
+        # Parse the body; drop unparsable frames.
         try:
             msg_data = json.loads(body_str)
         except Exception:
@@ -6431,6 +7133,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # HMAC verify + freshness pass; None for unsigned heartbeats (never
         # encrypted). Threaded into _handle_agent_relay_up for the nested
         # CS_TOKEN_RESULT decrypt (refinement #2).
+        # Verify signed frames; unsigned ones may only be heartbeats.
         dec_secret = None
         if sig:
             accepted, dec_secret = await self._verify_signed_frame(conn, body_str, sig, msg_data)
@@ -6443,12 +7146,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # crashed-on-startup agent — emit ONE actionable ERROR via the
             # GenericAgent logger (throttled per-connection) instead of
             # flooding WARNING per frame.
+            # Unsigned non-heartbeat: diagnose and drop.
             self._maybe_log_unauthenticated_agent(pk)
             logger.debug(
                 f"Unauthenticated non-heartbeat from {spoke_id} "
                 f"(only HEARTBEAT allowed). Dropping.")
             return
 
+        # Count received bytes.
         payload = msg_data.get("payload", {})
         self.bytes_count += len(message_json)  # Track received bytes
         # Per-spoke inbound rate (relayed agent frames count toward the
@@ -6495,6 +7200,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         if not self._passes_inbound_rate_limit(conn, payload):
             return
 
+        # Count the message and dispatch it.
         self.message_count += 1
         await self._dispatch_spoke_message(conn, msg_data, payload, dec_secret)
 
@@ -6514,8 +7220,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         — the point is to shed the FLOOD, not everyone. _spoke_offered is the
         TRUE pre-shed per-tick count, so it isn't corrupted by the shedding.
         """
+        # Only active in protect mode.
         if not self._protect_mode:
             return False
+        # Drop large frames from high-rate spokes and count the drop.
         try:
             if (len(message_json) > self._protect_shed_bytes
                     and self._spoke_offered.get(pk, 0) >= self._protect_shed_min_mps):
@@ -6533,8 +7241,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         dropped (``accepted`` False). On success ``msg_data`` has had its
         payload decrypted in place and ``dec_secret`` is the AEAD key used.
         """
+        # Unpack the connection and verify the signature against current or previous keys.
         spoke_id, pk = conn.spoke_id, conn.pk
         src = self.key_manager.verify_signature_source(pk, body_str.encode(), sig)
+        # Invalid signature: drop.
         if src is None:
             logger.warning(f"Invalid signature from spoke {spoke_id}")
             return False, None
@@ -6571,13 +7281,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # plaintext/legacy frames, and returns _H4_DROP on tamper / wrong key
         # / marked-encrypted-with-no-decrypt-key (the frame is dropped —
         # ciphertext is never dispatched).
+        # Decrypt any encrypted payload; drop on failure.
         dec_secret = await self._decrypt_inbound_payload(pk, src, msg_data)
         if dec_secret is _H4_DROP:
             return False, None
+        # Accepted.
         return True, dec_secret
 
     def _on_spoke_heartbeat(self, pk):
         """Record a heartbeat: liveness, persisted last-seen, absent clock."""
+        # Count it and update liveness.
         self.message_count += 1
         self.heartbeat.update_heartbeat(pk)
         # Persist last-contacted so a hub reboot doesn't reset this spoke to
@@ -6607,6 +7320,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
            late or broadcast reply from being mislogged as an "unknown
            message ID" WARNING.
         """
+        # Unpack the connection and the correlation id.
         spoke_id, pk, remote_ip = conn.spoke_id, conn.pk, conn.peer_ip
         corr_id = msg_data["correlation_id"]
         # Keepalive: a spoke servicing a slow request emits SPOKE_PROGRESS
@@ -6614,6 +7328,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # the request_response deadline instead of killing a genuinely-working
         # spoke at the base timeout. Bump the soft deadline (capped at the
         # hard ceiling) and drop the frame — it carries no result.
+        # Progress keepalive: extend the soft deadline up to the hard cap.
         if payload.get("type") == "SPOKE_PROGRESS":
             _pd = self._progress_deadlines.get(corr_id)
             if _pd is not None:
@@ -6629,6 +7344,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # probe reply isn't mislogged as a stray ack. The spoke that REPLIED
         # is the one whose socket holds the waiter (it echoed the nonce we
         # sent it on that socket).
+        # Liveness reply: resolve the pending ping.
         if corr_id in self._pending_liveness_nonces:
             self._pending_liveness_nonces.discard(corr_id)
             adapter = self.active_connections.get(pk)
@@ -6637,9 +7353,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             self.message_count += 1
             return
 
+        # Is this a reply to a live request, or one that already timed out?
         in_flight = corr_id in self._outstanding_requests
         late_reply = (not in_flight) and (corr_id in self._recent_request_timeouts)
         if in_flight or late_reply:
+            # Late reply: forget the timeout record and log.
             if late_reply:
                 self._recent_request_timeouts.pop(corr_id, None)
                 logger.debug(
@@ -6652,6 +7370,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # mailbox.push, so it's not in pending_ack. Expected — log DEBUG +
             # drop instead of WARNING "unknown message ID" (which fired on
             # every Clear-Logs click / debug toggle).
+            # Forget the broadcast id and log.
             self._pending_broadcast_ids.pop(corr_id, None)
             logger.debug(
                 "Broadcast command ack for %s from %s — dropped "
@@ -6663,9 +7382,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # a top-level "status" key, which the control plane never sets) —
             # read it from there so the "unknown ack" warning reflects reality
             # instead of always printing the stale "FAILED" default.
+            # Read the reply status.
             _pdata = payload.get("data") if isinstance(payload, dict) else None
             _rstatus = str(_pdata.get("status") or "").strip().upper() \
                 if isinstance(_pdata, dict) else ""
+            # Build an acknowledgement for the mailbox.
             ack = Acknowledgement(
                 correlation_id=corr_id,
                 status="SUCCESS" if _rstatus == "SUCCESS" else "FAILED",
@@ -6678,6 +7399,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 message_type=payload.get("type"),
                 source_ip=remote_ip,
             )
+            # Clear drain state when appropriate, then acknowledge.
             self._clear_drain_on_update_reply(pk, corr_id, _pdata)
             await self.mailbox.acknowledge(ack)
 
@@ -6687,6 +7409,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         # A get_version reply: remember the spoke's version + commit.
         if payload.get("type") == "COMMAND_RESULT":
+            # Record the version and commit SHA when present.
             data = payload.get("data", {})
             if isinstance(data, dict) and "version" in data:
                 self.spoke_versions[pk] = data["version"]
@@ -6708,6 +7431,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             if _wake is not None:
                 _wake.set()
 
+        # Count the message.
         self.message_count += 1
 
     def _count_loadtest_probe(self, pk, payload):
@@ -6716,15 +7440,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         A gap here would be a real must-process LOSS (a bug); telemetry gaps
         are expected.
         """
+        # Count it and get this spoke's probe state.
         self.message_count += 1
         st = self._probe_state.setdefault(
             pk, {"count": 0, "last_seq": -1, "gaps": 0})
+        # Read the sequence number; bad values become -1.
         try:
             seq = int((payload.get("data") or {}).get("seq", -1))
         except (TypeError, ValueError):
             seq = -1
+        # A jump in sequence numbers counts as gaps.
         if st["last_seq"] >= 0 and seq > st["last_seq"] + 1:
             st["gaps"] += seq - st["last_seq"] - 1
+        # Count the probe and advance the last sequence.
         st["count"] += 1
         if seq > st["last_seq"]:
             st["last_seq"] = seq
@@ -6735,6 +7463,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Only reached by frames WITHOUT a correlation_id (replies return
         earlier), so a reply can never be dropped here.
         """
+        # Unpack the connection.
         spoke_id, pk = conn.spoke_id, conn.pk
         # PROTECT MODE: SHED inbound telemetry/logs — but SURGICALLY, only
         # from high-offered-rate OFFENDERS. A legit low-rate spoke's
@@ -6745,9 +7474,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 and self._spoke_offered.get(pk, 0) >= self._protect_shed_min_mps):
             self.rate_limit_drops[pk] = self.rate_limit_drops.get(pk, 0) + 1
             return False
+        # No limiter yet: allow.
         limiter = self.rate_limiters.get(pk)
         if not limiter:
             return True
+        # Take a token.
         ok = limiter.consume()
         # SOFT WATERMARK (default 80% of burst consumed): flag the spoke so
         # the ladder (next 1s tick) TELLS it to slow + coalesce locally —
@@ -6756,6 +7487,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # client backs off here and never reaches the hard limit below.
         if limiter.capacity and limiter.tokens <= (1.0 - self._rl_soft_frac) * limiter.capacity:
             self._rl_breached.add(pk)
+        # Token available: allow.
         if ok:
             return True
         # HARD LIMIT (100%) → DROP the frame (enforcement). A client still
@@ -6764,6 +7496,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # disconnect+quarantine (DDoS defense: stop parsing its frames).
         self.rate_limit_drops[pk] = self.rate_limit_drops.get(pk, 0) + 1
         self._rl_harddrops[pk] = self._rl_harddrops.get(pk, 0) + 1
+        # Log the drop and reject.
         logger.debug(
             "Rate limit HARD-DROP for spoke %s (type=%s, total drops=%d).",
             spoke_id, payload.get('type'), self.rate_limit_drops[pk])
@@ -6776,6 +7509,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     # to mean "not handled" (only AGENT_RELAY_UP does, for an unmatched
     # sub-type); the frame then gets the unhandled-type INFO log, exactly as
     # the old if-chain fell through. Types not listed here get that log too.
+    # Message type to handler method name.
     _SPOKE_MESSAGE_HANDLERS = {
         "CS_TELEMETRY": "_spoke_msg_cs_telemetry",
         "CS_CONFIG_REQUEST": "_spoke_msg_cs_config_request",
@@ -6803,11 +7537,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     async def _dispatch_spoke_message(self, conn, msg_data, payload, dec_secret):
         """Route a fully-vetted frame to its handler (see the table above)."""
+        # Look up the handler for this type.
         mtype = payload.get("type")
         # A non-string type (e.g. a list) is never a valid key — and an
         # unhashable one would raise on dict lookup — so it goes straight to
         # the unhandled-type log, as it did under the old if-chain.
         handler_name = self._SPOKE_MESSAGE_HANDLERS.get(mtype) if isinstance(mtype, str) else None
+        # Run it; a False result falls through to the generic log line.
         if handler_name:
             handled = await getattr(self, handler_name)(conn, msg_data, payload, dec_secret)
             if handled is not False:
@@ -6826,13 +7562,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         the drain buffer instead of running the full ingest inline. A prior
         un-drained snapshot for this spoke is merged away (counted).
         """
+        # Count the frame.
         pk = conn.pk
         self._telemetry_received += 1
+        # Throttled spoke: keep only the latest frame for later processing.
         if pk in self._spoke_backoff:
             if pk in self._coalesce_pending:
                 self._telemetry_coalesced += 1
             self._coalesce_pending[pk] = (payload.get("data", {}), time.time())
             return
+        # Otherwise ingest now and count it.
         await self._handle_cs_telemetry(conn.spoke_id, payload.get("data", {}))
         self._telemetry_processed += 1
 
@@ -6843,6 +7582,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         hub would send now. Runs as a task: the push's reply arrives through
         this same loop.
         """
+        # Push config in the background, passing the spoke's config hash.
         _rd = payload.get("data", {}) or {}
         self._spawn_cs_push(self._handle_cs_config_request(
             conn.spoke_id, str(_rd.get("config_hash") or "")))
@@ -6854,6 +7594,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         replies to THIS spoke (CS_DOT1X_CREDENTIAL), whose answer arrives
         through this same loop.
         """
+        # Hand the message to the 802.1X broker in the background.
         self._spawn_cs_push(dot1x_jit.handle_spoke_message(
             self, conn.spoke_id, payload.get("type"), payload.get("data", {}) or {}))
 
@@ -6866,6 +7607,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         feed. Fire-and-forget passthrough (no ingest/state); every step is
         best-effort.
         """
+        # Log failures and look up the tenant.
         spoke_id = conn.spoke_id
         _pdata = payload.get("data", {}) or {}
         _log_cs_op_failure(f"spoke={spoke_id}", "CS_PROGRESS", _pdata)
@@ -6877,6 +7619,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # (instant, one vmid per event). Non-terminal progress sets the
         # in-progress state; terminals are owned by the CS_COMMAND_RESULT
         # handler.
+        # Mark in-progress VM states.
         try:
             _pstate = self._VM_ACTION_STATE.get(_pdata.get("action"))
             _pstat = str(_pdata.get("status") or "").lower()
@@ -6884,6 +7627,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 self._vm_live_set(_ptenant, _pdata.get("vmid"), _pstate)
         except Exception:  # noqa: BLE001 — overlay is best-effort
             pass
+        # Broadcast the progress to browsers.
         try:
             await self.simulations_broadcaster.broadcast(
                 spoke_id, {"type": "cs_progress", "data": _pdata}, _ptenant)
@@ -6892,6 +7636,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     async def _spoke_msg_spoke_log(self, conn, msg_data, payload, dec_secret):
         """Spoke log forwarding — see _handle_spoke_log."""
+        # Store the log entries.
         await self._handle_spoke_log(conn.spoke_id, payload)
 
     async def _spoke_msg_cs_debug_log(self, conn, msg_data, payload, dec_secret):
@@ -6903,6 +7648,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         per-(tenant,hostname) ring buffer and served via
         GET /api/cs/clients/{host}/debug-logs (routes/client_debug.py).
         """
+        # Store the debug lines.
         await self._handle_cs_debug_log(conn.spoke_id, payload)
 
     async def _spoke_msg_console(self, conn, msg_data, payload, dec_secret):
@@ -6917,14 +7663,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         bare-return there once killed the queue consumer). A sender that does
         not own the session is refused (surface K).
         """
+        # Find the session, refusing if the sender does not own it.
         _ctype = payload.get("type")
         _cdata = payload.get("data", {}) or {}
         _csess = self.get_console_session(_cdata.get("session_id")) if _cdata.get("session_id") else None
         if _csess and not self._relay_session_owner_ok(
                 _csess, conn.spoke_id, kind="console", remote_ip=conn.peer_ip):
             _csess = None  # sender does not own this session — refuse (surface K)
+        # No session: ignore.
         if not _csess:
             return
+        # Queue data or a ready/error/closed/downgraded event for the session.
         if _ctype == "CONSOLE_DATA_UP":
             try:
                 await _csess["queue"].put(base64.b64decode(_cdata.get("data") or ""))
@@ -6949,6 +7698,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         from the harvested identity. Fire-and-forget so the dispatch loop
         doesn't block on a NetBox round-trip.
         """
+        # Handle the probe result in the background.
         asyncio.create_task(self._handle_console_probe(conn.pk, payload.get("data", {}) or {}))
 
     async def _spoke_msg_nw_poll_result(self, conn, msg_data, payload, dec_secret):
@@ -6959,6 +7709,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         live SSH round-trip. ``data`` is the flattened poll — exactly what
         nw_cache_set_poll reads. Fire-and-forget.
         """
+        # Unpack the device id and poll data.
         _nwd = payload.get("data", {}) or {}
         _nw_did = _nwd.get("device_id")
         _nw_pdata = _nwd.get("data") if isinstance(_nwd.get("data"), dict) else _nwd
@@ -6974,6 +7725,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         the badge stays fresh between the hours-apart data polls.
         ``reachable`` may be None (UNKNOWN). Fire-and-forget.
         """
+        # Update the device's reachability in the background.
         _nwr = payload.get("data", {}) or {}
         _nwr_did = _nwr.get("device_id")
         if _nwr_did:
@@ -6988,6 +7740,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         serves instantly without a live WS JSON-RPC round-trip. ``data`` is
         the flattened poll. Fire-and-forget.
         """
+        # Unpack the appliance id and poll data, then cache in the background.
         _td = payload.get("data", {}) or {}
         _tn_aid = _td.get("appliance_id")
         _tn_pdata = _td.get("data") if isinstance(_td.get("data"), dict) else _td
@@ -7002,10 +7755,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         clears any prior cert-renew-failed alert edge (recovery email) —
         tenant from the spoke's binding, never the payload.
         """
+        # Unpack the domain and targets.
         spoke_id = conn.spoke_id
         ev = payload.get("data", {}) or {}
         _ev_domain = ev.get("domain")
         _ev_targets = ev.get("targets") or []
+        # Re-push the renewed cert when targets are known.
         if _ev_domain and _ev_targets:
             asyncio.create_task(self._on_le_cert_renewed(
                 spoke_id, _ev_domain, _ev_targets))
@@ -7013,6 +7768,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             logger.debug("LE_CERT_RENEWED from %s missing "
                          "domain/targets; hourly loop will cover it",
                          spoke_id)
+        # Clear any renewal-failure alert for the domain.
         if _ev_domain:
             _rn_tenant = self.state.get_spoke_tenant(spoke_id) or "default"
             asyncio.create_task(self.alert_engine.evaluate(
@@ -7026,6 +7782,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         prompt transport. Tenant from the spoke's binding (security: never
         trust the payload tenant).
         """
+        # Raise a renewal-failure alert for the domain.
         spoke_id = conn.spoke_id
         ev = payload.get("data", {}) or {}
         _fr_domain = ev.get("domain")
@@ -7045,6 +7802,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         _handle_status_run_demo resolves the tenant from ITS binding, never
         the payload. Fire-and-forget.
         """
+        # Run the demo in the background.
         asyncio.create_task(self._handle_status_run_demo(
             conn.spoke_id, payload.get("data", {}) or {}))
 
@@ -7055,12 +7813,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         rate-caps the reporter so a compromised edge can't poison the
         blocklist.
         """
+        # Handle the scanner report.
         self._handle_edge_probe_report(
             conn.spoke_id, conn.peer_ip, payload.get("data", {}) or {})
 
     async def _spoke_msg_app_login_failure(self, conn, msg_data, payload, dec_secret):
         """App-edge (AppBuilder) login failure → shared brute-force counter.
         _handle_app_login_failure rate-caps the reporter."""
+        # Count the login failure.
         self._handle_app_login_failure(
             conn.spoke_id, conn.peer_ip, payload.get("data", {}) or {})
 
@@ -7068,6 +7828,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """A node's hub-assigned canary endpoint was touched — a definitive
         intrusion attempt. _handle_node_canary_hit rate-caps the reporter and
         routes the response by the reporter's location."""
+        # Handle the canary hit.
         self._handle_node_canary_hit(
             conn.spoke_id, conn.peer_ip, payload.get("data", {}) or {})
 
@@ -7077,6 +7838,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         On a valid PSK the agent is auto-approved + bound to that tenant
         immediately; on any mismatch it just stays pending manual approval.
         """
+        # Try PSK auto-approval for the agent.
         await self._handle_agent_onboarding_psk(
             conn.spoke_id, payload.get("data", {}) or {})
 
@@ -7088,6 +7850,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         log (the dispatcher does that on False), matching the pre-extraction
         behavior.
         """
+        # Dispatch the relayed frame; False means it was not handled.
         return bool(await self._handle_agent_relay_up(
             conn.spoke_id, msg_data, payload, _dec_secret=dec_secret))
 
@@ -7095,6 +7858,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """Agent-initiated request (e.g. AppBuilder asking for logs or to
         trigger updates). See _handle_hub_request for the dispatch + signed
         HUB_RESPONSE reply."""
+        # Handle the request, passing the mTLS identity when present.
         await self._handle_hub_request(
             conn.spoke_id, msg_data, payload,
             getattr(conn.websocket, "peer_cert_identity", None))
@@ -7108,10 +7872,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     # (9ae39980 — the cs-spoke-1 zombie class).
 
     def _owns_spoke_slot(self, spoke_id, websocket):
+        """True if ``websocket`` is still the active connection for ``spoke_id``."""
+        # Same socket still holds the slot.
         return bool(spoke_id and self.active_connections.get(self._primary_key(spoke_id)) is websocket)
 
     def _on_spoke_connection_closed(self, spoke_id, websocket):
         """Clean WebSocket close."""
+        # Log; mark disconnected only if this socket held the slot.
         logger.info(f"Connection closed for spoke {spoke_id}")
         if self._owns_spoke_slot(spoke_id, websocket):
             self._mark_spoke_disconnected(spoke_id)
@@ -7119,6 +7886,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     def _on_spoke_connection_error(self, spoke_id, websocket, e):
         """Any other exception ended the connection."""
+        # Log; record the error only if this socket held the slot.
         logger.error(f"Error handling connection for {spoke_id}: {e}")
         if self._owns_spoke_slot(spoke_id, websocket):
             self.spoke_telemetry[self._primary_key(spoke_id)] = {
@@ -7136,13 +7904,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         is checked BEFORE deleting active_connections (the delete would
         otherwise make it False).
         """
+        # Finish any mTLS enrollment for this socket.
         if spoke_id:
             try:
                 self._mtls_enrollment_done(self._primary_key(spoke_id), websocket)
             except Exception:  # noqa: BLE001
                 pass
+        # Nothing to clean if another socket holds the slot.
         if not self._owns_spoke_slot(spoke_id, websocket):
             return
+        # Drop all per-connection state for this spoke.
         pk = self._primary_key(spoke_id)
         del self.active_connections[pk]
         self.active_connection_key_ids.pop(pk, None)
@@ -7174,6 +7945,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     def _log_source_label(self, sid: str) -> str:
         """Instance shim for the module-level resolver (kept for callers/tests
         that have a real hub)."""
+        # Delegate to the module-level helper.
         return _log_source_label(self, sid)
 
     def collect_all_logs(self):
@@ -7183,14 +7955,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         HUB_REQUEST GET_LOGS handler (used by the AppBuilder agent) share one
         implementation. Returns {"logs": [{"module": str, "log": str}, ...]}.
         """
+        # Start with the hub's own lines.
         all_logs = []
         for log in self.logs:
             all_logs.append({"module": "hub", "log": log})
 
+        # Add each relayed agent/spoke buffer.
         for agent_id, logs in self.agent_logs.items():
             for log in logs:
                 all_logs.append({"module": _log_source_label(self, agent_id), "log": log})
 
+        # Add the tail of each on-disk log file.
         try:
             log_dir = "/var/log/lm"
             if os.path.exists(log_dir):
@@ -7205,6 +7980,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         for line in _tail_lines(os.path.join(log_dir, filename), 500):
                             all_logs.append({"module": module_name, "log": line})
         except Exception as e:
+            # Log read errors.
             logger.error(f"Error reading module logs from disk: {e}")
 
         # Defense-in-depth against the 16 MiB WS frame ceiling: if the
@@ -7218,9 +7994,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # passes), NOT the prior `while ... pop(0)` loop which re-serialized the
         # whole list on every pop — O(N²) in log lines, which at 100s of spokes
         # × 1000-line deques stalled the event loop on every AppBuilder poll.
+        # Trim the payload to the size limit.
         max_bytes = getattr(self, "get_logs_max_bytes", lambda: 12 * 1024 * 1024)()
         all_logs = _fit_log_payload(all_logs, max_bytes)
 
+        # Return the logs.
         return {"logs": all_logs}
 
     def collect_error_logs(self):
@@ -7233,6 +8011,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         list of everything that has gone wrong across the whole stack, without
         having to comb each spoke's logs by hand.
         """
+        # Local import of re.
         import re
         # Match an actual ERROR/CRITICAL *level*, not the word "error" in prose.
         # Our log format is ``… - LEVEL - msg`` and LEVEL is always UPPERCASE
@@ -7250,14 +8029,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             r"(?<!\.)\b(?:ERROR|CRITICAL)\b"        # uppercase level (not prose "error")
             r"|\[[a-z][a-z-]*-error\]"              # [sync-error] and kin
             r"|(?i:\btraceback\b|\bexception\b)")    # Python failure indicators
+        # Collect matching hub lines.
         errs = []
         for log in self.logs:
             if pat.search(log):
                 errs.append(f"[hub] {log}")
+        # Collect matching agent/spoke lines.
         for agent_id, logs in self.agent_logs.items():
             for log in logs:
                 if pat.search(log):
                     errs.append(f"[{_log_source_label(self, agent_id)}] {log}")
+        # Collect matching lines from the tail of each on-disk log file.
         try:
             log_dir = "/var/log/lm"
             if os.path.exists(log_dir):
@@ -7269,8 +8051,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                 if pat.search(line):
                                     errs.append(f"[{module_name}] {line}")
                         except Exception:
+                            # Skip unreadable files.
                             continue
         except Exception as e:
+            # Log read errors.
             logger.error(f"Error reading module logs from disk: {e}")
         # Globally newest-first in the WebUI Error Log tab. The WebUI does
         # `.slice().reverse()` on whatever we return (main.js), and the three
@@ -7286,11 +8070,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # top of the error log.
         ts_re = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 
+        # Sort key: lines with a timestamp sort by it; lines without sort first.
         def _ts_key(line: str):
+            """Sort key: (1, timestamp) when a timestamp is found, else (0, "")."""
+            # Strip the source prefix, then find the timestamp.
             body = line.split("] ", 1)[1] if line.startswith("[") else line
             m = ts_re.search(body[:40])
             return (0, "") if not m else (1, m.group(1))
 
+        # Sort by timestamp.
         errs.sort(key=_ts_key)
 
         # De-duplicate across sources. The hub's OWN records reach this list
@@ -7301,6 +8089,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # keeping the first (oldest after the ascending sort) so each error
         # appears once. Spoke/agent relayed logs (``agent_logs``) have no
         # on-disk counterpart on the hub, so they survive untouched.
+        # Keep the first copy of each line, ignoring the source prefix.
         seen = set()
         deduped = []
         for line in errs:
@@ -7309,6 +8098,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 continue
             seen.add(key)
             deduped.append(line)
+        # Return the deduplicated lines.
         return {"logs": deduped}
 
     def _is_loopback_spoke(self, spoke_id: str) -> bool:
@@ -7320,10 +8110,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         spoke just writes files it can't present. remote_ip is captured at
         connect into spoke_telemetry. Unknown IP → NOT treated as loopback (don't
         suppress issuance on missing telemetry)."""
+        # Look up the spoke's remote IP.
         pk = self._primary_key(spoke_id)
         tel = ((self.spoke_telemetry or {}).get(pk)
                or (self.spoke_telemetry or {}).get(spoke_id) or {})
         ip = str(tel.get("remote_ip") or "").strip().lower()
+        # Loopback addresses only.
         return ip in ("127.0.0.1", "::1", "localhost")
 
     def _is_role_subspoke(self, spoke_id: str) -> bool:
@@ -7334,12 +8126,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ``parent_spoke_id`` ("skipped — role sub-spoke; parent carries the mTLS
         client cert"). The parent IS the transport endpoint and gets its own
         push."""
+        # A recorded parent means it is a role sub-spoke.
         pk = self._primary_key(spoke_id)
         _pm = getattr(self, "spoke_parent_map", None) or {}
         return bool(_pm.get(pk) or _pm.get(spoke_id))
 
     # Consecutive failed cert-less self-heals before the hub stops re-issuing.
     # Each re-issue restarts the spoke, so an unbounded retry is an outage loop.
+    # Maximum self-heal attempts before giving up.
     _MTLS_HEAL_MAX_ATTEMPTS = 3
 
     async def _provision_spoke_mtls_cert(self, spoke_id: str, force: bool = False) -> Dict[str, Any]:
@@ -7355,6 +8149,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         the spoke. Legacy spokes (and AppBuilder's separate agent) still get a
         hub-generated key in ``SPOKE_SET_MTLS_CLIENT_CERT``; that frame is in
         ``ENCRYPTED_TYPES`` so the key is AEAD-wrapped on the wire."""
+        # Import the CA module from either location.
         try:
             from security import mtls_ca
         except Exception:  # noqa: BLE001
@@ -7362,6 +8157,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 import mtls_ca  # type: ignore
             except Exception:  # noqa: BLE001
                 return {"status": "error", "message": "mtls_ca unavailable"}
+        # Primary key.
         pk = self._primary_key(spoke_id)
         # Co-located spokes connect over plaintext loopback (ws://127.0.0.1) — no
         # TLS leg, so a client cert can never be presented. Skip: issuing one just
@@ -7381,10 +8177,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     "message": "role sub-spoke shares its parent agent's connection — "
                                "the parent carries the mTLS client cert"}
         # A (re)issue clears any revocation — this IS the "un-revoke".
+        # Clear any revocation.
         try:
             (self.state.system_state.get("mtls_revoked", {}) or {}).pop(pk, None)
         except Exception:  # noqa: BLE001
             pass
+        # Module type and the cert registry entry.
         module_type = ((self.spoke_module_types or {}).get(pk)
                        or (self.spoke_module_types or {}).get(spoke_id) or "")
         reg = self.state.system_state.setdefault("mtls_client_certs", {})
@@ -7418,9 +8216,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # So: give up after _MTLS_HEAL_MAX_ATTEMPTS consecutive failed heals
             # and leave the spoke connected-but-cert-less, which is degraded yet
             # STABLE, and record why. A verified identity resets the counter.
+            # Spoke connected without presenting its cert.
             _ws = (self.active_connections or {}).get(pk)
             if _ws is not None and not getattr(_ws, "peer_cert_identity", None):
                 _tries = int(entry.get("heal_attempts") or 0)
+                # Give up after too many attempts.
                 if _tries >= self._MTLS_HEAL_MAX_ATTEMPTS:
                     return {"status": "heal-exhausted",
                             "reason": "cert never presented",
@@ -7432,6 +8232,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                 f"again (each re-push restarts the spoke). The cert is "
                                 f"most likely never reaching the hub — check for TLS "
                                 f"termination between this spoke and the hub.")}
+                # At most one re-issue every 10 minutes.
                 if (now - float(entry.get("issued_at") or 0)) >= 600:
                     logger.info(f"[mtls] {spoke_id} connected cert-less despite a "
                                 f"current registry cert — re-pushing (cert file "
@@ -7439,6 +8240,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                 f"{_tries + 1}/{self._MTLS_HEAL_MAX_ATTEMPTS}")
                     heal_attempts = _tries + 1
                     force = True
+            # Spoke presented its cert: reset the attempt counter.
             elif _ws is not None:
                 # Verified identity observed — the heal worked (or was never
                 # needed). Clear the strike count so a future genuine staleness
@@ -7449,10 +8251,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         self.state._mark_dirty()
                     except Exception:  # noqa: BLE001
                         pass
+            # Cert is current: nothing to do.
             if not force:
                 return {"status": "current", "not_after": entry.get("not_after")}
         # SANs: ab includes the pinned identities so _hub_request_authorized
         # matches its presented cert; other spokes just need a verified identity.
+        # Start the SAN list with the spoke id; read pinned AppBuilder identities.
         sans = [spoke_id]
         gc = self.state.get_global_config() or {}
         pinned = [str(n).strip() for n in (gc.get("ab_cert_identities") or []) if str(n).strip()]
@@ -7479,6 +8283,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # claimant is refused them (it still receives an ordinary self-identity
             # cert) and flagged. This closes the self-assertion gap by default with
             # no operator action and without breaking the live AppBuilder.
+            # Explicit allow-list of AppBuilder spoke ids.
             designated = {str(x).strip() for x in (gc.get("ab_spoke_ids") or []) if str(x).strip()}
             _autodesignated = False
             if designated:
@@ -7497,6 +8302,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # box ever wins the race it grabs the designation, but then the real
                 # AppBuilder is refused → loud ab_identity_spoof + dead logs/AI, the
                 # exact symptom an operator notices; they can override ab_spoke_ids.
+                # The id to lock trust-on-first-use to, and any lock already held in memory.
                 _lock = (pk or spoke_id or "").strip()
                 _mem = getattr(self, "_ab_tofu_lock", None)
                 if _mem and _mem != _lock:
@@ -7523,11 +8329,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             # this process, so a later different claimant is refused
                             # above; it will persist on the next successful grant.
                             pass
+            # Look up the spoke's remote IP for anomaly reports.
             try:
                 _ab_ip = (self.spoke_telemetry.get(pk, {}) or {}).get("remote_ip")
             except Exception:  # noqa: BLE001
                 _ab_ip = None
             _tm = getattr(self, "threat_monitor", None)
+            # Allowed: add the pinned SANs and report the designation.
             if _ab_ok:
                 sans = list(dict.fromkeys(pinned + [spoke_id]))
                 # Visibility (never auto-blocks — severity warning): record every
@@ -7567,25 +8375,33 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             _ab_ip, severity="warning")
                     except Exception:  # noqa: BLE001
                         pass
+        # Common name is the first SAN.
         cn = sans[0]
         key = None
+        # Whether the spoke can generate its own key and CSR.
         csr_capable = bool((getattr(self, "spoke_mtls_csr_capable", None) or {}).get(pk))
+        # Issue the certificate.
         try:
+            # CSR-capable: ask the spoke for a CSR and sign it.
             if csr_capable:
                 rr = await self.request_response(spoke_id, "SPOKE_MTLS_CSR",
                                                  {"cn": cn, "sans": sans}, timeout=30.0)
                 d = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
                 csr = (d or {}).get("csr") if isinstance(d, dict) else None
+                # No CSR returned: fail.
                 if not csr:
                     msg_ = (d or {}).get("message") if isinstance(d, dict) else None
                     logger.warning(f"[mtls] {spoke_id} returned no CSR: {msg_ or rr}")
                     return {"status": "error", "message": f"no CSR from spoke: {msg_ or 'timeout'}"}
                 fullchain = mtls_ca.sign_csr(csr, cn, sans=sans, days=397)
             else:
+                # Otherwise the hub generates both key and cert.
                 fullchain, key = mtls_ca.issue_client_cert(cn, sans=sans, days=397)
         except Exception as e:  # noqa: BLE001
+            # Issuance failed.
             logger.warning(f"[mtls] issue client cert for {spoke_id} failed: {e}")
             return {"status": "error", "message": str(e)}
+        # Deliver the cert (and key, if hub-generated) to the spoke.
         try:
             _data = {"cert": fullchain, "sans": sans}
             if key:
@@ -7596,14 +8412,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 payload=MessagePayload(type="SPOKE_SET_MTLS_CLIENT_CERT", data=_data))
             await self.send_to_spoke(msg)
         except Exception as e:  # noqa: BLE001
+            # Delivery failed.
             logger.warning(f"[mtls] deliver client cert to {spoke_id} failed: {e}")
             return {"status": "error", "message": str(e)}
         # Record metadata only (never the private key).
         na_iso, na_ts, serial = "", 0.0, ""
+        # Parse the leaf cert for its expiry and serial.
         try:
             from cryptography import x509
             end = "-----END CERTIFICATE-----"
             leaf = x509.load_pem_x509_certificate((fullchain.split(end)[0] + end).encode())
+            # Newer cryptography exposes a UTC-aware accessor.
             try:
                 na = leaf.not_valid_after_utc
             except Exception:  # noqa: BLE001
@@ -7611,6 +8430,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             na_iso, na_ts, serial = na.isoformat(), na.timestamp(), format(leaf.serial_number, "x")
         except Exception:  # noqa: BLE001
             pass
+        # Record the registry entry.
         reg[pk] = {"spoke_id": spoke_id, "module_type": module_type, "san": sans, "cn": cn,
                    "issued_at": now, "not_after": na_iso, "not_after_ts": na_ts,
                    "serial": serial, "source": "hub-ca", "ab": bool(is_bf),
@@ -7619,22 +8439,26 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                    # spoke restarts with the new one (delivery can fail).
                    "prev_serial": (entry or {}).get("serial", ""),
                    "key_custody": "spoke-csr" if csr_capable else "hub-generated"}
+        # Persist the registry.
         self.state.system_state["mtls_client_certs"] = reg
         try:
             await self.state.save_state_now()
         except Exception:  # noqa: BLE001
             pass
+        # Record the event.
         try:
             self.record_spoke_event(spoke_id, "mtls_cert_provisioned",
                                     f"san={','.join(sans)} exp={na_iso}")
         except Exception:  # noqa: BLE001
             pass
+        # Log and report success.
         logger.info(f"[mtls] provisioned Hub-CA client cert for {spoke_id} "
                     f"(san={sans}, exp={na_iso})")
         return {"status": "SUCCESS", "san": sans, "not_after": na_iso}
 
     async def _provision_spoke_mtls_cert_safe(self, spoke_id: str) -> None:
         """Fire-and-forget wrapper for the connect-time issuance task."""
+        # Run the provisioning; failures are only logged.
         try:
             await self._provision_spoke_mtls_cert(spoke_id)
         except Exception as e:  # noqa: BLE001
@@ -7644,7 +8468,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """Revoke a spoke's Hub-CA mTLS client cert: tell it to delete + stop
         presenting it (reconnect cert-less), drop it from the registry, and mark it
         revoked so auto-provision won't re-mint until an explicit (re)issue."""
+        # Primary key.
         pk = self._primary_key(spoke_id)
+        # Tell the spoke to delete its cert.
         try:
             msg = Message(
                 header=MessageHeader(message_id=str(uuid.uuid4()), timestamp=time.time(),
@@ -7653,6 +8479,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             await self.send_to_spoke(msg)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[mtls] clear cert on {spoke_id} failed: {e}")
+        # Remove it from the registry and record the revocation.
         prev = (self.state.system_state.setdefault("mtls_client_certs", {})).pop(pk, None)
         self.state.system_state.setdefault("mtls_revoked", {})[pk] = {
             "spoke_id": spoke_id, "revoked_at": time.time(),
@@ -7660,6 +8487,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Enforcement: the revoked serials are refused at connect even if the
         # spoke (or a thief) keeps presenting the cert; the identity loses its
         # binding so only an explicit re-issue lets it enroll again.
+        # Record the current, previous and bound serials as revoked.
         try:
             _na = float((prev or {}).get("not_after_ts") or 0)
             for _s in ((prev or {}).get("serial", ""), (prev or {}).get("prev_serial", "")):
@@ -7669,14 +8497,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 self._mtls_record_revoked_serial(pk, _bound["serial"], _na)
         except Exception:  # noqa: BLE001
             pass
+        # Persist.
         try:
             await self.state.save_state_now()
         except Exception:  # noqa: BLE001
             pass
+        # Record the event.
         try:
             self.record_spoke_event(spoke_id, "mtls_cert_revoked", "")
         except Exception:  # noqa: BLE001
             pass
+        # Log and report success.
         logger.info(f"[mtls] revoked Hub-CA client cert for {spoke_id}")
         return {"status": "SUCCESS", "spoke_id": spoke_id}
 
@@ -7685,12 +8516,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         (force) any CONNECTED spoke whose registry cert is within 7 days of expiry —
         spokes stay connected for months, so on-connect renewal alone would let a
         cert expire. Best-effort; never raises out of the loop."""
+        # Loop forever, hourly.
         while True:
             try:
                 await asyncio.sleep(3600)
+                # Skip when auto-provisioning is off.
                 if not (self.state.system_state.get("global_config", {}) or {}).get(
                         "mtls_ca_auto_provision", True):
                     continue
+                # Registry, current time and connected spokes.
                 reg = self.state.system_state.get("mtls_client_certs", {}) or {}
                 now = time.time()
                 active = set((self.active_connections or {}).keys())
@@ -7700,6 +8534,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # already-issued leaves keep working through the overlap, hot-reload
                 # the listener trust, and force-reissue connected spokes onto the new
                 # CA. Naturally one-shot: after rollover the CA is 10y out again.
+                # Roll the CA if it is within 90 days of expiry.
                 try:
                     from security import mtls_ca as _mtls_ca
                     from security import mtls as _mtls_mod
@@ -7715,6 +8550,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             logger.warning(f"[mtls] CA rollover trust reload failed: {ex}")
                         # Reissue every connected spoke from the new CA now, so nobody
                         # waits on the 7d leaf window with a soon-dead CA.
+                        # Reissue each connected spoke's cert from the new CA.
                         for pk2, e2 in list(reg.items()):
                             if pk2 not in active:
                                 continue
@@ -7725,6 +8561,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                 logger.warning(f"[mtls] CA-rollover reissue for {sid2} failed: {ex}")
                 except Exception as ex:  # noqa: BLE001
                     logger.warning(f"[mtls] CA expiry check failed: {ex}")
+                # Renew connected spokes' certs within 7 days of expiry.
                 for pk, e in list(reg.items()):
                     if pk not in active:
                         continue
@@ -7736,8 +8573,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         except Exception as ex:  # noqa: BLE001
                             logger.warning(f"[mtls] renew for {sid} failed: {ex}")
             except asyncio.CancelledError:
+                # Stop on cancellation.
                 break
             except Exception as e:  # noqa: BLE001
+                # Log and keep looping on other errors.
                 logger.warning(f"[mtls] renewal loop error: {e}")
 
     def _hub_request_authorized(self, spoke_id: str,
@@ -7769,6 +8608,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         off / no cert presented / extraction failed). Fail-closed: None or no
         pinned cert → deny. Everything else is denied and logged so attempted
         abuse surfaces in diagnostics."""
+        # AppBuilder cert identities the operator pinned.
         pinned = (self.state.get_global_config() or {}).get(
             "ab_cert_identities", []) or []
         if not pinned:
@@ -7779,6 +8619,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         if not peer_cert_identity:
             # mTLS off / no client cert presented / extraction failed → deny.
             return False
+        # Allowed only if the presented cert names a pinned identity.
         return any(name in pinned for name in peer_cert_identity)
 
     async def handle_hub_request(self, spoke_id: str, req: Dict[str, Any],
@@ -7792,10 +8633,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         and only a connection presenting the pinned AppBuilder client cert over
         mTLS is authorized to use the channel (H1) — see _hub_request_authorized.
         """
+        # Request type.
         req_type = req.get("type", "") if isinstance(req, dict) else ""
         # H1: the whole reverse channel (fleet RCE + cross-tenant logs + roster)
         # is AppBuilder's tool. Deny every other approved spoke before dispatch so
         # a malicious/compromised spoke can't escalate to fleet-wide action.
+        # Deny and record unauthorized callers.
         if not self._hub_request_authorized(spoke_id, peer_cert_identity):
             logger.warning(
                 f"[H1] denied HUB_REQUEST '{req_type}' from {spoke_id}: not "
@@ -7805,28 +8648,36 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                     f"type={req_type} — AppBuilder client cert required")
             return {"status": "error",
                     "message": "not authorized for HUB_REQUEST (AppBuilder role required)"}
+        # Dispatch by request type.
         try:
+            # Return all logs.
             if req_type == "GET_LOGS":
                 return await asyncio.to_thread(self.collect_all_logs)
 
+            # Return only error lines.
             if req_type == "GET_ERROR_LOGS":
                 return await asyncio.to_thread(self.collect_error_logs)
 
+            # Trigger a hub update.
             if req_type == "TRIGGER_UPDATE":
                 return await self.perform_update(force=bool(req.get("force", False)))
 
+            # Trigger spoke updates.
             if req_type == "TRIGGER_SPOKE_UPDATES":
                 return await self.update_spokes_only()
 
+            # Trigger agent updates.
             if req_type == "TRIGGER_AGENT_UPDATES":
                 return await self.update_agents_only()
 
+            # Trigger everything.
             if req_type == "TRIGGER_ALL_UPDATES":
                 hub = await self.perform_update(force=bool(req.get("force", False)))
                 spokes = await self.update_spokes_only()
                 agents = await self.update_agents_only()
                 return {"hub": hub, "spokes": spokes, "agents": agents}
 
+            # Report connections, approvals, types and recovery state.
             if req_type == "GET_SPOKE_STATUS":
                 return {
                     "active_connections": list(self.active_connections.keys()),
@@ -7860,6 +8711,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # short [bug-report] marker line in the hub log is what ab's
             # scan_bugs filters on; these handlers carry the payload.
             if req_type == "GET_BUG_REPORTS":
+                # List bug reports and mark those awaiting approval.
                 reports = self._list_bug_reports()
                 # Feature requests are gated on admin approval: ab must not
                 # file/work an unapproved feature. We still SEND them (annotated
@@ -7869,6 +8721,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # feature already approved/filed/fixed, are not gated.
                 for r in reports:
                     r["gated_pending_approval"] = self._bug_feature_gated(r)
+                # Log counts and return them.
                 gated = sum(1 for r in reports if r.get("gated_pending_approval"))
                 unfiled = sum(1 for r in reports if not r.get("filed"))
                 logger.info(
@@ -7878,16 +8731,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 return {"reports": reports}
 
             if req_type == "GET_BUG_REPORT":
+                # Load the report.
                 rid = req.get("id", "")
                 rep = await asyncio.to_thread(self._get_bug_report, rid)
                 # Defense in depth: never hand a full unapproved-feature report to
                 # ab (it would file + work it). The admin approves first.
+                # Withhold reports still awaiting approval.
                 if rep and self._bug_feature_gated(rep):
                     logger.info(
                         f"[bug-report] GET_BUG_REPORT id={rid} from {spoke_id}: "
                         f"GATED (feature awaiting admin approval)"
                     )
                     return {"gated_pending_approval": True, "id": rid}
+                # Log and return the report.
                 logger.info(
                     f"[bug-report] GET_BUG_REPORT id={rid} from {spoke_id}: "
                     f"{'hit' if rep else 'miss'}"
@@ -7895,6 +8751,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 return rep
 
             if req_type == "MARK_BUG_FILED":
+                # Mark the report as filed, log and report the outcome.
                 rid = req.get("id", "")
                 issue_url = req.get("issue_url", "")
                 ok = await asyncio.to_thread(self._mark_bug_filed, rid, issue_url)
@@ -7907,6 +8764,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             if req_type == "MARK_BUG_IN_PROGRESS":
                 # ab started actively working this report's issue → the LM UI
                 # shows "In Progress" so the user knows it's being worked on.
+                # Mark it in progress, log and report the outcome.
                 rid = req.get("id", "")
                 issue_url = req.get("issue_url", "")
                 ok = await asyncio.to_thread(self._mark_bug_in_progress, rid, issue_url)
@@ -7919,6 +8777,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             if req_type == "MARK_BUG_FIXED":
                 # ab closed the GitHub issue for this report → the LM UI shows
                 # "Fixed" + the issue link.
+                # Mark it fixed, log and report the outcome.
                 rid = req.get("id", "")
                 issue_url = req.get("issue_url", "")
                 ok = await asyncio.to_thread(self._mark_bug_fixed, rid, issue_url)
@@ -7930,6 +8789,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
             if req_type == "MARK_BUG_CLOSED":
                 # The issue was closed WITHOUT a fix → distinct "Closed (not fixed)".
+                # Mark it closed, log and report the outcome.
                 rid = req.get("id", "")
                 issue_url = req.get("issue_url", "")
                 ok = await asyncio.to_thread(self._mark_bug_closed, rid, issue_url)
@@ -7943,6 +8803,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # ab matched this report to an EXISTING issue (recurrence/same
                 # error) instead of filing a new one → the LM UI shows "Duplicate"
                 # linking that same issue.
+                # Mark it a duplicate, log and report the outcome.
                 rid = req.get("id", "")
                 issue_url = req.get("issue_url", "")
                 ok = await asyncio.to_thread(self._mark_bug_duplicate, rid, issue_url)
@@ -7975,12 +8836,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                     "installs the cert via its hosted Agent now. "
                                     "Update the netbox spoke to the agent-host build.")}
 
+            # Unknown request type.
             logger.warning(f"Unknown HUB_REQUEST type '{req_type}' from {spoke_id}")
             return {"status": "error", "message": f"unknown request type: {req_type}"}
         except Exception as e:
+            # Any handler error is returned as an error result.
             logger.error(f"HUB_REQUEST '{req_type}' from {spoke_id} failed: {e}")
             return {"status": "error", "message": str(e)}
 
+    # Seconds between simulations-cache flushes.
     _SIM_CACHE_FLUSH_INTERVAL_S = 30
     # Warm-load only bridges the seconds-long reconnect gap after a restart, so a
     # persisted telemetry frame older than this is dropped rather than shown —
@@ -7991,6 +8855,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """Group simulations_cache (keyed by spoke primary key) into per-tenant
         shards. Spokes with no tenant binding go to an ``_unassigned`` shard so
         they still persist/warm-load."""
+        # Look up the tenant, defaulting to "_unassigned".
         try:
             return self.state.get_spoke_tenant(spoke_pk) or "_unassigned"
         except Exception:  # noqa: BLE001
@@ -8000,13 +8865,18 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """Warm-start simulations_cache from per-tenant encrypted shards (best-
         effort) so the Clients/VM Server views seed on a restart instead of
         blank-until-reconnect. One-time migration from the legacy shared file."""
+        # Load per-tenant shards, migrating any legacy single file first.
         try:
+            # Imports for encryption and sharded storage.
             from security.encryption import hub_encryption
             from tenant_sharded import migrate_legacy, shard_load
+            # Decrypt and encrypt helpers.
             _dec = lambda b: hub_encryption.decrypt(b)  # noqa: E731
             _enc = lambda s: hub_encryption.encrypt(s)  # noqa: E731
+            # Migrate the legacy file into shards.
             migrate_legacy(self.state.data_dir, "simulations", "simulations_cache.json",
                            tenant_of=self._sim_cache_tenant_of, decrypt=_dec, encrypt=_enc)
+            # Load the shards.
             data = shard_load(self.state.data_dir, "simulations", "simulations_cache.json",
                               decrypt=_dec) or {}
             # Drop ANCIENT frames on warm-load. Warm-start only exists to bridge
@@ -8018,6 +8888,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # count) until the operator manually clears it. Dropping stale frames
             # here makes a restart never resurrect a ghost — the live relay
             # repopulates the real host within seconds.
+            # Keep only fresh frames, counting the stale ones dropped.
             _now = time.time()
             loaded, _dropped = {}, 0
             for k, v in data.items():
@@ -8028,17 +8899,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     _dropped += 1
                     continue
                 loaded[str(k)] = v
+            # Install the loaded cache and log what happened.
             self.simulations_cache = loaded
             if self.simulations_cache or _dropped:
                 logger.info("simulations_cache: warm-loaded %d spoke payload(s) from shards"
                             "%s", len(self.simulations_cache),
                             f" ({_dropped} stale ghost frame(s) dropped)" if _dropped else "")
         except Exception as e:  # noqa: BLE001
+            # Start empty on failure.
             logger.warning("simulations_cache warm load failed: %s — starting empty", e)
 
     def _save_simulations_cache(self) -> None:
         """Encrypted per-tenant shard write of simulations_cache. Never raises — a
         failed persist must not break telemetry ingest."""
+        # Write the cache as encrypted per-tenant shards.
         try:
             from security.encryption import hub_encryption
             from tenant_sharded import shard_save
@@ -8046,12 +8920,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                        self.simulations_cache, tenant_of=self._sim_cache_tenant_of,
                        encrypt=lambda s: hub_encryption.encrypt(s))
         except Exception as e:  # noqa: BLE001
+            # Log failures only.
             logger.warning("simulations_cache persist failed: %s", e)
 
     def _load_central_hub_status(self) -> None:
         """Warm-start central_hub_status from per-tenant encrypted shards so the
         centralized-mode Checks/Central/Hardware dashboards seed on a restart
         instead of blank-until-first-poll. One-time migration from legacy file."""
+        # Load per-tenant shards, migrating any legacy file first.
         try:
             from security.encryption import hub_encryption
             from tenant_sharded import migrate_legacy, shard_load
@@ -8061,17 +8937,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                            tenant_of=lambda k: k, decrypt=_dec, encrypt=_enc)
             data = shard_load(self.state.data_dir, "simulations", "central_hub_status.json",
                               decrypt=_dec) or {}
+            # Keep dict entries only, and log the count.
             self.central_hub_status = {str(k): v for k, v in data.items()
                                        if isinstance(v, dict)}
             if self.central_hub_status:
                 logger.info("central_hub_status: warm-loaded %d tenant status block(s) from shards",
                             len(self.central_hub_status))
         except Exception as e:  # noqa: BLE001
+            # Start empty on failure.
             logger.warning("central_hub_status warm load failed: %s — starting empty", e)
 
     def _save_central_hub_status(self) -> None:
         """Encrypted per-tenant shard write of central_hub_status. Never raises — a
         failed persist must not break the poll loop. Called once per poll cycle."""
+        # Write the status as encrypted per-tenant shards.
         try:
             from security.encryption import hub_encryption
             from tenant_sharded import shard_save
@@ -8079,6 +8958,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                        self.central_hub_status, tenant_of=lambda k: k,
                        encrypt=lambda s: hub_encryption.encrypt(s))
         except Exception as e:  # noqa: BLE001
+            # Log failures only.
             logger.warning("central_hub_status persist failed: %s", e)
 
     def _load_mist_hub_status(self) -> None:
@@ -8086,6 +8966,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         centralized-mode Checks/Mist/Hardware dashboards seed on a restart
         instead of blank-until-first-poll. One-time migration from legacy file.
         Mirror of _load_central_hub_status (separate product, not shared)."""
+        # Load per-tenant shards, migrating any legacy file first.
         try:
             from security.encryption import hub_encryption
             from tenant_sharded import migrate_legacy, shard_load
@@ -8095,18 +8976,21 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                            tenant_of=lambda k: k, decrypt=_dec, encrypt=_enc)
             data = shard_load(self.state.data_dir, "simulations", "mist_hub_status.json",
                               decrypt=_dec) or {}
+            # Keep dict entries only, and log the count.
             self.mist_hub_status = {str(k): v for k, v in data.items()
                                     if isinstance(v, dict)}
             if self.mist_hub_status:
                 logger.info("mist_hub_status: warm-loaded %d tenant status block(s) from shards",
                             len(self.mist_hub_status))
         except Exception as e:  # noqa: BLE001
+            # Start empty on failure.
             logger.warning("mist_hub_status warm load failed: %s — starting empty", e)
 
     def _save_mist_hub_status(self) -> None:
         """Encrypted per-tenant shard write of mist_hub_status. Never raises — a
         failed persist must not break the poll loop. Called once per poll cycle.
         Mirror of _save_central_hub_status."""
+        # Write the status as encrypted per-tenant shards.
         try:
             from security.encryption import hub_encryption
             from tenant_sharded import shard_save
@@ -8114,6 +8998,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                        self.mist_hub_status, tenant_of=lambda k: k,
                        encrypt=lambda s: hub_encryption.encrypt(s))
         except Exception as e:  # noqa: BLE001
+            # Log failures only.
             logger.warning("mist_hub_status persist failed: %s", e)
 
     def _load_central_on_prem_hub_status(self) -> None:
@@ -8122,6 +9007,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         instead of blank-until-first-poll. Mirror of _load_central_hub_status
         (separate shard file so cloud Central and Central On-Prem never share
         persisted status)."""
+        # Load per-tenant shards, migrating any legacy file first.
         try:
             from security.encryption import hub_encryption
             from tenant_sharded import migrate_legacy, shard_load
@@ -8131,12 +9017,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                            tenant_of=lambda k: k, decrypt=_dec, encrypt=_enc)
             data = shard_load(self.state.data_dir, "simulations", "central_on_prem_hub_status.json",
                               decrypt=_dec) or {}
+            # Keep dict entries only, and log the count.
             self.central_on_prem_hub_status = {str(k): v for k, v in data.items()
                                                if isinstance(v, dict)}
             if self.central_on_prem_hub_status:
                 logger.info("central_on_prem_hub_status: warm-loaded %d tenant status block(s) from shards",
                             len(self.central_on_prem_hub_status))
         except Exception as e:  # noqa: BLE001
+            # Start empty on failure.
             logger.warning("central_on_prem_hub_status warm load failed: %s — starting empty", e)
 
     def _save_central_on_prem_hub_status(self) -> None:
@@ -8144,6 +9032,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         raises — a failed persist must not break the poll loop. Called once per
         poll cycle by the Central On-Prem poller instance. Mirror of
         _save_central_hub_status (separate shard file)."""
+        # Write the status as encrypted per-tenant shards.
         try:
             from security.encryption import hub_encryption
             from tenant_sharded import shard_save
@@ -8151,6 +9040,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                        self.central_on_prem_hub_status, tenant_of=lambda k: k,
                        encrypt=lambda s: hub_encryption.encrypt(s))
         except Exception as e:  # noqa: BLE001
+            # Log failures only.
             logger.warning("central_on_prem_hub_status persist failed: %s", e)
 
     def reset_derived_cache(self, tenant: "Optional[str]" = None) -> dict:
@@ -8166,6 +9056,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         dicts is essential — deleting files alone would let the next save re-write
         the (possibly corrupt) resident data straight back. Best-effort per store.
         """
+        # Shard reset helpers and the Central poller's history stores.
         from tenant_sharded import reset_tenant_files, reset_all_tenant_files
         poller = getattr(self, "central_hub_poller", None)
         stores = [getattr(poller, a, None) for a in ("_health", "_cpw", "_cc")] if poller else []
@@ -8177,9 +9068,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # client-count stores (separate shard files). Wipe them too on a reset.
         on_prem_poller = getattr(self, "central_on_prem_hub_poller", None)
         stores += [getattr(on_prem_poller, a, None) for a in ("_health", "_cpw", "_cc")] if on_prem_poller else []
+        # One tenant: drop its status blocks, cache entries, history and shard files.
         if tenant:
             t = str(tenant)
             try:
+                # Each removal is best-effort.
                 self.central_hub_status.pop(t, None)
             except Exception:  # noqa: BLE001
                 pass
@@ -8192,20 +9085,24 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             except Exception:  # noqa: BLE001
                 pass
             try:
+                # Drop that tenant's simulation frames.
                 for pk in [pk for pk in list(self.simulations_cache)
                            if self._sim_cache_tenant_of(pk) == t]:
                     self.simulations_cache.pop(pk, None)
                 self._sim_cache_dirty = True
             except Exception:  # noqa: BLE001
                 pass
+            # Forget the tenant in each history store.
             for store in stores:
                 try:
                     if store:
                         store.forget(t)
                 except Exception:  # noqa: BLE001
                     pass
+            # Delete the tenant's shard files.
             files = reset_tenant_files(self.state.data_dir, t)
         else:
+            # All tenants: clear everything.
             try:
                 self.central_hub_status.clear()
             except Exception:  # noqa: BLE001
@@ -8223,13 +9120,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 self._sim_cache_dirty = True
             except Exception:  # noqa: BLE001
                 pass
+            # Clear each history store.
             for store in stores:
                 try:
                     if store:
                         store.clear()
                 except Exception:  # noqa: BLE001
                     pass
+            # Delete all shard files.
             files = reset_all_tenant_files(self.state.data_dir)
+        # Log and report.
         logger.warning("reset_derived_cache: scope=%s removed %d shard file(s)",
                        tenant or "ALL", files)
         return {"status": "ok", "scope": tenant or "all", "files_removed": files}
@@ -8241,6 +9141,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     # copy, so this is not a correctness fix — it stops the duplicate existing at
     # all, so every other consumer of the cache sees one owner per host.
     _DUAL_HOME_STALE_S = 600.0     # loser must be this far behind the winner
+    # Seconds between reconcile passes.
     _DUAL_HOME_INTERVAL_S = 300.0
 
     async def run_dual_home_reconcile_loop(self):
@@ -8253,11 +9154,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Reuses CS_PURGE_HOST, the same command the operator's "remove host"
         button sends, so there is one eviction path rather than two.
         """
+        # Loop forever.
         while True:
+            # Each pass waits, then reconciles; errors never stop the loop.
             try:
                 await asyncio.sleep(self._DUAL_HOME_INTERVAL_S)
                 # hostname -> [(last_seen, spoke_id)]
                 claims: Dict[str, list] = {}
+                # Collect every spoke's claim on each host with its last-seen time.
                 for sid, data in list((self.simulations_cache or {}).items()):
                     for h in ((data or {}).get("proxmox_hosts") or []):
                         hn = str((h or {}).get("hostname") or "").strip().lower()
@@ -8268,11 +9172,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         except (TypeError, ValueError):
                             seen = 0.0
                         claims.setdefault(hn, []).append((seen, sid))
+                # Hosts claimed by two or more spokes.
                 for hn, rows in claims.items():
                     if len(rows) < 2:
                         continue                      # single owner — nothing to do
+                    # Newest claim wins.
                     rows.sort(reverse=True)
                     win_seen, win_sid = rows[0]
+                    # Purge the host from each clearly-stale loser.
                     for lose_seen, lose_sid in rows[1:]:
                         if win_seen - lose_seen < self._DUAL_HOME_STALE_S:
                             continue                  # too close to call — leave both
@@ -8289,8 +9196,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             logger.debug("[dual-home] purge %s from %s failed: %s",
                                          hn, lose_sid, e)
             except asyncio.CancelledError:
+                # Propagate cancellation.
                 raise
             except Exception as e:  # noqa: BLE001
+                # Log other errors and continue.
                 logger.debug("dual-home reconcile loop error: %s", e)
 
     async def run_sim_cache_flush_loop(self):
@@ -8298,24 +9207,31 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Decoupled from the ~10s-per-spoke telemetry rate → one bounded write per
         interval; the sync write is offloaded via asyncio.to_thread so it can't
         reproduce the on-loop I/O starvation that stalled cs-svr-02's WS link."""
+        # Loop forever.
         while True:
             try:
+                # Wait, then save if dirty (in a worker thread).
                 await asyncio.sleep(self._SIM_CACHE_FLUSH_INTERVAL_S)
                 if self._sim_cache_dirty:
                     self._sim_cache_dirty = False
                     await asyncio.to_thread(self._save_simulations_cache)
             except asyncio.CancelledError:
+                # Propagate cancellation.
                 raise
             except Exception as e:  # noqa: BLE001
+                # Log other errors and continue.
                 logger.debug("sim cache flush loop error: %s", e)
 
     def _update_gate_config(self) -> dict:
         """The WebUI-editable maintenance-window / idle gate for AUTO restarts
         (global_config.update_gate). Defaults to a 02:00 local-time window."""
+        # Read the gate config section.
         try:
             cfg = (self.state.system_state.get("global_config", {}) or {}).get("update_gate", {}) or {}
         except Exception:  # noqa: BLE001
+            # Config unavailable: defaults.
             cfg = {}
+        # Return the settings with defaults.
         return {
             # window = STRICT maintenance window only (default, 2am — never on
             # daytime idle); idle_window = idle OR window; idle = when idle only;
@@ -8333,16 +9249,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     def _gate_allows_restart_now(self) -> bool:
         """Whether an AUTO-update restart may fire right now per update_gate.
         The footer Update button bypasses this (force sentinel). Fail-open."""
+        # Immediate mode always allows.
         g = self._update_gate_config()
         if g["mode"] == "immediate":
             return True
         # Idle = nobody actively logged into the WebUI (best-effort → treat
         # unknown as idle so we never strand an update).
+        # Idle means no active WebUI users.
         try:
             from api import _active_user_count
             idle = _active_user_count() == 0
         except Exception:  # noqa: BLE001
             idle = True
+        # Idle mode follows idleness alone.
         if g["mode"] == "idle":
             return idle
         # "idle_window" (legacy permissive): restart as soon as nobody is logged
@@ -8357,10 +9276,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # button (force sentinel) still applies on demand, any time. INVARIANT:
         # do NOT re-add an `if idle: return True` here for window mode — use
         # `idle_window` mode if promptly-on-idle behavior is wanted.
+        # Work out the current hour in the gate's timezone.
         try:  # window: hour (in the gate's timezone) within [start, start+duration) mod 24
             h = _update_gate_local_hour(g.get("timezone", ""))
         except Exception:  # noqa: BLE001
             return True   # clock unreadable → fail-open so an update never strands
+        # Allowed if the hour falls within the window.
         start = g["window_hour"] % 24
         dur = max(1, min(24, g["window_duration_h"]))
         return any((start + i) % 24 == h for i in range(dur))
@@ -8387,6 +9308,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
           ``check_update_health`` (see update_pipeline). The dot is yellow on
           EITHER signal.
         """
+        # Read the target version from the VERSION file.
         target_ver = ""
         try:
             vp = os.path.join(os.path.dirname(__file__), "../../VERSION")
@@ -8399,6 +9321,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # value stays correct — this is disk-vs-running drift detection, so it
             # MUST reflect a pull. Direct-read fallback when the cached reader is
             # unavailable (e.g. a stub hub in unit tests).
+            # Use the cached reader when available.
             _reader = getattr(self, "_read_version_cached", None)
             if _reader is not None:
                 target_ver = _reader(vp) or ""
@@ -8407,6 +9330,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     target_ver = vf.read().strip()
         except Exception:  # noqa: BLE001
             pass
+        # Running version from startup, else from the state file.
         running_ver = getattr(self, "_startup_version", "") or ""
         if not running_ver:
             try:
@@ -8414,6 +9338,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     running_ver = rf.read().strip()
             except Exception:  # noqa: BLE001
                 pass
+        # Behind when both are known and differ; plus whether an update is available.
         behind = bool(target_ver and running_ver and target_ver != running_ver)
         update_avail = bool(getattr(self, "_update_available", False))
         return target_ver, running_ver, behind, update_avail
@@ -8430,7 +9355,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         the cached dict (for armed/heartbeat/log_mtime) and overwrite the drift
         keys with a fresh ``_compute_version_drift`` — a cheap sync file read.
         """
+        # Copy the cached status.
         base = dict(getattr(self, "_watchdog_status", {}) or {})
+        # Add drift and fault keys.
         try:
             target_ver, running_ver, behind, update_avail = self._compute_version_drift()
             base["target_version"] = target_ver
@@ -8440,6 +9367,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             base.update(self._update_fault_state(behind, update_avail))
         except Exception:  # noqa: BLE001 — never let the dot break /status
             pass
+        # Return the status.
         return base
 
     # An update that is merely PENDING and one that is STUCK or FAILED looked
@@ -8459,15 +9387,18 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         Never raises: a fault here must not take /status with it.
         """
+        # Local time import and the default result.
         import time as _t
         out: dict = {"update_failed": False, "update_stuck": False,
                      "stuck_for_s": None, "bad_versions": [],
                      "update_fault_reason": ""}
+        # Read the update-recovery summary.
         try:
             import update_recovery
             summary = update_recovery.update_health_summary()
         except Exception:  # noqa: BLE001
             summary = {}
+        # Record bad versions.
         bad = list(summary.get("bad_versions") or [])
         out["bad_versions"] = bad
 
@@ -8477,6 +9408,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # lm-update-restart helper, an unresolved git HEAD. It was log-only, so
         # the UI could sit "updating" indefinitely while the answer sat in a log.
         # A broken updater is a hard fault: it will not fix itself.
+        # Include the hub's own update-path self-check errors.
         uh = getattr(self, "_update_health", None) or {}
         uh_errors = [str(e) for e in (uh.get("errors") or [])]
         out["update_health_errors"] = uh_errors
@@ -8486,6 +9418,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             out["update_fault_reason"] = ("the update path itself is broken — "
                                           + uh_errors[0])
 
+        # A failed update to boot is a failure.
         if summary.get("failed"):
             out["update_failed"] = True
             det = summary.get("failed_detail") or {}
@@ -8504,12 +9437,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         # Stuck: drift that has persisted. Tracked here (the single read point)
         # rather than in the 20s loop so it is correct even if that loop dies.
+        # Track when drift started; clear it when there is none.
         now = _t.time()
         drifting = bool(behind or update_avail)
         if not drifting:
             self._update_drift_since = None
         elif getattr(self, "_update_drift_since", None) is None:
             self._update_drift_since = now
+        # Report how long drift has lasted and flag it stuck after the threshold.
         since = getattr(self, "_update_drift_since", None)
         if since:
             held = max(0.0, now - float(since))
@@ -8521,6 +9456,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         f"an update has been pending for {int(held // 60)} min "
                         "without completing — the pull or the restart is not "
                         "progressing.")
+        # Return the result.
         return out
 
     async def run_watchdog_bridge_loop(self):
@@ -8533,18 +9469,22 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
              WebUI can show that auto-heal is alive (via /status → get_system_metrics).
         Purely observational + best-effort; never fatal to the hub.
         """
+        # Lazy import plus file paths and cached state.
         from api import write_active_users_file  # lazy: avoid module-level dep
         wlog = "/var/log/lm/watchdog.log"
         status_file = "/var/lib/lm/watchdog-status"
         self._watchdog_status = getattr(self, "_watchdog_status", {}) or {}
         self._watchdog_log_pos = getattr(self, "_watchdog_log_pos", None)
+        # Wait past boot.
         await asyncio.sleep(20)  # stagger past boot
+        # Loop forever, every 20 seconds.
         while True:
             try:
                 # 1. active-user count + restart-gate flag for the watchdog.
                 # The gate flag (1/0) encodes the maintenance-window/idle policy
                 # so the watchdog only auto-restarts when allowed (Update button
                 # force-sentinel bypasses it). Fail-open: written every cycle.
+                # Write the active-user count and restart-gate flag files.
                 try:
                     write_active_users_file(self)
                     _allowed = "1" if self._gate_allows_restart_now() else "0"
@@ -8556,6 +9496,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 except Exception:  # noqa: BLE001
                     pass
                 # 2. relay new watchdog.log lines into the hub log
+                # Relay new watchdog.log lines into the hub log.
                 try:
                     if os.path.isfile(wlog):
                         size = os.path.getsize(wlog)
@@ -8568,6 +9509,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                 f.seek(self._watchdog_log_pos)
                                 new = f.read()
                                 self._watchdog_log_pos = f.tell()
+                            # Restart-related lines are warnings; others are info.
                             for line in new.splitlines():
                                 line = line.strip()
                                 if not line:
@@ -8580,6 +9522,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 except Exception as e:  # noqa: BLE001
                     logger.debug("watchdog log relay failed: %s", e)
                 # 3. cache watchdog heartbeat/status for the WebUI
+                # Check whether the watchdog unit is active.
                 try:
                     armed = False
                     if shutil.which("systemctl"):
@@ -8588,6 +9531,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                         out, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
                         armed = out.decode().strip() == "active"
+                    # Read the watchdog heartbeat.
                     hb = ""
                     if os.path.isfile(status_file):
                         with open(status_file, "r") as f:
@@ -8595,6 +9539,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     # Version-drift for the footer indicator (extracted into
                     # _compute_version_drift so the disk-vs-running logic is
                     # unit-testable without standing up the full watchdog loop).
+                    # Compute version drift and cache the full status.
                     _target_ver, _running_ver, _behind, _update_avail = (
                         self._compute_version_drift())
                     self._watchdog_status = {
@@ -8609,21 +9554,26 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 except Exception as e:  # noqa: BLE001
                     logger.debug("watchdog status cache failed: %s", e)
             except Exception as e:  # noqa: BLE001 — never fatal
+                # Log cycle failures and continue.
                 logger.debug("watchdog bridge loop cycle failed: %s", e)
+            # Wait before the next pass.
             await asyncio.sleep(20)
 
     async def run_mps_loop(self):
         """
         Calculates messages per second and throughput using a 10-second moving average.
         """
+        # Log start and remember the last tick.
         logger.info("MPS and Throughput monitoring loop started.")
         _last_tick = time.time()
+        # Tick once a second.
         while True:
             await asyncio.sleep(1.0)
             # LOOP LAG = how much longer than the 1s sleep this cycle actually
             # took. When the event loop is CPU-saturated by ingest (single core
             # pegged), even this sleep returns late — so the overrun is a direct
             # "loop is the bottleneck" signal, independent of memory.
+            # Measure event-loop lag and record it.
             _now = time.time()
             _loop_lag = max(0.0, (_now - _last_tick) - 1.0)
             _last_tick = _now
@@ -8635,6 +9585,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # Memory guards OOM; loop-lag guards the single-core saturation
                 # that hangs the UI. Shedding (reads + telemetry) relieves BOTH.
                 try:
+                    # Read the protect-mode thresholds.
                     cfg = (self.state.get_global_config() or {}).get("protect", {}) or {}
                     mem_hi = float(cfg.get("mem_high_pct", 90))
                     mem_lo = float(cfg.get("mem_low_pct", 80))
@@ -8643,6 +9594,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     cpu_hi = float(cfg.get("cpu_high_pct", 90))   # hub-process %/core
                     cpu_lo = float(cfg.get("cpu_low_pct", 70))
                     self._protect_shed_bytes = int(cfg.get("shed_bytes", 2048))
+                    # Sample memory and hub-process CPU.
                     memp = psutil.virtual_memory().percent
                     cpup = self._proc.cpu_percent(interval=None) if self._proc else 0.0
                     # Stash for the ladder's fleet decision — hub-process CPU is
@@ -8651,9 +9603,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     # cross their marks). The graceful fleet slow-down keys off
                     # this at a LOWER threshold than protect.
                     self._proc_cpu = cpup
+                    # Decide whether we are over or under the thresholds.
                     _over = memp >= mem_hi or _loop_lag >= lag_hi or cpup >= cpu_hi
                     _under = memp <= mem_lo and _loop_lag <= lag_lo and cpup <= cpu_lo
                     dwell = float(cfg.get("min_dwell_s", 15))
+                    # Enter protect mode when over.
                     if not self._protect_mode and _over:
                         self._protect_mode = True
                         self._protect_entered_ts = _now
@@ -8663,6 +9617,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         logger.error("[protect] ENTER — %s (mem %.0f%%, cpu %.0f%%, lag %.1fs); "
                                      "shedding heavy reads + telemetry (pre-parse)",
                                      self._protect_reason, memp, cpup, _loop_lag)
+                    # Exit protect mode once under and past the minimum dwell.
                     elif (self._protect_mode and _under
                           and (_now - getattr(self, "_protect_entered_ts", 0)) >= dwell):
                         # Min-dwell before exit so the pre-parse shed (which drops
@@ -8672,8 +9627,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         self._protect_mode = False
                         self._protect_reason = ""
                 except Exception as _pe:  # noqa: BLE001 — never let the guard crash the loop
+                    # Sampling errors are only logged.
                     logger.debug("[protect] guard sample failed: %s", _pe)
 
+                # Update the rolling messages-per-second average.
                 self.message_history.append(self.message_count)
 
                 if len(self.message_history) > 0:
@@ -8681,12 +9638,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 else:
                     self.mps = 0.0
 
+                # Throughput in MB for this tick.
                 self.throughput_mbps = self.bytes_count / (1024 * 1024)
 
                 # Keep the mailbox's backlog-expiry cap in sync with the live
                 # config knob (global_config["backlog_expiry"].max_age_seconds,
                 # default 3600s; 0 disables the cap → 24h ttl). Cheap dict read.
                 try:
+                    # Refresh the backlog expiry cap.
                     _be = (self.state.get_global_config().get("backlog_expiry", {}) or {})
                     self.mailbox.backlog_max_age_s = float(_be.get("max_age_seconds", 3600))
                 except Exception:
@@ -8695,6 +9654,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # Refresh the soft-watermark fraction for the hot message loop
                 # (so it reads an attribute, not a config dict, per frame).
                 try:
+                    # Refresh the backpressure settings.
                     _bpc = (self.state.get_global_config().get("backpressure", {}) or {})
                     self._rl_soft_frac = float(_bpc.get("rl_soft_fraction", 0.8))
                     self._protect_shed_min_mps = float(_bpc.get("protect_shed_min_mps", 50.0))
@@ -8704,6 +9664,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # Per-spoke msg/s: push this tick's count into each spoke's 10s
                 # history and average. Prune history for spokes with no traffic
                 # and no live connection so the dicts don't grow unbounded.
+                # Update per-spoke rates, dropping idle disconnected spokes.
                 live = set(getattr(self, "active_connections", {}) or {})
                 seen = set(self.spoke_msg_count) | set(self.spoke_msg_history)
                 for sid in seen:
@@ -8717,23 +9678,28 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         # Idle + disconnected → drop it entirely.
                         self.spoke_msg_history.pop(sid, None)
                         self.spoke_mps.pop(sid, None)
+                # Reset per-tick counts.
                 self.spoke_msg_count = {}
                 # Snapshot the TRUE offered-frame counts for the protect source-
                 # shed (per-tick ≈ frames/s), then reset for the next tick.
+                # Snapshot offered-frame counts and reset them.
                 self._spoke_offered = self._spoke_recv
                 self._spoke_recv = {}
 
                 # ── Escalation ladder: throttle offenders first, then fleet ──
                 # Runs AFTER per-spoke mps is computed so it can name the loud
                 # talkers. Sends LM_BACKPRESSURE on state-change only.
+                # Run the backpressure ladder.
                 try:
                     await self._apply_backpressure_ladder(_loop_lag)
                 except Exception as _be:  # noqa: BLE001 — never crash the tick
                     logger.debug("[backpressure] ladder skipped: %s", _be)
 
+                # Reset the global counters.
                 self.message_count = 0
                 self.bytes_count = 0
             except Exception as e:
+                # Log loop errors and continue.
                 logger.debug("[mps] loop iteration skipped: %s", e, exc_info=True)
 
     async def _apply_backpressure_ladder(self, loop_lag: float) -> None:
@@ -8764,6 +9730,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # here would just compound the overload (this is what killed the hub at
         # ~800 spokes). So stand down and let protect shed; drop any buffered
         # coalesce work. The spoke slow-down signals we already sent still stand.
+        # Under protect: max level, throttle the loudest spokes and shed sources.
         if self._protect_mode:
             self._coalesce_pending = {}
             self._load_level = max(self._load_level, 3)
@@ -8775,6 +9742,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # MAX interval) — cheap (sort + top-K signals), and it's exactly the
             # spokes that need slowing. Then source-shed disconnects any that
             # ignore it. Quiet spokes (< fleet_min) are never touched.
+            # Throttle the loudest spokes above the fleet floor.
             try:
                 _cap = max(1, p["max_signals_per_tick"])
                 _fmin = p["fleet_min_mps"]
@@ -8793,18 +9761,22 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     await asyncio.gather(*_sigs, return_exceptions=True)
             except Exception as _te:  # noqa: BLE001
                 logger.debug("[protect] loud-throttle skipped: %s", _te)
+            # Disconnect the loudest sources if configured.
             try:
                 await self._protect_source_shed(p)
             except Exception as _se:  # noqa: BLE001
                 logger.debug("[protect] source-shed skipped: %s", _se)
+            # Done for this tick.
             return
 
+        # Settings and live spokes.
         p = self._backpressure_params()
         live = list(getattr(self, "active_connections", {}) or {})
         # Signals are collected and fired CONCURRENTLY (gather) at the end — a
         # fleet-wide transition is hundreds of frames and must not stall the 1s
         # tick (that's the very core we're trying to relieve). CAPPED per tick.
         sigs = []
+        # Disabled: release every throttled spoke and reset levels.
         if not p["enabled"]:
             for sid in [s for s, l in list(self._backoff_signaled.items()) if l]:
                 sigs.append(self._signal_backoff(sid, 0, 0.0))
@@ -8821,6 +9793,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         #   • hub-process CPU  — the earliest, truest saturation signal;
         #   • loop-lag         — the single core can't keep up (tick returns late);
         #   • mps              — raw processed throughput near the ceiling.
+        # Fleet hot/cool decision with hysteresis.
         cpu = getattr(self, "_proc_cpu", 0.0)
         fleet_hot = (cpu >= p["fleet_cpu_soft"]
                      or loop_lag >= p["fleet_lag_soft_s"]
@@ -8828,6 +9801,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         fleet_cool = (cpu <= p["fleet_cpu_clear"]
                       and loop_lag <= p["fleet_lag_clear_s"]
                       and self.mps < p["fleet_soft_mps"] * 0.6)
+        # Set or clear fleet backoff.
         if fleet_hot:
             self._fleet_backoff = True
         elif fleet_cool:
@@ -8846,6 +9820,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # the interval we ask FLEET-throttled spokes to conflate to — push the
         # fleet down HARDER as it heats up so CPU stays out of protect. Linear
         # from coalesce_min (at fleet_cpu_soft) to coalesce_max (at fleet_cpu_hard).
+        # Fleet coalesce interval scales with CPU between soft and hard marks.
         imin, imax = p["coalesce_min_interval_s"], p["coalesce_max_interval_s"]
         _soft, _hard = p["fleet_cpu_soft"], p["fleet_cpu_hard"]
         if cpu <= _soft or _hard <= _soft:
@@ -8855,6 +9830,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             fleet_interval = imin + frac * (imax - imin)
         self._fleet_interval = round(fleet_interval, 1)
 
+        # Timing and thresholds for per-spoke decisions.
         now = time.monotonic()
         dwell = p["release_dwell_s"]
         fmin = p["fleet_min_mps"]
@@ -8863,7 +9839,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # tick signal cap throttles the LOUD talkers first (not front-of-dict /
         # connection order — that was throttling quiet early spokes while loud
         # late-connecting ones kept blasting).
+        # Decide each spoke's level, loudest first.
         for sid in sorted(live, key=lambda s: self.spoke_mps.get(s, 0.0), reverse=True):
+            # Its rate and current level.
             mps = self.spoke_mps.get(sid, 0.0)
             was = self._backoff_signaled.get(sid, 0)
             if was:  # currently throttled → release dwell (measured rate is suppressed)
@@ -8884,31 +9862,38 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     desired = 2
                 else:
                     desired = 0
+            # Track spokes that remain throttled.
             if desired:
                 new_backoff.add(sid)
             # Fleet spokes get the adaptive interval; offenders get the min.
+            # Interval for the desired level.
             want_interval = (fleet_interval if desired == 2
                              else imin if desired == 1 else 0.0)
+            # Previous interval.
             was_interval = self._backoff_interval.get(sid, 0.0)
             # Re-signal on a level change OR a MATERIAL interval change (so the
             # fleet actually slows further as CPU climbs — not just a one-shot).
+            # Signal on level change or a material interval change.
             interval_changed = bool(desired) and abs(want_interval - was_interval) >= max(1.0, 0.25 * max(was_interval, imin))
             if desired != was or interval_changed:
                 if desired and not was:
                     self._backoff_since[sid] = now   # stamp when throttling began
                 sigs.append(self._signal_backoff(sid, desired, want_interval))
+        # Save the throttled set.
         self._spoke_backoff = new_backoff
         # Forget signal state for spokes that have disconnected.
         for sid in [s for s in list(self._backoff_signaled) if s not in live]:
             self._backoff_signaled.pop(sid, None)
             self._backoff_since.pop(sid, None)
             self._backoff_interval.pop(sid, None)
+        # Overall load level.
         self._load_level = 2 if self._fleet_backoff else (1 if self._spoke_backoff else 0)
         if sigs:
             # Cap sends per tick so a fleet-wide transition (hundreds of spokes)
             # spreads over several ticks instead of signing every frame in one
             # tick. Un-fired spokes just re-qualify next tick (was != desired
             # still holds because _backoff_signaled wasn't updated for them).
+            # Fire up to the cap and drop the rest.
             cap = max(1, p["max_signals_per_tick"])
             fire, defer = sigs[:cap], sigs[cap:]
             for c in defer:
@@ -8919,6 +9904,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # One line on any CHANGE of the throttled set or fleet state, naming the
         # offending spokes — this is what the operator sees in the Logs view and
         # drives the "throttled" badges. No change → silent (no flood).
+        # Log a summary when the throttled set or fleet state changes.
         prev = getattr(self, "_bp_last_summary", (frozenset(), False))
         cur = (frozenset(new_backoff), self._fleet_backoff)
         if cur != prev:
@@ -8946,10 +9932,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # the hub stops spending parse+verify on it (dropping AFTER parse doesn't
         # stop a DDoS — only closing the socket does). DEFAULT OFF (a legacy
         # spoke that can't honor the signal would keep hard-dropping too).
+        # Disconnect and quarantine persistent flooders.
         if p["ddos_disconnect"]:
+            # Settings and offenders list.
             min_hd = max(1, p["ddos_min_harddrops"])
             grace = p["ddos_grace_s"]
             offenders = []
+            # Track how long each spoke has been non-compliant.
             for sid, hd in harddrops.items():
                 # Count spokes that are BOTH flooding (hard-drops this tick) AND
                 # under throttle this tick (new_backoff) — i.e. we've told them to
@@ -8964,8 +9953,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 else:
                     self._noncompliant_since.pop(sid, None)
             # drop non-compliance clocks for anyone who stopped flooding
+            # Forget clocks for spokes that stopped hard-dropping.
             for sid in [s for s in list(self._noncompliant_since) if s not in harddrops]:
                 self._noncompliant_since.pop(sid, None)
+            # Quarantine the offenders.
             for sid, hd in offenders:
                 await self._disconnect_and_quarantine(sid, hd, p["quarantine_s"])
 
@@ -8975,15 +9966,18 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ``quarantine_s`` (checked in handle_connection). This is the DDoS
         backstop — dropping frames after parse still costs the hub; closing the
         socket stops the cost. Logged at ERROR (WebUI Logs view)."""
+        # Set the quarantine deadline and clear signal state.
         self._quarantine[spoke_id] = time.monotonic() + max(0.0, quarantine_s)
         self._noncompliant_since.pop(spoke_id, None)
         self._backoff_signaled.pop(spoke_id, None)
+        # Record the event and log it.
         self.record_spoke_event(spoke_id, "ddos_quarantine",
                                 f"ignored slow-down; {hard_drops} hard-drops/s → "
                                 f"disconnected + quarantined {quarantine_s:.0f}s")
         logger.error("[backpressure] DDoS DEFENSE — spoke %s ignored the slow-down "
                      "and kept flooding (%d hard-drops/s); DISCONNECTED + quarantined "
                      "for %.0fs.", spoke_id, hard_drops, quarantine_s)
+        # Close the spoke's socket.
         ws = self.active_connections.get(self._primary_key(spoke_id))
         if ws is not None:
             try:
@@ -8994,13 +9988,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     def _is_quarantined(self, spoke_id: str) -> bool:
         """True while ``spoke_id`` is inside its DDoS quarantine cooldown.
         Expired entries are pruned on read so the dict stays bounded."""
+        # Look up the quarantine deadline.
         sid = self._primary_key(spoke_id)
         until = self._quarantine.get(sid)
+        # None means not quarantined.
         if until is None:
             return False
+        # Expired: clear it.
         if time.monotonic() >= until:
             self._quarantine.pop(sid, None)
             return False
+        # Still quarantined.
         return True
 
     async def _protect_source_shed(self, p: dict) -> None:
@@ -9014,18 +10012,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         before the shed) above a floor, so low-rate real modules are never
         touched. Shed spokes get a SHORT quarantine and reconnect after it — a
         sustained flood self-limits into a sawtooth the hub survives."""
+        # Skip when source shedding is off.
         if not p["protect_shed_source"]:
             return
+        # Candidates above the rate floor.
         floor = p["protect_shed_min_mps"]
         cands = [(sid, n) for sid, n in (self._spoke_offered or {}).items()
                  if n >= floor and self._primary_key(sid) in self.active_connections
                  and not self._is_quarantined(sid)]
+        # Nothing to shed.
         if not cands:
             return
+        # Pick the top-K loudest, plus the quarantine length and current time.
         cands.sort(key=lambda x: x[1], reverse=True)
         topk = cands[:max(1, p["protect_shed_top_k"])]
         q = max(0.0, p["protect_quarantine_s"])
         now = time.monotonic()
+        # Quarantine, record and disconnect each one.
         for sid, n in topk:
             self._quarantine[sid] = now + q
             self.record_spoke_event(sid, "protect_shed",
@@ -9037,6 +10040,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     await ws.close(1013, "Hub overloaded — shedding loudest talkers")
                 except Exception as e:  # noqa: BLE001
                     logger.debug("[protect] source-shed close of %s failed: %s", sid, e)
+        # Log the shed.
         logger.error("[protect] SOURCE-SHED — disconnected %d loudest talker(s) "
                      "(%s) + quarantined %.0fs to free the loop for real spokes.",
                      len(topk), ", ".join(f"{s}:{n}/s" for s, n in topk[:5]), q)
@@ -9047,8 +10051,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         decides when to (re-)signal — on a level change OR a material change in
         the adaptive interval — so no level dedup here (that would swallow an
         interval escalation). Records both so the caller can diff next tick."""
+        # Remember what was signaled.
         self._backoff_signaled[spoke_id] = level
         self._backoff_interval[spoke_id] = min_interval
+        # Send the notification.
         await self.send_to_spoke_command(spoke_id, "LM_BACKPRESSURE", {
             "level": level,
             "coalesce": level > 0,
@@ -9070,40 +10076,48 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         The REAL merge work belongs on the spoke (it coalesces before sending);
         this only catches the in-flight burst before the slow-down signal lands."""
+        # Log start and loop forever.
         logger.info("Coalesce drain loop started (rung-3 backpressure safety net).")
         while True:
             try:
+                # Wait for the drain interval.
                 p = self._backpressure_params()
                 await asyncio.sleep(max(0.2, p["hub_drain_interval_s"]))
                 # If protect is active the loop is parse-bound; running hundreds
                 # of ingests here just compounds it. Drop the buffer (snapshots
                 # are superseded anyway) and let protect shed. This is the fix for
                 # the drain becoming a CPU sink at ~800 spokes.
+                # Skip under protect or when nothing is pending, counting dropped frames.
                 if self._protect_mode or not self._coalesce_pending:
                     if self._coalesce_pending:
                         self._telemetry_coalesced += len(self._coalesce_pending)
                         self._coalesce_pending = {}
                     continue
+                # Take the pending batch.
                 pending = self._coalesce_pending
                 self._coalesce_pending = {}
                 # BUDGET + TIME-BOX: process at most drain_budget spokes and never
                 # spend more than drain_max_s on the loop. The remainder are
                 # counted as coalesced (superseded) — bounded work regardless of
                 # how many spokes are throttled.
+                # Budget and deadline for this drain.
                 budget = max(1, p["hub_drain_budget"])
                 deadline = time.monotonic() + max(0.01, p["hub_drain_max_s"])
                 done = 0
+                # Process frames until the budget or deadline runs out; the rest are dropped.
                 for sid, (data, _ts) in pending.items():
                     if done >= budget or time.monotonic() >= deadline:
                         self._telemetry_coalesced += 1  # dropped/superseded
                         continue
                     try:
+                        # Handle the latest frame for the spoke.
                         await self._handle_cs_telemetry(sid, data)
                         self._telemetry_processed += 1
                         done += 1
                     except Exception as e:  # noqa: BLE001
                         logger.debug("[coalesce] drain %s failed: %s", sid, e)
             except Exception as e:  # noqa: BLE001 — never let the drain die
+                # Log loop errors and continue.
                 logger.debug("[coalesce] drain loop iteration skipped: %s", e)
 
     async def run_tenant_sync_loop(self):
@@ -9117,14 +10131,18 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ``group:`` prefix keeps a group from ever colliding with a real tenant
         slug. Groups that vanish from NetBox are pruned here; real tenants are
         deliberately NOT pruned (that is what the tenant-migration flow is for)."""
+        # Wait for spokes to connect, then loop forever.
         await asyncio.sleep(30)  # let spokes connect first
         while True:
             try:
+                # Find the NetBox spoke.
                 spoke_id = self.get_spoke_by_type("ipam")
                 if spoke_id:
+                    # Fetch tenants.
                     result = await self.request_response(spoke_id, "NETBOX_GET_TENANTS", {}, timeout=60.0)
                     data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else {}
                     if isinstance(data, dict) and data.get("status") == "SUCCESS":
+                        # Upsert each tenant, keeping any local-only fields.
                         for t in data.get("tenants", []):
                             slug = t["slug"]
                             cfg = self.state.get_tenant(slug) or {}
@@ -9141,11 +10159,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                     "name", "netbox_tenant_slug", "netbox_id", "description",
                                     "tenant_group_slug", "tenant_group_name")},
                             })
+                        # Persist and log.
                         self.state._mark_dirty()
                         logger.debug(f"Tenant sync: {len(data.get('tenants', []))} tenant(s) from NetBox")
+                    # Sync tenant groups too.
                     await self._sync_tenant_groups(spoke_id)
             except Exception as e:
+                # Skip errors quietly.
                 logger.debug(f"Tenant sync skipped: {e}")
+            # Wait five minutes.
             await asyncio.sleep(300)  # every 5 minutes
 
     async def _sync_tenant_groups(self, spoke_id: str) -> None:
@@ -9156,22 +10178,28 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         NETBOX_GET_TENANT_GROUPS: a non-SUCCESS reply leaves existing group
         records untouched (rather than pruning them all) so a spoke mid-upgrade
         can't strip a user's assigned group out from under them."""
+        # Fetch tenant groups.
         result = await self.request_response(spoke_id, "NETBOX_GET_TENANT_GROUPS", {}, timeout=60.0)
         data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else {}
+        # Give up on a failed reply.
         if not isinstance(data, dict) or data.get("status") != "SUCCESS":
             logger.debug("Tenant-group sync skipped: spoke reply %s",
                          (data or {}).get("status") if isinstance(data, dict) else "malformed")
             return
 
+        # Upsert each group as a hub tenant.
         import access as _access
         groups = data.get("groups", []) or []
         seen = set()
         for g in groups:
+            # Skip groups without a slug.
             gslug = str(g.get("slug") or "").strip()
             if not gslug:
                 continue
+            # Group tenant id.
             tid = _access.TENANT_GROUP_PREFIX + gslug
             seen.add(tid)
+            # Upsert the group, keeping local-only fields.
             cfg = self.state.get_tenant(tid) or {}
             self.state.update_tenant(tid, {
                 "name": g.get("name") or gslug,
@@ -9190,11 +10218,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     "parent_group_slug", "netbox_id", "description")},
             })
 
+        # Prune groups that no longer exist in NetBox.
         for tid, cfg in list(self.state.tenant_state.get("tenants", {}).items()):
             if cfg.get("is_tenant_group") and tid not in seen:
                 self.state.delete_tenant(tid)
                 logger.info("Tenant sync: pruned tenant group %s (gone from NetBox)", tid)
 
+        # Persist, refresh shared-tenant access and log.
         self.state._mark_dirty()
         _access.refresh_shared_tenant(self)
         logger.debug("Tenant sync: %d tenant group(s) from NetBox", len(groups))
@@ -9212,10 +10242,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         younger than 6h; the cache is persisted across restarts) and the
         Diagnostics tab serves from it instead of querying the spoke live."""
         async def _body():
+            """Run one drive-health feed pass if the feed exists."""
+            # Look up the feed function.
             feed = getattr(self, "pxmx_drive_health_feed_once", None)
             if feed:
                 await feed()
 
+        # Run it in the standard background loop.
         await run_sync_loop(
             stagger=90, body=_body, delay=lambda: 900.0,
             on_error=lambda e: logger.warning("pxmx drive-health feed error: %s", e),
@@ -9243,13 +10276,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # "expected" spokes are computed per-cycle from the APPROVED set (was a
         # static dedicated-id list — permanent false "missing" alerts in the
         # agent+role model, where ids are dynamic: {base} + {base}-{role}).
+        # Wait for spokes to connect, then set up state.
         await asyncio.sleep(20)  # let spokes connect first
         last: Dict[str, Any] = {}
         last_usb: List[str] = []
         cycle = 0
+        # Loop forever.
         while True:
             cycle += 1
             try:
+                # Snapshot connections, types and the hypervisor spoke.
                 conns = list(self.active_connections.keys())
                 mtypes = dict(self.spoke_module_types)
                 hyp_sid = self.get_spoke_by_type("hypervisor")
@@ -9265,6 +10301,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     "stale": None,
                     "vms": 0,
                 }
+                # Ask the hypervisor spoke for its VM list summary.
                 if hyp_sid:
                     try:
                         res = await self.request_response(hyp_sid, "PXMX_LIST_VMS", {}, timeout=8.0)
@@ -9275,6 +10312,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         snap["vms"] = len(data.get("vms", []))
                     except Exception as e:
                         snap["vms_err"] = str(e)
+                    # Flag a pxmx spoke that is connected but not acting as the hypervisor.
                     if pxmx_sid and mtypes.get(pxmx_sid) != "hypervisor":
                         snap["split_brain"] = True
                 elif pxmx_sid:
@@ -9284,6 +10322,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     snap["split_brain"] = True
 
                 # Emit on change, or a ~10min heartbeat (cycle % 20 == 0).
+                # Log on change, or as a periodic heartbeat.
                 changed = snap != last
                 if changed or cycle % 20 == 0:
                     parts = [
@@ -9293,6 +10332,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         f"vms={snap.get('vms')}",
                         f"agents={snap.get('agents')}",
                     ]
+                    # Add optional parts.
                     if snap.get("stale"):
                         parts.append("stale=true")
                     if snap.get("vms_err"):
@@ -9301,6 +10341,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         parts.append(f"missing={','.join(snap['missing'])}")
                     if snap.get("split_brain"):
                         parts.append("SPLIT_BRAIN=pxmx_connected_but_not_hypervisor")
+                    # Info on change, debug on heartbeat.
                     if changed:
                         logger.info("[spoke-diag] " + " ".join(parts))
                     else:
@@ -9314,17 +10355,22 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # line on change + a ~10min heartbeat. One compact entry per cs
                 # spoke host; lengths only (a CS payload may carry Proxmox tokens
                 # in other frames, so never values).
+                # Build per-spoke USB availability lines.
                 usb_parts: List[str] = []
                 for sid, data in (getattr(self, "simulations_cache", {}) or {}).items():
+                    # Look up the tenant.
                     try:
                         tid = self.state.get_spoke_tenant(sid)
                     except Exception:
                         tid = None
+                    # Normalize data.
                     data = data or {}
 
                     def _len(v):
+                        """Length of a list, else 0."""
                         return len(v) if isinstance(v, list) else 0
 
+                    # Multi-host payloads: one line per host.
                     hosts = data.get("proxmox_hosts")
                     if isinstance(hosts, list) and hosts:
                         for hh in hosts:
@@ -9339,6 +10385,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                 f"vms={vms} present={pres} unknown={unk} usb_devices={devs}"
                                 + ("" if (pres or unk or devs) else " NO_USB_DATA"))
                     else:
+                        # Single-host payloads.
                         px = data.get("proxmox") or {}
                         vms = _len(data.get("proxmox_vms"))
                         pres = _len(px.get("present_usb"))
@@ -9348,8 +10395,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             f"cs={sid} tenant={tid} host=legacy "
                             f"vms={vms} present={pres} unknown={unk} usb_devices={devs}"
                             + ("" if (pres or unk or devs) else " NO_USB_DATA"))
+                # Placeholder when there is nothing cached.
                 if not usb_parts:
                     usb_parts = ["none (no cached cs spoke)"]
+                # Log on change, else heartbeat.
                 if usb_parts != last_usb:
                     logger.info("[usb-telemetry] " + " | ".join(usb_parts)
                                 + (" | NO_USB_DATA means the cs spoke reports VMs but no USB — "
@@ -9359,7 +10408,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 elif cycle % 20 == 0:
                     logger.debug("[usb-telemetry] (heartbeat) " + " | ".join(usb_parts))
             except Exception as e:
+                # Log loop errors.
                 logger.warning(f"[spoke-diag] loop error: {e}")
+            # Wait before the next pass.
             await asyncio.sleep(30)
 
     # spoke_id prefix -> systemd unit, mirroring the spoke-side
@@ -9386,13 +10437,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         is read live, then from persisted metadata so an offline agent still
         resolves to lm-agent.
         """
+        # Module type from the live map or persisted state.
         mt = self.spoke_module_types.get(spoke_id) or \
             (self.state.system_state.get("module_metadata", {}).get(spoke_id, {}) or {}).get("module_type")
+        # Agents use the agent unit.
         if mt == "agent":
             return "lm-agent"
+        # Match by spoke id prefix.
         for prefix, unit in self._SPOKE_UNIT_PREFIX.items():
             if spoke_id.startswith(prefix):
                 return unit
+        # No unit.
         return ""
 
     async def _recovery_inspect(self, unit: str) -> dict:
@@ -9403,11 +10458,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         subprocess.run would stall heartbeats/relays for every stranded spoke
         it inspects in a pass.
         """
+        # Run the read-only inspect helper via sudo.
         try:
             proc = await asyncio.create_subprocess_exec(
                 "sudo", "-n", "/usr/local/bin/lm-spoke-recover", "--inspect", unit,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
+            # Wait up to 10 seconds, killing it on timeout.
             try:
                 stdout_b, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
             except asyncio.TimeoutError:
@@ -9417,11 +10474,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     pass
                 logger.warning(f"[recovery] inspect timed out for {unit}")
                 return {}
+            # Parse its JSON output; non-zero exit or empty output gives {}.
             stdout = (stdout_b or b"").decode(errors="replace")
             if proc.returncode != 0 or not stdout.strip():
                 return {}
             return json.loads(stdout.strip())
         except Exception as e:
+            # Log failures and return {}.
             logger.warning(f"[recovery] inspect failed for {unit}: {e}")
             return {}
 
@@ -9439,6 +10498,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         the result under `module`. The LM hub has no LLM of its own. Never raises —
         returns {ok, module, title, analysis, verdict, duration_s, error, at} and stores
         it in self._log_analysis_cache. Long timeout: the LLM can be slow."""
+        # Imports, cache, timestamp and cache key.
         from datetime import datetime as _dt
         import time as _t
         cache = getattr(self, "_log_analysis_cache", None)
@@ -9448,18 +10508,22 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         key = module or "hub"
 
         def _store(res):
+            """Cache and return a result."""
             cache[key] = res
             return res
 
+        # Fail when there is no ab spoke.
         sid = self.get_spoke_by_type("ab")
         if not sid:
             return _store({"ok": False, "running": False, "module": key, "title": title,
                            "analysis": "", "verdict": "unknown", "duration_s": None, "at": now,
                            "error": "AppBuilder spoke is not connected — Log Analysis needs AppBuilder online + approved."})
+        # Nothing to analyze.
         if not (log_text or "").strip():
             return _store({"ok": True, "running": False, "module": key, "title": title,
                            "analysis": "No log lines available to analyze.", "verdict": "none",
                            "duration_s": 0, "at": now, "error": None})
+        # Ask ab to analyze, timing the call.
         t0 = _t.monotonic()
         try:
             # Generous deadline: on a CPU model the analysis is slow, and it QUEUES
@@ -9468,9 +10532,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             resp = await self.request_response(sid, "ANALYZE_LOGS",
                                                {"logs": log_text, "title": title}, timeout=600.0)
         except Exception as e:  # noqa: BLE001
+            # Request failed.
             return _store({"ok": False, "running": False, "module": key, "title": title,
                            "analysis": "", "verdict": "unknown", "duration_s": round(_t.monotonic() - t0, 1),
                            "at": now, "error": f"request to ab failed: {e}"})
+        # Cache and return the result.
         dur = round(_t.monotonic() - t0, 1)
         inner = resp.get("payload", {}).get("data", resp) if isinstance(resp, dict) else {}
         ok = inner.get("status") == "ok"
@@ -9484,6 +10550,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     def _read_hub_log_tail(self, n=400):
         """Last n lines (list) of the hub's own log."""
+        # Prefer the on-disk hub log.
         try:
             from collections import deque
             p = "/var/log/lm/hub.log"
@@ -9492,6 +10559,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     return [l.rstrip("\n") for l in deque(f, maxlen=n)]
         except Exception:  # noqa: BLE001
             pass
+        # Fall back to the in-memory log buffer.
         try:
             return [str(l) for l in list(self.logs)[-n:]] if hasattr(self, "logs") else []
         except Exception:  # noqa: BLE001
@@ -9503,9 +10571,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         `minutes` — so the LLM sees ONLY recent activity (e.g. the 5 lines from the last
         15 min, not all 100). Lines without a parseable timestamp (multi-line tracebacks)
         inherit the current keep state so they stay attached to their header line."""
+        # Cutoff time.
         from datetime import datetime as _dt, timedelta as _td
         cutoff = _dt.now() - _td(minutes=minutes)
         out, keeping = [], False
+        # Keep timestamped lines within the window and their continuation lines.
         for ln in lines:
             try:
                 keeping = _dt.strptime((ln or "")[:19], "%Y-%m-%d %H:%M:%S") >= cutoff
@@ -9513,19 +10583,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 pass  # continuation line — inherit previous keep state
             if keeping:
                 out.append(ln)
+        # Return the kept lines.
         return out
 
     def _gather_module_log_lines(self, module, n=400):
         """Recent log lines for a module: hub.log for 'hub', else the relayed
         agent_logs of the spoke(s) advertising that module's type (or name-prefixed)."""
+        # The hub reads its own log.
         if module in ("hub", "recovery", "all", ""):
             return self._read_hub_log_tail(n)
+        # Spokes of the module's type plus matching relayed log buffers.
         mtype = self._SENTINEL_MODULE_TYPES.get(module)
         sids = set()
         if mtype:
             sids.update(sid for sid, mt in self.spoke_module_types.items() if mt == mtype)
         sids.update(sid for sid in getattr(self, "agent_logs", {})
                     if sid == module or sid.startswith(module + "-"))
+        # Collect their recent lines.
         out = []
         for sid in sids:
             for line in list(self.agent_logs.get(sid, []))[-n:]:
@@ -9535,61 +10609,75 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     def _sentinel_modules(self):
         """Modules the log sentinel watches: 'hub' + every short-name module that has a
         connected spoke (or buffered relayed logs)."""
+        # Always include the hub.
         mods = ["hub"]
+        # Add modules that are live or have buffered logs.
         for name, mtype in self._SENTINEL_MODULE_TYPES.items():
             live = any(mt == mtype for mt in self.spoke_module_types.values())
             buffered = any(sid == name or sid.startswith(name + "-")
                            for sid in getattr(self, "agent_logs", {}))
             if live or buffered:
                 mods.append(name)
+        # Return the list.
         return mods
 
     def _sentinel_module_sids(self, module):
         """Spoke id(s) that back a sentinel module (same matching rule as
         _gather_module_log_lines): every spoke advertising the module's type,
         plus any spoke id matching `module` or `module-*` (multi-role agents)."""
+        # Spokes of the module's type plus matching log buffers.
         mtype = self._SENTINEL_MODULE_TYPES.get(module)
         sids = set()
         if mtype:
             sids.update(sid for sid, mt in self.spoke_module_types.items() if mt == mtype)
         sids.update(sid for sid in getattr(self, "agent_logs", {})
                     if sid == module or sid.startswith(module + "-"))
+        # Return the ids.
         return sids
 
     @staticmethod
     def _error_lines(lines):
         """Error-level lines only — the cheap pre-gate before spending an LLM call."""
+        # Keep lines containing error keywords.
         kws = ("ERROR", "CRITICAL", "Traceback", "Exception", "FATAL")
         return [l for l in lines if any(k in l for k in kws)]
 
     def _sentinel_ledger_path(self):
+        """Path of the persisted escalation ledger."""
         return os.path.join(self.state.data_dir, "log_sentinel_escalated.json")
 
     def _load_sentinel_ledger(self):
         """Escalation ledger ("module|fingerprint" -> epoch seconds) from disk, so
         a hub restart doesn't re-escalate everything it already sent to ab."""
+        # Read and parse the ledger.
         try:
             with open(self._sentinel_ledger_path()) as f:
                 data = json.load(f)
             return {str(k): float(v) for k, v in data.items()}
         except (OSError, ValueError, AttributeError, TypeError):
+            # Missing or bad file: empty.
             return {}
 
     def _save_sentinel_ledger(self):
+        """Atomically write the escalation ledger to disk (best-effort)."""
         try:
+            # Write a temp file then rename over the ledger.
             path = self._sentinel_ledger_path()
             with open(path + ".tmp", "w") as f:
                 json.dump(self._log_sentinel_escalated, f)
             os.replace(path + ".tmp", path)
         except (OSError, AttributeError) as e:
+            # Log failures only.
             logger.debug(f"[log-sentinel] could not save escalation ledger: {e}")
 
     async def _escalate_to_ab(self, module, log_slice, analysis, verdict):
         """Ship a Tier-1 'escalate' verdict to the ab spoke for deep triage
         (ESCALATE_LOG_ISSUE → file_escalated_issue). Best-effort; logs the outcome."""
+        # No ab spoke: nothing to do.
         sid = self.get_spoke_by_type("ab")
         if not sid:
             return
+        # Send the escalation and log the reply.
         try:
             resp = await self.request_response(
                 sid, "ESCALATE_LOG_ISSUE",
@@ -9599,6 +10687,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             logger.info(f"[log-sentinel] escalated {module} → ab: "
                         f"{inner.get('status')} {inner.get('detail', '')}")
         except Exception as e:  # noqa: BLE001
+            # Log failures.
             logger.warning(f"[log-sentinel] escalation of {module} failed: {e}")
 
     async def run_log_health_loop(self):
@@ -9609,6 +10698,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         + log_analysis_interval_min (default 15). Self-throttled so it never overlaps and
         never fires faster than a sweep takes (effective gap = max(interval, last sweep
         duration)). Records generation-time metrics. Never raises out of the loop."""
+        # Imports and per-module signature state.
         import asyncio as _aio
         import time as _t
         if not hasattr(self, "_log_sentinel_sig"):
@@ -9617,23 +10707,29 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # The sig gate above only remembers the IMMEDIATELY preceding sweep, so an
         # intermittent fault that alternates present/absent slips through it every
         # other sweep. This ledger is what actually stops duplicate issues.
+        # Load the escalation ledger once.
         if not hasattr(self, "_log_sentinel_escalated"):
             self._log_sentinel_escalated = self._load_sentinel_ledger()
+        # Metrics and sweep timing.
         self._log_sentinel_metric = getattr(self, "_log_sentinel_metric", {})
         last_sweep = 0.0
         last_dur = 0.0
+        # Wait for startup, then loop forever.
         await _aio.sleep(120)  # let startup settle + ab connect
         while True:
             try:
+                # Read the sentinel settings.
                 gc = self.state.get_global_config() if hasattr(self.state, "get_global_config") else {}
                 auto = gc.get("log_analysis_auto", True)
                 interval_min = int(gc.get("log_analysis_interval_min", 30) or 30)
                 interval = max(60, interval_min * 60)
                 effective = max(interval, last_dur)  # self-throttle: never fire faster than a sweep takes
+                # Wait while disabled, without ab, or before the interval is up.
                 if not auto or not self.get_spoke_by_type("ab") or (_t.time() - last_sweep) < effective:
                     await _aio.sleep(30)
                     continue
 
+                # Sweep each module, timing it.
                 sweep_t0 = _t.monotonic()
                 durations = []
                 for module in self._sentinel_modules():
@@ -9641,6 +10737,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         # Only the last interval-minutes of logs — send the LLM recent
                         # activity, not the whole tail.
                         lines = self._window_log_lines(self._gather_module_log_lines(module), interval_min)
+                        # Error lines, plus volume lines if enabled.
                         errs = self._error_lines(lines)
                         if gc.get("log_volume_triage", False):
                             # Off by default; see _sentinel_volume_lines.
@@ -9655,7 +10752,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         # Cheap gate: skip unless this module has NEW error-level lines.
                         if not errs or self._log_sentinel_sig.get(module) == sig:
                             continue
+                        # Remember the new signature.
                         self._log_sentinel_sig[module] = sig
+                        # Title the hub with its version and commit.
                         if module == "hub":
                             running_ver = getattr(self, "_startup_version", "") or "unknown"
                             sha = (await self.get_local_commit())[:8] or "unknown"
@@ -9668,6 +10767,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             # otherwise sit empty forever. Best-effort: a spoke
                             # that doesn't implement GET_VERSION yet, or is
                             # slow/offline, just degrades to a bare title.
+                            # For spokes, fetch version and commit, falling back to cached values.
                             ver = sha = ""
                             sids = self._sentinel_module_sids(module)
                             if sids:
@@ -9687,11 +10787,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                     logger.debug(f"[log-sentinel] GET_VERSION for {module} failed: {ve}")
                                 ver = ver or self.spoke_versions.get(spk, "")
                                 sha = sha or self.spoke_commits.get(spk, "")
+                            # Title with whatever is known.
                             tag = (f" — v{ver}" if ver else "") + (f" @ {sha[:8]}" if sha else "")
                             title = f"{module} logs{tag}"
+                        # Analyze the logs.
                         res = await self.analyze_logs_via_ab(module, "\n".join(lines), title)
                         if res.get("duration_s"):
                             durations.append(res["duration_s"])
+                        # Escalate to ab unless still within the cooldown.
                         if res.get("ok") and res.get("verdict") == "escalate":
                             # Cooldown per (module, condition). Without this a standing
                             # fault re-escalates on every sweep for as long as it lasts:
@@ -9699,6 +10802,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             # 8 days. Keyed on the normalized fingerprint, so a genuinely
                             # different fault (different device, different command) is
                             # never suppressed by an unrelated one.
+                            # Cooldown settings and key.
                             cd_h = float(gc.get("log_escalation_cooldown_h", 24) or 24)
                             now_w = _t.time()
                             ekey = f"{module}|{sig}"
@@ -9716,12 +10820,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                 for k in [k for k, v in self._log_sentinel_escalated.items()
                                           if v < cutoff]:
                                     self._log_sentinel_escalated.pop(k, None)
+                                # Persist the ledger and escalate.
                                 self._save_sentinel_ledger()
                                 await self._escalate_to_ab(
                                     module, "\n".join(errs[-60:]), res.get("analysis", ""),
                                     "escalate")
                     except Exception as me:  # noqa: BLE001
+                        # Module errors are only logged.
                         logger.debug(f"[log-sentinel] module {module} error: {me}")
+                # Record sweep timing and metrics.
                 last_dur = round(_t.monotonic() - sweep_t0, 1)
                 last_sweep = _t.time()
                 from datetime import datetime as _dt
@@ -9732,7 +10839,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     "at": _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
             except Exception as e:  # noqa: BLE001
+                # Log cycle errors.
                 logger.debug(f"[log-sentinel] cycle error: {e}")
+            # Check again in 30 seconds.
             await _aio.sleep(30)
 
     # Re-arm a given-up spoke recovery after this many seconds so the hub keeps
@@ -9741,10 +10850,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     _RECOVERY_GIVEUP_REARM_S = 1800
 
     def _recovery_giveup_rearm_s(self) -> int:
+        """Seconds before a given-up recovery is retried (env override, 0 disables)."""
         try:
+            # Read the env override.
             return max(0, int(os.environ.get("LM_RECOVERY_GIVEUP_REARM_S",
                                              self._RECOVERY_GIVEUP_REARM_S)))
         except (TypeError, ValueError):
+            # Fall back to the default.
             return self._RECOVERY_GIVEUP_REARM_S
 
     def _recovery_giveup_action(self, st: dict, now: float) -> str:
@@ -9759,9 +10871,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Pure/side-effect-free so the strand-recovery decision is unit-testable
         without driving the async loop. `manual_pause` is handled by the caller
         (operator intent is terminal and never re-arms)."""
+        # Skip until the re-arm time has passed, or when re-arming is disabled.
         rearm = self._recovery_giveup_rearm_s()
         if rearm <= 0 or (now - st.get("gave_up_ts", 0)) < rearm:
             return "skip"
+        # Otherwise re-arm.
         return "rearm"
 
     async def run_spoke_recovery_loop(self):
@@ -9797,9 +10911,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         filing while the hub is recovering and escalate only on give_up.
         """
         await asyncio.sleep(30)  # let spokes connect + first heartbeats arrive
+        # Retry delays per attempt.
         backoff = (60, 120, 180)
+        # Loop forever.
         while True:
             try:
+                # Current time, approved spokes and live connections.
                 now = time.time()
                 approved = {s for s, a in self.approved_modules.items() if a}
                 conns = set(self.active_connections.keys())
@@ -9812,15 +10929,18 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         self.record_spoke_event(sid, "recovery_cleared", "spoke reconnected")
                         logger.info(f"[recovery] spoke_id={sid} action=cleared reason=reconnected")
 
+                # Consider approved spokes that are not connected.
                 for sid in sorted(approved - conns):
                     # Only act on a TRUE strand: disconnected AND heartbeat RED
                     # (>=300s stale or never seen). A spoke mid-self-restart is
                     # only down ~1-2s, so its heartbeat is still fresh -> skipped.
                     if str(self.heartbeat.get_status(sid)) != "RED":
                         continue
+                    # Skip spokes without their own unit.
                     unit = self._spoke_unit(sid)
                     if not unit:
                         continue
+                    # Recovery state; skip if paused manually.
                     st = self.spoke_recovery.setdefault(sid, {"attempts": 0})
                     if st.get("manual_pause"):
                         continue
@@ -9843,14 +10963,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         logger.info(
                             f"[recovery] spoke_id={sid} action=rearmed "
                             f"reason=giveup_cooldown_elapsed rearm_s={rearm}")
+                    # Wait for the next retry time.
                     if now < st.get("next_retry_ts", 0):
                         continue
 
+                    # Inspect the unit's state.
                     info = await self._recovery_inspect(unit)
                     sub = info.get("SubState", "")
                     result = info.get("Result", "")
                     ems = info.get("ExecMainStatus", "")
                     nrest = info.get("NRestarts", "0")
+                    # Parse the restart count.
                     try:
                         nrest_i = int(nrest) if str(nrest).lstrip("-").isdigit() else 0
                     except Exception:
@@ -9859,10 +10982,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     # without burning attempts (e.g. an approved-but-undeployed spoke).
                     if not info.get("ActiveState"):
                         continue
+                    # Crash signature and attempt count.
                     crash_sig = f"{sub}/{result}/{ems}"
                     attempts = int(st.get("attempts", 0))
 
                     # --- Give-up classification (checked BEFORE recovering) ---
+                    # Decide whether to give up.
                     give_up, reason = False, ""
                     if attempts >= 1 and st.get("last_crash_sig") == crash_sig and crash_sig != "//":
                         give_up, reason = True, f"same crash signature {crash_sig}"
@@ -9871,6 +10996,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     elif attempts >= 3:
                         give_up, reason = True, "3 failed restarts"
 
+                    # Give up: record it and stop retrying.
                     if give_up:
                         st.update({"gave_up": True, "gave_up_ts": now,
                                    "in_progress": False,
@@ -9885,11 +11011,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     # --- Recover: reset-failed (if failed) + restart ---
                     # Async subprocess so the sudo call (up to ~15s) doesn't
                     # block the event loop while the restart runs.
+                    # Run the recover helper (reset-failed plus restart).
                     try:
                         proc = await asyncio.create_subprocess_exec(
                             "sudo", "-n", "/usr/local/bin/lm-spoke-recover", unit,
                             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                         )
+                        # Wait up to 15 seconds, killing it on timeout.
                         try:
                             stdout_b, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
                         except asyncio.TimeoutError:
@@ -9898,12 +11026,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             except Exception:
                                 pass
                             stdout_b = b""
+                        # Parse the helper output.
                         stdout = (stdout_b or b"").decode(errors="replace")
                         rec = json.loads(stdout.strip()) if stdout.strip() else {}
                         reset = bool(rec.get("reset", False))
                     except Exception as e:
+                        # Helper failed.
                         reset = False
                         rec = {"error": str(e)}
+                    # Record the attempt and schedule the next retry.
                     attempts += 1
                     st.update({
                         "attempts": attempts,
@@ -9915,13 +11046,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         "gave_up": False,
                         "in_progress": True,
                     })
+                    # Record and log the restart.
                     detail = f"attempt={attempts}/3 reset={reset} pre={crash_sig}"
                     self.record_spoke_event(sid, "recovery_restart", detail)
                     logger.info(
                         f"[recovery] spoke_id={sid} unit={unit} action=restart "
                         f"reason=stranded attempt={attempts}/3 pre={crash_sig} reset={reset}")
             except Exception as e:
+                # Log loop errors.
                 logger.warning(f"[recovery] loop error: {e}")
+            # Check again in 30 seconds.
             await asyncio.sleep(30)
 
     def record_spoke_event(self, spoke_id: str, event: str, detail: str = "") -> None:
@@ -9932,8 +11066,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         so the WebUI can render a per-spoke timeline instead of guessing from
         a single OFFLINE flag. Also mirrored to the hub log for journalctl.
         """
+        # Ignore an empty id.
         if not spoke_id:
             return
+        # Append to the spoke's bounded event buffer.
         sid = self._primary_key(spoke_id)
         buf = self.spoke_events.setdefault(sid, deque(maxlen=self.spoke_event_limit))
         buf.append({
@@ -9941,6 +11077,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             "event": event,
             "detail": detail,
         })
+        # Log it.
         logger.info(f"[spoke-event] {spoke_id} {event}" + (f": {detail}" if detail else ""))
 
     def _record_hub_identity_rejection(self, spoke_id: str, pk: str,
@@ -9969,8 +11106,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         handle_connection), so any exception here is swallowed and logged at
         debug level.
         """
+        # Only identity rejections count.
         if not (close_code == 1008 and "identity" in (close_reason or "").lower()):
             return False
+        # Record the event and telemetry.
         try:
             self.record_spoke_event(
                 spoke_id, "hub_identity_rejected",
@@ -9982,6 +11121,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             }
             return True
         except Exception:  # noqa: BLE001 — telemetry must never break the handshake path
+            # Telemetry errors are only logged.
             logger.debug("Failed to record hub_identity_rejected telemetry", exc_info=True)
             return False
 
@@ -10027,8 +11167,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Telemetry-only failure mode: a monitoring hiccup must never break the
         dispatch loop.
         """
+        # Threat monitor.
         tm = getattr(self, "threat_monitor", None)
         try:
+            # Pull the fields from the report.
             src = str((data or {}).get("source_ip") or "").strip()
             path = str((data or {}).get("path") or "")
             method = str((data or {}).get("method") or "?").upper()[:8]
@@ -10042,6 +11184,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                              spoke_id, path)
                 return
             # Per-reporter rate cap (poisoning / revoke-loop defense).
+            # Keep this reporter's reports in a 10-minute window and drop over the cap.
             now = time.time()
             window = 600.0
             times = self._edge_probe_reports.setdefault(spoke_id or node, [])
@@ -10050,20 +11193,25 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 logger.warning("HTTP_PROBE_REPORT rate cap hit for reporter %s "
                                "(%d/%ds) — dropping", spoke_id, self._EDGE_PROBE_MAX, int(window))
                 return
+            # Record this report.
             times.append(now)
 
             # Route by reporter location. Unassigned (no tenant binding) and the
             # shared tenant are admin-managed perimeter/infra; a real tenant_id
             # is a tenant-network node.
+            # Decide whether the reporter is a perimeter (shared or unassigned) node.
             try:
                 import access as _access
                 reporter_tenant = self.state.get_spoke_tenant(self._primary_key(spoke_id)) or ""
                 is_perimeter = (not reporter_tenant) or _access.tenant_is_shared(reporter_tenant)
             except Exception:  # noqa: BLE001 — fail SAFE: treat unknown as tenant-side
+                # Default to tenant-side on error.
                 reporter_tenant, is_perimeter = "", False
 
+            # Perimeter reporters feed the central threat monitor.
             if is_perimeter:
                 # ── Perimeter: bounded central NSG block of the external source ──
+                # Need a monitor and a source IP.
                 if not tm:
                     return
                 if not src:
@@ -10084,6 +11232,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 except ValueError:
                     logger.debug("HTTP_PROBE_REPORT from %s: bad source_ip %r", spoke_id, src)
                     return
+                # Record the probe as a failure for possible blocking.
                 tm.record_failure(src, "http_probe",
                                   detail=f"edge {node} ({method} {path[:120]})",
                                   max_ttl_s=self._EDGE_BLOCK_TTL_S,
@@ -10091,6 +11240,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 return
 
             # ── Tenant-side: self-scoped hard-revoke (NEVER the NSG) ──
+            # Tenant-side: log and revoke within that tenant only.
             reason = (f"tenant-side recon detected on its own listener: "
                       f"{method} {path[:120]}"
                       + (f" from {src}" if src else ""))
@@ -10100,6 +11250,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             asyncio.create_task(
                 self._tenant_probe_hard_revoke(spoke_id, reporter_tenant, reason))
         except Exception:  # noqa: BLE001 — monitoring must never break dispatch
+            # Ingest errors are only logged.
             logger.debug("HTTP_PROBE_REPORT ingest failed", exc_info=True)
 
     def _handle_app_login_failure(self, spoke_id, reporter_ip: Optional[str],
@@ -10133,8 +11284,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Telemetry-only failure mode: a monitoring hiccup must never break the
         dispatch loop.
         """
+        # Threat monitor.
         tm = getattr(self, "threat_monitor", None)
         try:
+            # Pull the fields from the report.
             src = str((data or {}).get("source_ip") or "").strip()
             username = str((data or {}).get("username") or "")[:128]
             node = str((data or {}).get("node") or spoke_id or "?")[:64]
@@ -10142,6 +11295,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # Per-reporter rate cap (poisoning defense) — shares the edge-probe
             # cap; a compromised app spoke can flood forged failures just as
             # easily as forged probe hits.
+            # Keep this reporter's reports in a 10-minute window and drop over the cap.
             now = time.time()
             window = 600.0
             times = self._app_login_failure_reports.setdefault(spoke_id or node, [])
@@ -10151,13 +11305,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                "(%d/%ds) — dropping", spoke_id, self._EDGE_PROBE_MAX,
                                int(window))
                 return
+            # Record this report.
             times.append(now)
 
+            # Need a monitor and a source IP.
             if not tm or not src:
                 return
             # Never let an app spoke attribute a failure to a bogus / non-
             # routable source, or to one of our own INTERNAL ranges — NSG-
             # denying those would sever internal control-plane paths.
+            # Refuse internal or non-routable sources.
             try:
                 ipobj = ipaddress.ip_address(src)
                 if (ipobj.is_loopback or ipobj.is_unspecified or ipobj.is_link_local
@@ -10167,27 +11324,33 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                  spoke_id, src)
                     return
             except ValueError:
+                # Invalid IP.
                 logger.debug("APP_LOGIN_FAILURE from %s: bad source_ip %r", spoke_id, src)
                 return
 
+            # Decide whether the reporter is a perimeter node.
             try:
                 import access as _access
                 reporter_tenant = self.state.get_spoke_tenant(self._primary_key(spoke_id)) or ""
                 is_perimeter = (not reporter_tenant) or _access.tenant_is_shared(reporter_tenant)
             except Exception:  # noqa: BLE001 — fail SAFE: treat unknown as tenant-side
+                # Default to tenant-side on error.
                 reporter_tenant, is_perimeter = "", False
 
+            # Tenant-side reporters are only logged.
             if not is_perimeter:
                 logger.info("APP_LOGIN_FAILURE: tenant node %s (tenant=%s) reported "
                            "a login failure for %r from %s — log-only, no auto-action",
                            spoke_id, reporter_tenant or "?", username, src)
                 return
 
+            # Record the failure with the threat monitor.
             tm.record_failure(src, "app_login", username=username,
                               detail=f"app edge {node}",
                               max_ttl_s=self._EDGE_BLOCK_TTL_S,
                               allow_permanent=False)
         except Exception:  # noqa: BLE001 — monitoring must never break dispatch
+            # Ingest errors are only logged.
             logger.debug("APP_LOGIN_FAILURE ingest failed", exc_info=True)
 
     async def _tenant_probe_hard_revoke(self, spoke_id, tenant_id: str,
@@ -10203,6 +11366,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         revoked (a coordinated sweep is treated as a tenant-level compromise).
         Never raises — a monitoring path must not crash the loop."""
         try:
+            # Primary key.
             pk = self._primary_key(spoke_id)
             # 1) Revoke the reporting node itself.
             await self.revoke_spoke(spoke_id, reason=reason, source="threat_auto")
@@ -10210,8 +11374,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # 2) Track distinct-node trips per tenant for escalation. A blank
             # tenant can't be escalated tenant-wide (nothing to enumerate), so
             # the self-revoke above is the whole response in that case.
+            # No tenant: nothing to escalate.
             if not tenant_id:
                 return
+            # Record this node's trip.
             now = time.time()
             trips = self._tenant_probe_trips.setdefault(tenant_id, {})
             trips[pk] = now
@@ -10220,20 +11386,24 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             for k in [k for k, ts in trips.items() if ts < cutoff]:
                 trips.pop(k, None)
 
+            # Not enough distinct nodes yet.
             if len(trips) < self._TENANT_PROBE_ESCALATE_NODES:
                 return
 
             # 3) Escalate: hard-revoke every spoke/agent bound to this tenant.
+            # Consume the trips and log the escalation.
             distinct = len(trips)
             trips.clear()  # consume so we don't re-escalate on each subsequent hit
             esc_reason = (f"tenant-wide auto-revoke: {distinct} distinct nodes on "
                           f"tenant {tenant_id} reported recon within "
                           f"{int(self._TENANT_PROBE_WINDOW_S)}s (coordinated sweep)")
             logger.warning("HTTP_PROBE_REPORT ESCALATION — %s", esc_reason)
+            # Known modules.
             try:
                 known = list(self.state.system_state.get("known_modules", []) or [])
             except Exception:  # noqa: BLE001
                 known = []
+            # Revoke each one bound to this tenant.
             for sid in known:
                 try:
                     if (self.state.get_spoke_tenant(self._primary_key(sid)) or "") != tenant_id:
@@ -10242,6 +11412,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 except Exception:  # noqa: BLE001 — one bad spoke must not stop the sweep
                     logger.debug("tenant-wide revoke: failed on %s", sid, exc_info=True)
         except Exception:  # noqa: BLE001 — never let the response crash the loop
+            # Failures are only logged.
             logger.debug("_tenant_probe_hard_revoke failed", exc_info=True)
 
     def _handle_node_canary_hit(self, spoke_id, reporter_ip: Optional[str],
@@ -10271,14 +11442,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         radius is bounded identically to the probe path (rate cap + bounded TTL +
         internal-source refusal + exemptions). Telemetry-only failure mode.
         """
+        # Threat monitor.
         tm = getattr(self, "threat_monitor", None)
         try:
+            # Pull the fields from the report.
             src = str((data or {}).get("source_ip") or "").strip()
             path = str((data or {}).get("path") or "")
             method = str((data or {}).get("method") or "?").upper()[:8]
             node = str((data or {}).get("node") or spoke_id or "?")[:64]
 
             # Per-reporter rate cap (a compromised edge can't flood forged hits).
+            # Keep this reporter's reports in a 10-minute window and drop over the cap.
             now = time.time()
             window = 600.0
             times = self._canary_hit_reports.setdefault(spoke_id or node, [])
@@ -10288,21 +11462,26 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                "(%d/%ds) — dropping", spoke_id, self._EDGE_PROBE_MAX,
                                int(window))
                 return
+            # Record this report.
             times.append(now)
 
             # Route by reporter location (unassigned/shared = perimeter/infra;
             # a real tenant_id = a tenant-network node). Fail SAFE to tenant-side.
+            # Decide whether the reporter is a perimeter node.
             try:
                 import access as _access
                 reporter_tenant = self.state.get_spoke_tenant(self._primary_key(spoke_id)) or ""
                 is_perimeter = (not reporter_tenant) or _access.tenant_is_shared(reporter_tenant)
             except Exception:  # noqa: BLE001
+                # Default to tenant-side on error.
                 reporter_tenant, is_perimeter = "", False
 
             if is_perimeter:
                 # ── Perimeter: bounded central NSG block of the external source ──
+                # Need a monitor and a source IP.
                 if not tm or not src:
                     return
+                # Refuse internal or non-routable sources.
                 try:
                     ipobj = ipaddress.ip_address(src)
                     if (ipobj.is_loopback or ipobj.is_unspecified or ipobj.is_link_local
@@ -10313,6 +11492,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 except ValueError:
                     logger.debug("NODE_CANARY_HIT from %s: bad source_ip %r", spoke_id, src)
                     return
+                # Record the hit as a failure for possible blocking.
                 tm.record_failure(src, "canary",
                                   detail=f"edge {node} ({method} {path[:120]})",
                                   max_ttl_s=self._EDGE_BLOCK_TTL_S,
@@ -10320,6 +11500,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 return
 
             # ── Tenant-side: self-scoped hard-revoke (NEVER the NSG) ──
+            # Tenant-side: log and revoke within that tenant only.
             reason = (f"tenant-side intrusion detected (canary endpoint touched): "
                       f"{method} {path[:120]}"
                       + (f" from {src}" if src else ""))
@@ -10329,6 +11510,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             asyncio.create_task(
                 self._tenant_probe_hard_revoke(spoke_id, reporter_tenant, reason))
         except Exception:  # noqa: BLE001 — monitoring must never break dispatch
+            # Ingest errors are only logged.
             logger.debug("NODE_CANARY_HIT ingest failed", exc_info=True)
 
     def _is_approved_install_reconnect(self, spoke_id, install_uuid) -> bool:
@@ -10347,6 +11529,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         keeps real guessing sources (no such proof) fully detected. Fail-closed
         on any error (-> record the failure as before)."""
         try:
+            # Need an install uuid with a known owner.
             uuid = (install_uuid or "").strip()
             if not uuid:
                 return False
@@ -10357,10 +11540,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # primary keys), and that identity must already be approved.
             if self._primary_key(owner) != self._primary_key(spoke_id):
                 return False
+            # And the spoke must be approved.
             return bool(self.approved_modules.get(self._primary_key(spoke_id)))
         except Exception:  # noqa: BLE001 — never let the shield break a connect
+            # Never raise.
             return False
 
+    # Window and cap for reconnect exemptions per IP.
     _RECONNECT_EXEMPTION_WINDOW_S = 3600.0
     _RECONNECT_EXEMPTION_CAP = 120
 
@@ -10379,14 +11565,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         error: the caller already proved an approved identity, so a bookkeeping
         hiccup must never block a legitimate reconnect."""
         try:
+            # No IP: allow.
             if not peer_ip:
                 return True
+            # Drop events outside the window and record this one.
             now = time.time()
             buf = self._known_install_glitches.setdefault(peer_ip, deque())
             horizon = now - self._RECONNECT_EXEMPTION_WINDOW_S
             while buf and buf[0] < horizon:
                 buf.popleft()
             buf.append(now)
+            # Over the cap: refuse the exemption.
             if len(buf) > self._RECONNECT_EXEMPTION_CAP:
                 logger.warning(
                     "IP %s exceeded the known-install reconnect exemption budget "
@@ -10395,8 +11584,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     peer_ip, self._RECONNECT_EXEMPTION_CAP,
                     int(self._RECONNECT_EXEMPTION_WINDOW_S))
                 return False
+            # Within budget.
             return True
         except Exception:  # noqa: BLE001 — bookkeeping must never block a reconnect
+            # Allow on bookkeeping errors.
             return True
 
     def _record_spoke_auth_failure(self, peer_ip: Optional[str], spoke_id,
@@ -10414,9 +11605,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ``record_success`` (called on a verified secret) → success-grace exempt.
         Telemetry only: never let a monitoring hiccup break a connect.
         """
+        # Need a monitor and an IP.
         tm = getattr(self, "threat_monitor", None)
         if not tm or not peer_ip:
             return
+        # Record the failure.
         try:
             tm.record_failure(peer_ip, "spoke_auth", detail=f"{spoke_id or '?'}:{detail}")
         except Exception:  # noqa: BLE001 — monitoring must never break a connect
@@ -10428,6 +11621,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         directly (no reverse proxy), so this is the real client IP. None on
         failure (used only for telemetry / clone detection, never as a gate)."""
         try:
+            # First element of the remote address.
             ra = getattr(websocket, "remote_address", None)
             return ra[0] if ra else None
         except Exception:  # noqa: BLE001
@@ -10444,6 +11638,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         NAT/egress. These systems are not portable, so this IP is stable in
         normal operation."""
         try:
+            # Read known_ip from module metadata.
             md = self.state.system_state.get("module_metadata", {}) or {}
             return (md.get(pk, {}) or {}).get("known_ip") or None
         except Exception:  # noqa: BLE001
@@ -10456,8 +11651,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         BACKUP key can never poison it. Deferred disk write (marks state dirty,
         flushed by the periodic save) — and only on an actual change, so a normal
         reconnect storm does not churn state."""
+        # Ignore a missing IP.
         if not ip:
             return
+        # Persist only when it changed.
         try:
             if self._known_ip(pk) != ip:
                 self.state.update_module_metadata(pk, {"known_ip": ip})
@@ -10466,9 +11663,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     def get_spoke_events(self, spoke_id: str, limit: int = 50) -> list:
         """Most-recent-first lifecycle events for a spoke (for the WebUI)."""
+        # Look up the spoke's events.
         buf = self.spoke_events.get(self._primary_key(spoke_id))
         if not buf:
             return []
+        # Newest first, up to the limit.
         out = list(buf)[-limit:]
         out.reverse()
         return out
@@ -10480,9 +11679,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         the relayed log format ``<asctime> - <name> - <levelname> - <msg>`` from
         ``agent_logs[spoke_id]``; lines that don't parse or are below WARNING are
         skipped. Newest first, capped at ``limit``."""
+        # Look up the spoke's relayed log buffer.
         buf = self.agent_logs.get(self._primary_key(spoke_id))
         if not buf:
             return []
+        # Keep warning-and-above lines, parsed into fields.
         levels = {"WARNING", "ERROR", "CRITICAL"}
         out = []
         for entry in list(buf):
@@ -10495,6 +11696,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 continue
             out.append({"ts_str": parts[0].strip(), "level": level,
                         "name": parts[1].strip(), "msg": parts[3].strip()})
+        # Newest first, up to the limit.
         out.reverse()
         return out[:limit]
 
@@ -10513,11 +11715,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         this per-spoke bucket. Clamped to sane minimums so a bad config can't
         wedge delivery."""
         try:
+            # Read the rate limit config.
             cfg = (self.state.get_global_config() or {}).get("rate_limit", {}) or {}
             cap = float(cfg.get("capacity", 400))
             rate = float(cfg.get("fill_rate", 200))
         except Exception:
+            # Defaults on error.
             cap, rate = 400.0, 200.0
+        # Clamp to sane minimums.
         return (max(1.0, cap), max(0.1, rate))
 
     async def get_system_metrics(self) -> Dict[str, Any]:
@@ -10532,6 +11737,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # don't move meaningfully within a 5s window, and this keeps the
             # blocking syscalls off the hot path when many tabs poll at once.
             cpu = psutil.cpu_percent(interval=None)
+            # Reuse memory and disk readings for up to 5 seconds.
             _mnow = time.time()
             _hm = getattr(self, "_host_metrics_cache", None)
             if _hm is not None and (_mnow - _hm[0]) < 5.0:
@@ -10558,6 +11764,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # and is skipped entirely in protect mode.
             _pending_count = len(self.mailbox.get_all_pending())
 
+            # Return the metrics snapshot.
             return {
                 "cpu_util": cpu,
                 "mem_util": mem.percent,
@@ -10624,6 +11831,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 "watchdog": self._live_watchdog_status(),
             }
         except Exception as e:
+            # On error, log it and return zeroed metrics.
             logger.error(f"Error collecting system metrics: {e}")
             return {
                 "cpu_util": 0,
@@ -10642,8 +11850,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """
         Polls OPNsense for all firewall rules and caches them locally and in-memory.
         """
+        # Log the poll.
         logger.info(f"Polling OPNsense firewall rules (ID: {firewall_id or 'Default'})...")
 
+        # Find the spoke for this firewall, or any OPNsense spoke.
         if firewall_id:
             spoke_id = self.get_spoke_for_firewall(firewall_id)
             if not spoke_id:
@@ -10661,12 +11871,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             logger.warning(f"Skipping OPNsense polling: Spoke {spoke_id} is not currently connected")
             return False
 
+        # Fetch all rules.
         try:
             # 30s, not the 5.0s default: the spoke answers via a curl subprocess
             # with --max-time 15, so the 5s default guaranteed a timeout on any
             # cold/WAN spoke and left the forensic cache empty.
             result = await self.request_response(spoke_id, "OPNSENSE_GET_ALL_RULES", {}, timeout=30.0)
 
+            # Unwrap the reply data.
             data = {}
             if isinstance(result, dict):
                 if "data" in result:
@@ -10678,10 +11890,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             else:
                 data = result
 
+            # Nothing returned.
             if not data:
                 logger.warning(f"OPNsense polling returned empty data for {spoke_id}")
                 return False
 
+            # Cache key.
             cache_key = firewall_id or spoke_id
 
             # Forensic on-disk snapshot only — the firewall routes always fetch
@@ -10691,12 +11905,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # in-memory `firewall_caches`/`opnsense_cache` dicts were write-only
             # dead state and have been removed.
             try:
+                # Cache file path.
                 cache_filename = f"rules_{cache_key}.json"
                 cache_path = os.path.join(self.cache_dir, cache_filename)
 
                 def _write_cache():
+                    """Write the rules to the cache file, creating the directory if needed."""
+                    # Ensure the directory exists.
                     if not os.path.exists(self.cache_dir):
                         os.makedirs(self.cache_dir, exist_ok=True)
+                    # Write the JSON.
                     with open(cache_path, "w") as f:
                         json.dump(data, f)
 
@@ -10704,12 +11922,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # (a large ruleset can take long enough to stall heartbeats /
                 # request_response — same class as the cs-svr-02 I/O starvation).
                 await asyncio.to_thread(_write_cache)
+                # Log success.
                 logger.info(f"OPNsense rules cached to {cache_path}")
             except Exception as e:
+                # Disk errors are only logged.
                 logger.error(f"Failed to persist OPNsense cache to disk for {cache_key}: {e}")
 
+            # Done.
             return True
         except Exception as e:
+            # Log and fail on errors.
             logger.error(f"Error during OPNsense rule polling for {spoke_id}: {e}")
             return False
 
@@ -10718,14 +11940,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Background loop that monitors and executes the periodic rotation of
         cryptographic secrets for both spokes and the Hub.
         """
+        # Log start and loop forever.
         logger.info("Key rotation monitoring loop started.")
         while True:
             try:
+                # Spokes whose keys are due.
                 due_spokes = self.key_manager.get_keys_due_for_rotation(days=30)
                 # Rotate keys (local crypto — fast, sequential) then push the new
                 # secrets to all due spokes concurrently. Sequential sends at
                 # hundreds of spokes made a rotation pass take N round-trips.
                 rotated = []
+                # Rotate each connected one and build the key push message.
                 for sid in due_spokes:
                     if sid in self.active_connections:
                         logger.info(f"Rotating session key for spoke {sid} (due for rotation)")
@@ -10747,26 +11972,33 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         rotated.append((sid, msg, prev_secret))
 
                 async def _push_session_key(sid, msg, prev_secret):
+                    """Push a new session key, signed with the spoke's previous secret."""
+                    # Send it and log the result.
                     try:
                         await self.send_to_spoke(msg, signing_secret=prev_secret)
                         logger.info(f"New session key pushed to {sid}")
                     except Exception as e:
                         logger.error(f"Failed to push session key to {sid}: {e}")
 
+                # Push all keys concurrently.
                 if rotated:
                     await asyncio.gather(*(_push_session_key(sid, msg, prev) for sid, msg, prev in rotated))
 
+                # When the hub root secret was last rotated.
                 global_config = self.state.get_global_config()
                 last_root_rot = global_config.get("last_hub_root_rotation", 0)
 
+                # Rotate it every 30 days.
                 if (time.time() - last_root_rot) > (30 * 24 * 3600):
                     logger.info("Rotating Hub root secret (30-day interval)...")
                     new_root_secret = self.key_manager.rotate_hub_secret()
 
+                    # Record the rotation and save state.
                     global_config["last_hub_root_rotation"] = time.time()
                     self.state.system_state["global_config"] = global_config
                     await self.state.save_state_now()
 
+                    # Build a message for each approved spoke.
                     root_msgs = [
                         (sid, Message(
                             header=MessageHeader(
@@ -10781,27 +12013,34 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     ]
 
                     async def _push_root_secret(sid, msg):
+                        """Push the new hub secret to a spoke."""
+                        # Send it, logging failures.
                         try:
                             await self.send_to_spoke(msg)
                         except Exception as e:
                             logger.error(f"Failed to push new hub secret to {sid}: {e}")
 
+                    # Push concurrently and log.
                     if root_msgs:
                         await asyncio.gather(*(_push_root_secret(sid, msg) for sid, msg in root_msgs))
 
                     logger.info("Hub root secret rotated and pushed to all approved spokes.")
 
             except Exception as e:
+                # Log loop errors.
                 logger.error(f"Error in key rotation loop: {e}", exc_info=True)
 
+            # Check every hour.
             await asyncio.sleep(3600) # Check every hour
     async def run_opnsense_polling_loop(self):
         """
         Background loop that polls OPNsense rules at the configured interval for all configured firewalls.
         """
+        # Log start and loop forever.
         logger.info("OPNsense polling loop started.")
         while True:
             try:
+                # Read config.
                 config = self.state.get_global_config()
                 # Clamp >= 1h: a 0 (or negative) config value would make the
                 # loop sleep(0) and busy-loop poll_opnsense_rules across every
@@ -10812,17 +12051,21 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 except (TypeError, ValueError):
                     interval_hours = 1
 
+                # Configured OPNsense firewalls.
                 firewalls = config.get("firewalls", [])
                 opn_firewalls = [fw for fw in firewalls if fw.get("model") == "opnsense"]
 
+                # Poll each, or log that there are none.
                 if not opn_firewalls:
                     logger.info("No OPNsense firewalls configured to poll.")
                 else:
                     for fw in opn_firewalls:
                         await self.poll_opnsense_rules(firewall_id=fw["id"])
 
+                # Wait for the interval.
                 await asyncio.sleep(interval_hours * 3600)
             except Exception as e:
+                # On error, log and retry in 5 minutes.
                 logger.error(f"Error in OPNsense polling loop: {e}")
                 await asyncio.sleep(300) # Retry after 5 mins on error
 
@@ -10831,6 +12074,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     # same LAN auto-locate the hub with zero config (see messaging.hub_discovery).
     # zeroconf is an optional dep: a missing import or any registration failure
     # is logged once and skipped — it must never break the hub.
+    # Shared mDNS state.
     _mdns_zconf = None
     _mdns_info = None
     _mdns_warned = False
@@ -10842,6 +12086,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         adds any other non-loopback IPv4s psutil sees (multi-homed hubs advertise
         all reachable addresses)."""
         ips: List[str] = []
+        # Find the primary LAN IP via a UDP connect.
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
@@ -10853,6 +12098,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 s.close()
         except Exception:
             pass
+        # Add other interface IPv4s.
         try:
             for _name, addrs in psutil.net_if_addrs().items():
                 for a in addrs:
@@ -10862,21 +12108,27 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         ips.append(addr)
         except Exception:
             pass
+        # Fall back to loopback.
         return ips or ["127.0.0.1"]
 
     def _hub_version_str(self) -> str:
+        """The hub's VERSION file contents, or "unknown"."""
         try:
+            # Locate the VERSION file.
             version_path = os.path.join(os.path.dirname(__file__), "../../VERSION")
             if not os.path.exists(version_path):
                 version_path = os.path.join(os.path.dirname(__file__), "../VERSION")
+            # Read it.
             with open(version_path, "r") as f:
                 return f.read().strip() or "unknown"
         except Exception:
+            # Unknown on error.
             return "unknown"
 
     def _build_hub_service_info(self):
         """Construct the zeroconf ServiceInfo for the hub (or None if zeroconf
         is unavailable). Caller handles registration on a daemon thread."""
+        # Need zeroconf; warn once if missing.
         try:
             from zeroconf import ServiceInfo, Zeroconf  # noqa: F401
         except ImportError:
@@ -10885,6 +12137,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 logger.warning("zeroconf not installed — hub will not broadcast "
                                "mDNS; spokes must use the lm-hub DNS name or --hub.")
             return None
+        # Local addresses.
         import socket as _sock
         ips = self._local_ipv4s()
         addresses = [_sock.inet_aton(ip) for ip in ips]
@@ -10909,7 +12162,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # NOT the retired 8765 bare-listener port. The agent leg dials the SAME
         # :443 surface (/ws/agent), which the hub byte-proxies to the co-located
         # pxmx spoke's loopback LM_PXMX_AGENT_PORT (8443, NOT advertised).
+        # Advertise the TLS port.
         srv_port = int(self.tls_port)
+        # Build the service info.
         return ServiceInfo(
             type_="_lm-hub._tcp.local.",
             name="lm-hub._lm-hub._tcp.local.",
@@ -10921,11 +12176,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     def _start_mdns_broadcast(self) -> None:
         """Register the hub's mDNS service on a daemon thread (best-effort)."""
+        # Need zeroconf.
         try:
             from zeroconf import Zeroconf
         except ImportError:
             self._build_hub_service_info()  # emits the one-time warning
             return
+        # Build and register the service.
         try:
             info = self._build_hub_service_info()
             if info is None:
@@ -10934,9 +12191,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             zconf.register_service(info)
             self._mdns_zconf = zconf
             self._mdns_info = info
+            # Log success.
             logger.info(f"mDNS: broadcasting _lm-hub._tcp.local. on port {self.port} "
                         f"(addresses={self._local_ipv4s()})")
         except Exception as e:
+            # Log the failure.
             logger.warning(f"mDNS broadcast failed (hub still runs, spokes must use "
                            f"--hub or the lm-hub DNS name): {e}")
             # Clean up any half-initialized registrar.
@@ -10944,12 +12203,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     def _stop_mdns_broadcast(self) -> None:
         """Unregister + close the mDNS broadcaster (best-effort, idempotent)."""
+        # Detach the current registrar.
         zconf = self._mdns_zconf
         info = self._mdns_info
         self._mdns_zconf = None
         self._mdns_info = None
+        # Nothing registered.
         if zconf is None:
             return
+        # Unregister, then close, ignoring errors.
         try:
             if info is not None:
                 zconf.unregister_service(info)
@@ -10964,14 +12226,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """asyncio loop exception handler — logs unhandled task exceptions via
         the Hub logger (→ self.logs → Error Log + AppBuilder) then defers to the
         default handler. See logging-observability-contract.md req 4."""
+        # Pull the exception and message from the context.
         from messaging.log_relay import format_asyncio_context
         exc = context.get("exception")
         msg = context.get("message") or "unhandled asyncio exception"
         detail = format_asyncio_context(context)
+        # Log with a traceback when there is an exception.
         if exc is not None:
             logger.error("Uncaught asyncio exception: %s%s", msg, detail, exc_info=exc)
         else:
             logger.error("asyncio error: %s%s", msg, detail)
+        # Also run the default handler.
         loop.default_exception_handler(context)
 
     async def start(self):
@@ -10980,6 +12245,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """
         # Route unhandled asyncio-task exceptions through the Hub logger → its
         # error log (sync excepthook installed in __init__). See req 4.
+        # Install the exception relay.
         try:
             _loop = asyncio.get_running_loop()
             _loop.set_exception_handler(self._asyncio_exception_relay)
@@ -10994,6 +12260,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                "creation tracebacks captured; expect slow-callback overhead")
         except Exception:  # noqa: BLE001
             pass
+        # Read the VERSION file.
         version = "unknown"
         try:
             version_path = os.path.join(os.path.dirname(__file__), "../../VERSION")
@@ -11003,6 +12270,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             with open(version_path, "r") as f:
                 version = f.read().strip()
         except Exception as e:
+            # Log failures.
             logger.debug(f"Could not load version file: {e}")
 
         # Unified :443 surface: ONE uvicorn server (HTTP/WebUI + /ws/spoke +
@@ -11016,6 +12284,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         if self.tls_enabled:
             # Fail fast + loud on a broken cert so systemd surfaces a crash-loop
             # instead of silently serving plaintext on 0.0.0.0:443.
+            # Validate the cert and key.
             _ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             try:
                 _ctx.load_cert_chain(self.tls_cert_path, self.tls_key_path)
@@ -11027,19 +12296,24 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # Fallback to plaintext if TLS setup fails
                 self.tls_enabled = False
                 raise
+            # Discard the test context.
             del _ctx
+        # Listen port.
         listen_port = self.tls_port  # single unified port (443 w/ TLS, 443 plain)
         # Provision any operator site-extension modules BEFORE the app is built
         # (create_app → site_ext.load imports them). Best-effort; optional.
+        # Provision site extensions.
         try:
             import site_ext
             await site_ext.provision(self)
         except Exception:
             logger.debug("site extension provisioning skipped", exc_info=True)
+        # Build and start the API server.
         self._api_server = build_server(
             self, host=self.host, port=listen_port,
             tls_cert=self.tls_cert_path, tls_key=self.tls_key_path)
         self._api_task = asyncio.create_task(self._api_server.serve())
+        # Log the listening address.
         _scheme = "wss" if self.tls_enabled else "ws"
         logger.info(f"Hub {version} unified surface on {_scheme}://{self.host}:{listen_port} "
                     f"(/ws/spoke, /ws/agent, /ws/console + WebUI/REST)")
@@ -11053,6 +12327,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # "unknown" on a tarball install → the commit check is skipped and the
         # behaviour falls back to the (inert) VERSION compare.
         try:
+            # Record the boot commit.
             self._startup_commit = await self.get_local_commit()
         except Exception:  # noqa: BLE001
             self._startup_commit = "unknown"
@@ -11060,6 +12335,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # stale-detection — robust vs log-parsing the startup line, which can
         # rotate out of hub.log (the failure that left a stale hub undetected).
         try:
+            # Write the running version file for the watchdog.
             _rvp = os.environ.get("LM_RUNNING_VERSION_FILE",
                                   "/var/lib/lm/state/running-version")
             os.makedirs(os.path.dirname(_rvp), exist_ok=True)
@@ -11070,10 +12346,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Fresh process is current → satisfy + clear any pending watchdog restart
         # sentinel so a successful restart doesn't get restarted again.
         try:
+            # Clear any pending watchdog restart flag.
             self._clear_watchdog_restart_sentinel()
         except Exception:  # noqa: BLE001
             pass
 
+        # Start the core background loops.
         retry_task = asyncio.create_task(self.run_retry_loop())
         persistence_task = asyncio.create_task(self.state.persistence_loop())
         repo_sync_task = asyncio.create_task(self.run_repo_sync_loop())
@@ -11212,6 +12490,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # min bootstrap backup, keeping `retain` days. Off until configured in
         # Setup → Azure → Key Vault. See run_key_vault_loop.
         key_vault_task = asyncio.create_task(self.run_key_vault_loop())
+        # Spoke diagnostics loop.
         pxmx_diag_task = asyncio.create_task(self.run_pxmx_diag_loop())
         # JIT 802.1X accounts: hourly rotation (rotate_days) + cleanup of
         # accounts unused for unused_days, every cleanup_interval_days.
@@ -11285,19 +12564,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # CS_TELEMETRY (Phase 5). See simulations/central_hub_poller.py.
         central_on_prem_poll_task = asyncio.create_task(self.central_on_prem_hub_poller.run_loop())
         # Move any inline Central API secrets into the vault (no-op without one).
+        # Move inline Central secrets into the vault.
         from simulations import central_secrets as _central_secrets
         asyncio.create_task(_central_secrets.migrate_to_vault(self, self.simulations_store))
         # Scheduled email health report: fires each tenant's Checks + Client Count
         # report on its configured cadence via the tenant's SMTP (Setup →
         # Notifications → Email Reports). Off unless enabled per tenant.
         try:
+            # Start the scheduled email report loop.
             from simulations import email_report as _email_report
             asyncio.create_task(_email_report.run_loop(self))
         except Exception as _er_exc:  # noqa: BLE001 — never let the report loop block startup
+            # Log if it cannot start.
             logger.warning("email report loop not started: %s", _er_exc)
         # Adaptive sim-quota controller: modulates each adaptive quota's count
         # between min/max to keep its alert firing (ramp/decay/learn — design §9).
         # Registered on the Hub by register_simulations_routes.
+        # Start the adaptive quota controller if present.
         _adaptive_loop = getattr(self, "_adaptive_controller_loop", None)
         if _adaptive_loop is not None:
             asyncio.create_task(_adaptive_loop())
@@ -11305,6 +12588,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # ratchets the sim's [simulation] intensity knobs (e.g. dns_fail_rate/
         # duration) down to the floor that still fires the alert. Registered by
         # register_simulations_routes.
+        # Start the config-value learner if present.
         _knob_loop = getattr(self, "_knob_learner_loop", None)
         if _knob_loop is not None:
             asyncio.create_task(_knob_loop())
@@ -11314,6 +12598,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # controller also runs a reconcile pass each tick; this loop is the
         # decoupled safety net for a stable-but-stale spoke that missed a push
         # while continuously online. Registered by register_simulations_routes.
+        # Start the reconcile-push backstop if present.
         _reconcile_loop = getattr(self, "_reconcile_push_loop", None)
         if _reconcile_loop is not None:
             asyncio.create_task(_reconcile_loop())
@@ -11358,10 +12643,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # cert-install path falls back to direct inline writes if the hub-self
         # agent is down. ``LM_HUB_SELF_AGENT=0`` disables the feature entirely.
         # See ``core/src/hub_self.py`` + ``docs/hub-direct-ops.md``.
+        # Start the in-process hub-self agent host unless disabled.
         self._hub_self = None
         self._hub_self_task = None
         if os.environ.get("LM_HUB_SELF_AGENT", "1").strip() not in ("0", "false", "False"):
             try:
+                # Create it and run it as a task.
                 from hub_self import HubSelfControlPlane
                 self._hub_self = HubSelfControlPlane("hub-self")
                 # Store the task so the shutdown finally below can cancel it —
@@ -11372,8 +12659,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 logger.info("hub-self loopback agent-host started")
             except Exception as e:  # noqa: BLE001 — never fatal to the hub
                 logger.warning("hub-self agent-host disabled (non-fatal): %s", e)
+                # Run without it.
                 self._hub_self = None
 
+        # Start the certificate distribution loop.
         cert_dist_task = asyncio.create_task(self.run_cert_distribution_loop())
 
         # compression=None disables permessage-deflate. The hub's core venv and
@@ -11390,6 +12679,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # relaying, which closed the ab agent with code 1009 "message too
         # big". 16 MiB ceiling pairs with the total-char cap in collect_all_logs
         # so the serialized payload stays safely under the frame limit.
+        # Start mDNS and mark the hub ready.
         self._start_mdns_broadcast()
         self.is_ready = True
         try:
@@ -11397,22 +12687,26 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # (e.g. :443 already in use) instead of hanging silently with a
             # dead hub — the old websockets.serve raised on bind; a task just
             # stores the exception, so check it on first completion.
+            # Wait forever, or until the API server exits.
             _blocker = asyncio.Future()
             await asyncio.wait(
                 {asyncio.ensure_future(_blocker), self._api_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
+            # Surface an unexpected API server exit.
             if self._api_task.done() and not self._api_task.cancelled():
                 exc = self._api_task.exception()
                 if exc is not None:
                     logger.error("Hub unified :443 server exited unexpectedly: %s", exc)
                     raise exc
         finally:
+            # Stop the API server and wait for it.
             self._api_server.should_exit = True
             try:
                 await self._api_task
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Hub API server shutdown: %s", exc)
+            # Stop mDNS.
             self._stop_mdns_broadcast()
             # Cancel the background tasks created in start() so the loop
             # doesn't close with them pending (the "Task was destroyed but it
@@ -11422,6 +12716,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 if _t is None or _t.done():
                     continue
                 _t.cancel()
+            # Wait for the cancelled tasks to finish.
             for _t in (self._hub_self_task, cert_dist_task):
                 if _t is None or _t.done():
                     continue
@@ -11438,14 +12733,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         logger output into self.logs, which collect_all_logs returns as
         module="hub" — so this is the Hub's counterpart to the spoke-side
         BaseControlPlane._health_heartbeat_task."""
+        # Heartbeat interval with env override.
         interval = 60
         try:
             interval = max(10, int(os.environ.get("LM_HEARTBEAT_INTERVAL_S", "60")))
         except Exception:
             pass
+        # Record the start time and loop forever.
         start = time.time()
         while True:
             try:
+                # Uptime so far.
                 uptime = int(time.time() - start)
                 # INFO, not DEBUG: at the default INFO level a DEBUG line is
                 # filtered before it reaches HubLogHandler → never buffered into
@@ -11457,10 +12755,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     "[heartbeat] ok module=hub spoke_id=hub hub=ok uptime_s=%s spokes=%d",
                     uptime, len(self.active_connections),
                 )
+                # Wait for the next beat.
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
+                # Propagate cancellation.
                 raise
             except Exception as e:
+                # Log errors and keep going.
                 logger.warning("Hub heartbeat loop error: %s", e)
                 await asyncio.sleep(interval)
 
@@ -11475,11 +12776,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         USB-config changes down via ``SET_AGENT_CONFIG``. Best-effort; never
         raises out of the loop.
         """
+        # Import the poller.
         from gateway.cs_bridge import CSBridgePoller
         # Store the instance on the hub so a REST handler (the WebUI "CS Bridge
         # Status" panel) can read hub.cs_bridge.status_snapshot() without SSH —
         # the poller takes hub in its constructor, so the back-ref is symmetric.
         # Guarded so a loop restart doesn't clobber a live instance mid-cycle.
+        # Create the poller once and run it.
         if not getattr(self, "cs_bridge", None):
             self.cs_bridge = CSBridgePoller(self)
         await self.cs_bridge.run()
@@ -11488,30 +12791,43 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """Every 60s: expire TTL blocks in the threat monitor and reconcile the
         Azure NSG deny rule with the current blocked-IP set (a no-op when nothing
         changed / auto-block is off). Boot re-pushes once so Azure matches state."""
+        # Loop forever.
         while True:
             try:
+                # Expire blocks and reconcile the NSG.
                 self.threat_monitor.sweep()
                 await self.threat_monitor.reconcile_nsg()
             except Exception as e:  # noqa: BLE001
+                # Log errors.
                 logger.debug("threat sweep loop: %s", e)
+            # Wait a minute.
             await asyncio.sleep(60)
 
     async def run_retry_loop(self):
+        """Run the mailbox retry loop with a connection map backed by live spoke sockets."""
+        # Adapter the mailbox uses to find a sender for each spoke.
         class ConnectionMap(dict):
+            """Map that returns a send function for connected spokes."""
             def get(self, spoke_id):
+                """Return a sender for the spoke, or None if it is not connected."""
                 # NOTE: ConnectionMap intentionally ignores any dict contents.
                 # Mailbox.retry_loop's contract is `{spoke_id: send_func}`; we
                 # satisfy it by delegation: re-look up the active connection via
                 # hub.active_connections and route through hub.send_to_spoke
                 # (which resolves the live websocket itself), so retries always
                 # hit the current connection rather than a stale send_func.
+                # Not connected: no sender.
                 hub = self.hub_instance
                 if hub._primary_key(spoke_id) not in hub.active_connections:
                     return None
+                # Sender that routes through the hub.
                 async def _send(msg):
+                    """Send a message to the spoke via the hub."""
                     await hub.send_to_spoke(msg)
+                # Return the sender.
                 return _send
 
+        # Build the map and run the retry loop.
         conn_map = ConnectionMap()
         conn_map.hub_instance = self
         await self.mailbox.retry_loop(conn_map)
@@ -11528,16 +12844,19 @@ def _preflight() -> int:
     Exit 0 = the new code boots; the watchdog may adopt/restart into it.
     Exit 1 = it would crash-loop; the watchdog must NOT restart into it.
     """
+    # Construct the hub and server without serving.
     try:
         hub = LabManagerHub()
         srv = build_server(
             hub, host="127.0.0.1", port=hub.tls_port,
             tls_cert=hub.tls_cert_path, tls_key=hub.tls_key_path,
         )
+        # Discard and report success.
         del srv
         print("PREFLIGHT OK")
         return 0
     except BaseException:  # noqa: BLE001 — report ANY startup failure to the gate
+        # Print the traceback and report failure.
         import traceback
         traceback.print_exc()
         print("PREFLIGHT FAILED")
@@ -11562,28 +12881,35 @@ def _enable_wedge_stack_dumps() -> None:
     still start.
     """
     try:
+        # Imports.
         import faulthandler
         import signal as _signal
 
+        # Open the stack-dump log and enable faulthandler on it.
         os.makedirs("/var/log/lm", exist_ok=True)
         # Kept open for the process lifetime on purpose — faulthandler writes to
         # the raw fd from a signal handler, so it must outlive this function.
         f = open("/var/log/lm/wedge-stacks.log", "a", buffering=1)
         globals()["_WEDGE_STACK_FILE"] = f
         faulthandler.enable(file=f, all_threads=True)
+        # Dump stacks on SIGUSR1.
         if hasattr(_signal, "SIGUSR1"):
             faulthandler.register(_signal.SIGUSR1, file=f,
                                   all_threads=True, chain=False)
     except Exception:  # noqa: BLE001 — diagnostics must never block startup
+        # Diagnostics are best-effort.
         pass
 
 
 if __name__ == "__main__":
+    # Preflight mode only checks boot.
     if "--preflight" in sys.argv:
         sys.exit(_preflight())
+    # Enable stack dumps, build the hub and run it.
     _enable_wedge_stack_dumps()
     hub = LabManagerHub()
     try:
         asyncio.run(hub.start())
     except KeyboardInterrupt:
+        # Exit quietly on Ctrl-C.
         pass

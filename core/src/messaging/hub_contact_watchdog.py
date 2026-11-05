@@ -10,12 +10,14 @@ reference that ``self`` state plus ``self._spoke_state_dir`` and
 behavior change.
 """
 
+# Standard-library imports: async subprocesses/sleep, JSON state files, paths, time, logging.
 import asyncio
 import json
 import os
 import time
 import logging
 
+# Shares the control-plane logger.
 logger = logging.getLogger("BaseControlPlane")
 
 
@@ -29,9 +31,11 @@ class HubContactWatchdogMixin:
     # every VM on that host), so it is off unless a deployment enables it.
     # ------------------------------------------------------------------
     def _hcw_state_path(self) -> str:
+        """Path of the persisted escalation-state file."""
         return os.path.join(self._spoke_state_dir(), "hub_contact_watchdog.json")
 
     def _hcw_config_path(self) -> str:
+        """Path of the persisted hub-pushed config file."""
         return os.path.join(self._spoke_state_dir(), "hub_contact_watchdog_config.json")
 
     def _hcw_config(self) -> dict:
@@ -42,10 +46,12 @@ class HubContactWatchdogMixin:
         recover when the hub can't be reached, so 'enabled' can't depend on a
         live push."""
         def _envf(name, default):
+            """Read a float env var (at least 1), or ``default`` if unset or invalid."""
             try:
                 return max(1.0, float(os.environ.get(name, "").strip() or default))
             except (TypeError, ValueError):
                 return float(default)
+        # Start from env vars and defaults.
         cfg = {
             "enabled": os.environ.get("LM_HUB_CONTACT_WATCHDOG", "0").lower() in ("1", "true", "yes"),
             "service_s": _envf("LM_HUB_WATCHDOG_SERVICE_S", 300),
@@ -54,6 +60,7 @@ class HubContactWatchdogMixin:
             "sleep_s": _envf("LM_HUB_WATCHDOG_SLEEP_S", 3600),
             "max_runs": int(_envf("LM_HUB_WATCHDOG_MAX_RUNS", 3)),
         }
+        # Overlay any hub-pushed config file, validating each field.
         try:
             with open(self._hcw_config_path()) as f:
                 pushed = json.load(f)
@@ -68,6 +75,7 @@ class HubContactWatchdogMixin:
                             cfg[k] = max(1, caster(pushed[k]))
                         except (TypeError, ValueError):
                             pass
+        # No pushed config yet: use the env/default values.
         except FileNotFoundError:
             pass
         except Exception as e:  # noqa: BLE001
@@ -76,6 +84,7 @@ class HubContactWatchdogMixin:
 
     def _hcw_save_config(self, cfg: dict) -> None:
         """Persist the hub-pushed watchdog config so it survives restart/reboot."""
+        # Write to a temp file, then atomically replace the real one.
         try:
             os.makedirs(os.path.dirname(self._hcw_config_path()), exist_ok=True)
             tmp = self._hcw_config_path() + ".tmp"
@@ -90,6 +99,7 @@ class HubContactWatchdogMixin:
         one escalation attempt (service restart at t1, reboot at t2); after a
         failed run we sleep, then start another. Keys: run, run_start_at, stage,
         sleep_until, last_contact_at, gave_up."""
+        # Read the state file; anything unreadable counts as empty.
         try:
             with open(self._hcw_state_path()) as f:
                 d = json.load(f)
@@ -98,6 +108,8 @@ class HubContactWatchdogMixin:
             return {}
 
     def _hcw_save(self, st: dict) -> None:
+        """Persist escalation state atomically (best effort)."""
+        # Write to a temp file, then atomically replace the real one.
         try:
             os.makedirs(os.path.dirname(self._hcw_state_path()), exist_ok=True)
             tmp = self._hcw_state_path() + ".tmp"
@@ -108,6 +120,8 @@ class HubContactWatchdogMixin:
             logger.debug("hub-contact watchdog: state save failed: %s", e)
 
     def _hcw_clear(self) -> None:
+        """Delete the persisted escalation state (best effort)."""
+        # Remove the file; a missing file is fine.
         try:
             os.remove(self._hcw_state_path())
         except FileNotFoundError:
@@ -118,10 +132,12 @@ class HubContactWatchdogMixin:
     async def _hcw_reboot(self) -> None:
         """Reboot the host (best-effort; needs sudoers for reboot). Flushes logs
         first so the escalation is visible in the hub relay before we go down."""
+        # Flush logs first (best effort).
         try:
             await self._flush_log_relay_async()
         except Exception:  # noqa: BLE001
             pass
+        # Try each reboot command until one succeeds.
         for cmd in (["sudo", "-n", "/sbin/reboot"], ["sudo", "-n", "reboot"],
                     ["systemctl", "reboot"], ["/sbin/reboot"]):
             try:
@@ -133,6 +149,7 @@ class HubContactWatchdogMixin:
                     return
             except Exception:  # noqa: BLE001
                 continue
+        # None worked.
         logger.error("hub-contact watchdog: reboot command failed (no sudoers for "
                      "reboot?); leaving the server up.")
 
@@ -156,14 +173,17 @@ class HubContactWatchdogMixin:
             # counting; a genuine fresh boot after real contact just uses now.
             self._last_hub_contact = min(self._last_hub_contact, float(st["last_contact_at"]))
         logger.info("hub-contact watchdog running (enabled=%s).", self._hcw_config()["enabled"])
+        # Check every 30 seconds; errors never stop the loop.
         while True:
             try:
                 await asyncio.sleep(30)
+                # Read config fresh; when disabled, clear any ladder and do nothing.
                 cfg = self._hcw_config()
                 if not cfg["enabled"]:
                     if self._hcw_load():  # was armed, now disabled → wipe ladder
                         self._hcw_clear()
                     continue
+                # Escalation timings and the current outage state.
                 T1, T2 = cfg["service_s"], cfg["reboot_s"]
                 GRACE, SLEEP, MAX_RUNS = cfg["reboot_grace_s"], cfg["sleep_s"], cfg["max_runs"]
                 now = time.time()
@@ -171,6 +191,7 @@ class HubContactWatchdogMixin:
                 outage = now - self._last_hub_contact
                 st = self._hcw_load()
 
+                # Hub reachable: clear any ladder and record the contact.
                 if connected or outage < 1:
                     # Only a REAL recovery logs + clears — i.e. an escalation ladder
                     # was actually in progress (a run started / a stage advanced / we
@@ -189,10 +210,12 @@ class HubContactWatchdogMixin:
                     self._hcw_save({"last_contact_at": self._last_hub_contact})
                     continue
 
+                # Already gave up, or sleeping between runs: wait.
                 if st.get("gave_up"):
                     continue
                 if now < float(st.get("sleep_until", 0) or 0):
                     continue  # cooling down between runs
+                # Too many failed runs: give up for good.
                 run = int(st.get("run", 0) or 0)
                 if run >= MAX_RUNS:
                     logger.error("hub-contact watchdog: hub unreachable after %d runs (~%.1fh) — "
@@ -207,9 +230,11 @@ class HubContactWatchdogMixin:
                     st.update({"run_start_at": now, "stage": "started",
                                "last_contact_at": self._last_hub_contact})
                     self._hcw_save(st)
+                # How long this run has lasted, and its current stage.
                 run_outage = now - float(st["run_start_at"])
                 stage = st.get("stage", "started")
 
+                # Stage 1: restart the service.
                 if stage == "started" and run_outage >= T1:
                     logger.error("hub-contact watchdog: no hub contact for %.0fs (run %d) — "
                                  "restarting the service.", run_outage, run + 1)
@@ -221,6 +246,7 @@ class HubContactWatchdogMixin:
                     except Exception:  # noqa: BLE001
                         pass
                     os._exit(3)  # systemd Restart=on-failure relaunches us
+                # Stage 2: reboot the host.
                 elif stage == "service_restarted" and run_outage >= T2:
                     logger.error("hub-contact watchdog: still no hub contact %.0fs into run %d — "
                                  "rebooting the server.", run_outage, run + 1)
@@ -228,6 +254,7 @@ class HubContactWatchdogMixin:
                     st["last_contact_at"] = self._last_hub_contact
                     self._hcw_save(st)
                     await self._hcw_reboot()
+                # Stage 3: the run failed; sleep before the next one.
                 elif stage == "rebooted" and run_outage >= (T2 + GRACE):
                     logger.error("hub-contact watchdog: run %d failed (service restart + reboot "
                                  "did not restore contact) — sleeping %.0fs before the next run.",

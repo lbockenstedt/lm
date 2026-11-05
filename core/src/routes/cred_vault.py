@@ -18,13 +18,18 @@ front-end purges it from memory immediately after showing it once.
 """
 from __future__ import annotations
 
+# Keeps the wrapped route's name and signature in _guard.
 import functools
 
+# Lets the reveal route set no-cache headers.
 from fastapi.responses import JSONResponse
 
+# Shared Hub helpers: HTTP error type, request, role checks and logger.
 from api import HTTPException, Request, access, logger
+# The vault itself (storage, encryption, audit).
 import cred_vault as _cv
 
+# Headers that stop browsers and proxies from caching a revealed secret.
 _NO_STORE = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
     "Pragma": "no-cache",
@@ -33,12 +38,16 @@ _NO_STORE = {
 
 
 def register(app, hub, ctx):
+    """Register the Credential Vault routes on ``app``."""
+    # Session lookup from the shared route context.
     _session_user = ctx._session_user
 
     def _sess(request: Request):
+        """Return the caller's session ({} if not logged in)."""
         return _session_user(request) or {}
 
     def _actor(sess) -> str:
+        """Return the caller's login id for audit lines ("?" if unknown)."""
         # Sessions carry the login id as ``user_id`` (routes/auth.py); reading
         # only ``username``/``id`` logged every vault audit line as "?".
         sess = sess or {}
@@ -47,6 +56,7 @@ def register(app, hub, ctx):
                 or u.get("username") or u.get("id") or "?")
 
     def _acting_tenants(sess):
+        """Return the tenant ids the session belongs to."""
         return (sess or {}).get("user", {}).get("tenants") or []
 
     def _all_tenants(hub):
@@ -62,10 +72,12 @@ def register(app, hub, ctx):
         correctly-but-uselessly reported "no scan credential sets belong to this
         tenant" with no way to fix it. The non-tenant Global Admin slot is
         ``__admin__`` and is listed separately."""
+        # Read the tenant table ({} if it can't be read).
         try:
             tenants = (hub.state.tenant_state or {}).get("tenants", {}) or {}
         except Exception:  # noqa: BLE001
             return {}
+        # Map each tenant id to its display name (falling back to name, then id).
         out = {}
         for tid, meta in tenants.items():
             if not tid:
@@ -75,26 +87,31 @@ def register(app, hub, ctx):
         return out
 
     def _is_global_admin(sess) -> bool:
+        """True if the session is a Global Admin."""
         return access.is_admin(sess)
 
     def _reachable(sess, bucket: str) -> bool:
         """Can this session reach ``bucket``? Global Admin → any bucket + the
         admin slot; tenant-admin → only their own tenant buckets."""
+        # No bucket, no reach; Global Admins reach everything.
         if not bucket:
             return False
         if _is_global_admin(sess):
             return True
+        # Tenant-admins can't reach the admin slot, only their own tenants.
         if bucket == _cv.ADMIN_BUCKET:
             return False
         return bucket in _acting_tenants(sess)
 
     def _require_reach(sess, bucket: str):
+        """Raise 404 unless the session can reach ``bucket``."""
         # A record in an unreachable bucket is indistinguishable from missing
         # (404) so bucket existence never leaks across tenants.
         if not _reachable(sess, bucket):
             raise HTTPException(status_code=404, detail="bucket not found")
 
     async def _body(request: Request) -> dict:
+        """Read the JSON body (defaulting to {})."""
         try:
             return await request.json() or {}
         except Exception:
@@ -104,6 +121,8 @@ def register(app, hub, ctx):
         """Map domain/vault errors to clean HTTP codes."""
         @functools.wraps(fn)
         async def _wrapped(*a, **k):
+            """Run the route, translating vault errors to HTTP errors."""
+            # Our HTTP errors pass through; bad input is a 400; anything else is a 502.
             try:
                 return await fn(*a, **k)
             except HTTPException:
@@ -122,12 +141,14 @@ def register(app, hub, ctx):
         return _wrapped
 
     # ── discovery ───────────────────────────────────────────────────────────
+    # List the buckets the caller can reach.
     @app.get("/tenant/cred-vault/buckets")
     async def cv_buckets(request: Request):
         """Buckets the caller may reach, with pass-phrase + count status. A
         Global Admin sees EVERY tenant bucket (even empty ones with no secrets
         yet) plus the ``__admin__`` slot, so they can add/remove credentials for
         any tenant when they hold that tenant's pass-phrase."""
+        # Global Admins reach every tenant plus the admin slot; others only their tenants.
         sess = _sess(request)
         existing = {b["bucket"]: b for b in _cv.list_buckets(hub)}
         labels = {}
@@ -136,6 +157,7 @@ def register(app, hub, ctx):
             reach = set(existing) | set(labels) | {_cv.ADMIN_BUCKET}
         else:
             reach = set(_acting_tenants(sess))
+        # Describe each bucket (missing ones show as empty, without a pass-phrase).
         out = []
         for b in sorted(reach):
             rec = existing.get(b, {"bucket": b, "has_psk": False, "secret_count": 0})
@@ -153,9 +175,11 @@ def register(app, hub, ctx):
                         # Secrets encrypted under the bucket pass-phrase — these
                         # are what a pass-phrase reset would have to discard.
                         "psk_secret_count": _cv.count_psk_secrets(hub, b)})
+        # Return them with the caller's role and whether the vault backend is up.
         return {"buckets": out, "is_global_admin": _is_global_admin(sess),
                 "admin_slot": _cv.ADMIN_BUCKET, "vault_available": _cv._vault_available(hub)}
 
+    # Reset a lost bucket pass-phrase.
     @app.post("/tenant/cred-vault/reset-psk")
     @_guard
     async def cv_reset_psk(request: Request):
@@ -170,19 +194,23 @@ def register(app, hub, ctx):
         bucket holding only ``hub``-mode secrets therefore resets with zero data
         loss. Any ``psk``-mode secret is already undecryptable and can only be
         discarded, which is refused unless ``confirm_destroy`` is sent."""
+        # Global Admins only (others get a 404).
         sess = _sess(request)
         if not _is_global_admin(sess):
             # Not 403: a tenant-admin must not learn that this door exists.
             raise HTTPException(status_code=404, detail="bucket not found")
+        # Read the bucket and check reach.
         body = await _body(request)
         bucket = (body.get("bucket") or "").strip()
         _require_reach(sess, bucket)
+        # Reset it (PSK-mode secrets are destroyed only if confirmed).
         res = await _cv.reset_bucket_psk(
             hub, bucket, body.get("new_psk") or "",
             destroy_psk_secrets=bool(body.get("confirm_destroy")),
             actor=_actor(sess))
         return {"status": "ok", **res}
 
+    # Move a secret between buckets.
     @app.post("/tenant/cred-vault/move-secret")
     @_guard
     async def cv_move_secret(request: Request):
@@ -193,20 +221,24 @@ def register(app, hub, ctx):
         orphan. ``hub``-mode secrets need no pass-phrase (they are keyed on the
         hub Fernet key, not the bucket); ``psk``-mode secrets need both the
         source ``psk`` and the destination ``to_psk``."""
+        # Global Admins only (others get a 404).
         sess = _sess(request)
         if not _is_global_admin(sess):
             raise HTTPException(status_code=404, detail="bucket not found")
+        # Read both buckets and check reach to each.
         body = await _body(request)
         bucket = (body.get("bucket") or "").strip()
         to_bucket = (body.get("to_bucket") or "").strip()
         _require_reach(sess, bucket)
         _require_reach(sess, to_bucket)
+        # Move it.
         res = await _cv.move_secret(
             hub, bucket, (body.get("name") or "").strip(), to_bucket,
             psk=body.get("psk") or "", to_psk=body.get("to_psk") or "",
             actor=_actor(sess))
         return {"status": "ok", **res}
 
+    # Delete an orphaned bucket.
     @app.post("/tenant/cred-vault/delete-bucket")
     @_guard
     async def cv_delete_bucket(request: Request):
@@ -222,30 +254,38 @@ def register(app, hub, ctx):
         that belongs to a LIVE tenant — those follow the tenant lifecycle, and
         this endpoint exists to clear up orphans. Destroying leftover secrets
         requires ``confirm_destroy``."""
+        # Global Admins only (others get a 404).
         sess = _sess(request)
         if not _is_global_admin(sess):
             raise HTTPException(status_code=404, detail="bucket not found")
+        # Read the bucket and check reach.
         body = await _body(request)
         bucket = (body.get("bucket") or "").strip()
         _require_reach(sess, bucket)
+        # A live tenant's bucket can't be deleted here.
         if bucket in _all_tenants(hub):
             raise HTTPException(
                 status_code=400,
                 detail=f"'{bucket}' is a live tenant's bucket — delete the tenant "
                        "instead. This action is for buckets that match no tenant.")
+        # Delete it (leftover secrets only if confirmed).
         res = await _cv.delete_bucket(hub, bucket,
                                       confirm_destroy=bool(body.get("confirm_destroy")),
                                       actor=_actor(sess))
         return {"status": "ok", **res}
 
+    # List the secrets in a bucket (names and metadata only).
     @app.get("/tenant/cred-vault/secrets")
     async def cv_secrets(request: Request):
+        """Return the bucket's secret list and whether it has a pass-phrase."""
+        # Read the bucket from the query and check reach.
         sess = _sess(request)
         bucket = (request.query_params.get("bucket") or "").strip()
         _require_reach(sess, bucket)
         return {"bucket": bucket, "has_psk": _cv.bucket_has_psk(hub, bucket),
                 "secrets": _cv.list_secrets(hub, bucket)}
 
+    # List secrets that modules can read without a pass-phrase.
     @app.get("/tenant/cred-vault/automation-secrets")
     async def cv_automation_secrets(request: Request):
         """Picker source for module credential references (LE, Console): every
@@ -255,12 +295,14 @@ def register(app, hub, ctx):
         via :func:`cred_vault.automation_get` at use-time, so the plaintext is
         never exposed to the browser. Optional ``?type=`` filters by secret type
         (e.g. ``console`` / ``dns`` / ``henet``)."""
+        # Work out the reachable buckets as for the bucket list.
         sess = _sess(request)
         want_type = (request.query_params.get("type") or "").strip()
         if _is_global_admin(sess):
             reach = set(b["bucket"] for b in _cv.list_buckets(hub)) | {_cv.ADMIN_BUCKET}
         else:
             reach = set(_acting_tenants(sess))
+        # Collect each automation-readable secret, optionally of one type only.
         out = []
         for b in sorted(reach):
             for s in _cv.list_secrets(hub, b):
@@ -278,10 +320,13 @@ def register(app, hub, ctx):
     @app.post("/tenant/cred-vault/psk")
     @_guard
     async def cv_set_psk(request: Request):
+        """Set or change a bucket's pass-phrase (changing needs the old one)."""
+        # Read the bucket and check reach.
         sess = _sess(request)
         body = await _body(request)
         bucket = (body.get("bucket") or "").strip()
         _require_reach(sess, bucket)
+        # Save the new pass-phrase and log it.
         await _cv.set_bucket_psk(hub, bucket, body.get("new_psk") or "",
                                  old_psk=body.get("old_psk"))
         logger.info("cred-vault: pass-phrase set for bucket %s by %s", bucket, _actor(sess))
@@ -291,10 +336,13 @@ def register(app, hub, ctx):
     @app.post("/tenant/cred-vault/secret")
     @_guard
     async def cv_put_secret(request: Request):
+        """Create or update a secret in a bucket."""
+        # Read the bucket and check reach.
         sess = _sess(request)
         body = await _body(request)
         bucket = (body.get("bucket") or "").strip()
         _require_reach(sess, bucket)
+        # The secret value must be an object of fields.
         value = body.get("value")
         if not isinstance(value, dict):
             raise HTTPException(status_code=400, detail="value must be an object")
@@ -310,6 +358,7 @@ def register(app, hub, ctx):
                     status_code=400,
                     detail="credential fields are empty — re-enter the secret "
                            "(a blank save would erase the stored credential)")
+        # Store it, log it, and return the stored record's details.
         res = await _cv.put_secret(
             hub, bucket, body.get("name") or "", value,
             mode=(body.get("mode") or "psk"), sec_type=(body.get("type") or "generic"),
@@ -319,28 +368,35 @@ def register(app, hub, ctx):
                     res["name"], bucket, res["mode"], _actor(sess))
         return {"status": "ok", **res}
 
+    # Show one secret's value.
     @app.post("/tenant/cred-vault/reveal")
     @_guard
     async def cv_reveal(request: Request):
         """Reveal ONE secret's plaintext. PSK required; response is no-store so
         the value is never cached — the UI shows it once then purges it."""
+        # Read the bucket and check reach.
         sess = _sess(request)
         body = await _body(request)
         bucket = (body.get("bucket") or "").strip()
         _require_reach(sess, bucket)
+        # Decrypt it with the PSK, log the reveal, and return it with no-cache headers.
         value = await _cv.reveal_secret(hub, bucket, body.get("name") or "",
                                         psk=body.get("psk") or "", actor=_actor(sess))
         logger.info("cred-vault: secret %r REVEALED from %s by %s",
                     body.get("name"), bucket, _actor(sess))
         return JSONResponse(content={"status": "ok", "value": value}, headers=_NO_STORE)
 
+    # Delete a secret.
     @app.post("/tenant/cred-vault/delete")
     @_guard
     async def cv_delete(request: Request):
+        """Delete one secret from a bucket (PSK required)."""
+        # Read the bucket and check reach.
         sess = _sess(request)
         body = await _body(request)
         bucket = (body.get("bucket") or "").strip()
         _require_reach(sess, bucket)
+        # Delete it and log it.
         await _cv.delete_secret(hub, bucket, body.get("name") or "",
                                 psk=body.get("psk") or "", actor=_actor(sess))
         logger.info("cred-vault: secret %r DELETED from %s by %s",

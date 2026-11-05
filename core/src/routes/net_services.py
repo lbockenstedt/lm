@@ -30,19 +30,23 @@ def _deploy_status_for_role(progress: dict, role: str) -> dict:
     Falls back to the singular ``deploy`` field only if it already matches the
     role we asked about (back-compat with an agent running an older build that
     doesn't send ``deploys`` at all)."""
+    # Prefer the per-role list of deploys when the agent sends one.
     for entry in progress.get("deploys") or []:
         if isinstance(entry, dict) and entry.get("role") == role:
             return entry
+    # Older agents: use the single entry only if it is for this role.
     single = progress.get("deploy") or {}
     return single if single.get("role") == role else {}
 
 
+# The per-scope pool counters that add up to the server-wide totals.
 _DHCP_STATS_POOL_KEYS = ("total_addresses", "assigned_addresses",
                          "declined_addresses")
 
 
 def _dhcp_stats_subnets(payload):
     """The per-scope list out of a DHCP_STATS envelope, or None."""
+    # The scope list, if the envelope has one.
     if isinstance(payload, dict) and isinstance(payload.get("subnets"), list):
         return payload["subnets"]
     return None
@@ -74,18 +78,22 @@ def _dhcp_rescope_stats(before, after):
     scope, so they are left alone.
 
     Module-level + pure so it is unit-testable with plain dicts."""
+    # Nothing to fix when either side has no scope list or nothing was filtered out.
     subs_before = _dhcp_stats_subnets(before)
     subs_after = _dhcp_stats_subnets(after)
     if not isinstance(after, dict) or subs_before is None or subs_after is None:
         return after
     if len(subs_after) == len(subs_before):
         return after
+    # Drop the raw per-node replies, which still hold every scope.
     out = dict(after)
     out.pop("members", None)
+    # Re-sum the pool totals from the scopes the caller can see.
     totals = dict(out.get("global") or {})
     for key in _DHCP_STATS_POOL_KEYS:
         totals[key] = sum(int(s.get(key) or 0)
                           for s in subs_after if isinstance(s, dict))
+    # Recompute utilization from those totals (0 when there are no addresses).
     totals["utilization_pct"] = (
         round(totals["assigned_addresses"] / totals["total_addresses"] * 100, 1)
         if totals.get("total_addresses") else 0.0)
@@ -103,7 +111,9 @@ def _dhcp_rescope_stats(before, after):
 # list) can never fail open into another tenant's queries.
 
 def _dns_prefix_nets(prefixes):
+    """Parse a list of prefixes into networks, skipping bad ones."""
     nets = []
+    # Skip anything that is not a valid network.
     for p in prefixes or []:
         try:
             nets.append(ipaddress.ip_network(str(p), strict=False))
@@ -113,6 +123,8 @@ def _dns_prefix_nets(prefixes):
 
 
 def _dns_ip_in_nets(ip, nets):
+    """True when the IP is inside one of the networks (same IP version only)."""
+    # A bad IP is never in scope.
     try:
         addr = ipaddress.ip_address(str(ip))
     except ValueError:
@@ -124,15 +136,20 @@ def _dns_scope_query_names(rows, nets):
     """Keep only the sources inside ``nets``; re-derive each row's count from
     the surviving sources and drop rows left with none."""
     out = []
+    # Skip anything that is not a row.
     for row in rows or []:
         if not isinstance(row, dict):
             continue
+        # Keep only the sources inside the tenant's networks.
         sources = [s for s in (row.get("sources") or [])
                    if isinstance(s, dict) and _dns_ip_in_nets(s.get("ip"), nets)]
+        # Rows with no sources left are dropped.
         if not sources:
             continue
+        # Recount the row from what is left.
         out.append({**row, "sources": sources,
                     "count": sum(int(s.get("count") or 0) for s in sources)})
+    # Busiest first.
     out.sort(key=lambda r: r["count"], reverse=True)
     return out
 
@@ -147,18 +164,23 @@ def _dns_rescope_stats(data, prefixes, resolver_counters=None):
     ``resolver_counters`` names why they may be shown resolver-wide:
     ``"dedicated"`` (the resolver serves only this tenant) or ``"admin"`` (a
     Global Admin, who may see every tenant's traffic anyway)."""
+    # No tenant scope, or not an envelope: return it as is.
     if prefixes is None or not isinstance(data, dict):
         return data
+    # Filter the query rows; drop the per-node replies and the unfiltered tracked count.
     nets = _dns_prefix_nets(prefixes)
     rows = _dns_scope_query_names(data.get("query_names"), nets)
     out = {k: v for k, v in data.items()
            if k not in ("members", "query_names_tracked")}
     out["query_names"] = rows
+    # Rebuild the per-type counts from the filtered rows.
     types = {}
     for r in rows:
         t = r.get("type") or "?"
         types[t] = types.get(t, 0) + r["count"]
     out["query_types"] = dict(sorted(types.items(), key=lambda kv: kv[1], reverse=True))
+    # Headline counters: the total comes from the tenant's rows; cache and recursion
+    # counters are kept only when allowed (see above), otherwise None.
     g = data.get("global") if isinstance(data.get("global"), dict) else {}
     keep = resolver_counters in ("dedicated", "admin")
     out["global"] = {
@@ -167,6 +189,7 @@ def _dns_rescope_stats(data, prefixes, resolver_counters=None):
            for k in ("cache_hits", "cache_misses", "cache_hit_ratio",
                      "num_recursive", "recursion_time_avg", "prefetch")},
     }
+    # Say why the resolver-wide counters are shown.
     if keep:
         out["resolver_counters"] = resolver_counters
     out["tenant_scoped"] = True
@@ -176,17 +199,21 @@ def _dns_rescope_stats(data, prefixes, resolver_counters=None):
 def _dns_rescope_client_queries(data, prefixes):
     """Tenant-scope a DNS_CLIENT_QUERIES envelope by each query's client IP and
     re-derive ``total``/``top_names`` from what survives."""
+    # No tenant scope, or not an envelope: return it as is.
     if prefixes is None or not isinstance(data, dict):
         return data
+    # Keep only queries from clients inside the tenant's networks.
     nets = _dns_prefix_nets(prefixes)
     queries = [q for q in (data.get("queries") or [])
                if isinstance(q, dict) and _dns_ip_in_nets(q.get("client"), nets)]
+    # Count each name/type pair and keep the top 100.
     summary = {}
     for q in queries:
         k = (q.get("name"), q.get("type"))
         summary[k] = summary.get(k, 0) + 1
     top = sorted(({"name": n, "type": t, "count": c} for (n, t), c in summary.items()),
                  key=lambda x: x["count"], reverse=True)[:100]
+    # Fix the total only if something was removed.
     out = dict(data)
     if len(queries) != len(data.get("queries") or []):
         out["total"] = len(queries)
@@ -197,12 +224,16 @@ def _dns_rescope_client_queries(data, prefixes):
 
 
 def _private_service_addresses(report):
+    """The private, routable IPv4 service addresses from a report."""
     addresses = []
+    # Skip anything that is not an IP address.
     for raw in report.get("service_addresses") or []:
         try:
             address = ipaddress.ip_address(str(raw).strip())
         except ValueError:
             continue
+        # Keep private IPv4 addresses that are not loopback, link-local, unspecified,
+        # multicast or reserved.
         if (address.version == 4 and address.is_private
                 and not address.is_loopback
                 and not address.is_link_local
@@ -215,6 +246,7 @@ def _private_service_addresses(report):
 
 def register(app, hub, ctx):
     """Register net_services routes on the Hub app."""
+    # Helpers shared from the hub context.
     _filter_session = ctx._filter_session
     # Explicit-tenant filter (scopes even admins by the selected tenant; delegates
     # to _filter_session when no tenant is passed). Used by DNS/DHCP so the pages
@@ -233,9 +265,11 @@ def register(app, hub, ctx):
         can_edit_shared) the record's IP must fall within the caller's tenant
         subnets (access.record_in_tenant_scope); else 403. So a tenant-admin may
         only add/edit/delete records addressed within their own prefixes."""
+        # Global admins can write anything.
         sess = _session_user(request)
         if _is_admin(sess):
             return
+        # Others: the record must be in the tenant's subnets or on a spoke the tenant owns.
         if not await access.record_in_tenant_scope(hub, sess, record, fields) \
                 and not await _own_spoke_write(sess, spoke):
             raise HTTPException(
@@ -245,18 +279,21 @@ def register(app, hub, ctx):
     async def _own_spoke_write(sess, spoke):
         """True when the write lands on a spoke dedicated to the caller's
         tenant: its records are the tenant's whatever their IP."""
+        # Resolve the spoke (it may be a function or a coroutine).
         try:
             sid = spoke() if callable(spoke) else spoke
             if inspect.isawaitable(sid):
                 sid = await sid
         except Exception:  # noqa: BLE001 - unresolvable spoke: fail closed
             return False
+        # The spoke's owning tenant, and whether the caller may write to it.
         owner = access.spoke_owner_tenant(hub, sid)
         return bool(owner) and access._owned_spoke_writable(hub, sess, sid, owner)
 
     def _resolved_spoke(kind, request, tenant):
         """The single dns/dhcp spoke serving this request, or None (offline,
         or an admin merge across spokes)."""
+        # Pick the DNS or DHCP resolver; a 503 means no single spoke.
         try:
             resolver = _dns_spoke_for_request if kind == "dns" else _dhcp_spoke_for_request
             return resolver(request, tenant)
@@ -264,6 +301,7 @@ def register(app, hub, ctx):
             return None
 
     def _get_dns_spoke(hub):
+        """The first connected DNS spoke, or a 503."""
         return get_spoke_or_503(hub, "dns", "DNS")
 
     # ── tenant-aware DNS spoke resolution ───────────────────────────────────
@@ -286,15 +324,19 @@ def register(app, hub, ctx):
         that tenant by module_type, then the shared-tenant spoke. Admin with
         no tenant selected keeps the legacy global-first-connected-spoke
         behavior — see ``_dns_merge_fanout`` for the admin combined view."""
+        # Admin with no tenant: the first connected DNS spoke.
         hub = app.state.hub
         tid = _effective_tenant(request, tenant)
         if not tid:
             return spoke_or_503(hub.get_spoke_by_type("dns"), "DNS")
+        # The tenant's own DNS instance, if its spoke is connected.
         instances = (hub.state.system_state.get("global_config", {}) or {}).get("dns_instances", []) or []
         inst = next((i for i in instances if isinstance(i, dict) and i.get("tenant_id") == tid), None)
         spoke_id = (inst or {}).get("spoke_id") or ""
         if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
             return spoke_id
+        # Otherwise a spoke bound to the tenant, then the shared spoke (only if the tenant has none
+        # of its own).
         resolved = hub.get_dns_spoke_for_tenant(tid)
         if not resolved and not access.tenant_has_own_spoke(hub, tid, "dns"):
             resolved = hub.get_dns_spoke_for_shared()
@@ -306,6 +348,7 @@ def register(app, hub, ctx):
         tenant (``_tenant``), and merge — 'combine the data at the hub'
         instead of only ever seeing whichever spoke happened to connect
         first. Mirrors cppm.py's ``_nac_merge_fanout``."""
+        # Every connected, approved DNS spoke; none is a 503.
         hub = app.state.hub
         spokes = [s for s in (hub.get_all_spokes_by_type("dns") or [])
                   if s in hub.active_connections and hub.approved_modules.get(s, False)]
@@ -313,6 +356,8 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="No spoke connected")
 
         async def _one(sid):
+            """Fetch one spoke's records, tagged with its tenant; failures give an empty list."""
+            # Ask the spoke and unwrap its reply.
             try:
                 result = await hub.request_response(sid, cmd, payload or {})
                 data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
@@ -320,12 +365,15 @@ def register(app, hub, ctx):
             except Exception as e:  # noqa: BLE001 — one bad/offline spoke must not fail the merge
                 logger.debug("dns merge fanout: %s failed: %s", sid, e)
                 return []
+            # Pull out the record list.
             recs = data.get(list_key) if isinstance(data, dict) else None
             if not isinstance(recs, list):
                 return []
+            # Tag each record with the spoke's tenant.
             tid = hub.state.get_spoke_tenant(sid) or ""
             return [{**r, "_tenant": tid} if isinstance(r, dict) else r for r in recs]
 
+        # Ask all spokes at once and merge the results.
         merged = [r for recs in await asyncio.gather(*[_one(s) for s in spokes]) for r in recs]
         return {list_key: merged, "total": len(merged)}
 
@@ -347,8 +395,10 @@ def register(app, hub, ctx):
            never went through discovery, but whose id happens to be a known
            agent/spoke id.
         3. The raw id, unchanged — the pre-existing behavior."""
+        # No id: nothing to name.
         if not member_id:
             return member_id
+        # 1. A named DNS instance for this member.
         instances = (hub.state.system_state.get("global_config", {}) or {}).get("dns_instances", []) or []
         inst = next((i for i in instances
                      if isinstance(i, dict) and i.get("name")
@@ -356,9 +406,11 @@ def register(app, hub, ctx):
                           or i.get("source_agent_id") == member_id)), None)
         if inst:
             return inst["name"]
+        # 2. The module's known name.
         module_names = hub.state.system_state.get("module_names", {}) or {}
         if module_names.get(member_id):
             return module_names[member_id]
+        # 3. The metadata display name, or the raw id.
         metadata = hub.state.system_state.get("module_metadata", {}) or {}
         meta_name = (metadata.get(member_id) or {}).get("display_name")
         return meta_name or member_id
@@ -374,8 +426,10 @@ def register(app, hub, ctx):
            Matched on ``member_id`` or ``source_agent_id``.
         2. ``module_names`` / ``module_metadata[...].display_name`` directly.
         3. The raw id, unchanged."""
+        # No id: nothing to name.
         if not member_id:
             return member_id
+        # 1. A named DHCP instance for this member.
         instances = (hub.state.system_state.get("global_config", {}) or {}).get("dhcp_instances", []) or []
         inst = next((i for i in instances
                      if isinstance(i, dict) and i.get("name")
@@ -383,9 +437,11 @@ def register(app, hub, ctx):
                           or i.get("source_agent_id") == member_id)), None)
         if inst:
             return inst["name"]
+        # 2. The module's known name.
         module_names = hub.state.system_state.get("module_names", {}) or {}
         if module_names.get(member_id):
             return module_names[member_id]
+        # 3. The metadata display name, or the raw id.
         metadata = hub.state.system_state.get("module_metadata", {}) or {}
         meta_name = (metadata.get(member_id) or {}).get("display_name")
         return meta_name or member_id
@@ -393,11 +449,13 @@ def register(app, hub, ctx):
     def _annotate_dhcp_cluster_members(cluster):
         """Add a ``display_name`` to each member of a Kea HA cluster report,
         non-destructively — same convention as ``_annotate_dns_cluster_members``."""
+        # Leave anything without a member list unchanged.
         if not isinstance(cluster, dict):
             return cluster
         members = cluster.get("members")
         if not isinstance(members, list):
             return cluster
+        # Copy each member with a display name added.
         return {
             **cluster,
             "members": [
@@ -414,11 +472,13 @@ def register(app, hub, ctx):
         existing caller that only knows ``id`` is unaffected). No-op for
         anything that isn't a dict with a member list, e.g. a single-host
         module's ``{"enabled": false}``."""
+        # Leave anything without a member list unchanged.
         if not isinstance(cluster, dict):
             return cluster
         members = cluster.get("members")
         if not isinstance(members, list):
             return cluster
+        # Copy each member with a display name added.
         return {
             **cluster,
             "members": [
@@ -440,16 +500,20 @@ def register(app, hub, ctx):
         deliberately withholds. ``display_name`` is kept alongside ``id`` — a
         friendly name is not sensitive, unlike the hostname/address it is
         derived independently of."""
+        # Not a report: return it as is.
         if not isinstance(cluster, dict):
             return cluster
+        # Keep only the verdict fields.
         keep = ("enabled", "state", "converged", "member_count",
                 "converged_count", "recommendations", "reason")
         out = {k: v for k, v in cluster.items() if k in keep}
+        # Members keep only id, name, connection, convergence and role.
         out["members"] = [
             {k: v for k, v in m.items()
              if k in ("id", "display_name", "connected", "convergence", "role")}
             for m in (cluster.get("members") or []) if isinstance(m, dict)
         ]
+        # Desired state keeps only version and record count; last-commit detail is dropped.
         out["desired"] = {k: v for k, v in (cluster.get("desired") or {}).items()
                           if k in ("version", "record_count")}
         out["last_commit"] = {}
@@ -457,8 +521,10 @@ def register(app, hub, ctx):
 
     def _redact_dhcp_cluster(cluster):
         """Non-admin view of a Kea HA report — same posture as the DNS one."""
+        # Not a report: return it as is.
         if not isinstance(cluster, dict):
             return cluster
+        # Keep only the verdict fields.
         keep = ("enabled", "mode", "state", "healthy", "config_converged",
                 "config_digests_missing", "member_count", "healthy_count",
                 # A pair mid-apply is NOT faulty. Without these a non-admin saw
@@ -467,19 +533,23 @@ def register(app, hub, ctx):
                 "updating", "updating_members", "serving", "serving_count",
                 "recommendations", "supported_modes", "reason")
         out = {k: v for k, v in cluster.items() if k in keep}
+        # Members keep only id, name, connection, health, HA role/state and serving.
         out["members"] = [
             {k: v for k, v in m.items()
              if k in ("id", "display_name", "connected", "health", "ha_role",
                       "ha_state", "ha_enabled", "serving")}
             for m in (cluster.get("members") or []) if isinstance(m, dict)
         ]
+        # Drop peer and last-apply detail.
         out["peers"] = []
         out["last_apply"] = {}
         return out
 
     def _get_le_spoke(hub):
+        """The connected certificates spoke, or a 503."""
         return get_spoke_or_503(hub, "certificates", "Certificate")
 
+    # Cache key prefix, and the read commands that may be cached.
     # ── stale-while-revalidate cache for DNS/DHCP READ pages ────────────────
     # Pages must render from the hub's last-known spoke data (memory, persisted
     # to warm_cache.json so a restart is warm) and never block on a live spoke
@@ -495,49 +565,60 @@ def register(app, hub, ctx):
         "DHCP_LIST_SUBNETS", "DHCP_LIST_LEASES",
         "DHCP_LIST_RES", "DHCP_STATUS", "DHCP_DIAGNOSTICS", "DHCP_HA_STATUS",
         "DHCP_STATS", "DHCP_DNS_HOOK_STATUS", "DHCP_PACKET_TRACE"})
+    # Refreshes in progress, and a counter bumped on every write.
     _swr_inflight = set()
     _swr_gen = [0]
 
     def _swr_invalidate(spoke_id):
+        """Drop a spoke's cached reads (and merged reads) after a write."""
         _swr_gen[0] += 1
         if hasattr(hub, "warm_invalidate"):
             hub.warm_invalidate(_SWR_PREFIX, (f"{spoke_id}|", "merge|"))
 
     def _swr_key(scope, payload):
+        """Cache key: the scope plus a short hash of the payload."""
         raw = json.dumps(payload or {}, sort_keys=True, default=str)
         return f"{scope}|{hashlib.sha1(raw.encode()).hexdigest()[:16]}"
 
     async def _swr_refresh(ns, key, fetch):
+        """Refetch an entry in the background and store it unless a write happened meanwhile."""
+        # Only one refresh per entry at a time.
         tag = (ns, key)
         if tag in _swr_inflight:
             return
         _swr_inflight.add(tag)
         try:
+            # Note the write counter, fetch, and store only if no write happened since.
             gen = _swr_gen[0]
             data = await fetch()
             if gen == _swr_gen[0]:
                 await hub.warm_set(ns, key, copy.deepcopy(data))
         except Exception as e:  # noqa: BLE001 — background revalidation is best-effort
             logger.debug("net_services background refresh %s failed: %s", ns, e)
+        # Always clear the in-progress mark.
         finally:
             _swr_inflight.discard(tag)
 
     def _swr_serve_stale(ns, key):
         """Last-known envelope marked ``stale`` (spoke offline), or None."""
+        # Nothing cached: nothing to serve.
         cached = hub.warm_get(ns, key) if hasattr(hub, "warm_get") else None
         if cached is None:
             return None
+        # Copy it and add the cached badge.
         out = copy.deepcopy(cached)
         _swr_badge(out, ns, key)
         return out
 
     def _swr_badge(out, ns, key):
         """Badge ``out`` as cached only when the data is over 5 minutes old."""
+        # When it was last fetched, and whether it has since been invalidated.
         ts = hub.warm_last_fetched_at(ns, key)
         invalidated = bool(ts) and not hub.warm_fetched_at(ns, key)
         if isinstance(out, dict) and ts and (
             invalidated or time.time() - ts > hub.warm_policy.stale_after_s
         ):
+            # Mark it stale with its fetch time.
             out["stale"] = True
             out["cached_at"] = ts
 
@@ -547,8 +628,11 @@ def register(app, hub, ctx):
         route handlers mutate what they get back. If the live fetch fails
         because the spoke is unreachable, the last-known data is served marked
         ``stale`` so the UI can badge it as cached."""
+        # No warm cache on this hub: always fetch live.
         if not hasattr(hub, "warm_get"):
             return await fetch()
+        # A usable cached entry: serve a copy, refreshing in the background if it is aging, and
+        # badge it if stale.
         cached = hub.warm_get(ns, key)
         state = hub.warm_state(ns, key)
         if cached is not None and state in (FRESH, REFRESH, STALE):
@@ -558,6 +642,7 @@ def register(app, hub, ctx):
             if state == STALE:
                 _swr_badge(out, ns, key)
             return out
+        # No usable entry: fetch live.
         gen = _swr_gen[0]
         try:
             data = await fetch()
@@ -568,6 +653,7 @@ def register(app, hub, ctx):
                 if out is not None:
                     return out
             raise
+        # Store it unless a write happened while fetching.
         if gen == _swr_gen[0]:
             await hub.warm_set(ns, key, copy.deepcopy(data))
         return data
@@ -577,12 +663,14 @@ def register(app, hub, ctx):
         A tenant-bound instance has a known spoke id; with no tenant selected
         fall back to the newest entry for this payload. A tenant request with
         no known instance never borrows another tenant's data."""
+        # A tenant with a known spoke uses that spoke's key; a tenant without one gets nothing.
         hint = getattr(spoke_ref, "hint", None)
         sid = hint() if hint else None
         if sid:
             return _swr_key(sid, payload)
         if sid is not None:
             return None
+        # No tenant: the newest non-merged entry for the same payload.
         suffix = "|" + _swr_key("", payload).split("|", 1)[1]
         best = None
         for k in (getattr(hub, "warm_cache", {}).get(ns, {}) or {}):
@@ -595,24 +683,36 @@ def register(app, hub, ctx):
     def _spoke_ref(kind, request, tenant):
         """Lazy spoke resolver for ``_cached_relay`` so an offline spoke (the
         resolver's 503) can still be answered from the warm cache."""
+        # Pick the DNS or DHCP resolver.
         resolver = _dns_spoke_for_request if kind == "dns" else _dhcp_spoke_for_request
 
         def ref():
+            """Resolve the spoke (may raise a 503)."""
             return resolver(request, tenant)
 
         def hint():
+            """The tenant's instance spoke id: None with no tenant, "" when the tenant has none."""
+            # No tenant selected.
             tid = _effective_tenant(request, tenant)
             if not tid:
                 return None
+            # The tenant's instance, if any.
             insts = (hub.state.system_state.get("global_config", {}) or {}).get(f"{kind}_instances", []) or []
             inst = next((i for i in insts if isinstance(i, dict) and i.get("tenant_id") == tid), None)
             return (inst or {}).get("spoke_id") or ""
 
+        # Attach the hint for offline lookups.
         ref.hint = hint
         return ref
 
     async def _cached_relay(spoke, cmd, payload=None, log_name="", timeout=None):
+        """Relay a read through the stale-while-revalidate cache, serving cached data if the
+
+        spoke is offline.
+        """
+        # Cache namespace for this command.
         ns = _SWR_PREFIX + cmd.lower()
+        # A lazy resolver: resolve it now; if the spoke is offline, serve the last-known data.
         if callable(spoke):
             ref = spoke
             try:
@@ -624,11 +724,13 @@ def register(app, hub, ctx):
                     if out is not None:
                         return out
                 raise
+        # Serve through the cache, fetching from the spoke when needed.
         return await _swr(
             ns, _swr_key(spoke, payload),
             lambda: _relay_spoke(spoke, cmd, payload, log_name=log_name, timeout=timeout))
 
     async def _cached_merge(cmd, payload, list_key, fanout):
+        """Serve an admin merged read through the cache."""
         return await _swr(
             _SWR_PREFIX + cmd.lower(), _swr_key("merge", payload),
             lambda: fanout(cmd, payload, list_key))
@@ -648,6 +750,7 @@ def register(app, hub, ctx):
         """Revalidate every connected DNS/DHCP spoke's read caches so the pages
         are fed in the background (like the other modules) instead of only
         refreshing when a tab is opened. Best-effort; never raises."""
+        # Build refresh jobs for each DHCP and DNS spoke.
         jobs = []
         for stype, cmds, merge_cmds, fanout in (
             ("dhcp", _FEED_DHCP,
@@ -655,25 +758,30 @@ def register(app, hub, ctx):
               ("DHCP_LIST_LEASES", {"subnet": None}, "leases")), _dhcp_merge_fanout),
             ("dns", _FEED_DNS, (("DNS_LIST", {}, "records"),), _dns_merge_fanout),
         ):
+            # The connected spokes of this type.
             try:
                 spokes = list(hub.get_all_spokes_by_type(stype) or [])
             except Exception:  # noqa: BLE001
                 spokes = []
+            # Refresh each read command on each spoke.
             for sid in spokes:
                 for cmd, payload, tmo in cmds:
                     jobs.append(_swr_refresh(
                         _SWR_PREFIX + cmd.lower(), _swr_key(sid, payload),
                         lambda sid=sid, cmd=cmd, payload=payload, tmo=tmo, stype=stype:
                             _relay_spoke(sid, cmd, payload, log_name=f"{stype}_feed", timeout=tmo)))
+            # With more than one spoke, also refresh the merged admin views.
             if len(spokes) > 1:
                 for cmd, payload, list_key in merge_cmds:
                     jobs.append(_swr_refresh(
                         _SWR_PREFIX + cmd.lower(), _swr_key("merge", payload),
                         lambda cmd=cmd, payload=payload, list_key=list_key, fanout=fanout:
                             fanout(cmd, payload, list_key)))
+        # Run them all; errors are ignored.
         if jobs:
             await asyncio.gather(*jobs, return_exceptions=True)
 
+    # Let the hub run this feed on its schedule.
     hub.net_services_feed_once = _swr_feed_once
 
     async def _relay_spoke(spoke_id, command, payload=None, log_name="", timeout=None):
@@ -697,12 +805,14 @@ def register(app, hub, ctx):
         certbot for up to ~180s.
         """
         hub = app.state.hub
+        # Anything not in the read list counts as a write.
         _is_write = command not in _SWR_READ_CMDS
         try:
             if _is_write:
                 _swr_gen[0] += 1  # in-flight refreshes must not write back
             kw = {"timeout": timeout} if timeout else {}
             result = await hub.request_response(spoke_id, command, payload or {}, **kw)
+            # Unwrap the payload.
             # Mirrors access.unwrap_spoke: an explicit ``data: null`` means NO
             # payload, so fall back to the envelope. ``.get("data", result)``
             # only defaults when the key is absent, so a spoke replying
@@ -721,10 +831,12 @@ def register(app, hub, ctx):
                 logger.warning("%s: spoke %s rejected %s: %s",
                                log_name or command, spoke_id, command,
                                data.get("message") or data.get("error") or "no message")
+            # Raise on a spoke error, otherwise take the payload; a write drops the cached reads.
             _out = _spoke_payload_or_raise(data)
             if _is_write:
                 _swr_invalidate(spoke_id)
             return _out
+        # Pass HTTP errors through; other failures are logged and returned as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -745,9 +857,11 @@ def register(app, hub, ctx):
         ``_discover_dhcp_workers_for_spoke``. The request was only ever used
         to pick the spoke, so nothing below it changes.
         """
+        # The current cluster status from the spoke.
         current = await _relay_spoke(
             dns_spoke, "DNS_CLUSTER_STATUS",
             log_name="dns_cluster_discovery_status")
+        # Member ids, hosts by id, and connected member ids.
         current_ids = {
             str(m.get("id") or "") for m in (current.get("members") or [])
             if isinstance(m, dict)
@@ -761,17 +875,21 @@ def register(app, hub, ctx):
             str(m.get("id") or "") for m in (current.get("members") or [])
             if isinstance(m, dict) and m.get("connected")
         }
+        # The tenant the DNS spoke belongs to (the shared tenant for the shared spoke).
         dns_tenant = hub.state.get_spoke_tenant(dns_spoke) or ""
         shared_spoke = hub.get_dns_spoke_for_shared()
         if dns_spoke == shared_spoke:
             dns_tenant = access.shared_tenant_id() or dns_tenant
 
         def _upsert_dns_instance(sid, member_id, host):
+            """Add or update the DNS instance record for a discovered worker."""
+            # The stored instance list and any existing record for this worker.
             global_config = hub.state.system_state.setdefault("global_config", {})
             instances = global_config.setdefault("dns_instances", [])
             existing = next((i for i in instances if isinstance(i, dict)
                              and (i.get("source_agent_id") == sid
                                   or i.get("member_id") == member_id)), None)
+            # The worker's display name.
             module_names = hub.state.system_state.get("module_names", {}) or {}
             metadata = hub.state.system_state.get("module_metadata", {}) or {}
             display_name = (
@@ -779,6 +897,7 @@ def register(app, hub, ctx):
                 or (metadata.get(sid) or {}).get("display_name")
                 or sid
             )
+            # Build the record, keeping an existing id and name.
             record = {
                 "id": (existing or {}).get("id") or f"discovered-{sid}",
                 "name": (existing or {}).get("name") or display_name,
@@ -789,14 +908,17 @@ def register(app, hub, ctx):
                 "source_agent_id": sid,
                 "discovered": True,
             }
+            # Update or add it, then save.
             if existing is not None:
                 existing.update(record)
             else:
                 instances.append(record)
             hub.state._mark_dirty()
 
+        # Find connected agents that could be DNS workers.
         candidates = []
         for sid, module_type in list(hub.spoke_module_types.items()):
+            # Only connected agents in the DNS spoke's tenant.
             if module_type != "agent" or hub._primary_key(sid) not in hub.active_connections:
                 continue
             agent_tenant = hub.state.get_spoke_tenant(sid) or ""
@@ -805,6 +927,7 @@ def register(app, hub, ctx):
             candidates.append(sid)
 
         async def _roles(sid):
+            """Ask an agent which roles it has; an unreachable agent reports none."""
             try:
                 result = await hub.request_response(
                     sid, "GET_AVAILABLE_ROLES", {}, timeout=15.0)
@@ -815,8 +938,10 @@ def register(app, hub, ctx):
                                sid, exc)
                 return sid, {}
 
+        # Ask every candidate at once.
         discovered = []
         role_reports = await asyncio.gather(*[_roles(sid) for sid in candidates])
+        # The DNS spoke's host agent and its private address (the workers' coordinator).
         parent_id = (getattr(hub, "spoke_parent_map", {}).get(
             hub._primary_key(dns_spoke)) or "")
         parent_report = next((
@@ -827,11 +952,13 @@ def register(app, hub, ctx):
             parent_report)
         coordinator_host = (
             coordinator_addresses[0] if coordinator_addresses else "")
+        # Only agents with the dns-server role installed and active.
         for sid, report in role_reports:
             if "dns-server" not in (report.get("installed_deploy_roles") or []):
                 continue
             if "dns-server" not in (report.get("active_deploy_roles") or []):
                 continue
+            # Its configured worker entry, whether it is configured, and its member id.
             worker_info = next((
                 item for item in (report.get("configured_workers") or [])
                 if isinstance(item, dict) and item.get("role") == "dns-server"
@@ -840,6 +967,7 @@ def register(app, hub, ctx):
                 report.get("configured_worker_roles") or [])
             member_id = str(worker_info.get("member_id") or sid)
 
+            # The worker must report a private service address (never the public/NAT one).
             service_addresses = _private_service_addresses(report)
             if not service_addresses:
                 raise HTTPException(
@@ -848,12 +976,14 @@ def register(app, hub, ctx):
                         f"DNS Server agent {sid} did not report a private local "
                         "service address; refusing to use its public/NAT "
                         "WebSocket source address."))
+            # Already enrolled, connected, configured, and on the same host: just record it.
             host = service_addresses[0]
             if (member_id in current_ids and member_id in connected_ids
                     and configured and current_hosts.get(member_id) == host):
                 _upsert_dns_instance(sid, member_id, host)
                 discovered.append({"spoke_id": sid, "status": "already-configured"})
                 continue
+            # The coordinator must have a private address too.
             if parent_id and not coordinator_host:
                 raise HTTPException(
                     status_code=502,
@@ -861,6 +991,7 @@ def register(app, hub, ctx):
                         f"DNS Management host agent {parent_id} did not report "
                         "a private local service address; worker coordinator "
                         "configuration cannot be completed safely."))
+            # Enroll the worker with DNS Management to get its bootstrap settings.
             enrollment = await _relay_spoke(
                 dns_spoke, "DNS_CLUSTER_ENROLL_WORKER",
                 {"member": {"id": member_id, "host": host, "role": "resolver"}},
@@ -871,10 +1002,12 @@ def register(app, hub, ctx):
                 "worker_secret": enrollment.get("worker_secret"),
                 "coordinator_ca_pem": enrollment.get("coordinator_ca_pem"),
             }
+            # All of them must be present.
             if not all(bootstrap.values()):
                 raise HTTPException(
                     status_code=502,
                     detail=f"DNS Management returned incomplete enrollment for {sid}")
+            # Load (or reload) the dns-server role on the agent with that bootstrap.
             result = await hub.request_response(
                 sid, "LOAD_ROLE",
                 # force=True: reached only once the already-configured check
@@ -884,6 +1017,7 @@ def register(app, hub, ctx):
                 # coordinator pointer (same bug fixed for dhcp-server above).
                 {"role": "dns-server", "config": bootstrap, "force": True},
                 timeout=120.0)
+            # A deploy already running is fine if it is the DNS one; otherwise raise on error.
             deployed = result.get("payload", {}).get("data", result)
             if (deployed.get("status") == "ERROR"
                     and "deployment is already running" in str(
@@ -903,6 +1037,7 @@ def register(app, hub, ctx):
                     deployed = _spoke_payload_or_raise(deployed)
             else:
                 deployed = _spoke_payload_or_raise(deployed)
+            # If a deploy started, wait up to 2 minutes for it, failing on an error.
             worker_status = "configuring"
             if deployed.get("deploy"):
                 for _attempt in range(60):
@@ -922,6 +1057,7 @@ def register(app, hub, ctx):
                         raise HTTPException(
                             status_code=502,
                             detail=f"DNS worker configuration failed on {sid}: {detail}")
+                # Then wait up to a minute for the worker to connect to the cluster.
                 for _attempt in range(30):
                     await asyncio.sleep(2)
                     status = await _relay_spoke(
@@ -935,14 +1071,17 @@ def register(app, hub, ctx):
                     if live.get("connected"):
                         worker_status = "connected"
                         break
+            # Record the result and the instance.
             discovered.append({"spoke_id": sid, "status": worker_status,
                                "deploy": deployed.get("message", "")})
 
             _upsert_dns_instance(sid, member_id, host)
 
+        # Re-read the cluster status after enrollment.
         final_status = await _relay_spoke(
             dns_spoke, "DNS_CLUSTER_STATUS",
             log_name="dns_cluster_discovery_final_status")
+        # Whether every member is connected, and the desired config version.
         final_members = [
             m for m in (final_status.get("members") or [])
             if isinstance(m, dict) and m.get("id")
@@ -951,11 +1090,13 @@ def register(app, hub, ctx):
             bool(m.get("connected")) for m in final_members)
         desired_version = int(
             (final_status.get("desired") or {}).get("version") or 0)
+        # All connected and never committed: finalize enrollment (version 1).
         if all_connected and desired_version == 0:
             await _relay_spoke(
                 dns_spoke, "DNS_CLUSTER_FINALIZE_ENROLLMENT",
                 log_name="dns_cluster_finalize_enrollment", timeout=30)
             desired_version = 1
+        # Once there is a committed config, connected workers count as configured.
         if desired_version > 0:
             for item in discovered:
                 if item.get("status") == "connected":
@@ -978,6 +1119,7 @@ def register(app, hub, ctx):
         Admin with no tenant selected AND 2+ dns spokes connected: records
         are combined across every spoke (tagged _tenant) rather than only
         ever the first-connected one — see _dns_merge_fanout."""
+        # Admin with no tenant and several DNS spokes: merged view; otherwise one spoke.
         logger.debug("relay GET /api/dns/records tenant=%s", tenant)
         sess = _session_user(request)
         tid = _effective_tenant(request, tenant)
@@ -985,11 +1127,14 @@ def register(app, hub, ctx):
             data = await _cached_merge("DNS_LIST", {}, "records", _dns_merge_fanout)
         else:
             data = await _cached_relay(_spoke_ref("dns", request, tenant), "DNS_LIST", log_name="dns_list_records")
+        # Filter by tenant subnets.
         return await _filter_tenant(request, data, "dns", ["value", "ip"], tenant,
                                     spoke_id=_resolved_spoke("dns", request, tenant) if tid else None)
 
     @app.post("/api/dns/record")
     async def dns_add_record(request: Request, tenant: str = None):
+        """Add a DNS record (shared server: only inside the caller's subnets)."""
+        # Check the caller may write this record, then relay it.
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "value"], "DNS record",
                                       spoke=lambda: _dns_spoke_for_request(request, tenant))
@@ -997,6 +1142,8 @@ def register(app, hub, ctx):
 
     @app.delete("/api/dns/record")
     async def dns_delete_record(request: Request, tenant: str = None):
+        """Delete a DNS record (shared server: only inside the caller's subnets)."""
+        # Check the caller may write this record, then relay it.
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "value"], "DNS record",
                                       spoke=lambda: _dns_spoke_for_request(request, tenant))
@@ -1004,6 +1151,8 @@ def register(app, hub, ctx):
 
     @app.put("/api/dns/record")
     async def dns_update_record(request: Request, tenant: str = None):
+        """Update a DNS record (shared server: only inside the caller's subnets)."""
+        # Check the caller may write this record, then relay it.
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "value"], "DNS record",
                                       spoke=lambda: _dns_spoke_for_request(request, tenant))
@@ -1019,14 +1168,17 @@ def register(app, hub, ctx):
     async def dns_diagnostics(request: Request, tenant: str = None):
         """Unbound config, listener, and local query diagnostics."""
         logger.debug("relay GET /api/dns/diagnostics")
+        # Fetch the diagnostics (cached).
         data = await _cached_relay(
             _spoke_ref("dns", request, tenant),
             "DNS_DIAGNOSTICS",
             log_name="dns_diagnostics",
         )
+        # Add display names to cluster members.
         if isinstance(data, dict) and isinstance(data.get("cluster"), dict):
             data = {**data, "cluster": _annotate_dns_cluster_members(data["cluster"])}
         if isinstance(data, dict):
+            # Name the diagnostics source.
             # Same UUID/agent-id -> friendly-name treatment as the cluster
             # table above, applied to the other three places a raw member id
             # otherwise leaks into this panel: the "evidence below is from
@@ -1036,14 +1188,17 @@ def register(app, hub, ctx):
             if data.get("diagnostics_source"):
                 data = {**data, "diagnostics_source_name":
                          _dns_member_display_name(data["diagnostics_source"])}
+            # Name each per-member evidence card.
             if isinstance(data.get("members"), dict):
                 data = {**data, "members": {
                     mid: ({**diag, "display_name": _dns_member_display_name(mid)}
                           if isinstance(diag, dict) else diag)
                     for mid, diag in data["members"].items()
                 }}
+            # Swap member ids for names in the recommendation lines.
             if isinstance(data.get("recommendations"), list):
                 def _rename_ids(text):
+                    """Replace "[id]" with "[name]" in one line."""
                     if not isinstance(text, str):
                         return text
                     for mid in (data.get("members") or {}):
@@ -1053,6 +1208,7 @@ def register(app, hub, ctx):
                     return text
                 data = {**data, "recommendations":
                          [_rename_ids(r) for r in data["recommendations"]]}
+        # Non-admins: keep only the service's ok flag and exit code.
         if not _is_admin(_session_user(request)) and isinstance(data, dict):
             data = {
                 **data,
@@ -1081,6 +1237,7 @@ def register(app, hub, ctx):
                 ],
                 "conf_path": "",
             }
+            # Redact the cluster report too and drop per-member evidence.
             if isinstance(data.get("cluster"), dict):
                 data["cluster"] = _redact_dns_cluster(data["cluster"])
                 data["members"] = {}
@@ -1097,6 +1254,7 @@ def register(app, hub, ctx):
         agent-id stays for traceability, the name is what the WebUI shows as
         the primary label."""
         logger.debug("relay GET /api/dns/cluster")
+        # Fetch the cluster status (cached) and add member display names.
         data = await _cached_relay(_spoke_ref("dns", request, tenant),
                                   "DNS_CLUSTER_STATUS", log_name="dns_cluster_status")
         data = _annotate_dns_cluster_members(data)
@@ -1115,6 +1273,7 @@ def register(app, hub, ctx):
         Body: ``{"members": [{"id", "host"}...], "worker_secret": "…"}``. The
         secret is passed straight through to the spoke, which stores it as the
         listener PSK and never returns it."""
+        # Pass the body straight to the spoke.
         body = await request.json()
         return await _relay_spoke(_dns_spoke_for_request(request, tenant),
                                   "DNS_CLUSTER_CONFIG", body,
@@ -1123,8 +1282,10 @@ def register(app, hub, ctx):
     @app.post("/api/dns/cluster/discover")
     async def dns_cluster_discover(request: Request, tenant: str = None):
         """Automatically enroll DNS Server roles assigned to this DNS tenant."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
+        # Resolve the spoke and enroll under its lock.
         spoke_id = _dns_spoke_for_request(request, tenant)
         return await _dns_discover_locked(spoke_id)
 
@@ -1132,10 +1293,12 @@ def register(app, hub, ctx):
         """Serialize enrollment per spoke, then discover. Shared by the session
         route and the loopback lever so the two can never race each other into
         a half-enrolled pair (mirrors ``_dhcp_discover_locked``)."""
+        # One lock per spoke, created on first use.
         locks = getattr(app.state, "_dns_discovery_locks", None)
         if locks is None:
             locks = app.state._dns_discovery_locks = {}
         lock = locks.setdefault(hub._primary_key(spoke_id), asyncio.Lock())
+        # Run discovery under the lock; log failures.
         try:
             async with lock:
                 return await _discover_dns_workers_for_spoke(spoke_id)
@@ -1150,6 +1313,7 @@ def register(app, hub, ctx):
     @app.post("/api/dns/cluster/reconcile")
     async def dns_cluster_reconcile(request: Request, tenant: str = None):
         """Force an immediate reconcile pass (normally runs on a timer)."""
+        # Relay the reconcile command.
         return await _relay_spoke(_dns_spoke_for_request(request, tenant),
                                   "DNS_CLUSTER_RECONCILE", {},
                                   log_name="dns_cluster_reconcile", timeout=60)
@@ -1161,15 +1325,18 @@ def register(app, hub, ctx):
         DHCP spoke is bound/reachable for this request — callers show the raw
         IP in that case rather than failing the whole DNS stats response over
         a DHCP outage."""
+        # No DHCP spoke: no names.
         try:
             dhcp_spoke = _dhcp_spoke_for_request(request, tenant)
         except HTTPException:
             return {}
+        # Fetch the leases (cached); failure means no names.
         try:
             data = await _cached_relay(dhcp_spoke, "DHCP_LIST_LEASES", {},
                                        log_name="dns_stats_host_lookup")
         except HTTPException:
             return {}
+        # Map each leased IP to its hostname.
         out = {}
         for lease in (data.get("leases") or []):
             if not isinstance(lease, dict):
@@ -1195,12 +1362,15 @@ def register(app, hub, ctx):
         always may; otherwise only when the tenant's resolver is its OWN
         (its ``dns_instances`` record or a dns spoke bound to it) rather than
         the shared one other tenants also query."""
+        # Global admins may always see them.
         sess = _session_user(request)
         if sess and _is_admin(sess):
             return "admin"
+        # No tenant, or the shared tenant: withhold them.
         tid = _effective_tenant(request, tenant)
         if not tid or access.tenant_is_shared(tid):
             return None
+        # The tenant has its own resolver: show them.
         insts = (hub.state.system_state.get("global_config", {}) or {}).get("dns_instances", []) or []
         inst = next((i for i in insts if isinstance(i, dict) and i.get("tenant_id") == tid), None)
         if ((inst or {}).get("spoke_id") or hub.get_dns_spoke_for_tenant(tid)
@@ -1218,16 +1388,20 @@ def register(app, hub, ctx):
         module-level note above ``_dns_prefix_nets``. A tenant with no NetBox
         prefixes fails CLOSED (``[]``), except the shared tenant, which owns the
         shared resolver and so sees all of it (as ``filter_tenant`` does)."""
+        # The session user and the selected tenant.
         sess = _session_user(request)
         tid = _effective_tenant(request, tenant)
+        # No tenant: a non-admin sees nothing, an admin sees everything.
         if not tid:
             if sess and not _is_admin(sess):
                 return []
             return None
+        # The tenant's prefixes (access-checked for non-admins).
         if sess and not _is_admin(sess):
             prefixes = await access.resolve_prefixes_for_session_tenant(hub, sess, tid)
         else:
             prefixes = await access.resolve_prefixes_for_tenant(hub, tid)
+        # The shared tenant with no prefixes sees the whole shared resolver.
         if not prefixes and access.tenant_is_shared(tid):
             return None
         return list(prefixes or [])
@@ -1260,10 +1434,13 @@ def register(app, hub, ctx):
         ``_dns_rescope_stats``. An admin with no tenant selected sees every
         source (unfiltered)."""
         logger.debug("relay GET /api/dns/stats")
+        # The source prefixes to scope by, and the spoke request.
         source_prefixes = await _dns_query_source_prefixes(request, tenant)
         payload = {}
+        # Pass the name search.
         if search:
             payload["search"] = search
+        # Pass the time window, if it is a known range.
         rng = (range or "").strip().lower()
         range_seconds = _DNS_STATS_RANGE_SECONDS.get(rng)
         if range_seconds:
@@ -1275,6 +1452,7 @@ def register(app, hub, ctx):
             # configured prefixes), so the spoke fails CLOSED (no source rows)
             # rather than treating an empty/omitted list as "unfiltered".
             payload["source_prefixes"] = source_prefixes
+        # Fetch the stats (cached).
         data = await _cached_relay(
             _spoke_ref("dns", request, tenant), "DNS_STATS",
             payload, log_name="dns_stats",
@@ -1284,6 +1462,7 @@ def register(app, hub, ctx):
             data = _dns_rescope_stats(
                 dict(data), source_prefixes,
                 _dns_resolver_counters(request, tenant) if source_prefixes is not None else None)
+        # Add hostnames to each source and apply the host filter.
         query_names = data.get("query_names") if isinstance(data, dict) else None
         if isinstance(query_names, list) and query_names:
             ip_to_host = await _dns_stats_ip_to_host(request, tenant)
@@ -1309,6 +1488,7 @@ def register(app, hub, ctx):
         """Pi-hole-style per-device query log: every query ``client`` (an IP,
         or a DHCP-lease hostname resolved to its IP) made in the trailing
         ``minutes``, newest first. Tenant scoping mirrors /api/dns/stats."""
+        # Resolve a hostname to its IP using the DHCP leases.
         client = (client or "").strip()
         ip_to_host = await _dns_stats_ip_to_host(request, tenant)
         if client and client not in ip_to_host:
@@ -1317,16 +1497,20 @@ def register(app, hub, ctx):
                 if name.lower() == low:
                     client = ip
                     break
+        # The source prefixes to scope by.
         source_prefixes = await _dns_query_source_prefixes(request, tenant)
+        # Build the request (window clamped to 1 minute to 30 days) with search and scoping.
         payload = {"client": client, "minutes": max(1, min(int(minutes), 43200))}
         if search:
             payload["search"] = search
         if source_prefixes is not None:
             payload["source_prefixes"] = source_prefixes
+        # Ask the spoke, then scope the result to the tenant.
         data = await _relay_spoke(_dns_spoke_for_request(request, tenant),
                                   "DNS_CLIENT_QUERIES", payload,
                                   log_name="dns_client_queries")
         data = _dns_rescope_client_queries(data, source_prefixes)
+        # Add each query's client hostname.
         for q in data.get("queries") or []:
             if isinstance(q, dict):
                 q["host"] = ip_to_host.get(q.get("client", ""), "")
@@ -1336,11 +1520,13 @@ def register(app, hub, ctx):
     async def dns_forwarders(request: Request, tenant: str = None):
         """Configured upstream forwarders (per-zone upstream servers)."""
         logger.debug("relay GET /api/dns/forwarders")
+        # Fetch the forwarders (cached).
         return await _cached_relay(_spoke_ref("dns", request, tenant), "DNS_FORWARDERS", log_name="dns_forwarders")
 
     @app.post("/api/dns/forwarders")
     async def dns_add_forwarder(request: Request, tenant: str = None):
         """Add a persistent forwarding zone to every resolver worker."""
+        # Relay the zone and its upstreams.
         body = await request.json()
         return await _relay_spoke(
             _dns_spoke_for_request(request, tenant),
@@ -1353,10 +1539,12 @@ def register(app, hub, ctx):
     @app.delete("/api/dns/forwarders")
     async def dns_delete_forwarder(request: Request, tenant: str = None):
         """Remove a persistent forwarding zone from resolver workers."""
+        # Read the body; a bad body counts as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Relay the zone to remove.
         return await _relay_spoke(
             _dns_spoke_for_request(request, tenant),
             "DNS_FORWARDER_REMOVE",
@@ -1368,10 +1556,12 @@ def register(app, hub, ctx):
     @app.put("/api/dns/forwarders")
     async def dns_update_forwarder(request: Request, tenant: str = None):
         """Update a persistent forwarding zone across resolver workers."""
+        # Read the body; a bad body counts as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Relay the zone, its upstreams and its old name.
         return await _relay_spoke(
             _dns_spoke_for_request(request, tenant),
             "DNS_FORWARDER_UPDATE",
@@ -1386,16 +1576,21 @@ def register(app, hub, ctx):
     # record model: a tenant-admin may apply/remove a profile only for a device
     # IP or a subnet that lies entirely inside their own tenant subnets.
     async def _dns_override_constrain(request, target):
+        """Check a tenant-admin may apply an override to this IP or subnet; 400 or 403 if not."""
+        # Global admins may target anything.
         sess = _session_user(request)
         if _is_admin(sess):
             return
+        # The target must be an IP or subnet.
         try:
             net = ipaddress.ip_network(str(target or "").strip(), strict=False)
         except ValueError:
             raise HTTPException(status_code=400, detail="target must be an IP address or subnet")
+        # A single IP follows the DNS record rule.
         if net.num_addresses == 1:
             await _constrain_shared_write(request, {"ip": str(net.network_address)}, ["ip"], "DNS override")
             return
+        # A subnet must sit entirely inside one of the tenant's own prefixes.
         own = _dns_prefix_nets(await access.resolve_owned_prefixes(hub, sess))
         if not any(net.version == n.version and net.subnet_of(n) for n in own):
             raise HTTPException(
@@ -1403,6 +1598,7 @@ def register(app, hub, ctx):
                 detail="You may only apply a DNS override to a subnet inside your tenant's subnets")
 
     async def _dns_override_body(request):
+        """Read the JSON body; must be an object (a bad body counts as empty)."""
         try:
             body = await request.json()
         except Exception:
@@ -1416,9 +1612,11 @@ def register(app, hub, ctx):
         """Override profiles, their client assignments, and per-resolver
         convergence. A tenant-scoped caller sees every profile (so they can
         pick one) but only assignments inside their own subnets."""
+        # The source prefixes to scope by, and the overrides from the spoke.
         source_prefixes = await _dns_query_source_prefixes(request, tenant)
         data = await _relay_spoke(_dns_spoke_for_request(request, tenant),
                                   "DNS_OVERRIDES", {}, log_name="dns_overrides")
+        # Scoped: keep only assignments inside the tenant's networks.
         if source_prefixes is not None and isinstance(data, dict):
             nets = _dns_prefix_nets(source_prefixes)
             kept = []
@@ -1437,14 +1635,17 @@ def register(app, hub, ctx):
         """Live proof the overrides work: per resolver, whether each profile's
         view is loaded in the running Unbound, and recent queries from assigned
         clients answered from it. Tenant-scoped callers see only their clients."""
+        # The source prefixes to scope by, and the verification from the spoke.
         source_prefixes = await _dns_query_source_prefixes(request, tenant)
         data = await _relay_spoke(_dns_spoke_for_request(request, tenant),
                                   "DNS_OVERRIDES_VERIFY", {"minutes": minutes},
                                   log_name="dns_overrides_verify", timeout=30)
+        # Scoped: keep only hits and assignments inside the tenant's networks.
         if source_prefixes is not None and isinstance(data, dict):
             nets = _dns_prefix_nets(source_prefixes)
 
             def _mine(value):
+                """True when the IP or subnet is inside the tenant's networks."""
                 try:
                     net = ipaddress.ip_network(str(value), strict=False)
                 except ValueError:
@@ -1459,20 +1660,26 @@ def register(app, hub, ctx):
     @app.put("/api/dns/overrides/profile")
     async def dns_override_profile_set(request: Request, tenant: str = None):
         """Create, replace or rename (``old_name``) an override profile."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
+        # Read the profile, plus the old name for a rename.
         body = await _dns_override_body(request)
         payload = {"profile": body.get("profile") or {}}
         if body.get("old_name"):
             payload["old_name"] = body["old_name"]
+        # Relay it.
         return await _relay_spoke(_dns_spoke_for_request(request, tenant),
                                   "DNS_OVERRIDE_PROFILE_SET", payload,
                                   log_name="dns_override_profile_set", timeout=45)
 
     @app.delete("/api/dns/overrides/profile")
     async def dns_override_profile_delete(request: Request, tenant: str = None):
+        """Delete an override profile (admins only; ``force`` removes it even if in use)."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
+        # Relay the delete.
         body = await _dns_override_body(request)
         return await _relay_spoke(_dns_spoke_for_request(request, tenant),
                                   "DNS_OVERRIDE_PROFILE_DELETE",
@@ -1484,23 +1691,30 @@ def register(app, hub, ctx):
         """Apply a profile to a device IP or a subnet. ``old_target`` edits an
         existing override onto a new IP/subnet (the old one is removed in the
         same change)."""
+        # Read the target and check the caller may use it.
         body = await _dns_override_body(request)
         target = body.get("target") or body.get("ip") or ""
         await _dns_override_constrain(request, target)
+        # Build the assignment.
         payload = {"target": target, "profile": body.get("profile", ""),
                    "label": body.get("label", ""), "comment": body.get("comment", "")}
+        # Moving an override: the caller must also be allowed the old target.
         if body.get("old_target"):
             await _dns_override_constrain(request, body["old_target"])
             payload["old_target"] = body["old_target"]
+        # Relay it.
         return await _relay_spoke(_dns_spoke_for_request(request, tenant),
                                   "DNS_OVERRIDE_ASSIGN", payload,
                                   log_name="dns_override_assign", timeout=45)
 
     @app.delete("/api/dns/override-assignment")
     async def dns_override_unassign(request: Request, tenant: str = None):
+        """Remove an override from a device IP or subnet."""
+        # Read the target and check the caller may use it.
         body = await _dns_override_body(request)
         target = body.get("target") or body.get("ip") or ""
         await _dns_override_constrain(request, target)
+        # Relay the removal.
         return await _relay_spoke(_dns_spoke_for_request(request, tenant),
                                   "DNS_OVERRIDE_UNASSIGN", {"target": target},
                                   log_name="dns_override_unassign", timeout=45)
@@ -1514,6 +1728,7 @@ def register(app, hub, ctx):
         auto-sync loop build the identical payload.
         """
         hub = app.state.hub
+        # Run the shared sync; skipped means a missing spoke (503), error is a 500.
         result = await hub.sync_dns_from_netbox()
         if result.get("status") == "skipped":
             raise HTTPException(status_code=503, detail=result.get("reason", "No spoke connected"))
@@ -1526,8 +1741,10 @@ def register(app, hub, ctx):
         """Last-run status + config for the NetBox→Unbound/Kea auto-sync loop
         (fuels the DNS/DHCP status tiles). Read-only, authed (under /api/)."""
         hub = app.state.hub
+        # The stored sync settings.
         gc = hub.state.system_state.get("global_config", {}) or {}
         cfg = gc.get("dns_dhcp_sync", {}) or {}
+        # Last-run status plus the effective settings.
         return {
             "status": hub.dns_dhcp_sync_status,
             "config": {
@@ -1558,6 +1775,7 @@ def register(app, hub, ctx):
     # (see api.py _ADMIN_INFRA_WRITE_PREFIXES) — replacing/importing the WHOLE
     # set would blow away other tenants' records if opened up per-tenant.
     def _get_henet_spoke(hub):
+        """The connected HE.NET spoke, or a 503."""
         return get_spoke_or_503(hub, "henet", "HE.NET")
 
     def _henet_update_cfg(hub, **fields):
@@ -1567,6 +1785,7 @@ def register(app, hub, ctx):
         top-level key it's given — passing ``{"henet": {"tenant_credentials":
         {...}}}`` would silently wipe the sibling ``vault_credential`` (and
         vice versa). Read-modify-write the full sub-dict here instead."""
+        # Copy the HE.NET section, apply the changes, and save it whole.
         gc = hub.state.get_global_config() or {}
         henet_cfg = dict(gc.get("henet") or {})
         henet_cfg.update(fields)
@@ -1579,12 +1798,14 @@ def register(app, hub, ctx):
         under ``henet.tenant_credentials[tenant_id]`` / ``henet.vault_credential``
         respectively, so add/sync don't have to re-pick the credential on
         every write."""
+        # The tenant's slot, or the global slot with no tenant.
         gc = hub.state.get_global_config() or {}
         henet_cfg = gc.get("henet") or {}
         if tenant_id:
             ref = (henet_cfg.get("tenant_credentials") or {}).get(tenant_id)
         else:
             ref = henet_cfg.get("vault_credential")
+        # Use it only if both bucket and name are set.
         if isinstance(ref, dict) and (ref.get("bucket") or "").strip() and (ref.get("name") or "").strip():
             return {"bucket": ref["bucket"].strip(), "name": ref["name"].strip()}
         return None
@@ -1597,6 +1818,7 @@ def register(app, hub, ctx):
         records by passing a different id. Global Admin may explicitly target
         ONE tenant (managing on its behalf) via ``explicit_tenant``, or omit it
         for the global/shared scope (``""``)."""
+        # Non-admins: their own tenant; admins: the given tenant or "" for global.
         if not _is_admin(sess):
             return (sess.get("user", {}) or {}).get("tenant_id") or "default"
         return (explicit_tenant or "").strip()
@@ -1605,6 +1827,7 @@ def register(app, hub, ctx):
         """The existing managed record matching (name, type), or None. Used to
         determine ownership before an add/update/delete touches it — there's no
         per-record GET, so this reads the full list (spoke-local, cheap)."""
+        # Fetch the full list and find the matching name (and type, if given).
         r = await _relay_spoke(_get_henet_spoke(hub), "HENET_LIST", log_name="henet_owner_check")
         rt = (rtype or "").upper()
         for rec in (r or {}).get("records") or []:
@@ -1621,9 +1844,11 @@ def register(app, hub, ctx):
         never a 403 — a record belonging to another tenant must be
         indistinguishable from a genuinely absent one, same convention as
         tenant_devices.py."""
+        # A new record: nothing to check.
         existing = await _henet_find_record(hub, name, rtype)
         if existing is None:
             return None
+        # Another tenant's record looks missing to a non-admin.
         owner = existing.get("tenant_id") or ""
         if not _is_admin(sess) and owner != _henet_tenant_scope(sess):
             raise HTTPException(status_code=404, detail="record not found")
@@ -1642,8 +1867,10 @@ def register(app, hub, ctx):
         """Pull the HE dyndns update password out of a resolved vault secret,
         tolerating the several shapes an identical HE credential can be stored in
         (see :data:`_HENET_KEY_FIELDS`). Returns the key string or ``None``."""
+        # Not a dict: no key.
         if not isinstance(val, dict):
             return None
+        # The first non-empty field, in priority order.
         for f in _HENET_KEY_FIELDS:
             v = val.get(f)
             if isinstance(v, str) and v.strip():
@@ -1673,10 +1900,12 @@ def register(app, hub, ctx):
             {"ddns_key": "..."}   # henet secret
             {"provider": "he-login", "he_username": "...", "he_password": "..."}
         """
+        # An explicit reference in the request, else the assigned one.
         ref = body.pop("henet_vault_credential", None)
         explicit = isinstance(ref, dict)
         if not explicit:
             ref = _henet_get_assigned_cred(app.state.hub, tenant_id or None)
+        # No credential at all: 400.
         if not isinstance(ref, dict):
             raise HTTPException(
                 status_code=400,
@@ -1684,17 +1913,20 @@ def register(app, hub, ctx):
                        "DNS → External DNS → HE.NET (a Credential Vault secret "
                        "of type 'HE.NET DDNS key', or a shared Let's Encrypt "
                        "'Hurricane Electric' DNS-01 secret).")
+        # The reference needs both a bucket and a name.
         bucket = (ref.get("bucket") or "").strip()
         name = (ref.get("name") or "").strip()
         if not bucket or not name:
             raise HTTPException(status_code=400,
                                 detail="henet_vault_credential requires bucket + name")
+        # An explicit reference from a non-admin must be in a bucket they can reach.
         sess = _session_user(request) or {}
         if explicit and not _is_admin(sess):
             reach = set((sess.get("user", {}) or {}).get("tenants") or [])
             if bucket not in reach:
                 # Indistinguishable from missing so bucket existence never leaks.
                 raise HTTPException(status_code=404, detail="vault credential not found")
+        # Read the secret from the vault.
         import cred_vault as _cv
         try:
             val = await _cv.automation_get(app.state.hub, bucket, name)
@@ -1702,11 +1934,13 @@ def register(app, hub, ctx):
             logger.warning("henet: vault credential resolve failed: %s", e)
             raise HTTPException(status_code=502,
                                 detail=f"could not resolve vault credential: {e}")
+        # Pull out the key; none is a 404.
         key = _henet_extract_ddns_key(val)
         if not key:
             raise HTTPException(status_code=404,
                                 detail="vault credential not found, not automation-readable, "
                                        "or missing a usable HE DDNS key / password")
+        # Put the key in the relayed command.
         body["ddns_key"] = key
 
     async def _henet_resolve_account_login(request: Request, tenant_id: str = ""):
@@ -1723,6 +1957,7 @@ def register(app, hub, ctx):
         Returns ``(username, password)``. Raises 400 when no credential is
         assigned, 404 when the secret can't be read, and 422 when the assigned
         secret is only a bare DDNS key (no account login to scrape with)."""
+        # The tenant's own credential, else the global one; none is a 400.
         tid = (tenant_id or "").strip()
         ref = _henet_get_assigned_cred(app.state.hub, tid) if tid else None
         if not isinstance(ref, dict):
@@ -1733,6 +1968,7 @@ def register(app, hub, ctx):
                 detail="No HE.NET credential assigned. Assign the Credential Vault "
                        "'Hurricane Electric (account login)' secret (email + password) "
                        "under DNS → External DNS → HE.NET.")
+        # Non-admins must be able to reach the bucket.
         bucket = (ref.get("bucket") or "").strip()
         name = (ref.get("name") or "").strip()
         sess = _session_user(request) or {}
@@ -1740,6 +1976,7 @@ def register(app, hub, ctx):
             reach = set((sess.get("user", {}) or {}).get("tenants") or [])
             if bucket not in reach:
                 raise HTTPException(status_code=404, detail="vault credential not found")
+        # Read the secret from the vault.
         import cred_vault as _cv
         try:
             val = await _cv.automation_get(app.state.hub, bucket, name)
@@ -1747,6 +1984,7 @@ def register(app, hub, ctx):
             logger.warning("henet: account-login resolve failed: %s", e)
             raise HTTPException(status_code=502,
                                 detail=f"could not resolve vault credential: {e}")
+        # Pull out the login; a bare DDNS key without one is a 422.
         if not isinstance(val, dict):
             raise HTTPException(status_code=404, detail="vault credential not found")
         username = (val.get("he_username") or val.get("username") or val.get("email") or "").strip()
@@ -1769,6 +2007,7 @@ def register(app, hub, ctx):
         returns the merged overview — the global slot under ``credential`` PLUS
         every tenant that has assigned one under ``tenants`` — mirroring the
         Sim-Quota admin-overview shape (global + every tenant, side by side)."""
+        # Admins: one tenant's slot if asked, otherwise the global slot plus every tenant's.
         sess = _session_user(request) or {}
         hub = app.state.hub
         if _is_admin(sess):
@@ -1783,6 +2022,7 @@ def register(app, hub, ctx):
             }
             return {"status": "SUCCESS", "credential": _henet_get_assigned_cred(hub),
                     "tenants": tenant_creds}
+        # Non-admins: their own tenant's slot.
         return {"status": "SUCCESS", "credential": _henet_get_assigned_cred(hub, _henet_tenant_scope(sess))}
 
     @app.post("/api/henet/credential")
@@ -1794,12 +2034,14 @@ def register(app, hub, ctx):
         ``henet`` DDNS key OR a shared LE DNS-01 "Hurricane Electric" secret)
         before persisting it, so a bad reference is rejected up-front rather than
         at first push."""
+        # Read the reference; bucket and name are required.
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         bucket = (body.get("bucket") or "").strip()
         name = (body.get("name") or "").strip()
         if not bucket or not name:
             raise HTTPException(status_code=400, detail="bucket and name are required")
+        # Admins pick the slot; non-admins use their own tenant and a bucket they can reach.
         sess = _session_user(request) or {}
         if _is_admin(sess):
             tenant_id = (body.get("tenant") or "").strip()
@@ -1808,6 +2050,7 @@ def register(app, hub, ctx):
             reach = set((sess.get("user", {}) or {}).get("tenants") or [])
             if bucket not in reach:
                 raise HTTPException(status_code=404, detail="vault credential not found")
+        # Check the secret resolves and holds a usable key.
         import cred_vault as _cv
         try:
             val = await _cv.automation_get(app.state.hub, bucket, name)
@@ -1817,6 +2060,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=404,
                                 detail="vault credential not found, not automation-readable, "
                                        "or missing a usable HE DDNS key / password")
+        # Save it to the tenant's slot or the global slot.
         hub = app.state.hub
         if tenant_id:
             gc = hub.state.get_global_config() or {}
@@ -1825,6 +2069,7 @@ def register(app, hub, ctx):
             _henet_update_cfg(hub, tenant_credentials=tenant_creds)
         else:
             _henet_update_cfg(hub, vault_credential={"bucket": bucket, "name": name})
+        # Save now and log it.
         await hub.state.save_state_now()
         logger.info("henet: DDNS credential assigned -> %s/%s (tenant=%s)",
                     bucket, name, tenant_id or "global")
@@ -1835,12 +2080,15 @@ def register(app, hub, ctx):
     async def henet_clear_credential(request: Request):
         """Clear an assigned HE DDNS credential — the caller's own tenant slot,
         or (Global Admin only) the global slot / an explicit ``?tenant=`` slot."""
+        # The session and the hub.
         sess = _session_user(request) or {}
         hub = app.state.hub
+        # Admins pick the slot; non-admins use their own tenant.
         if _is_admin(sess):
             tenant_id = (request.query_params.get("tenant") or "").strip()
         else:
             tenant_id = _henet_tenant_scope(sess)
+        # Remove the tenant's slot, or clear the global one.
         if tenant_id:
             gc = hub.state.get_global_config() or {}
             tenant_creds = dict((gc.get("henet") or {}).get("tenant_credentials") or {})
@@ -1848,6 +2096,7 @@ def register(app, hub, ctx):
             _henet_update_cfg(hub, tenant_credentials=tenant_creds)
         else:
             _henet_update_cfg(hub, vault_credential=None)
+        # Save now and log it.
         await hub.state.save_state_now()
         logger.info("henet: DDNS credential assignment cleared (tenant=%s)", tenant_id or "global")
         return {"status": "SUCCESS", "credential": None}
@@ -1862,11 +2111,14 @@ def register(app, hub, ctx):
         global set nor another tenant's — filtered here, not just hidden client-
         side, since the spoke itself has no tenant concept."""
         logger.debug("relay GET /api/henet/records")
+        # Fetch every managed record from the spoke.
         result = await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_LIST",
                                     log_name="henet_list_records")
+        # Admins see all of them.
         sess = _session_user(request) or {}
         if _is_admin(sess):
             return result
+        # Non-admins see only their own tenant's records.
         scope = _henet_tenant_scope(sess)
         records = [r for r in (result or {}).get("records") or [] if (r.get("tenant_id") or "") == scope]
         out = dict(result or {})
@@ -1893,17 +2145,22 @@ def register(app, hub, ctx):
         which the spoke may not); only records HE actually accepted are persisted
         locally (so a failed write never leaves a phantom managed record).
         Returns a WebUI-shaped ``{status, pushed, errors?}``."""
+        # Find the spoke (503 if offline) and the HE account login.
         hub = app.state.hub
         spoke_id = _get_henet_spoke(hub)  # 503 early if the spoke is offline
         username, password = await _henet_resolve_account_login(request, tenant_id)
+        # Write the records through the HE web panel (off the event loop).
         import henet_scrape
         scraper = henet_scrape.HENetScraper()
         result = await asyncio.to_thread(scraper.set_records, username, password, records)
+        # A total failure is a 502.
         if result.get("status") == "ERROR" and not result.get("results"):
             raise HTTPException(status_code=502,
                                 detail=result.get("message") or "HE.NET web update failed")
+        # Look up each submitted record by name and type.
         by_key = {(str(r.get("name", "")).strip().rstrip("."),
                    str(r.get("type", "A")).upper()): r for r in records}
+        # Keep the records HE accepted, with their submitted values.
         local = []
         for res in result.get("results", []):
             if not res.get("ok"):
@@ -1913,9 +2170,11 @@ def register(app, hub, ctx):
                           "value": src.get("value", ""), "ttl": src.get("ttl", 300),
                           "tenant_id": src.get("tenant_id", ""),
                           "ok": True, "detail": res.get("detail", "")})
+        # Record those on the spoke.
         if local:
             await _relay_spoke(spoke_id, "HENET_WEB_RECORD", {"records": local},
                                log_name="henet_web_record")
+        # List the failures; any failure makes it a partial success.
         errors = [f'{r["name"]}: {r.get("detail")}'
                   for r in result.get("results", []) if not r.get("ok")]
         out = {"status": "SUCCESS" if not errors else "PARTIAL",
@@ -1931,10 +2190,12 @@ def register(app, hub, ctx):
         tenant; re-adding an EXISTING name they don't own 404s (see
         _henet_assert_can_write). Global Admin may target a specific tenant via
         ``{"tenant": "<id>"}``, else the record is global."""
+        # Read the body and the session.
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         sess = _session_user(request) or {}
         hub = app.state.hub
+        # Normalize the name, type and value; name and value are required.
         name = str(body.get("name") or "").strip().rstrip(".")
         rtype = str(body.get("type") or "A").upper()
         value = str(body.get("value") or "").strip()
@@ -1942,13 +2203,16 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail="name is required")
         if not value:
             raise HTTPException(status_code=400, detail="value is required")
+        # Check ownership; an existing record keeps its owner, a new one gets the caller's scope.
         existing_owner = await _henet_assert_can_write(hub, sess, name, rtype)
         tenant_id = existing_owner if existing_owner is not None else \
             _henet_tenant_scope(sess, body.get("tenant") if _is_admin(sess) else None)
+        # TTL, defaulting to 300.
         try:
             ttl = int(body.get("ttl", 300))
         except (TypeError, ValueError):
             ttl = 300
+        # Write it through the web panel.
         return await _henet_web_write(request, [{
             "name": name, "type": rtype, "value": value,
             "ttl": ttl, "tenant_id": tenant_id}], tenant_id=tenant_id)
@@ -1958,10 +2222,12 @@ def register(app, hub, ctx):
         """Update an existing record at HE.NET with a new value via the account
         login (web panel). Must already own it (or be admin) — 404 otherwise,
         see _henet_assert_can_write."""
+        # Read the body and the session.
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         sess = _session_user(request) or {}
         hub = app.state.hub
+        # Normalize the name, type and value; name and value are required.
         name = str(body.get("name") or "").strip().rstrip(".")
         rtype = str(body.get("type") or "A").upper()
         value = str(body.get("value") or "").strip()
@@ -1969,6 +2235,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail="name is required")
         if not value:
             raise HTTPException(status_code=400, detail="value is required")
+        # Check ownership.
         existing_owner = await _henet_assert_can_write(hub, sess, name, rtype)
         # Global Admin may re-home an existing record to another tenant (or back
         # to global) by sending an explicit ``tenant``; otherwise the record
@@ -1977,10 +2244,12 @@ def register(app, hub, ctx):
             tenant_id = _henet_tenant_scope(sess, body.get("tenant"))
         else:
             tenant_id = existing_owner if existing_owner is not None else _henet_tenant_scope(sess)
+        # TTL, defaulting to 300.
         try:
             ttl = int(body.get("ttl", 300))
         except (TypeError, ValueError):
             ttl = 300
+        # Write it through the web panel.
         return await _henet_web_write(request, [{
             "name": name, "type": rtype, "value": value,
             "ttl": ttl, "tenant_id": tenant_id}], tenant_id=tenant_id)
@@ -1990,10 +2259,12 @@ def register(app, hub, ctx):
         """Remove a record from local management (no HE credential needed — HE's
         dyndns API has no delete verb, so the zone entry itself is left as-is).
         Must already own it (or be admin) — 404 otherwise."""
+        # Read the body and the session.
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         sess = _session_user(request) or {}
         hub = app.state.hub
+        # Check ownership of the name/type, then relay the delete.
         name = str(body.get("name") or "").strip().rstrip(".")
         rtype = str(body.get("type") or "").strip()
         await _henet_assert_can_write(hub, sess, name, rtype)
@@ -2009,14 +2280,17 @@ def register(app, hub, ctx):
         (moving a record between tenants is an admin operation); ``tenant`` "" or
         omitted moves it back to the Global/admin scope. No DDNS key needed, so
         it works even while the dyndns endpoint is unreachable."""
+        # Read the body; admins only.
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         sess = _session_user(request) or {}
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
+        # A name is required.
         name = str(body.get("name") or "").strip().rstrip(".")
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
+        # Relay the new owner.
         payload = {"name": name, "type": body.get("type"),
                    "tenant_id": _henet_tenant_scope(sess, body.get("tenant"))}
         return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_SET_TENANT",
@@ -2028,13 +2302,16 @@ def register(app, hub, ctx):
         web panel — NO per-record DDNS key needed. Each record in the body is
         create/updated at HE with the account login (the same credential Import
         uses), then the spoke's local state is refreshed with the outcome."""
+        # Read the body and work out the tenant scope.
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         sess = _session_user(request) or {}
         scope = _henet_tenant_scope(sess, body.get("tenant") if _is_admin(sess) else None)
+        # The records must be a non-empty list.
         records = body.get("records")
         if not isinstance(records, list) or not records:
             raise HTTPException(status_code=400, detail="records must be a non-empty list")
+        # Normalize each record and tag it with the scope.
         clean = []
         for r in records:
             if not isinstance(r, dict):
@@ -2044,6 +2321,7 @@ def register(app, hub, ctx):
                           "value": str(r.get("value") or "").strip(),
                           "ttl": r.get("ttl", 300),
                           "tenant_id": scope})
+        # Write them through the web panel.
         return await _henet_web_write(request, clean, tenant_id=scope)
 
     @app.post("/api/henet/import")
@@ -2068,18 +2346,22 @@ def register(app, hub, ctx):
         the matching account login is used, so importing under a tenant reads
         THAT tenant's HE account and the records land on that tenant's tab."""
         hub = app.state.hub
+        # Find the spoke (503 if offline).
         spoke_id = _get_henet_spoke(hub)  # 503 early if the spoke is offline
+        # Read the body; a bad body counts as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
         if not isinstance(body, dict):
             body = {}
+        # The optional zone, the tenant scope, and that scope's HE account login.
         zone_filter = body.get("zone")
         sess = _session_user(request) or {}
         scope = _henet_tenant_scope(sess, body.get("tenant") if _is_admin(sess) else None)
         username, password = await _henet_resolve_account_login(request, scope)
 
+        # Scrape the zones from the HE web panel (off the event loop); failure is a 502.
         import henet_scrape
         scraper = henet_scrape.HENetScraper()
         result = await asyncio.to_thread(scraper.import_all, username, password, zone_filter)
@@ -2087,6 +2369,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=502,
                                 detail=result.get("message") or "HE.NET import failed")
 
+        # Tag each record with the scope and merge them into the spoke's state.
         records = result.get("records", [])
         for r in records:
             if isinstance(r, dict):
@@ -2106,13 +2389,16 @@ def register(app, hub, ctx):
     async def henet_sync_config_get(request: Request):
         """Scheduled HE.NET re-sync config + last-run status (fuels the External
         DNS schedule control + status line). Read-only, authed under /api/."""
+        # The stored schedule settings.
         hub = app.state.hub
         gc = hub.state.system_state.get("global_config", {}) or {}
         cfg = gc.get("henet_sync", {}) or {}
+        # Interval, defaulting to an hour.
         try:
             interval = int(cfg.get("interval_seconds", 3600) or 3600)
         except (TypeError, ValueError):
             interval = 3600
+        # Effective settings (interval at least 5 minutes) plus the last run.
         return {
             "status": "SUCCESS",
             "config": {
@@ -2130,28 +2416,34 @@ def register(app, hub, ctx):
         whole /api/henet/ write surface is admin-gated in api.py). Partial: only
         the provided fields are changed. ``interval_seconds`` is clamped to the
         5-minute floor so a bad value can't hammer HE."""
+        # Read the body and the current settings.
         import re as _re
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         hub = app.state.hub
         gc = hub.state.get_global_config() or {}
         cur = dict(gc.get("henet_sync") or {})
+        # Change only the fields that were sent.
         if "enabled" in body:
             cur["enabled"] = bool(body.get("enabled"))
+        # Mode is "daily" or "interval".
         if "mode" in body:
             mode = str(body.get("mode") or "interval").strip().lower()
             cur["mode"] = "daily" if mode == "daily" else "interval"
+        # Interval must be an integer, at least 5 minutes.
         if "interval_seconds" in body:
             try:
                 cur["interval_seconds"] = max(300, int(body.get("interval_seconds")))
             except (TypeError, ValueError):
                 raise HTTPException(status_code=400,
                                     detail="interval_seconds must be an integer >= 300")
+        # Daily time must look like HH:MM (default 02:00).
         if "daily_time" in body:
             dt = str(body.get("daily_time") or "").strip()
             if dt and not _re.match(r"^\d{1,2}:\d{2}$", dt):
                 raise HTTPException(status_code=400, detail="daily_time must be HH:MM")
             cur["daily_time"] = dt or "02:00"
+        # Save now and log it.
         hub.state.update_global_config({"henet_sync": cur})
         await hub.state.save_state_now()
         logger.info("henet: scheduled sync config updated -> %s", cur)
@@ -2174,6 +2466,7 @@ def register(app, hub, ctx):
 
     def _le_inner(payload):
         """The le spoke returns nested {status, data:{...}}; pull out data."""
+        # Nested data wins; otherwise the payload itself (or empty).
         if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
             return payload["data"]
         return payload if isinstance(payload, dict) else {}
@@ -2183,8 +2476,10 @@ def register(app, hub, ctx):
         SUCCESS payload (raises 502/503/500 on spoke error/down). ``timeout``
         overrides the request_response default (5s) for long-running certbot
         commands (issue/renew/revoke — certbot can run up to ~180s)."""
+        # The certificates spoke, or a 503.
         hub = app.state.hub
         le_sid = _get_le_spoke(hub)
+        # Ask it; transport failures are logged and returned as a 500.
         try:
             kw = {"timeout": timeout} if timeout else {}
             result = await hub.request_response(le_sid, command, body or {}, **kw)
@@ -2193,6 +2488,7 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.exception("%s relay failed", command)
             raise HTTPException(status_code=500, detail=str(e))
+        # Unwrap the reply and raise on a spoke error.
         ret = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
         return hub, le_sid, _spoke_payload_or_raise(ret)
 
@@ -2200,12 +2496,14 @@ def register(app, hub, ctx):
         """True when the Credential Vault (Azure Key Vault) is configured. When
         on, LE credentials belong in the vault; any raw creds still held on the
         le spoke should be migrated there manually (we never auto-drop them)."""
+        # Any failure counts as no vault.
         try:
             import cred_vault as _cv
             return bool(_cv._vault_available(app.state.hub))
         except Exception:  # noqa: BLE001
             return False
 
+    # Warning shown when local LE credentials remain while the vault is on.
     _LE_MIGRATE_WARNING = (
         "The credential vault is enabled but this LE credential is still stored "
         "locally on the hub/spoke. Migrate it into the Credential Vault manually; "
@@ -2228,21 +2526,25 @@ def register(app, hub, ctx):
             {"provider": "cloudflare", "dns_creds": "<certbot INI text>"}
             {"provider": "he-login", "he_username": "...", "he_password": "..."}
         """
+        # No reference: drop the key and leave the body as is.
         ref = body.get("dns_vault_credential")
         if not isinstance(ref, dict):
             body.pop("dns_vault_credential", None)
             return
+        # The reference needs both a bucket and a name.
         bucket = (ref.get("bucket") or "").strip()
         name = (ref.get("name") or "").strip()
         if not bucket or not name:
             raise HTTPException(status_code=400,
                                 detail="dns_vault_credential requires bucket + name")
+        # Non-admins must be able to reach the bucket.
         sess = _session_user(request) or {}
         if not _is_admin(sess):
             reach = set((sess.get("user", {}) or {}).get("tenants") or [])
             if bucket not in reach:
                 # Indistinguishable from missing so bucket existence never leaks.
                 raise HTTPException(status_code=404, detail="vault credential not found")
+        # Read the secret from the vault.
         import cred_vault as _cv
         try:
             val = await _cv.automation_get(app.state.hub, bucket, name)
@@ -2250,6 +2552,7 @@ def register(app, hub, ctx):
             logger.warning("le: vault dns credential resolve failed: %s", e)
             raise HTTPException(status_code=502,
                                 detail=f"could not resolve vault credential: {e}")
+        # It must be a dict with a provider.
         if not isinstance(val, dict):
             raise HTTPException(status_code=404,
                                 detail="vault credential not found or not automation-readable")
@@ -2257,13 +2560,16 @@ def register(app, hub, ctx):
         if not provider:
             raise HTTPException(status_code=400,
                                 detail="vault credential is missing a 'provider' field")
+        # Set the certbot plugin (mapping aliases).
         body.pop("dns_credential", None)  # vault ref supersedes any named cred
         body["dns_provider"] = _LE_DNS_PLUGIN_ALIAS.get(provider, provider)
+        # HE login: copy the username and password.
         if provider == "he-login":
             if val.get("he_username"):
                 body["he_username"] = val["he_username"]
             if val.get("he_password"):
                 body["he_password"] = val["he_password"]
+        # Other providers: the INI credentials text.
         else:
             body["dns_creds"] = val.get("dns_creds") or val.get("ini") or ""
         # Keep a normalized (secret-free) reference in the body so the spoke can
@@ -2274,17 +2580,21 @@ def register(app, hub, ctx):
     def _le_store_vault_ref(domain, ref):
         """Persist a secret-free {bucket,name} vault DNS-01 reference for ``domain``
         in hub state so it survives a spoke reinstall (re-pushed on reconnect)."""
+        # Need a domain and a full reference.
         if not (domain and isinstance(ref, dict)):
             return
         b = (ref.get("bucket") or "").strip()
         n = (ref.get("name") or "").strip()
         if not (b and n):
             return
+        # Save it under the domain.
         gc = app.state.hub.state.system_state.setdefault("global_config", {})
         refs = gc.setdefault("le_vault_dns_creds", {})
         refs[domain] = {"bucket": b, "name": n}
 
     def _le_forget_vault_ref(domain):
+        """Drop the stored vault reference for a domain; True if one was removed."""
+        # Remove it if present.
         gc = app.state.hub.state.system_state.get("global_config", {}) or {}
         refs = gc.get("le_vault_dns_creds")
         if isinstance(refs, dict) and domain in refs:
@@ -2303,6 +2613,7 @@ def register(app, hub, ctx):
         configured the HE login belongs in it (DNS-01 secret, provider *Hurricane
         Electric (account login)*) and this returns 409; with no vault there is
         nowhere else to put it, so the spoke-local knob stays available."""
+        # With a vault configured, local HE logins are refused (409).
         if _le_vault_enabled():
             raise HTTPException(
                 status_code=409,
@@ -2310,6 +2621,7 @@ def register(app, hub, ctx):
                         "disabled. Add it to the Credential Vault (DNS-01 secret, "
                         "provider 'Hurricane Electric (account login)') and pick it "
                         "when issuing a certificate."))
+        # Relay it to the spoke.
         _hub, _sid, payload = await _le_request("LE_SET_HE_LOGIN", await request.json())
         return payload
 
@@ -2317,7 +2629,9 @@ def register(app, hub, ctx):
     async def le_get_he_login():
         """Whether the HE account-login knob is configured (never returns the
         password) — drives the Setup knob's 'configured' state."""
+        # Ask the spoke.
         _hub, _sid, payload = await _le_request("LE_GET_HE_LOGIN", {})
+        # Add the vault state and any migrate warning.
         if isinstance(payload, dict):
             vault_on = _le_vault_enabled()
             data = _le_inner(payload)
@@ -2333,6 +2647,8 @@ def register(app, hub, ctx):
     # the le command — NEVER taken from the request body — so one tenant can't
     # read or write another's creds.
     def _le_tenant(request):
+        """The caller's tenant id from the session ("default" if none)."""
+        # Never taken from the request.
         sess = _session_user(request)
         return ((sess.get("user", {}).get("tenant_id") if sess else None) or "default")
 
@@ -2344,6 +2660,7 @@ def register(app, hub, ctx):
     def _le_guard_change(request, domain):
         """403 unless the caller may CHANGE this cert (admin, an owner, or a
         legacy ownerless cert). Shared-but-not-owned → deploy only, so blocked."""
+        # Block anyone who may not change this cert.
         sess = _session_user(request)
         if not _lca.can_change(hub, sess, domain):
             raise HTTPException(
@@ -2353,6 +2670,8 @@ def register(app, hub, ctx):
                        "change it.")
 
     async def _le_persist(context):
+        """Save hub state now; log failures."""
+        # Best effort: log failures.
         try:
             await app.state.hub.state.save_state_now()
         except Exception as e:  # noqa: BLE001
@@ -2368,12 +2687,15 @@ def register(app, hub, ctx):
         falling back to its owning spoke; otherwise the identifier/spoke_id IS
         the spoke, and its module_metadata tenant is the target's tenant."""
         def _agent_tenant(aid):
+            """The tenant an agent is pinned to, or "" if none or on error."""
+            # The agent's pinned simulation tenant.
             try:
                 ac = (hub.state.system_state.get("agent_config", {}) or {}).get(
                     hub._agent_primary_key(aid), {}) or {}
                 return str((ac.get("client_simulation") or {}).get("tenant_id") or "").strip()
             except Exception:  # noqa: BLE001 — fail-open to spoke-tenant fallback
                 return ""
+        # Resolve the owner using the hub's spoke, agent and pinned-tenant lookups.
         return target_owner_tenant(
             {"module_type": module_type, "identifier": identifier,
              "spoke_id": spoke_id},
@@ -2386,9 +2708,11 @@ def register(app, hub, ctx):
         may target anything (incl. the hub + shared spokes). A tenant-admin may
         target ONLY a spoke/agent bound to one of their own tenants — never the
         hub and never another tenant's (or an unattributable/shared) target."""
+        # Global admins may target anything.
         sess = _session_user(request)
         if _is_admin(sess):
             return
+        # Otherwise the target must belong to one of the caller's tenants.
         ttid = _le_target_tenant(module_type, identifier, spoke_id)
         mine = set(_lca.user_tenants(sess)) | {_lca.current_tenant(sess)}
         if not ttid or ttid not in mine:
@@ -2401,6 +2725,7 @@ def register(app, hub, ctx):
     def _nw_device_tenant(device_id):
         """The owning tenant_id of an nw device (from global_config.nw_devices),
         used to authorize a shared-cert deploy to the caller's own device."""
+        # Find the device and return its tenant ("" if none or not found).
         gc = app.state.hub.state.system_state.get("global_config", {}) or {}
         for d in gc.get("nw_devices", []) or []:
             if isinstance(d, dict) and str(d.get("id")) == str(device_id):
@@ -2408,12 +2733,15 @@ def register(app, hub, ctx):
         return ""
 
     def _tenant_exists(tid):
+        """True when the tenant exists on the hub."""
+        # Look it up in the tenant list.
         tenants = (getattr(app.state.hub.state, "tenant_state", {}) or {}).get("tenants", {}) or {}
         return tid in tenants
 
     @app.get("/api/le/certs/{domain}/tenants")
     async def le_get_cert_tenants(domain: str, request: Request):
         """The cert's explicit owner-tenant list + the caller's rights."""
+        # The cert's owners and the caller's rights; logged for troubleshooting.
         sess = _session_user(request)
         meta = _lca.meta(hub, sess, domain)
         logger.info("LE-CERT-TENANTS GET domain=%r -> meta=%r store_keys=%r",
@@ -2424,6 +2752,7 @@ def register(app, hub, ctx):
         """The domains that currently have an explicit owner-tenant list stored,
         for troubleshooting a save that 'doesn't stick' (a key mismatch between
         the stored domain and the cert-list domain is the usual culprit)."""
+        # The stored keys, sorted.
         gc = app.state.hub.state.system_state.get("global_config", {}) or {}
         m = gc.get(_lca.STORE_KEY) or {}
         return sorted(m.keys()) if isinstance(m, dict) else []
@@ -2433,26 +2762,32 @@ def register(app, hub, ctx):
         set + durably persist, and return the tagging meta. Raises HTTPException
         (400/403/500) on any failure so the caller never reports a false
         success."""
+        # The caller, logged with the request.
         sess = _session_user(request)
         u = (sess or {}).get("user", {}) if isinstance(sess, dict) else {}
         logger.info(
             "LE-CERT-TENANTS SET request domain=%r want=%r caller(tenant_id=%r "
             "tenants=%r admin=%s)", domain, want, u.get("tenant_id"),
             u.get("tenants"), _is_admin(sess))
+        # The domain is required.
         if not (isinstance(domain, str) and domain.strip()):
             logger.warning("LE-CERT-TENANTS SET rejected: empty/invalid domain %r", domain)
             raise HTTPException(status_code=400, detail="'domain' is required")
         domain = domain.strip()
+        # The caller must be allowed to change the cert.
         _le_guard_change(request, domain)
+        # The tenant list must be a list.
         if not isinstance(want, list):
             logger.warning("LE-CERT-TENANTS SET rejected: 'tenants' not a list: %r", want)
             raise HTTPException(status_code=400, detail="'tenants' must be a list")
+        # Validate the new list; problems are a 400.
         try:
             clean = _lca.validate_tenant_edit(hub, sess, domain, want, _tenant_exists)
         except _lca.TenantEditError as e:
             logger.warning("LE-CERT-TENANTS SET rejected by validate domain=%r "
                            "want=%r: %s", domain, want, e)
             raise HTTPException(status_code=400, detail=str(e))
+        # Store it and log what reads back.
         _lca.set_tenants(hub, domain, clean)
         stored = _lca.get_tenants(hub, domain)
         logger.info("LE-CERT-TENANTS SET stored domain=%r validated=%r read-back=%r "
@@ -2488,6 +2823,7 @@ def register(app, hub, ctx):
         """Replace a cert's owner-tenant list (domain + tenants in the JSON body).
         See :func:`_le_apply_cert_tenants` for the authorization/validation
         semantics."""
+        # Read the body and apply it.
         body = await request.json()
         body = body if isinstance(body, dict) else {}
         return await _le_apply_cert_tenants(
@@ -2502,6 +2838,7 @@ def register(app, hub, ctx):
         A non-admin owner may add/remove OTHER tenants but never their own (their
         active tenant must remain). Adding the shared tenant makes the cert
         deployable by every tenant to their own devices."""
+        # Read the tenant list and apply it.
         body = await request.json()
         want = body.get("tenants") if isinstance(body, dict) else None
         return await _le_apply_cert_tenants(request, domain, want)
@@ -2510,8 +2847,10 @@ def register(app, hub, ctx):
     async def le_list_dns_creds(request: Request):
         """This tenant's saved DNS-01 credentials (names + providers; NO secrets),
         plus the provider field catalog for the editor."""
+        # Ask the spoke for this tenant's credentials.
         _hub, _sid, payload = await _le_request(
             "LE_LIST_DNS_CREDS", {"tenant_id": _le_tenant(request)})
+        # Add the vault state and any migrate warning.
         if isinstance(payload, dict):
             vault_on = _le_vault_enabled()
             data = _le_inner(payload)
@@ -2534,12 +2873,14 @@ def register(app, hub, ctx):
         store is the supported path and stays open — it encrypts at rest. Either
         way existing spoke creds are left untouched (no migration, no
         auto-delete) and can still be used by name or deleted for cleanup."""
+        # With a vault configured, local credentials are refused (409).
         if _le_vault_enabled():
             raise HTTPException(
                 status_code=409,
                 detail=("Creating DNS credentials in the LE module is disabled. Store "
                         "them in the Credential Vault (add a 'DNS-01' secret) and pick "
                         "the vault credential when issuing a certificate."))
+        # Read the body, set the tenant from the session, and relay it.
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         body["tenant_id"] = _le_tenant(request)  # server-derived; ignore any client value
@@ -2549,6 +2890,7 @@ def register(app, hub, ctx):
     @app.delete("/api/le/dns-credentials")
     async def le_delete_dns_cred(request: Request):
         """Delete one of this tenant's DNS-01 credentials by name."""
+        # Read the name and relay the delete for this tenant.
         body = await request.json()
         name = (body.get("name") if isinstance(body, dict) else None)
         _hub, _sid, payload = await _le_request(
@@ -2563,30 +2905,38 @@ def register(app, hub, ctx):
         import ipaddress
 
         def _in(ip):
+            """True when the IP is inside one of the networks."""
+            # A bad IP is never in range.
             try:
                 a = ipaddress.ip_address(str(ip).strip())
             except (ValueError, AttributeError):
                 return False
             return any(a in n for n in (nets or []))
 
+        # Hostnames found, and whether any source answered.
         hosts = set()
         any_source = False
 
         def _collect(records, name_keys, ip_keys):
+            """Add the A/AAAA hostnames from these records whose IP is in range."""
+            # Skip non-dicts and non-address records.
             for r in records if isinstance(records, list) else []:
                 if not isinstance(r, dict):
                     continue
                 if str(r.get("type", "A")).upper() not in ("A", "AAAA"):
                     continue
+                # The first non-empty name field.
                 name = ""
                 for k in name_keys:
                     name = str(r.get(k) or "").strip().rstrip(".").lower()
                     if name:
                         break
+                # The first non-empty IP field; keep the name if it is in range (or no filter).
                 ip = next((r.get(k) for k in ip_keys if r.get(k)), None)
                 if name and (nets is None or (ip and _in(ip))):
                     hosts.add(name)
 
+        # The DNS module's records.
         try:
             # Certificate-issuance hostname enumeration (le module) — out of
             # scope for the DNS tenant-routing fix above; certificates aren't
@@ -2597,10 +2947,12 @@ def register(app, hub, ctx):
             _collect((dns_data or {}).get("records") or [], ("name",), ("value", "ip"))
         except Exception:  # noqa: BLE001 — DNS module down; try the firewalls
             pass
+        # The configured firewalls.
         try:
             firewalls = (hub.state.system_state.get("global_config", {}) or {}).get("firewalls", []) or []
         except Exception:  # noqa: BLE001
             firewalls = []
+        # Each connected firewall's host overrides; one failure does not stop the others.
         for sid in {fw.get("spoke_id") for fw in firewalls if fw.get("spoke_id")}:
             if hub._primary_key(sid) not in getattr(hub, "active_connections", {}):
                 continue
@@ -2629,10 +2981,13 @@ def register(app, hub, ctx):
         ``data['certs']`` (``None`` on the enveloped shape), so per-cert tenant
         ownership / ab tags / the ownership filter never reached the certs
         the UI actually renders."""
+        # Not a dict: no list.
         if not isinstance(data, dict):
             return None
+        # Flat shape.
         if isinstance(data.get("certs"), list):
             return data["certs"]
+        # Enveloped shape.
         inner = data.get("data")
         if isinstance(inner, dict) and isinstance(inner.get("certs"), list):
             return inner["certs"]
@@ -2643,13 +2998,17 @@ def register(app, hub, ctx):
         SAME nesting level the originals were found (flat top-level, or nested
         under ``data``), so a tag/filter transform reaches the list the WebUI
         reads instead of injecting a stray, ignored top-level ``certs`` key."""
+        # Not a dict: return it as is.
         if not isinstance(data, dict):
             return data
+        # Flat shape.
         if isinstance(data.get("certs"), list):
             return {**data, "certs": new_certs}
+        # Enveloped shape.
         inner = data.get("data")
         if isinstance(inner, dict) and isinstance(inner.get("certs"), list):
             return {**data, "data": {**inner, "certs": new_certs}}
+        # No list found: add one at the top.
         return {**data, "certs": new_certs}
 
     async def _filter_le_certs(request, data, tenant=None):
@@ -2665,8 +3024,10 @@ def register(app, hub, ctx):
         Tenant scoping: an EXPLICIT tenant (the picker) scopes by THAT tenant's
         prefixes even for admins (matches nw/ipam/firewall); with none selected, an
         admin sees all and a session-tenant user is scoped by their own prefixes."""
+        # Nothing to do when not a dict or the cert filter is off.
         if not isinstance(data, dict) or not access.filter_enabled(hub, "le"):
             return data
+        # The session and the selected tenant (only if one was passed).
         sess = _session_user(request)
         tid = _effective_tenant(request, tenant) if tenant else None
         # Tenant set the caller is scoped to (an explicit picker tenant, else the
@@ -2700,6 +3061,7 @@ def register(app, hub, ctx):
         shared_hidden = (access.tenant_left_shared(hub, _vt, "certificates")
                          and access._norm_tenant_id(access.spoke_owner_tenant(hub, _le_sid)) != _vt)
 
+        # Parse the prefixes into networks.
         import ipaddress
         nets = []
         for p in prefixes:
@@ -2707,11 +3069,14 @@ def register(app, hub, ctx):
                 nets.append(ipaddress.ip_network(p, strict=False))
             except ValueError:
                 continue
+        # The tenant's DNS hostnames, and whether any DNS source answered.
         tenant_hosts, any_source = await _dns_hosts(nets) if nets else (set(), True)
         if nets and not any_source and not shared_hidden:
             return data  # both DNS sources unreachable → fail open
 
         def _match(cert):
+            """True when the caller should see this cert."""
+            # Shared spoke hidden: only certs this tenant owns.
             if shared_hidden:
                 return _vt in {access._norm_tenant_id(t)
                                for t in _lca.get_tenants(hub, cert.get("domain"))}
@@ -2723,8 +3088,10 @@ def register(app, hub, ctx):
                                   admin_all=not explicit_scope)
             if own is not None:
                 return own
+            # No tenant hostnames: hide it.
             if not tenant_hosts:
                 return False
+            # Match each SAN: wildcards match the apex or any host under it; others match exactly.
             for san in (cert.get("domains") or []):
                 s = str(san).strip().rstrip(".").lower()
                 if not s:
@@ -2737,12 +3104,14 @@ def register(app, hub, ctx):
                     return True
             return False
 
+        # Keep only the visible certs.
         return _le_with_certs(data, [c for c in (_le_certs_holder(data) or []) if _match(c)])
 
     def _ab_pinned():
         """The set of DNS names designated as AppBuilder certs (H1) —
         ``global_config['ab_cert_identities']``. The HUB_REQUEST channel
         is gated to a connection presenting one of these over mTLS."""
+        # The stored AppBuilder names.
         gc = hub.state.system_state.get("global_config", {}) or {}
         # Lower-cased: le_set_ab stores lowercase, and DNS names are
         # case-insensitive — so match case-insensitively (a cert whose domain
@@ -2753,12 +3122,15 @@ def register(app, hub, ctx):
         """Tag each cert with ``ab: bool`` (its domain / any SAN is in the
         pinned AppBuilder list) so the LE-module UI can show the AppBuilder toggle's
         state. Runs on both live + cached-stale paths."""
+        # Not a dict: return it as is.
         if not isinstance(data, dict):
             return data
+        # The pinned names and the cert list (none: nothing to tag).
         pinned = _ab_pinned()
         certs = _le_certs_holder(data)
         if certs is None:
             return data
+        # Tag each cert by whether its domain or any SAN is pinned.
         tagged = []
         for c in certs:
             if not isinstance(c, dict):
@@ -2775,8 +3147,10 @@ def register(app, hub, ctx):
         """Tag each cert with its explicit owner ``tenants`` list plus the
         caller's rights (``shared``/``owned``/``can_edit``) so the LE UI can show
         tenant chips and enable/disable the change actions."""
+        # Not a dict: return it as is.
         if not isinstance(data, dict):
             return data
+        # The session and the cert list.
         sess = _session_user(request)
         certs = _le_certs_holder(data)
         if certs is None:
@@ -2785,6 +3159,7 @@ def register(app, hub, ctx):
             logger.info("LE-CERT-TENANTS LIST no cert list in response; top_keys=%r",
                         list(data.keys()))
             return data
+        # Add each cert's owner list and the caller's rights.
         out = []
         tagged_owned = {}
         for c in certs:
@@ -2820,8 +3195,10 @@ def register(app, hub, ctx):
         ``global_config['ab_cert_identities']`` list, and with its explicit
         owner ``tenants`` + the caller's rights (``_tag_cert_tenants``)."""
         logger.debug("relay GET /api/le/certs")
+        # The certificates spoke.
         hub = app.state.hub
         le_sid = hub.get_spoke_by_type("certificates")
+        # Offline: serve the cached list marked stale (tagged and filtered), or a 503.
         if not le_sid:
             cached = hub.le_cache_get("certs")
             if cached is not None:
@@ -2829,10 +3206,12 @@ def register(app, hub, ctx):
                 out["stale"] = True
                 return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_ab(out), tenant))
             raise HTTPException(status_code=503, detail="No spoke connected")
+        # Fetch live, cache it, and return it tagged and filtered.
         try:
             data = await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_list_certs")
             await hub.le_cache_set("certs", data)
             return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_ab(data), tenant))
+        # Live fetch failed: fall back to the cached list, else re-raise.
         except HTTPException:
             cached = hub.le_cache_get("certs")
             if cached is not None:
@@ -2848,6 +3227,7 @@ def register(app, hub, ctx):
         module and firewalls), plus a derived ``*.<domain>`` wildcard per parent
         domain. Non-admin with the filter ON → only hostnames in their prefixes;
         admin or filter OFF → all DNS hostnames. Feeds the issue-cert domain dropdown."""
+        # Non-admins with the filter on: only their own prefixes; otherwise no filter.
         sess = _session_user(request)
         nets = None
         if sess and not _is_admin(sess) and access.filter_enabled(hub, "le"):
@@ -2858,6 +3238,7 @@ def register(app, hub, ctx):
                     nets.append(ipaddress.ip_network(p, strict=False))
                 except ValueError:
                     continue
+        # The matching hostnames plus one wildcard per parent domain.
         hosts, _src = await _dns_hosts(nets)
         wildcards = sorted({f"*.{h.split('.', 1)[1]}" for h in hosts if "." in h})
         return {"hosts": sorted(hosts), "wildcards": wildcards}
@@ -2870,6 +3251,7 @@ def register(app, hub, ctx):
         so the operator can see what's in flight, since we can't predict how
         fast a cert will transfer or install (hypervisor pveproxy restart can
         take many minutes). Cleared the moment a push returns."""
+        # The pushes in progress.
         hub = app.state.hub
         items = list(getattr(hub, "cert_dist_inflight", {}).values())
         return {"status": "SUCCESS", "inflight": items}
@@ -2887,6 +3269,7 @@ def register(app, hub, ctx):
         its targets. Returns the spoke result with an added ``distribution``
         per-target summary. Injects the session tenant so a named DNS credential
         (``dns_credential``) resolves against THIS tenant's store."""
+        # Read the body and set the tenant from the session.
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         body["tenant_id"] = _le_tenant(request)  # server-derived; scopes dns_credential
@@ -2897,10 +3280,13 @@ def register(app, hub, ctx):
                        if isinstance(body, dict) else None)
         if _req_domain and _lca.has_owners(app.state.hub, _req_domain):
             _le_guard_change(request, _req_domain)
+        # Turn a vault reference into inline DNS credentials, keeping the reference.
         await _le_resolve_vault_dns_cred(request, body)  # {bucket,name} → inline creds
         vault_ref = body.get("dns_vault_credential") if isinstance(body, dict) else None
+        # Issue the cert (certbot can take minutes).
         hub, le_sid, payload = await _le_request("LE_ISSUE_CERT", body,
                                                   timeout=_LE_CERTBOT_TIMEOUT)
+        # The issued domain and its targets.
         inner = _le_inner(payload)
         domain = inner.get("domain")
         targets = inner.get("targets") or []
@@ -2919,6 +3305,7 @@ def register(app, hub, ctx):
                 logger.warning("persist le vault ref for %s failed: %s", domain, e)
             if le_sid:
                 asyncio.create_task(hub._le_sync_vault_dns_creds(le_sid))
+        # Push the new cert to its targets; failures are recorded per target.
         dist = []
         # Always invoke distribution (even with no targets) so the no-targets
         # skip is logged under Certificates — otherwise a freshly-issued cert
@@ -2931,6 +3318,7 @@ def register(app, hub, ctx):
             except Exception as e:
                 logger.warning("cert distribution after issue failed: %s", e)
                 dist = [{"status": "ERROR", "message": str(e)}]
+        # Attach the distribution summary.
         inner["distribution"] = dist
         # Refresh the hub's le_cache so a FAILED issue's new ledger entry
         # (last_issue_error) + any deploy last_status are hub-visible promptly
@@ -2945,10 +3333,12 @@ def register(app, hub, ctx):
         """The Hub-Local-CA mTLS client certs the hub has issued to spokes
         (system_state.mtls_client_certs) — so the LE module can list/manage them
         alongside LE certs. Admin-only."""
+        # Admins only.
         hub = app.state.hub
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # The issued certs, each marked connected or not (connected first).
         reg = (hub.state.system_state.get("mtls_client_certs") or {})
         active = set((hub.active_connections or {}).keys())
         certs = []
@@ -2964,10 +3354,12 @@ def register(app, hub, ctx):
         for an offline spoke — it enrolls on its next connect), else every
         connected spoke. Admin-only. Used to roll certs out immediately
         instead of waiting for the next reconnect."""
+        # Admins only.
         hub = app.state.hub
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # One spoke if named, otherwise every connected spoke.
         body = await request.json() if request.headers.get("content-length") else {}
         one = (body or {}).get("spoke_id") if isinstance(body, dict) else None
         targets = [one] if one else list((hub.active_connections or {}).keys())
@@ -2981,6 +3373,7 @@ def register(app, hub, ctx):
                     hub._mtls_allow_reenroll(hub._primary_key(sid))
                 except Exception:  # noqa: BLE001
                     pass
+            # Re-issue the cert; record each result or error.
             try:
                 r = await hub._provision_spoke_mtls_cert(sid, force=True)
                 results.append({"spoke_id": sid, **(r or {})})
@@ -2996,10 +3389,12 @@ def register(app, hub, ctx):
         (re)issue. While mTLS enforcement is on, a revoked spoke is REFUSED until
         re-issued. Body {spoke_id}.
         Admin-only."""
+        # Admins only.
         hub = app.state.hub
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # The spoke id is required.
         body = await request.json()
         sid = (body or {}).get("spoke_id") if isinstance(body, dict) else None
         if not sid:
@@ -3012,10 +3407,12 @@ def register(app, hub, ctx):
         relayed from the le spoke. Diagnoses 'requested clientAuth but got
         serverAuth-only' — shows whether certbot is new enough (>=4.0 for
         --preferred-profile) and the clientAuth-capable profile's real name."""
+        # No certificates spoke: not available.
         hub = app.state.hub
         le_sid = hub.get_spoke_by_type("certificates")
         if not le_sid:
             return {"available": False, "reason": "certificate spoke not connected"}
+        # Ask the spoke; any failure is reported as not available.
         try:
             payload = await _relay_spoke(le_sid, "LE_ACME_INFO", log_name="le_acme_info")
             inner = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
@@ -3030,12 +3427,15 @@ def register(app, hub, ctx):
         is server-only. Needed for mTLS CLIENT certs (AppBuilder, the mTLS wildcard) —
         certs that don't need it stay server-only. Re-distributes the freshly-issued
         material to the cert's targets, like /api/le/issue."""
+        # Read the flag; the caller must be allowed to change the cert.
         body = await request.json()
         enabled = bool(body.get("enabled", body.get("client_auth", False))) if isinstance(body, dict) else False
         _le_guard_change(request, domain)
+        # Re-issue with the new setting (certbot can take minutes).
         data = {"domain": domain, "client_auth": enabled, "tenant_id": _le_tenant(request)}
         hub, le_sid, payload = await _le_request("LE_SET_CLIENTAUTH", data,
                                                   timeout=_LE_CERTBOT_TIMEOUT)
+        # Push the new cert to its targets, then refresh the cert cache.
         inner = _le_inner(payload)
         d = inner.get("domain") or domain
         targets = inner.get("targets") or []
@@ -3054,6 +3454,7 @@ def register(app, hub, ctx):
         """Renew one (body.domain) or all managed certs via the le spoke, then
         hub-broker renewed material to each renewed cert's targets. Returns the
         spoke result with per-cert + aggregate ``distribution`` summaries."""
+        # Read the body.
         hub = app.state.hub
         renew_body = await request.json()
         renew_body = dict(renew_body) if isinstance(renew_body, dict) else {}
@@ -3075,8 +3476,10 @@ def register(app, hub, ctx):
                 renew_body["vault_dns_creds"] = vmap
         except Exception as e:  # noqa: BLE001
             logger.debug("le renew vault map resolve skipped: %s", e)
+        # Renew (certbot can take minutes).
         hub, le_sid, payload = await _le_request("LE_RENEW_CERT", renew_body,
                                                   timeout=_LE_CERTBOT_TIMEOUT)
+        # Push each renewed cert to its targets, collecting the results.
         inner = _le_inner(payload)
         agg = []
         for r in inner.get("renewed") or []:
@@ -3091,6 +3494,7 @@ def register(app, hub, ctx):
                                    r.get("domain"), e)
                     r["distribution"] = [{"status": "ERROR", "message": str(e)}]
                     agg.extend(r["distribution"])
+        # Attach the overall summary.
         inner["distribution"] = agg
         # Refresh le_cache so on-demand renew results (last_error / deploy
         # last_status) are hub-visible promptly for the cert-failure alert
@@ -3101,6 +3505,8 @@ def register(app, hub, ctx):
 
     @app.post("/api/le/revoke")
     async def le_revoke_cert(request: Request):
+        """Revoke a cert via the le spoke (naming a domain you own; revoke-all is admin-only)."""
+        # Read the domain; the caller must own it (only admins may omit it).
         body = await request.json()
         domain = (body or {}).get("domain") if isinstance(body, dict) else None
         if domain:
@@ -3109,6 +3515,7 @@ def register(app, hub, ctx):
             raise HTTPException(
                 status_code=403,
                 detail="Revoking requires naming a domain you own.")
+        # Relay the revoke (certbot can take minutes).
         result = await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REVOKE_CERT",
                                     body, log_name="le_revoke_cert",
                                     timeout=_LE_CERTBOT_TIMEOUT)
@@ -3141,6 +3548,7 @@ def register(app, hub, ctx):
                 status_code=403,
                 detail="Distributing all certificates is a Global Admin action. "
                        "Use per-certificate deploy for a certificate you own.")
+        # Push every stale cert to its targets; failure is a 500.
         hub = app.state.hub
         le_sid = _get_le_spoke(hub)
         try:
@@ -3162,6 +3570,7 @@ def register(app, hub, ctx):
             payload = (dict(cached) if isinstance(cached, dict)
                        else {"certs": cached or []})
             payload["stale"] = True
+        # Attach the distribution summary.
         _le_inner(payload)["distribution"] = dist or []
         return payload
 
@@ -3176,6 +3585,7 @@ def register(app, hub, ctx):
         ``distribute_cert_to_targets``' skip-check never short-circuits — a
         click is an explicit re-deploy, even on an already-green target. Returns
         a one-entry per-target summary."""
+        # Read the body; module_type is required, and the caller must own the cert.
         body = await request.json()
         if not isinstance(body, dict) or not body.get("module_type"):
             raise HTTPException(status_code=400, detail="module_type required")
@@ -3185,8 +3595,10 @@ def register(app, hub, ctx):
         # are Global-Admin-only.
         _le_guard_target(request, body.get("module_type"),
                          body.get("identifier"), body.get("spoke_id"))
+        # The single target to push to.
         target = {"module_type": body["module_type"],
                   "identifier": body.get("identifier") or ""}
+        # Push it; failure is a 500.
         hub = app.state.hub
         le_sid = _get_le_spoke(hub)
         try:
@@ -3215,10 +3627,12 @@ def register(app, hub, ctx):
         of their own tenants — the hub and any shared / other-tenant target are
         omitted, so they can't select an install target they aren't allowed to
         deploy to (le_add_target / le_distribute_target enforce the same rule)."""
+        # The hypervisor and simulation spokes that host agents.
         hub = app.state.hub
         agent_spokes = list(dict.fromkeys(
             hub.get_all_spokes_by_type("hypervisor")
             + hub.get_all_spokes_by_type("simulation")))
+        # Their agents (from the pxmx cache); failure leaves the list empty.
         agents: list = []
         if agent_spokes:
             try:
@@ -3227,6 +3641,7 @@ def register(app, hub, ctx):
                 agents = (agg or {}).get("agents", []) or []
             except Exception as e:  # noqa: BLE001 - modal still usable w/o agents
                 logger.debug("le_available_targets: agents gather failed: %s", e)
+        # Build the target list.
         module_names = hub.state.system_state.get("module_names", {}) or {}
         targets = build_available_targets(
             dict(hub.spoke_module_types), hub.active_connections,
@@ -3234,6 +3649,7 @@ def register(app, hub, ctx):
             netbox_server_agents=set(getattr(hub, "netbox_server_agents", set())),
             ldap_server_agents=set(getattr(hub, "ldap_server_agents", set())),
             zabbix_server_agents=set(getattr(hub, "zabbix_server_agents", set())))
+        # Non-admins see only targets in their own tenants.
         sess = _session_user(request)
         if sess and not _is_admin(sess):
             mine = set(_lca.user_tenants(sess)) | {_lca.current_tenant(sess)}
@@ -3251,6 +3667,7 @@ def register(app, hub, ctx):
         what distribute_wildcard_to_all_spokes does: every connected cert-capable
         spoke (by spoke_id) + the hub; a netbox-server host counts via its
         capability even though its base module_type is 'agent'."""
+        # The cert-capable types, known modules, names, metadata, and NetBox/Zabbix server hosts.
         hub = app.state.hub
         capable = hub.CERT_CAPABLE_MODULES
         known = hub.state.system_state.get("known_modules", []) or []
@@ -3260,18 +3677,22 @@ def register(app, hub, ctx):
         zbx_servers = set(getattr(hub, "zabbix_server_agents", set()))
 
         def _mt(sid):
+            """A spoke's module type (live, else from metadata)."""
             return (hub.spoke_module_types.get(hub._primary_key(sid))
                     or (module_metadata.get(sid, {}) or {}).get("module_type"))
 
+        # The hub is always eligible.
         eligible = [{"spoke_id": "hub", "module_type": "hub",
                      "label": "hub (LM WebUI)", "connected": True}]
         ineligible = []
+        # Check each known module.
         for sid in known:
             mt = _mt(sid)
             connected = hub._primary_key(sid) in hub.active_connections
             label = module_names.get(sid, sid) or sid
             is_nb_server = hub._primary_key(sid) in nb_servers
             is_zbx_server = hub._primary_key(sid) in zbx_servers
+            # NetBox/Zabbix server hosts count as cert-capable under their server type.
             eff_mt = mt
             if mt not in capable:
                 if is_nb_server:
@@ -3279,6 +3700,7 @@ def register(app, hub, ctx):
                 elif is_zbx_server:
                     eff_mt = "zabbix-server"
             eff_capable = (mt in capable) or is_nb_server or is_zbx_server
+            # Offline or not cert-capable is ineligible, with the reason; otherwise eligible.
             entry = {"spoke_id": sid, "module_type": eff_mt or mt or "—",
                      "label": label, "connected": connected}
             if not connected:
@@ -3288,6 +3710,7 @@ def register(app, hub, ctx):
                                    "reason": f"module type '{mt or '—'}' does not support cert install"})
             else:
                 eligible.append(entry)
+        # The feature flag plus both lists and counts.
         return {"enabled": hub._wildcard_all_spokes_enabled(),
                 "eligible": eligible, "ineligible": ineligible,
                 "eligible_count": len(eligible), "ineligible_count": len(ineligible)}
@@ -3299,6 +3722,8 @@ def register(app, hub, ctx):
 
     @app.get("/api/le/certs/{domain}/targets")
     async def le_list_targets(domain: str):
+        """List the distribution targets of one managed cert (404 if not managed)."""
+        # Fetch every cert and return the targets of this one.
         payload = await _relay_spoke(_get_le_spoke(app.state.hub), "LE_LIST_CERTS",
                                      log_name="le_list_targets")
         for c in _le_inner(payload).get("certs") or []:
@@ -3308,6 +3733,8 @@ def register(app, hub, ctx):
 
     @app.post("/api/le/certs/{domain}/targets")
     async def le_add_target(domain: str, request: Request):
+        """Add a distribution target to a cert (owner or admin) and push the cert to it."""
+        # Read the body; module_type is required, and the caller must own the cert.
         body = await request.json()
         if not isinstance(body, dict) or not body.get("module_type"):
             raise HTTPException(status_code=400, detail="module_type required")
@@ -3318,6 +3745,7 @@ def register(app, hub, ctx):
         # the hub and never another tenant's or an unattributable/shared target.
         _le_guard_target(request, body.get("module_type"),
                          body.get("identifier"), body.get("spoke_id"))
+        # The hub and the normalized module type.
         hub = app.state.hub
         mt = str(body.get("module_type") or "").strip()
         # Defense-in-depth: reject a target the UI would never offer. The UI
@@ -3335,6 +3763,7 @@ def register(app, hub, ctx):
             raise HTTPException(
                 status_code=400,
                 detail=f"no connected '{mt}' spoke — install/connect it first")
+        # Fetch every cert (a failed read skips the check).
         # One cert per target: a module/agent already assigned to ANOTHER managed
         # cert is ineligible (a device serves a single TLS cert per endpoint).
         # Reject naming the owning domain so the operator removes it there first.
@@ -3347,6 +3776,7 @@ def register(app, hub, ctx):
         except Exception as e:  # noqa: BLE001 — don't block add if the ledger read fails
             all_certs = []
             logger.debug("le_add_target: conflict pre-check skipped: %s", e)
+        # Reject a target already used by another cert (409).
         for c in all_certs:
             if c.get("domain") == domain:
                 continue
@@ -3358,6 +3788,7 @@ def register(app, hub, ctx):
                         detail=f"{tgt_label} is already assigned to the cert for "
                                f"'{c.get('domain')}'. A target can host only one cert — "
                                f"remove it there first.")
+        # Relay the new target to the spoke.
         le_sid = _get_le_spoke(hub)
         result = await _relay_spoke(le_sid, "LE_ADD_TARGET",
                                     {"domain": domain, "target": body},
@@ -3367,11 +3798,13 @@ def register(app, hub, ctx):
         target = {"module_type": mt, "identifier": ident}
 
         async def _push_new_target():
+            """Push the cert to the new target; the hourly sweep retries on failure."""
             try:
                 await hub._distribute_one_cert(le_sid, domain, [target])
             except Exception as e:  # noqa: BLE001 — the hourly sweep retries
                 logger.warning("[cert] %s → %s: initial push after add failed: %s",
                                domain, mt, e)
+        # Start it in the background.
         asyncio.create_task(_push_new_target())
         return result
 
@@ -3385,14 +3818,17 @@ def register(app, hub, ctx):
         it. Admin-only. The cert itself is issued/managed via the normal LE flow;
         this just records which domain's cert is the AppBuilder identity."""
         hub = app.state.hub
+        # Admins only.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Read the flag and normalize the domain (required).
         data = await request.json()
         enabled = bool(data.get("enabled")) if isinstance(data, dict) else False
         domain = (domain or "").strip().lower()
         if not domain:
             raise HTTPException(status_code=400, detail="domain required")
+        # The current pinned list; add or remove the domain.
         gc = hub.state.system_state.get("global_config", {}) or {}
         pinned = [str(n).strip().lower() for n in (gc.get("ab_cert_identities") or [])]
         if enabled:
@@ -3400,6 +3836,7 @@ def register(app, hub, ctx):
                 pinned.append(domain)
         else:
             pinned = [n for n in pinned if n != domain]
+        # Save the list now and log it.
         gc["ab_cert_identities"] = pinned
         hub.state.system_state["global_config"] = gc
         await hub.state.save_state_now()
@@ -3416,13 +3853,16 @@ def register(app, hub, ctx):
         real-vs-private 'ISRG Root X1' hazard), and (c) whether a connected spoke is
         presenting a verified cert for each pinned identity. Admin-only."""
         hub = app.state.hub
+        # Admins only.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Load the mTLS helper; if it is missing, report that.
         try:
             from security import mtls as _mtls
         except Exception as e:  # noqa: BLE001
             return {"error": f"mtls module unavailable: {e}"}
+        # The trust diagnostics and the pinned AppBuilder names.
         diag = _mtls.trust_diagnostics()
         gc = hub.state.system_state.get("global_config", {}) or {}
         pinned = [str(n).strip() for n in (gc.get("ab_cert_identities") or []) if str(n).strip()]
@@ -3435,16 +3875,20 @@ def register(app, hub, ctx):
         _md = hub.state.system_state.get("module_metadata", {}) or {}
 
         def _label(_pk):
+            """A friendly name for a connection."""
             return node_name(hub.state.system_state, _pk)
 
+        # Describe each live connection's client cert.
         clients = []
         for pk, ws in list((hub.active_connections or {}).items()):
+            # The verified cert names and the raw cert.
             ident = getattr(ws, "peer_cert_identity", None)
             raw = getattr(ws, "peer_cert_raw", None) or {}
             sans = list(ident) if ident else []
             subj = ""
             issuer = ""
             not_after = ""
+            # Format the subject, issuer and expiry; ignore parse errors.
             try:
                 if isinstance(raw, dict):
                     subj = ", ".join("=".join(x) for rdn in raw.get("subject", ()) for x in rdn)
@@ -3455,6 +3899,7 @@ def register(app, hub, ctx):
             # Co-located spokes connect over plaintext loopback (ws://127.0.0.1):
             # no TLS leg, so mTLS is not applicable (never a failure — just N/A).
             local = hub._is_loopback_spoke(pk)
+            # Record the connection.
             clients.append({
                 "spoke_id": pk,
                 "label": _label(pk),
@@ -3470,6 +3915,7 @@ def register(app, hub, ctx):
         # Sort: active first, then remote-eligible (cert-less), then loopback N/A last.
         clients.sort(key=lambda c: (not c["mtls_active"], c.get("local", False),
                                     c.get("label") or c["spoke_id"]))
+        # Counts by mTLS state.
         diag["clients"] = clients
         diag["clients_summary"] = {
             "connected": len(clients),
@@ -3477,6 +3923,7 @@ def register(app, hub, ctx):
             "cert_less": sum(1 for c in clients if not c["mtls_active"] and not c.get("local")),
             "local": sum(1 for c in clients if c.get("local")),
         }
+        # For each pinned name, whether a live connection presents it.
         # Pinned AppBuilder identity — reflect the LIVE connection: is a connected
         # spoke presenting a VERIFIED cert whose SAN matches the pin? (The LE cert is
         # no longer the mTLS cert — ab presents the hub-CA clientAuth cert, so
@@ -3496,6 +3943,7 @@ def register(app, hub, ctx):
                                "detail": "no connected spoke is presenting a verified cert "
                                          "with this SAN — issue/re-provide its mTLS cert"})
         diag["pinned_cert_checks"] = checks
+        # The auto-provision setting (on by default).
         gc2 = hub.state.system_state.get("global_config", {}) or {}
         diag["auto_provision"] = bool(gc2.get("mtls_ca_auto_provision", True))
         return diag
@@ -3505,9 +3953,11 @@ def register(app, hub, ctx):
         """Toggle whether the hub auto-mints + delivers a Hub-CA mTLS client cert to
         each spoke on connect. Default ON. Admin-only."""
         hub = app.state.hub
+        # Admins only.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Read the flag, save it now, and log it.
         body = await request.json()
         enabled = bool(body.get("enabled")) if isinstance(body, dict) else False
         gc = hub.state.system_state.get("global_config", {}) or {}
@@ -3524,13 +3974,16 @@ def register(app, hub, ctx):
         fleet-wide WS backpressure (spokes dropping with 1011 keepalive timeout
         because a saturated hub loop can't drain their sockets). Admin-only."""
         hub = app.state.hub
+        # Admins only.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Recent loop lag samples and the protect thresholds.
         import psutil as _ps
         lag_hist = list(getattr(hub, "_loop_lag_hist", []) or [])
         gc = (hub.state.get_global_config() or {})
         pcfg = (gc.get("protect", {}) or {})
+        # Memory use (0 if unavailable).
         try:
             memp = _ps.virtual_memory().percent
         except Exception:  # noqa: BLE001
@@ -3540,10 +3993,12 @@ def register(app, hub, ctx):
         smps = getattr(hub, "spoke_mps", {}) or {}
         top = sorted(smps.items(), key=lambda kv: kv[1] or 0, reverse=True)[:8]
         def _label(sid):
+            """A spoke's friendly name, or its id on error."""
             try:
                 return hub._spoke_label(sid)
             except Exception:  # noqa: BLE001
                 return sid
+        # How many recent request timeouts are still active.
         now = time.time()
         recent_to = len({k: v for k, v in (getattr(hub, "_recent_request_timeouts", {}) or {}).items()
                          if v > now})
@@ -3554,22 +4009,26 @@ def register(app, hub, ctx):
         # backpressure, NOT a hub-loop problem). High loop_lag + LOW rtt/buffers =
         # hub loop; high rtt or growing buffers = network/spoke transport.
         tel_all = getattr(hub, "spoke_telemetry", {}) or {}
+        # For each connection: keepalive round-trip, outbound buffer, and remote IP.
         conns = []
         for pk, ws in list((getattr(hub, "active_connections", {}) or {}).items()):
             lat = getattr(ws, "latency", None)   # seconds (websockets keepalive RTT)
             wbuf = None
+            # Outbound buffer size, if the transport exposes it.
             try:
                 tr = getattr(ws, "transport", None)
                 if tr is not None and hasattr(tr, "get_write_buffer_size"):
                     wbuf = int(tr.get_write_buffer_size())
             except Exception:  # noqa: BLE001
                 wbuf = None
+            # Remote IP, if known.
             raddr = ""
             try:
                 ra = getattr(ws, "remote_address", None)
                 raddr = ra[0] if ra else ""
             except Exception:  # noqa: BLE001
                 pass
+            # Record it.
             tel = tel_all.get(pk, {}) or {}
             conns.append({
                 "spoke": _label(pk),
@@ -3578,7 +4037,9 @@ def register(app, hub, ctx):
                 "write_buffer_bytes": wbuf,
                 "mps": round((smps.get(pk) or 0), 1),
             })
+        # Worst first.
         conns.sort(key=lambda c: ((c["write_buffer_bytes"] or 0), (c["rtt_ms"] or 0)), reverse=True)
+        # Loop lag, load, protect state, timeouts, top talkers, connections and thresholds.
         return {
             "loop_lag_s": round(getattr(hub, "_loop_lag", 0.0), 3),
             "loop_lag_max_s": round(max(lag_hist) if lag_hist else 0.0, 3),
@@ -3612,21 +4073,25 @@ def register(app, hub, ctx):
         UI can render a per-device Deploy button + status. Falls back to the
         stashed distribution report if the live fetch fails."""
         hub = app.state.hub
+        # The stashed report, keyed by device id or name.
         rep = hub.cert_device_report(domain, module_type, identifier)
         stashed = {}
         for d in (rep.get("devices") or []):
             k = str(d.get("device_id") or d.get("name") or "")
             if k:
                 stashed[k] = d
+        # For nw, list the live fleet with each device's stashed status.
         devices = []
         if module_type == "nw":
             try:
                 spoke_id = hub.get_spoke_by_type("nw")
                 if spoke_id:
                     res = await hub.request_response(spoke_id, "NW_LIST_DEVICES", {}, timeout=15.0)
+                    # Unwrap the device list.
                     data = access.unwrap_spoke(res) or {}
                     fleet = data.get("devices") if isinstance(data, dict) else data
                     for dv in (fleet or []):
+                        # Device id, type, and stashed status.
                         did = str(dv.get("id") or dv.get("device_id") or "")
                         ot = (dv.get("object_type") or "").strip().lower()
                         st = stashed.get(did) or {}
@@ -3643,6 +4108,7 @@ def register(app, hub, ctx):
                         })
             except Exception as e:  # noqa: BLE001 — fall back to the stash
                 logger.debug("le_target_devices: live nw fleet fetch failed: %s", e)
+        # Nothing live: use the stashed list.
         if not devices:
             devices = rep.get("devices") or []
         return {"status": "SUCCESS", "domain": domain, "module_type": module_type,
@@ -3656,6 +4122,7 @@ def register(app, hub, ctx):
         material from le and sends INSTALL_CERT to the nw spoke with the device's
         id, then records that device's per-device status."""
         hub = app.state.hub
+        # Only deploy to the caller's own devices (see above).
         # A shared cert may be deployed by any tenant to THEIR OWN devices; an
         # owned cert only by an owner/admin. Reject a deploy to a device that
         # isn't the caller's (unless they can change the cert outright).
@@ -3665,13 +4132,16 @@ def register(app, hub, ctx):
                 status_code=403,
                 detail="You may only deploy this certificate to devices in your "
                        "own tenant, and only if the certificate is shared.")
+        # The nw and certificates spokes.
         spoke_id = get_spoke_or_503(hub, "nw", "Network Devices")
         le_spoke = _get_le_spoke(hub)
+        # Fetch the cert material; anything but SUCCESS is a 502.
         mat = await hub.request_response(le_spoke, "LE_GET_CERT", {"domain": domain}, timeout=60.0)
         m = access.unwrap_spoke(mat) or {}
         if not (isinstance(m, dict) and m.get("status") == "SUCCESS"):
             raise HTTPException(status_code=502, detail=(m or {}).get("message", "LE_GET_CERT failed"))
         cert = m.get("data") or {}
+        # Install it on the device; failure is a 502.
         try:
             res = await hub.request_response(spoke_id, "INSTALL_CERT", {
                 "domain": domain, "fullchain": cert.get("fullchain", ""),
@@ -3679,6 +4149,7 @@ def register(app, hub, ctx):
                 "identifier": device_id, "module_type": "nw"}, timeout=120.0)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"deploy failed: {e}")
+        # Record the device's status.
         r = access.unwrap_spoke(res) or {}
         hub.update_cert_device_status(domain, "nw", "", device_id, r)
         return {"status": "ok", "device_id": device_id,
@@ -3686,10 +4157,12 @@ def register(app, hub, ctx):
 
     @app.delete("/api/le/certs/{domain}/targets/{idx}")
     async def le_remove_target(domain: str, idx: int, request: Request):
+        """Detach one target from a cert by index (owner or admin)."""
         # Owner-or-admin: detaching a target from a cert you own only removes the
         # install intent (no cert material is pushed), so the cert-change guard is
         # the right gate — a tenant-admin may prune targets from their own cert.
         _le_guard_change(request, domain)
+        # Relay the removal.
         return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REMOVE_TARGET",
                                   {"domain": domain, "idx": idx},
                                   log_name="le_remove_target")
@@ -3697,6 +4170,7 @@ def register(app, hub, ctx):
     # ─── DHCP API ─────────────────────────────────────────────────────────────
 
     def _get_dhcp_spoke(hub):
+        """The first connected DHCP spoke, or a 503."""
         return get_spoke_or_503(hub, "dhcp", "DHCP")
 
     # ── tenant-aware DHCP spoke resolution ──────────────────────────────────
@@ -3717,15 +4191,19 @@ def register(app, hub, ctx):
         that tenant by module_type, then the shared-tenant spoke. Admin with
         no tenant selected keeps the legacy global-first-connected-spoke
         behavior — see ``_dhcp_merge_fanout`` for the admin combined view."""
+        # Admin with no tenant: the first connected DHCP spoke.
         hub = app.state.hub
         tid = _effective_tenant(request, tenant)
         if not tid:
             return spoke_or_503(hub.get_spoke_by_type("dhcp"), "DHCP")
+        # The tenant's own DHCP instance, if its spoke is connected.
         instances = (hub.state.system_state.get("global_config", {}) or {}).get("dhcp_instances", []) or []
         inst = next((i for i in instances if isinstance(i, dict) and i.get("tenant_id") == tid), None)
         spoke_id = (inst or {}).get("spoke_id") or ""
         if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
             return spoke_id
+        # Otherwise a spoke bound to the tenant, then the shared spoke (only if the tenant has none
+        # of its own).
         resolved = hub.get_dhcp_spoke_for_tenant(tid)
         if not resolved and not access.tenant_has_own_spoke(hub, tid, "dhcp"):
             resolved = hub.get_dhcp_spoke_for_shared()
@@ -3738,9 +4216,11 @@ def register(app, hub, ctx):
     def _dhcp_shared(request: Request, tenant: str = None) -> bool:
         """True when the selected tenant has no DHCP server of its own, so its
         DHCP views read the shared Kea that holds every tenant's scopes."""
+        # No tenant: not shared.
         tid = _effective_tenant(request, tenant)
         if not tid:
             return False
+        # The tenant has its own instance or spoke: not shared.
         instances = (hub.state.system_state.get("global_config", {}) or {}).get("dhcp_instances", []) or []
         if any(isinstance(i, dict) and i.get("tenant_id") == tid for i in instances):
             return False
@@ -3753,19 +4233,24 @@ def register(app, hub, ctx):
 
     def _dhcp_write_body(body):
         """The relayed payload with the hub's routing keys removed."""
+        # Not a dict: return it as is.
         if not isinstance(body, dict):
             return body
         return {k: v for k, v in body.items() if k not in _DHCP_ROUTING_KEYS}
 
+    # Fields a subnet's id may be under.
     _DHCP_SUBNET_ID_KEYS = ("subnet_id", "subnet-id", "id")
 
     def _dhcp_subnet_matches(subnet, want_id: str, want_ip: str) -> bool:
         """Does this spoke-reported subnet record cover the write's target?"""
+        # Not a subnet record.
         if not isinstance(subnet, dict):
             return False
+        # Match by id.
         if want_id and any(str(subnet.get(k) or "").strip() == want_id
                            for k in _DHCP_SUBNET_ID_KEYS):
             return True
+        # Otherwise match the IP against the subnet's CIDR.
         cidr = str(subnet.get("subnet") or "").strip()
         if want_ip and cidr:
             try:
@@ -3792,15 +4277,19 @@ def register(app, hub, ctx):
         the body's ``subnet_id`` (or its IP, by CIDR containment) against each
         spoke's own subnet list. Returns None whenever the answer is not
         unambiguous, leaving the legacy resolver in charge."""
+        # No body: no answer.
         if not isinstance(body, dict):
             return None
         hub = app.state.hub
+        # A tenant is selected: routing is already clear.
         if _effective_tenant(request, tenant):
             return None  # tenant-resolved routing is already unambiguous
+        # Only matters with 2+ connected, approved DHCP spokes.
         spokes = [s for s in (hub.get_all_spokes_by_type("dhcp") or [])
                   if s in hub.active_connections and hub.approved_modules.get(s, False)]
         if len(spokes) < 2:
             return None
+        # The target's subnet id and IP; with neither, no answer.
         want_id = str(body.get("subnet_id") or body.get("subnet-id") or "").strip()
         want_ip = ""
         for k in _RES_IP_KEYS + ("old_ip",):
@@ -3811,6 +4300,8 @@ def register(app, hub, ctx):
             return None
 
         async def _owns(sid):
+            """True when this spoke serves the target subnet; unreachable spokes own nothing."""
+            # Ask the spoke for its subnets.
             try:
                 result = await hub.request_response(sid, "DHCP_LIST_SUBNETS", {})
                 data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
@@ -3818,9 +4309,11 @@ def register(app, hub, ctx):
             except Exception as e:  # noqa: BLE001 — an unreachable spoke simply owns nothing
                 logger.debug("dhcp write routing: %s subnet probe failed: %s", sid, e)
                 return False
+            # Check each one.
             subnets = (data.get("subnets") if isinstance(data, dict) else None) or []
             return any(_dhcp_subnet_matches(s, want_id, want_ip) for s in subnets)
 
+        # Ask every spoke; exactly one owner is required.
         hits = await asyncio.gather(*[_owns(s) for s in spokes])
         owners = [s for s, hit in zip(spokes, hits) if hit]
         if len(owners) != 1:
@@ -3849,11 +4342,14 @@ def register(app, hub, ctx):
         (``_dhcp_spoke_owning_target``); only if that is ambiguous too does the
         legacy first-connected-spoke resolver decide."""
         hub = app.state.hub
+        # The spoke named in the body.
         requested = str((body or {}).get("spoke_id")
                         or (body or {}).get("_spoke") or "").strip()
+        # None named: the target's owning spoke, else the default resolver.
         if not requested:
             owner = await _dhcp_spoke_owning_target(request, tenant, body)
             return owner or _dhcp_spoke_for_request(request, tenant)
+        # It must be a connected, approved DHCP spoke.
         connected = [s for s in (hub.get_all_spokes_by_type("dhcp") or [])
                      if hub._primary_key(s) in hub.active_connections
                      and hub.approved_modules.get(s, False)]
@@ -3861,6 +4357,8 @@ def register(app, hub, ctx):
             raise HTTPException(
                 status_code=400,
                 detail=f"'{requested}' is not a connected, approved DHCP spoke")
+        # With a tenant selected, the spoke must be the tenant's or the shared one, and a tenant
+        # with its own spoke may not use the shared one.
         tid = _effective_tenant(request, tenant)
         if tid:
             spoke_tid = hub.state.get_spoke_tenant(requested) or ""
@@ -3885,9 +4383,11 @@ def register(app, hub, ctx):
         the UI path is unavailable. The request was only ever used to pick the
         spoke, so nothing below it changes.
         """
+        # The current HA status from the spoke.
         current = await _relay_spoke(
             dhcp_spoke, "DHCP_HA_STATUS",
             log_name="dhcp_worker_discovery_status", timeout=30)
+        # Current members, by id.
         current_members = [
             m for m in (current.get("members") or [])
             if isinstance(m, dict) and m.get("id")
@@ -3895,12 +4395,15 @@ def register(app, hub, ctx):
         current_by_id = {
             str(m["id"]): m for m in current_members
         }
+        # The tenant the DHCP spoke belongs to (the shared tenant for the shared spoke).
         dhcp_tenant = hub.state.get_spoke_tenant(dhcp_spoke) or ""
         shared_spoke = hub.get_dhcp_spoke_for_shared()
         if dhcp_spoke == shared_spoke:
             dhcp_tenant = access.shared_tenant_id() or dhcp_tenant
 
         def _upsert_instance(sid, member_id, host):
+            """Add or update the DHCP instance record for a discovered worker."""
+            # The stored instance list and any existing record for this worker.
             global_config = hub.state.system_state.setdefault("global_config", {})
             instances = global_config.setdefault("dhcp_instances", [])
             existing = next((
@@ -3908,6 +4411,7 @@ def register(app, hub, ctx):
                 and (item.get("source_agent_id") == sid
                      or item.get("member_id") == member_id)
             ), None)
+            # The worker's display name.
             module_names = hub.state.system_state.get("module_names", {}) or {}
             metadata = hub.state.system_state.get("module_metadata", {}) or {}
             display_name = (
@@ -3915,6 +4419,7 @@ def register(app, hub, ctx):
                 or (metadata.get(sid) or {}).get("display_name")
                 or sid
             )
+            # Build the record, keeping an existing id and name.
             record = {
                 "id": (existing or {}).get("id") or f"discovered-{sid}",
                 "name": (existing or {}).get("name") or display_name,
@@ -3925,12 +4430,14 @@ def register(app, hub, ctx):
                 "source_agent_id": sid,
                 "discovered": True,
             }
+            # Update or add it, then save.
             if existing is not None:
                 existing.update(record)
             else:
                 instances.append(record)
             hub.state._mark_dirty()
 
+        # Connected agents in the DHCP spoke's tenant.
         candidates = []
         for sid, module_type in list(hub.spoke_module_types.items()):
             if module_type != "agent" or hub._primary_key(sid) not in hub.active_connections:
@@ -3940,6 +4447,7 @@ def register(app, hub, ctx):
             candidates.append(sid)
 
         async def _roles(sid):
+            """Ask an agent which roles it has; an unreachable agent reports none."""
             try:
                 result = await hub.request_response(
                     sid, "GET_AVAILABLE_ROLES", {}, timeout=15.0)
@@ -3950,7 +4458,9 @@ def register(app, hub, ctx):
                                sid, exc)
                 return sid, {}
 
+        # Ask every candidate at once.
         reports = await asyncio.gather(*[_roles(sid) for sid in candidates])
+        # The DHCP spoke's host agent and its private address (the workers' coordinator).
         parent_id = (getattr(hub, "spoke_parent_map", {}).get(
             hub._primary_key(dhcp_spoke)) or "")
         parent_report = next((
@@ -3971,12 +4481,14 @@ def register(app, hub, ctx):
         skipped = []
 
         def _agent_label(sid):
+            """An agent's friendly name, or its id."""
             names = hub.state.system_state.get("module_names", {}) or {}
             meta = hub.state.system_state.get("module_metadata", {}) or {}
             return (names.get(sid)
                     or (meta.get(sid) or {}).get("display_name")
                     or sid)
 
+        # Keep agents with the dhcp-server role installed and active; note why others were skipped.
         for sid, report in reports:
             if not report:
                 skipped.append({"spoke_id": sid, "name": _agent_label(sid),
@@ -3990,10 +4502,12 @@ def register(app, hub, ctx):
                 skipped.append({"spoke_id": sid, "name": _agent_label(sid),
                                 "reason": "DHCP Server role is installed but not active"})
                 continue
+            # Its configured worker entry.
             worker_info = next((
                 item for item in (report.get("configured_workers") or [])
                 if isinstance(item, dict) and item.get("role") == "dhcp-server"
             ), {})
+            # The worker must report a private service address.
             addresses = _private_service_addresses(report)
             if not addresses:
                 raise HTTPException(
@@ -4002,6 +4516,7 @@ def register(app, hub, ctx):
                         f"DHCP Server agent {sid} did not report a private local "
                         "service address; refusing to use its public/NAT "
                         "WebSocket source address."))
+            # Record the worker.
             workers.append({
                 "spoke_id": sid,
                 "id": str(worker_info.get("member_id") or sid),
@@ -4010,9 +4525,11 @@ def register(app, hub, ctx):
                     report.get("configured_worker_roles") or []),
             })
 
+        # Sort by id and record each as an instance.
         workers.sort(key=lambda item: item["id"])
         for item in workers:
             _upsert_instance(item["spoke_id"], item["id"], item["host"])
+        # Fewer than two: report what was found and why others were skipped.
         if len(workers) < 2:
             tenant_label = dhcp_tenant or "unassigned"
             message = (
@@ -4051,6 +4568,7 @@ def register(app, hub, ctx):
                     f"Active: {listed}. Unload the DHCP Server role from the "
                     "extras, then run discovery again."))
 
+        # Both already enrolled, connected and on the same host: nothing to do.
         already_configured = all(
             item["configured"]
             and item["id"] in current_by_id
@@ -4066,6 +4584,7 @@ def register(app, hub, ctx):
                 "discovered_count": 2,
                 "cluster_ready": True,
             }
+        # The coordinator must have a private address.
         if parent_id and not coordinator_host:
             raise HTTPException(
                 status_code=502,
@@ -4074,6 +4593,7 @@ def register(app, hub, ctx):
                     "private local service address; worker coordinator "
                     "configuration cannot be completed safely."))
 
+        # Enroll the pair (first primary, second standby) to get their bootstrap settings.
         enrollment = await _relay_spoke(
             dhcp_spoke, "DHCP_HA_ENROLL_WORKERS",
             {"members": [
@@ -4085,6 +4605,9 @@ def register(app, hub, ctx):
         bootstraps = enrollment.get("workers") or {}
 
         async def _deploy(item):
+            """Load the dhcp-server role on one worker with its bootstrap and wait for the deploy.
+            """
+            # Its bootstrap, pointed at the coordinator; every field is required.
             bootstrap = dict(bootstraps.get(item["id"]) or {})
             if coordinator_host:
                 bootstrap["coordinator"] = coordinator_host
@@ -4098,6 +4621,7 @@ def register(app, hub, ctx):
                     status_code=502,
                     detail=f"DHCP Management returned incomplete enrollment for "
                            f"{item['spoke_id']}")
+            # Load (or reload) the role.
             result = await hub.request_response(
                 item["spoke_id"], "LOAD_ROLE",
                 # force=True: this call is only reached once the
@@ -4111,6 +4635,7 @@ def register(app, hub, ctx):
                 # forever, no matter how many times discovery "succeeded".
                 {"role": "dhcp-server", "config": bootstrap, "force": True},
                 timeout=120.0)
+            # A deploy already running is fine if it is the DHCP one; otherwise raise on error.
             deployed = result.get("payload", {}).get("data", result)
             if (deployed.get("status") == "ERROR"
                     and "deployment is already running" in str(
@@ -4126,6 +4651,7 @@ def register(app, hub, ctx):
                     deployed = _spoke_payload_or_raise(deployed)
             else:
                 deployed = _spoke_payload_or_raise(deployed)
+            # If a deploy started, wait up to 2 minutes for it, failing on an error.
             if deployed.get("deploy"):
                 for _attempt in range(60):
                     await asyncio.sleep(2)
@@ -4147,7 +4673,9 @@ def register(app, hub, ctx):
                                    f"{item['spoke_id']}: {detail}")
             return {"spoke_id": item["spoke_id"], "status": "configuring"}
 
+        # Deploy both at once.
         deployed = list(await asyncio.gather(*[_deploy(item) for item in workers]))
+        # Commit enrollment, retrying for up to a minute while the spoke is still waiting.
         for _attempt in range(30):
             result = await hub.request_response(
                 dhcp_spoke, "DHCP_HA_COMMIT_ENROLLMENT", {}, timeout=30)
@@ -4159,6 +4687,7 @@ def register(app, hub, ctx):
             if not committed.get("waiting"):
                 _spoke_payload_or_raise(committed)
             await asyncio.sleep(2)
+        # Ready once both are configured.
         return {
             "status": "SUCCESS",
             "workers": deployed,
@@ -4172,6 +4701,7 @@ def register(app, hub, ctx):
         out to EVERY connected, approved dhcp spoke, tag each returned record
         with its spoke's owning tenant (``_tenant``), and merge. Mirrors
         cppm.py's ``_nac_merge_fanout`` / the DNS resolver above."""
+        # Every connected, approved DHCP spoke; none is a 503.
         hub = app.state.hub
         spokes = [s for s in (hub.get_all_spokes_by_type("dhcp") or [])
                   if s in hub.active_connections and hub.approved_modules.get(s, False)]
@@ -4179,6 +4709,9 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="No spoke connected")
 
         async def _one(sid):
+            """Fetch one spoke's records tagged with tenant and spoke, or an error entry on failure.
+            """
+            # Ask the spoke and unwrap its reply.
             try:
                 result = await hub.request_response(sid, cmd, payload or {})
                 data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
@@ -4187,10 +4720,12 @@ def register(app, hub, ctx):
                 logger.debug("dhcp merge fanout: %s failed: %s", sid, e)
                 return [], {"spoke": sid, "tenant": hub.state.get_spoke_tenant(sid) or "",
                             "error": str(e) or e.__class__.__name__}
+            # Pull out the record list.
             recs = data.get(list_key) if isinstance(data, dict) else None
             if not isinstance(recs, list):
                 return [], {"spoke": sid, "tenant": hub.state.get_spoke_tenant(sid) or "",
                             "error": f"spoke returned no '{list_key}' list"}
+            # Tag each record with the spoke's tenant and the spoke.
             tid = hub.state.get_spoke_tenant(sid) or ""
             # ``_spoke`` is the routing key for the WRITE side: each dhcp spoke
             # is its own Kea (usually its own HA pair), so a row from the merged
@@ -4220,6 +4755,7 @@ def register(app, hub, ctx):
         with no tenant selected AND 2+ dhcp spokes connected combines every
         spoke (see _dhcp_merge_fanout); otherwise the normal single-spoke
         tenant-resolved relay."""
+        # Admin with no tenant and several DHCP spokes: merged view; otherwise one spoke.
         sess = _session_user(request)
         tid = _effective_tenant(request, tenant)
         if not tid and sess and _is_admin(sess) and len(hub.get_all_spokes_by_type("dhcp") or []) > 1:
@@ -4238,6 +4774,7 @@ def register(app, hub, ctx):
         Admin with no tenant selected AND 2+ dhcp spokes connected: subnets
         are combined across every spoke (tagged _tenant)."""
         logger.debug("relay GET /api/dhcp/subnets")
+        # Fetch the subnets, then filter by tenant.
         data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_SUBNETS", {}, "subnets", "dhcp_list_subnets")
         return await _filter_tenant(request, data, "dhcp", ["subnet"], tenant,
                                     shared_source=_dhcp_shared(request, tenant),
@@ -4249,6 +4786,7 @@ def register(app, hub, ctx):
         return. Admin with no tenant selected AND 2+ dhcp spokes connected:
         leases are combined across every spoke (tagged _tenant)."""
         logger.debug("relay %s %s subnet=%s", request.method, request.url.path, subnet)
+        # Fetch the leases, then filter by tenant.
         data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_LEASES", {"subnet": subnet}, "leases", "dhcp_list_leases")
         return await _filter_tenant(request, data, "dhcp", ["ip", "address", "ip-address", "ip_address"], tenant,
                                     shared_source=_dhcp_shared(request, tenant),
@@ -4257,17 +4795,22 @@ def register(app, hub, ctx):
     @app.delete("/api/dhcp/lease")
     async def dhcp_delete_lease(request: Request, tenant: str = None):
         """Delete an active DHCP lease from Kea's lease database."""
+        # Read the body and check the caller may write it.
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP lease",
                                       spoke=lambda: _dhcp_write_spoke(request, tenant, body))
+        # Relay it to the spoke that owns it, without the routing keys.
         spoke = await _dhcp_write_spoke(request, tenant, body)
         return await _relay_spoke(spoke, "DHCP_DEL_LEASE", _dhcp_write_body(body), log_name="dhcp_delete_lease")
 
+    # Fields an IP or MAC may be under.
     # ── Reservation → NetBox write-back ──────────────────────────────────────
     _RES_IP_KEYS = ("ip", "address", "ip-address", "ip_address")
     _RES_MAC_KEYS = ("mac", "hw-address", "hw_address", "mac_address")
 
     def _res_field(body, keys):
+        """The first non-empty field, without any /prefix length."""
+        # Return the first value found.
         for k in keys:
             v = (body or {}).get(k)
             if v:
@@ -4281,6 +4824,7 @@ def register(app, hub, ctx):
         operator who adds a reservation for an address NetBox has never heard
         of needs to know it won't survive, and the Kea reply alone can't tell
         them."""
+        # Copy the reply and add the outcome; wrap a non-dict reply.
         if isinstance(result, dict):
             result = dict(result)
             result["netbox_writeback"] = writeback
@@ -4312,12 +4856,14 @@ def register(app, hub, ctx):
         Best-effort like its caller: the Kea write has already been applied, so
         nothing in here may raise.
         """
+        # The IP must be valid.
         try:
             addr = ipaddress.ip_address(ip)
         except ValueError:
             return {"status": "not_found", "ip": ip,
                     "reason": f"{ip!r} is not a valid IP address"}
 
+        # Find the narrowest NetBox prefix that contains it.
         prefixes = access.unwrap_spoke(await hub.request_response(
             ipam, "NETBOX_GET_PREFIXES", {}, timeout=30.0)) or {}
         best = None
@@ -4331,6 +4877,7 @@ def register(app, hub, ctx):
                 continue
             if addr in net and (best is None or net.prefixlen > best[0].prefixlen):
                 best = (net, cidr)
+        # No containing prefix: it cannot be created.
         if not best:
             return {"status": "not_found", "ip": ip,
                     "reason": "no NetBox IP object for this address and no "
@@ -4338,6 +4885,7 @@ def register(app, hub, ctx):
                               "created; the reservation will be dropped by "
                               "the next NetBox→Kea sync"}
 
+        # Create the IP with the hostname as its DNS name.
         hostname = ((body or {}).get("hostname")
                     or (body or {}).get("host") or "").strip()
         created = access.unwrap_spoke(await hub.request_response(
@@ -4345,12 +4893,14 @@ def register(app, hub, ctx):
             {"prefix": best[1], "address": ip, "dns_name": hostname,
              "description": "DHCP reservation (created by Lab Manager)"},
             timeout=30.0)) or {}
+        # Failure is reported as an error.
         new_id = created.get("id")
         if str(created.get("status", "")).upper() == "ERROR" or not new_id:
             return {"status": "error", "ip": ip,
                     "error": created.get("message")
                              or "NetBox refused to create the IP object"}
 
+        # Then mark it as a reservation with its MAC.
         access.unwrap_spoke(await hub.request_response(
             ipam, "NETBOX_UPDATE_IP_ADDR",
             # dhcp_reservation=True is what actually makes build_dhcp_payload
@@ -4360,6 +4910,7 @@ def register(app, hub, ctx):
             {"ip_id": new_id, "custom_fields": {"mac_address": mac,
                                                  "dhcp_reservation": True}},
             timeout=30.0))
+        # Refresh the cached IP list and log it.
         # Every other NetBox mutation goes through netbox.py's _netbox_write,
         # which invalidates the cached IP list for all tenants and kicks a
         # background re-fetch. This path talks to the spoke directly, so it has
@@ -4410,15 +4961,19 @@ def register(app, hub, ctx):
         small dict describing the outcome (``ok``/``created``/``unchanged``/
         ``skipped``/``not_found``/``error``) for the caller to surface.
         """
+        # The IP, and the MAC (none when clearing).
         hub = app.state.hub
         ip = _res_field(body, _RES_IP_KEYS)
         mac = "" if clear else _res_field(body, _RES_MAC_KEYS)
+        # No IP: nothing to do.
         if not ip:
             return {"status": "skipped", "reason": "no ip in body"}
+        # No IPAM spoke: skip.
         ipam = hub.get_spoke_by_type("ipam")
         if not ipam:
             return {"status": "skipped", "reason": "no ipam spoke connected",
                     "ip": ip}
+        # Find the NetBox IP object for this address.
         try:
             ips = access.unwrap_spoke(await hub.request_response(
                 ipam, "NETBOX_GET_IPS", {}, timeout=30.0)) or {}
@@ -4427,6 +4982,7 @@ def register(app, hub, ctx):
                 if (entry.get("address") or "").split("/")[0].strip() == ip:
                     match = entry
                     break
+            # Not found: nothing to do when clearing; otherwise create it.
             if not match or not match.get("id"):
                 if clear or not mac:
                     # Nothing to preserve: removing a reservation whose address
@@ -4434,17 +4990,21 @@ def register(app, hub, ctx):
                     return {"status": "unchanged", "ip": ip}
                 return await _create_netbox_ip_for_reservation(
                     hub, ipam, ip, mac, body)
+            # Its current MAC and reservation flag.
             existing_cf = match.get("custom_fields") or {}
             current_mac = (existing_cf.get("mac_address") or "").strip()
             current_res = bool(existing_cf.get("dhcp_reservation"))
             want_res = not clear
+            # Already correct: nothing to change.
             if current_mac.lower() == mac.lower() and current_res == want_res:
                 return {"status": "unchanged", "ip": ip, "ip_id": match["id"]}
+            # Set the reservation flag (and the MAC when adding).
             custom_fields = {"dhcp_reservation": want_res}
             if not clear:
                 # Clearing leaves mac_address alone (see docstring) — only an
                 # active reservation write sets it.
                 custom_fields["mac_address"] = mac
+            # Update the IP in NetBox and log it.
             payload = {"ip_id": match["id"], "custom_fields": custom_fields}
             access.unwrap_spoke(await hub.request_response(
                 ipam, "NETBOX_UPDATE_IP_ADDR", payload, timeout=30.0))
@@ -4453,6 +5013,7 @@ def register(app, hub, ctx):
                         ip, match["id"], mac, want_res)
             return {"status": "ok", "ip": ip, "ip_id": match["id"],
                     "mac_address": mac}
+        # Report failures without raising.
         except Exception as e:  # noqa: BLE001 — never fail an applied Kea write
             logger.warning("dhcp reservation write-back to NetBox failed "
                            "for %s: %s", ip, e)
@@ -4460,8 +5021,11 @@ def register(app, hub, ctx):
 
     @app.post("/api/dhcp/reservation")
     async def dhcp_add_reservation(request: Request, tenant: str = None):
+        """Add a DHCP reservation in Kea, then mirror it into NetBox."""
+        # Read the body and check the caller may write it.
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
+        # Relay it to the owning spoke, then write the reservation back to NetBox.
         spoke = await _dhcp_write_spoke(request, tenant, body)
         result = await _relay_spoke(spoke, "DHCP_ADD_RES", _dhcp_write_body(body), log_name="dhcp_add_reservation")
         return _with_writeback(result, await _reservation_netbox_writeback(body))
@@ -4478,6 +5042,7 @@ def register(app, hub, ctx):
         Admin with no tenant selected AND 2+ dhcp spokes connected:
         reservations are combined across every spoke (tagged _tenant)."""
         logger.debug("relay GET /api/dhcp/reservations")
+        # Fetch the reservations, then filter by tenant.
         data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_RES", {}, "reservations", "dhcp_list_reservations")
         return await _filter_tenant(request, data, "dhcp", ["ip", "address", "ip-address", "ip_address"], tenant,
                                     shared_source=_dhcp_shared(request, tenant),
@@ -4485,8 +5050,11 @@ def register(app, hub, ctx):
 
     @app.put("/api/dhcp/reservation")
     async def dhcp_update_reservation(request: Request, tenant: str = None):
+        """Update a DHCP reservation in Kea, then mirror it into NetBox."""
+        # Read the body and check the caller may write it.
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
+        # Relay it to the owning spoke.
         spoke = await _dhcp_write_spoke(request, tenant, body)
         result = await _relay_spoke(spoke, "DHCP_UPDATE_RES", _dhcp_write_body(body), log_name="dhcp_update_reservation")
         # A re-addressed reservation leaves a stale mac_address behind on the
@@ -4499,8 +5067,11 @@ def register(app, hub, ctx):
 
     @app.delete("/api/dhcp/reservation")
     async def dhcp_delete_reservation(request: Request, tenant: str = None):
+        """Delete a DHCP reservation in Kea and clear its NetBox reservation flag."""
+        # Read the body and check the caller may write it.
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
+        # Relay it to the owning spoke.
         spoke = await _dhcp_write_spoke(request, tenant, body)
         result = await _relay_spoke(spoke, "DHCP_DEL_RES", _dhcp_write_body(body), log_name="dhcp_delete_reservation")
         # Without clearing the NetBox mac_address the next sync would simply
@@ -4517,14 +5088,17 @@ def register(app, hub, ctx):
     async def dhcp_diagnostics(request: Request, tenant: str = None):
         """Kea service, config, interface, listener, CA, and lease diagnostics."""
         logger.debug("relay GET /api/dhcp/diagnostics")
+        # Fetch the diagnostics (cached).
         data = await _cached_relay(
             _spoke_ref("dhcp", request, tenant),
             "DHCP_DIAGNOSTICS",
             log_name="dhcp_diagnostics",
         )
+        # Add display names to cluster members.
         if isinstance(data, dict) and isinstance(data.get("cluster"), dict):
             data = {**data, "cluster": _annotate_dhcp_cluster_members(data["cluster"])}
         if isinstance(data, dict):
+            # Name the diagnostics source.
             # Same UUID/agent-id -> friendly-name treatment as DNS diagnostics:
             # the "evidence below is from ..." source line, each per-member
             # evidence card's heading (``members`` dict keyed by id), and the
@@ -4532,12 +5106,14 @@ def register(app, hub, ctx):
             if data.get("diagnostics_source"):
                 data = {**data, "diagnostics_source_name":
                          _dhcp_member_display_name(data["diagnostics_source"])}
+            # Name each per-member evidence card.
             if isinstance(data.get("members"), dict):
                 data = {**data, "members": {
                     mid: ({**diag, "display_name": _dhcp_member_display_name(mid)}
                           if isinstance(diag, dict) else diag)
                     for mid, diag in data["members"].items()
                 }}
+            # Swap member ids for names in the recommendation lines.
             if isinstance(data.get("recommendations"), list):
                 # Union of the two id sources that can appear in DHCP
                 # recommendation text: the per-fanout-member ``members`` dict
@@ -4552,6 +5128,7 @@ def register(app, hub, ctx):
                         all_ids.add(m["id"])
 
                 def _rename_dhcp_ids(text):
+                    """Replace member ids with names in one line."""
                     if not isinstance(text, str):
                         return text
                     for mid in sorted(all_ids, key=len, reverse=True):
@@ -4563,6 +5140,7 @@ def register(app, hub, ctx):
                     return text
                 data = {**data, "recommendations":
                          [_rename_dhcp_ids(r) for r in data["recommendations"]]}
+        # Non-admins: strip errors, paths, addresses, subnets and listeners.
         if not _is_admin(_session_user(request)) and isinstance(data, dict):
             data = {
                 **data,
@@ -4600,6 +5178,7 @@ def register(app, hub, ctx):
                     for item in (data.get("recommendations") or [])
                 ],
             }
+            # Redact the cluster report too and drop per-member evidence.
             if isinstance(data.get("cluster"), dict):
                 data["cluster"] = _redact_dhcp_cluster(data["cluster"])
                 data["members"] = {}
@@ -4615,26 +5194,32 @@ def register(app, hub, ctx):
         Body: ``{"mac": "aa:bb:..", "minutes": 30, "capture_seconds": 0-60}``.
         ``capture_seconds`` > 0 sniffs UDP/67-68 on the Kea host(s) for that
         long — run it while the client is retrying. Never cached."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
+        # Read the body; a bad body counts as empty.
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
             body = {}
         body = body if isinstance(body, dict) else {}
+        # Capture time, clamped to 0-60 seconds.
         try:
             capture = max(0, min(int(float(body.get("capture_seconds") or 0)), 60))
         except (TypeError, ValueError):
             capture = 0
+        # Build the request and log it.
         payload = {"mac": str(body.get("mac") or "").strip(),
                    "minutes": body.get("minutes", 30),
                    "capture_seconds": capture}
         logger.info("relay POST /api/dhcp/packet-trace mac=%s capture=%ss",
                     payload["mac"] or "*", capture)
+        # Relay it, allowing for the capture time.
         data = await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
                                   "DHCP_PACKET_TRACE", payload,
                                   log_name="dhcp_packet_trace",
                                   timeout=capture + 45)
+        # Name the trace source and each member.
         if isinstance(data, dict):
             if data.get("trace_source"):
                 data = {**data, "trace_source_name":
@@ -4651,10 +5236,12 @@ def register(app, hub, ctx):
         """Kea HA pair state: per-node HA state, lease sync, config drift and
         recommendations. A single-host DHCP module answers ``enabled: false``."""
         logger.debug("relay GET /api/dhcp/ha")
+        # Fetch the HA status (cached) and add member display names.
         data = await _cached_relay(_spoke_ref("dhcp", request, tenant),
                                   "DHCP_HA_STATUS", log_name="dhcp_ha_status",
                                   timeout=30)
         data = _annotate_dhcp_cluster_members(data)
+        # Non-admins get the redacted view.
         if not _is_admin(_session_user(request)) and isinstance(data, dict):
             data = {"status": data.get("status", "SUCCESS"),
                     **_redact_dhcp_cluster(data)}
@@ -4669,6 +5256,7 @@ def register(app, hub, ctx):
         "load-balancing", "worker_secret": "…"}``. ``mode`` defaults to
         hot-standby; the secret is stored as the listener PSK and never
         returned."""
+        # Pass the body straight to the spoke.
         body = await request.json()
         return await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
                                   "DHCP_HA_CONFIG", body,
@@ -4677,8 +5265,10 @@ def register(app, hub, ctx):
     @app.post("/api/dhcp/ha/discover")
     async def dhcp_ha_discover(request: Request, tenant: str = None):
         """Automatically enroll the tenant's two active DHCP Server roles."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
+        # Resolve the spoke and enroll under its lock.
         spoke_id = _dhcp_spoke_for_request(request, tenant)
         return await _dhcp_discover_locked(spoke_id)
 
@@ -4686,10 +5276,12 @@ def register(app, hub, ctx):
         """Serialize enrollment per spoke, then discover. Shared by the session
         route and the loopback lever so the two can never race each other into
         a half-enrolled pair."""
+        # One lock per spoke, created on first use.
         locks = getattr(app.state, "_dhcp_discovery_locks", None)
         if locks is None:
             locks = app.state._dhcp_discovery_locks = {}
         lock = locks.setdefault(hub._primary_key(spoke_id), asyncio.Lock())
+        # Run discovery under the lock; log failures.
         try:
             async with lock:
                 return await _discover_dhcp_workers_for_spoke(spoke_id)
@@ -4705,6 +5297,7 @@ def register(app, hub, ctx):
     async def dhcp_ha_apply(request: Request, tenant: str = None):
         """Re-apply the current desired DHCP configuration to BOTH nodes
         (validate both → standby first → primary)."""
+        # Relay the apply.
         return await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
                                   "DHCP_HA_APPLY", {},
                                   log_name="dhcp_ha_apply", timeout=120)
@@ -4716,6 +5309,7 @@ def register(app, hub, ctx):
         tail of its own event log. Mirrors ``/api/dhcp/ha``'s GET shape —
         this is a status read, open to any authenticated session."""
         logger.debug("relay GET /api/dhcp/dns-hook")
+        # Fetch the hook status (cached).
         return await _cached_relay(_spoke_ref("dhcp", request, tenant),
                                   "DHCP_DNS_HOOK_STATUS", log_name="dhcp_dns_hook_status",
                                   timeout=30)
@@ -4732,6 +5326,7 @@ def register(app, hub, ctx):
         Body: ``{"enabled", "targets", "domain", "ttl", "register_ptr"}``
         (see ``kea_dns_hook.validate_settings`` for field meaning/defaults)
         plus an optional ``hook_dir`` override."""
+        # Split off the hook directory and relay the settings.
         body = await request.json()
         settings = {k: v for k, v in body.items() if k != "hook_dir"}
         result = await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
@@ -4764,6 +5359,7 @@ def register(app, hub, ctx):
         scopes and drops the raw per-HA-node ``members`` replies, which embed a
         second, unfiltered copy of every subnet."""
         logger.debug("relay GET /api/dhcp/stats")
+        # Fetch the stats (cached), filter by tenant, then fix the totals.
         data = await _cached_relay(_spoke_ref("dhcp", request, tenant), "DHCP_STATS", log_name="dhcp_stats")
         filtered = await _filter_tenant(request, data, "dhcp", ["subnet"], tenant,
                                     shared_source=_dhcp_shared(request, tenant),
@@ -4777,6 +5373,7 @@ def register(app, hub, ctx):
         Delegates to the shared DnsDhcpSyncMixin helper so the manual button and
         the periodic auto-sync loop build the identical payload.
         """
+        # Run the shared sync; skipped means a missing spoke (503), error is a 500.
         hub = app.state.hub
         result = await hub.sync_dhcp_from_netbox()
         if result.get("status") == "skipped":

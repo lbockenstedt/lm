@@ -1,29 +1,50 @@
+"""Lab Manager DHCP spoke: drives Kea locally or coordinates a two-node Kea HA pair.
+
+In single-host mode commands go straight to the local Kea Control Agent. When an HA
+pair is configured the spoke becomes the coordinator, rendering and applying both
+nodes' configs through the cluster transport and its lm-dhcp-worker agents.
+"""
+# Async command handling.
 import asyncio
+# JSON for the pending-enrollment file and fingerprints.
 import json
+# Logging.
 import logging
+# Paths, environment variables and file permissions.
 import os
+# Generating worker secrets.
 import secrets
+# Host name lookups.
 import socket
+# Path handling.
 from pathlib import Path
+# Type hints.
 from typing import Any, Dict, List
 
+# Base spoke class; the import path differs between deployment layouts.
 try:
     from base_spoke import BaseSpoke
 except ImportError:
     from core.src.base_spoke import BaseSpoke
 
+# Local Kea Control Agent client.
 from kea_manager import KeaManager
+# Packet-trace helpers and limits.
 from kea_packet_trace import VERDICT_RANK, clamp_int, MAX_CAPTURE_SECONDS, MAX_LOOKBACK_MINUTES
 
+# HA topology helpers and persisted-config functions.
 from kea_ha import (
     DEFAULT_CLUSTER_CONFIG, DEFAULT_DESIRED_STATE, DEFAULT_DESIRED_STATE6,
     DHCP_WORKER_OPS,
     KeaHAConfigError, UnsupportedHAMode, build_peers, load_cluster_config,
     normalize_mode, save_cluster_config,
 )
+# HA apply coordinator.
 from kea_cluster import KeaHACoordinator
+# Per-member HA TLS certificate issuing.
 from ha_pki import issue_member_material
 
+# Module logger.
 logger = logging.getLogger("DHCPSpoke")
 
 #: Member fields that are credentials. Stored so the coordinator can render the
@@ -40,37 +61,48 @@ _PRESERVED_MEMBER_FIELDS = ("ha_password", "ha_user", "ha_port", "ha_scheme",
 
 def _merge_preserved(new_members, old_members):
     """Carry write-only/omitted HA fields forward from the stored topology."""
+    # Index the stored members by id.
     by_id = {m.get("id"): m for m in (old_members or []) if isinstance(m, dict)}
     out = []
+    # Fill each new member's missing preserved fields from the stored member.
     for member in new_members or []:
+        # Pass non-dict entries through unchanged.
         if not isinstance(member, dict):
             out.append(member)
             continue
+        # Copy the member, then fill each blank preserved field.
         previous = by_id.get(member.get("id")) or {}
         merged = dict(member)
         for field in _PRESERVED_MEMBER_FIELDS:
             if not merged.get(field) and previous.get(field):
                 merged[field] = previous[field]
         out.append(merged)
+    # Return the merged list.
     return out
 
 
 def _redact_members(members):
     """Strip HA credentials from a member list before it leaves the spoke."""
+    # Copy each member without secret fields.
     out = []
     for member in members or []:
+        # Pass non-dict entries through unchanged.
         if not isinstance(member, dict):
             out.append(member)
             continue
+        # Drop the secret fields.
         clean = {k: v for k, v in member.items() if k not in _SECRET_MEMBER_FIELDS}
+        # Say whether an HA password is set, without revealing it.
         if any(k in member for k in _SECRET_MEMBER_FIELDS):
             clean["ha_password_set"] = bool(member.get("ha_password"))
         out.append(clean)
+    # Return the redacted list.
     return out
 
 
 def _topology_fingerprint(members, mode):
     """Stable marker used to reject a stale staged enrollment."""
+    # Canonical JSON of the members and mode.
     payload = {"members": members or [], "mode": mode or "hot-standby"}
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -78,7 +110,9 @@ def _topology_fingerprint(members, mode):
 
 def _packet_trace_args(data: Dict[str, Any]) -> Dict[str, Any]:
     """Clamp DHCP_PACKET_TRACE arguments (the capture length drives RPC timeouts)."""
+    # Treat None as empty.
     data = data or {}
+    # MAC as given, lookback minutes and capture seconds clamped to their limits.
     return {"mac": str(data.get("mac") or ""),
             "minutes": clamp_int(data.get("minutes"), 30, 1, MAX_LOOKBACK_MINUTES),
             "capture_seconds": clamp_int(data.get("capture_seconds"), 0, 0,
@@ -95,19 +129,29 @@ class _DisabledTransport:
     members: List[Dict[str, str]] = []
 
     def set_members(self, members):
+        """Accept a member list and ignore it; returns no members."""
+        # No members are ever stored.
         return []
 
     def member_ids(self):
+        """Return no member ids."""
+        # There are never members.
         return []
 
     def member_links(self):
+        """Return no member links."""
+        # There are never links.
         return []
 
     async def fanout(self, command, data, timeout=20.0, member_ids=None):
+        """Fail every fan-out because no transport exists."""
+        # Report the missing transport as an error.
         return {"status": "ERROR", "results": {}, "ok": [], "failed": [],
                 "message": "cluster transport unavailable"}
 
     async def call(self, member_id, command, data, timeout=20.0):
+        """Fail every single-member call because no transport exists."""
+        # Report the missing transport as an error.
         return {"status": "ERROR", "message": "cluster transport unavailable"}
 
 
@@ -155,10 +199,19 @@ class DHCPSpoke(BaseSpoke):
     """
 
     def __init__(self, spoke_id: str, config: Dict[str, Any]):
+        """Build the spoke, its local Kea client and the HA coordinator.
+
+        Args:
+            spoke_id: This spoke's id.
+            config: Spoke configuration.
+        """
+        # Base spoke setup.
         super().__init__(spoke_id, config)
+        # Client for the local Kea Control Agent.
         ca_url = config.get("kea_ca_url", "http://localhost:8001")
         self.mgr = KeaManager(ca_url=ca_url)
 
+        # Paths for the HA topology, the HA PKI directory and the pending-enrollment file.
         self._cluster_config_path = config.get(
             "cluster_config",
             os.getenv("LM_DHCP_CLUSTER_CONFIG", DEFAULT_CLUSTER_CONFIG))
@@ -169,13 +222,16 @@ class DHCPSpoke(BaseSpoke):
             "pending_enrollment",
             os.getenv("LM_DHCP_PENDING_ENROLLMENT",
                       "/etc/lm-dhcp/pending-enrollment.json"))
+        # Load any staged enrollment.
         self._pending_enrollment = self._load_pending_enrollment()
+        # Members and mode from config, else from the persisted topology.
         persisted = load_cluster_config(self._cluster_config_path)
         members = config.get("cluster_members")
         if members is None:
             members = persisted["members"]
         mode = config.get("ha_mode") or persisted["mode"]
         self._hook_dir = config.get("hook_dir") or persisted["hook_dir"] or ""
+        # Worker transport and the HA coordinator, with v4 and v6 desired-state paths.
         self._transport = self._build_transport(members)
         self.cluster = KeaHACoordinator(
             self._transport, mode=mode, hook_dir=self._hook_dir,
@@ -195,15 +251,18 @@ class DHCPSpoke(BaseSpoke):
         deploys independently of this one. A core without it leaves HA disabled
         instead of crashing a working single-host spoke.
         """
+        # Import the shared transport; its path differs between layouts.
         try:
             try:
                 from core.src.messaging.service_cluster import ClusterCoordinator
             except ImportError:
                 from messaging.service_cluster import ClusterCoordinator  # type: ignore
+        # No transport in this core: stay single-host.
         except ImportError:
             logger.info("Cluster transport unavailable in this core build — "
                         "DHCP stays single-host")
             return _DisabledTransport()
+        # Coordinator for the "dhcp" service, limited to the DHCP worker ops.
         return ClusterCoordinator("dhcp", DHCP_WORKER_OPS,
                                   lambda: getattr(self, "control_plane", None),
                                   members=members)
@@ -214,30 +273,50 @@ class DHCPSpoke(BaseSpoke):
         Only a real HA pair binds a port — a single-host DHCP role must never
         open a listener it has no use for.
         """
+        # Needed for an active pair or a staged enrollment waiting for workers.
         return bool(self.cluster.enabled or self._pending_enrollment)
 
     def _load_pending_enrollment(self) -> Dict[str, Any]:
+        """Load the staged enrollment from disk.
+
+        Returns:
+            The staged enrollment dict, or {} if none or unreadable.
+        """
+        # Read the JSON file; it must be an object.
         try:
             with open(self._pending_enrollment_path, encoding="utf-8") as stream:
                 data = json.load(stream)
             return data if isinstance(data, dict) else {}
+        # No file: nothing staged.
         except FileNotFoundError:
             return {}
+        # Unreadable file: log it and treat as nothing staged.
         except Exception as exc:  # noqa: BLE001
             logger.error("Could not load pending DHCP enrollment: %s", exc)
             return {}
 
     def _save_pending_enrollment(self, data: Dict[str, Any]) -> None:
+        """Atomically write the staged enrollment with owner-only permissions.
+
+        Args:
+            data: Enrollment dict to store (contains secrets).
+        """
+        # Create the parent directory if needed.
         path = Path(self._pending_enrollment_path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Write to a temp file, restrict permissions, then atomically replace.
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
+        # Keep the in-memory copy in step.
         self._pending_enrollment = data
 
     def _clear_pending_enrollment(self) -> None:
+        """Forget the staged enrollment in memory and on disk."""
+        # Clear the in-memory copy.
         self._pending_enrollment = {}
+        # Delete the file; already gone is fine.
         try:
             os.unlink(self._pending_enrollment_path)
         except FileNotFoundError:
@@ -245,20 +324,25 @@ class DHCPSpoke(BaseSpoke):
 
     async def _enroll_workers(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Stage a discovered pair and return retry-stable node bootstraps."""
+        # Discovery must supply exactly two members.
         raw = data.get("members")
         if not isinstance(raw, list) or len(raw) != 2:
             return {"status": "ERROR",
                     "message": "DHCP HA discovery requires exactly 2 members"}
+        # Validate each member and collect its id/host.
         members = []
         seen = set()
         for index, item in enumerate(raw):
+            # Each entry must be an object.
             if not isinstance(item, dict):
                 return {"status": "ERROR", "message": "each member must be an object"}
+            # Id and host are required, and ids must be distinct.
             member_id = str(item.get("id") or item.get("member_id") or "").strip()
             host = str(item.get("host") or "").strip()
             if not member_id or not host or member_id in seen:
                 return {"status": "ERROR",
                         "message": "each member needs a distinct id and host"}
+            # Record it; the first member becomes primary, the second standby.
             seen.add(member_id)
             members.append({
                 "id": member_id,
@@ -266,6 +350,7 @@ class DHCPSpoke(BaseSpoke):
                 "role": "primary" if index == 0 else "standby",
             })
 
+        # Under the shared lock, reuse the current worker secret or generate one.
         async with self.cluster.transaction():
             cp = getattr(self, "control_plane", None)
             worker_secret = (
@@ -274,23 +359,28 @@ class DHCPSpoke(BaseSpoke):
                 else "")
             worker_secret = (
                 str(worker_secret or "").strip() or secrets.token_urlsafe(32))
+            # Is this the same pair (ids and hosts) as an already-staged enrollment?
             pending = self._pending_enrollment
             same_pair = [
                 (m.get("id"), m.get("host")) for m in pending.get("members", [])
             ] == [(m["id"], m["host"]) for m in members]
+            # Current topology, used for credential reuse and stale-enrollment detection.
             old_members = list(getattr(self._transport, "members", []) or [])
+            # HA user: reuse from the staged pair, then from current members, else "kea-ha".
             ha_user = (
                 str(pending.get("ha_user") or "").strip() if same_pair else ""
             ) or next(
                 (str(m.get("ha_user") or "").strip() for m in old_members
                  if str(m.get("ha_user") or "").strip()),
                 "kea-ha")
+            # HA password: reuse the same way, else generate a new one.
             ha_password = (
                 str(pending.get("ha_password") or "") if same_pair else ""
             ) or next(
                 (str(m.get("ha_password") or "") for m in old_members
                  if str(m.get("ha_password") or "")),
                 secrets.token_urlsafe(32))
+            # Give every member the credentials and the standard HA TLS file paths.
             for member in members:
                 member.update({
                     "ha_user": ha_user,
@@ -299,10 +389,12 @@ class DHCPSpoke(BaseSpoke):
                     "ha_cert": "/etc/kea/ha-tls/node.crt",
                     "ha_key": "/etc/kea/ha-tls/node.key",
                 })
+            # Make sure the pair is a valid HA topology.
             try:
                 build_peers(members, "hot-standby")
             except KeaHAConfigError as exc:
                 return {"status": "ERROR", "message": str(exc)}
+            # Stage the enrollment, tied to the topology it was started from.
             self._save_pending_enrollment({
                 "members": members,
                 "ha_user": ha_user,
@@ -310,34 +402,42 @@ class DHCPSpoke(BaseSpoke):
                 "base_topology": _topology_fingerprint(
                     old_members, self.cluster.mode),
             })
+            # Need a control plane that can store the worker secret.
             if cp is None or not hasattr(cp, "set_agent_secret"):
                 return {"status": "ERROR",
                         "message": "DHCP cluster control plane is unavailable"}
+            # Store the secret; fail if it could not be saved.
             if not cp.set_agent_secret(worker_secret):
                 return {
                     "status": "ERROR",
                     "message": "DHCP worker secret could not be persisted",
                 }
+            # Start the worker listener.
             listener = await cp.ensure_cluster_listener()
             if not listener.get("ok"):
                 return {"status": "ERROR", "listener": listener,
                         "message": "the DHCP cluster listener did not start: "
                                    + (listener.get("error") or "unknown error")}
 
+            # Read the coordinator's TLS certificate so workers can trust it.
             cert_path = Path(str(
                 getattr(cp, "_listener_cert", "") or
                 "/etc/lm-dhcp/tls/coordinator.crt"))
             try:
                 coordinator_ca_pem = cert_path.read_text(encoding="utf-8")
+            # Certificate unreadable: fail.
             except OSError as exc:
                 return {"status": "ERROR",
                         "message": f"could not read DHCP coordinator certificate: {exc}"}
+            # Must look like a PEM certificate.
             if "-----BEGIN CERTIFICATE-----" not in coordinator_ca_pem:
                 return {"status": "ERROR",
                         "message": "DHCP coordinator certificate is invalid"}
 
+            # Issue each member's HA certificate and build its bootstrap bundle.
             bootstraps = {}
             try:
+                # Certificate issuing is blocking, so run it in a thread.
                 for member in members:
                     material = await asyncio.to_thread(
                         issue_member_material, self._ha_pki_dir,
@@ -354,20 +454,30 @@ class DHCPSpoke(BaseSpoke):
                             m["host"] for m in members
                             if m["id"] != member["id"]],
                     }
+            # Issuing failed: log it with the traceback and fail.
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Could not issue DHCP HA member certificates")
                 return {"status": "ERROR",
                         "message": f"could not issue DHCP HA certificates: {exc}"}
+            # Return redacted members and the per-worker bootstraps.
             return {"status": "SUCCESS", "pending": True,
                     "members": _redact_members(members), "workers": bootstraps}
 
     async def _commit_worker_enrollment(self) -> Dict[str, Any]:
+        """Commit the staged enrollment once both workers have connected.
+
+        Returns:
+            The HA config result, or an error if nothing is staged, the topology changed,
+            or workers are still missing.
+        """
+        # Under the shared lock, a two-member enrollment must be staged.
         async with self.cluster.transaction():
             pending = self._pending_enrollment
             members = pending.get("members") or []
             if len(members) != 2:
                 return {"status": "ERROR",
                         "message": "No DHCP enrollment is pending"}
+            # Refuse if the topology changed since staging.
             current_topology = _topology_fingerprint(
                 self._transport.members, self.cluster.mode)
             if pending.get("base_topology") != current_topology:
@@ -376,12 +486,14 @@ class DHCPSpoke(BaseSpoke):
                     "message": "DHCP topology changed while enrollment was "
                                "pending; run discovery again",
                 }
+            # Both workers must be connected.
             cp = getattr(self, "control_plane", None)
             connected = set((getattr(cp, "connected_agents", None) or {}).keys())
             missing = [m["id"] for m in members if m["id"] not in connected]
             if missing:
                 return {"status": "ERROR", "waiting": missing,
                         "message": "Waiting for DHCP workers: " + ", ".join(missing)}
+            # Apply the staged pair; clear the staging only when it took effect.
             result = await self._apply_ha_config_locked(
                 members, {"members": members, "mode": "hot-standby"})
             if result.get("status") in ("SUCCESS", "PARTIAL"):
@@ -406,6 +518,7 @@ class DHCPSpoke(BaseSpoke):
         the previous members, mode and hook dir are restored in memory so the
         live coordinator never ends up on a half-applied topology.
         """
+        # Members must be supplied as a list.
         raw = data.get("members")
         if raw is None:
             return {"status": "ERROR", "message": "members is required"}
@@ -417,11 +530,22 @@ class DHCPSpoke(BaseSpoke):
         # stand down, a node the other transaction is mid-way through).
         async with self.cluster.transaction():
             result = await self._apply_ha_config_locked(raw, data)
+            # Optionally drop a staged enrollment once this config took effect.
             if cancel_pending and result.get("status") in ("SUCCESS", "PARTIAL"):
                 self._clear_pending_enrollment()
             return result
 
     async def _apply_ha_config_locked(self, raw, data) -> Dict[str, Any]:
+        """Apply a new HA topology; caller holds the transaction lock.
+
+        Args:
+            raw: New member list.
+            data: Request data (mode, hook_dir, worker_secret, ...).
+
+        Returns:
+            Result dict; on any failure the previous topology and secret are restored.
+        """
+        # Remember the current topology so failures can restore it.
         previous = {
             "members": [dict(m) for m in self._transport.members],
             "mode": self.cluster.mode,
@@ -429,17 +553,22 @@ class DHCPSpoke(BaseSpoke):
         }
 
         def _restore():
+            """Put the previous members, mode and hook directory back."""
+            # Restore every field changed below.
             self._transport.set_members(previous["members"])
             self.cluster.mode = previous["mode"]
             self._hook_dir = previous["hook_dir"]
             self.cluster.hook_dir = previous["hook_dir"]
 
+        # Fill omitted write-only fields from the stored members, then install them.
         merged = _merge_preserved(raw, previous["members"])
         members = self._transport.set_members(merged)
+        # A non-empty list with no usable members is rejected.
         if raw and not members:
             _restore()
             return {"status": "ERROR",
                     "message": "no usable members — each needs a non-empty id"}
+        # Optional mode change; only supported modes are accepted.
         if "mode" in data:
             try:
                 self.cluster.mode = normalize_mode(data.get("mode"))
@@ -447,6 +576,7 @@ class DHCPSpoke(BaseSpoke):
                 _restore()
                 return {"status": "ERROR", "message": str(e),
                         "supported_modes": ["hot-standby"]}
+        # Optional hook directory change.
         if "hook_dir" in data:
             self._hook_dir = str(data.get("hook_dir") or "")
             self.cluster.hook_dir = self._hook_dir
@@ -461,6 +591,7 @@ class DHCPSpoke(BaseSpoke):
                 return {"status": "ERROR", "message": str(e)}
 
         # Enabling requires a usable worker PSK. Refuse rather than mint one.
+        # Worker secret handling.
         cp = getattr(self, "control_plane", None)
         secret = str(data.get("worker_secret") or "").strip()
         enabling = len(members) >= 2
@@ -498,8 +629,10 @@ class DHCPSpoke(BaseSpoke):
                               "write-only and preserved when you re-save without "
                               "retyping it.")}
 
+        # Members being removed in this change.
         removing = [m["id"] for m in previous["members"]
                     if m.get("id") not in {n["id"] for n in members}]
+        # Persist the topology; restore everything if that fails.
         try:
             save_cluster_config(self._cluster_config_path, members,
                                 self.cluster.mode, self._hook_dir)
@@ -519,9 +652,12 @@ class DHCPSpoke(BaseSpoke):
             cp.set_agent_secret(secret)
 
         def _restore_secret():
+            """Put back the worker secret that was in force before this change."""
+            # Only if a secret was replaced and the control plane can restore it.
             if previous_secret is not None and hasattr(cp, "restore_agent_secret"):
                 cp.restore_agent_secret(previous_secret)
 
+        # Start (or confirm) the worker listener; older cores return a bare bool.
         listener = {"ok": True, "serving": False, "endpoint": "", "error": ""}
         if cp is not None and hasattr(cp, "ensure_cluster_listener"):
             listener = await cp.ensure_cluster_listener() or listener
@@ -544,11 +680,13 @@ class DHCPSpoke(BaseSpoke):
                     "message": (f"the DHCP cluster listener did not start: "
                                 f"{listener.get('error') or 'unknown error'}")}
 
+        # Ask removed nodes to stand down and build the result.
         stood_down, unreachable = await self._standdown_removed(removing)
         result = {"status": "SUCCESS", "members": _redact_members(members),
                   "mode": self.cluster.mode,
                   "cluster_enabled": self.cluster.enabled,
                   "listener": {**self._listener_hint(), **listener}}
+        # Report removed nodes; any unreachable one makes the result PARTIAL.
         if removing:
             result["removed"] = removing
             result["removed_stood_down"] = stood_down
@@ -565,10 +703,12 @@ class DHCPSpoke(BaseSpoke):
 
     async def _standdown_removed(self, removed):
         """Ask removed nodes to leave the pair; report the ones we could not."""
+        # Ask each removed node to stand down and sort them by outcome.
         stood_down, unreachable = [], []
         for member_id in removed or []:
             reply = await self._transport.call(member_id, "KEAW_STANDDOWN", {},
                                                timeout=20.0)
+            # Only an explicit SUCCESS counts as stood down.
             if isinstance(reply, dict) and reply.get("status") == "SUCCESS":
                 stood_down.append(member_id)
             else:
@@ -576,6 +716,12 @@ class DHCPSpoke(BaseSpoke):
         return stood_down, unreachable
 
     def _listener_hint(self) -> Dict[str, Any]:
+        """Describe where workers should connect.
+
+        Returns:
+            Dict with the agent port, path and whether the listener is serving.
+        """
+        # Port from the environment, fixed path, and whether the server task exists.
         cp = getattr(self, "control_plane", None)
         return {"port": int(os.environ.get("LM_DHCP_AGENT_PORT", "8770")),
                 "path": "/ws/agent",
@@ -588,18 +734,22 @@ class DHCPSpoke(BaseSpoke):
         the existing Diagnostics panels keep rendering real data; ``healthy``
         requires every node healthy AND the pair in sync.
         """
+        # Cluster status without its own status key.
         report = (await self.cluster.status()).copy()
         report.pop("status", None)
+        # Ask every node for diagnostics; malformed replies become errors.
         fan = await self._transport.fanout("KEAW_DIAGNOSTICS", {}, timeout=25.0)
         per_member: Dict[str, Any] = {}
         for member_id, reply in (fan.get("results") or {}).items():
             per_member[member_id] = reply if isinstance(reply, dict) else {
                 "status": "ERROR", "message": "malformed reply"}
 
+        # Use the first healthy-replying node as the top-level evidence source.
         source = next((m["id"] for m in report.get("members", [])
                        if (per_member.get(m["id"]) or {}).get("status") == "SUCCESS"), "")
         base: Dict[str, Any] = dict(per_member.get(source) or {})
         base.pop("member_id", None)
+        # Gather per-node recommendations, tagging each with its node id.
         recommendations: List[str] = []
         for member_id, diag in per_member.items():
             if diag.get("status") != "SUCCESS":
@@ -609,8 +759,10 @@ class DHCPSpoke(BaseSpoke):
                 continue
             for rec in diag.get("recommendations") or []:
                 recommendations.append(f"[{member_id}] {rec}")
+        # Add the cluster-level recommendations.
         recommendations.extend(report.get("recommendations") or [])
 
+        # Healthy only if every node replied SUCCESS and healthy.
         members_healthy = bool(per_member) and all(
             d.get("status") == "SUCCESS" and d.get("healthy")
             for d in per_member.values())
@@ -637,6 +789,7 @@ class DHCPSpoke(BaseSpoke):
         trace is returned under ``members``; the top-level verdict is the
         node that got furthest through the exchange.
         """
+        # Run the trace on every node, allowing the capture time plus slack.
         args = _packet_trace_args(data)
         fan = await self._transport.fanout(
             "KEAW_PACKET_TRACE", args, timeout=args["capture_seconds"] + 30.0)
@@ -644,11 +797,13 @@ class DHCPSpoke(BaseSpoke):
         for member_id, reply in (fan.get("results") or {}).items():
             members[member_id] = reply if isinstance(reply, dict) else {
                 "status": "ERROR", "message": "malformed reply"}
+        # Keep successful traces; fail if none.
         ok = {m: r for m, r in members.items() if r.get("status") == "SUCCESS"}
         if not ok:
             errors = "; ".join(f"[{m}] {r.get('message') or r.get('error') or 'no response'}"
                                for m, r in members.items()) or "no DHCP node answered"
             return {"status": "ERROR", "message": f"packet trace failed: {errors}"}
+        # Use the node whose verdict got furthest as the top-level result.
         best = max(ok, key=lambda m: VERDICT_RANK.get(
             (ok[m].get("verdict") or {}).get("code"), -1))
         out = dict(ok[best])
@@ -658,6 +813,7 @@ class DHCPSpoke(BaseSpoke):
 
     async def _ha_stats(self) -> Dict[str, Any]:
         """Per-node Kea statistics plus summed pool/packet totals."""
+        # Ask every node for stats and set up the summed totals.
         fan = await self._transport.fanout("KEAW_STATS", {}, timeout=20.0)
         per_member: Dict[str, Any] = {}
         totals = {"total_addresses": 0, "assigned_addresses": 0,
@@ -671,6 +827,7 @@ class DHCPSpoke(BaseSpoke):
         # every scope twice in the Overview tab (one row per node).
         subnet_totals: Dict[Any, Dict[str, Any]] = {}
         subnet_hits: Dict[Any, int] = {}
+        # Sum each successful node's global counters and collect per-subnet numbers.
         for member_id, reply in (fan.get("results") or {}).items():
             per_member[member_id] = reply
             if not isinstance(reply, dict) or reply.get("status") != "SUCCESS":
@@ -689,6 +846,7 @@ class DHCPSpoke(BaseSpoke):
                                     "declined_addresses"):
                         subnet_totals[key][num_key] = (
                             subnet_totals[key].get(num_key, 0) + sub.get(num_key, 0))
+        # Average the per-subnet numbers across nodes and compute utilization.
         subnets: List[Dict[str, Any]] = []
         for key, sub in subnet_totals.items():
             hits = max(1, subnet_hits[key])
@@ -698,6 +856,7 @@ class DHCPSpoke(BaseSpoke):
                 round(sub["assigned_addresses"] / sub["total_addresses"] * 100, 1)
                 if sub.get("total_addresses") else 0.0)
             subnets.append(sub)
+        # Sort subnets by id.
         subnets.sort(key=lambda s: s.get("subnet_id") if s.get("subnet_id") is not None else 0)
         # Pool capacity is the SAME address space on both nodes — summing it
         # would double-count. Report one node's view of capacity/usage.
@@ -705,6 +864,7 @@ class DHCPSpoke(BaseSpoke):
                                 if isinstance(r, dict) and r.get("status") == "SUCCESS"))
         for key in ("total_addresses", "assigned_addresses", "declined_addresses"):
             totals[key] = totals[key] // node_count
+        # Overall utilization.
         totals["utilization_pct"] = (
             round(totals["assigned_addresses"] / totals["total_addresses"] * 100, 1)
             if totals["total_addresses"] else 0.0)
@@ -720,14 +880,17 @@ class DHCPSpoke(BaseSpoke):
         node that fails is surfaced in ``member_errors`` rather than silently
         shrinking the answer.
         """
+        # Ask every node and merge their lists.
         fan = await self._transport.fanout(command, payload, timeout=20.0)
         merged: List[Any] = []
         seen = set()
         errors: Dict[str, str] = {}
+        # Record failed nodes and skip them.
         for member_id, reply in (fan.get("results") or {}).items():
             if not isinstance(reply, dict) or reply.get("status") != "SUCCESS":
                 errors[member_id] = (reply or {}).get("message") or "no response"
                 continue
+            # Deduplicate by address/subnet, or by full content when neither is present.
             for item in reply.get(list_key) or []:
                 if isinstance(item, dict):
                     key = (item.get("ip") or item.get("ip-address")
@@ -751,11 +914,13 @@ class DHCPSpoke(BaseSpoke):
         before the lock, let two concurrent edits start from the same base and
         the second silently discard the first.
         """
+        # Apply the reservation change inside the coordinator's lock.
         action = "delete" if cmd == "DHCP_DEL_RES" else "upsert"
         res = await self.cluster.mutate_reservation(action, data)
         if res.get("status") != "SUCCESS" or action == "delete":
             return res
 
+        # After an upsert, purge the client's old leases so it moves to the reserved address.
         ip = data.get("ip")
         old_ip = data.get("old_ip")
         mac = data.get("mac")
@@ -763,6 +928,7 @@ class DHCPSpoke(BaseSpoke):
             purged, errors = await self._purge_client_leases(ip, old_ip, mac)
         except Exception as e:  # noqa: BLE001
             purged, errors = [], {"coordinator": str(e)}
+        # Report the purge outcome.
         res["lease_purge"] = {"purged": purged, "errors": errors}
         if errors:
             # Writing the reservation is only half the job: while the client
@@ -794,26 +960,31 @@ class DHCPSpoke(BaseSpoke):
         FAILED — left a live lease behind with nothing logged anywhere.
         Returns ``(purged, errors)``.
         """
+        # Ask every node to purge leases for the new IP, old IP and MAC.
         reply = await self.cluster.transport.fanout(
             "KEAW_DEL_LEASE", {"ip": ip, "old_ip": old_ip, "mac": mac})
         purged, errors = set(), {}
+        # Collect purged addresses and per-node errors.
         for member_id, r in (reply.get("results") or {}).items():
             r = r if isinstance(r, dict) else {}
             if r.get("status") == "SUCCESS":
                 purged.update(r.get("purged") or [])
             else:
                 errors[member_id] = r.get("message") or "lease purge failed"
+        # No replies at all counts as an error.
         if not reply.get("results"):
             errors["cluster"] = reply.get("message") or "no node answered the lease purge"
         return sorted(purged), errors
 
     async def _ha_reservation6(self, cmd: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """The DHCPv6 mirror of :meth:`_ha_reservation`."""
+        # Apply the v6 reservation change inside the coordinator's lock.
         action = "delete" if cmd == "DHCP_DEL_RES6" else "upsert"
         res = await self.cluster.mutate_reservation6(action, data)
         if res.get("status") != "SUCCESS" or action == "delete":
             return res
 
+        # After an upsert, purge the client's old v6 leases.
         ip = data.get("ip")
         old_ip = data.get("old_ip")
         mac = data.get("mac")
@@ -821,6 +992,7 @@ class DHCPSpoke(BaseSpoke):
             purged, errors = await self._purge_client_leases6(ip, old_ip, mac)
         except Exception as e:  # noqa: BLE001
             purged, errors = [], {"coordinator": str(e)}
+        # Report the purge outcome; any error makes the result PARTIAL.
         res["lease_purge"] = {"purged": purged, "errors": errors}
         if errors:
             logger.warning(
@@ -837,25 +1009,40 @@ class DHCPSpoke(BaseSpoke):
 
     async def _purge_client_leases6(self, ip, old_ip, mac):
         """The DHCPv6 mirror of :meth:`_purge_client_leases`."""
+        # Ask every node to purge v6 leases for the new IP, old IP and MAC.
         reply = await self.cluster.transport.fanout(
             "KEAW_DEL_LEASE6", {"ip": ip, "old_ip": old_ip, "mac": mac})
         purged, errors = set(), {}
+        # Collect purged addresses and per-node errors.
         for member_id, r in (reply.get("results") or {}).items():
             r = r if isinstance(r, dict) else {}
             if r.get("status") == "SUCCESS":
                 purged.update(r.get("purged") or [])
             else:
                 errors[member_id] = r.get("message") or "lease purge failed"
+        # No replies at all counts as an error.
         if not reply.get("results"):
             errors["cluster"] = reply.get("message") or "no node answered the lease purge"
         return sorted(purged), errors
 
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Dispatch a hub command to the HA cluster or the local Kea instance.
+
+        Args:
+            command_type: Command name (case-insensitive).
+            data: Command payload.
+
+        Returns:
+            The command's result dict.
+        """
+        # Commands are matched in upper case.
         cmd = command_type.upper()
 
+        # Version query.
         if cmd == "GET_VERSION":
             return {"status": "SUCCESS", "version": self.get_version()}
 
+        # HA topology and enrollment commands.
         if cmd == "DHCP_HA_CONFIG":
             return await self._apply_ha_config(data, cancel_pending=True)
 
@@ -865,6 +1052,7 @@ class DHCPSpoke(BaseSpoke):
         if cmd == "DHCP_HA_COMMIT_ENROLLMENT":
             return await self._commit_worker_enrollment()
 
+        # HA status; report "disabled" when no pair is configured.
         if cmd == "DHCP_HA_STATUS":
             if not self.cluster.enabled:
                 return {"status": "SUCCESS", "enabled": False, "members": [],
@@ -873,6 +1061,7 @@ class DHCPSpoke(BaseSpoke):
                         "reason": "no Kea HA pair configured"}
             return await self.cluster.status()
 
+        # Re-apply the last synced v4 config to the pair.
         if cmd == "DHCP_HA_APPLY":
             if not self.cluster.enabled:
                 return {"status": "ERROR", "message": "Kea HA is not enabled"}
@@ -888,6 +1077,7 @@ class DHCPSpoke(BaseSpoke):
             return await self.cluster.apply(desired.get("subnets") or [],
                                             desired.get("reservations") or [])
 
+        # HA status for DHCPv6.
         if cmd == "DHCP_HA_STATUS6":
             if not self.cluster.enabled:
                 return {"status": "SUCCESS", "enabled": False, "members": [],
@@ -896,6 +1086,7 @@ class DHCPSpoke(BaseSpoke):
                         "reason": "no Kea HA pair configured"}
             return await self.cluster.status6()
 
+        # Re-apply the last synced v6 config to the pair.
         if cmd == "DHCP_HA_APPLY6":
             if not self.cluster.enabled:
                 return {"status": "ERROR", "message": "Kea HA is not enabled"}
@@ -914,16 +1105,20 @@ class DHCPSpoke(BaseSpoke):
                              "DHCP_DEL_LEASE6", "DHCP_ADD_RES6", "DHCP_DEL_RES6",
                              "DHCP_LIST_RES6")
         if cmd in _DHCP6_HA_COMMANDS and self.cluster.enabled:
+            # Push the v6 config to both nodes.
             if cmd == "DHCP_SYNC6":
                 return await self.cluster.apply6(data.get("subnets", []),
                                                  data.get("reservations", []))
+            # v6 reservation changes.
             if cmd in ("DHCP_ADD_RES6", "DHCP_DEL_RES6"):
                 return await self._ha_reservation6(cmd, data)
+            # v6 list queries merged across nodes.
             if cmd == "DHCP_LIST_SUBNETS6":
                 return await self._ha_list("KEAW_LIST_SUBNETS6", {}, "subnets")
             if cmd == "DHCP_LIST_LEASES6":
                 return await self._ha_list("KEAW_LIST_LEASES6",
                                            {"subnet": data.get("subnet")}, "leases")
+            # Delete a v6 lease on every node.
             if cmd == "DHCP_DEL_LEASE6":
                 ip = data.get("ip") or data.get("ip-address")
                 if not ip:
@@ -936,6 +1131,7 @@ class DHCPSpoke(BaseSpoke):
                     return {"status": "ERROR", "results": {},
                             "message": fan.get("message")
                             or "no node answered the DHCPv6 lease purge"}
+                # Collect per-node failures; all failing is ERROR, some failing is PARTIAL.
                 member_errors = {}
                 for member_id, r in results.items():
                     if not isinstance(r, dict):
@@ -950,35 +1146,43 @@ class DHCPSpoke(BaseSpoke):
                             "message": ("DHCPv6 lease purge failed on "
                                         + ", ".join(sorted(member_errors)))}
                 return {"status": "SUCCESS", "results": results}
+            # v6 reservation listing.
             if cmd == "DHCP_LIST_RES6":
                 return await self._ha_list("KEAW_LIST_RES6", {}, "reservations")
 
         # ── HA path: both nodes are configured as one transaction ───────────
         if self.cluster.enabled:
+            # Push the v4 config to both nodes.
             if cmd == "DHCP_SYNC":
                 return await self.cluster.apply(data.get("subnets", []),
                                                 data.get("reservations", []))
+            # v4 reservation changes.
             if cmd in ("DHCP_ADD_RES", "DHCP_UPDATE_RES", "DHCP_DEL_RES"):
                 return await self._ha_reservation(cmd, data)
+            # v4 list queries merged across nodes.
             if cmd == "DHCP_LIST_SUBNETS":
                 return await self._ha_list("KEAW_LIST_SUBNETS", {}, "subnets")
             if cmd == "DHCP_LIST_LEASES":
                 return await self._ha_list("KEAW_LIST_LEASES",
                                            {"subnet": data.get("subnet")}, "leases")
+            # Delete a v4 lease on every node.
             if cmd == "DHCP_DEL_LEASE":
                 ip = data.get("ip") or data.get("ip-address")
                 if not ip:
                     return {"status": "ERROR", "message": "ip is required"}
                 fan = await self.cluster.transport.fanout("KEAW_DEL_LEASE", {"ip": ip})
                 return {"status": "SUCCESS", "results": fan.get("results", {})}
+            # v4 reservation listing.
             if cmd == "DHCP_LIST_RES":
                 return await self._ha_list("KEAW_LIST_RES", {}, "reservations")
+            # Diagnostics, packet trace and stats across the pair.
             if cmd == "DHCP_DIAGNOSTICS":
                 return await self._ha_diagnostics()
             if cmd == "DHCP_PACKET_TRACE":
                 return await self._ha_packet_trace(data)
             if cmd == "DHCP_STATS":
                 return await self._ha_stats()
+            # Service status built from the cluster report.
             if cmd == "DHCP_STATUS":
                 report = await self.cluster.status()
                 return {"status": "SUCCESS",
@@ -1011,6 +1215,7 @@ class DHCPSpoke(BaseSpoke):
             reservations = data.get("reservations", [])
             return await asyncio.to_thread(self.mgr.sync, subnets, reservations)
 
+        # Single-node v4 list queries.
         if cmd == "DHCP_LIST_SUBNETS":
             subnets = await asyncio.to_thread(self.mgr.list_subnets)
             return {"status": "SUCCESS", "subnets": subnets}
@@ -1020,12 +1225,14 @@ class DHCPSpoke(BaseSpoke):
             leases = await asyncio.to_thread(self.mgr.list_leases, subnet)
             return {"status": "SUCCESS", "leases": leases}
 
+        # Delete one v4 lease.
         if cmd == "DHCP_DEL_LEASE":
             ip = data.get("ip") or data.get("ip-address")
             if not ip:
                 return {"status": "ERROR", "message": "ip is required"}
             return await asyncio.to_thread(self.mgr.delete_lease, ip)
 
+        # Add a v4 reservation; subnet, IP and MAC are required.
         if cmd == "DHCP_ADD_RES":
             subnet_id = data.get("subnet_id")
             ip        = data.get("ip")
@@ -1035,10 +1242,12 @@ class DHCPSpoke(BaseSpoke):
                 return {"status": "ERROR", "message": "subnet_id, ip, and mac are required"}
             return await asyncio.to_thread(self.mgr.add_reservation, int(subnet_id), ip, mac, hostname)
 
+        # List v4 reservations.
         if cmd == "DHCP_LIST_RES":
             reservations = await asyncio.to_thread(self.mgr.list_reservations)
             return {"status": "SUCCESS", "reservations": reservations}
 
+        # Update a v4 reservation, identified by its old IP.
         if cmd == "DHCP_UPDATE_RES":
             old_ip    = data.get("old_ip") or data.get("ip")
             subnet_id = data.get("subnet_id")
@@ -1051,6 +1260,7 @@ class DHCPSpoke(BaseSpoke):
                 return {"status": "ERROR", "message": "subnet_id, ip, and mac are required"}
             return await asyncio.to_thread(self.mgr.update_reservation, old_ip, int(subnet_id), ip, mac, hostname)
 
+        # Delete a v4 reservation.
         if cmd == "DHCP_DEL_RES":
             ip = data.get("ip")
             if not ip:
@@ -1063,6 +1273,7 @@ class DHCPSpoke(BaseSpoke):
             reservations = data.get("reservations", [])
             return await asyncio.to_thread(self.mgr.sync6, subnets, reservations)
 
+        # Single-node v6 list queries.
         if cmd == "DHCP_LIST_SUBNETS6":
             subnets = await asyncio.to_thread(self.mgr.list_subnets6)
             return {"status": "SUCCESS", "subnets": subnets}
@@ -1072,12 +1283,14 @@ class DHCPSpoke(BaseSpoke):
             leases = await asyncio.to_thread(self.mgr.list_leases6, subnet)
             return {"status": "SUCCESS", "leases": leases}
 
+        # Delete one v6 lease.
         if cmd == "DHCP_DEL_LEASE6":
             ip = data.get("ip") or data.get("ip-address")
             if not ip:
                 return {"status": "ERROR", "message": "ip is required"}
             return await asyncio.to_thread(self.mgr.delete_lease6, ip)
 
+        # Add a v6 reservation; subnet, IP and MAC are required.
         if cmd == "DHCP_ADD_RES6":
             subnet_id = data.get("subnet_id")
             ip        = data.get("ip")
@@ -1087,16 +1300,19 @@ class DHCPSpoke(BaseSpoke):
                 return {"status": "ERROR", "message": "subnet_id, ip, and mac are required"}
             return await asyncio.to_thread(self.mgr.add_reservation6, int(subnet_id), ip, mac, hostname)
 
+        # List v6 reservations.
         if cmd == "DHCP_LIST_RES6":
             reservations = await asyncio.to_thread(self.mgr.list_reservations6)
             return {"status": "SUCCESS", "reservations": reservations}
 
+        # Delete a v6 reservation.
         if cmd == "DHCP_DEL_RES6":
             ip = data.get("ip")
             if not ip:
                 return {"status": "ERROR", "message": "ip is required"}
             return await asyncio.to_thread(self.mgr.delete_reservation6, ip)
 
+        # Status, diagnostics, packet trace and stats from local Kea.
         if cmd == "DHCP_STATUS":
             s = await asyncio.to_thread(self.mgr.status)
             return {"status": "SUCCESS", **s}
@@ -1112,11 +1328,18 @@ class DHCPSpoke(BaseSpoke):
         if cmd == "DHCP_STATS":
             return await asyncio.to_thread(self.mgr.get_stats)
 
+        # Anything else is unknown.
         return {"status": "ERROR", "error": f"Unknown command: {command_type}"}
 
     async def get_status(self) -> Dict[str, Any]:
+        """Return the telemetry summary the hub polls.
+
+        Returns:
+            Dict with spoke id, Kea state, subnet count, optional cluster info and health.
+        """
         # Polled by the hub for telemetry — offload the sync Kea CA RPC off the
         # shared loop (same reason as handle_command).
+        # HA mode: summarize the pair from the cached cluster report.
         if self.cluster.enabled:
             report = self.cluster.report()
             reachable = report["member_count"] - len(report["unreachable"])
@@ -1137,6 +1360,7 @@ class DHCPSpoke(BaseSpoke):
                 # half-configured pair must never render green.
                 "status": "HEALTHY" if report["healthy"] else "DEGRADED",
             }
+        # Single-host mode: summarize local Kea.
         s = await asyncio.to_thread(self.mgr.status)
         return {
             "spoke_id":     self.spoke_id,
@@ -1147,8 +1371,15 @@ class DHCPSpoke(BaseSpoke):
         }
 
     def get_version(self) -> str:
+        """Return this module's version.
+
+        Returns:
+            Contents of the VERSION file, or "unknown" if it cannot be read.
+        """
+        # Read VERSION from the module root.
         from pathlib import Path
         try:
             return (Path(__file__).parent.parent / "VERSION").read_text().strip()
+        # Missing or unreadable file.
         except Exception:
             return "unknown"

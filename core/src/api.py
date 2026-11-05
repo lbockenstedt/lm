@@ -84,6 +84,8 @@ a bare ``raise HTTPException(500, detail=str(e))`` so hub logs capture the trace
 (a handful of older sites still lack it — add it when you touch them).
 """
 
+# Standard-library modules used across the hub API: files, regexes, TLS, async, encoding,
+# JSON, time, ids, logging, hashing, secure tokens and IP parsing.
 import os
 import re
 import ssl
@@ -97,6 +99,7 @@ import logging
 import hashlib
 import secrets
 import ipaddress
+# FastAPI app, errors, request and WebSocket types.
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 # Shared logging runtime toggle (lm/core/src/logging_setup.py). Used by the
@@ -109,15 +112,18 @@ except ImportError:
         from core.src.logging_setup import set_log_level
     except ImportError:
         def set_log_level(enabled):  # minimal fallback (hub always has core/src)
+            """Fallback: set the root and every known logger to DEBUG or INFO; return the level."""
             import logging as _logging
             lvl = _logging.DEBUG if enabled else _logging.INFO
             _logging.getLogger().setLevel(lvl)
             for _n in list(_logging.root.manager.loggerDict):
                 _logging.getLogger(_n).setLevel(lvl)
             return lvl
+# Response types, CORS middleware, and Starlette's WebSocket state enum.
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
+# Type hints.
 from typing import Any, Dict
 # NOTE: any typing name used in an annotation on a nested `def` inside
 # create_app() (e.g. ``Dict[str, Any]``) MUST be imported here at module scope.
@@ -126,9 +132,11 @@ from typing import Any, Dict
 # .117→.121 regression. ``str | None`` (PEP 604) in nested-def return annotations
 # also evaluates at def-time and needs Python 3.10+ (prod is 3.11; the dev box
 # is 3.9, so prefer ``Optional[X]`` over ``X | None`` in nested defs).
+# uvicorn serves the app; websockets is the WS library the hub's spoke code was written for.
 import uvicorn
 import websockets
 
+# Hub logger.
 logger = logging.getLogger("Hub")
 
 
@@ -147,6 +155,8 @@ class StarletteWSAdapter:
     """
 
     def __init__(self, websocket: WebSocket):
+        """Wrap the Starlette WebSocket with a send lock and empty probe/peer-cert state."""
+        # Underlying Starlette socket and a lock so sends never interleave.
         self._ws = websocket
         self._send_lock = asyncio.Lock()
         # App-layer liveness probe wiring (see _install_active_connection's
@@ -174,6 +184,7 @@ class StarletteWSAdapter:
 
     @property
     def remote_address(self):
+        """Peer (host, port) as a tuple, or None before accept."""
         client = self._ws.client  # (host, port) tuple or None pre-accept
         return tuple(client) if client else None
 
@@ -199,9 +210,11 @@ class StarletteWSAdapter:
         return "CLOSED"
 
     async def recv(self) -> str:
+        """Receive one text frame."""
         return await self._ws.receive_text()
 
     async def send(self, data: str) -> None:
+        """Send one text frame, serialised with the send lock."""
         async with self._send_lock:
             await self._ws.send_text(data)
 
@@ -209,10 +222,12 @@ class StarletteWSAdapter:
         # A close mid-probe cancels outstanding ping waiters so a liveness check
         # blocked on this socket resolves to "dead" (CancelledError → the probe's
         # except → alive=False) instead of hanging until its 2s timeout.
+        """Cancel pending pings, then close the socket; errors are ignored."""
         for fut in list(self._pending_pongs.values()):
             if not fut.done():
                 fut.cancel()
         self._pending_pongs.clear()
+        # Close under the send lock; ignore errors on an already-closed socket.
         try:
             async with self._send_lock:
                 await self._ws.close(code=code, reason=reason)
@@ -238,6 +253,7 @@ class StarletteWSAdapter:
             # No signing context (pending/unauthenticated) → not probeable;
             # treat as dead so the caller falls through to evict/zombie handling.
             raise ConnectionError("liveness probe unavailable (no probe sender)")
+        # Fresh nonce and a future for the matching pong.
         nonce = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()
         # Send BEFORE registering: a reply can't predate a successful send, and
@@ -250,11 +266,13 @@ class StarletteWSAdapter:
         """Resolve the ping waiter for ``nonce`` (the hub's inbound dispatch
         calls this when a HUB_PONG / COMMAND_RESULT carrying the ping's
         message_id arrives). No-op if unknown/already resolved (late/dup pong)."""
+        # Resolve the waiter if it is still pending.
         fut = self._pending_pongs.pop(nonce, None)
         if fut is not None and not fut.done():
             fut.set_result(None)
 
     def __aiter__(self):
+        """Async-iterator protocol: the adapter is its own iterator."""
         return self
 
     async def __anext__(self) -> str:
@@ -262,13 +280,16 @@ class StarletteWSAdapter:
         # (async-for only catches StopAsyncIteration) so handle_connection's
         # ``except`` clean-close branch runs — sets telemetry DISCONNECTED and
         # records the connection_closed event, matching the websockets-lib path.
+        """Return the next text message; a disconnect propagates to end the loop."""
         return await self._ws.receive_text()
 
 
+# Spoke message types and the Simulations UI routes and tenant filter.
 from messaging.protocol import Message, MessageHeader, MessagePayload
 from simulations.routes import register_simulations_routes
 from simulations.tenant_filter import filter_items_by_prefixes
 
+# Access control, API tokens and VM id allocation.
 import access
 import api_tokens
 import vmid_alloc
@@ -319,6 +340,7 @@ async def persist_on_shutdown(hub):
     """Graceful-shutdown flush: cache writes are debounced and state
     mutations are dirty-flagged (60s persistence loop) — persist them all
     now so a clean stop loses no coalesced writes."""
+    # Flush each cache and the state; log any failure and continue.
     for name, flush in (("nw-cache", hub.nw_cache_flush_now),
                         ("le-cache", hub.le_cache_flush_now),
                         ("truenas-cache", hub.truenas_cache_flush_now),
@@ -346,9 +368,11 @@ def _load_trusted_proxies() -> tuple:
     safe: with no trusted proxies configured, XFF is ignored and the peer IP
     is used (so a misconfigured deploy self-DoSes rather than becoming
     spoofable)."""
+    # Read the env var.
     raw = os.environ.get("LM_TRUSTED_PROXIES", "").strip()
     nets = []
     if raw:
+        # Parse each token as an IP network; skip bad ones with a warning.
         for tok in re.split(r"[,\s]+", raw):
             tok = tok.strip()
             if not tok:
@@ -360,10 +384,13 @@ def _load_trusted_proxies() -> tuple:
     return tuple(nets), raw
 
 
+# Parse the trusted proxies once at import.
 _TRUSTED_PROXY_NETS, _TRUSTED_PROXIES_RAW = _load_trusted_proxies()
 
 
 def _ip_in_trusted(ip: str) -> bool:
+    """Whether an IP address falls inside a trusted proxy network."""
+    # Bad input is never trusted.
     try:
         addr = ipaddress.ip_address(ip)
     except (ValueError, TypeError):
@@ -373,9 +400,11 @@ def _ip_in_trusted(ip: str) -> bool:
 
 def _install_secret_token() -> str:
     """Local install token for loopback-only setup mutations."""
+    # Prefer the environment.
     tok = (os.environ.get("LM_INSTALL_SECRET") or os.environ.get("LM_SETUP_TOKEN") or "").strip()
     if tok:
         return tok
+    # Else read it from the .env file.
     env_path = os.environ.get("LM_ENV_FILE", "/opt/lm/.env")
     try:
         with open(env_path, "r", encoding="utf-8") as f:
@@ -392,6 +421,8 @@ def _install_secret_token() -> str:
 
 
 def _is_loopback_peer(request: Request) -> bool:
+    """Whether the request's TCP peer is a loopback address."""
+    # Peer host; fall back to name matching if it isn't an IP.
     peer = (request.client.host if request.client else "") or ""
     try:
         return ipaddress.ip_address(peer).is_loopback
@@ -401,8 +432,10 @@ def _is_loopback_peer(request: Request) -> bool:
 
 def _is_loopback_install_request(request: Request) -> bool:
     """Allow only hub-local install scripts carrying the install/setup token."""
+    # Must come from loopback.
     if not _is_loopback_peer(request):
         return False
+    # Compare the supplied header token with the install secret in constant time.
     expected = _install_secret_token()
     supplied = (request.headers.get("x-install-token")
                 or request.headers.get("x-setup-token")
@@ -422,11 +455,14 @@ def _client_ip(request: Request) -> str:
     there's no trusted-proxy config at all, return the peer (fail-safe: a
     misconfigured Azure deploy self-DoSes the per-IP limiter rather than
     trusting spoofable XFF)."""
+    # TCP peer.
     peer = (request.client.host if request.client else "") or "unknown"
+    # No trusted proxies, or the peer isn't one: use the peer and ignore XFF.
     if not _TRUSTED_PROXY_NETS:
         return peer
     if not _ip_in_trusted(peer):
         return peer
+    # Parse the X-Forwarded-For chain.
     xff = request.headers.get("x-forwarded-for", "")
     if not xff:
         return peer
@@ -450,10 +486,14 @@ def _trusted_bind_networks():
     # The operator's shared trusted list (e.g. their Zscaler range) doubles as
     # "one client" for the session bind, so egress hops across /24s don't read
     # as a cookie hijack.
+    """Trusted networks from the threat monitor's allowlist, so hops within them count as one
+    client.
+    """
     tm = getattr(_MODULE_HUB, "threat_monitor", None)
     return tm._allowlist_ips() if tm else []
 
 
+# Hand that provider to the access layer.
 access.set_bind_networks_provider(_trusted_bind_networks)
 
 
@@ -490,11 +530,13 @@ def _cookie_secure() -> bool:
     TLS-terminating Azure front end that doesn't forward ``X-Forwarded-Proto``,
     set ``LM_COOKIE_SECURE=1`` explicitly so the cookie isn't replayed over any
     http hop."""
+    # Explicit setting wins.
     v = os.environ.get("LM_COOKIE_SECURE", "").strip().lower()
     if v in ("1", "true", "yes", "on"):
         return True
     if v in ("0", "false", "no", "off"):
         return False
+    # Otherwise on when a TLS cert is configured.
     return bool(os.environ.get("LM_TLS_CERT", "").strip())
 
 
@@ -509,6 +551,7 @@ def _record_session(hub, user_data: dict, bind_ip: str = "") -> str:
     a stolen/synced cookie; see ``access.session_user``). Binding at LOGIN
     (rather than first-use) closes the ``client_ip=None`` window where the first
     replayer would otherwise become the baseline. Returns the new opaque token."""
+    # New random token and admin id, plus the time and user.
     import math as _math
     token = secrets.token_urlsafe(32)
     sid = secrets.token_hex(8)
@@ -525,6 +568,7 @@ def _record_session(hub, user_data: dict, bind_ip: str = "") -> str:
         while len(owned) >= _MAX_SESSIONS_PER_USER:
             old_t, _ = owned.pop(0)
             _sessions.pop(old_t, None)
+    # Store the new session, bound to the login IP.
     _sessions[token] = {
         "user_id":  user_id,
         "expires":  now + _SESSION_TTL,
@@ -535,12 +579,14 @@ def _record_session(hub, user_data: dict, bind_ip: str = "") -> str:
         "client_ip": (bind_ip or None),
         "ip_seen":  ({bind_ip: now} if bind_ip else {}),
     }
+    # Persist and return the token.
     _save_sessions(hub)
     return token
 
 
 def _end_impersonation(sess: dict) -> None:
     """Restore an impersonating session to the admin who started it."""
+    # Swap back to the impersonator's identity and clear cached prefixes.
     imp = sess.pop("impersonator", None) or {}
     sess["user_id"] = imp.get("user_id")
     sess["user"] = imp.get("user") or {}
@@ -555,8 +601,10 @@ def _invalidate_user_sessions(hub, user_id) -> int:
     demoted admin's existing cookie stops granting admin (the stale-session
     window the access-control middleware would otherwise keep honoring until
     ``/auth/me`` or the 8h TTL). Returns the count dropped."""
+    # No user id: nothing to drop.
     if not user_id:
         return 0
+    # Sessions owned by the user (not impersonated), or ones the user started as impersonator.
     drop = [t for t, s in _sessions.items()
             if (s.get("user_id") == user_id and not s.get("impersonator"))
             or (s.get("impersonator") or {}).get("user_id") == user_id]
@@ -568,6 +616,7 @@ def _invalidate_user_sessions(hub, user_id) -> int:
              if s.get("user_id") == user_id and s.get("impersonator")]
     for s in ended:
         _end_impersonation(s)
+    # Persist and log if anything changed.
     if drop or ended:
         _save_sessions(hub)
         logger.info("Invalidated %d session(s) for user %s", len(drop), user_id)
@@ -586,6 +635,7 @@ def _active_user_count(window_s: int = 300) -> int:
     ~10s, refreshing last_seen). Used to defer a disruptive restart/update to a
     quiet window (see the watchdog idle-guard). Recency-based so a walked-away
     session ages out of the count on its own."""
+    # Count users whose session is live and seen within the window.
     now = time.time()
     users = set()
     for s in _sessions.values():
@@ -602,9 +652,11 @@ def write_active_users_file(hub) -> None:
     before a (non-force) restart, so it can hold off while users are logged in.
     Best-effort; never raises. Path mirrors update_pipeline's sentinel dir."""
     try:
+        # Target path (overridable), created if needed.
         path = os.environ.get("LM_ACTIVE_USERS_FILE",
                               "/var/lib/lm/state/active-users")
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Write the count.
         with open(path, "w") as f:
             f.write(f"{_active_user_count()}\n")
     except Exception as e:  # noqa: BLE001 — best-effort signalling
@@ -624,6 +676,7 @@ def _save_sessions(hub) -> None:
     ``/auth/me`` recognise it. A write failure logs a warning and degrades to
     today's in-memory-only behavior."""
     try:
+        # Copy only live sessions with their core fields.
         now = time.time()
         pruned: dict = {}
         for token, sess in _sessions.items():
@@ -639,6 +692,7 @@ def _save_sessions(hub) -> None:
             }
             if sess.get("impersonator"):
                 pruned[token]["impersonator"] = sess["impersonator"]
+        # Write to a temp file, lock permissions, then rename into place.
         path = _sessions_file(hub)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
@@ -659,13 +713,16 @@ def _load_sessions(hub) -> None:
     (sid) / defaulted (last_seen=created=now) so the idle timeout and admin
     revocation work for rehydrated sessions too."""
     try:
+        # Nothing to load if the file is missing or empty.
         path = _sessions_file(hub)
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             return
+        # Read and check the JSON.
         with open(path) as f:
             data = json.load(f)
         if not isinstance(data, dict):
             return
+        # Restore each unexpired session.
         now = time.time()
         for token, sess in data.items():
             if not isinstance(token, str) or not isinstance(sess, dict):
@@ -682,6 +739,7 @@ def _load_sessions(hub) -> None:
             }
             if isinstance(sess.get("impersonator"), dict):
                 _sessions[token]["impersonator"] = sess["impersonator"]
+        # Log how many came back.
         if _sessions:
             logger.info("Restored %d active session(s) from disk", len(_sessions))
     except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
@@ -704,10 +762,12 @@ def _session_cache_scopes(sess: dict) -> set:
     """Cache scopes a session can see: its tenant ids; a Global Admin or a
     tenant-less (protected) account also sees admin-wide data ("*") and the
     default tenant."""
+    # Tenant ids from the user record.
     user = (sess or {}).get("user", {}) or {}
     scopes = {t for t in (user.get("tenants") or []) if t}
     if user.get("tenant_id"):
         scopes.add(user["tenant_id"])
+    # Admins and tenant-less accounts also see admin-wide data and the default tenant.
     if not scopes or access.is_admin(sess):
         scopes |= {"*", "default"}
     return scopes
@@ -717,6 +777,7 @@ def _cache_active_scopes() -> set:
     """Scopes with a live session seen in the last 10 minutes — the refresher
     keeps their data on the fast (60s) cycle. Injected as
     ``hub.cache_active_scopes_fn``."""
+    # Union of scopes for sessions seen recently.
     now = time.time()
     out: set = set()
     for s in list(_sessions.values()):
@@ -733,9 +794,11 @@ def cache_kick_login(hub, user_data: dict) -> None:
     """Login hook: refresh everything the new session can see RIGHT NOW so the
     first pages show current data; afterwards pages serve from cache. An admin
     login refreshes admin-wide data + the default tenant (not every tenant)."""
+    # Hub without the cache: nothing to do.
     if not hasattr(hub, "cache_kick_tenant"):
         return
     try:
+        # Refresh each scope ("*" means admin-wide, i.e. tenant None).
         for scope in _session_cache_scopes({"user": user_data}):
             hub.cache_kick_tenant(None if scope == "*" else scope)
     except Exception as e:  # noqa: BLE001 — never fail a login over the cache
@@ -753,6 +816,7 @@ _LEGACY_CACHE_NS = {
 
 def _legacy_cache_namespaces(key: str) -> tuple:
     """Legacy module key → hub-cache namespace(s)."""
+    # Strip any ":suffix", then map NetBox, firewall and other legacy keys.
     key = (key or "").split(":")[0]
     if key.startswith("netbox_"):
         return (f"nb_{key[len('netbox_'):]}",)
@@ -765,10 +829,13 @@ def _refresh_module_all_tenants(hub, key: str) -> int:
     """After a write: refresh module ``key`` (legacy key name, e.g.
     ``netbox_devices``, ``cppm_devices``, ``pxmx_vms``, ``rules``) for EVERY
     tenant now. Maps onto ``hub.cache_refresh``; returns refreshes started."""
+    # Prefix changes also clear the tenant prefix cache.
     if key == "netbox_prefixes":
         access.clear_prefix_cache(hub)
+    # Hub without the cache: nothing to do.
     if not hasattr(hub, "cache_refresh"):
         return 0
+    # Refresh each mapped namespace and count them.
     namespaces = _legacy_cache_namespaces(key)
     n = 0
     for ns in namespaces:
@@ -808,12 +875,14 @@ def _normalize_cached(result):
     either key means NO payload and falls back to the envelope, so a cache hit
     can never hand a None back to a route that will serialize it as a literal
     JSON ``null`` body (see ``_spoke_payload_or_raise``)."""
+    # Non-dicts pass through.
     if not isinstance(result, dict):
         return result
     if "payload" in result and isinstance(result["payload"], dict):
         data = result["payload"].get("data")
         # `is not None`: an empty-but-real payload ({}, [], 0, False) is data.
         return data if data is not None else result
+    # Bare data key.
     if result.get("data") is not None:
         return result["data"]
     return result
@@ -877,8 +946,10 @@ def _spoke_payload_or_raise(data):
     spoke-error banner. Nothing downstream can render a null envelope, so fail
     it here at the single choke point every relay group already funnels through.
     """
+    # None is never valid.
     if data is None:
         raise HTTPException(status_code=502, detail="Spoke returned no data")
+    # Spoke error: 503 while updating, else 502.
     if isinstance(data, dict) and data.get("status") == "ERROR":
         if data.get("updating") or data.get("draining"):
             raise HTTPException(status_code=503, detail=SPOKE_UPDATING_DETAIL)
@@ -896,15 +967,20 @@ def _unwrap_netbox(result):
     return _spoke_payload_or_raise(_unwrap_spoke(result))
 
 
+# Simple attribute bundle passed to route modules.
 from types import SimpleNamespace  # ctx bundle for route modules
 
 
 def _hash_password(password: str) -> str:
+    """Hash a password with PBKDF2-SHA256 and a random salt, as "salt$hex"."""
+    # Random salt and 260k iterations.
     salt = secrets.token_hex(16)
     dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260000)
     return f"{salt}${dk.hex()}"
 
 def _verify_password(password: str, stored: str) -> bool:
+    """Check a password against a "salt$hex" hash in constant time; False on bad input."""
+    # Re-derive with the stored salt and compare.
     try:
         salt, dk_hex = stored.split("$", 1)
         dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 260000)
@@ -914,15 +990,19 @@ def _verify_password(password: str, stored: str) -> bool:
 
 
 def get_netbox_spoke(hub):
+    """Shim: delegate to access.get_netbox_spoke."""
     return access.get_netbox_spoke(hub)
 
 def get_tenant_scoping(hub, tenant_id: str = None) -> dict:
+    """Shim: delegate to access.get_tenant_scoping."""
     return access.get_tenant_scoping(hub, tenant_id)
 
 def netbox_tenant_scope(hub, tenant_id: str = None) -> dict:
+    """Shim: delegate to access.netbox_tenant_scope."""
     return access.netbox_tenant_scope(hub, tenant_id)
 
 def tenant_netbox_slugs(hub, tenant_id: str = None) -> list:
+    """Shim: delegate to access.tenant_netbox_slugs."""
     return access.tenant_netbox_slugs(hub, tenant_id)
 
 
@@ -952,6 +1032,7 @@ def require_spoke(module_type: str, label: str):
     ``spoke_id: str = Depends(require_spoke("nw", "Network Devices"))``
     resolves the connected spoke id or 503s with the standard message."""
     def _dep(request: Request) -> str:
+        """Dependency body: the connected spoke id for module_type, or a 503."""
         return get_spoke_or_503(request.app.state.hub, module_type, label)
     return _dep
 
@@ -967,12 +1048,15 @@ _WEBUI_VER_CACHE: Dict[str, Any] = {}
 def _webui_asset_fingerprint(ui_path: str):
     """``(name, size, mtime_ns)`` for every WebUI ``.js`` at the top level and
     in ``js/``, sorted. A few dozen stat() calls; no file is read."""
+    # Check the top-level dir and js/.
     out = []
     for sub in ("", "js"):
         try:
+            # List the directory; skip it if missing.
             names = sorted(os.listdir(os.path.join(ui_path, sub)))
         except OSError:
             continue
+        # Record each .js file's size and mtime.
         for name in names:
             if not name.endswith(".js"):
                 continue
@@ -1002,16 +1086,20 @@ def _webui_version(ui_path: str) -> str:
     collide with a previously-cached bundle. Cached on that same fingerprint, so
     steady state is a few stat() calls per index.html request.
     """
+    # VERSION path and current JS fingerprint.
     ver_path = os.path.join(ui_path, "VERSION")
     fp = _webui_asset_fingerprint(ui_path)
+    # VERSION mtime (None if missing).
     try:
         mtime = os.path.getmtime(ver_path)
     except OSError:
         mtime = None
+    # Cache hit when both are unchanged.
     key = (mtime, fp)
     cached = _WEBUI_VER_CACHE.get(ver_path)
     if cached and cached[0] == key:
         return cached[1]
+    # Read the version text.
     ver = "0"
     if mtime is not None:
         try:
@@ -1022,6 +1110,7 @@ def _webui_version(ui_path: str) -> str:
     # No JS found (unexpected layout) -> fall back to the bare version rather
     # than emitting a constant, which would pin caches forever.
     token = f"{ver}.{hashlib.sha256(repr(fp).encode()).hexdigest()[:8]}" if fp else ver
+    # Cache and return.
     _WEBUI_VER_CACHE[ver_path] = (key, token)
     return token
 
@@ -1035,12 +1124,14 @@ def create_app(hub):
     Simulations (cs) routes, and all Hub WebUI/integration endpoints. Returns
     the configured app; host it with ``run_api_server``.
     """
+    # The app.
     app = FastAPI(title="Lab Manager Hub API")
 
     # Gzip text responses (WebUI JS/HTML/JSON). main.js is ~1.3 MB uncompressed
     # and dominated page load (~9s on the wire); gzip cuts JS/HTML ~4-5x. Only
     # applies to http responses with Accept-Encoding: gzip and bodies over the
     # threshold — WebSocket upgrades (scope "websocket") pass through untouched.
+    # Gzip middleware for large text responses.
     from starlette.middleware.gzip import GZipMiddleware
     app.add_middleware(GZipMiddleware, minimum_size=1024)
 
@@ -1050,6 +1141,7 @@ def create_app(hub):
     # ``LM_CORS_ORIGINS`` (comma-separated) opts IN to specific trusted origins with
     # credentials. ``["*"]`` + ``allow_credentials=True`` is spec-invalid (browsers
     # reject it) and would reflect arbitrary Origin headers — never set both.
+    # CORS setting from the environment.
     _cors_env = os.environ.get("LM_CORS_ORIGINS", "").strip()
     if _cors_env and _cors_env != "*":
         _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
@@ -1123,6 +1215,7 @@ def create_app(hub):
         """One-time cleanup: the old per-tenant cache shards
         (``<data_dir>/tenants/<tid>/api_cache/tenant_cache.json``) are
         replaced by the hub data cache files and are never read again."""
+        # Tenants dir under the data dir; remove each old shard file.
         root = os.path.join(getattr(hub.state, "data_dir", "") or "", "tenants")
         try:
             for tid in os.listdir(root):
@@ -1133,6 +1226,7 @@ def create_app(hub):
         except OSError:
             pass
 
+    # Run it at startup.
     app.router.on_startup.append(_cleanup_legacy_tenant_cache_shards)
 
     @app.middleware("http")
@@ -1145,6 +1239,7 @@ def create_app(hub):
         circuits to a 401/403 JSON response when the gate fails, otherwise calls
         the next handler.
         """
+        # Request path.
         path = request.url.path
 
         # HTTPS-port scanner detection: a request for a path we never serve
@@ -1206,6 +1301,7 @@ def create_app(hub):
                    "/auth/oidc/login", "/auth/oidc/callback", "/auth/oidc/enabled",
                    "/sim/api/init", "/sim/api/health"}
         _PUBLIC_GET = {"/setup/appearance", "/setup/toast-config"}
+        # Public endpoints pass straight through.
         if path in _PUBLIC or (request.method == "GET" and path in _PUBLIC_GET):
             return await call_next(request)
 
@@ -1262,10 +1358,12 @@ def create_app(hub):
         # (a trusted/allow-listed admin IP is spared). access.session_user
         # enforces the same bind for non-HTTP (WebSocket) callers. Wrapped so a
         # resolver/monitor hiccup can never wrongly reject a valid request.
+        # The raw session for the cookie, if any and still valid.
         _btok = request.cookies.get("lm_session")
         _raw = _sessions.get(_btok) if _btok else None
         if isinstance(_raw, dict) and _raw.get("expires", 0) > time.time():
             try:
+                # Client IP, bound IP, and other IPs seen recently for this cookie.
                 _ip = _client_ip(request)
                 _bound = _raw.get("client_ip")
                 _nowt = time.time()
@@ -1293,6 +1391,7 @@ def create_app(hub):
                     for _stale in [o for o, ts in _seen.items()
                                    if _nowt - float(ts) > 3600]:
                         _seen.pop(_stale, None)
+                # Different IP outside the bound subnet: treat as a stolen cookie.
                 elif _ip and _ip != _bound:
                     _admin = _is_admin(_raw)
                     # Never sweep the owner's OWN pool addresses into the block
@@ -1309,11 +1408,13 @@ def create_app(hub):
                         _raw.get("user_id"), _raw.get("sid"), _bound, _ip,
                         _admin, _concurrent, path,
                         (request.headers.get("user-agent") or "")[:80])
+                    # Drop the session and persist the drop.
                     _sessions.pop(_btok, None)
                     try:
                         _save_sessions(hub)
                     except Exception:  # noqa: BLE001
                         pass
+                    # Report to the threat monitor.
                     _tm = getattr(hub, "threat_monitor", None)
                     if _tm:
                         try:
@@ -1336,6 +1437,8 @@ def create_app(hub):
                                 })
                         except Exception:  # noqa: BLE001
                             pass
+                        # Admin cookie used while the owner is active: block the non-trusted
+                        # sources.
                         if _admin and _concurrent and _involved:
                             logger.critical(
                                 "SESSION-HIJACK user=%s sid=%s — admin cookie "
@@ -1352,6 +1455,7 @@ def create_app(hub):
                                                 f"replayed from {_ip}"))
                                 except Exception:  # noqa: BLE001
                                     pass
+                    # Reject the request.
                     return JSONResponse(
                         status_code=401,
                         content={"detail": "Session invalidated — cookie used "
@@ -1367,6 +1471,7 @@ def create_app(hub):
             except Exception:  # noqa: BLE001 — never wrongly break a valid request
                 pass
 
+        # Validate the session.
         sess = _session_user(request)
         if not sess:
             # A present-but-invalid lm_session cookie is a forged/tampered
@@ -1700,6 +1805,7 @@ def create_app(hub):
         # tenant-admin tier (can_edit_shared) — a tenant-admin manages their OWN
         # certs; the per-object guards keep them out of other tenants' certs.
         _LE_TENANT_WRITE_PREFIXES = ("/api/le/",)
+        # Apply the write tiers to mutating methods only (most specific prefixes first).
         if request.method in ("POST", "PUT", "DELETE", "PATCH"):
             if any(path.startswith(p) for p in _SHARED_CONSTRAINED_WRITE_PREFIXES):
                 if not _can_edit_shared(sess):
@@ -1735,6 +1841,7 @@ def create_app(hub):
                 content={"detail": f"Not authorized for tenant '{tenant}'"},
             )
 
+        # All checks passed.
         return await call_next(request)
 
     # ── Error logging (outermost middleware) ────────────────────────────────
@@ -1751,6 +1858,8 @@ def create_app(hub):
 
     @app.middleware("http")
     async def overload_admission_middleware(request, call_next):
+        """In protect mode, answer heavy GET views with 503 + Retry-After so clients back off."""
+        # Shed only when protecting, for GETs to the heavy prefixes.
         hub = getattr(app.state, "hub", None)
         if (hub is not None and getattr(hub, "_protect_mode", False)
                 and request.method == "GET"
@@ -1770,6 +1879,8 @@ def create_app(hub):
     # instead of a bare "Internal Server Error" that requires CLI log-tailing.
     @app.middleware("http")
     async def error_logging_middleware(request, call_next):
+        """Catch any unhandled exception, log it with a reference id, and return a generic 500."""
+        # Run the rest of the stack.
         try:
             return await call_next(request)
         except Exception as exc:
@@ -1798,6 +1909,8 @@ def create_app(hub):
     # baseline hardening headers that are harmless on both http and https.
     @app.middleware("http")
     async def security_headers_middleware(request, call_next):
+        """Add HSTS (when served over TLS) and baseline security headers to every response."""
+        # Get the response, then add headers it doesn't already set.
         resp = await call_next(request)
         if _cookie_secure():
             resp.headers.setdefault(
@@ -1858,6 +1971,7 @@ def create_app(hub):
         # already carry the header and are left untouched here — only responses
         # that arrive with NO cache directive (i.e. the dynamic API/auth ones)
         # get ``no-store`` + ``Vary: Cookie``.
+        # No cache directive yet: forbid storing and vary on Cookie.
         if "cache-control" not in (k.lower() for k in resp.headers.keys()):
             resp.headers["Cache-Control"] = "no-store"
             _existing_vary = resp.headers.get("Vary")
@@ -1885,115 +1999,149 @@ def create_app(hub):
         # A Bearer API token (programmatic clients) takes precedence; otherwise
         # the WebUI cookie session. Both return the same session-shaped dict so
         # every access.* gate downstream is identical.
+        """Session for the request: a bearer API token first, else the WebUI cookie session."""
         bt = api_tokens.bearer_session(request)
         if bt is not None:
             return bt
         return access.session_user(_sessions, request)
 
     def _is_admin(sess):
+        """Shim: delegate to access.is_admin."""
         return access.is_admin(sess)
 
     def _is_tenant_admin(sess):
+        """Shim: delegate to access.is_tenant_admin."""
         return access.is_tenant_admin(sess)
 
     def _has_cs_access(sess):
+        """Shim: delegate to access.has_cs_access."""
         return access.has_cs_access(sess)
 
     def _has_nw_access(sess):
+        """Shim: delegate to access.has_nw_access."""
         return access.has_nw_access(sess)
 
     def _has_ipam_access(sess):
+        """Shim: delegate to access.has_ipam_access."""
         return access.has_ipam_access(sess)
 
     def _has_le_access(sess):
+        """Shim: delegate to access.has_le_access."""
         return access.has_le_access(sess)
 
     def _has_reports_access(sess):
+        """Shim: delegate to access.has_reports_access."""
         return access.has_reports_access(sess)
 
     def _has_console_access(sess):
+        """Shim: delegate to access.has_console_access."""
         return access.has_console_access(sess)
 
     def _has_console_write_access(sess):
+        """Shim: delegate to access.has_console_write_access."""
         return access.has_console_write_access(sess)
 
     def _has_firewall_access(sess):
+        """Shim: delegate to access.has_firewall_access."""
         return access.has_firewall_access(sess)
 
     def _has_dns_access(sess):
+        """Shim: delegate to access.has_dns_access."""
         return access.has_dns_access(sess)
 
     def _has_henet_access(sess):
+        """Shim: delegate to access.has_henet_access."""
         return access.has_henet_access(sess)
 
     def _has_dhcp_access(sess):
+        """Shim: delegate to access.has_dhcp_access."""
         return access.has_dhcp_access(sess)
 
     def _has_nac_access(sess):
+        """Shim: delegate to access.has_nac_access."""
         return access.has_nac_access(sess)
 
     def _has_ldap_access(sess):
+        """Shim: delegate to access.has_ldap_access."""
         return access.has_ldap_access(sess)
 
     def _has_pxmx_access(sess):
+        """Shim: delegate to access.has_pxmx_access."""
         return access.has_pxmx_access(sess)
 
     def _has_edit_access(sess):
+        """Shim: delegate to access.has_edit_access."""
         return access.has_edit_access(sess)
 
     def _can_edit_shared(sess):
+        """Shim: delegate to access.can_edit_shared."""
         return access.can_edit_shared(sess)
 
     def _check_tenant_access(sess, tenant_id):
+        """Shim: delegate to access.check_tenant_access."""
         return access.check_tenant_access(sess, tenant_id)
 
     def _resolve_tenant(request, explicit=None):
+        """Shim: delegate to access.resolve_tenant."""
         return access.resolve_tenant(_sessions, request, explicit)
 
     async def _fetch_tenant_prefixes(hub, tenant_id):
+        """Shim: delegate to access.fetch_tenant_prefixes."""
         return await access.fetch_tenant_prefixes(hub, tenant_id)
 
     async def _resolve_prefixes(hub, sess):
+        """Shim: delegate to access.resolve_prefixes."""
         return await access.resolve_prefixes(hub, sess)
 
     def _effective_tenant(request, explicit=None):
+        """Shim: delegate to access.effective_tenant."""
         return access.effective_tenant(_sessions, request, explicit)
 
     def _acting_tenant(request):
+        """Shim: delegate to access.acting_tenant."""
         return access.acting_tenant(_sessions, request)
 
     def _effective_tenant_slug(request, explicit=None):
+        """Shim: delegate to access.effective_tenant_slug."""
         return access.effective_tenant_slug(hub, _sessions, request, explicit)
 
     async def _resolve_prefixes_for_tenant(hub, tenant_id):
+        """Shim: delegate to access.resolve_prefixes_for_tenant."""
         return await access.resolve_prefixes_for_tenant(hub, tenant_id)
 
     def _filter_enabled(hub, module):
+        """Shim: delegate to access.filter_enabled."""
         return access.filter_enabled(hub, module)
 
     async def _filter_session(request, data, module, ip_fields, spoke_id=None, spoke_of=None):
+        """Shim: delegate to access.filter_session."""
         return await access.filter_session(hub, _sessions, request, data, module, ip_fields,
                                            spoke_id=spoke_id, spoke_of=spoke_of)
 
     async def _filter_fw(request, data, endpoint, firewall_id=None, explicit_tenant=None, spoke_id=None):
+        """Shim: delegate to access.filter_fw."""
         return await access.filter_fw(hub, _sessions, request, data, endpoint, firewall_id, explicit_tenant,
                                       spoke_id=spoke_id)
 
     async def _filter_nw(request, data, endpoint, explicit_tenant=None, spoke_id=None):
+        """Shim: delegate to access.filter_nw."""
         return await access.filter_nw(hub, _sessions, request, data, endpoint, explicit_tenant,
                                       spoke_id=spoke_id)
 
     async def _gate_record(request, record, module, ip_fields, spoke_id=None):
+        """Shim: delegate to access.gate_record."""
         return await access.gate_record(hub, _sessions, request, record, module, ip_fields,
                                         spoke_id=spoke_id)
 
     async def _filter_tenant(request, data, module, ip_fields, explicit_tenant=None,
                              shared_source=False, spoke_id=None, spoke_of=None):
+        """Shim: delegate to access.filter_tenant."""
         return await access.filter_tenant(hub, _sessions, request, data, module, ip_fields,
                                           explicit_tenant, shared_source, spoke_id=spoke_id,
                                           spoke_of=spoke_of)
 
     async def _gate_record_tenant(request, record, module, ip_fields, explicit_tenant=None, spoke_id=None):
+        """Shim: delegate to access.gate_record_tenant."""
         return await access.gate_record_tenant(hub, _sessions, request, record, module, ip_fields,
                                                explicit_tenant, spoke_id=spoke_id)
 
@@ -2008,6 +2156,7 @@ def create_app(hub):
         sync trigger must not break the IPAM mutation it follows.
         """
         try:
+            # Tenant from the body's IPAM scope, else the acting user's tenant.
             tid = None
             scope = (data or {}).get("tenant") if isinstance(data, dict) else None
             if scope:
@@ -2028,6 +2177,7 @@ def create_app(hub):
         must not break the VM mutation it follows. A superadmin with no tenant
         is a no-op (the scheduled loop covers unbound tenants).
         """
+        # Sync the acting user's tenant.
         try:
             tid = _acting_tenant(request)
             hub.trigger_vm_sync(tid)
@@ -2078,6 +2228,7 @@ def create_app(hub):
     hub_watchdog as hub_watchdog_routes, hub_tls_verify as hub_tls_verify_routes, netbox_sso as netbox_sso_routes, security as security_routes, client_debug as client_debug_routes, admin_ops as admin_ops_routes,
     cert_monitor as cert_monitor_routes, monitoring as monitoring_routes, vm_snapshots as vm_snapshots_routes,
     )
+    # Each route module registers its routes using the shared context.
     security_routes.register(app, hub, ctx)
     setup.register(app, hub, ctx)
     firewall.register(app, hub, ctx)
@@ -2155,6 +2306,10 @@ def create_app(hub):
 
     @app.exception_handler(_StarletteHTTPException)
     async def scrub_internal_detail_handler(request: Request, exc):
+        """Hide 5xx details from non-admins (log them with a ref id); pass others through
+        unchanged.
+        """
+        # 5xx: find out who is asking.
         if exc.status_code >= 500:
             sess = None
             try:
@@ -2183,8 +2338,10 @@ def create_app(hub):
         )
 
     # --- Static File Serving ---
+    # WebUI folder, relative to this file.
     ui_path = os.path.join(os.path.dirname(__file__), "../../WebUI")
 
+    # Serve the UI if the folder exists.
     if os.path.exists(ui_path):
         ui_real = os.path.realpath(ui_path)
 
@@ -2198,8 +2355,12 @@ def create_app(hub):
             # segments outright and verify the realpath stays under ui_path
             # before serving. (Starlette decodes %2e%2e → '..' before the
             # :path converter, so encoded traversal is caught too.)
+            """Public catch-all: serve a WebUI file, or index.html with the version token filled
+            in.
+            """
             if ".." in (full_path or "").split("/"):
                 raise HTTPException(status_code=404, detail="Not found")
+            # Resolve the real path and make sure it stays inside the UI folder.
             file_path = os.path.join(ui_path, full_path)
             try:
                 real = os.path.realpath(file_path)
@@ -2207,6 +2368,7 @@ def create_app(hub):
                 raise HTTPException(status_code=404, detail="Not found")
             if real != ui_real and not real.startswith(ui_real + os.sep):
                 raise HTTPException(status_code=404, detail="Not found")
+            # An existing file: serve it.
             if os.path.isfile(real):
                 response = FileResponse(real)
                 # Cacheability: index.html is served no-store (below) so it always
@@ -2224,6 +2386,7 @@ def create_app(hub):
                     response.headers["Cache-Control"] = "no-cache"
                 return response
 
+            # Otherwise serve index.html (SPA routing).
             index_html_path = os.path.join(ui_path, "index.html")
             if os.path.exists(index_html_path):
                 # Serve index.html with the ?v= cache-bust placeholder
@@ -2246,8 +2409,10 @@ def create_app(hub):
     else:
         @app.get("/")
         async def root():
+            """Fallback root when the WebUI folder is missing."""
             return {"message": "Hub API is running. UI folder not found. Please check repository structure."}
 
+    # Return the configured app.
     return app
 
 def _uvicorn_log_config():
@@ -2285,11 +2450,13 @@ def _uvicorn_log_config():
     The live WebUI debug toggle already levels every logger, so this only
     closes the boot-time path.
     """
+    # Canonical format, date format, and the root logger's level.
     fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     datefmt = '%Y-%m-%d %H:%M:%S'
     level = logging.getLevelName(logging.getLogger().getEffectiveLevel())
     if not isinstance(level, str) or not level.isalpha():
         level = "INFO"
+    # Config with one stderr handler shared by the uvicorn loggers.
     return {
         "version": 1,
         "disable_existing_loggers": False,
@@ -2310,6 +2477,7 @@ def _ws_keepalive_env(name: str, default: float) -> float:
     """Env-overridable WebSocket keepalive knob (seconds), shared by the hub's
     uvicorn server and the spoke ``websockets.connect`` call so both ends of a
     link use the same ping interval / pong timeout. Clamped to >=5s."""
+    # Parse the env value; fall back to the default if it's not a number.
     try:
         return max(5.0, float(os.environ.get(name, str(default))))
     except Exception:
@@ -2325,8 +2493,10 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
     ``ssl_keyfile`` when a cert is configured so uvicorn serves wss; without a
     cert it serves plaintext on the same port (legacy no-TLS fallback).
     """
+    # Build the app and the base uvicorn config.
     app = create_app(hub)
     cfg_kwargs = {"host": host, "port": port, "log_config": _uvicorn_log_config()}
+    # Serve TLS when a cert and key are configured.
     if tls_cert and tls_key:
         cfg_kwargs["ssl_certfile"] = tls_cert
         cfg_kwargs["ssl_keyfile"] = tls_key
@@ -2394,6 +2564,7 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
     # technology/version disclosure that scanners flag. (Applies to the hub's
     # in-loop server path.)
     cfg_kwargs["server_header"] = False
+    # Create the server.
     server = uvicorn.Server(uvicorn.Config(app, **cfg_kwargs))
     # Explicitly pin the TLS floor + cipher suite on the public listener rather
     # than inheriting the platform/uvicorn defaults, so the "strongest
@@ -2431,6 +2602,7 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
                 _mtls.register_server_ctx(server.config.ssl)
     except Exception:  # noqa: BLE001 - never brick the boot on a context-register hiccup
         pass
+    # Return the server for the hub to await.
     return server
 
 
@@ -2440,6 +2612,7 @@ def run_api_server(hub, port=443):
     hub's asyncio loop; this blocking form is kept for direct/standalone
     launches. Honors ``LM_TLS_CERT``/``LM_TLS_KEY`` for wss; otherwise plaintext.
     """
+    # Build the app and read the TLS cert/key from the env.
     app = create_app(hub)
     cert = os.environ.get("LM_TLS_CERT", "").strip()
     key = os.environ.get("LM_TLS_KEY", "").strip()
@@ -2459,6 +2632,7 @@ def run_api_server(hub, port=443):
             _ws_kw["ws"] = _peer_cert_ws._PeerCertProtocol
     except Exception:  # noqa: BLE001
         pass
+    # TLS: serve with the cert, plus optional mTLS client verification.
     if cert and key:
         _mtls_kw = {}
         # mTLS hub↔spoke server leg — PERMISSIVE (see build_server()): request +
@@ -2479,6 +2653,7 @@ def run_api_server(hub, port=443):
                     ssl_keyfile=key, log_config=_uvicorn_log_config(),
                     server_header=False,
                     **_ws_kw, **_mtls_kw)
+    # No cert: serve plaintext.
     else:
         uvicorn.run(app, host="0.0.0.0", port=port, log_config=_uvicorn_log_config(),
                     server_header=False, **_ws_kw)

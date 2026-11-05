@@ -10,17 +10,25 @@ toggles + schedule live in ``store.get_email_report``. A background loop
 The report is tenant-scoped: it renders only the tenant's own sites (the same
 central_status the dashboard shows for that tenant).
 """
+# Allow modern type-hint syntax on older Python versions.
 from __future__ import annotations
 
+# asyncio drives the background scheduler loop.
 import asyncio
+# Dates for the report header and for schedule/period calculations.
 import datetime
+# Standard-library logging for delivery results and errors.
 import logging
+# Type hints only.
 from typing import Any, Dict, List, Tuple
 
+# The read service that shapes cached telemetry into dashboard data.
 from .service import SimulationsService
 
+# One named logger for the email report feature.
 logger = logging.getLogger("EmailReport")
 
+# How often (seconds) the scheduler wakes up to check for due reports.
 _POLL_S = 300  # scheduler tick (fires when the configured hour is reached)
 
 # status -> (label, bg, fg) — the pill colors, matching the WebUI badges.
@@ -30,15 +38,20 @@ _PILL = {
     "error": ("Failing", "#fdeaea", "#c0322a"),
     "no_data": ("No data", "#eef2f1", "#5c6b65"),
 }
+# Strip cell colors indexed 0..3 by _strip below.
 _HCOLOR = ("#10b981", "#f59e0b", "#ef4444", "#e2e8f0")  # ok / warn / err / none
+# Sort order so failing checks are listed first.
 _RANK = {"error": 0, "warning": 1, "ok": 2}  # worst-first ordering
 
 
 def _esc(s: Any) -> str:
+    """HTML-escape a value (None becomes "") so it is safe to embed in the email."""
     return str(s if s is not None else "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _pill(status: str) -> str:
+    """Render a status as a colored pill badge, like the WebUI."""
+    # Look up label and colors; unknown statuses render as "No data".
     label, bg, fg = _PILL.get(str(status).lower(), _PILL["no_data"])
     return (f'<span style="display:inline-block;font-family:Arial,sans-serif;font-size:11px;'
             f'font-weight:bold;text-transform:uppercase;color:{fg};background:{bg};'
@@ -47,25 +60,34 @@ def _pill(status: str) -> str:
 
 def _strip(daily: List[Dict[str, Any]]) -> str:
     """30-day green/yellow/red strip as a fixed cell table (email-safe)."""
+    # Pad the left with empty grey cells when fewer than 30 days of history exist.
     cells = ['<td style="background:#eef2f6;width:5px;height:14px;font-size:0;line-height:0">&nbsp;</td>'
              for _ in range(max(0, 30 - len(daily)))]
+    # Add one colored cell per day for the most recent 30 days.
     for d in (daily or [])[-30:]:
+        # Day counts of error / warning / ok samples.
         e, w, o = int(d.get("e", 0)), int(d.get("w", 0)), int(d.get("o", 0))
+        # Pick the worst state seen that day: error > warning > ok > no data.
         idx = 2 if e else (1 if w else (0 if o else 3))
         cells.append(f'<td style="background:{_HCOLOR[idx]};width:5px;height:14px;font-size:0;line-height:0">&nbsp;</td>')
+    # Wrap the cells in a single-row table, which every mail client renders.
     return ('<table role="presentation" cellpadding="0" cellspacing="1" border="0" '
             f'style="border-collapse:separate"><tr>{"".join(cells)}</tr></table>')
 
 
 def _num(v: Any) -> str:
+    """Escape a number for display, or show an em dash when it is missing."""
     return _esc(v) if v is not None else "—"
 
 
 def _pct(v: Any) -> str:
     """Success-% cell: colored green/amber/red by band, '—' when no graded samples."""
+    # No graded samples: show a grey dash.
     if v is None:
         return '<span style="color:#9ca3af">—</span>'
+    # Green at >=99%, amber at >=95%, red below.
     col = "#10b981" if v >= 99 else ("#b8860b" if v >= 95 else "#ef4444")
+    # Show whole numbers without a trailing ".0".
     n = int(v) if float(v).is_integer() else v
     return f'<span style="color:{col};font-weight:bold">{n}%</span>'
 
@@ -73,76 +95,101 @@ def _pct(v: Any) -> str:
 def _html_to_text(html: str) -> str:
     """Crude plain-text fallback for the multipart email (clients render the
     HTML; this is the text/plain alternative)."""
+    # Imported locally because only this helper needs regular expressions.
     import re as _re
+    # Remove style/script blocks entirely, including their contents.
     txt = _re.sub(r"<(style|script)[^>]*>.*?</\1>", " ", html or "", flags=_re.S | _re.I)
+    # Replace every remaining tag with a space and decode non-breaking spaces.
     txt = _re.sub(r"<[^>]+>", " ", txt).replace("&nbsp;", " ")
+    # Collapse runs of spaces and blank lines into clean plain text.
     return _re.sub(r"[ \t]*\n\s*", "\n", _re.sub(r"[ \t]{2,}", " ", txt)).strip()
 
 
 async def build_report(hub, service: SimulationsService, tenant_id: str,
                        cfg: Dict[str, Any]) -> Tuple[str, str]:
     """Return (subject, html) for the tenant's report per ``cfg['sections']``."""
+    # Default to including both sections when the config does not say.
     sections = cfg.get("sections") or {"checks": True, "clients": True}
+    # Prefer the tenant's display name in the report; fall back to the id.
     tenant_name = tenant_id
     try:
         t = (hub.state.tenant_state or {}).get("tenants", {}).get(tenant_id) or {}
         tenant_name = t.get("name") or tenant_id
+    # Missing hub state (e.g. in tests) just keeps the tenant id as the name.
     except Exception:  # noqa: BLE001
         pass
 
+    # Latest Central data for every spoke of this tenant.
     data = await service.get_central_data(tenant_id)
+    # Flatten per-spoke check statuses and client-count rows into simple lists.
     checks: List[Dict[str, Any]] = []
     ccrows: List[Dict[str, Any]] = []
     for s in (data.get("spokes") or []):
+        # Each spoke reports a status map: site -> check id -> info.
         cst = s.get("central_status") or {}
+        # One row per site/check, with status normalised to lowercase.
         for site, cmap in (cst.get("status") or {}).items():
             for cid, info in (cmap or {}).items():
                 if isinstance(info, dict):
                     checks.append({"site": site, "check": cid,
                                    "status": str(info.get("status") or "no_data").lower()})
+        # One client-count row per site.
         for site, entry in (cst.get("client_count_status") or {}).items():
             if isinstance(entry, dict):
                 ccrows.append({"site": site, **entry})
 
     # 30-day health (centralized hub poller + relayed distributed spokes)
+    # Per-site/check daily history and success percentages for the report.
     health: Dict[str, Dict[str, Any]] = {}
     success: Dict[str, Dict[str, Any]] = {}
+    # The hub's central poller (if running) keeps the 30-day health history.
     hh = getattr(getattr(hub, "central_hub_poller", None), "_health", None)
     if hh is not None:
+        # Read centrally-polled history; failures leave it empty instead of breaking the report.
         try:
             health = dict(hh.summary(tenant_id) or {})
         except Exception:  # noqa: BLE001
             health = {}
+        # Read centrally-polled success percentages, also failure-tolerant.
         try:
             success = dict(hh.success_stats(tenant_id) or {})
         except Exception:  # noqa: BLE001
             success = {}
+    # Merge history relayed by distributed spokes on top of the centralized history.
     for _sid, sd in service._spokes_for_tenant(tenant_id):
         sp = ((sd or {}).get("central") or {}).get("health") or {}
         for site, cm in sp.items():
             health.setdefault(site, {}).update(cm)
     # Success-% per check over 24h·7d·4w. Centralized = hourly-accurate; distributed
     # checks (daily-only) fall back to their daily buckets so every row gets a score.
+    # Imported here to avoid a circular import at module load.
     from .central_hub_poller import success_from_daily
+    # Fill in a success score from daily buckets for any check that has none yet.
     for site, cm in health.items():
         for cid, dlist in (cm or {}).items():
             if success.get(site, {}).get(cid) is None:
                 success.setdefault(site, {})[cid] = success_from_daily(dlist)
 
+    # Sort worst status first, then by site and check name.
     checks.sort(key=lambda r: (_RANK.get(r["status"], 3), r["site"], r["check"]))
+    # Headline totals for the summary chips and subject line.
     n_fail = sum(1 for c in checks if c["status"] == "error")
     n_warn = sum(1 for c in checks if c["status"] == "warning")
     n_ok = sum(1 for c in checks if c["status"] == "ok")
     n_clients = sum(int(r.get("current") or 0) for r in ccrows)
+    # Human-readable date for the header.
     today = datetime.datetime.now().strftime("%a, %b %d, %Y")
 
     # ── HTML (inline styles only) ──────────────────────────────────────────
+    # Shared inline CSS snippets for headers and cells (mail clients ignore <style>).
     P = 'font-family:Arial,Helvetica,sans-serif'
     th = f'style="{P};font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;font-weight:bold;text-align:left;padding:6px 8px;border-bottom:1px solid #e8ecea"'
     td = f'style="{P};font-size:12px;color:#1f2937;padding:8px;border-bottom:1px solid #f0f2f1"'
     tdn = f'style="{P};font-size:12px;color:#1f2937;padding:8px;border-bottom:1px solid #f0f2f1;text-align:right"'
 
+    # The HTML body is assembled as a list of fragments and joined at the end.
     parts: List[str] = []
+    # Header block: title, date, tenant and the summary stat chips.
     parts.append(f'''
 <div style="background:#f5f7f6;padding:20px 0;{P}">
  <div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #e8ecea;border-radius:10px;overflow:hidden">
@@ -160,15 +207,19 @@ async def build_report(hub, service: SimulationsService, tenant_id: str,
     </td>
   </tr></table>''')
 
+    # Dashboard Checks section, when enabled.
     if sections.get("checks", True):
+        # One table row per check with status pill, success percentages and 30-day strip.
         rows = []
         for c in checks:
+            # This check's daily history and success stats (empty when unknown).
             daily = ((health.get(c["site"]) or {}).get(c["check"])) or []
             sx = ((success.get(c["site"]) or {}).get(c["check"])) or {}
             rows.append(f'<tr><td {td}><span style="font-family:monospace;font-size:11px;color:#374151">{_esc(c["site"])}</span></td>'
                         f'<td {td}>{_esc(c["check"])}</td><td {td}>{_pill(c["status"])}</td>'
                         f'<td {tdn}>{_pct(sx.get("h24"))}</td><td {tdn}>{_pct(sx.get("d7"))}</td><td {tdn}>{_pct(sx.get("w4"))}</td>'
                         f'<td {td}>{_strip(daily)}</td></tr>')
+        # Section heading, table, rows (or a "no checks" row) and a color legend.
         parts.append(f'''
   <div style="padding:18px 22px 8px">
    <div style="{P};font-size:13px;font-weight:bold;color:#1f2937;margin-bottom:8px">Dashboard Checks
@@ -182,9 +233,12 @@ async def build_report(hub, service: SimulationsService, tenant_id: str,
      <span style="color:#ef4444">■</span> not detected &nbsp; <span style="color:#cbd5e1">■</span> no data</div>
   </div>''')
 
+    # Client Count section, when enabled.
     if sections.get("clients", True):
+        # One table row per site, sorted by name.
         rows = []
         for r in sorted(ccrows, key=lambda x: x.get("site_name") or x.get("site") or ""):
+            # Highlight a client-count drop in amber; otherwise grey.
             drop = r.get("drop_pct")
             dcol = "#b8860b" if (drop or 0) > 0 else "#6b7280"
             rows.append(
@@ -194,6 +248,7 @@ async def build_report(hub, service: SimulationsService, tenant_id: str,
                 f'<td {tdn}>{_num(r.get("wireless"))}</td><td {tdn}>{_num(r.get("hourly_avg"))}</td>'
                 f'<td style="{P};font-size:12px;color:{dcol};padding:8px;border-bottom:1px solid #f0f2f1;text-align:right">{_num(drop)}{"%" if drop is not None else ""}</td>'
                 f'<td {tdn}>{_num(r.get("max_7day"))}</td><td {tdn}>{_num(r.get("max_30day"))}</td></tr>')
+        # Section heading, table header and rows (or a "no data" row).
         parts.append(f'''
   <div style="padding:8px 22px 8px">
    <div style="{P};font-size:13px;font-weight:bold;color:#1f2937;margin-bottom:8px">Client Count
@@ -206,6 +261,7 @@ async def build_report(hub, service: SimulationsService, tenant_id: str,
    </table>
   </div>''')
 
+    # Footer explaining why the email was sent.
     parts.append(f'''
   <div style="padding:14px 22px 20px;border-top:1px solid #f0f2f1;background:#f5f7f6;{P};font-size:11px;color:#6b7280">
     Sent by <b>LM</b> because Email Reports is on for your tenant · manage in Setup → Notifications.
@@ -213,11 +269,13 @@ async def build_report(hub, service: SimulationsService, tenant_id: str,
  </div>
 </div>''')
 
+    # Subject line summarises failing/warning counts so it is useful in an inbox list.
     subject = f"LM Health Report — {tenant_name} — {n_fail} failing, {n_warn} warning"
     return subject, "".join(parts)
 
 
 def _stat(n: Any, label: str, color: str) -> str:
+    """Render one summary stat chip (big number with a small label)."""
     return (f'<span style="display:inline-block;background:#ffffff;border:1px solid #e8ecea;border-radius:8px;'
             f'padding:8px 12px;margin-right:8px;font-family:Arial,sans-serif">'
             f'<span style="font-size:18px;font-weight:bold;color:{color}">{_esc(n)}</span>'
@@ -226,20 +284,28 @@ def _stat(n: Any, label: str, color: str) -> str:
 
 
 def _period_key(now: datetime.datetime, freq: str) -> str:
+    """Return a string that identifies the current schedule period for the frequency."""
+    # Daily reports key on the date.
     if freq == "daily":
         return now.strftime("%Y-%m-%d")
+    # Monthly reports key on year-month.
     if freq == "monthly":
         return now.strftime("%Y-%m")
+    # Weekly (default) reports key on ISO year and week number.
     iso = now.isocalendar()
     return f"{iso[0]}-W{iso[1]:02d}"  # weekly
 
 
 def _due(now: datetime.datetime, sch: Dict[str, Any]) -> bool:
+    """Return True when the schedule says a report should go out at this time."""
+    # Not before the configured hour of the day (default 7am).
     if now.hour < int(sch.get("hour", 7) or 7):
         return False
+    # Weekly reports also need the right weekday (0 = Monday).
     freq = sch.get("freq", "weekly")
     if freq == "weekly" and now.weekday() != int(sch.get("dow", 0) or 0):
         return False
+    # Monthly reports also need the right day of the month.
     if freq == "monthly" and now.day != int(sch.get("dom", 1) or 1):
         return False
     return True
@@ -247,11 +313,15 @@ def _due(now: datetime.datetime, sch: Dict[str, Any]) -> bool:
 
 async def send_now(hub, tenant_id: str, cfg: Dict[str, Any]) -> None:
     """Build + send immediately (the 'Send test now' path)."""
+    # Imported lazily; it is the same provider-aware sender used for hub alerts.
     import notifications as _n  # leaf, lazy — same provider-aware sender as hub alerts
+    # Build the report for this tenant.
     service = SimulationsService(hub)
     subject, html = await build_report(hub, service, tenant_id, cfg)
+    # Send both the HTML and a plain-text alternative.
     ok = await _n.send_email(hub, subject, _html_to_text(html),
                              to_emails=cfg.get("recipients") or [], html=html)
+    # Surface a clear error so the UI can tell the user what to check.
     if not ok:
         raise RuntimeError("send failed — check Setup → Notifications "
                            "(provider enabled, From address + recipient(s) set)")
@@ -262,29 +332,37 @@ def get_reports(hub) -> List[Dict[str, Any]]:
     sections, recipients, schedule, enabled, last_sent}`` carries its own target
     ``tenant`` so a Global Admin manages reports for any tenant from one list.
     Stored in ``global_config['email_reports']``."""
+    # Reports live in global config; return a copy so callers can edit it freely.
     gc = hub.state.system_state.get("global_config", {}) or {}
     return list(gc.get("email_reports", []) or [])
 
 
 def save_reports(hub, reports: List[Dict[str, Any]]) -> None:
+    """Store the global list of email reports and mark hub state for saving."""
+    # Create the global config section if missing, then replace the list.
     gc = hub.state.system_state.setdefault("global_config", {})
     gc["email_reports"] = list(reports or [])
+    # Mark state dirty so the hub persists it.
     hub.state._mark_dirty()
 
 
 async def _migrate_legacy(hub) -> None:
     """One-time: fold any pre-list per-tenant email_report config into the global
     list so an existing schedule isn't lost when this ships."""
+    # Migration runs only once; a flag in global config records that it is done.
     gc = hub.state.system_state.setdefault("global_config", {})
     if gc.get("email_reports_migrated"):
         return
+    # Start from the existing global list and note which tenants already have a report.
     store = hub.simulations_store
     reports = get_reports(hub)
     have = {r.get("tenant") for r in reports}
+    # Copy each tenant's old config into the list if it had recipients and no report yet.
     try:
         for tid in store.tenant_ids():
             old = await store.get_email_report(tid)
             if isinstance(old, dict) and old.get("recipients") and tid not in have:
+                # Build a global-list entry from the old per-tenant settings, with defaults.
                 reports.append({
                     "id": "legacy-" + str(tid), "name": str(tid) + " dashboard",
                     "tenant": tid,
@@ -294,8 +372,10 @@ async def _migrate_legacy(hub) -> None:
                     "enabled": bool(old.get("enabled")),
                     "last_sent": old.get("last_sent"),
                 })
+    # Migration is best-effort; a store error must not stop the scheduler.
     except Exception:  # noqa: BLE001
         pass
+    # Save the merged list and set the "migrated" flag so this never runs again.
     save_reports(hub, reports)
     gc["email_reports_migrated"] = True
     hub.state._mark_dirty()
@@ -303,46 +383,64 @@ async def _migrate_legacy(hub) -> None:
 
 async def run_loop(hub) -> None:
     """Fire each due report in the global list once per period. Started from main.py."""
+    # Service instance reused for every report build.
     service = SimulationsService(hub)
+    # Fold any legacy per-tenant configs into the global list first.
     try:
         await _migrate_legacy(hub)
+    # A failed migration is logged and the loop still runs.
     except Exception as exc:  # noqa: BLE001
         logger.debug("email report migration skipped: %s", exc)
+    # Run forever, checking for due reports every _POLL_S seconds.
     while True:
         try:
+            # Snapshot the time and the report list for this tick.
             now = datetime.datetime.now()
             reports = get_reports(hub)
             changed = False
+            # Imported lazily, same sender as hub alerts.
             import notifications as _n
+            # Consider each report independently.
             for r in reports:
                 try:
+                    # Skip disabled reports.
                     if not r.get("enabled"):
                         continue
+                    # Skip reports whose scheduled time has not arrived.
                     sch = r.get("schedule") or {}
                     if not _due(now, sch):
                         continue
+                    # Skip reports already sent in this period.
                     period = _period_key(now, sch.get("freq", "weekly"))
                     if r.get("last_sent") == period:
                         continue
+                    # Build and send the report for its target tenant.
                     tid = r.get("tenant") or "default"
                     subject, html = await build_report(hub, service, tid, r)
                     sent = await _n.send_email(hub, subject, _html_to_text(html),
                                                to_emails=r.get("recipients") or [], html=html)
+                    # Delivery was refused (no provider/From/recipients): log and retry next tick.
                     if not sent:
                         logger.warning("email report '%s' (tenant %s) not sent "
                                        "(notifications disabled / no From / no recipients)",
                                        r.get("name"), tid)
                         continue
+                    # Record the period so the report is not sent again until the next one.
                     r["last_sent"] = period
                     changed = True
                     logger.info("email report '%s' delivered (tenant %s, %s)",
                                 r.get("name"), tid, period)
+                # One failing report must never block the others.
                 except Exception as exc:  # noqa: BLE001 — one report never blocks the rest
                     logger.warning("email report '%s' failed: %s", r.get("name"), exc)
+            # Persist last_sent stamps only when something was delivered.
             if changed:
                 save_reports(hub, reports)
+        # Cancellation (hub shutdown) must propagate to stop the loop.
         except asyncio.CancelledError:
             raise
+        # Any other error is logged and the loop keeps going.
         except Exception as exc:  # noqa: BLE001
             logger.warning("email report loop error: %s", exc)
+        # Wait until the next scheduler tick.
         await asyncio.sleep(_POLL_S)

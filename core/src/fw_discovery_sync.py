@@ -42,21 +42,30 @@ import ``main`` or ``api`` (no back-import — that would create a cycle, since
 Audience: Hub developers.
 """
 
+# Postpone evaluation of type hints so annotations are never evaluated at runtime.
 from __future__ import annotations
 
+# asyncio runs spoke fetches and tenant pushes concurrently with semaphores.
 import asyncio
+# datetime builds the UTC "last synced" timestamp.
 import datetime as _dt
+# Standard-library logging for per-cycle and per-tenant results.
 import logging
+# Type hints only.
 from typing import Any, Dict, List, Tuple
 
+# Prefix helpers used to attribute devices to tenants; optional so tests can run without them.
 try:
     from access import fetch_tenant_prefixes, attribute_by_prefix  # sibling leaf (no main/api back-import)
 except Exception:  # pragma: no cover - access always importable in-app
     fetch_tenant_prefixes = None  # type: ignore
     attribute_by_prefix = None  # type: ignore
+# Shared helpers: MAC normalisation, spoke/tenant ownership and spoke reply unwrapping.
 from access import norm_mac, nw_spoke_tenant, spoke_owner_tenant, unwrap_spoke  # sibling leaf (no main/api back-import)
+# Shared scheduling helpers: compute the next delay and run the periodic loop.
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
+# Use the hub's main logger so sync lines (incl. [sync-error]) land in the hub log.
 logger = logging.getLogger("Hub")
 
 
@@ -97,6 +106,7 @@ class FwDiscoverySyncMixin:
     # the push command + target module are fixed below.
     """
 
+    # Registry of firewall/DHCP sources the hub can pull devices from (fields described above).
     FIREWALL_DISCOVERY_SOURCES: Dict[str, Dict[str, str]] = {
         "opnsense": {
             "module_type": "firewall",
@@ -123,6 +133,7 @@ class FwDiscoverySyncMixin:
     _FW_DISCOVERY_TARGET_MODULE = "ipam"
     _FW_DISCOVERY_PUSH_COMMAND = "NETBOX_SYNC_DEVICES"
 
+    # global_config key holding this sync's settings.
     _FW_DISCOVERY_CFG_KEY = "opnsense_netbox_device_sync"
 
     # ── config helpers ──────────────────────────────────────────────────────
@@ -130,6 +141,7 @@ class FwDiscoverySyncMixin:
     def _fw_discovery_cfg(self) -> Dict[str, Any]:
         """Read the sync config fresh (enabled/source/source_data/mode/interval/
         daily_time/firewall_id/defaults)."""
+        # global_config[opnsense_netbox_device_sync]; "or {}" guards against a stored None.
         return (self.state.system_state.get("global_config", {})
                 .get(self._FW_DISCOVERY_CFG_KEY, {})) or {}
 
@@ -141,6 +153,7 @@ class FwDiscoverySyncMixin:
         Setup UI's "active" display); the actual pull/push pipeline uses
         ``_fw_discovery_sources()``.
         """
+        # First resolved source, or OPNsense if none resolve.
         sources = self._fw_discovery_sources()
         return sources[0][1] if sources else self.FIREWALL_DISCOVERY_SOURCES["opnsense"]
 
@@ -177,18 +190,23 @@ class FwDiscoverySyncMixin:
         into one push would let one source's replace-delete wrongly remove
         devices the OTHER source owns.
         """
+        # Configured source name, normalised.
         name = str(self._fw_discovery_cfg().get("source", "") or "").strip().lower()
+        # Auto (default): every source with at least one connected spoke.
         if not name or name == "auto":
             return [(n, se) for n, se in self.FIREWALL_DISCOVERY_SOURCES.items()
                     if self.get_all_spokes_by_type(se.get("module_type", ""))]
 
+        # Unknown name: behave like auto.
         if name not in self.FIREWALL_DISCOVERY_SOURCES:
             return [(n, se) for n, se in self.FIREWALL_DISCOVERY_SOURCES.items()
                     if self.get_all_spokes_by_type(se.get("module_type", ""))]
 
+        # The pinned source's registry entry.
         source_entry = self.FIREWALL_DISCOVERY_SOURCES[name]
         module_type = source_entry.get("module_type", "")
 
+        # Pinned firewall: it first, then every connected non-firewall source (e.g. Kea).
         if module_type == "firewall":
             result = [(name, source_entry)]
             for n, se in self.FIREWALL_DISCOVERY_SOURCES.items():
@@ -196,6 +214,7 @@ class FwDiscoverySyncMixin:
                         self.get_all_spokes_by_type(se.get("module_type", ""))):
                     result.append((n, se))
             return result
+        # Pinned non-firewall source: only that source.
         else:
             return [(name, source_entry)]
 
@@ -210,20 +229,25 @@ class FwDiscoverySyncMixin:
         Unset (or a non-firewall source) → every connected spoke of the
         source's type. Empty when none connected.
         """
+        # Config and the source's spoke type.
         cfg = self._fw_discovery_cfg()
         module_type = source_entry.get("module_type", "firewall")
+        # A pinned firewall id narrows a firewall source to one spoke.
         pinned = str(cfg.get("firewall_id") or "").strip()
         if pinned and module_type == "firewall":
             sid = self.get_spoke_for_firewall(pinned)
             return [sid] if sid else []
+        # Otherwise every connected spoke of that type.
         return list(self.get_all_spokes_by_type(module_type) or [])
 
     def _fw_discovery_concurrency(self) -> int:
         """Max tenants pushed in parallel per cycle. Clamp 1..8; default 4."""
+        # Configured concurrency; fall back to 4 if not a number.
         try:
             n = int(self._fw_discovery_cfg().get("concurrency", 4))
         except (TypeError, ValueError):
             n = 4
+        # Clamp to 1..8.
         return max(1, min(8, n))
 
     # ── pull / attribute / push ─────────────────────────────────────────────
@@ -238,14 +262,17 @@ class FwDiscoverySyncMixin:
         Dedup is by MAC (primary) then IP — a device with no MAC keys by its IP.
         DHCP hostnames win over ARP hostnames on merge.
         """
+        # Short alias, current config and which data sets (DHCP/ARP) to pull.
         se = source_entry
         cfg = self._fw_discovery_cfg()
         src_data = str(cfg.get("source_data", "both")).strip().lower()
         want_dhcp = src_data in ("both", "dhcp")
         want_arp = src_data in ("both", "arp")
+        # Spokes to pull from, and accumulators for raw rows and errors.
         spokes = self._fw_firewall_spokes(source_entry)
         raw: List[Dict[str, str]] = []
         errors: List[str] = []
+        # Nothing connected: report it as a pull error.
         if not spokes:
             return [], {"errors": [f"no {se.get('label', 'firewall')} spoke connected"]}
 
@@ -256,11 +283,16 @@ class FwDiscoverySyncMixin:
 
         async def _fetch(sid: str, cmd: str, payload: Dict[str, Any], tag: str) -> None:
             # A tenant-dedicated source's records are its tenant's, not IP-attributed.
+            """Fetch one command's rows from spoke ``sid`` into ``raw`` (errors go to
+            ``errors``).
+            """
             owner = spoke_owner_tenant(self, sid)
+            # Request under the concurrency limit, then unwrap the reply.
             try:
                 async with fetch_sem:
                     r = await self.request_response(sid, cmd, payload, timeout=30.0)
                 d = unwrap_spoke(r) if isinstance(r, dict) else {}
+                # The spoke reported an error.
                 if isinstance(d, dict) and d.get("status") == "ERROR":
                     # Sources like OPNsense wrap the real failure under
                     # "details" (e.g. {"status": "ERROR", "details": {...}})
@@ -276,7 +308,9 @@ class FwDiscoverySyncMixin:
                 # Sources do not agree on where the list lives: OPNsense answers
                 # under "data", Kea under "leases".
                 rows_key = se.get("rows_key", "data")
+                # The list of rows (empty if missing).
                 rows = (d.get(rows_key) if isinstance(d, dict) else None) or []
+                # Normalise each row.
                 for row in rows or []:
                     if not isinstance(row, dict):
                         continue
@@ -284,6 +318,7 @@ class FwDiscoverySyncMixin:
                     # ip-address/hw-address rather than ip/mac.
                     ip = str(row.get("ip") or row.get("ip-address") or "").strip()
                     mac = norm_mac(row.get("mac") or row.get("hw-address"))
+                    # Hostname; "unknown" placeholders become empty.
                     hostname = str(row.get("hostname") or "").strip()
                     if hostname == "unknown":
                         hostname = ""
@@ -291,14 +326,18 @@ class FwDiscoverySyncMixin:
                         ip = ""
                     if not ip and not mac:
                         continue  # nothing to attribute or push
+                    # Record it, noting the tenant of the spoke it came from.
                     rec = {"ip": ip, "mac": mac, "hostname": hostname, "_src": tag,
                            "source_tenant_id": nw_spoke_tenant(self, sid)}
+                    # A tenant-dedicated spoke's rows always belong to that tenant.
                     if owner:
                         rec["owner_tenant_id"] = owner
                     raw.append(rec)
+            # Transport/parse failure for this spoke and command.
             except Exception as e:
                 errors.append(f"{tag}({sid}): {e}")
 
+        # Build fetch tasks for every spoke and wanted data set.
         fetches = []
         for sid in spokes:
             if want_dhcp:
@@ -310,20 +349,28 @@ class FwDiscoverySyncMixin:
             # answer it and log a per-cycle error.
             if want_arp and se.get("arp_command"):
                 fetches.append(_fetch(sid, se["arp_command"], {}, "ARP"))
+        # Run them all; each task records its own errors.
         await asyncio.gather(*fetches, return_exceptions=True)
 
         # Merge + dedup: key by MAC (primary), else by ip:<ip>, per source
         # tenant (the same IP in two tenants' VRFs is two devices). DHCP
         # hostname preferred; fill in ip/mac the other source supplied.
+        # Merged records by key.
         merged: Dict[str, Dict[str, str]] = {}
+        # Fold each raw row into the merged set.
         for rec in raw:
+            # Key by MAC, else by IP; rows with neither are skipped.
             mac, ip = rec.get("mac", ""), rec.get("ip", "")
             key = mac if mac else (f"ip:{ip}" if ip else "")
             if not key:
                 continue
+            # Prefix the key with the source tenant so the same address in two tenants stays
+            # separate.
             src_tid = rec.get("source_tenant_id", "")
             key = f"{src_tid}|{key}"
+            # Existing merged record for this key, if any.
             ex = merged.get(key)
+            # First sighting: create the record.
             if ex is None:
                 merged[key] = {"ip": ip, "mac": mac, "hostname": rec.get("hostname", "")}
                 if src_tid:
@@ -338,12 +385,15 @@ class FwDiscoverySyncMixin:
                 # could win.
                 if str(rec.get("_src", "")).lower() == "dhcp" and rec.get("hostname"):
                     ex["hostname"] = rec["hostname"]
+                # Otherwise fill in a missing hostname.
                 elif not ex.get("hostname") and rec.get("hostname"):
                     ex["hostname"] = rec["hostname"]
+                # Fill in IP/MAC the other row lacked.
                 if not ex.get("ip") and ip:
                     ex["ip"] = ip
                 if not ex.get("mac") and mac:
                     ex["mac"] = mac
+        # Return the merged records and any pull errors.
         return list(merged.values()), {"errors": errors}
 
     async def _fw_attribute(self, records: List[Dict[str, str]]
@@ -361,8 +411,10 @@ class FwDiscoverySyncMixin:
         tenant-authoritative, no orphans. Returns ``({tenant_id: [records]},
         dropped_count)``.
         """
+        # Without the helper (tests only) nothing can be attributed.
         if attribute_by_prefix is None:  # pragma: no cover - access importable in-app
             return {}, len(records)
+        # Delegate to the shared prefix-attribution helper.
         return await attribute_by_prefix(self, records)
 
     async def _fw_push_tenant(self, tenant_id: str, devices: List[Dict[str, str]],
@@ -382,22 +434,28 @@ class FwDiscoverySyncMixin:
         yields an error/skipped status, never an unhandled exception (the loop
         depends on this).
         """
+        # Timestamp and tenant details.
         now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         tenant_cfg = self.state.get_tenant(tenant_id) or {}
         tenant_name = tenant_cfg.get("name") or tenant_id
         netbox_slug = str(tenant_cfg.get("netbox_tenant_slug") or "").strip()
+        # Label of the source being pushed.
         source_label = source_entry.get("label", "OPNsense")
+        # Fields shared by every status this function returns.
         base = {"tenant_id": tenant_id, "tenant_name": tenant_name,
                 "last_sync_ts": now, "discovered_total": len(devices),
                 "source": source_label}
+        # NetBox spoke must be connected.
         netbox = self.get_spoke_by_type(self._FW_DISCOVERY_TARGET_MODULE)
         if not netbox:
             return {**base, "status": "error", "pushed": 0, "errors": 0,
                     "skipped": 0, "deleted": 0, "message": "NetBox spoke not connected"}
+        # Tenant must be bound to a NetBox tenant.
         if not netbox_slug:
             return {**base, "status": "skipped", "pushed": 0, "errors": 0,
                     "skipped": 0, "deleted": 0,
                     "message": "tenant not bound to NetBox (no netbox_tenant_slug)"}
+        # Default field values the sink applies to new devices.
         defaults = self._fw_discovery_cfg().get("defaults", {}) or {}
         # Source of truth for discovered devices: "external" (the discovery feed
         # owns the device → overwrite IP mac/dns_name + rename, populating the
@@ -409,12 +467,15 @@ class FwDiscoverySyncMixin:
         sot_raw = str((self.state.system_state.get("global_config", {}) or {})
                      .get("source_of_truth", {}).get("device_sync", "netbox")
                      ).strip().lower()
+        # Only accept the two known values.
         sot = sot_raw if sot_raw in ("external", "netbox") else "netbox"
+        # Authoritative (replace=True) payload for this tenant and source.
         payload = {"tenant_id": tenant_id, "tenant_slug": netbox_slug,
                    "tenant_name": tenant_name,
                    "source": source_label,
                    "replace": True, "devices": devices, "defaults": defaults,
                    "source_of_truth": sot}
+        # Push to NetBox and read the result counters.
         try:
             rr = await self.request_response(netbox, self._FW_DISCOVERY_PUSH_COMMAND,
                                              payload, timeout=120.0)
@@ -445,11 +506,13 @@ class FwDiscoverySyncMixin:
                             "pushed=%d skipped=%d deleted=%d errors=%d",
                             tenant_id, tenant_name, source_label, rstate,
                             len(devices), pushed, skipped, deleted, errors)
+            # Build the status record.
             status = {**base, "status": rstate,
                       "pushed": pushed, "errors": errors, "skipped": skipped,
                       "deleted": deleted,
                       "message": message or (f"{len(devices)} device(s) sent"
                                               if rstatus != "ERROR" else "NetBox error")}
+        # Network/timeout/unexpected errors become an error status.
         except Exception as e:
             logger.warning("[sync-error] fw-discovery tenant=%s source=%s push failed: %s",
                            tenant_id, source_label, e)
@@ -470,14 +533,18 @@ class FwDiscoverySyncMixin:
         though the stored record is one dict. The full per-source breakdown
         also survives under ``sources`` for anything that wants it.
         """
+        # A single source: copy its status and keep it as the only breakdown entry.
         if len(statuses) == 1:
             out = dict(statuses[0])
             out["sources"] = [statuses[0]]
             return out
+        # Overall status: error beats success beats skipped.
         any_error = any(s.get("status") == "error" for s in statuses)
         any_success = any(s.get("status") == "success" for s in statuses)
         combined_status = "error" if any_error else ("success" if any_success else "skipped")
+        # Each source's message, prefixed with its label.
         messages = [f"{s.get('source', '?')}: {s.get('message')}" for s in statuses if s.get("message")]
+        # Sum the counters and keep the newest timestamp.
         return {
             "tenant_id": statuses[0].get("tenant_id"),
             "tenant_name": statuses[0].get("tenant_name"),
@@ -506,7 +573,9 @@ class FwDiscoverySyncMixin:
         attributed devices still gets a pushed status per source (the sink's
         replace-delete then reconciles that tenant's set for that source).
         """
+        # Sources to pull this run.
         sources = self._fw_discovery_sources()
+        # None connected: record a "skipped" status.
         if not sources:
             now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             tenant_name = (self.state.get_tenant(tenant_id) or {}).get("name") or tenant_id
@@ -519,15 +588,18 @@ class FwDiscoverySyncMixin:
             await self.simulations_store.set_fw_discovery_sync_status(tenant_id, status)
             return {**status, "discovered_total_global": 0, "dropped_unattributed": 0, "pull_errors": []}
 
+        # Accumulators across sources.
         per_source_statuses = []
         discovered_total_global = 0
         dropped_total = 0
         pull_errors: List[str] = []
+        # Pull, attribute and push each source separately.
         for name, entry in sources:
             records, pull = await self._fw_pull_discovered(entry)
             discovered_total_global += len(records)
             src_errors = pull.get("errors", [])
             pull_errors.extend(f"{entry.get('label', name)}: {e}" for e in src_errors)
+            # Attribute to tenants and count unattributed records.
             buckets, dropped = await self._fw_attribute(records)
             dropped_total += dropped
             if src_errors:
@@ -545,9 +617,11 @@ class FwDiscoverySyncMixin:
                     "status": "error", "pushed": 0, "errors": 0, "skipped": 0, "deleted": 0,
                     "message": f"pull failed, push skipped: {'; '.join(src_errors)}"})
                 continue
+            # Push this tenant's devices from this source.
             per_source_statuses.append(
                 await self._fw_push_tenant(tenant_id, buckets.get(tenant_id, []), entry))
 
+        # Combine the per-source statuses, save, and add global counts for the UI.
         combined = self._fw_combine_statuses(per_source_statuses)
         await self.simulations_store.set_fw_discovery_sync_status(tenant_id, combined)
         combined["discovered_total_global"] = discovered_total_global
@@ -573,17 +647,21 @@ class FwDiscoverySyncMixin:
         by the background loop (which discards the return) and the
         all-tenant 'Sync now'.
         """
+        # Sources to pull this cycle.
         sources = self._fw_discovery_sources()
         if not sources:
             logger.info("fw discovery sync cycle: no firewall discovery source connected")
             return {"results": [], "dropped_unattributed": 0, "discovered_total": 0}
 
+        # Limit concurrent tenant pushes; collect statuses per tenant.
         sem = asyncio.Semaphore(self._fw_discovery_concurrency())
         per_tenant: Dict[str, List[Dict[str, Any]]] = {}
         discovered_total = 0
         dropped_total = 0
 
+        # Pull, attribute and push each source in turn.
         for name, entry in sources:
+            # Pull and count.
             records, pull = await self._fw_pull_discovered(entry)
             discovered_total += len(records)
             src_errors = pull.get("errors", [])
@@ -597,6 +675,7 @@ class FwDiscoverySyncMixin:
                                "skipping push this cycle to avoid an incomplete replace=True",
                                source_label, "; ".join(src_errors))
                 continue
+            # Attribute to tenants.
             buckets, dropped = await self._fw_attribute(records)
             dropped_total += dropped
             active_tids = set(buckets.keys())
@@ -609,14 +688,20 @@ class FwDiscoverySyncMixin:
             # them, same as any other tenant's push.
             previous_tids = set(await self.simulations_store
                                 .get_fw_discovery_last_nonzero_tenants(source_label))
+            # Tenants to push: current ones plus those that just dropped to zero.
             stale_tids = previous_tids - active_tids
             tids = sorted(active_tids | stale_tids)
+            # Nothing to push: clear the "last non-zero" list for this source.
             if not tids:
                 await self.simulations_store.set_fw_discovery_last_nonzero_tenants(
                     source_label, [])
                 continue
 
             async def _one(tid: str, entry=entry, buckets=buckets, name=name):
+                """Push one tenant for this source under the semaphore; returns (tenant id,
+                status or None).
+                """
+                # Wait for a free slot.
                 async with sem:
                     try:
                         return tid, await self._fw_push_tenant(tid, buckets.get(tid, []), entry)
@@ -624,13 +709,17 @@ class FwDiscoverySyncMixin:
                         logger.debug("fw discovery gather tenant=%s source=%s: %s", tid, name, e)
                         return tid, None
 
+            # Push all tenants for this source in parallel.
             results = await asyncio.gather(*(_one(tid) for tid in tids))
+            # Keep successful statuses per tenant.
             for tid, status in results:
                 if status:
                     per_tenant.setdefault(tid, []).append(status)
+            # Remember which tenants had devices, for next cycle's reconciliation.
             await self.simulations_store.set_fw_discovery_last_nonzero_tenants(
                 source_label, sorted(active_tids))
 
+        # No tenant matched anything: log and return.
         if not per_tenant:
             logger.info("fw discovery sync cycle: %d records pulled across %d source(s), "
                         "0 tenants matched, %d dropped unattributed",
@@ -638,12 +727,14 @@ class FwDiscoverySyncMixin:
             return {"results": [], "dropped_unattributed": dropped_total,
                     "discovered_total": discovered_total}
 
+        # Combine and save each tenant's statuses.
         out = []
         for tid, statuses in per_tenant.items():
             combined = self._fw_combine_statuses(statuses)
             await self.simulations_store.set_fw_discovery_sync_status(tid, combined)
             out.append(combined)
 
+        # Cycle totals; log a [sync-error] warning if any record failed.
         pushed = sum(int(r.get("pushed", 0)) for r in out)
         errs = sum(int(r.get("errors", 0)) for r in out)
         if errs > 0:
@@ -672,15 +763,25 @@ class FwDiscoverySyncMixin:
         syncs don't simultaneous-fire on startup.
         """
         def _guard() -> bool:
+            """Return True when this cycle should run: enabled, a source resolves, and NetBox is
+            connected.
+            """
+            # Read config fresh.
             cfg = self._fw_discovery_cfg()
             return bool(cfg.get("enabled", False)
                         and self._fw_discovery_sources()
                         and self.get_spoke_by_type(self._FW_DISCOVERY_TARGET_MODULE))
 
         def _delay() -> float:
+            """Return seconds until the next cycle (60 s while disabled so enabling applies
+            quickly).
+            """
+            # Read the schedule fresh.
             cfg = self._fw_discovery_cfg()
+            # Disabled: re-check in a minute.
             if not cfg.get("enabled", False):
                 return 60
+            # Compute the delay for interval or daily-at-HH:MM mode.
             return next_schedule_delay(cfg, default_daily_time="02:00",
                                        log_name="fw discovery sync")
 

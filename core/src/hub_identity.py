@@ -1,11 +1,16 @@
 """Install-UUID identity tracking for the LM Hub (clone/rename detection)."""
 
+# Postpone evaluation of type hints so annotations are never evaluated at runtime.
 from __future__ import annotations
 
+# Standard-library logging; [identity] warnings go to the hub log.
 import logging
+# time.time() timestamps reimage bursts and checks how recently a spoke was seen.
 import time
+# Type hints only.
 from typing import Dict, Optional
 
+# Use the hub's main logger so identity events appear with other hub output.
 logger = logging.getLogger("Hub")
 
 # Clone-collision backstop: a single box being re-imaged is a rare, one-shot
@@ -75,15 +80,19 @@ class HubIdentityMixin:
     # new hostname → hostname_changed; new UUID reusing a known id → reimaged.
     def _rebuild_install_uuid_index(self) -> None:
         """Rebuild the install_uuid → id index from persisted metadata on load."""
+        # install_uuid -> id map.
         idx: Dict[str, str] = {}
+        # Spokes record their install_uuid in module_metadata.
         for sid, meta in self.state.system_state.get("module_metadata", {}).items():
             iu = (meta or {}).get("install_uuid")
             if iu:
                 idx[iu] = sid
+        # Agents record theirs in agent_config.
         for aid, cfg in self.state.system_state.get("agent_config", {}).items():
             iu = (cfg or {}).get("install_uuid")
             if iu:
                 idx[iu] = aid
+        # Replace the index in one step.
         self.install_uuid_index = idx
 
     def _note_reimage_collision(self, guid: str) -> None:
@@ -97,11 +106,14 @@ class HubIdentityMixin:
         warning + spoke event so the operator strips identity on the image rather
         than chasing a flapping spoke."""
         try:
+            # Reimage timestamps for this guid, plus now.
             hist = self._recent_reimages.setdefault(guid, [])
             now = time.time()
             hist.append(now)
+            # Keep only reimages inside the window.
             cutoff = now - _CLONE_REIMAGE_WINDOW_S
             hist[:] = [t for t in hist if t >= cutoff]
+            # Too many in the window: warn loudly and record a spoke event.
             if len(hist) >= _CLONE_REIMAGE_THRESHOLD:
                 logger.warning(
                     "[identity] CLONE COLLISION: guid %s reimaged %d× in %ds — "
@@ -115,6 +127,7 @@ class HubIdentityMixin:
                     f"{len(hist)} reimages in ≤{_CLONE_REIMAGE_WINDOW_S}s — "
                     "multiple boxes sharing one identity")
                 hist.clear()  # dedupe until it re-accumulates
+        # Alerting must never break the connect path.
         except Exception:
             pass
 
@@ -136,6 +149,7 @@ class HubIdentityMixin:
         rule out a concurrent collision, the safe outcome is to leave the real
         owner intact and hold the new id pending, never to auto-hand over keys."""
         try:
+            # The old id's primary key; the same box is never a collision.
             old_pk = self._primary_key(old_id)
             if old_pk == new_pk:
                 return False
@@ -163,6 +177,7 @@ class HubIdentityMixin:
         except Exception:  # noqa: BLE001 — fail closed (no silent key handover)
             return True
 
+    # Short uuid prefix for messages (never log the whole identifier).
     def _note_uuid_collision(self, old_id: str, new_id: str,
                              install_uuid: str) -> None:
         """Record + loudly alert a shared-install_uuid collision (two live boxes,
@@ -172,6 +187,7 @@ class HubIdentityMixin:
         shows why the new box is stuck pending."""
         try:
             short = (install_uuid or "")[:8]
+            # Loud warning explaining the refusal and the fix.
             logger.warning(
                 "[identity] INSTALL_UUID COLLISION: %s claimed install_uuid %s… "
                 "while its current owner %s is still live — refusing identity "
@@ -180,6 +196,7 @@ class HubIdentityMixin:
                 "duplicate machine uuid (Proxmox clone-template / cloned golden "
                 ".env). The new id stays pending until it presents a unique "
                 "identity.", new_id, short, old_id, new_id, old_id)
+            # Record the event on both ids so either one shows why.
             self.record_spoke_event(
                 old_id, "install_uuid_collision",
                 f"{new_id} claimed this box's install_uuid while it is still live "
@@ -188,6 +205,7 @@ class HubIdentityMixin:
                 new_id, "install_uuid_collision",
                 f"shares install_uuid with live spoke {old_id} — left pending; "
                 f"regenerate this box's machine uuid")
+        # Alerting must never break the connect path.
         except Exception:  # noqa: BLE001
             pass
 
@@ -199,6 +217,7 @@ class HubIdentityMixin:
         the recorded value has already been overwritten with whatever the caller
         claimed and no comparison is possible."""
         try:
+            # Read the uuid from the spoke's metadata; any error means "none recorded".
             mm = self.state.system_state.get("module_metadata", {}) or {}
             return ((mm.get(pk, {}) or {}).get("install_uuid") or "").strip()
         except Exception:  # noqa: BLE001
@@ -213,6 +232,7 @@ class HubIdentityMixin:
         to deny the challenger over admitting a possible key thief; the real
         spoke reconnects on its next retry."""
         try:
+            # Connected right now.
             if self.active_connections.get(pk) is not None:
                 return True
             # No inner try: a state fault must reach the outer handler and fail
@@ -263,10 +283,13 @@ class HubIdentityMixin:
         after a restart is therefore unbound. Steady state (the alias armed by
         the legitimate spoke's own reconnect) is covered."""
         try:
+            # Normalise both values.
             presented = (presented_uuid or "").strip()
             recorded = (prev_uuid or "").strip()
+            # Nothing on record: allow (legacy/first connect).
             if not recorded:
                 return True
+            # No uuid presented: allow, but record it as an anomaly.
             if not presented:
                 self._note_uuid_binding_event(
                     spoke_id, pk, presented, recorded, peer_ip, denied=False,
@@ -274,9 +297,11 @@ class HubIdentityMixin:
                            "on record (agent guid file unreadable, or a client "
                            "replaying only the session key)")
                 return True
+            # Matches: normal case.
             if presented == recorded:
                 return True
 
+            # Mismatch: deny if the owner is live or strict mode is on; always record it.
             owner_live = self._uuid_binding_owner_live(pk)
             strict = self._uuid_binding_strict()
             denied = owner_live or strict
@@ -290,6 +315,7 @@ class HubIdentityMixin:
                          "no live owner — indistinguishable from a re-image that "
                          "kept its secret, so the connection is allowed and only "
                          "reported (set security.uuid_binding_strict to deny)")))
+            # True allows the connection.
             return not denied
         except Exception:  # noqa: BLE001 — a bookkeeping fault must never strand
             # a legitimate spoke; the secret already verified.
@@ -301,6 +327,7 @@ class HubIdentityMixin:
         corroborates it. Default False: observe first, enforce once the fleet is
         known to report guids cleanly (same staged posture as ``auto_block``)."""
         try:
+            # Read global_config.security.uuid_binding_strict; any error means "not strict".
             cfg = (self.state.get_global_config() or {}).get("security", {}) or {}
             return bool(cfg.get("uuid_binding_strict"))
         except Exception:  # noqa: BLE001
@@ -317,9 +344,11 @@ class HubIdentityMixin:
         fleet is a cloning/imaging mistake, and cutting off the site's egress
         would turn a misconfiguration into an outage. Never raises."""
         try:
+            # Short uuid prefixes and the verdict for messages.
             short_p = (presented or "-")[:8]
             short_r = (recorded or "-")[:8]
             verb = "DENIED" if denied else "ALLOWED (observe-only)"
+            # Loud warning with guidance for the operator.
             logger.warning(
                 "[identity] INSTALL_UUID BINDING MISMATCH: %s presented a VALID "
                 "session key with install_uuid %s… but the hub has %s… on record "
@@ -329,10 +358,12 @@ class HubIdentityMixin:
                 "Verify the box before re-approving; rotate the spoke's key if "
                 "you cannot account for it.",
                 spoke_id, short_p, short_r, verb, detail)
+            # Record a spoke event.
             self.record_spoke_event(
                 pk, "install_uuid_binding_mismatch",
                 f"valid key presented with install_uuid {short_p}… but "
                 f"{short_r}… is on record — {verb}; {detail}")
+            # Report to the threat monitor (if present) at "warning" severity, so no auto-block.
             tm = getattr(self, "threat_monitor", None)
             if tm:
                 tm.note_anomaly(
@@ -342,6 +373,7 @@ class HubIdentityMixin:
                     ip=peer_ip, severity="warning",
                     meta={"spoke_id": spoke_id, "presented_uuid": short_p,
                           "recorded_uuid": short_r, "denied": denied})
+        # Alerting must never break the connect path.
         except Exception:  # noqa: BLE001
             pass
 
@@ -372,21 +404,27 @@ class HubIdentityMixin:
         re-keyed blobs. A crash before the next save just re-runs this (no-op
         for already-guid keys).
         """
+        # Already done: nothing to do.
         ss = self.state.system_state
         if ss.get(self._GUID_BLOB_MIGRATION_SENTINEL):
             return
+        # Stores to re-key: metadata, last-seen, simulations cache and mailbox.
         md = ss.get("module_metadata", {})
         sls = ss.get("spoke_last_seen", {})
         sc = getattr(self, "simulations_cache", None)
         mb = getattr(self, "mailbox", None)
+        # Count of entries moved.
         moved = 0
+        # Each offline spoke whose metadata names a guid different from its key.
         for raw_sid, meta in list(md.items()):
             guid = (meta or {}).get("install_uuid")
             if not guid or guid == raw_sid:
                 continue
+            # Move its cached simulations payload.
             if isinstance(sc, dict) and raw_sid in sc:
                 sc[guid] = sc.pop(raw_sid)
                 moved += 1
+            # Move its mailbox queues.
             if mb is not None:
                 try:
                     if mb.rename_spoke_inplace(raw_sid, guid):
@@ -394,9 +432,11 @@ class HubIdentityMixin:
                 except Exception:  # noqa: BLE001
                     logger.warning("[identity] boot mailbox re-key %s→%s failed",
                                    raw_sid, guid)
+            # Move its last-seen time.
             if raw_sid in sls:
                 sls[guid] = sls.pop(raw_sid)
                 moved += 1
+        # Mark the migration done and mark state for saving.
         ss[self._GUID_BLOB_MIGRATION_SENTINEL] = True
         self.state._mark_dirty()
         # Nudge the debounced simulations-cache flush so the re-keyed payload
@@ -406,6 +446,7 @@ class HubIdentityMixin:
                 self._sim_cache_dirty = True
             except Exception:  # noqa: BLE001
                 pass
+        # Log only if something moved.
         if moved:
             logger.info("[identity] boot guid-blob migration re-keyed %d entry(ies)",
                         moved)
@@ -422,6 +463,7 @@ class HubIdentityMixin:
         ``spoke_id_alias`` empty (before the Phase 2b migration trigger arms)
         this returns ``spoke_id`` for every spoke → identical to today.
         """
+        # Alias lookup; unknown ids map to themselves.
         return self.spoke_id_alias.get(spoke_id, spoke_id)
 
     def _agent_primary_key(self, agent_id: str) -> str:
@@ -436,6 +478,7 @@ class HubIdentityMixin:
         With ``agent_id_alias`` empty (before the B2 arm fires) this returns
         ``agent_id`` for every agent → identical to today.
         """
+        # Alias lookup; unknown ids map to themselves.
         return self.agent_id_alias.get(agent_id, agent_id)
 
     def _agent_relay_name(self, agent_id: str) -> str:
@@ -448,6 +491,7 @@ class HubIdentityMixin:
         AGENT_RELAY_UP write site); an unknown / offline id falls back to itself
         so a relay to a just-disconnected agent still targets the right name.
         """
+        # The raw name stored with the agent's info, if known.
         apk = self._agent_primary_key(agent_id)
         name = (self.agent_info.get(apk) or {}).get("agent_id")
         if name:
@@ -478,8 +522,10 @@ class HubIdentityMixin:
         inherit the victim's approval + a freshly minted session key. The agent
         relay path is post-auth and migrates unconditionally (default True).
         """
+        # Nothing to do without an id.
         if not new_id:
             return
+        # Agents have their own reconcile path.
         if is_agent:
             self._reconcile_agent_identity(new_id, install_uuid, hostname, parent_spoke_id)
             return
@@ -503,6 +549,7 @@ class HubIdentityMixin:
         # re-creating a name-keyed record and splitting. Pre-arm this is just
         # new_id (alias empty), so behavior is identical to today.
         new_pk = self._primary_key(new_id)
+        # This spoke's stored metadata and previous hostname/uuid.
         mm = self.state.system_state.setdefault("module_metadata", {})
         meta = mm.get(new_pk, {})
         prev_hostname = meta.get("hostname")
@@ -512,7 +559,9 @@ class HubIdentityMixin:
         # thus whether we record it into new_id's metadata + repoint the index).
         # False only in the unproven-rename branch below.
         owns_uuid = True
+        # Correlate by uuid when one was presented.
         if install_uuid:
+            # Which id the uuid was last seen under.
             old_id = self.install_uuid_index.get(install_uuid)
             if old_id and old_id != new_pk:
                 if migrate_if and self._is_uuid_collision(old_id, new_pk):
@@ -576,6 +625,7 @@ class HubIdentityMixin:
 
         # Persist current hostname + install_uuid so the next reconnect can diff.
         # install_uuid is recorded only when new_id actually owns it.
+        # Values to save.
         _persist = {
             "hostname": hostname or "",
             "install_uuid": (install_uuid or "") if owns_uuid else "",
@@ -591,13 +641,18 @@ class HubIdentityMixin:
         # Role sub-spokes (id "{host}-{role}") report the SAME hostname as their
         # base agent, so seed them with the connect-id to keep the registry rows
         # distinguishable. A legacy row still carrying the bare hostname is healed.
+        # Is this a role sub-spoke ("{host}-{role}")? Pick the seed display name accordingly.
         _is_sub = bool(hostname) and new_id.lower().startswith(hostname.lower() + "-")
         _seed = new_id if _is_sub else hostname
+        # Current metadata.
         _meta = self.state.system_state.get("module_metadata", {}) or {}
+        # New module with a declared hostname: seed the display name.
         if hostname and new_pk not in _meta:
             _persist["display_name"] = _seed
+        # Heal a legacy sub-spoke row that still shows the bare hostname.
         elif _is_sub and (_meta.get(new_pk, {}) or {}).get("display_name") == hostname:
             _persist["display_name"] = new_id
+        # Save the metadata.
         self.state.update_module_metadata(new_pk, _persist)
 
         # Lazy guid-primary arm: relocate this spoke's hub-side state from its
@@ -623,6 +678,7 @@ class HubIdentityMixin:
         the composite write site keeps writing ``{name}:{agent}`` and the
         composite must stay name-keyed (agent composites are B2 territory).
         """
+        # Nothing to migrate.
         if old_id == new_id:
             return
         # Persisted module-keyed state (approved_modules / known_modules /
@@ -701,8 +757,10 @@ class HubIdentityMixin:
         re-keyed for accuracy. ``install_uuid_index`` repoints to the guid (the
         new primary key).
         """
+        # No uuid, or the id already is the guid: nothing to arm.
         if not install_uuid or install_uuid == spoke_id:
             return
+        # Existing alias for this name, if any.
         existing = self.spoke_id_alias.get(spoke_id)
         if existing == install_uuid:
             return  # already armed to this guid — idempotent no-op
@@ -711,6 +769,7 @@ class HubIdentityMixin:
             logger.warning("[identity] %s already guid-armed to %s; ignoring %s",
                            spoke_id, existing, install_uuid)
             return
+        # Record the alias.
         self.spoke_id_alias[spoke_id] = install_uuid
         # Bulk re-key name→guid (state + in-memory + keys). The active-connection
         # pop inside is a safe no-op at arm time (no ws installed yet). Agent
@@ -721,6 +780,7 @@ class HubIdentityMixin:
         # stay name-keyed until B2.
         self._migrate_spoke_identity(spoke_id, install_uuid,
                                      rekey_agent_composite=False)
+        # The uuid now indexes to itself (the guid).
         self.install_uuid_index[install_uuid] = install_uuid
         # spoke_last_seen is module-keyed offline-only contact metadata; re-key
         # so a hub reboot doesn't reset this spoke to "Never connected / RED".
@@ -737,15 +797,18 @@ class HubIdentityMixin:
         # eventual (next _asave / retry loop) with the one-shot startup
         # migration as the reboot backstop. ``mailbox`` is guarded so the
         # unit-test arm stubs (no mailbox) still work.
+        # Mailbox may be absent in unit tests.
         mb = getattr(self, "mailbox", None)
         if mb is not None:
             try:
                 mb.rename_spoke_inplace(spoke_id, install_uuid)
             except Exception:  # noqa: BLE001
                 logger.warning("[identity] mailbox re-key %s→%s failed", spoke_id, install_uuid)
+        # Move the cached simulations payload.
         sim_cache = getattr(self, "simulations_cache", None)
         if isinstance(sim_cache, dict) and spoke_id in sim_cache:
             sim_cache[install_uuid] = sim_cache.pop(spoke_id)
+        # Mark state for saving and log.
         self.state._mark_dirty()
         logger.info("[identity] armed guid-primary %s → %s", spoke_id, install_uuid)
 
@@ -762,6 +825,7 @@ class HubIdentityMixin:
         unconditionally (no CC2 ``migrate_if`` gate — the spoke vouched for the
         agent by relaying it). Arms guid-primary at the end (B2).
         """
+        # Nothing to do without an id.
         if not new_id:
             return
         # Cold-restart re-arm (mirror the spoke path): agent_id_alias is in-memory
@@ -776,13 +840,16 @@ class HubIdentityMixin:
                 and self.install_uuid_index.get(install_uuid) == install_uuid \
                 and install_uuid != new_id:
             self.agent_id_alias[new_id] = install_uuid
+        # This agent's stored config and previous hostname/uuid.
         new_pk = self._agent_primary_key(new_id)
         ac = self.state.system_state.setdefault("agent_config", {})
         cfg = ac.get(new_pk, {})
         prev_hostname = cfg.get("hostname")
         prev_uuid = cfg.get("install_uuid")
 
+        # Correlate by uuid when one was presented.
         if install_uuid:
+            # Which id the uuid was last seen under.
             old_id = self.install_uuid_index.get(install_uuid)
             if old_id and old_id != new_pk:
                 # Cloned+renamed Proxmox node: carry over per-agent config. Target
@@ -794,6 +861,7 @@ class HubIdentityMixin:
                 self.record_spoke_event(new_pk, "identity_changed",
                                         f"migrated from {old_id} (hostname={hostname or '?'})")
                 self.install_uuid_index[install_uuid] = new_pk
+            # Fresh uuid: note a re-image if the slot had a different one, then index it.
             elif not old_id:
                 if prev_uuid and prev_uuid != install_uuid:
                     self.record_spoke_event(parent_spoke_id or new_pk, "reimaged",
@@ -806,10 +874,12 @@ class HubIdentityMixin:
             # ponging agent state guid↔name every reconnect once the alias is
             # armed: index[uuid]=guid and _agent_primary_key(name)=guid → equal.)
 
+        # Report a hostname change.
         if hostname and prev_hostname and prev_hostname != hostname:
             self.record_spoke_event(parent_spoke_id or new_pk, "hostname_changed",
                                     f"agent {new_id}: was {prev_hostname}, now {hostname}")
 
+        # Save current hostname and uuid for the next comparison.
         cfg_new = ac.setdefault(new_pk, {})
         cfg_new["hostname"] = hostname or ""
         cfg_new["install_uuid"] = install_uuid or ""
@@ -835,6 +905,7 @@ class HubIdentityMixin:
         as today; the next AGENT_HEARTBEAT overwrites the composite with the
         armed form, so a transient mismatch self-heals within ~30s.
         """
+        # Nothing to migrate.
         if old_id == new_id:
             return
         # Persisted per-agent config (client_simulation/tenant binding/display_name).
@@ -853,8 +924,11 @@ class HubIdentityMixin:
         # _handle_agent_relay_up refreshes it on the next frame.
         if old_id in self.agent_info:
             self.agent_info[new_id] = self.agent_info.pop(old_id)
+        # Parent-spoke-keyed state.
         if parent_spoke_id:
+            # Parent spoke's primary key.
             parent_pk = self._primary_key(parent_spoke_id)
+            # Move the agent's nested telemetry entry.
             if parent_pk in self.spoke_telemetry:
                 nested = self.spoke_telemetry[parent_pk]
                 if old_id in nested:
@@ -864,7 +938,9 @@ class HubIdentityMixin:
             new_hb = f"{parent_pk}:{new_id}"
             if old_hb in self.heartbeat.last_seen:
                 self.heartbeat.last_seen[new_hb] = self.heartbeat.last_seen.pop(old_hb)
+        # Move the agent's keys.
         self.key_manager.rename_spoke_keys(old_id, new_id)
+        # Log the migration.
         logger.info(f"[identity] migrated agent {old_id} → {new_id}")
 
     def _arm_agent_guid_primary(self, agent_id: str, install_uuid: str,
@@ -884,8 +960,10 @@ class HubIdentityMixin:
         ``agent_info[guid]["agent_id"]`` holds the raw name (set by the write
         site in _handle_agent_relay_up) for guid→name relay translation.
         """
+        # No uuid, or the id already is the guid: nothing to arm.
         if not install_uuid or install_uuid == agent_id:
             return
+        # Existing alias for this name, if any.
         existing = self.agent_id_alias.get(agent_id)
         if existing == install_uuid:
             return  # already armed to this guid — idempotent no-op
@@ -894,6 +972,7 @@ class HubIdentityMixin:
             logger.warning("[identity] agent %s already guid-armed to %s; ignoring %s",
                            agent_id, existing, install_uuid)
             return
+        # Record the alias, re-key the agent's state, and index the uuid to itself.
         self.agent_id_alias[agent_id] = install_uuid
         self._migrate_agent_identity(agent_id, install_uuid, parent_spoke_id)
         self.install_uuid_index[install_uuid] = install_uuid

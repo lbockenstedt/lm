@@ -21,13 +21,18 @@ plaintext out of the hub's on-disk config.
 Backward-compatible by construction: when a record has **no** ``vault_credential``
 every helper here is a no-op and the inline fields flow exactly as before.
 """
+# copy makes deep copies so the stored record is never mutated with secrets.
 import copy
+# logging reports vault resolve failures.
 import logging
 
+# HTTPException turns validation failures into API error responses.
 from fastapi import HTTPException
 
+# cred_vault resolves vault references to secret values and reports vault availability.
 import cred_vault
 
+# Module-level logger named after this module.
 logger = logging.getLogger(__name__)
 
 
@@ -130,12 +135,14 @@ NONSECRET_VAULT_FIELDS = {
 
 def secret_field_names(storage_key):
     """The record fields that a vault credential may supply for this product."""
+    # The secret field names configured for this product (empty for unknown products).
     return tuple((SECRET_FIELDS.get(storage_key) or {}).keys())
 
 
 def _vault_overlay_fields(storage_key):
     """Merged map of all fields (secret + non-secret) that may be overlaid from
     a resolved vault secret for this product."""
+    # Start from the secret fields, then add the non-secret overlay fields.
     merged = dict(SECRET_FIELDS.get(storage_key) or {})
     merged.update(NONSECRET_VAULT_FIELDS.get(storage_key) or {})
     return merged
@@ -144,9 +151,11 @@ def _vault_overlay_fields(storage_key):
 def _normalize_ref(record):
     """Return a clean ``{"bucket","name"}`` dict for the record's
     ``vault_credential`` reference, or ``None`` when absent/blank."""
+    # Read the reference; anything other than a dict is not a reference.
     ref = (record or {}).get("vault_credential")
     if not isinstance(ref, dict):
         return None
+    # Both bucket and name must be non-blank.
     bucket = (ref.get("bucket") or "").strip()
     name = (ref.get("name") or "").strip()
     if not bucket or not name:
@@ -162,8 +171,10 @@ def has_vault_ref(record):
 def _extract(value, aliases):
     """Pull the first non-empty string among ``aliases`` from a resolved
     vault-secret ``value`` dict."""
+    # Only a dict value can carry fields.
     if not isinstance(value, dict):
         return None
+    # Return the first alias holding a non-blank string.
     for a in aliases:
         v = value.get(a)
         if isinstance(v, str) and v.strip():
@@ -176,8 +187,10 @@ def strip_inline_secrets(record, storage_key):
     the plaintext is never persisted in ``global_config``. Mutates and returns
     ``record``. Non-secret fields and the reference itself are kept. No-op when
     the record has no vault reference (inline secrets stay, as today)."""
+    # Without a reference there is nothing to strip.
     if not has_vault_ref(record):
         return record
+    # Store the cleaned reference and drop every inline secret field.
     record["vault_credential"] = _normalize_ref(record)
     for f in secret_field_names(storage_key):
         record.pop(f, None)
@@ -189,12 +202,15 @@ async def resolve_value(hub, record):
     ``None`` when the record carries no reference. Raises nothing on a resolve
     failure — returns ``None`` and logs — so a transient vault miss degrades to
     'push whatever inline remains' rather than crashing the push loop."""
+    # No reference means nothing to resolve.
     ref = _normalize_ref(record)
     if ref is None:
         return None
+    # Fetch the secret value unattended from the vault.
     try:
         return await cred_vault.automation_get(hub, ref["bucket"], ref["name"])
     except Exception as e:  # noqa: BLE001 — vault/network/decrypt
+        # Any vault, network or decryption failure is logged and treated as "no value".
         logger.warning("instance_vault: could not resolve %s/%s: %s",
                        ref["bucket"], ref["name"], e)
         return None
@@ -208,11 +224,14 @@ async def overlay(hub, record, storage_key):
     each mapped secret field set from the resolved value (only fields the secret
     actually carries are overlaid; the ``vault_credential`` marker is dropped
     from the pushed copy so it never reaches the spoke)."""
+    # No reference: return the record untouched (no copy, no vault call).
     if not has_vault_ref(record):
         return record
+    # Resolve the secret and work on a copy with the vault marker removed.
     value = await resolve_value(hub, record)
     out = copy.deepcopy(record)
     out.pop("vault_credential", None)
+    # Overlay each mapped field the resolved secret actually provides.
     if isinstance(value, dict):
         for field, aliases in _vault_overlay_fields(storage_key).items():
             got = _extract(value, aliases)
@@ -223,6 +242,7 @@ async def overlay(hub, record, storage_key):
 
 async def overlay_many(hub, records, storage_key):
     """:func:`overlay` for a list of records (e.g. an nw fleet slice)."""
+    # Overlay each dict record in turn; non-dict entries pass through unchanged.
     out = []
     for r in records or []:
         out.append(await overlay(hub, r, storage_key) if isinstance(r, dict) else r)
@@ -246,17 +266,21 @@ async def validate_ref(hub, record, sess, *, is_admin, storage_key):
 
     Raises :class:`fastapi.HTTPException` on failure; returns ``None`` (and does
     nothing further) when the record carries no reference and no violation."""
+    # The product's vault-backed secret fields; none means nothing to validate.
     spec = SECRET_FIELDS.get(storage_key) or {}
     if not spec:
         return  # product has no vault-backed secret fields — nothing to validate
+    # Records without a reference only need the vault-only policy checks.
     ref = _normalize_ref(record)
     if ref is None:
+        # Products that require a vault reference reject records without one.
         if storage_key in VAULT_REQUIRED and cred_vault._vault_available(hub):
             raise HTTPException(
                 status_code=400,
                 detail="Credential Vault is enabled for this hub — select a Credential "
                        "Vault credential (e.g. an 'API key + secret' secret) for this "
                        "connection.")
+        # Reject inline secrets while the vault is available.
         if _vault_only_violation(hub, record, spec):
             raise HTTPException(
                 status_code=400,
@@ -265,16 +289,20 @@ async def validate_ref(hub, record, sess, *, is_admin, storage_key):
                        "instead of entering it inline. Locally-stored secrets are "
                        "not permitted while the vault is available.")
         return
+    # Non-admins may only reference buckets of their own tenants (404 hides existence).
     if not is_admin:
         reach = set((sess or {}).get("user", {}).get("tenants") or [])
         if ref["bucket"] not in reach:
             raise HTTPException(status_code=404, detail="vault credential not found")
+    # The reference must resolve to an automation-readable secret.
     try:
         value = await cred_vault.automation_get(hub, ref["bucket"], ref["name"])
     except Exception as e:  # noqa: BLE001 — vault/network/decrypt
+        # Report resolve failures as "not found" so details of other buckets are not leaked.
         raise HTTPException(status_code=404,
                             detail=f"vault credential not found or not "
                                    f"automation-readable: {e}")
+    # The secret must carry at least one field this product can use.
     if not any(_extract(value, aliases) for aliases in spec.values()):
         raise HTTPException(
             status_code=400,
@@ -289,7 +317,9 @@ def _vault_only_violation(hub, record, spec) -> bool:
     of them WITHOUT a ``vault_credential`` reference — i.e. an inline/local
     secret being saved while the operator directive says it must come from the
     vault instead."""
+    # No vault configured means inline secrets are allowed.
     if not cred_vault._vault_available(hub):
         return False
+    # Violation if any secret field has an inline value.
     return any(record.get(field) for field in spec)
 
