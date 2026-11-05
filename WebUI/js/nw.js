@@ -1126,7 +1126,7 @@ async function _renderNwScanTab() {
 
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-700 mb-1">Background Supernet Sweep</h3>
-        <p class="text-xs text-slate-400 mb-3">Slowly probes the rest of each NetBox supernet (e.g. a /16 split into /24s) for unknown hosts not covered by DNS, DHCP, NAC, child subnets or your extra targets. Runs separately from scheduled scans, reports only, and never adds devices.</p>
+        <p class="text-xs text-slate-400 mb-3">First pings the gateway (.1 and .254) of every /24 in your NetBox supernets that isn't a NetBox prefix yet, and adds each /24 that answers to NetBox so scheduled scans cover it. Then it slowly pings the rest of the supernet space and probes hosts that answer (SSH, Telnet, HTTP/HTTPS, NETCONF, SNMP). Hosts it finds are only reported, never added as devices.</p>
         <div id="nwt-sweep" class="text-xs text-slate-400 italic">Loading…</div>
       </div>
       ${(setTimeout(() => _nwtLoadSweep(), 0), '')}
@@ -1331,10 +1331,50 @@ async function _nwtLoadSweep() {
             <button onclick="nwtSweepAction({run: true})" class="px-3 py-1 rounded bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Probe next batch now</button>
             <button onclick="nwtSweepAction({reset: true})" class="px-3 py-1 rounded bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Restart cycle</button>
             <span>${d.total ? `Progress ${pct}% of ${d.total} addresses · cycles ${d.cycles || 0}` : 'No supernet space to sweep yet'}${d.last_status ? ` · last: ${escapeHtml(d.last_status)}` : ''}${d.last_error ? ` (${escapeHtml(d.last_error)})` : ''}</span></div>
+            <div id="nwt-gw" class="mb-3 p-2 rounded bg-slate-50"></div>
             ${rows ? `<table class="w-full text-left"><thead><tr class="text-slate-400"><th>Unknown host</th><th>Open ports</th><th>Last seen</th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="italic text-slate-400">No unknown hosts found yet.</p>'}`;
+        _nwtRenderGateway(document.getElementById('nwt-gw'), d.gateway || {});
     } catch (e) {
         box.textContent = 'Sweep status unavailable: ' + e.message;
     }
+}
+
+// Gateway pass status + the /24s it found. Built with textContent (values
+// come from the spoke/NetBox) and addEventListener, not inline HTML.
+function _nwtRenderGateway(box, g) {
+    if (!box) return;
+    const el = (tag, text, cls) => { const n = document.createElement(tag); if (text != null) n.textContent = text; if (cls) n.className = cls; return n; };
+    const head = el('div', null, 'flex flex-wrap items-center gap-3 mb-1');
+    head.append(el('span', 'Subnet discovery (gateway ping)', 'font-bold'));
+    const btn = el('button', 'Find subnets now', 'px-3 py-1 rounded bg-slate-100 text-slate-700 font-bold hover:bg-slate-200');
+    btn.addEventListener('click', () => { btn.disabled = true; btn.textContent = 'Pinging gateways…'; nwtSweepAction({find_subnets: true}); });
+    head.append(btn);
+    const found = g.found || [];
+    const added = found.filter(f => !f.error).length;
+    let status = 'Not run yet';
+    if (g.total) {
+        const pct = g.cursor ? Math.round(100 * g.cursor / g.total) : (g.cycles ? 100 : 0);
+        status = `${pct}% of ${g.total} /24s checked · ${added} subnet(s) added to NetBox · passes ${g.cycles || 0}`;
+    } else if (g.last_status === 'no-supernets') {
+        status = 'No supernets in NetBox to search';
+    }
+    if (g.last_error) status += ` · ${g.last_error}`;
+    head.append(el('span', status));
+    box.replaceChildren(head);
+    if (!found.length) return;
+    const table = el('table', null, 'w-full text-left mt-1');
+    const hr = el('tr', null, 'text-slate-400');
+    ['Subnet', 'Gateway', 'Found', 'NetBox'].forEach(h => hr.append(el('th', h)));
+    table.append(el('thead'), el('tbody'));
+    table.tHead.append(hr);
+    found.slice(0, 200).forEach(f => {
+        const tr = el('tr');
+        tr.append(el('td', f.prefix, 'py-1 pr-3 font-mono'), el('td', f.gateway, 'pr-3 font-mono'),
+            el('td', f.found_at ? new Date(f.found_at * 1000).toLocaleString() : '', 'pr-3'),
+            el('td', f.error ? `not added: ${f.error}` : 'added', f.error ? 'text-amber-600' : 'text-emerald-700'));
+        table.tBodies[0].append(tr);
+    });
+    box.append(table);
 }
 
 async function nwtSweepAction(body) {
@@ -1344,6 +1384,10 @@ async function nwtSweepAction(body) {
         const d = await r.json().catch(() => ({}));
         if (!r.ok) { showToast(d.detail || 'Sweep action failed', 'error'); return; }
         if (body.run) showToast('Sweep batch: ' + ((d.run || {}).status || 'done'), 'success');
+        if (body.find_subnets) {
+            const run = d.run || {};
+            showToast(run.status === 'ok' ? `Checked ${run.checked} /24s, added ${run.added} subnet(s)` : `Subnet discovery: ${run.reason || run.status}`, run.status === 'ok' ? 'success' : 'error');
+        }
     } catch (e) { showToast(e.message, 'error'); }
     _nwtLoadSweep();
 }
