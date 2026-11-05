@@ -262,8 +262,17 @@ _NW_SCAN_MAX_TOTAL = 32768
 _NW_SCAN_PARALLEL_BATCHES = 3
 # Recurring-scan cadence a tenant gets automatically once it has its own nw spoke.
 _NW_SCAN_DEFAULT_INTERVAL = 21600
-# Hosts probed per sweep tick (a tick runs every few minutes per tenant).
-_NW_SWEEP_BATCH = 256
+# TCP ports the sweep probes on hosts that answered its ping: SSH, Telnet,
+# HTTP, HTTPS, NETCONF, Aruba controller UI, alternate HTTP/HTTPS. SNMP (UDP
+# 161) is tried separately with the tenant's vault communities.
+_NW_SWEEP_PORTS = (22, 23, 80, 443, 830, 4343, 8080, 8443)
+# Hosts pinged per sweep tick (a tick runs every few minutes per tenant); only
+# the ones that answer are port-probed.
+_NW_SWEEP_BATCH = 1024
+# /24 blocks checked per gateway-sweep tick (two pings each: .1 and .254), and
+# how long a finished gateway pass waits before it runs again.
+_NW_GW_SWEEP_BLOCKS = 1024
+_NW_GW_RESWEEP_SECONDS = 7 * 86400
 
 
 # A prefix wider than this (more than 1024 hosts) is never expanded by the
@@ -353,6 +362,45 @@ def sweep_take(ranges, cursor, n, skip=frozenset()):
         if consumed - cursor >= n:
             break
     return ips, (consumed if consumed < total else 0), total
+
+
+def gateway_take(supernets, cursor, n, skip=frozenset()):
+    """Next ``n`` /24 blocks (``IPv4Network``) of the top-level ``supernets``,
+    starting at block index ``cursor``. Blocks whose ``/24 number``
+    (``int(address) >> 8``) is in ``skip`` are passed over but still advance
+    the cursor. Returns ``(blocks, new_cursor, total_blocks)``; ``new_cursor``
+    is ``0`` once the end is reached."""
+    tops = sorted((s for s in supernets if s.prefixlen <= 24
+                   and not any(o != s and s.subnet_of(o) for o in supernets)),
+                  key=lambda s: int(s.network_address))
+    total = sum(2 ** (24 - s.prefixlen) for s in tops)
+    if not total:
+        return [], 0, 0
+    cursor = cursor if 0 <= cursor < total else 0
+    blocks, idx, pos = [], 0, cursor
+    for s in tops:
+        size = 2 ** (24 - s.prefixlen)
+        first = int(s.network_address) >> 8
+        while idx <= pos < idx + size and pos - cursor < n:
+            num = first + pos - idx
+            if num not in skip:
+                blocks.append(ipaddress.IPv4Network((num << 8, 24)))
+            pos += 1
+        idx += size
+    return blocks, (pos if pos < total else 0), total
+
+
+def covered_blocks(leaves, supernets):
+    """/24 numbers that already have a NetBox prefix: every /24 inside a leaf,
+    and every /24 holding a prefix of /24 or longer."""
+    out = set()
+    for n in list(leaves) + list(supernets):
+        first = int(n.network_address) >> 8
+        if n.prefixlen >= 24:
+            out.add(first)
+        elif n in leaves:
+            out.update(range(first, first + 2 ** (24 - n.prefixlen)))
+    return out
 
 
 def build_scan_target_pool(targets, subnets, cap):
@@ -2398,11 +2446,15 @@ def register(app, hub, ctx):
     # background run_nw_scan_schedule_loop (a mixin method) can drive scans
     # without re-implementing the credential/target/add pipeline.
     # ── Tier 2: background supernet sweep ────────────────────────────────────
-    # Slow, report-only, opt-in per tenant. Walks the address space of the
-    # tenant's supernets MINUS anything the targeted scan already covers (DNS,
-    # DHCP, NAC, child prefixes, user extras, fleet devices), a small batch per
-    # tick with a persisted cursor, and records hosts that answer a light TCP
-    # probe. It never adds devices and never blocks a scheduled scan.
+    # Opt-in per tenant, two passes per tick:
+    #  1. Gateway pass: ping .1/.254 of every /24 in the tenant's supernets that
+    #     has no NetBox prefix; each /24 that answers is added to NetBox so the
+    #     scheduled scan covers it. Reruns weekly.
+    #  2. Host sweep (once the gateway pass is done): walks the rest of the
+    #     supernets MINUS anything the targeted scan already covers (DNS, DHCP,
+    #     NAC, child prefixes, user extras, fleet devices), pings a batch per
+    #     tick and probes only hosts that answer (_NW_SWEEP_PORTS + SNMP).
+    #     Report-only: it never adds devices and never blocks a scheduled scan.
     def _sweep_enabled(hub, tid):
         gc = hub.state.system_state.get("global_config", {}) or {}
         return bool((((gc.get("nw_tenant_cfg") or {}).get(tid) or {}).get("sweep") or {}).get("enabled", False))
@@ -2423,6 +2475,9 @@ def register(app, hub, ctx):
             hub, tid, str(saved.get("spoke_id") or "").strip(), access.shared_tenant_id())
         if not spoke_id:
             return {"status": "skipped", "reason": "no nw spoke connected"}
+        gw = await _nw_gateway_sweep_step(tid, spoke_id)
+        if gw.get("status") == "ok":
+            return gw  # one batch per tick: finish the gateway pass first
         st = _sweep_state(hub, tid)
         leaves, supers = await _nw_netbox_prefix_split(hub, tid)
         ranges = sweep_ranges(supers, leaves)
@@ -2437,14 +2492,20 @@ def register(app, hub, ctx):
                                   for d in (gc.get("nw_devices") or []) if isinstance(d, dict)}
         batch, cursor, total = sweep_take(ranges, st.get("cursor") or 0,
                                           _NW_SWEEP_BATCH, skip=frozenset(covered))
-        options = {"tcp_ports": [22, 443, 80, 23], "try_snmp": False, "use_nmap": False,
-                   "concurrency": 8, "crawl": False, "max_targets": _NW_SWEEP_BATCH,
+        options = {"tcp_ports": list(_NW_SWEEP_PORTS), "try_snmp": True, "use_nmap": False,
+                   "concurrency": 32, "crawl": False, "max_targets": _NW_SWEEP_BATCH,
                    "max_depth": 1}
         try:
+            # Ping first; only hosts that answer get the port + SNMP probe. A
+            # spoke without NW_PING_SWEEP (older version) probes the whole batch.
+            alive = await _nw_ping(spoke_id, batch) if batch else []
+            targets = batch if alive is None else alive
+            options["pinged"] = alive is not None
             res = access.unwrap_spoke(await hub.request_response(
                 spoke_id, "NW_SCAN",
-                {"targets": batch, "credentials": [], "options": options, "tenant": tid},
-                timeout=600.0)) if batch else {}
+                {"targets": targets, "credentials": await _nw_snmp_creds(tid),
+                 "options": options, "tenant": tid},
+                timeout=600.0)) if targets else {}
         except Exception as e:
             st.update(last_status="error", last_error=str(e), last_run_at=time.time())
             hub.state._mark_dirty()
@@ -2458,7 +2519,9 @@ def register(app, hub, ctx):
                 continue
             prev = found.get(ip) or {"address": ip, "first_seen": now}
             prev.update(last_seen=now, open_ports=r.get("open_ports") or prev.get("open_ports") or [],
-                        object_type=r.get("object_type") or prev.get("object_type"))
+                        object_type=r.get("object_type") or prev.get("object_type"),
+                        hostname=r.get("hostname") or prev.get("hostname") or "",
+                        snmp=bool(r.get("snmp_ok")) or bool(prev.get("snmp")))
             found[ip] = prev
         wrapped = cursor == 0 and bool(batch)
         st.update(cursor=cursor, total=total, scanned=int(st.get("scanned") or 0) + len(batch),
@@ -2467,6 +2530,104 @@ def register(app, hub, ctx):
                   cycles=int(st.get("cycles") or 0) + (1 if wrapped else 0))
         hub.state._mark_dirty()
         return {"status": "ok", "probed": len(batch), "discovered": len(found)}
+
+    async def _nw_snmp_creds(tid):
+        """The tenant's vault SNMP communities as scan credentials (no logins:
+        the sweep only reads SNMP, it never SSHes into unknown hosts)."""
+        from routes.monitoring import vault_snmp_scan_sets
+        sets = await instance_vault.overlay_many(hub, vault_snmp_scan_sets(hub, tid),
+                                                 "nw_scan_credentials")
+        return [{"id": c.get("id"), "name": c.get("name"),
+                 "snmp_community": c.get("snmp_community")}
+                for c in sets if c.get("snmp_community")]
+
+    async def _nw_ping(spoke_id, targets):
+        """IPs from ``targets`` that answer a ping on the nw spoke, or None when
+        the spoke can't ping (older spoke without NW_PING_SWEEP)."""
+        res = access.unwrap_spoke(await hub.request_response(
+            spoke_id, "NW_PING_SWEEP", {"targets": targets}, timeout=300.0)) or {}
+        if str(res.get("status", "")).upper() != "SUCCESS":
+            return None
+        return list(res.get("alive") or [])
+
+    def _gw_state(hub, tid):
+        gc = hub.state.system_state.setdefault("global_config", {})
+        return gc.setdefault("nw_gw_sweep", {}).setdefault(tid, {
+            "cursor": 0, "total": 0, "cycles": 0, "cycle_done_at": None,
+            "found": [], "last_run_at": None, "last_status": None, "last_error": ""})
+
+    async def _nw_add_subnet(tid, block, supers):
+        """Create ``block`` in NetBox for the tenant (its VRF, under the
+        narrowest supernet). Returns "" on success, else the reason."""
+        slug = access.netbox_tenant_scope(hub, tid).get("tenant")
+        nb = access.get_netbox_spoke(hub)
+        if not slug or not nb:
+            return "no NetBox tenant" if not slug else "NetBox spoke offline"
+        parent = max((s for s in supers if block.subnet_of(s)), key=lambda s: s.prefixlen)
+        try:
+            res = access.unwrap_spoke(await hub.request_response(nb, "NETBOX_ALLOCATE_PREFIX", {
+                "parent_prefix": str(parent), "requested_prefix": str(block), "prefix_length": 24,
+                "tenant": slug, "status": "active",
+                "description": "Found by LM gateway sweep"}, timeout=30.0)) or {}
+        except Exception as e:
+            return str(e)[:200]
+        return "" if str(res.get("status", "")).upper() == "SUCCESS" else str(res.get("message") or res)[:200]
+
+    async def _nw_gateway_sweep_step(tid, spoke_id, *, force=False):
+        """Gateway pass: ping .1 and .254 of each /24 in the tenant's supernets
+        that has no NetBox prefix yet. Every /24 whose gateway answers is added
+        to NetBox, so the scheduled scan sweeps it. A finished pass reruns
+        after a week (or now with ``force``)."""
+        st = _gw_state(hub, tid)
+        now = time.time()
+        if (not force and not st.get("cursor") and st.get("cycle_done_at")
+                and now - st["cycle_done_at"] < _NW_GW_RESWEEP_SECONDS):
+            return {"status": "idle"}
+        leaves, supers = await _nw_netbox_prefix_split(hub, tid)
+        blocks, cursor, total = gateway_take(supers, st.get("cursor") or 0, _NW_GW_SWEEP_BLOCKS,
+                                             skip=covered_blocks(leaves, supers))
+        if not total:
+            st.update(total=0, cursor=0, last_status="no-supernets", last_run_at=now)
+            hub.state._mark_dirty()
+            return {"status": "no-supernets"}
+        gateways = {}
+        for b in blocks:
+            gateways[str(b[1])] = b
+            gateways[str(b[254])] = b
+        try:
+            alive = await _nw_ping(spoke_id, list(gateways)) if gateways else []
+        except Exception as e:
+            alive, err = None, str(e)
+        else:
+            err = "nw spoke does not support ping sweep (update the spoke)"
+        if alive is None:
+            st.update(last_status="error", last_error=err, last_run_at=now)
+            hub.state._mark_dirty()
+            return {"status": "error", "reason": err}
+        found = {}
+        for ip in alive:
+            found.setdefault(gateways[ip], ip)
+        if len(blocks) >= 32 and len(found) == len(blocks):
+            # Every gateway answering is a device replying for any address,
+            # not real subnets — don't flood NetBox.
+            st["last_error"] = f"all {len(blocks)} /24s answered — ignored as not real"
+            found = {}
+        else:
+            st["last_error"] = ""
+        added = 0
+        for block, ip in found.items():
+            error = await _nw_add_subnet(tid, block, supers)
+            added += not error
+            st["found"] = ([{"prefix": str(block), "gateway": ip, "found_at": now, "error": error}]
+                           + [f for f in st.get("found") or [] if f.get("prefix") != str(block)])[:2000]
+        if added:
+            access.clear_prefix_cache(hub)
+        done = cursor == 0
+        st.update(cursor=cursor, total=total, last_run_at=now, last_status="ok",
+                  cycles=int(st.get("cycles") or 0) + done,
+                  cycle_done_at=now if done else st.get("cycle_done_at"))
+        hub.state._mark_dirty()
+        return {"status": "ok", "checked": len(blocks), "added": added}
 
     hub.run_nw_sweep_step = _nw_sweep_step
     hub.nw_sweep_enabled_for_tenant = lambda tid: _sweep_enabled(hub, tid)
@@ -2482,12 +2643,14 @@ def register(app, hub, ctx):
         st["discovered"] = [d for d in st.get("discovered", []) if d.get("address") not in known]
         st["enabled"] = _sweep_enabled(hub, tid)
         st["tenant"] = tid
+        st["gateway"] = dict(_gw_state(hub, tid))
         return st
 
     @app.post("/api/nw/sweep")
     async def post_nw_sweep(request: Request):
         """Body: ``tenant``, optional ``enabled`` (bool), ``run`` (bool, probe
-        one batch now), ``reset`` (bool, restart the cycle + clear findings)."""
+        one batch now), ``find_subnets`` (bool, run one gateway-pass batch now),
+        ``reset`` (bool, restart both cycles + clear findings)."""
         sess = _session_user(request)
         if not (_is_admin(sess) or _is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="admin or tenant-admin required")
@@ -2502,8 +2665,15 @@ def register(app, hub, ctx):
             gc["nw_tenant_cfg"] = tmap
         if data.get("reset"):
             gc.setdefault("nw_sweep", {}).pop(tid, None)
+            gc.setdefault("nw_gw_sweep", {}).pop(tid, None)
         hub.state._mark_dirty()
         out = {"status": "ok", "enabled": _sweep_enabled(hub, tid)}
+        if data.get("find_subnets"):
+            saved = _nw_scan_config(hub, tid)
+            spoke_id = resolve_nw_scan_spoke(
+                hub, tid, str(saved.get("spoke_id") or "").strip(), access.shared_tenant_id())
+            out["run"] = (await _nw_gateway_sweep_step(tid, spoke_id, force=True) if spoke_id
+                          else {"status": "skipped", "reason": "no nw spoke connected"})
         if data.get("run"):
             out["run"] = await _nw_sweep_step(tid, force=True)
         return out

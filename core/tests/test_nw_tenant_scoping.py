@@ -779,3 +779,48 @@ def test_scan_schedules_narrow_to_selected_tenant(monkeypatch, tmp_path):
     r = c.get("/api/nw/scan-schedules?tenant=acme", cookies={"lm_session": tok})
     assert r.status_code == 200, r.text
     assert [s["tenant_id"] for s in r.json()["schedules"]] == ["acme"]
+
+
+# ── background sweep: gateway pass, then ping-first host sweep ─────────────
+
+def test_sweep_adds_answering_gateway_24s_then_pings_before_probing(monkeypatch, tmp_path):
+    _client, hub = _build(monkeypatch, tmp_path)
+
+    netbox = ["10.9.0.0/22", "10.9.2.0/24"]  # 10.9.2.0/24 already in NetBox
+
+    async def prefixes(_hub, _tid):
+        return list(netbox)
+    monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", prefixes)
+    alive = {"10.9.1.254", "10.9.3.7"}
+
+    async def rr(spoke_id, cmd, data, timeout=30.0):
+        hub.calls.append((spoke_id, cmd, data))
+        if cmd == "NW_PING_SWEEP":
+            return {"payload": {"data": {"status": "SUCCESS",
+                                         "alive": [t for t in data["targets"] if t in alive]}}}
+        if cmd == "NETBOX_ALLOCATE_PREFIX":
+            netbox.append(data["requested_prefix"])
+        return {"payload": {"data": {"status": "SUCCESS", "reachable": []}}}
+    hub.request_response = rr
+    for name in ("get_dns_spoke_for_tenant", "get_dhcp_spoke_for_tenant",
+                 "get_cppm_spoke_for_tenant"):
+        setattr(hub, name, lambda *_a, **_k: None)
+
+    # Tick 1: gateway pass pings .1/.254 of the 3 unknown /24s, adds 10.9.1.0/24.
+    assert asyncio.run(hub.run_nw_sweep_step("acme", force=True))["added"] == 1
+    pinged = hub.calls[0][2]["targets"]
+    assert sorted(pinged) == ["10.9.0.1", "10.9.0.254", "10.9.1.1",
+                              "10.9.1.254", "10.9.3.1", "10.9.3.254"]
+    nb = [d for _s, c, d in hub.calls if c == "NETBOX_ALLOCATE_PREFIX"]
+    assert [(d["requested_prefix"], d["parent_prefix"], d["tenant"]) for d in nb] == [
+        ("10.9.1.0/24", "10.9.0.0/22", "acme")]
+
+    # Tick 2: pass done -> host sweep pings, then port-probes only 10.9.3.7.
+    hub.calls.clear()
+    asyncio.run(hub.run_nw_sweep_step("acme", force=True))
+    cmds = [c for _s, c, _d in hub.calls]
+    assert cmds == ["NW_PING_SWEEP", "NW_SCAN"]
+    assert hub.calls[1][2]["targets"] == ["10.9.3.7"]
+    opts = hub.calls[1][2]["options"]
+    assert opts["pinged"] is True and opts["try_snmp"] is True
+    assert {22, 80, 443}.issubset(opts["tcp_ports"])
