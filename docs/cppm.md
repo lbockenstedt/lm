@@ -37,7 +37,7 @@ Talks to ClearPass REST (`CPPMClient`, `src/client.py`, `requests.Session`, TLS 
 
 ## Key commands / handlers (`spoke.handle_command`, via `run_in_executor` — `CPPMQueries` is sync `requests`)
 
-`GET_VERSION`, `CPPM_REFRESH_CACHE`, `UPDATE_CONFIG`, `TEST_AUTH` (tries every OAuth candidate, reports per-attempt), `PROBE_API` (raw `_request`). Cached: `CPPM_GET_ACCESS_TRACKER`, `CPPM_GET_DEVICE_DATABASE`, `CPPM_GET_NAC_STATUS`. Live: `CPPM_GET_RECENT_SESSIONS` (last `lookback_minutes` default 2 — **not cached**, time-sensitive, called ~60s by the hub realtime NAC→IPAM loop), `CPPM_GET_SYSTEM_HEALTH`, `GET_DEVICE` (by MAC), `LIST_ENDPOINTS`, `GET_ENDPOINT_DETAIL`, `GET_DEVICE_SESSIONS`, `GET_USER_SESSIONS`, `GET_LOGS` (auth logs by start/end), `LIST_ROLES`, `SEARCH_SESSIONS`, `CPPM_SYNC_ENDPOINTS` (hub-orchestrated IPAM→ClearPass: upserts a tenant's endpoint batch tagged `NetBox_Tenant_Slug`/`_Name`/`_ID` + `Tenant`/`Tenant_Slug` + `IP Address`/`Hostname`/`status:Known`; `replace=True` deletes endpoints previously tagged with this tenant absent from the batch; MAC-keyed upsert with IP fallback; IP-only records with no existing endpoint skipped; per-endpoint failures counted, never raised).
+`GET_VERSION`, `CPPM_REFRESH_CACHE`, `UPDATE_CONFIG`, `TEST_AUTH` (tries every OAuth candidate, reports per-attempt), `PROBE_API` (raw `_request`). Cached: `CPPM_GET_ACCESS_TRACKER`, `CPPM_GET_DEVICE_DATABASE`, `CPPM_GET_NAC_STATUS`. Live: `CPPM_GET_RECENT_SESSIONS` (last `lookback_minutes` default 2 — **not cached**, time-sensitive, called ~60s by the hub realtime NAC→IPAM loop), `CPPM_GET_SYSTEM_HEALTH`, `GET_DEVICE` (by MAC), `LIST_ENDPOINTS`, `GET_ENDPOINT_DETAIL`, `GET_DEVICE_SESSIONS`, `GET_USER_SESSIONS`, `GET_LOGS` (auth logs by start/end), `LIST_ROLES` (optional `prefix` filter, paged), `SEARCH_SESSIONS`, `CPPM_SYNC_ENDPOINTS` (hub-orchestrated IPAM→ClearPass: upserts a tenant's endpoint batch tagged `NetBox_Tenant_Slug`/`_Name`/`_ID` + `Tenant`/`Tenant_Slug` + `IP Address`/`Hostname`/`status:Known`, plus `LM_Role` from `nac_role` (a role change bounces the session); `replace=True` deletes endpoints previously tagged with this tenant absent from the batch; MAC-keyed upsert with IP fallback; IP-only records with no existing endpoint skipped; per-endpoint failures counted, never raised).
 
 ## Key files
 
@@ -71,6 +71,17 @@ Talks to ClearPass REST (`CPPMClient`, `src/client.py`, `requests.Session`, TLS 
 - **Trigger an IPAM→ClearPass endpoint sync on demand** for one tenant or all tenants from System → Sync's endpoint-sync card — this runs `CPPM_SYNC_ENDPOINTS` immediately instead of waiting for the scheduled interval/daily time. `POST /admin/ops/endpoint-sync {"tenant_id"}` does the same for one tenant and also runs the Network Device (`CPPM_SYNC_NADS`) sync.
 - **Trigger the realtime NAC→IPAM reverse sync on demand** ("Sync now" on the realtime NAC→IPAM card in the same System → Sync area) to pull the last `lookback_minutes` of sessions and push newly-seen devices into NetBox right away.
 - **Look up a specific device or session**: use My Devices / Unknown Devices / Access Tracker tabs, which map to `GET_DEVICE`/`GET_ENDPOINT_DETAIL` (by MAC), `GET_DEVICE_SESSIONS`/`GET_USER_SESSIONS`, and `SEARCH_SESSIONS`/global search respectively.
+
+## NAC role override (`LM_Role`)
+
+Pick a ClearPass role for one device so ClearPass hands back a different VLAN or policy (DMZ, ROUTED, and so on).
+
+- **Where:** NetBox → IP Addresses → Edit → **NAC Role Override**. The dropdown lists every ClearPass role whose name starts with `SSPLM-`. There is one list for everyone, read from the global NAC spoke. The choice is saved on the IP as the NetBox custom field `nac_role`.
+- **Role list cache:** `GET /api/cppm/role-overrides` (`LIST_ROLES {"prefix":"SSPLM-"}`, cache namespace `nac_role_overrides`). It's refreshed by the NAC cache feed and shows a stale badge if ClearPass is unreachable. `POST /api/cppm/role-overrides/refresh` re-reads it immediately (the **Refresh** button). If you add a new `SSPLM-` role in ClearPass, it appears here on the next refresh.
+- **Push:** saving the IP re-syncs that tenant's endpoints. Each endpoint record carries `nac_role`, and the cppm spoke writes it to the endpoint attribute `LM_Role`, or removes the attribute when the role is cleared. The spoke creates `LM_Role` in the Endpoint dictionary the first time it's needed. Records without a `nac_role` key (older hubs) leave `LM_Role` untouched.
+- **Bounce:** when `LM_Role` changes on an endpoint that has a MAC, the spoke sends a RADIUS Disconnect (`POST /api/session-action/disconnect/mac/<mac>`), so the device re-authenticates and picks up the new role. This happens whether the change came from LM or from a direct NetBox edit. An unchanged role never bounces.
+- **Needs a MAC:** ClearPass endpoints are keyed by MAC, so an IP with no MAC can't carry an override.
+- **ClearPass side (one-time per role):** see `clearpass/README.md` → *NAC role override*.
 
 ## JIT 802.1X accounts & "My Users"
 
