@@ -26,14 +26,17 @@ Audience: Hub developers.
 
 from __future__ import annotations
 
+# datetime for UTC timestamps; asyncio for the loop; logging; type hints.
 import datetime as _dt
 import asyncio
 import logging
 from typing import Any, Dict
 
+# Unwrap spoke replies; shared periodic-loop runner.
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
 from sync_loop import run_sync_loop  # sibling leaf
 
+# Log to the hub's logger.
 logger = logging.getLogger("Hub")
 
 
@@ -53,11 +56,13 @@ class StalenessSweepMixin:
     # refreshed and is never swept; an object that stops appearing ages out.
     """
 
+    # Config key and the command pushed to the netbox spoke.
     _STALENESS_CFG_KEY = "staleness_sweep"
     _STALENESS_PUSH_COMMAND = "NETBOX_STALENESS_SWEEP"
 
     def _staleness_cfg(self) -> Dict[str, Any]:
         """Read the sweep config fresh (enabled/interval/stale_days/delete_days)."""
+        # The config block from global_config, or {}.
         return (self.state.system_state.get("global_config", {})
                 .get(self._STALENESS_CFG_KEY, {})) or {}
 
@@ -71,11 +76,13 @@ class StalenessSweepMixin:
         hourly, 7d unseen → offline + decommissioned_at, 30d → deleted (IP freed).
         Best-effort: a state/save failure is logged DEBUG and swallowed (a
         staleness config must never block startup)."""
+        # Add defaults only when the key is absent; failures are logged and ignored.
         try:
             sys_state = self.state.system_state
             if sys_state is None:  # defensive — always a dict in practice
                 sys_state = self.state.system_state = {}
             gc = sys_state.setdefault("global_config", {})
+            # Never configured: seed defaults, mark state dirty, and log it.
             if self._STALENESS_CFG_KEY not in gc:
                 gc[self._STALENESS_CFG_KEY] = {"enabled": True,
                                               "interval_seconds": 3600,
@@ -91,22 +98,28 @@ class StalenessSweepMixin:
     def _staleness_interval(self) -> float:
         """Seconds between scheduled sweeps. Clamp >= 60 so a bad config can't
         hot-loop the hub. Default 3600 (hourly)."""
+        # Configured interval, or hourly when invalid.
         try:
             n = int(self._staleness_cfg().get("interval_seconds", 3600))
         except (TypeError, ValueError):
             n = 3600
+        # At least 60 seconds.
         return max(60.0, float(n))
 
     def _staleness_thresholds(self) -> Dict[str, int]:
         """Forwarded to the spoke: {stale_days, delete_days}. Clamp each to
         >= 1; defaults 7 / 30."""
+        # Read config once.
         cfg = self._staleness_cfg()
         def _pos(key: str, default: int) -> int:
+            """Return config value key as a positive int, using default when missing or invalid."""
+            # Bad values fall back to the default.
             try:
                 v = int(cfg.get(key, default))
             except (TypeError, ValueError):
                 v = default
             return max(1, v)
+        # Both thresholds, clamped.
         return {"stale_days": _pos("stale_days", 7),
                 "delete_days": _pos("delete_days", 30)}
 
@@ -118,7 +131,9 @@ class StalenessSweepMixin:
         outage yields an 'error' status, never an unhandled exception (the
         background loop depends on this).
         """
+        # UTC timestamp for this run.
         now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # No IPAM spoke: record an error status and stop.
         ipam = self.get_spoke_by_type("ipam")
         if not ipam:
             logger.info("staleness sweep SKIP: NetBox (IPAM) spoke not connected")
@@ -128,10 +143,13 @@ class StalenessSweepMixin:
                       "per_tenant": {}, "last_sync_ts": now}
             await self.simulations_store.set_staleness_sweep_status(status)
             return status
+        # Thresholds to send to the spoke.
         thresholds = self._staleness_thresholds()
+        # Ask the spoke to sweep; any failure becomes an error status.
         try:
             rr = await self.request_response(
                 ipam, self._STALENESS_PUSH_COMMAND, thresholds, timeout=180.0)
+            # Unwrap the reply and read its counters.
             rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
             scanned = int((rd or {}).get("scanned", 0) or 0)
@@ -145,6 +163,7 @@ class StalenessSweepMixin:
             # Hub-authoritative sync log: clean → INFO; errors/failure →
             # [sync-error] WARNING carrying the spoke's message so the cause
             # lands in the hub log + GET_ERROR_LOGS (ab).
+            # Errors go to the error-log feed; a clean run logs at info.
             if errors > 0 or rstatus == "ERROR":
                 logger.warning("[sync-error] staleness-sweep status=%s scanned=%d "
                                "decommissioned=%d deleted=%d ip_freed=%d errors=%d — %s",
@@ -153,17 +172,20 @@ class StalenessSweepMixin:
             else:
                 logger.info("staleness sweep: scanned=%d decommissioned=%d deleted=%d "
                             "ip_freed=%d", scanned, decommissioned, deleted, ip_freed)
+            # Status record for the WebUI.
             status = {"status": rstate, "scanned": scanned,
                       "decommissioned": decommissioned, "deleted": deleted,
                       "ip_freed": ip_freed, "errors": errors,
                       "message": message or ("sweep complete" if rstatus != "ERROR"
                                               else "NetBox error"),
                       "per_tenant": per_tenant, "last_sync_ts": now}
+        # Exception: log it and record an error status.
         except Exception as e:
             logger.warning("[sync-error] staleness-sweep failed: %s", e)
             status = {"status": "error", "scanned": 0, "decommissioned": 0,
                       "deleted": 0, "ip_freed": 0, "errors": 0,
                       "message": str(e), "per_tenant": {}, "last_sync_ts": now}
+        # Persist the status and return it.
         await self.simulations_store.set_staleness_sweep_status(status)
         return status
 
@@ -178,10 +200,14 @@ class StalenessSweepMixin:
         simultaneous-fire with the other heavy syncs.
         """
         def _guard() -> bool:
+            """Return True when the sweep is enabled and an IPAM spoke is connected."""
+            # Both conditions are required.
             return bool(self._staleness_cfg().get("enabled", False)
                         and self.get_spoke_by_type("ipam"))
 
         def _delay() -> float:
+            """Return seconds until the next cycle: the interval, or 60 while disabled."""
+            # Use the configured interval only while enabled.
             enabled = self._staleness_cfg().get("enabled", False)
             return self._staleness_interval() if enabled else 60
 

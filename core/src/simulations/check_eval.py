@@ -22,8 +22,10 @@ per-caller concerns — site filtering, status-string casing, the diag log line,
 and any extra result fields.
 """
 
+# Postpone evaluation of type hints so annotations stay plain strings at runtime.
 from __future__ import annotations
 
+# Type hints only; stdlib so the file stays import-free of project code and vendors cleanly.
 from typing import Any, Dict, Mapping, Optional
 
 
@@ -35,9 +37,14 @@ def normalize_counts(d: Optional[Mapping[str, Any]]) -> Dict[str, int]:
     way — that is what lets a quota typed "DNS Server Failed to Respond" match
     Central's "dns server failed to respond".
     """
+    # Result map keyed by the normalised condition name.
     out: Dict[str, int] = {}
+    # Walk every (name, count) pair; a None input is treated as an empty map.
     for k, v in (d or {}).items():
+        # Normalise the key so differently-cased/padded names land in one bucket.
         kk = str(k).strip().lower()
+        # Add (not overwrite) so two raw names that normalise alike are summed;
+        # a None/blank count counts as 0.
         out[kk] = out.get(kk, 0) + int(v or 0)
     return out
 
@@ -58,9 +65,14 @@ def count_for_check(check: Mapping[str, Any],
     Pass PRE-normalised dicts (see normalize_counts) so a loop over many checks
     normalises each bucket once rather than once per check.
     """
+    # Normalise the check id the same way normalize_counts() folds the bucket keys.
     key = str(check.get("id") or "").strip().lower()
+    # A check without an id cannot match anything, so it has no active count.
     if not key:
         return 0
+    # Missing/blank type defaults to "alert", the pollers' historical behaviour.
     is_alert = (check.get("type") or "alert") == "alert"
+    # Pick the bucket matching the check's type as primary, the other as fall-back.
     primary, other = (alert_ci, insight_ci) if is_alert else (insight_ci, alert_ci)
+    # Use the primary count if non-zero, else the fall-back bucket, else 0.
     return int(primary.get(key, 0) or other.get(key, 0) or 0)

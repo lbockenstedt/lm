@@ -30,15 +30,19 @@ A leaf: stdlib only. MUST NOT import ``main``/``api``. Audience: Hub developers.
 """
 from __future__ import annotations
 
+# asyncio runs leg calls concurrently; hashlib/json build stable scope keys.
 import asyncio
 import hashlib
 import json
+# logging for the hub log; os reads env config; re detects IP queries; time ages entries.
 import logging
 import os
 import re
 import time
+# Type hints only.
 from typing import Any, Dict, List, Optional, Tuple
 
+# Log to the hub's logger.
 logger = logging.getLogger("Hub")
 
 # (leg key surfaced in ``spokes_queried``, spoke search command).
@@ -53,6 +57,7 @@ SEARCH_LEGS: List[Tuple[str, str]] = [
 # the others scope by tenant slug / proxmox tag alone.
 PREFIX_SCOPED_CMD = "SEARCH_DHCP"
 
+# Limits on what goes into the match blob, and IP-looking query patterns.
 _MAX_BLOB_FIELD = 256  # ignore oversized/opaque values when building match blob
 _MAX_BLOB_LIST = 50    # max list/tuple members folded into the match blob
 _IP_QUERY_RE = re.compile(r"[0-9.:]+(?:/[0-9]{1,3})?")
@@ -67,11 +72,13 @@ def search_scope_key(nb_slug: str, proxmox_tag: str, is_admin: bool) -> str:
     NetBox tenant slug (``NETBOX_GET_PREFIXES`` for that slug), so the slug fully
     identifies the DHCP scope — letting the request path compute this key WITHOUT
     the 30-second prefix fetch (which moves into the background populate)."""
+    # Scope fields that change what a spoke returns.
     payload = {
         "slug": nb_slug or "",
         "ptag": proxmox_tag or "",
         "admin": bool(is_admin),
     }
+    # Canonical JSON, hashed and shortened.
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -80,24 +87,31 @@ def search_result_blob(item: Dict[str, Any]) -> str:
     """Lower-cased, space-joined blob of an item's scalar fields (plus the scalar
     members of list/tuple fields, first 50) — the haystack a query needle is
     tested against (mirrors ``console_port_search_blob``)."""
+    # Non-dict items are matched on their string form.
     if not isinstance(item, dict):
         return str(item).lower()
+    # Collected text pieces.
     parts: List[str] = []
 
     def _add(v: Any) -> None:
+        """Append v to parts when it is a short string or number (None, bools and long values skipped)."""
+        # Booleans and None carry no searchable text.
         if v is None or isinstance(v, bool):
             return
+        # Short scalars become text.
         if isinstance(v, (str, int, float)):
             s = str(v)
             if s and len(s) <= _MAX_BLOB_FIELD:
                 parts.append(s)
 
+    # Fold scalar fields and the first members of list fields.
     for v in item.values():
         if isinstance(v, (list, tuple)):
             for m in v[:_MAX_BLOB_LIST]:
                 _add(m)
         else:
             _add(v)
+    # Join and lowercase.
     return " ".join(parts).lower()
 
 
@@ -105,11 +119,13 @@ def is_ip_query(q: str) -> bool:
     """True when ``q`` looks like a (partial) IPv4/IPv6 address or CIDR: only
     digits/dots/colons with an optional /mask, and at least one of ``.:/`` so a
     bare number such as a site code is not treated as an IP."""
+    # IPv4-ish: digits/dots/colons with at least one separator.
     s = (q or "").strip()
     if _IP_QUERY_RE.fullmatch(s) and any(c in s for c in ".:/"):
         return True
     # IPv6 needs hex letters. Require "::" (compressed) or the full 8-group form so a
     # colon-separated MAC (5 colons, no "::") is never taken for an address.
+    # IPv6: needs "::" or all 8 groups so a MAC does not match.
     addr = s.split("/")[0]
     return bool(_IPV6_QUERY_RE.fullmatch(s)) and ("::" in addr or addr.count(":") == 7)
 
@@ -120,6 +136,7 @@ def cold_live_legs(
 ) -> List[Tuple[Optional[str], str]]:
     """Legs that must still be queried live after a memory hit: spoke present,
     not the prefix-scoped DHCP leg (slow prefix fetch), and no warm cache."""
+    # Keep legs with a spoke, not the DHCP leg, and no warm entry.
     return [
         (spoke, cmd) for spoke, cmd in legs
         if spoke and cmd != PREFIX_SCOPED_CMD and warm_items_by_cmd.get(cmd) is None
@@ -133,10 +150,13 @@ async def topup_cold_legs(cold, call, timeout=8.0):
     {"type": "error"} rows `call` synthesizes (a broken leg must stay visible, not look like "no matches");
     degraded = list of cmds that timed out, raised, or answered with an error row (in `cold` order,
     no duplicates)."""
+    # Nothing to query.
     if not cold:
         return [], []
 
     async def _one(spoke, cmd):
+        """Query one leg with a timeout; return (cmd, rows, degraded flag)."""
+        # Call the leg; a timeout or error yields no rows and marks it degraded.
         try:
             rows = await asyncio.wait_for(call(spoke, cmd), timeout)
         except asyncio.TimeoutError:
@@ -145,12 +165,15 @@ async def topup_cold_legs(cold, call, timeout=8.0):
         except Exception as e:
             logger.warning("search: cold leg %s failed: %s", cmd, e)
             return cmd, [], True
+        # Non-list answers count as empty; error rows mark the leg degraded.
         if not isinstance(rows, list):
             rows = []
         bad = any(isinstance(r, dict) and r.get("type") == "error" for r in rows)
         return cmd, rows, bad
 
+    # Run all legs at once.
     results = await asyncio.gather(*[_one(s, c) for s, c in cold])
+    # Merge rows and collect degraded commands once each.
     rows_out: List[Dict[str, Any]] = []
     degraded: List[str] = []
     for cmd, rows, bad in results:
@@ -163,6 +186,7 @@ async def topup_cold_legs(cold, call, timeout=8.0):
 def search_result_matches(item: Dict[str, Any], needle: str) -> bool:
     """True when the (already lower-cased, non-empty) ``needle`` is a substring
     of the item's identifier blob."""
+    # Empty needle never matches.
     return bool(needle) and needle in search_result_blob(item)
 
 
@@ -170,13 +194,16 @@ def _extract_results(unwrapped: Any) -> Optional[List[Dict[str, Any]]]:
     """Pull the ``results`` list out of an unwrapped spoke envelope, or None if
     the envelope is an error / not a usable result set. Error rows inside the
     list are dropped so a transient per-item error never poisons the cache."""
+    # Must be a dict without an ERROR status.
     if not isinstance(unwrapped, dict):
         return None
     if unwrapped.get("status") == "ERROR":
         return None
+    # Must carry a results list.
     results = unwrapped.get("results")
     if not isinstance(results, list):
         return None
+    # Drop error rows.
     return [r for r in results if isinstance(r, dict) and r.get("type") != "error"]
 
 
@@ -186,11 +213,15 @@ class SearchIndexMixin:
     # ── config (env-overridable) ─────────────────────────────────────────────
     @property
     def _search_index_enabled(self) -> bool:
+        """True unless LM_SEARCH_INDEX is set to an off value (0/false/off/no/empty)."""
+        # Default on.
         return os.environ.get("LM_SEARCH_INDEX", "1").strip().lower() not in (
             "0", "false", "off", "no", "")
 
     @property
     def _search_index_interval(self) -> float:
+        """Seconds between background refreshes (LM_SEARCH_INDEX_INTERVAL, default 60, min 10)."""
+        # Bad values fall back to the default.
         try:
             return max(10.0, float(os.environ.get("LM_SEARCH_INDEX_INTERVAL", "60")))
         except (TypeError, ValueError):
@@ -200,6 +231,7 @@ class SearchIndexMixin:
     def _search_index_ttl(self) -> float:
         """Max age a cached leg set may reach before the request path treats it
         as stale and falls back to a live call for that leg."""
+        # Bad values fall back to the default; minimum 30 s.
         try:
             return max(30.0, float(os.environ.get("LM_SEARCH_INDEX_TTL", "180")))
         except (TypeError, ValueError):
@@ -207,6 +239,8 @@ class SearchIndexMixin:
 
     @property
     def _search_index_max_items(self) -> int:
+        """Max items cached per leg and scope (LM_SEARCH_INDEX_MAX_ITEMS, default 5000, min 100)."""
+        # Bad values fall back to the default.
         try:
             return max(100, int(os.environ.get("LM_SEARCH_INDEX_MAX_ITEMS", "5000")))
         except (TypeError, ValueError):
@@ -223,10 +257,14 @@ class SearchIndexMixin:
         self._search_warming: set = set()
 
     def search_index_enabled(self) -> bool:
+        """Return whether the search index is enabled (public wrapper around the env setting)."""
+        # Read the property.
         return self._search_index_enabled
 
     @staticmethod
     def _search_ns(cmd: str) -> str:
+        """Return the warm-cache namespace used for a leg command."""
+        # One namespace per leg command.
         return f"search_idx_{cmd}"
 
     # ── request-path reads ────────────────────────────────────────────────────
@@ -235,6 +273,7 @@ class SearchIndexMixin:
                               proxmox_tag: str) -> None:
         """Record a scope the request path has observed so the background loop
         keeps it warm. Cheap + idempotent (just refreshes ``seen``)."""
+        # Store or refresh the scope's details and last-seen time.
         try:
             self._search_scopes[scope_key] = {
                 "resolved": resolved or "",
@@ -251,12 +290,15 @@ class SearchIndexMixin:
         """Fresh cached full result set for ``(cmd, scope)``, or None when the
         entry is absent or older than the TTL (→ caller falls back to a live
         leg call)."""
+        # Read the cached entry for this leg and scope.
         entry = self.warm_get(self._search_ns(cmd), scope_key)
         if not isinstance(entry, dict):
             return None
+        # Stale or missing timestamp: treat as a miss.
         at = entry.get("at", 0)
         if not at or at < time.time() - self._search_index_ttl:
             return None
+        # Only a list of items counts as a hit.
         items = entry.get("items")
         return items if isinstance(items, list) else None
 
@@ -271,16 +313,20 @@ class SearchIndexMixin:
         when that spoke is itself UNBOUND (or shared/ADMIN-bound) — otherwise
         the warmed ADMIN bucket would hold another tenant's VMs."""
         import access  # local: access imports hub state, circular at module scope
+        # A real tenant (not "default") is a scoped caller.
         scoped = bool(resolved and resolved != "default")
+        # Scoped: use the tenant's own hypervisor and directory spokes.
         if scoped:
             hypervisor = self.get_hypervisor_spoke_for_tenant(resolved)
             directory = (self.get_directory_spoke_for_tenant(resolved)
                          or (None if access.tenant_has_own_spoke(self, resolved, "directory")
                              else self.get_spoke_by_type("directory")))
         else:
+            # Unscoped: use the global hypervisor only if it is not bound to a tenant.
             _gs = self.get_hypervisor_spoke()
             hypervisor = _gs if access.spoke_is_unbound(self, _gs) else None
             directory = self.get_spoke_by_type("directory")
+        # Leg command -> spoke for this scope.
         return {
             "NETBOX_SEARCH": self.get_spoke_by_type("ipam"),
             "SEARCH_VMS": hypervisor,
@@ -292,8 +338,10 @@ class SearchIndexMixin:
     async def _search_scope_payload(self, scope: Dict[str, Any]) -> Dict[str, Any]:
         """Build the empty-query, fully-scoped populate payload for a scope,
         fetching tenant prefixes here (off the request path) for the DHCP leg."""
+        # Prefixes are only needed when the scope has a NetBox slug.
         nb_slug = scope.get("nb_slug") or ""
         prefixes: List[str] = []
+        # Fetch them here, off the request path; failures leave the list empty.
         if nb_slug:
             try:
                 import access
@@ -302,6 +350,7 @@ class SearchIndexMixin:
             except Exception as e:  # noqa: BLE001 - best-effort warm-up
                 logger.debug("search-index: prefix fetch for '%s' failed: %s",
                              scope.get("resolved"), e)
+        # Empty query with the scope's full tenant filters.
         return {
             "q": "",
             "tenant": nb_slug,
@@ -316,23 +365,29 @@ class SearchIndexMixin:
         """Refresh one ``(leg, scope)`` cache entry. Never raises; only stores a
         non-empty, well-formed result set (so a rejected empty-query or a down
         spoke leaves the leg on the live path)."""
+        # No spoke for this leg: nothing to refresh.
         if not spoke:
             return
+        # Run the leg's search; a failure leaves the cache untouched.
         try:
             r = await self.request_response(spoke, cmd, payload)
         except Exception as e:  # noqa: BLE001 - a leg failure must not break others
             logger.debug("search-index populate %s/%s failed: %s", cmd, scope_key, e)
             return
+        # Unwrap the spoke envelope (fall back to the raw dict).
         try:
             import access  # leaf module (no api/main cycle)
             unwrapped = access.unwrap_spoke(r)
         except Exception:  # pragma: no cover - fall back to raw dict shape
             unwrapped = r
+        # Only cache a non-empty result set.
         results = _extract_results(unwrapped)
         if not results:
             return
+        # Cap the item count.
         if len(results) > self._search_index_max_items:
             results = results[: self._search_index_max_items]
+        # Store the items with their fetch time.
         await self.warm_set(self._search_ns(cmd), scope_key,
                             {"items": results, "at": time.time()})
 
@@ -341,6 +396,7 @@ class SearchIndexMixin:
         """Refresh every leg cache for one scope (resolve spokes, build the
         scoped empty-query payload — fetching prefixes off the request path —
         then populate each leg). Never raises."""
+        # Resolve spokes, build the payload, then refresh each leg in turn.
         try:
             spokes = self._resolve_search_spokes(
                 scope.get("resolved") or "", bool(scope.get("is_admin")))
@@ -352,6 +408,8 @@ class SearchIndexMixin:
             logger.debug("search-index populate scope %s failed: %s", scope_key, e)
 
     async def _search_refresh_once(self) -> None:
+        """Refresh every registered scope once, one scope at a time."""
+        # Iterate a snapshot so new registrations do not break the loop.
         for scope_key, scope in list(self._search_scopes.items()):
             await self._search_populate_scope(scope_key, scope)
 
@@ -361,26 +419,33 @@ class SearchIndexMixin:
         or stale legs) is collected in the background. Deduped — a scope already
         warming is not re-scheduled. No-op when the index is disabled, the scope
         is unknown, or there is no running loop."""
+        # Disabled index: do nothing.
         if not self._search_index_enabled:
             return
+        # Unknown or already-warming scope: do nothing.
         scope = self._search_scopes.get(scope_key)
         if not scope or scope_key in self._search_warming:
             return
+        # Mark warming and start the task; unmark when it finishes.
         try:
             self._search_warming.add(scope_key)
             task = asyncio.create_task(self._search_warm_scope(scope_key))
             task.add_done_callback(
                 lambda _t: self._search_warming.discard(scope_key))
+        # No running event loop: undo the mark.
         except RuntimeError:  # pragma: no cover - no running loop
             self._search_warming.discard(scope_key)
 
     async def _search_warm_scope(self, scope_key: str) -> None:
+        """Refresh every leg for one registered scope (the task started by search_kick_warm)."""
+        # The scope may have gone; only warm it if still known.
         scope = self._search_scopes.get(scope_key)
         if scope:
             await self._search_populate_scope(scope_key, scope)
 
     async def run_search_index_refresh_loop(self) -> None:
         """Periodically re-populate every observed scope's leg caches."""
+        # Refresh every interval; errors log and the loop continues.
         while True:
             try:
                 if self._search_index_enabled and self._search_scopes:
@@ -389,4 +454,5 @@ class SearchIndexMixin:
                 raise
             except Exception as e:  # noqa: BLE001 - loop must survive any error
                 logger.warning("search-index refresh loop error: %s", e)
+            # Wait for the next cycle.
             await asyncio.sleep(self._search_index_interval)

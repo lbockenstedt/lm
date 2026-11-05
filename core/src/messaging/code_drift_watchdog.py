@@ -46,11 +46,13 @@ wide corrections live here:
   reloads override ``_drift_role_for_dir`` / ``_reload_role_for_drift``; the
   default keeps the historical whole-process restart.
 """
+# asyncio runs git and the polling loop; os does paths and the exit; weakref tracks peers.
 import asyncio
 import logging
 import os
 import weakref
 
+# Module logger.
 logger = logging.getLogger("lm.watchdog.code_drift")
 
 # Every control plane with an armed watchdog in THIS process. Weak so a stopped
@@ -69,6 +71,7 @@ def _update_in_flight_anywhere() -> bool:
     doing the pull is a DIFFERENT object from the peers watching the repo it is
     pulling. Exiting on a HEAD move that an in-process peer is actively creating
     truncates that peer's ``git pull``."""
+    # Any peer draining or updating counts; broken peers are skipped.
     for peer in list(_DRIFT_PEERS):
         try:
             if getattr(peer, "_draining", False) or getattr(
@@ -91,17 +94,20 @@ class CodeDriftWatchdogMixin:
         at runtime (``_resolve_core_root()``) — exactly the two repos an update
         pulls. The generic agent overrides this to also watch each loaded role's
         sibling repo. Only real git roots are returned."""
+        # Add our own repo root, ignoring errors.
         dirs = set()
         try:
             dirs.add(os.path.abspath(self._repo_root()))
         except Exception:  # noqa: BLE001
             pass
+        # Add the shared core checkout, if there is one.
         try:
             core = self._resolve_core_root()
             if core:
                 dirs.add(os.path.abspath(core))
         except Exception:  # noqa: BLE001
             pass
+        # Keep only directories that are git checkouts.
         return [d for d in dirs if os.path.isdir(os.path.join(str(d), ".git"))]
 
     # ── Role-scoped drift hooks (overridden by the role-hosting agent) ────────
@@ -130,16 +136,19 @@ class CodeDriftWatchdogMixin:
         directory owns it, the other ~9 in a role-hosting agent skip it. Removes
         both the duplicated ``git rev-parse`` load and the race where several
         watchdogs exit on the same event."""
+        # Find the current owner, if it still exists.
         ref = _DRIFT_DIR_OWNERS.get(key)
         current = ref() if ref is not None else None
         if current is None:  # unclaimed, or the previous owner has gone away
             _DRIFT_DIR_OWNERS[key] = weakref.ref(self)
             return True
+        # Otherwise we own it only if we are the owner.
         return current is self
 
     def _drift_release_dirs(self) -> None:
         """Release every directory this watchdog owns so a surviving peer can
         take over — an unloaded role must not strand ``/opt/lm`` unwatched."""
+        # Drop entries we own, or whose owner has gone.
         for key, ref in list(_DRIFT_DIR_OWNERS.items()):
             try:
                 if ref() is self or ref() is None:
@@ -158,6 +167,8 @@ class CodeDriftWatchdogMixin:
         boot (a role loaded at runtime) is baselined, not treated as drift.
         Never crashes the consumer — every failure is swallowed."""
         async def _head(d):
+            """Return ``d``'s git HEAD commit, or "" on any failure."""
+            # Run ``git rev-parse HEAD`` with a 10-second limit.
             try:
                 proc = await asyncio.create_subprocess_exec(
                     "git", "-C", str(d), "rev-parse", "HEAD",
@@ -168,6 +179,7 @@ class CodeDriftWatchdogMixin:
             except Exception:  # noqa: BLE001 — never let the watchdog crash the consumer
                 return ""
 
+        # Record each watched repo's HEAD at startup.
         baseline = {}
         for d in self._drift_watched_dirs():
             baseline[str(d)] = await _head(d)
@@ -203,12 +215,14 @@ class CodeDriftWatchdogMixin:
                         # One checker per directory per process.
                         if not self._drift_owns_dir(key):
                             continue
+                        # Read the current HEAD; skip if it could not be read.
                         now = await _head(d)
                         if not now:
                             continue
                         if key not in baseline:  # newly-watched repo -> baseline it
                             baseline[key] = now
                             continue
+                        # Only act when HEAD actually moved.
                         was = baseline.get(key)
                         if not (was and now != was):
                             continue
@@ -220,22 +234,26 @@ class CodeDriftWatchdogMixin:
                         # A single role's sibling repo only needs that role to
                         # reload; the process (and its other roles) can stay up.
                         role = self._drift_role_for_dir(key)
+                        # Try reloading just that role in place.
                         if role:
                             try:
                                 absorbed = await self._reload_role_for_drift(role, key)
                             except Exception as e:  # noqa: BLE001
+                                # The reload failed: fall back to restarting the whole process.
                                 logger.warning(
                                     "code-drift: reloading role '%s' after %s "
                                     "advanced %s->%s failed (%s); falling back to a "
                                     "process restart.", role, d, was[:8], now[:8], e)
                                 absorbed = False
                             if absorbed:
+                                # Fully absorbed: adopt the new HEAD and keep running.
                                 baseline[key] = now
                                 logger.info(
                                     "code-drift: %s advanced %s->%s; reloaded role "
                                     "'%s' in place (other roles left running).",
                                     d, was[:8], now[:8], role)
                                 continue
+                        # No targeted reload: log, flush logs and exit for systemd to restart us.
                         logger.warning(
                             "code-drift: %s advanced %s->%s on disk but the process "
                             "never restarted -- exiting so systemd reloads current "
@@ -245,6 +263,7 @@ class CodeDriftWatchdogMixin:
                         except Exception:  # noqa: BLE001
                             pass
                         os._exit(3)
+                # Cancellation propagates; other errors are logged and the loop continues.
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:  # noqa: BLE001 — never fatal

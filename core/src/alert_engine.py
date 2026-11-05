@@ -21,16 +21,23 @@ Emails route through the same provider-aware ``notifications.send_email`` the hu
 alerts + scheduled reports use. State is in-memory: after a restart a still-bad
 item re-alerts once (arguably useful — confirms it's still down).
 """
+# asyncio is the event-loop library this async engine runs on.
 import asyncio
+# Standard-library logging for send failures and transitions.
 import logging
+# Type hints only.
 from typing import Any, Dict
+# Resolves a spoke/agent id to its friendly display name for alert subjects.
 from display_names import node_name  # sibling leaf
 
+# One named logger so alert-engine messages can be filtered together.
 logger = logging.getLogger("AlertEngine")
 
+# Every alert source name a tenant alert rule may subscribe to.
 SOURCES = ("dashboard_check", "vm_offline", "quota_unmet", "adaptive_quota_maxed",
            "spoke_offline", "cert_issue_failed", "cert_renew_failed", "cert_deploy_failed",
            "bulk_dongle_failure", "single_bus_failing")
+# Human-readable title for each source, used in email subjects/headers.
 _LABEL = {
     "dashboard_check": "Dashboard check",
     "vm_offline": "VM / hypervisor offline",
@@ -43,11 +50,15 @@ _LABEL = {
     "bulk_dongle_failure": "Dongle quarantine — bulk client failure",
     "single_bus_failing": "Dongle quarantine — single bus failing",
 }
+# How often (seconds) the loop re-evaluates every tenant.
 _POLL_S = 60
+# Module types whose outage is reported as "vm_offline" rather than "spoke_offline".
 _HYPERVISOR_TYPES = ("hypervisor", "simulation")
 
 
 def _esc(s: Any) -> str:
+    """HTML-escape a value (None becomes "") so it is safe to embed in an email body."""
+    # Replace &, < and > with their HTML entities (& first so entities are not double-escaped).
     return str(s if s is not None else "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
@@ -56,14 +67,20 @@ def _human_body(label, state, tenant, item, sev, detail, ts, is_bad, extra):
     status pill, a 30-day health-trend strip (``extra['daily']``) and/or client-
     count trend numbers (``extra['trend']``) when available — the same visual
     language as the scheduled report / dashboard."""
+    # Shared inline CSS font stack (email clients ignore stylesheets).
     P = "font-family:Arial,Helvetica,sans-serif"
+    # Header colour: red for a breach, green for a recovery.
     hdr = "#c0322a" if is_bad else "#0f7a58"
+    # Reuse the scheduled report's trend-strip and status-pill widgets when available.
     try:
         from simulations.email_report import _strip, _pill  # reuse the report's widgets
+    # Report module unavailable: fall back to no strip and a plain escaped status.
     except Exception:  # noqa: BLE001
         _strip = lambda d: ""  # noqa: E731
         _pill = lambda s: _esc(s)  # noqa: E731
+    # Coloured pill for known statuses; plain escaped text otherwise.
     pill = _pill(sev) if sev in ("ok", "warning", "error", "no_data") else _esc(sev)
+    # Optional 30-day trend strip, only when daily history was supplied.
     strip_html = ""
     if isinstance(extra, dict) and extra.get("daily"):
         strip_html = (f'<div style="{P};font-size:11px;color:#6b7280;margin-top:14px;'
@@ -74,21 +91,27 @@ def _human_body(label, state, tenant, item, sev, detail, ts, is_bad, extra):
                       f'<span style="color:#f59e0b">■</span> degraded '
                       f'<span style="color:#ef4444">■</span> failing '
                       f'<span style="color:#cbd5e1">■</span> no data</div>')
+    # Optional client-count trend table, only when trend numbers were supplied.
     trend_html = ""
     tr = extra.get("trend") if isinstance(extra, dict) else None
     if isinstance(tr, dict):
+        # Label/value pairs to show, in display order.
         pairs = [("Current", tr.get("current")), ("Wired", tr.get("wired")),
                  ("Wireless", tr.get("wireless")), ("Hour avg", tr.get("hourly_avg")),
                  ("Drop %", tr.get("drop_pct")), ("7-day peak", tr.get("max_7day")),
                  ("30-day peak", tr.get("max_30day"))]
+        # One table row per value that is present.
         cells = "".join(
             f'<tr><td style="color:#6b7280;padding:2px 14px 2px 0">{k}</td>'
             f'<td style="color:#1f2937;font-weight:bold">{_esc(v)}</td></tr>'
             for k, v in pairs if v is not None)
+        # Only render the table if at least one row exists.
         if cells:
             trend_html = f'<table role="presentation" style="{P};font-size:12px;margin-top:12px;border-collapse:collapse">{cells}</table>'
+    # Small helper that renders one label/value table row.
     row = lambda k, v: (f'<tr><td style="color:#6b7280;padding:3px 14px 3px 0">{k}</td>'  # noqa: E731
                         f'<td style="color:#1f2937">{v}</td></tr>')
+    # Assemble the full HTML email: header bar, details table, then trend table and strip.
     html = (f'<div style="background:#f5f7f6;padding:20px 0;{P}">'
             f'<div style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #e8ecea;border-radius:10px;overflow:hidden">'
             f'<div style="padding:16px 20px;border-bottom:3px solid {hdr}">'
@@ -99,13 +122,18 @@ def _human_body(label, state, tenant, item, sev, detail, ts, is_bad, extra):
             + row("Tenant", _esc(tenant)) + row("Status", pill)
             + (row("Detail", _esc(detail)) if detail else "") + row("Time", _esc(ts))
             + f'</table>{trend_html}{strip_html}</div></div></div>')
+    # Plain-text alternative for email clients that do not render HTML.
     text = (f"{label} {state.upper()}\nTenant: {tenant}\nItem: {item}\nStatus: {sev}\n"
             + (f"Detail: {detail}\n" if detail else "") + f"Time: {ts}\n")
+    # Return both bodies.
     return text, html
 
 
 class AlertEngine:
+    """Edge-triggered alert router: emails rule recipients only when an item changes state."""
     def __init__(self, hub) -> None:
+        """Keep a reference to the hub and start with no known bad items."""
+        # The hub provides the alert-rule store and the email sender.
         self.hub = hub
         self._state: Dict[tuple, bool] = {}  # (tenant, source, item) -> currently-bad
 
@@ -117,110 +145,156 @@ class AlertEngine:
         the 30-day trend strip + stats like the dashboard) or ``raw`` (a compact
         JSON body for automation to ingest). ``extra`` may carry ``daily`` (30-day
         health buckets for the trend strip) and/or ``trend`` (client-count numbers)."""
+        # Unique identity of the monitored item.
         key = (tenant, source, item)
+        # Was it bad last time? Unknown items count as good.
         was = self._state.get(key, False)
+        # No change in state: stay silent (this is what makes it edge-triggered).
         if bool(is_bad) == was:
             return
+        # Remember the new state before sending, so a send failure does not cause a re-fire storm.
         self._state[key] = bool(is_bad)
+        # Load this tenant's alert rules; if that fails, skip this transition.
         try:
             rules = await self.hub.simulations_store.get_alert_rules(tenant)
         except Exception:  # noqa: BLE001
             return
+        # Rules that are enabled, match this source and have someone to email.
         matching = [r for r in rules if r.get("enabled") and r.get("source") == source
                     and r.get("recipients")]
+        # Nobody subscribed: nothing to send.
         if not matching:
             return
+        # Human title, transition word, and normalised severity for the message.
         label = _LABEL.get(source, source)
         state = "breached" if is_bad else "recovered"
         sev = (severity or ("error" if is_bad else "ok")).lower()
+        # Imported lazily; only needed when an email is actually sent.
         import datetime as _dt
+        # Timestamp shown in the email.
         ts = _dt.datetime.now().isoformat(timespec="seconds")
         # Group recipients by requested format so each set gets ONE email.
         by_fmt: Dict[str, set] = {}
+        # Each rule asks for "raw" (JSON) or "human" (formatted) emails; collect recipients per
+        # format.
         for r in matching:
             fmt = "raw" if str(r.get("format") or "human").lower() == "raw" else "human"
             by_fmt.setdefault(fmt, set()).update(x for x in (r.get("recipients") or []) if x)
+        # Imported lazily: the hub's email sender and a JSON encoder for raw payloads.
         import notifications as _n
         import json as _json
+        # Send one email per format.
         for fmt, recips in by_fmt.items():
+            # Stable recipient order; skip if empty.
             recips = sorted(recips)
             if not recips:
                 continue
+            # A failed send is logged so other formats/recipients still get their email.
             try:
+                # Raw format: a compact JSON body for automated consumers.
                 if fmt == "raw":
                     payload = {"event": "lm_alert", "state": state, "tenant": tenant,
                                "source": source, "item": item, "severity": sev,
                                "detail": detail, "ts": ts}
+                    # Include only simple trend values so the payload stays JSON-friendly.
                     if isinstance(extra, dict) and isinstance(extra.get("trend"), dict):
                         payload["trend"] = {k: v for k, v in extra["trend"].items()
                                             if isinstance(v, (int, float, str))}
+                    # Send the JSON payload with a machine-friendly subject.
                     await _n.send_email(self.hub, f"lm.alert {source} {state} {item}",
                                         _json.dumps(payload, separators=(",", ":")),
                                         to_emails=recips)
+                # Human format: formatted subject and text+HTML body.
                 else:
                     subj = f"[LM {'ALERT' if is_bad else 'OK'}] {label}: {item}"
                     text, html = _human_body(label, state, tenant, item, sev, detail, ts, is_bad, extra)
                     await _n.send_email(self.hub, subj, text, to_emails=recips, html=html)
+            # Log the failure and carry on.
             except Exception as e:  # noqa: BLE001
                 logger.warning("alert send failed (%s/%s %s, %s): %s",
                                tenant, source, item, fmt, e)
+        # Log the transition and how many recipients got each format.
         logger.info("alert %s: %s/%s '%s' -> %s", state.upper(), tenant, source, item,
                     {f: len(r) for f, r in by_fmt.items()})
 
 
 async def _eval_tenant(engine: "AlertEngine", service, tenant: str, needed: set) -> None:
+    """Evaluate every alert source the tenant's rules need, firing transitions via ``engine``."""
+    # The hub holds state, caches and spoke alerts.
     hub = engine.hub
     # dashboard_check + quota_unmet — from the tenant's aggregated central data.
     if needed & {"dashboard_check", "quota_unmet"}:
+        # Fetch the tenant's aggregated Central data; on failure treat it as empty.
         try:
             data = await service.get_central_data(tenant)
         except Exception:  # noqa: BLE001
             data = {}
         # 30-day health history (site -> check -> daily buckets) for the trend strip.
+        # Per-site/per-check daily health history, if the Central poller is running.
         health = {}
         hh = getattr(getattr(hub, "central_hub_poller", None), "_health", None)
         if hh is not None:
+            # History lookup is optional; any failure just means no trend strip.
             try:
                 health = dict(hh.summary(tenant) or {})
             except Exception:  # noqa: BLE001
                 health = {}
+        # Walk each Central spoke's status report.
         for sp in (data.get("spokes") or []):
+            # That spoke's status block.
             cst = sp.get("central_status") or {}
+            # Dashboard checks: one alert item per site/check pair.
             if "dashboard_check" in needed:
                 for site, cmap in (cst.get("status") or {}).items():
                     for cid, info in (cmap or {}).items():
+                        # Skip malformed entries.
                         if not isinstance(info, dict):
                             continue
+                        # Normalised status and the matching 30-day history.
                         st = str(info.get("status") or "").lower()
                         daily = ((health.get(site) or {}).get(cid)) or []
+                        # Bad when warning or error; message shown as detail.
                         await engine.evaluate(tenant, "dashboard_check", f"{site} · {cid}",
                                               st in ("warning", "error"),
                                               info.get("message") or st,
                                               severity=st, extra={"daily": daily})
+            # Quota: one alert item per site's client-count check.
             if "quota_unmet" in needed:
                 for site, entry in (cst.get("client_count_status") or {}).items():
+                    # Skip malformed entries.
                     if not isinstance(entry, dict):
                         continue
+                    # Normalised status; only "error" counts as unmet.
                     st = str(entry.get("status") or "").lower()
                     await engine.evaluate(tenant, "quota_unmet", site, st == "error",
                                           entry.get("message") or "client requirement not met",
                                           severity=st, extra={"trend": entry})
     # vm_offline / spoke_offline — from the spoke out-of-contact tiers.
     if needed & {"vm_offline", "spoke_offline"}:
+        # Current out-of-contact tier per spoke id; on failure treat all as healthy.
         try:
             alerts = {a["spoke_id"]: a.get("tier") for a in hub.get_active_spoke_alerts()}
         except Exception:  # noqa: BLE001
             alerts = {}
+        # All known spokes/agents and their metadata.
         md = hub.state.system_state.get("module_metadata", {}) or {}
+        # Check each one.
         for sid, meta in md.items():
+            # Guard against a stored None.
             meta = meta or {}
             if (meta.get("tenant_id") or "") not in ("", tenant):
                 continue  # bound to a different tenant
+            # Work out its module type (live registry first, then stored metadata).
             mtype = (hub.spoke_module_types.get(hub._primary_key(sid)) or meta.get("module_type") or "").lower()
+            # Hypervisor/simulation outages are reported as vm_offline; everything else as
+            # spoke_offline.
             source = "vm_offline" if mtype in _HYPERVISOR_TYPES else "spoke_offline"
+            # Skip if no rule for that source.
             if source not in needed:
                 continue
+            # Its current alert tier ("none" if not alerting).
             tier = alerts.get(sid, "none")
+            # Bad when warning or error; named by its friendly display name.
             await engine.evaluate(tenant, source, node_name(hub.state.system_state, sid),
                                   tier in ("warning", "error"), f"out of contact ({tier})",
                                   severity=tier)
@@ -232,34 +306,45 @@ async def _eval_tenant(engine: "AlertEngine", service, tenant: str, needed: set)
     # re-alerts a still-bad cert within one tick. Per-tenant: a cert's
     # tenant_id must match (default "" → "default").
     if needed & {"cert_issue_failed", "cert_renew_failed", "cert_deploy_failed"}:
+        # Certificates for this tenant from the hub's cached copy of the LE ledger.
         certs = []
+        # Cache problems just mean no certs to check this round.
         try:
             cl = hub.le_cache_get("certs") if hasattr(hub, "le_cache_get") else None
             clist = cl.get("certs") if isinstance(cl, dict) else None
             if isinstance(clist, list):
+                # Keep only well-formed certs belonging to this tenant.
                 certs = [c for c in clist if isinstance(c, dict)
                          and (c.get("tenant_id") or "default") == tenant]
         except Exception:  # noqa: BLE001
             certs = []
+        # Evaluate each certificate.
         for c in certs:
+            # Domain is the alert item name.
             domain = c.get("domain") or "<unknown>"
+            # Issue failure: bad while last_issue_error is set.
             if "cert_issue_failed" in needed:
                 ie = c.get("last_issue_error")
                 await engine.evaluate(tenant, "cert_issue_failed", domain,
                                       bool(ie), ie or "",
                                       severity="error" if ie else "ok")
+            # Renewal failure: bad while last_error is set.
             if "cert_renew_failed" in needed:
                 rerr = c.get("last_error")
                 await engine.evaluate(tenant, "cert_renew_failed", domain,
                                       bool(rerr), rerr or "",
                                       severity="error" if rerr else "ok")
+            # Deploy failure: one alert item per deployment target.
             if "cert_deploy_failed" in needed:
                 for t in (c.get("targets") or []):
+                    # Skip malformed targets.
                     if not isinstance(t, dict):
                         continue
+                    # Item name combines domain, target module type and optional identifier.
                     mt = t.get("module_type") or ""
                     ident = t.get("identifier") or ""
                     item = f"{domain}/{mt}" + (f"/{ident}" if ident else "")
+                    # Bad when the last deploy status is ERROR.
                     bad = str(t.get("last_status") or "").upper() == "ERROR"
                     await engine.evaluate(tenant, "cert_deploy_failed", item,
                                           bad, t.get("last_message") or "",
@@ -273,15 +358,20 @@ async def _eval_tenant(engine: "AlertEngine", service, tenant: str, needed: set)
     # ``single_bus_failing`` = a single USB bus accumulating quarantine strikes
     # (a flaky port/dongle — the storm-guard counterpart to the bulk case).
     if needed & {"bulk_dongle_failure", "single_bus_failing"}:
+        # Raw status frames for this tenant's CS spokes; on failure treat as none.
         try:
             raw_spokes = service._spokes_for_tenant(tenant)  # [(sid, raw_frame)]
         except Exception:  # noqa: BLE001
             raw_spokes = []
+        # Inspect each spoke's quarantine state.
         for sid, data in raw_spokes:
+            # Skip spokes that did not report qt_state.
             qt = data.get("qt_state") if isinstance(data, dict) else None
             if not isinstance(qt, dict):
                 continue
+            # Friendly spoke name for the alert item (fallback to id).
             spk = (data.get("spoke_name") if isinstance(data, dict) else None) or sid
+            # Bulk failure: bad while any host is listed in bulk_hosts.
             if "bulk_dongle_failure" in needed:
                 bulk = qt.get("bulk_hosts") or []
                 bad = bool(bulk)
@@ -308,22 +398,31 @@ async def run_alert_loop(hub) -> None:
     """Every ~60s: for each tenant with enabled alert rules, evaluate the needed
     sources and fire breach/recovery emails on transitions. Started from main.py.
     Runs on the shared run_sync_loop skeleton (same error-tolerant shape)."""
+    # Imported lazily to avoid circular imports at module load.
     from simulations.service import SimulationsService
     from sync_loop import run_sync_loop
+    # Service for tenant data, the shared engine, and the store holding alert rules.
     service = SimulationsService(hub)
     engine = hub.alert_engine
     store = hub.simulations_store
 
     async def _body():
+        """One loop cycle: evaluate every tenant that has enabled alert rules."""
+        # Visit each tenant.
         for tid in store.tenant_ids():
+            # One tenant's failure is logged and must not stop the others.
             try:
+                # Collect the sources this tenant's enabled rules care about.
                 rules = await store.get_alert_rules(tid)
                 needed = {r.get("source") for r in rules if r.get("enabled")}
+                # Only evaluate when at least one source is needed.
                 if needed:
                     await _eval_tenant(engine, service, tid, needed)
+            # Log quietly and move on.
             except Exception as exc:  # noqa: BLE001
                 logger.debug("alert eval tenant %s: %s", tid, exc)
 
+    # Run the cycle every 60 s with error tolerance.
     await run_sync_loop(stagger=0, body=_body, delay=lambda: _POLL_S,
                         on_error=lambda e: logger.warning("alert loop error: %s", e),
                         error_delay=_POLL_S)

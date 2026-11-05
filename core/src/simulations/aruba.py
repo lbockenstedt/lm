@@ -18,21 +18,32 @@ polling/caching surface is intentionally NOT vendored here; if centralized
 mode later needs hub-side polling, port the full ``ArubaClient`` from the
 cs spoke instead of growing this file.
 """
+# Postponed annotations: type hints are not evaluated at runtime.
 from __future__ import annotations
 
+# hashlib makes a short fingerprint of the config for cache keys.
 import hashlib
+# JSON serialises the config deterministically and formats error snippets.
 import json
+# Standard-library logging for API failures.
 import logging
+# Wall-clock time for token expiry and cache freshness.
 import time
+# Dataclass helpers used to define the ArubaFinding record.
 from dataclasses import dataclass, field
+# Type hints only.
 from typing import Any, Dict, Optional
 
+# Async HTTP client used for every Central API call.
 import httpx
 
+# SSRF guard: only allow public https URLs for the cluster gateway.
 from access import safe_external_url
 
+# Module-level logger named after this module.
 logger = logging.getLogger(__name__)
 
+# OAuth token endpoints: HPE SSO, and the GreenLake per-workspace template.
 _NEW_CENTRAL_TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
 _GLP_TOKEN_URL_TEMPLATE = "https://global.api.greenlake.hpe.com/authorization/v2/oauth2/{workspace_id}/token"
 
@@ -45,11 +56,13 @@ DEFAULT_NEW_CENTRAL_MONITORED_CHECKS = (
     {"type": "alert", "id": "GATEWAY_DOWN", "name": "Gateways Down / Offline"},
     {"type": "alert", "id": "CLIENT_COUNT", "name": "Connected Client Count"},
 )
+# Hardware (device-down) checks offered for new Central.
 DEFAULT_NEW_CENTRAL_HARDWARE_CHECKS = (
     {"id": "AP_DOWN", "name": "APs Down / Offline", "device_type": "ap"},
     {"id": "SWITCH_DOWN", "name": "Switches Down / Offline", "device_type": "switch"},
     {"id": "GATEWAY_DOWN", "name": "Gateways Down / Offline", "device_type": "gateway"},
 )
+# Fallback classic Central alert types when the API returns none.
 KNOWN_CLASSIC_ALERT_TYPES = {
     "AP_DOWN": "AP Down", "AP_UP": "AP Up", "ACCESS_POINT_DOWN": "Access Point Down",
     "CLIENT_ASSOCIATION_FAILURE": "Client Association Failure",
@@ -61,6 +74,7 @@ KNOWN_CLASSIC_ALERT_TYPES = {
     "UPLINK_FAILURE": "Uplink Failure", "VPN_TUNNEL_DOWN": "VPN Tunnel Down",
     "WIRELESS_CLIENT_ROAM": "Wireless Client Roam", "WIRELESS_INTERFERENCE": "Wireless Interference",
 }
+# Fallback classic Central insight categories when the API returns none.
 KNOWN_CLASSIC_INSIGHT_CATEGORIES = {
     "CONNECTIVITY": "Connectivity", "PERFORMANCE": "Performance",
     "RELIABILITY": "Reliability", "SECURITY": "Security",
@@ -87,11 +101,13 @@ _NC_GLOBAL_CACHE_TTL = 270  # 4.5 min — just under the 5-min poll interval
 # module-level cache lets a same-config client reuse a still-valid token; expiry
 # handling is unchanged (each state dict carries its own ``expires_at``).
 _token_cache: dict[str, dict[str, Any]] = {}
+# Host suffixes of genuine Aruba Central API gateways.
 _KNOWN_CENTRAL_GATEWAY_SUFFIXES = (".api.central.arubanetworks.com", ".api.central.arubanetworks.com.cn")
 
 
 @dataclass
 class ArubaFinding:
+    """One alert/insight observation for a site, with a traffic-light status."""
     site_name: str
     check_name: str
     status: str  # "red" | "yellow" | "green"
@@ -107,6 +123,8 @@ class ArubaClient:
     """
 
     def __init__(self, config: Dict[str, Any]) -> None:
+        """Copy the config, sanitise the cluster URL, and work out the API flavour."""
+        # Keep a private copy of the config.
         self.config = dict(config or {})
         # SSRF belt-and-suspenders: the save path (/sim/api/aggregate/central)
         # already confines cluster_url to a public https URL with a DNS-rebind
@@ -123,6 +141,7 @@ class ArubaClient:
         self.api_version = (self.config.get("api_version")
                             or ("new_central" if self.config.get("mode") == "central" else "classic")
                             ).strip()
+        # Short MD5 of the sorted config; identical configs share caches and tokens.
         self._config_hash = hashlib.md5(
             json.dumps(self.config, sort_keys=True, default=str).encode()
         ).hexdigest()[:8]
@@ -139,23 +158,30 @@ class ArubaClient:
         self._site_index_sig: Any = None
 
     def is_configured(self) -> bool:
+        """Return True when there is a cluster URL, or the client uses new Central (fixed URLs)."""
         return bool(self.cluster_url) or self.api_version == "new_central"
 
     def _token_state(self) -> Dict[str, Any]:
+        """Return this config's shared token-state dict, creating it on first use."""
         return _token_cache.setdefault(self._config_hash, {})
 
     def _new_central_token_url(self) -> str:
+        """Return the OAuth token URL: GreenLake workspace URL when set, else HPE SSO."""
+        # A workspace id selects the GreenLake token endpoint.
         workspace_id = str(self.config.get("workspace_id") or "").strip()
         if workspace_id:
             return _GLP_TOKEN_URL_TEMPLATE.format(workspace_id=workspace_id)
         return _NEW_CENTRAL_TOKEN_URL
 
     async def _ensure_token(self, client: httpx.AsyncClient) -> str:
+        """Return a valid access token, reusing a cached one or obtaining a new one."""
+        # Reuse the cached token while it has more than 60 seconds left.
         now = time.time()
         token_state = self._token_state()
         if token_state.get("access_token") and token_state.get("expires_at", 0) > now + 60:
             return token_state["access_token"]
 
+        # New Central: client-credentials OAuth or a static pasted token.
         if self.api_version == "new_central":
             # Client credentials win: they mint a fresh token on every expiry.
             # A pasted static access token expires (~2h) and can't be renewed,
@@ -163,10 +189,12 @@ class ArubaClient:
             has_client_creds = bool(self.config.get("client_id") and self.config.get("client_secret"))
             static_token = str(self.config.get("access_token") or "").strip()
             if static_token and not has_client_creds:
+                # Only a static token: cache it with an assumed 2-hour life.
                 token_state.clear()
                 token_state.update({"access_token": static_token, "expires_at": now + 7200})
                 return static_token
 
+            # Request a token with the client-credentials grant.
             workspace_id = str(self.config.get("workspace_id") or "").strip()
             resp = await client.post(
                 self._new_central_token_url(),
@@ -177,12 +205,14 @@ class ArubaClient:
                 },
                 timeout=15,
             )
+            # Error statuses raise; a response without a token is treated as an error.
             resp.raise_for_status()
             payload = resp.json()
             if "access_token" not in payload:
                 raise ValueError(
                     f"Token endpoint returned no access_token. Response: {json.dumps(payload)[:300]}"
                 )
+            # Cache the new token with its expiry (default 15 min for GreenLake, else 2 h).
             token_state.clear()
             token_state.update(
                 {
@@ -192,19 +222,23 @@ class ArubaClient:
             )
             return token_state["access_token"]
 
+        # Classic Central: tokens come from the stored config.
         access_token = self.config.get("access_token")
         refresh_token = self.config.get("refresh_token")
 
+        # Access token without a refresh token: use it with an assumed 1-hour life.
         if access_token and not refresh_token:
             token_state.clear()
             token_state.update({"access_token": access_token, "expires_at": now + 3600})
             return access_token
 
+        # Neither token present: the config is unusable.
         if not refresh_token:
             raise ValueError(
                 "Aruba Central credentials incomplete — need access_token or refresh_token"
             )
 
+        # Refresh-token grant request body, plus the customer id when set.
         data = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
@@ -214,7 +248,10 @@ class ArubaClient:
         if self.config.get("customer_id"):
             data["customer_id"] = self.config["customer_id"]
 
+        # Exchange the refresh token at the cluster's OAuth endpoint.
         resp = await client.post(f"{self.cluster_url}/oauth2/token", data=data, timeout=15)
+        # Error statuses raise; then cache the new token, keeping the old refresh token if none
+        # returned.
         resp.raise_for_status()
         payload = resp.json()
         token_state.clear()
@@ -228,19 +265,26 @@ class ArubaClient:
         return token_state["access_token"]
 
     def _headers(self, token: str) -> Dict[str, str]:
+        """Return the auth headers for Central API requests (plus customer id when set)."""
+        # Bearer token header.
         headers = {"Authorization": f"Bearer {token}"}
+        # Classic Central multi-tenant setups also need the customer id header.
         if self.config.get("customer_id"):
             headers["X-Customer-ID"] = str(self.config["customer_id"])
         return headers
 
     async def _get(self, client: "httpx.AsyncClient", path: str, params: Dict[str, Any] | None = None) -> Any:
+        """GET a Central API path with a fresh token and return parsed JSON, raising on errors."""
+        # Make sure we have a valid token first.
         token = await self._ensure_token(client)
+        # Issue the request with auth headers, query params and a 30s timeout.
         resp = await client.get(
             f"{self.cluster_url}{path}",
             headers=self._headers(token),
             params=params or {},
             timeout=30,
         )
+        # Turn 4xx/5xx responses into exceptions.
         resp.raise_for_status()
         return resp.json()
 
@@ -251,10 +295,12 @@ class ArubaClient:
         spoke. ``new_central`` returns a static default catalog (no API call);
         ``classic`` live-fetches alert/insight types from the cluster gateway,
         falling back to the known standard types when Central returns nothing."""
+        # Not configured: empty catalogs with a warning.
         if not self.is_configured():
             return {"alerts": [], "insights": [], "hardware": [],
                     "warning": "Central not configured."}
 
+        # New Central: the static default catalog, no API call.
         if self.api_version == "new_central":
             return {
                 "alerts": [dict(item) for item in DEFAULT_NEW_CENTRAL_MONITORED_CHECKS],
@@ -263,16 +309,21 @@ class ArubaClient:
                 "warning": None,
             }
 
+        # Classic Central: live-fetch alert types and insight categories from the last 30 days.
         alert_types: Dict[str, str] = {}
         insight_categories: Dict[str, str] = {}
         warnings: list = []
         thirty_days_ago = int(time.time()) - 30 * 86400
 
+        # One HTTP client for all catalog requests.
         async with httpx.AsyncClient(timeout=30) as client:
+            # Try each alerts endpoint version until one returns data.
             for alerts_path in ("/monitoring/v1/alerts", "/monitoring/v2/alerts", "/aiops/v2/alerts"):
                 try:
+                    # Fetch alerts from the last 30 days.
                     payload = await self._get(client, alerts_path,
                                               params={"limit": 1000, "from_timestamp": thirty_days_ago})
+                    # Record each distinct alert type with a readable name.
                     for alert in payload.get("alerts") or payload.get("items") or []:
                         alert_id = str(alert.get("alert_type") or alert.get("type") or "").strip()
                         if not alert_id:
@@ -281,21 +332,28 @@ class ArubaClient:
                             alert.get("alert_type_name") or alert.get("name")
                             or alert_id.replace("_", " ").title()
                         )
+                    # Stop at the first endpoint that produced types.
                     if alert_types:
                         break
+                # 404 means try the next version; other HTTP errors are reported and stop the
+                # search.
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code == 404:
                         continue
                     warnings.append(f"Alerts endpoint returned HTTP {exc.response.status_code}.")
                     break
+                # Network or parse errors are reported and stop the search.
                 except Exception as exc:  # noqa: BLE001
                     warnings.append(f"Network error fetching alerts: {exc}")
                     break
 
+            # Same approach for insight categories.
             for insights_path in ("/aiops/v1/insights", "/aiops/v2/insights"):
                 try:
+                    # Fetch insights from the last 30 days.
                     payload = await self._get(client, insights_path,
                                               params={"limit": 1000, "from_timestamp": thirty_days_ago})
+                    # Record each distinct insight category with a readable name.
                     for insight in payload.get("insights") or payload.get("items") or []:
                         category = str(insight.get("category") or insight.get("type") or "").strip()
                         if not category:
@@ -304,17 +362,22 @@ class ArubaClient:
                             insight.get("category_name") or insight.get("name")
                             or category.replace("_", " ").title()
                         )
+                    # Stop at the first endpoint that produced categories.
                     if insight_categories:
                         break
+                # 404 means try the next version; other HTTP errors are reported and stop the
+                # search.
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code == 404:
                         continue
                     warnings.append(f"Insights endpoint returned HTTP {exc.response.status_code}.")
                     break
+                # Network or parse errors are reported and stop the search.
                 except Exception as exc:  # noqa: BLE001
                     warnings.append(f"Network error fetching insights: {exc}")
                     break
 
+        # Fill in fallback catalogs for anything the API did not return.
         using_fallback = False
         if not alert_types:
             alert_types = dict(KNOWN_CLASSIC_ALERT_TYPES)
@@ -325,10 +388,12 @@ class ArubaClient:
         if using_fallback:
             warnings.append("No live checks returned by Central — showing standard Aruba Central check types.")
 
+        # Offer hardware checks that match a known or device-down alert type.
         hardware_catalog = [
             dict(item) for item in DEFAULT_NEW_CENTRAL_HARDWARE_CHECKS
             if item.get("id") in alert_types or item.get("id") in {"AP_DOWN", "SWITCH_DOWN", "GATEWAY_DOWN"}
         ]
+        # Return sorted catalogs and de-duplicated warnings.
         return {
             "alerts": [{"id": key, "name": value} for key, value in sorted(alert_types.items())],
             "insights": [{"id": key, "name": value} for key, value in sorted(insight_categories.items())],
@@ -338,6 +403,8 @@ class ArubaClient:
 
     @staticmethod
     def _finding_status(value: Any) -> str:
+        """Map a severity/status word to red, yellow or green (unknown values are yellow)."""
+        # Compare case-insensitively; severe values red, cleared values green.
         sev = str(value or "").strip().lower()
         if sev in {"critical", "major", "red", "open", "error"}:
             return "red"
@@ -347,22 +414,30 @@ class ArubaClient:
 
     async def poll_alerts_and_insights(self, site_filter: Optional[str] = None) -> list[ArubaFinding]:
         """Collect Aruba alerts and insights across the supported API variants for a tenant."""
+        # Not configured: no findings.
         if not self.is_configured():
             return []
 
+        # Findings collected across all endpoints.
         findings: list[ArubaFinding] = []
+        # One HTTP client for every request in this poll.
         async with httpx.AsyncClient(timeout=30) as client:
+            # New Central: only site health is polled here.
             if self.api_version == "new_central":
                 try:
+                    # Fetch the health of every site.
                     data = await self._get(client, "/network-monitoring/v1alpha1/sites-health")
+                    # One SITE_HEALTH finding per site (optionally only the requested site).
                     for item in data.get("items") or []:
                         site = (item.get("name") or item.get("siteName") or item.get("site_name") or "unknown").strip() or "unknown"
                         if site_filter and site.lower() != site_filter.lower():
                             continue
+                        # Use the "Good" health group percentage, else the overall health score.
                         good_pct = next(
                             (g.get("value", 0) for g in (item.get("health") or {}).get("groups", []) if g.get("name") == "Good"),
                             item.get("healthScore", item.get("health_score", 100)),
                         )
+                        # Health >= 80 is green, anything lower is yellow.
                         findings.append(
                             ArubaFinding(
                                 site_name=site,
@@ -372,6 +447,7 @@ class ArubaClient:
                                 raw=item,
                             )
                         )
+                # Failures are logged; whatever was collected is returned.
                 except Exception as exc:
                     logger.warning("Aruba sites-health fetch failed [%s]: %s", self._config_hash, exc)
                 # For new_central: insights are fetched on-demand via _new_central_insights()
@@ -379,22 +455,27 @@ class ArubaClient:
                 # from background polling burning the rate-limit quota.
                 return findings
 
+            # Classic Central: optional site filter for alerts.
             params: dict[str, Any] = {"limit": 1000}
             if site_filter:
                 params["site"] = site_filter
 
+            # Fetch alerts from the first endpoint version that exists.
             try:
                 alerts_payload = None
                 for alerts_path in ("/monitoring/v1/alerts", "/monitoring/v2/alerts", "/aiops/v2/alerts"):
                     try:
                         alerts_payload = await self._get(client, alerts_path, params=params)
                         break
+                    # 404 means try the next version; anything else is raised to the outer handler.
                     except httpx.HTTPStatusError as exc:
                         if exc.response.status_code == 404:
                             continue
                         raise
+                # Turn each alert into a finding with its site, name and status.
                 for alert in (alerts_payload or {}).get("alerts") or (alerts_payload or {}).get("items") or []:
                     site = (alert.get("site_name") or alert.get("site") or alert.get("group") or "unknown").strip() or "unknown"
+                    # Use the first available name field.
                     name = (
                         alert.get("name")
                         or alert.get("alert_name")
@@ -402,27 +483,34 @@ class ArubaClient:
                         or alert.get("alert_type")
                         or "alert"
                     )
+                    # Map severity/status to a colour and record the finding.
                     status = self._finding_status(alert.get("severity") or alert.get("status"))
                     findings.append(ArubaFinding(site_name=site, check_name=str(name), status=status, source="alert", raw=alert))
+            # Alert failures are logged; insights are still attempted.
             except Exception as exc:
                 logger.warning("Aruba alerts fetch failed [%s]: %s", self._config_hash, exc)
 
+            # Insights use "site_name" instead of "site" for filtering.
             insight_params = dict(params)
             if site_filter:
                 insight_params["site_name"] = site_filter
                 insight_params.pop("site", None)
+            # Fetch insights from the first endpoint version that exists.
             try:
                 insights_payload = None
                 for insights_path in ("/aiops/v1/insights", "/aiops/v2/insights"):
                     try:
                         insights_payload = await self._get(client, insights_path, params=insight_params)
                         break
+                    # 404 means try the next version; anything else is raised to the outer handler.
                     except httpx.HTTPStatusError as exc:
                         if exc.response.status_code == 404:
                             continue
                         raise
+                # Turn each insight into a finding with its site, name and status.
                 for insight in (insights_payload or {}).get("insights") or (insights_payload or {}).get("items") or []:
                     site = (insight.get("site_name") or insight.get("site") or insight.get("group") or "unknown").strip() or "unknown"
+                    # Use the first available name field.
                     name = (
                         insight.get("name")
                         or insight.get("insight_name")
@@ -430,8 +518,10 @@ class ArubaClient:
                         or insight.get("category")
                         or "insight"
                     )
+                    # Map severity/status to a colour and record the finding.
                     status = self._finding_status(insight.get("severity") or insight.get("status"))
                     findings.append(ArubaFinding(site_name=site, check_name=str(name), status=status, source="insight", raw=insight))
+            # Insight failures are logged.
             except Exception as exc:
                 logger.warning("Aruba insights fetch failed [%s]: %s", self._config_hash, exc)
 
@@ -446,16 +536,19 @@ class ArubaClient:
         rebuilt only if the underlying cache tuples change identity (a mid-cycle
         TTL refresh). Grouping predicates mirror poll_site_data's old per-item
         filters exactly."""
+        # Fetch (or reuse cached) global lists from the module caches.
         sites_health = await self._nc_sites_health()
         devices = await self._nc_devices()
         clients = await self._nc_clients()
         insights = await self._new_central_insights()
         alerts = await self._new_central_alerts()
+        # Identity signature of the cached lists; unchanged means the index is still valid.
         sig = (id(sites_health), id(devices), id(clients), id(insights), id(alerts))
         if self._site_index is not None and self._site_index_sig == sig:
             return self._site_index
 
         # Site health by name — FIRST match wins (mirrors the old break-on-first).
+        # Index site health records by lowercased name.
         health_by_name: Dict[str, dict] = {}
         for item in sites_health:
             name = (item.get("name") or item.get("siteName") or item.get("site_name") or "").strip()
@@ -464,6 +557,7 @@ class ArubaClient:
                 health_by_name[key] = item
 
         # Devices by site_id; a device with no site_id matched EVERY site.
+        # Index devices by site id; devices without one apply to every site.
         devices_by_site_id: Dict[str, list] = {}
         devices_no_site: list = []
         for d in devices:
@@ -474,6 +568,7 @@ class ArubaClient:
                 devices_no_site.append(d)
 
         # Clients by site_id (a client with no site_id matched no specific site).
+        # Index clients by site id.
         clients_by_site_id: Dict[str, list] = {}
         for c in clients:
             sid = str(c.get("siteId") or c.get("site_id") or "").strip()
@@ -481,6 +576,7 @@ class ArubaClient:
                 clients_by_site_id.setdefault(sid, []).append(c)
 
         # Insights: global bucket = no site or "All Sites"; else pinned by name.
+        # Split insights into global ones and ones pinned to a named site.
         insights_global: list = []
         insights_by_site: Dict[str, list] = {}
         for ins in insights:
@@ -491,6 +587,7 @@ class ArubaClient:
                 insights_by_site.setdefault(s.lower(), []).append(ins)
 
         # Alerts: global bucket = no site or "-"/"—"; else pinned by name.
+        # Split alerts into global ones and ones pinned to a named site.
         alerts_global: list = []
         alerts_by_site: Dict[str, list] = {}
         for al in alerts:
@@ -500,6 +597,7 @@ class ArubaClient:
             else:
                 alerts_by_site.setdefault(s.lower(), []).append(al)
 
+        # Store the index and its signature for reuse during this poll cycle.
         self._site_index = {
             "health_by_name": health_by_name,
             "devices_all": devices,
@@ -521,6 +619,7 @@ class ArubaClient:
         hw_check_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         """Collect per-site Aruba Central health, counts, and hardware device names."""
+        # Not configured: return an all-zero result in the expected shape.
         if not self.is_configured():
             return {
                 "site_health": None,
@@ -531,6 +630,7 @@ class ArubaClient:
                 "hw_devices": {},
             }
 
+        # Normalise the requested hardware check ids and set up per-site accumulators.
         hw_check_ids = {str(check_id).strip() for check_id in (hw_check_ids or set()) if str(check_id).strip()}
         site_health: int | None = None
         wireless_clients = 0
@@ -539,40 +639,52 @@ class ArubaClient:
         insight_cat_counts: dict[str, int] = {}
         hw_devices: dict[str, dict[str, int]] = {}
 
+        # New Central: answer from the per-cycle site index built from cached global lists.
         if self.api_version == "new_central":
             # Per-poll-cycle indexes over the cached global fetchers (built once,
             # reused across sites) — was rescanning every devices/clients/
             # insights/alerts list per site (O(sites×items)); now O(matches).
+            # Build or reuse the index, and normalise the site name for lookups.
             idx = await self._build_new_central_index()
             site_lower = site.lower()
 
+            # Look up the site's health record to get its id and health score.
             site_id: str | None = None
             _h = idx["health_by_name"].get(site_lower)
             if _h is not None:
                 site_id = str(_h.get("id") or _h.get("siteId") or _h.get("site_id") or "").strip() or None
+                # Use the "Good" health group percentage, else the overall health score.
                 good_pct = next(
                     (g.get("value", 0) for g in (_h.get("health") or {}).get("groups", []) if g.get("name") == "Good"),
                     _h.get("healthScore", _h.get("health_score", 0)),
                 )
                 site_health = int(good_pct or 0)
 
+            # Map Central device types to the matching "down" alert id.
             DEVICE_ALERT = {"ACCESS_POINT": "AP_DOWN", "SWITCH": "SWITCH_DOWN", "GATEWAY": "GATEWAY_DOWN"}
             # site_id None → every device matched; else devices at this site_id
             # PLUS devices with no site_id (which the old scan counted for every
             # site). Index-prefiltered, so no per-device site check here.
+            # Pick devices to consider for this site.
             if site_id is None:
                 device_candidates = idx["devices_all"]
             else:
                 device_candidates = idx["devices_by_site_id"].get(site_id, []) + idx["devices_no_site"]
+            # Count each offline device under its "down" alert id.
             for device in device_candidates:
+                # Device type and status, uppercased for comparison.
                 device_type = str(device.get("deviceType") or "").upper()
                 status = str(device.get("status") or "").upper()
+                # Devices that are up are healthy.
                 if status in {"UP", "ONLINE"}:
                     continue
+                # Ignore device types we do not track.
                 alert_id = DEVICE_ALERT.get(device_type)
                 if not alert_id:
                     continue
+                # Count the down device.
                 alert_type_counts[alert_id] = alert_type_counts.get(alert_id, 0) + 1
+                # Record the device name when its hardware check is monitored (or all are).
                 if not hw_check_ids or alert_id in hw_check_ids:
                     device_name = (
                         device.get("deviceName") or device.get("name")
@@ -584,10 +696,12 @@ class ArubaClient:
             # Count all clients (wired + wireless) for the site. site_id None →
             # all clients; else only clients whose site_id matches (clients with
             # no site_id are NOT counted, mirroring the old match condition).
+            # Pick clients to count for this site.
             if site_id is None:
                 client_candidates = idx["clients_all"]
             else:
                 client_candidates = idx["clients_by_site_id"].get(site_id, [])
+            # Count wired vs wireless clients.
             for cl in client_candidates:
                 conn_type = str(cl.get("clientConnectionType") or cl.get("connection_type") or "").lower()
                 if conn_type == "wired":
@@ -599,6 +713,7 @@ class ArubaClient:
             # the Central -> Insights tab) evaluate on the dashboard. Keyed
             # name||category to match the WebUI monitored-check id. Candidates =
             # global (no site / "All Sites") + those pinned to this site.
+            # Count insights by name (or category).
             for ins in idx["insights_global"] + idx["insights_by_site"].get(site_lower, []):
                 cat = str(ins.get("name") or ins.get("category") or "").strip()
                 if cat:
@@ -608,11 +723,13 @@ class ArubaClient:
             # (Central -> Alerts Monitor button) evaluate on the dashboard. Alerts
             # aren't reliably site-scoped, so a global ("-"/"—"/no site) alert
             # counts for EVERY monitored site; key name||category = check id.
+            # Count alerts by name (or category).
             for al in idx["alerts_global"] + idx["alerts_by_site"].get(site_lower, []):
                 nm = str(al.get("name") or al.get("category") or "").strip()
                 if nm:
                     alert_type_counts[nm] = alert_type_counts.get(nm, 0) + 1
 
+            # Return the new Central poll result.
             return {
                 "site_health": site_health,
                 "wireless_clients": wireless_clients,
@@ -623,24 +740,31 @@ class ArubaClient:
                 "hw_devices": hw_devices,
             }
 
+        # Classic Central: query the per-site endpoints directly.
         async with httpx.AsyncClient(timeout=30) as client:
 
+            # Alerts for this site, up to 1000.
             params: dict[str, Any] = {"site": site, "limit": 1000}
+            # Fetch alerts from the first endpoint version that exists.
             try:
                 alerts_payload = None
                 for alerts_path in ("/monitoring/v1/alerts", "/monitoring/v2/alerts"):
                     try:
                         alerts_payload = await self._get(client, alerts_path, params=params)
                         break
+                    # 404 means try the next version; anything else is raised to the outer handler.
                     except httpx.HTTPStatusError as exc:
                         if exc.response.status_code == 404:
                             continue
                         raise
+                # Count alerts per type.
                 for alert in (alerts_payload or {}).get("alerts") or (alerts_payload or {}).get("items") or []:
                     alert_type = str(alert.get("alert_type") or alert.get("type") or "").strip()
+                    # Skip alerts without a type.
                     if not alert_type:
                         continue
                     alert_type_counts[alert_type] = alert_type_counts.get(alert_type, 0) + 1
+                    # For monitored hardware alert types, also record the device name.
                     if hw_check_ids and alert_type in hw_check_ids:
                         device_name = (
                             alert.get("device_name")
@@ -650,63 +774,80 @@ class ArubaClient:
                         ).strip()
                         if device_name:
                             hw_devices.setdefault(alert_type, {})[device_name] = hw_devices.setdefault(alert_type, {}).get(device_name, 0) + 1
+            # Alert failures are logged; the rest of the poll continues.
             except Exception as exc:
                 logger.warning("Aruba alerts fetch failed [%s:%s]: %s", self._config_hash, site, exc)
 
+            # Insights for this site, up to 1000.
             insight_params = {"site_name": site, "limit": 1000}
+            # Fetch insights from the first endpoint version that exists.
             try:
                 insights_payload = None
                 for insights_path in ("/aiops/v1/insights", "/aiops/v2/insights"):
                     try:
                         insights_payload = await self._get(client, insights_path, params=insight_params)
                         break
+                    # 404 means try the next version; anything else is raised to the outer handler.
                     except httpx.HTTPStatusError as exc:
                         if exc.response.status_code == 404:
                             continue
                         raise
+                # Count insights per category.
                 for insight in (insights_payload or {}).get("insights") or (insights_payload or {}).get("items") or []:
                     category = str(insight.get("category") or insight.get("type") or "").strip()
                     if category:
                         insight_cat_counts[category] = insight_cat_counts.get(category, 0) + 1
+            # Insight failures are logged; the rest of the poll continues.
             except Exception as exc:
                 logger.warning("Aruba insights fetch failed [%s:%s]: %s", self._config_hash, site, exc)
 
+            # Wireless client total: try each endpoint version and both site parameter names.
             fetched_wireless = False
             for clients_path in ("/monitoring/v2/clients/wireless", "/monitoring/v1/clients/wireless"):
                 for site_param in ("site", "site_name"):
                     try:
+                        # limit=1 because only the total count is needed.
                         payload = await self._get(client, clients_path, params={site_param: site, "limit": 1})
                         wireless_clients = int(payload.get("total") or payload.get("count") or 0)
                         fetched_wireless = True
                         break
+                    # 404 means try the next variant; other HTTP errors propagate.
                     except httpx.HTTPStatusError as exc:
                         if exc.response.status_code == 404:
                             continue
                         raise
+                    # Other errors are logged and stop trying this endpoint.
                     except Exception as exc:
                         logger.warning("Aruba wireless clients fetch failed [%s:%s]: %s", self._config_hash, site, exc)
                         break
+                # Stop once a count was obtained.
                 if fetched_wireless:
                     break
 
+            # Wired client total, using the same approach.
             fetched_wired = False
             for clients_path in ("/monitoring/v2/clients/wired", "/monitoring/v1/clients/wired"):
                 for site_param in ("site", "site_name"):
                     try:
+                        # limit=1 because only the total count is needed.
                         payload = await self._get(client, clients_path, params={site_param: site, "limit": 1})
                         wired_clients = int(payload.get("total") or payload.get("count") or 0)
                         fetched_wired = True
                         break
+                    # 404 means try the next variant; other HTTP errors propagate.
                     except httpx.HTTPStatusError as exc:
                         if exc.response.status_code == 404:
                             continue
                         raise
+                    # Other errors are logged and stop trying this endpoint.
                     except Exception as exc:
                         logger.warning("Aruba wired clients fetch failed [%s:%s]: %s", self._config_hash, site, exc)
                         break
+                # Stop once a count was obtained.
                 if fetched_wired:
                     break
 
+        # Return the classic Central poll result.
         return {
             "site_health": site_health,
             "wireless_clients": wireless_clients,
@@ -719,13 +860,18 @@ class ArubaClient:
 
     async def list_sites(self) -> list[dict[str, Any]]:
         """Return normalized Aruba Central sites for hub auto-discovery."""
+        # Not configured: nothing to list.
         if not self.is_configured():
             return []
 
+        # De-duplicate by case-insensitive site name.
         sites: dict[str, dict[str, Any]] = {}
+        # One HTTP client for the requests.
         async with httpx.AsyncClient(timeout=30) as client:
+            # New Central: sites come from the sites-health endpoint.
             if self.api_version == "new_central":
                 data = await self._get(client, "/network-monitoring/v1alpha1/sites-health")
+                # Build one normalised entry per named site.
                 for item in data.get("items") or []:
                     site_name = (item.get("name") or item.get("siteName") or item.get("site_name") or "").strip()
                     if not site_name:
@@ -740,25 +886,32 @@ class ArubaClient:
                         ),
                         "wireless_clients": (item.get("clients") or {}).get("count") or item.get("clientCount") or item.get("client_count"),
                     }
+                # Return the sites sorted by name.
                 return sorted(sites.values(), key=lambda item: item["name"].casefold())
 
+        # Classic Central: derive site names from current alerts and insights.
         try:
             findings = await self.poll_alerts_and_insights()
         except Exception as exc:
             logger.warning("Aruba classic site discovery failed [%s]: %s", self._config_hash, exc)
             findings = []
+        # Add each distinct named site.
         for finding in findings:
             site_name = str(finding.site_name or "").strip()
             if not site_name:
                 continue
             sites.setdefault(site_name.casefold(), {"name": site_name})
+        # Return the sites sorted by name.
         return sorted(sites.values(), key=lambda item: item["name"].casefold())
 
     async def list_clients(self, limit: int = 500) -> list[dict[str, Any]]:
         """Return normalized wireless clients from Central API."""
+        # Not configured: no clients.
         if not self.is_configured():
             return []
+        # One HTTP client for the request(s).
         async with httpx.AsyncClient(timeout=30) as client:
+            # New Central: one clients call, normalised to the common field set.
             if self.api_version == "new_central":
                 try:
                     data = await self._get(client, "/network-monitoring/v1alpha1/clients", params={"limit": limit})
@@ -778,11 +931,14 @@ class ArubaClient:
                         }
                         for item in (data.get("items") or [])
                     ]
+                # Errors are logged and give an empty list.
                 except Exception as exc:
                     logger.warning("list_clients new_central failed [%s]: %s", self._config_hash, exc)
                     return []
+            # Classic Central: try the v2 then v1 wireless clients endpoints.
             for path in ("/monitoring/v2/clients/wireless", "/monitoring/v1/clients/wireless"):
                 try:
+                    # Fetch and normalise the clients.
                     data = await self._get(client, path, params={"limit": limit})
                     return [
                         {
@@ -799,34 +955,43 @@ class ArubaClient:
                         }
                         for item in (data.get("clients") or data.get("items") or [])
                     ]
+                # 404 means try the older version; other HTTP errors give an empty list.
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code == 404:
                         continue
                     logger.warning("list_clients classic failed [%s] %s: %s", self._config_hash, path, exc)
                     return []
+                # Other errors give an empty list.
                 except Exception as exc:
                     logger.warning("list_clients classic failed [%s] %s: %s", self._config_hash, path, exc)
                     return []
+            # No endpoint answered.
             return []
 
     async def _new_central_device_alerts(self) -> list[dict[str, Any]]:
         """Fetch device-level alerts (down APs/switches/gateways) for new_central browse view."""
+        # Friendly alert names per device type.
         DEVICE_TYPE_ALERT = {"ACCESS_POINT": "AP Down", "SWITCH": "Switch Down", "GATEWAY": "Gateway Down"}
         alerts: list[dict[str, Any]] = []
+        # Turn each device that is not up into an alert row.
         try:
             devices = await self._nc_devices()
             for device in devices:
+                # Skip devices that are up or have no status.
                 status = str(device.get("status") or "").upper()
                 if status in {"UP", "ONLINE", ""}:
                     continue
+                # Name the alert after the device type.
                 device_type = str(device.get("deviceType") or device.get("type") or "").upper()
                 alert_name = DEVICE_TYPE_ALERT.get(device_type) or f"{device_type} Down"
+                # Site and device name, with a dash when unknown.
                 site = (
                     device.get("siteName") or device.get("site_name") or device.get("site") or "—"
                 ).strip() or "—"
                 device_name = (
                     device.get("deviceName") or device.get("name") or device.get("serialNumber") or device.get("id") or "—"
                 ).strip()
+                # Add the alert row for the UI.
                 alerts.append({
                     "name": alert_name,
                     "site": site,
@@ -836,6 +1001,7 @@ class ArubaClient:
                     "status": status,
                     "ts": None,
                 })
+        # Errors are logged; whatever was collected is returned.
         except Exception as exc:
             logger.warning("new_central device alerts fetch failed [%s]: %s", self._config_hash, exc)
         return alerts
@@ -844,9 +1010,11 @@ class ArubaClient:
 
     async def _nc_sites_health(self) -> list[dict[str, Any]]:
         """Return cached sites-health list; one API call shared across all site queries."""
+        # Return the cached list while it is fresh.
         cached = _sites_health_cache.get(self._config_hash)
         if cached and time.time() - cached[0] < _NC_GLOBAL_CACHE_TTL:
             return cached[1]
+        # Otherwise fetch it once for all site queries.
         result: list[dict[str, Any]] = []
         try:
             async with httpx.AsyncClient(timeout=30) as http:
@@ -859,18 +1027,22 @@ class ArubaClient:
             # caching so the next cycle re-fetches.
             logger.warning("new_central sites-health cache fetch [%s]: %s", self._config_hash, exc)
             return cached[1] if cached else result
+        # Cache the successful result.
         _sites_health_cache[self._config_hash] = (time.time(), result)
         return result
 
     async def _nc_devices(self) -> list[dict[str, Any]]:
         """Return cached devices list from /network-monitoring/v1/devices (paginated)."""
+        # Return the cached list while it is fresh.
         cached = _devices_cache.get(self._config_hash)
         if cached and time.time() - cached[0] < _NC_GLOBAL_CACHE_TTL:
             return cached[1]
+        # Otherwise fetch every page of devices.
         result: list[dict[str, Any]] = []
         try:
             async with httpx.AsyncClient(timeout=30) as http:
                 params: dict[str, Any] = {"limit": 1000}
+                # Keep following the "next" cursor until a short or final page.
                 while True:
                     data = await self._get(http, "/network-monitoring/v1/devices", params=params)
                     items = data.get("items") or []
@@ -885,18 +1057,22 @@ class ArubaClient:
             # empty WITHOUT caching so the next cycle re-fetches.
             logger.warning("new_central devices cache fetch [%s]: %s", self._config_hash, exc)
             return cached[1] if cached else []
+        # Cache the successful result.
         _devices_cache[self._config_hash] = (time.time(), result)
         return result
 
     async def _nc_clients(self) -> list[dict[str, Any]]:
         """Return cached clients list from /network-monitoring/v1/clients (paginated)."""
+        # Return the cached list while it is fresh.
         cached = _nc_clients_cache.get(self._config_hash)
         if cached and time.time() - cached[0] < _NC_GLOBAL_CACHE_TTL:
             return cached[1]
+        # Otherwise fetch every page of clients.
         result: list[dict[str, Any]] = []
         try:
             async with httpx.AsyncClient(timeout=30) as http:
                 params: dict[str, Any] = {"limit": 1000}
+                # Keep following the "next" cursor until a short or final page.
                 while True:
                     data = await self._get(http, "/network-monitoring/v1/clients", params=params)
                     items = data.get("items") or []
@@ -911,8 +1087,10 @@ class ArubaClient:
             # empty WITHOUT caching so the next cycle re-fetches.
             logger.warning("new_central clients cache fetch [%s]: %s", self._config_hash, exc)
             return cached[1] if cached else []
+        # Log the client field names once to help with field mapping.
         if result:
             logger.info("new_central client fields sample [%s]: %s", self._config_hash, list(result[0].keys()))
+        # Cache the successful result.
         _nc_clients_cache[self._config_hash] = (time.time(), result)
         return result
 
@@ -959,6 +1137,7 @@ class ArubaClient:
     @classmethod
     def _reason_to_alert_name(cls, reason_code: str) -> str:
         """Convert a sites-health reason code to a human-readable alert name."""
+        # Use the known friendly name when there is one.
         name = cls._REASON_NAMES.get(reason_code)
         if name:
             return name
@@ -969,6 +1148,7 @@ class ArubaClient:
     @classmethod
     def _reason_severity(cls, health: str) -> str:
         """Map a sites-health reason health value to a severity string."""
+        # Poor is red, fair is yellow, anything else green.
         h = str(health or "").lower()
         if h == "poor":
             return "red"
@@ -979,6 +1159,7 @@ class ArubaClient:
     @classmethod
     def _reason_category(cls, reason_code: str) -> str:
         """Infer alert category from the reason code prefix."""
+        # Compare in upper case.
         code = reason_code.upper()
         # Check specific metrics before generic prefixes
         if "CHANNEL" in code or "NOISE" in code or "PKT_DROP" in code or "PACKET_DROP" in code:
@@ -996,6 +1177,7 @@ class ArubaClient:
     @staticmethod
     def _nc_alert_severity(severity: str) -> str:
         """Map new_central alert severity (Critical/Major/Minor/Info) to UI colour."""
+        # Lower-case the severity, then map critical/major/minor to colours.
         s = str(severity or "").lower()
         if s == "critical":
             return "red"
@@ -1014,9 +1196,11 @@ class ArubaClient:
         the same alert firing multiple times shows as one row with a count.
         Cache TTL: 5 minutes.
         """
+        # Return cached alerts while they are fresh.
         cached = _alerts_cache.get(self._config_hash)
         if cached and time.time() - cached[0] < _ALERTS_CACHE_TTL:
             return cached[1]
+        # Otherwise fetch them.
         alerts: list[dict[str, Any]] = []
         try:
             async with httpx.AsyncClient(timeout=30) as http:
@@ -1037,15 +1221,19 @@ class ArubaClient:
                 # "next" — so slow/looping alert pagination can NEVER stall
                 # browse_all (which awaits alerts + insights + sites in parallel).
                 while next_page is not None and pages < 5 and next_page not in seen:
+                    # Remember this page token so a repeated "next" stops the loop.
                     seen.add(next_page)
                     payload = await self._get(http, "/network-notifications/v1/alerts",
                                               params={"limit": 100, "next": next_page})
+                    # Unwrap a body nested under "msg".
                     if isinstance(payload, dict) and isinstance(payload.get("msg"), dict):
                         payload = payload["msg"]  # some responses wrap the body under "msg"
+                    # Collect the page's alerts and advance to the next page.
                     items = (payload or {}).get("items") or []
                     raw_alerts.extend(items)
                     pages += 1
                     next_page = (payload or {}).get("next")
+                    # An empty page means we are done.
                     if not items:
                         break
 
@@ -1071,16 +1259,19 @@ class ArubaClient:
                 # Group by (name, site). Keep only non-cleared alerts (the demo's
                 # expected errors that should be PRESENT).
                 groups: dict[tuple[str, str], dict[str, Any]] = {}
+                # Skip cleared alerts.
                 for item in raw_alerts:
                     status = str(item.get("status") or "").strip().lower()
                     if status in ("cleared", "closed", "resolved") or item.get("clearedReason"):
                         continue
+                    # Alert name and site (by name, else mapped from the site id, else a dash).
                     name = str(item.get("name") or item.get("summary") or "Alert").strip()
                     site = (str(item.get("siteName") or item.get("site_name")
                                 or item.get("site") or item.get("groupName") or "").strip()
                             or site_id_to_name.get(str(item.get("siteId")
                                 or item.get("site_id") or "").strip(), "")
                             or "—")
+                    # First time this name/site pair is seen: create its group row.
                     key = (name.lower(), site.lower())
                     if key not in groups:
                         groups[key] = {
@@ -1093,18 +1284,22 @@ class ArubaClient:
                             "ts": item.get("createdAt") or item.get("updatedAt") or None,
                             "count": 0,
                         }
+                    # Count every occurrence.
                     groups[key]["count"] += 1
 
+                # Mention repeat counts in the detail text and emit the rows.
                 for entry in groups.values():
                     cnt = entry.pop("count")
                     if cnt > 1:
                         entry["detail"] = f"{cnt} occurrences" + (f" — {entry['detail']}" if entry["detail"] else "")
                     alerts.append(entry)
 
+        # Errors are logged with the response body when there is one.
         except Exception as exc:
             body = getattr(getattr(exc, "response", None), "text", None)
             logger.warning("new_central alerts fetch [%s]: %s%s", self._config_hash, exc, f" — {body}" if body else "")
         logger.info("new_central alerts fetched [%s]: %d alert groups from /network-notifications/v1/alerts", self._config_hash, len(alerts))
+        # Cache the result; an empty result is aged so it expires after about a minute.
         ttl_offset = 0 if alerts else (_ALERTS_CACHE_TTL - 60)
         _alerts_cache[self._config_hash] = (time.time() - ttl_offset, alerts)
         return alerts
@@ -1115,15 +1310,19 @@ class ArubaClient:
         Each insight is global (siteId="-1") or site-specific and contains an
         impactedSites list.  Results are cached for 15 minutes.
         """
+        # Return cached insights while they are fresh.
         cached = _insights_cache.get(self._config_hash)
         if cached and time.time() - cached[0] < _INSIGHTS_CACHE_TTL:
             return cached[1]
 
+        # Otherwise fetch them.
         insights: list[dict[str, Any]] = []
         try:
             async with httpx.AsyncClient(timeout=30) as http:
+                # One page of up to 100 insights.
                 payload = await self._get(http, "/network-notifications/v1/insights", params={"limit": 100})
                 raw_list = payload.get("items") or []
+                # Normalise each insight's title, category, description and timestamp.
                 for item in raw_list:
                     title = str(item.get("title") or item.get("name") or item.get("category") or "Insight").strip()
                     category = str(item.get("category") or "").strip()
@@ -1134,6 +1333,7 @@ class ArubaClient:
                         import datetime
                         ts = datetime.datetime.utcfromtimestamp(int(ts) / 1000).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+                    # One row per impacted site, or a single "All Sites" row.
                     impacted = item.get("impactedSites") or []
                     if impacted:
                         for s in impacted:
@@ -1159,17 +1359,21 @@ class ArubaClient:
                             "client_count": 0,
                             "ts": ts,
                         })
+        # Errors are logged; whatever was collected is used.
         except Exception as exc:
             logger.warning("new_central insights fetch [%s]: %s", self._config_hash, exc)
         logger.info("new_central insights fetched [%s]: %d insights from /network-notifications/v1/insights", self._config_hash, len(insights))
+        # Cache the result; an empty result is aged so it expires after 2 minutes.
         ttl = _INSIGHTS_CACHE_TTL if insights else 120
         _insights_cache[self._config_hash] = (time.time() - (_INSIGHTS_CACHE_TTL - ttl), insights)
         return insights
 
     async def browse_all(self) -> dict[str, Any]:
         """Fetch all Central sites, alerts, insights, clients, and devices for the browse view."""
+        # Local import: only needed for the parallel fetch below.
         import asyncio
 
+        # New Central: fetch sites, devices, clients, insights and alerts in parallel.
         if self.api_version == "new_central":
             sites, all_devices, all_clients, nc_insights, nc_alerts = await asyncio.gather(
                 self.list_sites(),
@@ -1179,6 +1383,7 @@ class ArubaClient:
                 self._new_central_alerts(),
                 return_exceptions=True,
             )
+            # A site-list failure is fatal; the other parts fall back to empty lists.
             if isinstance(sites, Exception):
                 # Re-raise so _refresh_central_browse preserves the existing cache
                 raise sites
@@ -1193,6 +1398,7 @@ class ArubaClient:
 
             # Build devices_by_site: {siteName: [device, ...]}
             devices_by_site: dict[str, list[dict[str, Any]]] = {}
+            # Group devices by site name with a normalised subset of fields.
             for dev in all_devices:
                 sn = (dev.get("siteName") or dev.get("site_name") or "—").strip() or "—"
                 devices_by_site.setdefault(sn, []).append({
@@ -1209,6 +1415,7 @@ class ArubaClient:
             # Build clients_by_site: {siteName: {total, wired, wireless}}
             clients_by_site: dict[str, dict[str, Any]] = {}
             normalized_clients: list[dict[str, Any]] = []
+            # Count clients per site by connection type and normalise each client.
             for cli in all_clients:
                 sn = (cli.get("siteName") or cli.get("site_name") or "—").strip() or "—"
                 entry = clients_by_site.setdefault(sn, {"total": 0, "wired": 0, "wireless": 0})
@@ -1232,6 +1439,7 @@ class ArubaClient:
                     "connection_type": cli.get("clientConnectionType") or "",
                 })
 
+            # Return the full new Central browse payload.
             return {
                 "sites": sites,
                 "alerts": list(nc_alerts),
@@ -1241,18 +1449,21 @@ class ArubaClient:
                 "clients_by_site": clients_by_site,
             }
 
+        # Classic Central: sites, findings and clients in parallel.
         sites, findings, clients = await asyncio.gather(
             self.list_sites(),
             self.poll_alerts_and_insights(),
             self.list_clients(),
             return_exceptions=True,
         )
+        # A site-list failure is fatal; the other parts fall back to empty lists.
         if isinstance(sites, Exception):
             raise sites
         if isinstance(findings, Exception):
             findings = []
         if isinstance(clients, Exception):
             clients = []
+        # Split findings into alert rows and insight rows.
         alerts = [
             {"name": f.check_name, "site": f.site_name, "severity": f.status, "detail": "", "ts": None}
             for f in findings
@@ -1263,6 +1474,7 @@ class ArubaClient:
             for f in findings
             if isinstance(f, ArubaFinding) and f.source == "insight"
         ]
+        # Return the classic browse payload.
         return {"sites": sites, "alerts": alerts, "insights": insights, "clients": clients}
 
 
@@ -1275,6 +1487,7 @@ async def test_central_from_config(cfg: Dict[str, Any], spoke_id: str = "hub") -
     ``token_state`` is a short string ("present"/"missing"), NOT the raw token
     dict, so the access token is never shipped to the browser.
     """
+    # Build a client from the config; stop early if it is not configured.
     client = ArubaClient(cfg)
     if not client.is_configured():
         logger.info("test_central [hub/%s]: Central not configured (no cluster_url)",
@@ -1282,8 +1495,10 @@ async def test_central_from_config(cfg: Dict[str, Any], spoke_id: str = "hub") -
         return {"spoke_id": spoke_id, "spoke_name": "Hub (centralized)",
                 "token_state": "missing", "token_valid": False,
                 "status": "Central not configured."}
+    # API flavour and config hash, for logging.
     mode = client.api_version
     chash = client._config_hash
+    # Getting a token proves the credentials and connectivity work.
     try:
         import httpx as _httpx
         async with _httpx.AsyncClient(timeout=20) as http:
@@ -1293,6 +1508,7 @@ async def test_central_from_config(cfg: Dict[str, Any], spoke_id: str = "hub") -
         return {"spoke_id": spoke_id, "spoke_name": "Hub (centralized)",
                 "token_state": "present", "token_valid": True,
                 "status": "Connected."}
+    # Any error is reported as a failed connection.
     except Exception as exc:  # noqa: BLE001 — surface any token/transport error
         logger.warning("test_central [hub/%s] mode=%s cfg=%s FAILED: %r",
                        spoke_id, mode, chash, exc)
@@ -1306,9 +1522,11 @@ async def get_central_available_from_config(cfg: Dict[str, Any], spoke_id: str =
     cs spoke's ``central_poller.available_checks()`` so the Central API editor's
     monitored-check picker works without contacting the spoke. Returns the same
     ``{alerts, insights, hardware, warning}`` shape the spoke returns."""
+    # Build a client and fetch its check catalog.
     client = ArubaClient(cfg)
     try:
         return await client.available_checks()
+    # Errors give empty catalogs with a warning.
     except Exception as exc:  # noqa: BLE001 — surface any token/transport error
         logger.warning("get_central_available [hub/%s] FAILED: %r", spoke_id, exc)
         return {"alerts": [], "insights": [], "hardware": [],
@@ -1321,14 +1539,17 @@ async def browse_all_from_config(cfg: Dict[str, Any], spoke_id: str = "hub") -> 
     ``central_poller.browse()`` so the Central -> Sites/Alerts/Clients tabs work
     without contacting a spoke. Returns the same shape browse_all produces, or an
     empty set + warning on misconfig/error."""
+    # Build a client; not configured means an empty successful result.
     client = ArubaClient(cfg)
     if not client.is_configured():
         return {"status": "SUCCESS", "sites": [], "alerts": [], "insights": [],
                 "clients": [], "devices_by_site": {}, "clients_by_site": {},
                 "warning": "Central not configured.", "fetched_at": time.time()}
+    # Fetch everything and stamp the fetch time.
     try:
         data = await client.browse_all()
         return {"status": "SUCCESS", **data, "fetched_at": time.time()}
+    # Errors give an ERROR result with empty lists.
     except Exception as exc:  # noqa: BLE001
         logger.warning("browse_all [hub/%s] FAILED: %r", spoke_id, exc)
         return {"status": "ERROR", "message": str(exc), "sites": [], "alerts": [],

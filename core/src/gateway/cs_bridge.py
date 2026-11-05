@@ -41,8 +41,10 @@ relay failure is logged at debug and skipped — it never breaks the loop or the
 agent's own telemetry/heartbeat.
 """
 
+# Allow modern type-hint syntax.
 from __future__ import annotations
 
+# Standard-library imports: async loop, JSON signatures, logging, env vars, time.
 import asyncio
 import json
 import logging
@@ -50,10 +52,12 @@ import os
 import time
 from typing import Any, Dict, Optional
 
+# Module logger.
 logger = logging.getLogger("CSBridge")
 
 
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    """Read an integer env var, clamped to ``minimum``; ``default`` if missing or invalid."""
     try:
         return max(minimum, int(os.environ.get(name, str(default))))
     except Exception:
@@ -62,6 +66,7 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
 
 def _unwrap(result: Any) -> Dict[str, Any]:
     """Unwrap a spoke reply the way api.py does: result["payload"]["data"]."""
+    # Prefer payload.data; otherwise use the reply itself if it is a dict.
     if isinstance(result, dict):
         data = result.get("payload", {}).get("data", result)
         return data if isinstance(data, dict) else (result if isinstance(result, dict) else {})
@@ -75,11 +80,13 @@ def _is_timeout_message(message: Any) -> bool:
     agent/OS surfaces when a host is too saturated to ACK in time. A genuine
     agent ERROR (``"VM not found"``, ``"already deleted"``, ``"no such vmid"``)
     contains none of these markers and correctly returns False."""
+    # Empty messages are not timeouts.
     if not message:
         return False
     msg = str(message).strip().lower()
     if not msg:
         return False
+    # Look for any timeout-style phrase.
     return any(m in msg for m in (
         "timed out", "timeout", "time-out", "timed-out",
         "did not respond", "didn't respond", "no response",
@@ -93,6 +100,8 @@ class CSBridgePoller:
     commands + USB config to whichever spoke actually holds its connection."""
 
     def __init__(self, hub) -> None:
+        """Read tuning settings from env/config and set up per-agent tracking state."""
+        # How often to poll, and how often to check USB config.
         self.hub = hub
         self.poll_interval = _env_int("CS_POLL_INTERVAL_S", 5, 2)
         self.usb_interval = _env_int("CS_USB_CONFIG_INTERVAL_S", 60, 30)
@@ -169,10 +178,12 @@ class CSBridgePoller:
     # ── main loop ──────────────────────────────────────────────────────────
 
     async def run(self) -> None:
+        """Main loop: refresh timeouts, run one tick, sleep, forever."""
         # Let spokes/agents connect before the first poll.
         await asyncio.sleep(5)
         logger.info("CS bridge loop started (poll=%ds, usb=%ds)",
                     self.poll_interval, self.usb_interval)
+        # Errors are logged and the loop continues; cancellation stops it.
         while True:
             try:
                 self._apply_configured_timeouts()
@@ -196,16 +207,19 @@ class CSBridgePoller:
         before the hub gives up; never below the env default (CS_RELAY_TIMEOUT_S
         / CS_RELAY_TIMEOUT_LONG_S). Unconfigured → env defaults (old behavior).
         """
+        # Read global_config, tolerating a hub without state.
         margin = 5.0
         try:
             gc = (self.hub.state.get_global_config() or {}) if getattr(
                 self.hub, "state", None) else {}
         except Exception:  # noqa: BLE001 — best-effort; fall back to env
             gc = {}
+        # Record the configured spoke-side windows, if set.
         cl = gc.get("agent_relay_timeout_long_s")
         cf = gc.get("agent_relay_timeout_fast_s")
         self._configured_long = float(cl) if cl is not None else None
         self._configured_fast = float(cf) if cf is not None else None
+        # Keep each hub window above the configured one plus margin, never below the env default.
         if self._configured_long is not None:
             self.relay_timeout_long = max(self._env_relay_timeout_long,
                                           self._configured_long + margin)
@@ -225,6 +239,7 @@ class CSBridgePoller:
         a tick that races ahead of the cs spoke applying the CS_CONFIG_UPDATE
         still re-polls once the spoke's usb_config actually flips. tenant_id
         None → all tenants (rarely needed)."""
+        # Open a forced-resync window for one tenant, or for all of them.
         deadline = time.time() + max(0.0, window_s)
         if tenant_id:
             self._usb_resync_until[str(tenant_id)] = deadline
@@ -239,6 +254,7 @@ class CSBridgePoller:
         return now < td
 
     async def _tick(self) -> None:
+        """One poll cycle: relay queued commands and sync USB config for every CS-enabled agent."""
         hub = self.hub
         # An agent can connect through a dedicated pxmx (hypervisor) spoke OR
         # directly to a cs (simulation) spoke's own /ws/agent listener (the
@@ -253,8 +269,10 @@ class CSBridgePoller:
         agent_spokes = list(dict.fromkeys(
             hub.get_all_spokes_by_type("hypervisor") + hub.get_all_spokes_by_type("simulation")
         ))
+        # Counters for the cycle summary.
         now = time.time()
         n_agents = n_active = 0
+        # Ask each hosting spoke for its connected agents.
         for host_spoke in agent_spokes:
             agents = await self._connected_agents(host_spoke)
             if not agents:
@@ -265,6 +283,7 @@ class CSBridgePoller:
                 hostname = a.get("hostname") or aid
                 if not aid:
                     continue
+                # Look up the agent's stored config.
                 cfg_key, ac_entry = self._agent_config_entry(aid, hostname)
                 # Heal a hostname-keyed (or otherwise stale-keyed) entry to the
                 # agent primary key (guid once armed, else the runtime agent_id)
@@ -275,6 +294,7 @@ class CSBridgePoller:
                 if cfg_key != agent_pk and ac_entry:
                     self._migrate_agent_config_key(cfg_key, agent_pk)
                     cfg_key, ac_entry = self._agent_config_entry(aid, hostname)
+                # Read the CS settings and find the tenant's cs spoke.
                 cs_cfg = ac_entry.get("client_simulation") or {}
                 enabled = bool(cs_cfg.get("enabled"))
                 tenant_id = cs_cfg.get("tenant_id") or self._spoke_tenant(host_spoke)
@@ -296,14 +316,18 @@ class CSBridgePoller:
                 else:
                     keynote = "" if cfg_key == agent_pk else f" [config keyed by {cfg_key!r}, not agent pk — re-save to normalize]"
                     decision = f"ACTIVE — tenant={tenant_id} cs_spoke={cs_spoke}{keynote}"
+                # Log the decision (throttled to changes).
                 self._log_agent_diag(host_spoke, aid, hostname, decision)
 
+                # Only active agents go further.
                 if not enabled or not cs_spoke:
                     continue
                 n_active += 1
 
+                # Deliver queued commands to the agent.
                 await self._relay_inbox(host_spoke, cs_spoke, aid, hostname)
 
+                # Sync USB config when forced or when the interval has passed.
                 if (self._usb_resync_forced(tenant_id, now)
                         or now - self._last_usb_push.get(aid, 0.0) >= self.usb_interval):
                     await self._sync_usb_config(host_spoke, cs_spoke, aid, hostname, now)
@@ -317,6 +341,7 @@ class CSBridgePoller:
         # hub log / WebUI Logs even when it does nothing (0 spokes / 0 agents /
         # all skipped) — throttled to changes so a steady fleet doesn't spam.
         cyc = f"spokes={len(agent_spokes)} agents={n_agents} active={n_active}"
+        # Log the cycle summary: INFO when it changed, DEBUG otherwise.
         if cyc != self._last_cycle_diag:
             self._last_cycle_diag = cyc
             logger.info("[cs-bridge] cycle: %s", cyc)
@@ -326,6 +351,8 @@ class CSBridgePoller:
     # ── helpers ────────────────────────────────────────────────────────────
 
     async def _connected_agents(self, host_spoke: str) -> list:
+        """Return the connected agents reported by ``host_spoke`` (each with an agent_id)."""
+        # Ask the spoke for its agent list and keep entries that have an agent_id.
         resp = await self.hub.request_response(host_spoke, "GET_AGENTS", {}, timeout=30.0)
         data = _unwrap(resp)
         agents = data.get("agents", []) if isinstance(data, dict) else []
@@ -347,15 +374,18 @@ class CSBridgePoller:
         Try that first, then the raw name, then the hostname (and the hostname's
         guid resolution) — covers armed / pre-arm / legacy-hostname-keyed entries.
         """
+        # Read the stored agent_config map.
         try:
             store = self.hub.state.system_state.get("agent_config", {}) or {}
         except Exception:
             return agent_id, {}
+        # Candidate keys in priority order, without duplicates.
         keys = []
         for k in (self.hub._agent_primary_key(agent_id), agent_id,
                   self.hub._agent_primary_key(hostname or ""), hostname):
             if k and k not in keys:
                 keys.append(k)
+        # Return the first key that has a stored entry.
         for key in keys:
             if isinstance(store.get(key), dict):
                 return key, store[key]
@@ -370,6 +400,7 @@ class CSBridgePoller:
         suspenders, not load-bearing. On the rare case both keys exist, the
         stale entry's explicit client_simulation (the operator's enable/tenant)
         wins, but any usb_config already on the agent_id entry is preserved."""
+        # Move the old entry to the new key, merging with anything already there.
         try:
             store = self.hub.state.system_state.get("agent_config", {}) or {}
             if old_key == new_key or old_key not in store:
@@ -377,6 +408,7 @@ class CSBridgePoller:
             src = store.pop(old_key)
             dst = store.get(new_key) or {}
             merged = {**dst, **src}  # operator-set src wins on collisions
+            # Merge the CS sections; keep existing usb_config if the old entry has none.
             src_cs = src.get("client_simulation") or {}
             dst_cs = dst.get("client_simulation") or {}
             cs = {**dst_cs, **src_cs}
@@ -384,6 +416,7 @@ class CSBridgePoller:
                 cs["usb_config"] = dst_cs["usb_config"]
             if cs:
                 merged["client_simulation"] = cs
+            # Store, mark for saving and log.
             store[new_key] = merged
             self.hub.state._mark_dirty()
             logger.info("[cs-bridge] migrated agent_config key %r → %r "
@@ -400,6 +433,7 @@ class CSBridgePoller:
         mismatch?) is visible in the hub log / WebUI Logs without SSH+jq.
         INFO on a state change (so a broken agent is loud), DEBUG when steady
         (so a healthy fleet doesn't spam every 60s cycle)."""
+        # INFO when the decision changed, DEBUG when it is the same as last time.
         line = f"[cs-bridge] {agent_id} (host {hostname} via {host_spoke}): {decision}"
         if self._last_diag.get(agent_id) != decision:
             self._last_diag[agent_id] = decision
@@ -428,6 +462,7 @@ class CSBridgePoller:
     def _bump(self, agent_id: str, hostname: str, outcome: str) -> None:
         """Increment a per-agent relay-outcome counter and stamp the last
         outcome/ts, for the WebUI "CS Bridge Status" panel."""
+        # Get or create this agent's counter row.
         row = self._relay_counts.setdefault(
             agent_id,
             {"hostname": hostname, "host_spoke": "", "decision": "",
@@ -435,6 +470,7 @@ class CSBridgePoller:
              "failed": 0, "last_outcome": None, "last_ts": 0.0,
              "last_inbox_count": 0},
         )
+        # Bump the named counter and stamp the outcome and time.
         row["hostname"] = hostname
         if outcome in row:
             row[outcome] = int(row[outcome]) + 1
@@ -452,6 +488,7 @@ class CSBridgePoller:
         # transient drop doesn't erase the counters mid-diagnosis.
         now = time.time()
         agents = []
+        # Copy each row, adding the agent id and a readable timestamp.
         for aid, row in self._relay_counts.items():
             r = dict(row)
             r["agent_id"] = aid
@@ -460,7 +497,9 @@ class CSBridgePoller:
                 if r.get("last_ts") else ""
             )
             agents.append(r)
+        # Sort by hostname (or agent id).
         agents.sort(key=lambda r: (r.get("hostname") or r.get("agent_id") or ""))
+        # Panel payload: agent rows, last cycle summary and the current relay windows.
         return {
             "agents": agents,
             "cycle": self._last_cycle_diag,
@@ -480,6 +519,7 @@ class CSBridgePoller:
         }
 
     def _spoke_tenant(self, spoke_id: str) -> Optional[str]:
+        """Return the tenant bound to ``spoke_id``, or None."""
         try:
             return self.hub.state.get_spoke_tenant(spoke_id)
         except Exception:
@@ -487,7 +527,9 @@ class CSBridgePoller:
 
     async def _relay_inbox(self, host_spoke: str, cs_spoke: str,
                            agent_id: str, hostname: str) -> None:
+        """Fetch an agent's pending commands from the cs spoke and relay each one."""
         hub = self.hub
+        # Ask the cs spoke for the agent's queued commands.
         inbox = await hub.request_response(cs_spoke, "CS_POLL_AGENT_INBOX",
                                            {"hostname": hostname}, timeout=5.0)
         data = _unwrap(inbox)
@@ -498,10 +540,12 @@ class CSBridgePoller:
         # 0 in the inbox) from "inbox had commands but the relay failed/timed
         # out" (0 accepted with N in the inbox → relay path issue).
         row = self._relay_counts.get(agent_id)
+        # Record how many commands were waiting.
         if isinstance(row, dict):
             row["last_inbox_count"] = len(commands)
         if not commands:
             return
+        # Relay each well-formed command.
         for cmd in commands:
             if not isinstance(cmd, dict):
                 continue
@@ -509,11 +553,14 @@ class CSBridgePoller:
 
     async def _relay_one(self, host_spoke: str, cs_spoke: str,
                          agent_id: str, hostname: str, cmd: Dict[str, Any]) -> None:
+        """Relay one command to the agent and ack, requeue or leave it based on the reply."""
         hub = self.hub
+        # Skip commands missing an id or action.
         cmd_id = cmd.get("id")
         action = cmd.get("action")
         if not cmd_id or not action:
             return
+        # Build the relay payload: the queue id, the action and any arguments.
         # Carry the cs queue id so the agent's CS_COMMAND dispatch can
         # correlate a later CS_COMMAND_RESULT back to this command (Phase E).
         relay_data: Dict[str, Any] = {"cs_cmd_id": cmd_id, "action": action}
@@ -528,6 +575,7 @@ class CSBridgePoller:
         timeout = (self.relay_timeout_long if action in self._long_actions
                    else self.relay_timeout)
 
+        # Send via the hosting spoke; a send error is treated as retryable.
         try:
             raw = await hub.request_response(
                 host_spoke, "SPOKE_RELAY",
@@ -539,6 +587,7 @@ class CSBridgePoller:
                                         f"relay error: {exc}")
             return
 
+        # Read the reply status and message.
         data = _unwrap(raw)
         status = str(data.get("status", "") or "").upper()
         message = data.get("message", "")
@@ -558,8 +607,10 @@ class CSBridgePoller:
                          cmd_id, action, agent_id)
             return
 
+        # Success completes the command.
         if status == "SUCCESS":
             ack_status, ack_msg = "completed", message or ""
+        # Errors: retry relay timeouts, fail genuine rejections.
         elif status in ("ERROR", "FAILED", "TIMEOUT"):
             # Distinguish a relay TIMEOUT (the agent was too busy to ACCEPT —
             # transient; retry up to max_retries via requeue) from a genuine
@@ -588,6 +639,7 @@ class CSBridgePoller:
                                         message or "agent command did not complete")
             return
 
+        # Report the terminal result to the cs spoke.
         await self._ack(cs_spoke, agent_id, hostname, cmd_id, action, ack_status, ack_msg)
 
     async def _requeue_or_fail(self, cs_spoke: str, agent_id: str, hostname: str,
@@ -598,9 +650,11 @@ class CSBridgePoller:
         marks it ``failed`` itself — so this never acks a "failed" that would
         short-circuit a later, legitimate retry. ``max_retries <= 0`` (or a
         non-positive env) falls back to the old fail-fast behavior."""
+        # Retries disabled: fail immediately.
         if self.max_retries <= 0:
             await self._ack(cs_spoke, agent_id, hostname, cmd_id, action, "failed", message)
             return
+        # Ask the cs spoke to requeue; it marks the command failed once retries run out.
         try:
             raw = await self.hub.request_response(
                 cs_spoke, "CS_REQUEUE_COMMAND",
@@ -611,6 +665,7 @@ class CSBridgePoller:
             logger.debug("CS bridge: requeue %s failed: %s", cmd_id, exc)
             return
         data = _unwrap(raw)
+        # Log whether it was requeued or retries are exhausted.
         if data.get("requeued"):
             self._bump(agent_id, hostname, "requeued")
             logger.info("[cs-bridge] %s %s %s relay timed out — re-queued (attempt %s/%s): %s",
@@ -627,6 +682,7 @@ class CSBridgePoller:
         the cs spoke) on ACCEPTED, so the stale-delivered re-probe and the
         delete-verify sweep don't fire while a long op is alive and re-acking.
         Best-effort — a touch failure just means the spoke re-probes normally."""
+        # Send the touch; failures are only logged.
         try:
             await self.hub.request_response(
                 cs_spoke, "CS_TOUCH_COMMAND", {"id": cmd_id}, timeout=5.0,
@@ -636,6 +692,8 @@ class CSBridgePoller:
 
     async def _ack(self, cs_spoke: str, agent_id: str, hostname: str,
                    cmd_id: str, action: str, status: str, message: str) -> None:
+        """Report a command's terminal status to the cs spoke and update counters."""
+        # Send the ack; failures are only logged.
         try:
             await self.hub.request_response(
                 cs_spoke, "CS_ACK_COMMAND",
@@ -660,7 +718,9 @@ class CSBridgePoller:
 
     async def _sync_usb_config(self, host_spoke: str, cs_spoke: str,
                                agent_id: str, hostname: str, now: float) -> None:
+        """Fetch the agent's USB config from the cs spoke and push it to the agent when needed."""
         hub = self.hub
+        # Fetch the current USB config.
         try:
             resp = await hub.request_response(cs_spoke, "CS_GET_USB_CONFIG",
                                               {"hostname": hostname}, timeout=5.0)
@@ -668,6 +728,7 @@ class CSBridgePoller:
             logger.debug("CS bridge: usb config fetch for %s failed: %s", agent_id, exc)
             self._last_usb_push[agent_id] = now
             return
+        # Without a USB config there is nothing to push.
         data = _unwrap(resp)
         cfg = data.get("usb_config") if isinstance(data, dict) else None
         if not isinstance(cfg, dict):
@@ -677,11 +738,13 @@ class CSBridgePoller:
             self._last_usb_push[agent_id] = now
             return
 
+        # A canonical signature, to detect changes.
         sig = json.dumps(cfg, sort_keys=True, separators=(",", ":"), default=str)
         # Push when the config changed OR it's been >= repush_interval since we
         # last actually sent it — the periodic re-push re-establishes CS mode on
         # an agent that restarted and lost it (see repush_interval note).
         stale = (now - self._last_actual_push.get(agent_id, 0.0)) >= self.repush_interval
+        # Unchanged and recently pushed: nothing to do.
         if self._last_usb_cfg.get(agent_id) == sig and not stale:
             self._last_usb_push[agent_id] = now  # unchanged + recently pushed
             return
@@ -696,10 +759,12 @@ class CSBridgePoller:
         cs_cfg["usb_config"] = cfg
         # Keep the guard set in sync if the cs spoke publishes one (optional).
         protected = cfg.get("protected_vmids") if isinstance(cfg, dict) else None
+        # Pass along the protected VMIDs list if the cs spoke provides one.
         if protected:
             cs_cfg["protected_vmids"] = protected
         merged["client_simulation"] = cs_cfg
 
+        # Push the merged config to the agent (queued if the spoke is draining).
         try:
             # Drain-aware: when the host spoke is mid self-update (draining —
             # about to os._exit + relaunch), a raw request_response would hang
@@ -715,9 +780,11 @@ class CSBridgePoller:
             outcome = await hub._drain_aware_config_push(
                 host_spoke, "SET_AGENT_CONFIG",
                 {"agent_id": agent_id, "config": merged}, timeout=5.0)
+            # Record what was sent, unless it was only queued.
             if not outcome.get("queued"):
                 self._last_usb_cfg[agent_id] = sig
                 self._last_actual_push[agent_id] = now
+            # Log the push with a short summary.
             _nvid = len(cfg.get("vidpids") or []) if isinstance(cfg, dict) else 0
             _qnote = " (queued — spoke draining/unreachable, applies on reconnect)" \
                 if outcome.get("queued") else ""
@@ -727,5 +794,6 @@ class CSBridgePoller:
         except Exception as exc:  # noqa: BLE001
             logger.warning("[cs-bridge] %s: usb_config PUSH FAILED to spoke %s: %s",
                            agent_id, host_spoke, exc)
+        # Always record that we checked.
         finally:
             self._last_usb_push[agent_id] = now

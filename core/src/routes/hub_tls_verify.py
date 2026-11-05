@@ -15,32 +15,44 @@ Under ``/setup/`` so the access-control middleware admin-gates it.
 """
 from __future__ import annotations
 
+# Shared Hub helpers: HTTP error type, request and logger.
 from api import HTTPException, Request, logger
 
+# The allowed policy values (see the module docstring).
 MODES = ("install", "auto", "on", "off")
 
 
 def register(app, hub, ctx):
+    """Register the hub-TLS-verification routes on ``app``."""
     def _mode() -> str:
+        """Return the saved mode (``install`` if unset or unknown)."""
         m = str(hub.state.get_global_config().get("hub_tls_verify") or "install").lower()
         return m if m in MODES else "install"
 
+    # Read the current policy.
     @app.get("/setup/hub-tls-verify")
     async def get_hub_tls_verify():
+        """Return the current mode and the list of allowed modes."""
         return {"mode": _mode(), "modes": list(MODES)}
 
+    # Change the policy.
     @app.post("/setup/hub-tls-verify")
     async def set_hub_tls_verify(request: Request):
+        """Save a new mode and push it to every spoke/agent."""
+        # Read the JSON body (defaulting to {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # The mode must be one of the allowed values.
         mode = str((body or {}).get("mode") or "").strip().lower()
         if mode not in MODES:
             raise HTTPException(status_code=400, detail=f"mode must be one of {', '.join(MODES)}")
+        # Save it.
         gc = hub.state.get_global_config()
         gc["hub_tls_verify"] = mode
         hub.state._mark_dirty()
+        # Push it to every spoke; a failure is reported, not raised.
         try:
             fanout = await hub.push_tls_verify_to_all_spokes(mode)
         except Exception as e:  # noqa: BLE001

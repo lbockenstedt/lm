@@ -33,14 +33,18 @@ limit.
 """
 from __future__ import annotations
 
+# Async locking/concurrency, logging, env vars and file extensions, and timestamps.
 import asyncio
 import logging
 import os
 import time
+# Type hints.
 from typing import Dict, List, Optional, Tuple
 
+# Logger for this module.
 logger = logging.getLogger(__name__)
 
+# GitHub's REST API (for the file list) and its raw-file CDN (for file contents).
 API = "https://api.github.com"
 RAW = "https://raw.githubusercontent.com"
 
@@ -51,6 +55,7 @@ CACHE_TTL_SECONDS = 3600
 # Ceiling on a single file we will hold in memory. The sim scripts are a few KB;
 # anything far larger is a vendored blob that would only add noise.
 MAX_FILE_BYTES = 512_000
+# At most this many files per repo, and the HTTP timeout in seconds.
 MAX_FILES = 400
 _HTTP_TIMEOUT = 20.0
 
@@ -67,6 +72,8 @@ class SourceSpec:
     def __init__(self, owner: str, repo: str, branch: str,
                  path_prefixes: Tuple[str, ...], exts: Tuple[str, ...],
                  label: Optional[str] = None):
+        """Describe one repo slice: where it lives and which files to take."""
+        # Store the settings (extensions lower-cased; label defaults to the repo name).
         self.owner = owner
         self.repo = repo
         self.branch = branch
@@ -75,12 +82,14 @@ class SourceSpec:
         self.label = label or repo
 
     def wants(self, path: str) -> bool:
+        """True if ``path`` is under one of our folders and has one of our extensions."""
         if not path.startswith(self.path_prefixes):
             return False
         return os.path.splitext(path)[1].lower() in self.exts
 
     @property
     def key(self) -> str:
+        """The "owner/repo@branch" id for this source."""
         return f"{self.owner}/{self.repo}@{self.branch}"
 
 
@@ -96,11 +105,13 @@ def default_specs() -> List[SourceSpec]:
     Overridable via ``LM_HELP_SOURCE_REPO`` (``owner/name``) and
     ``LM_HELP_SOURCE_BRANCH`` for a fork or a release branch.
     """
+    # Read the repo and branch (from env, with defaults); a bad repo value falls back.
     slug = (os.environ.get("LM_HELP_SOURCE_REPO") or "lbockenstedt/cs").strip()
     branch = (os.environ.get("LM_HELP_SOURCE_BRANCH") or "main").strip()
     owner, _, name = slug.partition("/")
     if not owner or not name:
         owner, name = "lbockenstedt", "cs"
+    # The client script folders, shell and PowerShell only.
     return [SourceSpec(
         owner=owner, repo=name, branch=branch,
         path_prefixes=("clients/linux/", "clients/windows/", "clients/lib/"),
@@ -112,6 +123,7 @@ def default_specs() -> List[SourceSpec]:
 def _token() -> str:
     """Optional PAT. Only affects the tree-API rate limit; the target repo is
     public, so an absent token is a supported configuration, not a failure."""
+    # The first token env var that is set ("" if none).
     for var in ("LM_HELP_SOURCE_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
         v = (os.environ.get(var) or "").strip()
         if v:
@@ -120,6 +132,7 @@ def _token() -> str:
 
 
 def _headers() -> Dict[str, str]:
+    """Return the GitHub API request headers (with the token, if there is one)."""
     h = {"Accept": "application/vnd.github+json",
          "User-Agent": "lm-help-assistant"}
     tok = _token()
@@ -140,6 +153,8 @@ class GitHubSourceCache:
 
     def __init__(self, specs: Optional[List[SourceSpec]] = None,
                  ttl: int = CACHE_TTL_SECONDS):
+        """Set up an empty cache for ``specs`` (default: the shipped scope)."""
+        # Settings and an empty corpus.
         self._specs = specs if specs is not None else default_specs()
         self._ttl = ttl
         self._files: Dict[str, str] = {}
@@ -154,15 +169,18 @@ class GitHubSourceCache:
         self._lock_obj: Optional[asyncio.Lock] = None
 
     def _get_lock(self) -> asyncio.Lock:
+        """Return the refresh lock, creating it on first use."""
         if self._lock_obj is None:
             self._lock_obj = asyncio.Lock()
         return self._lock_obj
 
     @property
     def fresh(self) -> bool:
+        """True if we have files and they are younger than the TTL."""
         return bool(self._files) and (time.time() - self._fetched_at) < self._ttl
 
     def stats(self) -> Dict[str, object]:
+        """Return file count, age, repos and last error (for status displays)."""
         return {"files": len(self._files),
                 "age_seconds": int(time.time() - self._fetched_at) if self._fetched_at else None,
                 "repos": [s.key for s in self._specs],
@@ -170,11 +188,14 @@ class GitHubSourceCache:
 
     async def files(self) -> Dict[str, str]:
         """The corpus, refreshing it if stale. Never raises."""
+        # Fresh corpus: use it as is.
         if self.fresh:
             return self._files
+        # Otherwise refresh under the lock.
         async with self._get_lock():
             if self.fresh:            # another task refreshed while we waited
                 return self._files
+            # Fetch; keep the old files if nothing came back.
             try:
                 fetched = await self._fetch_all()
                 if fetched:
@@ -194,6 +215,8 @@ class GitHubSourceCache:
         return self._files
 
     async def _fetch_all(self) -> Dict[str, str]:
+        """Fetch every source's files into one dict (a failing repo is skipped)."""
+        # HTTP client (imported only when needed).
         import httpx
         out: Dict[str, str] = {}
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT,
@@ -207,6 +230,8 @@ class GitHubSourceCache:
         return out
 
     async def _fetch_spec(self, client, spec: SourceSpec) -> Dict[str, str]:
+        """Fetch one source's matching files: list them via the API, then read each from raw."""
+        # List the whole repo in one API call.
         resp = await client.get(
             f"{API}/repos/{spec.owner}/{spec.repo}/git/trees/{spec.branch}",
             params={"recursive": "1"}, headers=_headers())
@@ -217,11 +242,13 @@ class GitHubSourceCache:
             # quietly returning a partial corpus that looks complete.
             logger.warning("help source: %s tree truncated — corpus may be partial",
                            spec.key)
+        # Pick the files we want (not too big, capped in number).
         wanted = [n for n in (tree.get("tree") or [])
                   if n.get("type") == "blob" and spec.wants(n.get("path") or "")
                   and int(n.get("size") or 0) <= MAX_FILE_BYTES][:MAX_FILES]
 
         async def _one(node):
+            """Download one file; return (label/path, text)."""
             path = node["path"]
             r = await client.get(f"{RAW}/{spec.owner}/{spec.repo}/{spec.branch}/{path}")
             r.raise_for_status()
@@ -233,6 +260,7 @@ class GitHubSourceCache:
         sem = asyncio.Semaphore(8)
 
         async def _guarded(node):
+            """Download one file under the concurrency limit (failures are skipped)."""
             async with sem:
                 try:
                     k, v = await _one(node)
@@ -240,5 +268,6 @@ class GitHubSourceCache:
                 except Exception as e:  # noqa: BLE001
                     logger.debug("help source: skip %s: %s", node.get("path"), e)
 
+        # Download them all.
         await asyncio.gather(*(_guarded(n) for n in wanted))
         return out

@@ -37,6 +37,7 @@ auto-update pulls code but not install-script/systemd changes); until then
 the watchdog Popen fails silently and we degrade to the pre-rollback
 behavior (restart, no rollback) — never fatal.
 """
+# Standard-library imports: async, context managers, file locks, JSON, files, subprocesses, time.
 import asyncio
 import contextlib
 import fcntl
@@ -64,10 +65,12 @@ class SelfUpdateMixin:
     # ------------------------------------------------------------------
 
     def _ensure_git_pull_strategy(self, cwd: str) -> None:
+        """Set the repo to rebase on pull and auto-stash local changes."""
         subprocess.run(["git", "config", "pull.rebase", "true"], cwd=cwd, check=False, timeout=15)
         subprocess.run(["git", "config", "rebase.autoStash", "true"], cwd=cwd, check=False, timeout=15)
 
     def _run_git(self, args, cwd: str) -> subprocess.CompletedProcess:
+        """Run a git command with a timeout, retrying once after clearing a leftover lock."""
         # All git sub-commands (rev-parse/rev-list/pull/rebase/reset) run via
         # this helper in the update path, awaited through to_thread — a
         # stalled remote could hang any of them forever without a deadline.
@@ -75,6 +78,7 @@ class SelfUpdateMixin:
         timeout = 120 if args and args[0] in ("pull", "fetch", "rebase") else 60
 
         def _once() -> subprocess.CompletedProcess:
+            """Run the git command once; a timeout becomes exit code 124."""
             try:
                 return subprocess.run(["git"] + args, cwd=cwd, text=True,
                                       capture_output=True, check=False, timeout=timeout)
@@ -106,6 +110,7 @@ class SelfUpdateMixin:
         genuine conflict, e.g. "cannot lock ref 'HEAD': Unable to create
         '.git/HEAD.lock': File exists" or "Another git process seems to be
         running in this repository"."""
+        # Join all output, lower-cased, and look for lock-error wording.
         blob = " ".join(b or "" for b in blobs).lower()
         if "another git process seems to be running" in blob:
             return True
@@ -124,6 +129,7 @@ class SelfUpdateMixin:
         This makes automated cleanup safe even if some other git briefly runs
         concurrently (its fresh lock is left untouched). Best-effort; never
         raises. Returns the number of lock files removed."""
+        # Find the .git directory; give up if it isn't a plain directory.
         try:
             git_dir = os.path.join(cwd, ".git")
             if not os.path.isdir(git_dir):
@@ -144,6 +150,7 @@ class SelfUpdateMixin:
                         paths.append(os.path.join(root, f))
         except Exception:  # noqa: BLE001
             pass
+        # Check each lock's age and remove the old ones.
         for p in paths:
             try:
                 st = os.stat(p)
@@ -191,6 +198,7 @@ class SelfUpdateMixin:
         dependency. The cost is a ``RestartSec`` delay (acceptable for an
         update); the benefit is the component always comes back.
         """
+        # Just log the restart; the caller does the exit.
         svc = self.get_service_name()
         logger.info(
             "Reloading %s to apply new code (reason: %s); exiting so systemd "
@@ -214,9 +222,11 @@ class SelfUpdateMixin:
         '/var/lib/lm'" (the installer didn't create/chown the dir). The chosen
         path is passed to the external watchdog via ``--state-dir`` so both
         agree. Cached so the choice is stable across a run."""
+        # Reuse the earlier choice if there is one.
         cached = getattr(self, "_state_dir_cached", None)
         if cached:
             return cached
+        # Try /var/lib/lm/<id> first.
         sid = getattr(self, "spoke_id", None) or getattr(self, "agent_id", None) or "component"
         primary = os.path.join("/var/lib/lm", sid)
         chosen = primary
@@ -228,6 +238,7 @@ class SelfUpdateMixin:
             with open(probe, "w"):
                 pass
             os.remove(probe)
+        # Not writable: fall back to a dir inside the repo.
         except OSError:
             fallback = os.path.join(self._repo_root(), ".lm-state", sid)
             try:
@@ -240,12 +251,14 @@ class SelfUpdateMixin:
             except OSError as e:
                 logger.warning("No writable state dir (%s); rollback disabled: %s",
                                primary, e)
+        # Remember the choice.
         self._state_dir_cached = chosen
         return chosen
 
     def _clear_healthy_marker(self) -> None:
         """Drop a stale ``healthy`` marker on boot so a fresh start must re-prove
         health (the watchdog treats the marker as the positive health signal)."""
+        # Remove the marker if present.
         try:
             m = os.path.join(self._spoke_state_dir(), "healthy")
             if os.path.exists(m):
@@ -256,6 +269,7 @@ class SelfUpdateMixin:
     def _touch_healthy_marker(self) -> None:
         """Mark the component healthy after the hub mutual-auth succeeds — the
         watchdog's positive health signal (presence => new code booted + authed)."""
+        # Create an empty marker file.
         try:
             d = self._spoke_state_dir()
             os.makedirs(d, exist_ok=True)
@@ -266,6 +280,7 @@ class SelfUpdateMixin:
     def _snapshot_for_update(self, head_before: str, repo_root: str):
         """Pre-swap code snapshot (belt-and-suspenders — ``git reset --hard`` is
         the primary rollback for a git repo). Returns the backup dir or None."""
+        # Copy the src tree into a timestamped backup.
         try:
             from update_recovery import snapshot_code
             ts = time.strftime("%Y%m%d-%H%M%S")
@@ -279,6 +294,7 @@ class SelfUpdateMixin:
         """True if ``commit`` was rolled back before (skip re-pulling it)."""
         if not commit:
             return False
+        # Ask the recovery module whether it is on the bad list.
         try:
             from update_recovery import is_bad_commit
             return bool(is_bad_commit(commit, state_dir=self._spoke_state_dir()))
@@ -286,6 +302,8 @@ class SelfUpdateMixin:
             return False
 
     def _clear_pending_update(self) -> None:
+        """Remove the pending-update manifest (best-effort)."""
+        # Load the stamp; too old means pull normally.
         try:
             from update_recovery import clear_pending
             clear_pending(state_dir=self._spoke_state_dir())
@@ -330,6 +348,7 @@ class SelfUpdateMixin:
                 stamp = json.load(fh)
             if time.time() - float(stamp.get("ts") or 0) > self.CORE_CONVERGE_TTL_S:
                 return False
+            # Converged only if HEAD still matches the stamp.
             head = self._run_git(["rev-parse", "HEAD"], cwd=core_root).stdout.strip()
             return bool(head) and head == stamp.get("head")
         except Exception:  # noqa: BLE001 — any doubt → pull normally
@@ -340,6 +359,7 @@ class SelfUpdateMixin:
         cannot write the stamp, siblings simply pull as they do today."""
         if not head:
             return
+        # Write the stamp atomically via a temp file.
         try:
             path = self._core_converge_stamp_path(core_root)
             tmp = path + ".tmp"
@@ -362,11 +382,13 @@ class SelfUpdateMixin:
         another user (root/the hub) and this (non-root ``svc_lm``) process gets
         ``[Errno 13] Permission denied`` opening it. makedirs succeeding does NOT
         prove the file is openable, so the fallback is driven by the open()."""
+        # Lock file locations to try, in order.
         candidates = [
             "/var/lib/lm/.lm-core-update.lock",
             os.path.join(self._repo_root(), ".lm-state", "core-update.lock"),
             os.path.join(self._repo_root(), ".lm-core-update.lock"),
         ]
+        # Open the first usable one.
         fd = None
         lock_path = candidates[0]
         for i, cand in enumerate(candidates):
@@ -388,6 +410,7 @@ class SelfUpdateMixin:
                            "without host-wide serialization", candidates)
             yield True
             return
+        # Poll for the lock until the timeout.
         acquired = False
         deadline_ts = time.monotonic() + timeout
         try:
@@ -405,13 +428,16 @@ class SelfUpdateMixin:
                         return
                     time.sleep(min(1.0, remaining))
             yield True
+        # Always release and close.
         finally:
             if acquired:
+                # Try to take the real lock; any failure means skip core.
                 try:
                     fcntl.flock(fd, fcntl.LOCK_UN)
                 except OSError:
                     pass
             if fd is not None:
+                # Hand back the result, then release, ignoring release errors.
                 try:
                     os.close(fd)
                 except OSError:
@@ -473,6 +499,7 @@ class SelfUpdateMixin:
     _SELFUPDATE_RESTART_COOLDOWN_S = 180
 
     def _restart_cooldown_s(self) -> int:
+        """Restart cooldown in seconds, from the env var or the default."""
         try:
             return max(0, int(os.environ.get("LM_SELFUPDATE_RESTART_COOLDOWN_S",
                                              self._SELFUPDATE_RESTART_COOLDOWN_S)))
@@ -480,6 +507,7 @@ class SelfUpdateMixin:
             return self._SELFUPDATE_RESTART_COOLDOWN_S
 
     def _restart_marker_path(self) -> str:
+        """Path of the file stamping the last update restart."""
         return os.path.join(self._spoke_state_dir(), "last_selfupdate_restart")
 
     def _selfupdate_restart_allowed(self) -> Tuple[bool, int]:
@@ -491,6 +519,7 @@ class SelfUpdateMixin:
         cooldown = self._restart_cooldown_s()
         if cooldown <= 0:
             return True, 0
+        # Allowed if there is no marker or the cooldown has passed.
         try:
             last = os.path.getmtime(self._restart_marker_path())
         except OSError:
@@ -504,6 +533,7 @@ class SelfUpdateMixin:
         """Stamp the restart marker (mtime = now) right before ``os._exit(3)`` so
         the NEXT boot's update pass sees a recent restart and coalesces. Never
         raises."""
+        # Write the current time to the marker.
         try:
             p = self._restart_marker_path()
             os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -535,6 +565,7 @@ class SelfUpdateMixin:
         state_dir = self._spoke_state_dir()
         service_unit = self.get_service_name()
         recovery_py = None
+        # Write the pending-update manifest, including core details when given.
         try:
             from update_recovery import write_pending
             import update_recovery as _ur
@@ -551,6 +582,7 @@ class SelfUpdateMixin:
                           state_dir=state_dir, extra=extra)
         except Exception as e:
             logger.warning("write_pending failed (rollback disabled): %s", e)
+        # Start the external watchdog in its own session.
         try:
             cmd = ["sudo", "-n", "/usr/local/bin/lm-component-update-restart",
                    "--unit", service_unit, "--state-dir", state_dir,
@@ -566,6 +598,7 @@ class SelfUpdateMixin:
             )
         except Exception as e:  # pragma: no cover - sudo missing / not permitted
             logger.debug("could not schedule update watchdog: %s", e)
+        # Signal the restart.
         return self._prepare_service_restart(reason=reason)
 
     # ------------------------------------------------------------------
@@ -600,10 +633,12 @@ class SelfUpdateMixin:
         Fails SAFE: any doubt — unknown commit, git failure, empty diff we
         can't explain — returns True. Running stale code indefinitely is far
         worse than one unnecessary restart."""
+        # Missing info means restart; same commit means nothing changed.
         if not (core_root and from_commit and to_commit):
             return True
         if from_commit == to_commit:
             return False
+        # List files changed between the two commits.
         try:
             res = self._run_git(["diff", "--name-only", from_commit, to_commit],
                                 cwd=core_root)
@@ -614,6 +649,7 @@ class SelfUpdateMixin:
             return True
         if not paths:
             return True
+        # No restart needed if every changed file is static.
         inert = self._CORE_NO_RESTART_PREFIXES
         skipped = [p for p in paths if p.startswith(inert)]
         if len(skipped) == len(paths):
@@ -693,6 +729,7 @@ class SelfUpdateMixin:
                                         "core pull.")
                             core_root = None
                         else:
+                            # Pull core (only while holding the lock and not already converged).
                             try:
                                 # Recorded only here, in the branch that actually
                                 # runs git against core, and only while the
@@ -700,6 +737,8 @@ class SelfUpdateMixin:
                                 # makes an age-0 force-clear of core's lock safe
                                 # later: no sibling component can be mid-pull.
                                 core_heal_root = core_root
+                                # Clear old locks, point at the URL, set pull options and abort any
+                                # half-done rebase.
                                 self._clear_stale_git_locks(core_root)
                                 self._run_git(["remote", "set-url", "origin",
                                                core_repo_url], cwd=core_root)
@@ -708,11 +747,14 @@ class SelfUpdateMixin:
                                 self._run_git(["config", "rebase.autoStash", "true"],
                                               cwd=core_root)
                                 self._run_git(["rebase", "--abort"], cwd=core_root)
+                                # Note core's HEAD, then fetch.
                                 core_from_commit = self._run_git(
                                     ["rev-parse", "HEAD"], cwd=core_root).stdout.strip()
                                 fetch_core = self._run_git(["fetch", "origin"],
                                                            cwd=core_root)
                                 if fetch_core.returncode == 0:
+                                    # Pull the requested (or current) branch; hard-reset if the
+                                    # rebase fails.
                                     cbranch = core_branch or self._run_git(
                                         ["rev-parse", "--abbrev-ref", "HEAD"],
                                         cwd=core_root).stdout.strip() or "main"
@@ -727,6 +769,7 @@ class SelfUpdateMixin:
                                         self._run_git(["rebase", "--abort"], cwd=core_root)
                                         self._run_git(["reset", "--hard",
                                                        f"origin/{cbranch}"], cwd=core_root)
+                                    # Note the new HEAD; undo it if it is a known-bad commit.
                                     core_to_commit = self._run_git(
                                         ["rev-parse", "HEAD"], cwd=core_root).stdout.strip()
                                     if self._is_known_bad_commit(core_to_commit):
@@ -739,6 +782,7 @@ class SelfUpdateMixin:
                                                        core_from_commit], cwd=core_root)
                                         core_to_commit = core_from_commit
                                     else:
+                                        # Note whether core moved and whether that needs a restart.
                                         core_advanced = (core_to_commit != core_from_commit)
                                         core_changed = self._core_change_needs_restart(
                                             core_root, core_from_commit, core_to_commit)
@@ -754,6 +798,7 @@ class SelfUpdateMixin:
                                                "continuing with own-repo update only.", e)
                                 core_root = None
             else:
+                # No core URL: skip core.
                 core_root = None
 
             # 1. Update remote origin
@@ -802,6 +847,7 @@ class SelfUpdateMixin:
                                    capture_output=True, text=True)
                 else:
                     raise
+            # Pull with rebase; on failure abort and hard-reset to the remote branch.
             pull = self._run_git(["pull", "--rebase", "--autostash", "origin"], cwd=cwd)
             if pull.returncode != 0:
                 logger.warning(f"git pull --rebase failed (rc={pull.returncode}); resetting hard to origin")
@@ -816,6 +862,7 @@ class SelfUpdateMixin:
                         rst.returncode, ["git", "reset", "--hard", f"origin/{branch}"],
                         output=rst.stdout, stderr=rst.stderr)
 
+            # HEAD after the pull.
             head_after = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
 
             own_changed = (head_after != head_before)
@@ -874,10 +921,13 @@ class SelfUpdateMixin:
                 # _prepare_service_restart's docstring.) When core advanced we
                 # also record it so the watchdog resets /opt/lm too.
                 core_repo = None
+                # Include core in the manifest when it changed.
                 if core_changed and core_root:
                     core_repo = {"root": core_root,
                                  "from_commit": core_from_commit,
                                  "to_commit": core_to_commit}
+                # Arm the watchdog, stamp the restart, flush logs and exit for systemd to restart
+                # us.
                 if self._prepare_restart_with_watchdog(
                         head_before, head_after, backup_dir, cwd,
                         reason=reason, core_repo=core_repo):
@@ -887,6 +937,7 @@ class SelfUpdateMixin:
                 return {"status": "SUCCESS",
                         "message": f"Updated from {repo_url}; restart skipped"}
             else:
+                # Nothing to restart.
                 if core_advanced:
                     # The pull DID happen — saying "already up to date" here
                     # would send an operator hunting for an update that landed.
@@ -898,10 +949,12 @@ class SelfUpdateMixin:
                                         f"no restart needed")}
                 logger.debug("update: already up to date; no restart needed.")
                 return {"status": "SUCCESS", "message": "Already up to date; no restart needed"}
+        # A git command failed: decode its output.
         except subprocess.CalledProcessError as e:
             stderr = e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, bytes) else (e.stderr or '')
             stdout = e.stdout.decode('utf-8', errors='replace') if isinstance(e.stdout, bytes) else (e.stdout or '')
             detail = (stderr or stdout or str(e)).strip()
+            # Log DNS failures distinctly from other git errors.
             _dl = detail.lower()
             if any(k in _dl for k in ("could not resolve host", "temporary failure in name resolution",
                                       "name or service not known", "could not resolve hostname")):
@@ -926,6 +979,7 @@ class SelfUpdateMixin:
                                       "cannot lock ref",
                                       "another git process seems to be running",
                                       "index.lock")):
+                # Clear locks in this repo and in core if core was touched.
                 roots = [cwd]
                 if core_heal_root and core_heal_root != cwd:
                     roots.append(core_heal_root)
@@ -938,6 +992,7 @@ class SelfUpdateMixin:
                     except Exception:  # noqa: BLE001
                         pass
             return {"status": "ERROR", "message": f"git operation failed: {detail}"}
+        # Any other failure.
         except Exception as e:
             logger.error(f"update failed: {e}")
             return {"status": "ERROR", "message": str(e)}

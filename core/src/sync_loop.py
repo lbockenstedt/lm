@@ -15,11 +15,13 @@ is ``main → sync_loop`` only). Audience: Hub developers.
 
 from __future__ import annotations
 
+# asyncio for sleeps; datetime for daily scheduling; logging; type hints.
 import asyncio
 import datetime as _dt
 import logging
 from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
+# Log to the hub's logger.
 logger = logging.getLogger("Hub")
 
 
@@ -48,26 +50,35 @@ async def run_sync_loop(*, stagger: float,
       ``[sync-error] <error_label>: e``), then sleep ``error_delay`` — a float,
       or a callable evaluated defensively (falls back to 60 s if it raises).
     """
+    # Startup stagger, once.
     await asyncio.sleep(stagger)
+    # Loop forever; nothing escapes.
     while True:
         try:
+            # Run the body only when the guard allows (or there is none).
             if guard is None or guard():
                 await body()
+            # Sleep until the next cycle; delay() is read after the body.
             await asyncio.sleep(delay())
+        # Any error: report it, then wait error_delay before retrying.
         except Exception as e:  # noqa: BLE001 — the loop must survive anything
+            # Use the caller's error handler, falling back to a warning if it fails.
             if on_error is not None:
                 try:
                     on_error(e)
                 except Exception:  # noqa: BLE001 — reporting must not kill the loop
                     logger.warning("[sync-error] %s: %s", error_label, e)
+            # No handler: log a warning.
             else:
                 logger.warning("[sync-error] %s: %s", error_label, e)
+            # error_delay may be a number or a callable; a failing callable means 60 s.
             d: Any = error_delay
             if callable(d):
                 try:
                     d = float(d())
                 except Exception:  # noqa: BLE001 — bad config must not kill the loop
                     d = 60.0
+            # Back off, then loop again.
             await asyncio.sleep(d)
 
 
@@ -83,9 +94,12 @@ def next_schedule_delay(cfg: Dict[str, Any], *,
     Previously duplicated verbatim across the vm/endpoint/fw/nw sync mixins
     (identical apart from the default daily time + debug-log prefix).
     """
+    # Schedule mode, normalised.
     mode = str(cfg.get("mode", "interval")).strip().lower()
+    # Daily mode: sleep until the next HH:MM.
     if mode == "daily":
         hhmm = str(cfg.get("daily_time", default_daily_time)).strip()
+        # Parse HH:MM and compute the next occurrence (tomorrow if already past).
         try:
             hh, mm = (int(p) for p in hhmm.split(":")[:2])
             now = _dt.datetime.now()
@@ -93,12 +107,15 @@ def next_schedule_delay(cfg: Dict[str, Any], *,
             if target <= now:
                 target += _dt.timedelta(days=1)
             return max(60.0, (target - now).total_seconds())
+        # Bad time: log and fall through to interval mode.
         except Exception:  # noqa: BLE001 — bad HH:MM falls back to interval mode
             logger.debug("%s: bad daily_time %r — falling back to interval",
                          log_name, hhmm)
+    # Interval mode: configured seconds, or the default if invalid.
     interval = default_interval
     try:
         interval = int(cfg.get("interval_seconds", default_interval))
     except (TypeError, ValueError):
         interval = default_interval
+    # At least 60 seconds.
     return max(60.0, float(interval))

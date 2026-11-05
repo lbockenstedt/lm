@@ -15,14 +15,21 @@ DEBUG/INFO/WARNING/ERROR) overrides ``default_level`` at boot; the WebUI
 every named logger between DEBUG and INFO.
 """
 
+# logging (and its handlers submodule) is what this module configures.
 import logging
 import logging.handlers
+# os reads env vars and lists/sizes log files.
 import os
+# re parses uvicorn access-log lines.
 import re
+# sys gives access to stdout/stderr for line buffering.
 import sys
+# threading runs the log-size watchdog in the background.
 import threading
+# time paces the watchdog's sleep between passes.
 import time
 
+# Standard line format and timestamp format shared by every LM process.
 DEFAULT_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 DEFAULT_DATEFMT = '%Y-%m-%d %H:%M:%S'
 
@@ -45,8 +52,11 @@ DEFAULT_DATEFMT = '%Y-%m-%d %H:%M:%S'
 #
 # Tunable via env: LM_LOG_MAX_BYTES=0 disables the cap entirely (unbounded).
 # Default: 50 MB, 0 backups.
+# Default size cap per log file: 50 MB.
 _DEFAULT_LOG_MAX_BYTES = 50 * 1024 * 1024
+# Default number of rotated backups: none (single circular file).
 _DEFAULT_LOG_BACKUPS = 0
+# Seconds between watchdog passes.
 _DEFAULT_LOG_CAP_INTERVAL = 30.0
 
 # Successful (2xx/3xx) uvicorn.access lines are routine request chatter, not
@@ -68,7 +78,9 @@ _DEFAULT_LOG_CAP_INTERVAL = 30.0
 # NOTE: the hub's public liveness endpoints are the bare ``/status`` (see
 # routes/setup.py) and ``/api/hub/health`` — there never was an ``/api/health``
 # or ``/api/status`` route, so an earlier default here never matched anything.
+# Special value meaning "quiet every successful request".
 _QUIET_ACCESS_ALL = "*"
+# Default is to quiet all successful requests.
 _DEFAULT_QUIET_ACCESS_PATHS = _QUIET_ACCESS_ALL
 
 # Matches uvicorn's access-log request line: `"<METHOD> <PATH> HTTP/x.y" <code>`.
@@ -91,25 +103,33 @@ class _QuietSuccessAccessFilter(logging.Filter):
     """
 
     def __init__(self, quiet_paths: tuple) -> None:
+        """Remember whether all paths are quieted, or only an explicit set."""
+        # Initialise the base Filter.
         super().__init__()
+        # "*" anywhere in the list means quiet everything; otherwise keep the exact paths.
         self._all = _QUIET_ACCESS_ALL in quiet_paths
         self._quiet_paths = set(quiet_paths)
 
     def filter(self, record: logging.LogRecord) -> bool:
         # In debug mode show every access line.
+        """Return False (drop) for successful access lines that should be quieted."""
         if logging.getLogger("uvicorn.access").getEffectiveLevel() <= logging.DEBUG:
             return True
+        # Render the log message; a formatting error should not drop the record.
         try:
             msg = record.getMessage()
         except Exception:  # noqa: BLE001 — never block a record on a format error
             return True
+        # Not an access line we recognise: keep it.
         m = _ACCESS_LINE_RE.search(msg)
         if not m:
             return True
+        # In path-scoped mode, keep lines for paths not on the list (query string ignored).
         if not self._all:
             path = m.group("path").split("?", 1)[0]
             if path not in self._quiet_paths:
                 return True
+        # Keep only failures (status 400 and above).
         return int(m.group("status")) >= 400
 
 
@@ -117,9 +137,11 @@ def _quiet_access_paths() -> tuple:
     """Resolve the quiet-access-path list. Unset env → default (``*``: quiet all
     successful requests); empty env → filtering disabled; otherwise the
     comma-separated exact-path list."""
+    # Read the env var; unset means the default.
     raw = os.getenv("LM_QUIET_ACCESS_PATHS")
     if raw is None:
         raw = _DEFAULT_QUIET_ACCESS_PATHS
+    # Split on commas and drop blanks; an empty result disables filtering.
     paths = tuple(p for p in (s.strip() for s in raw.split(",")) if p)
     return paths
 
@@ -143,15 +165,18 @@ class _QuietUvicornLifecycleFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         # Never quiet warnings/errors — only the INFO lifecycle chatter.
+        """Return False (drop) for routine per-connection uvicorn lifecycle lines."""
         if record.levelno >= logging.WARNING:
             return True
         # In debug mode show every lifecycle line.
         if logging.getLogger(record.name).getEffectiveLevel() <= logging.DEBUG:
             return True
+        # Render the message; a formatting error should not drop the record.
         try:
             msg = record.getMessage()
         except Exception:  # noqa: BLE001 — never block a record on a format error
             return True
+        # Drop the connection open/closed chatter.
         if msg in ("connection open", "connection closed"):
             return False
         # WebSocket accept line: ``<addr> - "WebSocket /path" [accepted]``.
@@ -163,10 +188,13 @@ class _QuietUvicornLifecycleFilter(logging.Filter):
 
 
 def _int_env(name: str, default: int) -> int:
+    """Read a non-negative integer env var, falling back to ``default`` when unset or invalid."""
+    # Parse the value; negative numbers fall back to the default.
     try:
         v = int(str(os.getenv(name) or "").strip())
         return v if v >= 0 else default
     except (TypeError, ValueError):
+        # Missing or non-numeric value: use the default.
         return default
 
 
@@ -182,10 +210,13 @@ def _build_file_handler(log_file: str) -> logging.Handler:
     (``LM_LOG_BACKUPS>=1``), for the rare standalone-file case where this
     handler actually owns the writer. ``delay=True`` so the file isn't opened
     until the first record — cheap when a component logs elsewhere."""
+    # Read the size cap and backup count from env.
     max_bytes = _int_env("LM_LOG_MAX_BYTES", _DEFAULT_LOG_MAX_BYTES)
     backups = _int_env("LM_LOG_BACKUPS", _DEFAULT_LOG_BACKUPS)
+    # No cap or no backups: a plain FileHandler (the watchdog enforces the cap).
     if max_bytes <= 0 or backups <= 0:
         return logging.FileHandler(log_file)
+    # Backups requested: let the handler rotate files itself.
     return logging.handlers.RotatingFileHandler(
         log_file, maxBytes=max_bytes, backupCount=backups, delay=True)
 
@@ -193,15 +224,19 @@ def _build_file_handler(log_file: str) -> logging.Handler:
 def _resolve_level(default_level: int) -> int:
     """Return the effective level: ``LOG_LEVEL`` env (if a valid level name)
     wins, else ``default_level``."""
+    # Read LOG_LEVEL, normalised to upper case.
     raw = (os.getenv("LOG_LEVEL") or "").strip().upper()
     if raw:
+        # Use it only if it names a real logging level.
         resolved = getattr(logging, raw, None)
         if isinstance(resolved, int):
             return resolved
     return default_level
 
 
+# Whether the watchdog thread has been started in this process.
 _log_cap_watchdog_started = False
+# Lock so two threads cannot both start the watchdog.
 _log_cap_watchdog_lock = threading.Lock()
 
 
@@ -217,23 +252,29 @@ def cap_oversized_logs(log_dir: str, max_bytes: int) -> list:
     rationale. Best-effort per file: any error is swallowed so the watchdog can
     never crash the process it runs inside. Returns the list of filenames it
     truncated on this pass."""
+    # A non-positive cap means "unbounded": nothing to do.
     if max_bytes <= 0:
         return []
+    # List the directory; it may not exist yet.
     truncated = []
     try:
         names = os.listdir(log_dir)
     except Exception:  # noqa: BLE001 — dir may not exist yet; try next pass
+        # Missing or unreadable directory: try again on the next pass.
         return truncated
+    # Check every .log file.
     for name in names:
         if not name.endswith(".log"):
             continue
         path = os.path.join(log_dir, name)
+        # Truncate files over the cap in place and remember which ones.
         try:
             if os.path.isfile(path) and os.path.getsize(path) > max_bytes:
                 with open(path, "w"):
                     pass  # O_TRUNC in place — see truncate_log_files() docstring
                 truncated.append(name)
         except Exception:  # noqa: BLE001 — per-file best-effort, never raise
+            # Per-file failures are ignored so the watchdog never crashes.
             pass
     return truncated
 
@@ -249,22 +290,29 @@ def _start_log_cap_watchdog(log_dir: str, max_bytes: int,
     thread so it never blocks interpreter shutdown; idempotent so repeated
     ``configure_logging`` calls don't spawn duplicates; ``max_bytes<=0``
     (``LM_LOG_MAX_BYTES=0``) disables it (unbounded logs)."""
+    # Module-level flag shared across calls.
     global _log_cap_watchdog_started
+    # Cap disabled: no watchdog.
     if max_bytes <= 0:
         return
+    # Start at most once per process.
     with _log_cap_watchdog_lock:
         if _log_cap_watchdog_started:
             return
         _log_cap_watchdog_started = True
 
     def _loop():
+        """Watchdog body: cap oversized logs, then sleep, forever."""
         while True:
+            # Run one pass; any error is swallowed so the thread keeps running.
             try:
                 cap_oversized_logs(log_dir, max_bytes)
             except Exception:  # noqa: BLE001 — never let the watchdog die
                 pass
+            # Wait before the next pass.
             time.sleep(interval)
 
+    # Run as a daemon so it never blocks interpreter shutdown.
     threading.Thread(target=_loop, name="lm-log-cap-watchdog", daemon=True).start()
 
 
@@ -288,26 +336,34 @@ def configure_logging(default_level: int = logging.INFO, *,
         (``StandardOutput=append:``) flush promptly instead of block-buffering
         (which loses the last lines on a crash/restart).
     """
+    # Work out the effective level from env or the caller's default.
     level = _resolve_level(default_level)
+    # No explicit handlers means basicConfig uses a stderr stream handler.
     handlers = None
+    # With a log file: make sure its directory exists, then log to file and stderr.
     if log_file:
         try:
             os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
         except Exception:
+            # Directory creation failure surfaces when the handler opens the file.
             pass
         handlers = [_build_file_handler(log_file), logging.StreamHandler()]
+    # Replace any existing root configuration (force=True) with ours.
     logging.basicConfig(level=level, format=fmt, datefmt=datefmt,
                         handlers=handlers, force=True)
+    # Line-buffer stdout/stderr so redirected output is flushed promptly.
     if line_buffered:
         for stream in (sys.stdout, sys.stderr):
             try:
                 stream.reconfigure(line_buffering=True)
             except Exception:
+                # Some streams (e.g. replaced ones) do not support reconfigure; ignore.
                 pass
 
     # Successful (2xx/3xx) access lines are routine request chatter and are
     # debug-only by default; 4xx/5xx still log. Bypassed in debug mode.
     # Idempotent across re-inits.
+    # Install the access-line filter once, if filtering is enabled.
     quiet_paths = _quiet_access_paths()
     if quiet_paths:
         access_logger = logging.getLogger("uvicorn.access")
@@ -319,6 +375,7 @@ def configure_logging(default_level: int = logging.INFO, *,
     # uvicorn.access so a high-volume client-WS spoke (cs) doesn't flood the
     # journal + hub relay with a line per connect/disconnect. Bypassed in debug
     # mode; WARNING+ (rejections/failures) always log. Idempotent across re-inits.
+    # Install the lifecycle filter once on each uvicorn logger.
     for _lname in ("uvicorn.error", "uvicorn.access"):
         _lg = logging.getLogger(_lname)
         if not any(isinstance(f, _QuietUvicornLifecycleFilter) for f in _lg.filters):
@@ -329,9 +386,11 @@ def configure_logging(default_level: int = logging.INFO, *,
     # configure_logging() with no log_file — their file is written by systemd's
     # append: redirect, which the watchdog still caps in place). Idempotent, so
     # a re-init won't spawn a second thread. LM_LOG_MAX_BYTES=0 disables.
+    # Log directory for the watchdog: the log file's directory, else /var/log/lm.
     _cap_dir = os.path.dirname(log_file) if log_file else "/var/log/lm"
     _start_log_cap_watchdog(_cap_dir or "/var/log/lm",
                             _int_env("LM_LOG_MAX_BYTES", _DEFAULT_LOG_MAX_BYTES))
+    # Return the level that was applied.
     return level
 
 
@@ -345,8 +404,11 @@ def set_log_level(enabled: bool) -> int:
     on restart the env value takes effect again. ``enabled=False`` returns to
     INFO (the button is a binary DEBUG/INFO toggle).
     """
+    # DEBUG when enabled, INFO otherwise.
     level = logging.DEBUG if enabled else logging.INFO
+    # Apply it to the root logger.
     logging.getLogger().setLevel(level)
+    # And to every named logger so module-level overrides do not block the toggle.
     for name in list(logging.root.manager.loggerDict):
         logging.getLogger(name).setLevel(level)
     return level
@@ -372,13 +434,18 @@ def truncate_log_files(log_dir: str = "/var/log/lm"):
     that ``copytruncate`` exists to avoid, sidestepped here by truncating in
     place. Returns the list of filenames truncated (best-effort per file:
     a permission error on one file is logged + skipped, not raised)."""
+    # Names of files truncated.
     truncated = []
+    # List the directory.
     try:
         names = os.listdir(log_dir)
     except FileNotFoundError:
+        # No log directory: nothing to truncate.
         return truncated
     except Exception:  # noqa: BLE001 — never let log-clearing crash the caller
+        # Any other listing error is ignored so the caller never crashes.
         return truncated
+    # Truncate each regular .log file in place.
     for name in names:
         if not name.endswith(".log"):
             continue
@@ -390,6 +457,7 @@ def truncate_log_files(log_dir: str = "/var/log/lm"):
                 pass  # O_TRUNC in place — see docstring on why not unlink
             truncated.append(name)
         except Exception:  # noqa: BLE001 — per-file best-effort
+            # A file that cannot be truncated is logged (with traceback in debug mode) and skipped.
             logging.getLogger(__name__).warning(
                 "truncate_log_files: could not truncate %s: %s", path,
                 exc_info=True if logging.getLogger().isEnabledFor(logging.DEBUG) else None)

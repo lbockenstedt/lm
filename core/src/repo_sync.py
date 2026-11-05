@@ -37,14 +37,18 @@ Audience: Hub developers.
 
 from __future__ import annotations
 
+# asyncio runs git subprocesses without blocking the event loop.
 import asyncio
 
+# Shared periodic-loop runner.
 from sync_loop import run_sync_loop  # sibling leaf
+# datetime stamps the run; logging for the hub log; os walks repo dirs; type hints only.
 import datetime as _dt
 import logging
 import os
 from typing import Any, Dict, List
 
+# Log to the hub's logger.
 logger = logging.getLogger("Hub")
 
 
@@ -57,16 +61,19 @@ class RepoSyncMixin:
     WebUI change takes effect without a restart.
     """
 
+    # global_config key for this subsystem.
     _REPO_SYNC_CFG_KEY = "repo_sync"
 
     def _repo_sync_cfg(self) -> Dict[str, Any]:
         """Read the repo-sync config fresh (enabled / interval_seconds)."""
+        # The config block from global_config, or {}.
         return (self.state.system_state.get("global_config", {})
                 .get(self._REPO_SYNC_CFG_KEY, {})) or {}
 
     def _repo_sync_interval(self) -> float:
         """Seconds between scheduled syncs. Clamp >= 60 so a bad config can't
         hot-loop the hub. Default 900 (15 minutes)."""
+        # Read the interval; bad values fall back to 900, then clamp to at least 60.
         try:
             n = int(self._repo_sync_cfg().get("interval_seconds", 900))
         except (TypeError, ValueError):
@@ -75,6 +82,7 @@ class RepoSyncMixin:
 
     async def _git_head(self, repo_dir: str) -> str:
         """Best-effort `git rev-parse HEAD` for a repo dir; '' on any failure."""
+        # Run git rev-parse with a timeout; return the hash on success.
         try:
             proc = await asyncio.create_subprocess_exec(
                 "git", "-C", repo_dir, "rev-parse", "HEAD",
@@ -82,6 +90,7 @@ class RepoSyncMixin:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
             if proc.returncode == 0:
                 return out.decode("utf-8", "replace").strip()
+        # Any failure only logs at debug.
         except Exception as e:  # noqa: BLE001 — best-effort, never fatal
             logger.debug("repo_sync rev-parse %s failed: %s", repo_dir, e)
         return ""
@@ -93,6 +102,7 @@ class RepoSyncMixin:
         assuming ``origin``: provisioning_repos are cloned by several different
         install scripts and do not all use the same remote name.
         """
+        # Run git remote get-url with a timeout; return the URL on success.
         try:
             proc = await asyncio.create_subprocess_exec(
                 "git", "-C", repo_dir, "remote", "get-url", "origin",
@@ -100,6 +110,7 @@ class RepoSyncMixin:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
             if proc.returncode == 0:
                 return out.decode("utf-8", "replace").strip()
+        # Any failure only logs at debug.
         except Exception as e:  # noqa: BLE001 — best-effort, never fatal
             logger.debug("repo_sync remote get-url %s failed: %s", repo_dir, e)
         return ""
@@ -113,6 +124,7 @@ class RepoSyncMixin:
         whether anything actually moved. Never raises — a failure is recorded
         as ``status: "error"`` and the sync continues with the next repo.
         """
+        # Repo name for status, and its commit before the pull.
         name = os.path.basename(repo_dir.rstrip("/"))
         before = await self._git_head(repo_dir)
         # A checkout under provisioning_repos keeps itself updated forever, so
@@ -133,11 +145,13 @@ class RepoSyncMixin:
         except Exception as e:  # noqa: BLE001 — a policy read must not break sync
             logger.debug("repo_sync policy check failed for %s: %s", name, e)
         try:
+            # Fast-forward-only pull with a 2-minute timeout, then read the new head.
             proc = await asyncio.create_subprocess_exec(
                 "git", "-C", repo_dir, "pull", "--ff-only",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             out, err = await asyncio.wait_for(proc.communicate(), timeout=120.0)
             after = await self._git_head(repo_dir)
+            # Success flag and the last useful output line.
             ok = proc.returncode == 0
             tail = (out.decode("utf-8", "replace").strip()
                     or err.decode("utf-8", "replace").strip())
@@ -152,6 +166,7 @@ class RepoSyncMixin:
                 "commit_after": after,
                 "changed": bool(before) and bool(after) and before != after,
             }
+        # Any failure is recorded, not raised.
         except Exception as e:  # noqa: BLE001 — best-effort
             return {"name": name, "status": "error", "message": str(e)[:300],
                     "commit_before": before, "commit_after": "",
@@ -172,21 +187,26 @@ class RepoSyncMixin:
         ``provision`` no-ops and the tip never moves, so nothing restarts.
         Best-effort — never raises into the sync loop.
         """
+        # Load the extension module and its directory; missing means nothing to do.
         try:
             import site_ext
             d = site_ext.ext_dir(self)
         except Exception as e:  # noqa: BLE001 — optional feature, never fatal
             logger.debug("repo_sync site_ext: unavailable (%s)", e)
             return {}
+        # Commit before provisioning (only if it is a git checkout).
         has_git = os.path.isdir(os.path.join(d, ".git"))
         before = await self._git_head(d) if has_git else ""
+        # Provision (clone/pull) the extension repo; failures end this step quietly.
         try:
             await site_ext.provision(self)
         except Exception as e:  # noqa: BLE001 — best-effort
             logger.debug("repo_sync site_ext provision failed: %s", e)
             return {}
+        # Commit after, and whether it moved.
         after = await self._git_head(d) if os.path.isdir(os.path.join(d, ".git")) else ""
         changed = bool(before) and bool(after) and before != after
+        # Moved: ask the watchdog for a gated (non-forced) restart.
         if changed:
             logger.info("repo_sync: site extensions updated %s->%s — scheduling "
                         "gated hub restart to load new code",
@@ -196,6 +216,7 @@ class RepoSyncMixin:
                     f"site-ext {before[:10]}->{after[:10]}", force=False)
             except Exception as e:  # noqa: BLE001 — signalling is best-effort
                 logger.debug("repo_sync site_ext restart request failed: %s", e)
+        # Status entry for the WebUI.
         return {"name": "site_ext", "status": "ok", "commit_before": before,
                 "commit_after": after, "changed": changed}
 
@@ -230,9 +251,11 @@ class RepoSyncMixin:
         race (the restart is a non-blocking ``systemd-run``), so the WebUI
         still shows the cycle that triggered it.
         """
+        # Cycle timestamp.
         now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # ── provisioning_repos/* (hub-local auxiliary service sources) ──────
+        # Pull every git subdirectory of provisioning_repos; skip non-git ones.
         repo_results: List[Dict[str, Any]] = []
         try:
             hub_root = os.path.abspath(
@@ -240,6 +263,7 @@ class RepoSyncMixin:
             prov_dir = os.path.join(hub_root, "provisioning_repos")
             if os.path.isdir(prov_dir):
                 for entry in sorted(os.listdir(prov_dir)):
+                    # Only directories.
                     sub = os.path.join(prov_dir, entry)
                     if not os.path.isdir(sub):
                         continue
@@ -248,7 +272,9 @@ class RepoSyncMixin:
                                              "message": "not a git repo",
                                              "changed": False})
                         continue
+                    # Pull it and record the result.
                     repo_results.append(await self._git_pull_repo(sub))
+        # A scan failure is logged and the cycle continues.
         except Exception as e:  # noqa: BLE001 — best-effort, never fatal
             logger.warning("[sync-error] repo_sync provisioning_repos scan failed: %s", e)
 
@@ -256,6 +282,7 @@ class RepoSyncMixin:
         # Re-sync the out-of-band ext repo on the same cadence and, if its tip
         # moved, schedule a gated restart so the updated modules load. Keeps the
         # hub's private extensions current without a manual restart.
+        # Provision the site-extension repo and add its status if any.
         try:
             se = await self._sync_site_ext()
             if se:
@@ -276,11 +303,13 @@ class RepoSyncMixin:
             logger.debug("repo_sync module-version refresh failed: %s", e)
 
         # ── hub tree + spoke fan-out (version-gated, snapshot/rollback) ─────
+        # Pull the hub tree and fan updates out to spokes; normalize a non-dict result.
         try:
             hub_result = await self.perform_update(force=force, force_spokes=force_spokes)
             if not isinstance(hub_result, dict):
                 hub_result = {"status": "checked",
                               "message": str(hub_result)}
+        # A failure becomes an error entry, never an exception.
         except Exception as e:  # noqa: BLE001 — best-effort
             logger.warning("[sync-error] repo_sync perform_update failed: %s", e)
             hub_result = {"status": "error", "message": str(e)[:300]}
@@ -290,6 +319,7 @@ class RepoSyncMixin:
         # updater is LOUD, not silent (the failure mode behind a hub quietly
         # serving stale code). Each warning → [sync-error] so it lands in the
         # hub error log + GET_ERROR_LOGS (ab) and the repo-sync status.
+        # Audit the update machinery; a crash in the audit itself becomes a failed result.
         try:
             update_health = await self.check_update_health()
         except Exception as e:  # noqa: BLE001 — never fatal to the loop
@@ -312,6 +342,7 @@ class RepoSyncMixin:
         # after clearing (state change = signal); while it persists unchanged,
         # emit a single condensed INFO line so the condition stays observable
         # without flooding. Errors above are never deduped (always loud).
+        # Log new warnings, clearances, and a short line while warnings persist unchanged.
         cur_warnings = set(update_health.get("warnings", []))
         prev_warnings = getattr(self, "_prev_update_warnings", set())
         for w in sorted(cur_warnings - prev_warnings):
@@ -327,6 +358,7 @@ class RepoSyncMixin:
         # hub log WITHOUT landing in the Error Log / AppBuilder feed. Deduped across
         # cycles like warnings (the stale state persists from pull → 2am restart,
         # so log it once per state change, not every 15-min cycle).
+        # Log new and cleared notices at INFO only.
         cur_notices = set(update_health.get("notices", []))
         prev_notices = getattr(self, "_prev_update_notices", set())
         for n in sorted(cur_notices - prev_notices):
@@ -335,11 +367,13 @@ class RepoSyncMixin:
             logger.info("update-health: CLEARED — %s", n)
         self._prev_update_notices = cur_notices
 
+        # Counts and changed repos for the summary message.
         ok_count = sum(1 for r in repo_results if r.get("status") == "ok")
         err_count = sum(1 for r in repo_results if r.get("status") == "error")
         skip_count = sum(1 for r in repo_results if r.get("status") == "skipped")
         changed = [r["name"] for r in repo_results if r.get("changed")]
         hub_status = str(hub_result.get("status") or "")
+        # One-line summary of the whole cycle.
         message = (f"hub={hub_status}; provisioning_repos: {ok_count} ok, "
                    f"{err_count} error, {skip_count} skipped"
                    + (f"; changed: {', '.join(changed)}" if changed else "")
@@ -349,11 +383,13 @@ class RepoSyncMixin:
 
         # Hub-authoritative sync log: errors → [sync-error] WARNING so the
         # cause lands in the hub log + GET_ERROR_LOGS (ab).
+        # Warn on any error, otherwise log at INFO.
         if err_count or hub_status == "error" or not update_health.get("ok"):
             logger.warning("[sync-error] repo_sync — %s", message)
         else:
             logger.info("repo_sync: %s", message)
 
+        # Status record for the WebUI Sync card.
         status = {"last_sync_ts": now, "hub": hub_result,
                   "provisioning_repos": repo_results, "message": message,
                   # Per-module spoke fan-out results ("sid: triggered/up-to-date/
@@ -367,6 +403,7 @@ class RepoSyncMixin:
                   # gating) — just not displayed in the spokes list.
                   "agents": (hub_result.get("agents") if isinstance(hub_result, dict) else None) or [],
                   "update_health": update_health}
+        # Persist it; a store failure only warns.
         try:
             await self.simulations_store.set_repo_sync_status(status)
         except Exception as e:  # noqa: BLE001 — store failure must not kill the loop
@@ -382,10 +419,15 @@ class RepoSyncMixin:
         a freshly-booted hub reconciles its repos sooner) and away from the
         other heavy syncs that stagger at 90s+.
         """
+        # When the disabled-mode audit last ran (epoch seconds).
         _last_disabled_audit = 0.0
 
         async def _body():
+            """Run one loop iteration: a full sync when enabled, or a throttled health audit when
+            disabled.
+            """
             nonlocal _last_disabled_audit
+            # Read config fresh each cycle.
             cfg = self._repo_sync_cfg()
             if cfg.get("enabled", True):
                 # run_repo_sync_all runs check_update_health every cycle.
@@ -425,9 +467,11 @@ class RepoSyncMixin:
                 # watchdog timer, restart helper, git checkout) so drift is
                 # LOUD in the hub log regardless of the sync toggle. Throttled
                 # to ~5m to avoid a per-minute git ls-remote.
+                # Run the audit at most every 5 minutes.
                 _now = _dt.datetime.now(_dt.timezone.utc).timestamp()
                 if (_now - _last_disabled_audit) >= 300:
                     _last_disabled_audit = _now
+                    # Log each error and warning from the audit.
                     try:
                         health = await self.check_update_health()
                         for e in health.get("errors", []):
@@ -439,6 +483,8 @@ class RepoSyncMixin:
                     except Exception as e:  # noqa: BLE001 - never fatal
                         logger.warning("[sync-error] update-health audit failed: %s", e)
         def _delay() -> float:
+            """Return seconds until the next iteration: the configured interval, or 60 while disabled."""
+            # Use the interval only while enabled.
             enabled = self._repo_sync_cfg().get("enabled", True)
             return self._repo_sync_interval() if enabled else 60
 

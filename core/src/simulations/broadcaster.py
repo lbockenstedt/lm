@@ -7,9 +7,12 @@ WebUI /sim WS endpoints subscribe/unsubscribe on connect/disconnect.
 Audience: Hub developers.
 """
 
+# Standard-library logging so failed sends can be reported without crashing the fan-out.
 import logging
+# Type hints only; they document the shape of the subscriber maps and telemetry payloads.
 from typing import Any, Dict, Set
 
+# One named logger so all broadcaster messages can be filtered together.
 logger = logging.getLogger("SimulationsBroadcaster")
 
 
@@ -17,6 +20,7 @@ class SimulationsBroadcaster:
     """Per-tenant + admin WebSocket multiplexer for cs telemetry."""
 
     def __init__(self):
+        """Start with no tenant subscribers and no admin subscribers."""
         # tenant_id -> Set[WebSocket]
         self._subscribers: Dict[str, Set] = {}
         # admin_subscribers: Set[WebSocket]
@@ -39,10 +43,12 @@ class SimulationsBroadcaster:
         # Explicit arg wins; fall back to the tenant carried in the payload.
         if not tenant_id:
             tenant_id = data.get("tenant_id")
+        # Neither the caller nor the payload named a tenant, so there is nowhere safe to route it.
         if not tenant_id:
             logger.debug("simulations broadcast: no tenant for spoke %s, dropping", spoke_id)
             return
 
+        # Wrap the raw telemetry in an envelope so the browser knows its type and source spoke.
         message = {
             "type": "telemetry",
             "spoke_id": spoke_id,
@@ -52,8 +58,10 @@ class SimulationsBroadcaster:
         # Tenant subscribers — iterate a snapshot so a socket dropping mid-loop
         # (or a subscriber set mutating) can't break the fan-out.
         for ws in list(self._subscribers.get(tenant_id, set())):
+            # Send to this subscriber; one failure must not stop delivery to the others.
             try:
                 await ws.send_json(message)
+            # A closed or broken socket raises here; log it and move on to the next subscriber.
             except Exception as exc:
                 logger.warning(
                     "simulations broadcast: tenant subscriber send failed "
@@ -61,6 +69,7 @@ class SimulationsBroadcaster:
 
         # Admins receive every tenant's stream.
         for ws in list(self._admins):
+            # Same isolation as above: a dead admin socket is logged and skipped.
             try:
                 await ws.send_json(message)
             except Exception as exc:
@@ -70,8 +79,10 @@ class SimulationsBroadcaster:
 
     def subscribe(self, websocket, tenant_id: str, is_admin: bool = False):
         """Register a WebUI socket for a tenant's stream (or the admin stream)."""
+        # Admin sockets go into the shared admin set that sees every tenant.
         if is_admin:
             self._admins.add(websocket)
+        # Tenant sockets go into that tenant's set, creating the set on first subscribe.
         else:
             if tenant_id not in self._subscribers:
                 self._subscribers[tenant_id] = set()
@@ -79,7 +90,9 @@ class SimulationsBroadcaster:
 
     def unsubscribe(self, websocket, tenant_id: str = None, is_admin: bool = False):
         """Drop a WebUI socket from its tenant stream (or the admin stream)."""
+        # Admin sockets live in the admin set; discard() is a no-op if already removed.
         if is_admin:
             self._admins.discard(websocket)
+        # Tenant sockets are removed only if the tenant still has a subscriber set.
         elif tenant_id and tenant_id in self._subscribers:
             self._subscribers[tenant_id].discard(websocket)

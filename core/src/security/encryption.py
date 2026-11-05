@@ -18,14 +18,21 @@ the key and hub-secret stores) and by ``state/manager.py`` (which uses
 per-message wire signing — that is ``security/signer.py``.
 """
 
+# os: env-var configuration and file existence checks.
 import os
+# base64 encodes the derived legacy key into Fernet's key format.
 import base64
+# sys.platform limits the /proc scrub to Linux.
 import sys
+# Fernet is the symmetric authenticated encryption used for all state files.
 from cryptography.fernet import Fernet
+# SHA-256 and PBKDF2 derive the legacy machine-id key.
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+# Standard-library logging for key loading and hardening messages.
 import logging
 
+# One named logger so encryption messages can be filtered together.
 logger = logging.getLogger("Encryption")
 
 
@@ -38,6 +45,7 @@ def plaintext_fallback_allowed() -> bool:
     sessions/simulations) to a plaintext read. Shared by KeyManager (secrets)
     and the StateManager/SimulationsStore plaintext fallbacks so the operator's
     fail-closed promise holds across EVERY encrypted store, not just keys."""
+    # Default "1" keeps the fallback; any other value fails closed.
     return os.environ.get("LM_ALLOW_PLAINTEXT_FALLBACK", "1").strip() in ("1", "true", "yes")
 
 
@@ -67,9 +75,11 @@ class HubEncryption:
         # hardening: shrink the /proc/<pid>/environ window a root reader can grab
         # the key from without ptrace/core-dump).
         self._primary_key_str: str = ""
+        # Build the legacy key, load the required primary key, then any previous rotation keys.
         self._legacy_fernet = self._derive_machine_id_fernet()
         self.fernet = self._load_primary_fernet()
         self._previous_fernets = self._load_previous_fernets()
+        # Optionally remove the key from the environment now that it is held in memory.
         self._maybe_drop_env_key()
         # Decrypt attempt order: current primary key, then any PREVIOUS
         # (post-rotation) keys, then the legacy machine-id key. A blob that only
@@ -86,6 +96,7 @@ class HubEncryption:
         ``LM_FERNET_KEY`` so the hub can still read state encrypted under them;
         those blobs migrate to the current key on their next save. Invalid
         entries are skipped with a warning (never fatal)."""
+        # Accept commas or spaces between keys; each valid one becomes a Fernet object.
         raw = os.getenv("LM_FERNET_KEY_PREVIOUS", "") or ""
         out = []
         for tok in raw.replace(",", " ").split():
@@ -93,12 +104,14 @@ class HubEncryption:
                 out.append(Fernet(tok.strip().encode()))
             except Exception as e:  # noqa: BLE001
                 logger.warning("Ignoring invalid key in LM_FERNET_KEY_PREVIOUS: %s", e)
+        # Mention how many fallback keys are active.
         if out:
             logger.info("Loaded %d previous Fernet key(s) for decrypt fallback.", len(out))
         return out
 
     def _derive_machine_id_fernet(self) -> Fernet:
         """Legacy key derivation from the machine-id (INSECURE; fallback only)."""
+        # Read the machine id, then stretch it with PBKDF2-SHA256 (100k rounds) into 32 bytes.
         machine_id = self._get_machine_id()
         salt = b'lab-manager-salt-2026'  # legacy; only used by the fallback path
         kdf = PBKDF2HMAC(
@@ -107,6 +120,7 @@ class HubEncryption:
             salt=salt,
             iterations=100000,
         )
+        # Derive the key and encode it as a Fernet key.
         key = kdf.derive(machine_id.encode())
         return Fernet(base64.urlsafe_b64encode(key))
 
@@ -128,6 +142,7 @@ class HubEncryption:
         and the hub will not start. The weak machine-id key is kept only as
         ``_legacy_fernet`` for transparent decrypt of pre-``LM_FERNET_KEY``
         blobs (new writes use the primary key)."""
+        # Find the key (Key Vault or env); refuse to start without one.
         key_str, source = self._resolve_primary_key()
         if not key_str:
             raise RuntimeError(
@@ -138,6 +153,7 @@ class HubEncryption:
                 "Generate a key with: python -c \"from cryptography.fernet import "
                 "Fernet; print(Fernet.generate_key().decode())\"."
             )
+        # Validate the key format; a malformed key also stops startup with a clear message.
         try:
             fernet = Fernet(key_str.encode())
         except Exception as e:
@@ -146,6 +162,7 @@ class HubEncryption:
         # Stash the validated raw key so consumers (oidc.py, key_vault.py) can get
         # it from the singleton after we drop LM_FERNET_KEY from os.environ.
         self._primary_key_str = key_str
+        # Note in the log when the key came from Key Vault.
         if source.startswith("keyvault"):
             logger.info("Loaded primary Fernet key from %s (off-disk Tier 1).", source)
         return fernet
@@ -161,8 +178,10 @@ class HubEncryption:
         unreachable vault does NOT hard-fail: it falls back to ``LM_FERNET_KEY``
         (env) with a warning, so a migrating deployment that still keeps the key
         in ``.env`` stays bootable. Returns ``("", "")`` if nothing resolves."""
+        # Key Vault is only tried when an operator names the secret to fetch.
         kv_secret = (os.getenv("LM_FERNET_KEY_KV_SECRET") or "").strip()
         if kv_secret:
+            # Use the vault value if it came back; otherwise warn and fall through to the env var.
             val = self._fetch_key_from_vault(kv_secret)
             if val:
                 return val.strip(), f"keyvault:{kv_secret}"
@@ -171,9 +190,11 @@ class HubEncryption:
                 "fetched from Key Vault (SDK missing, LM_KEYVAULT_URL unset, "
                 "auth/network error, or secret absent). Falling back to "
                 "LM_FERNET_KEY from the environment if present.", kv_secret)
+        # The plain environment variable is the default key source.
         env_key = (os.getenv("LM_FERNET_KEY") or "").strip()
         if env_key:
             return env_key, "env"
+        # Neither source produced a key.
         return "", ""
 
     @staticmethod
@@ -181,13 +202,16 @@ class HubEncryption:
         """Best-effort fetch of ``secret_name`` from Azure Key Vault via the
         shared credential provider. Returns the secret value or ``None`` (never
         raises — a vault problem must not crash import)."""
+        # Import the credential store from either the package or the flat module path.
         try:
             from security.credential_store import get_credential_provider
         except ImportError:  # pragma: no cover - import-path fallback
+            # Use the provider only if it is Key Vault and ready; any error means "no key".
             try:
                 from credential_store import get_credential_provider
             except Exception:  # noqa: BLE001
                 return None
+        # Read /proc/self/stat and pick out the environment start/end addresses.
         try:
             provider = get_credential_provider()
             if getattr(provider, "name", "") != "keyvault" or not provider.ready:
@@ -232,12 +256,16 @@ class HubEncryption:
         visible to operators. Linux-only and entirely best-effort: any failure
         is logged at debug and ignored, since failing to harden must never stop
         the hub from booting. Returns the names actually scrubbed."""
+        # Nothing to do without names, or on non-Linux systems (no /proc).
         if not names or not sys.platform.startswith("linux"):
             return []
+        # Locate the environment block; give up if the bounds are unusable.
         env_start, env_end = self._proc_env_bounds()
         if env_end <= env_start:
             return []
+        # Names we actually wiped.
         scrubbed = []
+        # Open our own memory, read the whole environment block, and search it for each name.
         try:
             with open("/proc/self/mem", "r+b", buffering=0) as mem:
                 mem.seek(env_start)
@@ -245,6 +273,7 @@ class HubEncryption:
                 for name in names:
                     needle = (name + "=").encode()
                     pos = 0
+                    # Scan for every occurrence of "NAME=" in the block.
                     while True:
                         idx = block.find(needle, pos)
                         if idx == -1:
@@ -255,14 +284,17 @@ class HubEncryption:
                         if idx != 0 and block[idx - 1] != 0:
                             pos = idx + 1
                             continue
+                        # The entry ends at the next NUL byte (or the end of the block).
                         end = block.find(b"\0", idx)
                         if end == -1:
                             end = len(block)
+                        # Overwrite the entry with zero bytes and continue searching after it.
                         mem.seek(env_start + idx)
                         mem.write(b"\0" * (end - idx))
                         if name not in scrubbed:
                             scrubbed.append(name)
                         pos = end
+        # Any failure (permissions, non-Linux /proc) is logged quietly and ignored.
         except Exception as exc:  # noqa: BLE001 — best-effort hardening
             logger.debug("/proc/self/mem environ scrub skipped: %s", exc)
         return scrubbed
@@ -289,12 +321,14 @@ class HubEncryption:
         default. ``LM_KEEP_FERNET_KEY_ENV=1`` force-disables it even when the drop
         flag is on (the rotate CLI sets this). No-op if the key material could not
         be captured (fail-safe)."""
+        # Only act when the drop is enabled, not force-disabled, and the key was captured.
         if os.environ.get("LM_DROP_FERNET_KEY_ENV", "").strip() not in ("1", "true", "yes"):
             return
         if os.environ.get("LM_KEEP_FERNET_KEY_ENV", "").strip() in ("1", "true", "yes"):
             return
         if not self._primary_key_str:
             return
+        # Remove both key variables from os.environ, remembering which were present.
         names = ("LM_FERNET_KEY", "LM_FERNET_KEY_PREVIOUS")
         dropped = []
         for var in names:
@@ -304,6 +338,7 @@ class HubEncryption:
         # the var: the stack block keeps whatever execve() was handed, so a var
         # already popped by other code is still sitting there in the clear.
         scrubbed = self._scrub_proc_environ(names)
+        # Log what was removed (names only, never values).
         if dropped or scrubbed:
             logger.info(
                 "Dropped %s from the process environment after load "
@@ -317,10 +352,12 @@ class HubEncryption:
     def primary_key(self) -> str:
         """The raw primary Fernet key string captured at load. Prefer this over
         ``os.environ['LM_FERNET_KEY']`` — the env var is dropped after load."""
+        # Hand out the in-memory copy captured at load.
         return self._primary_key_str
 
     def _get_machine_id(self) -> str:
         """Retrieves the unique machine ID from the system."""
+        # Standard Linux locations of the machine id; return the first readable one.
         paths = ['/etc/machine-id', '/var/lib/dbus/machine-id']
         for path in paths:
             if os.path.exists(path):
@@ -348,11 +385,13 @@ class HubEncryption:
 
     def encrypt(self, data: str) -> bytes:
         """Encrypts a string and returns the ciphertext bytes."""
+        # Always encrypt with the primary key.
         return self.fernet.encrypt(data.encode())
 
     def decrypt(self, ciphertext: bytes) -> str:
         """Decrypts ciphertext, trying the current key, then PREVIOUS (rotation)
         keys, then the legacy machine-id key (transparent migration)."""
+        # Return only the plaintext, discarding the "used primary key" flag.
         return self.decrypt_with_meta(ciphertext)[0]
 
     def decrypt_with_meta(self, ciphertext: bytes):
@@ -363,6 +402,7 @@ class HubEncryption:
         signals the caller (state manager) to re-encrypt the blob under the
         current key so it stops depending on the old key. Raises the primary
         key's error if NONE succeed (preserving the original failure surface)."""
+        # Try each key in order; remember the first error to re-raise if all fail.
         first_err = None
         for f in self._decrypt_chain:
             try:
@@ -370,18 +410,21 @@ class HubEncryption:
             except Exception as e:  # noqa: BLE001
                 if first_err is None:
                     first_err = e
+        # No key could decrypt the blob.
         raise first_err
 
     def encrypt_bytes(self, data: bytes) -> bytes:
         """Encrypt raw bytes (no str round-trip). Used by the hub data cache,
         which encrypts already-compressed bytes so the str-based ``encrypt``
         would force a pointless base64/decode step."""
+        # Always encrypt with the primary key.
         return self.fernet.encrypt(data)
 
     def decrypt_bytes(self, ciphertext: bytes) -> bytes:
         """Bytes counterpart of ``decrypt``: same key chain (current →
         previous → legacy), so a cache file written before a key rotation still
         loads. Raises the primary key's error when no key works."""
+        # Try each key in order; remember the first error to re-raise if all fail.
         first_err = None
         for f in self._decrypt_chain:
             try:
@@ -389,6 +432,7 @@ class HubEncryption:
             except Exception as e:  # noqa: BLE001
                 if first_err is None:
                     first_err = e
+        # No key could decrypt the data.
         raise first_err
 
 # Singleton instance for the process
@@ -406,10 +450,12 @@ def primary_fernet_key() -> str:
     Consumers that historically read ``os.environ['LM_FERNET_KEY']`` (e.g.
     ``oidc.py``'s state-cookie HMAC fallback) MUST use this so they keep working
     after the env-drop."""
+    # Prefer the in-memory key from the singleton.
     try:
         k = hub_encryption.primary_key()
         if k:
             return k
     except Exception:  # noqa: BLE001
         pass
+    # Fall back to the env var (or "" if not set).
     return (os.environ.get("LM_FERNET_KEY", "") or "").strip()

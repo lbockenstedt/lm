@@ -26,8 +26,10 @@ The client private key is read from ``key_path`` — never stored in
 ``global_config`` — and resolved through ``security.credential_store`` so it
 may be a filesystem path OR a Key Vault reference (``kv:<secret-name>``).
 """
+# Allow modern type-hint syntax on older Pythons.
 from __future__ import annotations
 
+# Standard-library helpers: encoding, hashing/HMAC, JSON, logging, env, regex, time, URL quoting.
 import base64
 import hashlib
 import hmac
@@ -38,18 +40,24 @@ import re
 import time
 from urllib.parse import quote as _url_quote
 
+# httpx is the async HTTP client used to talk to Entra and Graph.
 import httpx
 
+# shared_client reuses an injected client or opens a short-lived one; jwt signs/verifies tokens.
 from http_client import shared_client
 import jwt
+# serialization loads and writes PEM keys and certificates.
 from cryptography.hazmat.primitives import serialization
 
+# Helpers that turn Entra group membership into LM groups, tenants and permissions.
 from access import groups_and_tenants_for_membership, resolve_effective_permissions
 
+# Shared hub logger.
 logger = logging.getLogger("Hub")
 
 # ── config ──────────────────────────────────────────────────────────────────
 
+# Scopes requested at login, and how long the login round-trip may take.
 _DEFAULT_SCOPE = "openid profile email offline_access"
 _STATE_TTL_S = 300  # the OIDC round-trip must complete within 5 minutes
 
@@ -69,15 +77,18 @@ def default_oidc_dir(hub=None) -> str:
     writable — the state manager write-tests it with a home-dir fallback) →
     ``_OIDC_DIR``. Deriving from ``data_dir`` is what keeps "Generate certificate"
     from hitting EACCES on ``/etc/lm`` for a non-root hub."""
+    # An explicit env override wins.
     env = (os.environ.get("LM_OIDC_DIR") or "").strip()
     if env:
         return env
+    # Otherwise use an "oidc" folder inside the hub's data directory, if known.
     try:
         dd = getattr(getattr(hub, "state", None), "data_dir", "") or ""
         if dd:
             return os.path.join(dd, "oidc")
     except Exception:  # noqa: BLE001
         pass
+    # Last resort: the module default.
     return _OIDC_DIR
 
 
@@ -94,13 +105,16 @@ def _parse_redirect_uris(env_val, stored_val, primary: str) -> list:
     Accepts the default ``primary`` (always first/allowed), a stored value (list
     or comma/whitespace-delimited string), and an env override (delimited
     string). Used to validate the dynamically chosen per-proxy redirect_uri."""
+    # Ordered result list with no duplicates.
     out: list = []
 
     def _add(v):
+        """Append ``v`` (trimmed) unless it is empty or already present."""
         v = (v or "").strip()
         if v and v not in out:
             out.append(v)
 
+    # Primary first, then stored values (list or delimited string), then env values.
     _add(primary)
     if isinstance(stored_val, (list, tuple)):
         for v in stored_val:
@@ -122,11 +136,14 @@ class OidcConfig:
     requires ``tenant_id`` + ``client_id`` + ``key_path`` to be truthy."""
 
     def __init__(self, stored: dict | None = None, default_dir: str | None = None):
+        """Resolve each setting from env first, then stored config, then defaults."""
+        # Default cert/key file paths inside the OIDC directory.
         stored = stored or {}
         env = os.environ
         _dir = (default_dir or _OIDC_DIR)
         _def_key = os.path.join(_dir, "client-key.pem")
         _def_cert = os.path.join(_dir, "client-cert.pem")
+        # Tenant, client and default redirect URI.
         self.tenant_id = (env.get("LM_OIDC_TENANT_ID") or stored.get("tenant_id") or "").strip()
         self.client_id = (env.get("LM_OIDC_CLIENT_ID") or stored.get("client_id") or "").strip()
         self.redirect_uri = (env.get("LM_OIDC_REDIRECT_URI") or stored.get("redirect_uri") or "").strip()
@@ -147,6 +164,7 @@ class OidcConfig:
                           or "").strip() or _def_cert
         self.key_path = (env.get("LM_OIDC_CLIENT_KEY") or stored.get("key_path")
                          or "").strip() or _def_key
+        # Optional login-restricting group(s) and the master enabled switch.
         self.allowed_group = (env.get("LM_OIDC_ALLOWED_GROUP") or stored.get("allowed_group") or "").strip()
         self.enabled = _bool_env(env.get("LM_OIDC_ENABLED"), stored.get("enabled", False))
 
@@ -157,13 +175,16 @@ class OidcConfig:
         return bool(self.tenant_id and self.client_id and self.key_path)
 
     def issuer(self) -> str:
+        """The expected id-token issuer for this tenant."""
         return f"https://login.microsoftonline.com/{self.tenant_id}/v2.0"
 
     def discovery_url(self) -> str:
+        """URL of this tenant's OIDC discovery document."""
         return f"https://login.microsoftonline.com/{self.tenant_id}/v2.0/.well-known/openid-configuration"
 
 
 def _bool_env(val, default: bool) -> bool:
+    """Interpret an env string as a boolean, or use ``default`` when unset."""
     if val is None:
         return bool(default)
     return str(val).strip().lower() in ("1", "true", "yes", "on")
@@ -172,6 +193,7 @@ def _bool_env(val, default: bool) -> bool:
 def get_oidc_config(hub) -> OidcConfig:
     """Read the stored OIDC config from ``global_config`` (admin-set via
     ``/setup/oidc-config``) and build an :class:`OidcConfig`."""
+    # Read the oidc section of global_config, tolerating a hub without state.
     stored = {}
     try:
         stored = hub.state.system_state.get("global_config", {}).get("oidc", {}) or {}
@@ -189,9 +211,11 @@ def _fernet_key_secret() -> str:
     It must NOT read ``os.environ['LM_FERNET_KEY']`` directly — that var is
     dropped from the environment after load (root/LPE hardening), so we go
     through ``security.encryption.primary_fernet_key`` which stashes the key."""
+    # Import the key accessor from wherever the security package is importable.
     try:
         from .encryption import primary_fernet_key  # security package (relative)
     except ImportError:  # pragma: no cover - import-path fallback
+        # Return the stashed key; fall back to the environment if that fails.
         try:
             from security.encryption import primary_fernet_key  # core/src on path
         except ImportError:
@@ -208,18 +232,22 @@ def _state_secret(hub) -> bytes:
     within _STATE_TTL_S so a mid-round-trip rotation is covered by verifying
     against the full hub_secrets list), then the Fernet key, then a constant
     (only when nothing else is configured — logged as a weakness)."""
+    # 1. Dedicated env secret.
     sec = os.environ.get("LM_OIDC_STATE_SECRET", "").strip()
     if sec:
         return sec.encode()
+    # 2. Newest hub root secret.
     try:
         secrets_list = hub.key_manager.hub_secrets
         if secrets_list:
             return secrets_list[0].encode()
     except Exception:  # noqa: BLE001
         pass
+    # 3. The Fernet key.
     fk = _fernet_key_secret()
     if fk:
         return fk.encode()
+    # 4. Weak constant fallback, with a warning.
     logger.warning("OIDC state cookie has no dedicated secret — using weak fallback")
     return b"lm-oidc-state-weak-fallback"
 
@@ -232,8 +260,10 @@ def sign_state_cookie(hub, state: str, nonce: str, code_verifier: str,
     never contains ``:`` or ``.`` and can't collide with the delimiters) is
     carried so the callback reuses the SAME redirect_uri for the token
     exchange."""
+    # Timestamp plus the redirect URI in delimiter-safe base64url.
     ts = int(time.time())
     ruri_b64 = base64.urlsafe_b64encode((redirect_uri or "").encode()).decode().rstrip("=")
+    # Join the fields and append an HMAC signature.
     payload = f"{state}:{nonce}:{code_verifier}:{ruri_b64}:{ts}"
     sig = hmac.new(_state_secret(hub), payload.encode(), hashlib.sha256).hexdigest()
     return f"{payload}.{sig}"
@@ -243,6 +273,7 @@ def _b64url_decode(s: str) -> str:
     """Decode a padding-stripped urlsafe-base64 string back to text (best effort)."""
     if not s:
         return ""
+    # Restore padding and decode; bad input yields "".
     try:
         pad = "=" * (-len(s) % 4)
         return base64.urlsafe_b64decode(s + pad).decode()
@@ -255,12 +286,14 @@ def verify_state_cookie(hub, cookie: str) -> tuple | None:
     HMAC is valid and fresh (within ``_STATE_TTL_S``); else ``None``. Accepts any
     key in the hub_secrets history so a rotation mid-round-trip doesn't drop the
     login. Tolerates the legacy 4-field payload (no redirect_uri)."""
+    # Split off the signature; reject malformed cookies.
     if not cookie or "." not in cookie:
         return None
     payload, _, sig = cookie.rpartition(".")
     expected_off = payload.rfind(":")  # ts is the last colon-separated field
     if expected_off < 0:
         return None
+    # Collect every key the cookie might have been signed with.
     keys = []
     try:
         keys = [s.encode() for s in hub.key_manager.hub_secrets]
@@ -274,6 +307,7 @@ def verify_state_cookie(hub, cookie: str) -> tuple | None:
         keys.append(fk.encode())
     if not keys:
         keys.append(b"lm-oidc-state-weak-fallback")
+    # Accept the cookie if any key produces a matching signature.
     for k in keys:
         if hmac.new(k, payload.encode(), hashlib.sha256).hexdigest() == sig:
             parts = payload.split(":")
@@ -287,6 +321,7 @@ def verify_state_cookie(hub, cookie: str) -> tuple | None:
                 redirect_uri = _b64url_decode(ruri_b64)
             else:
                 return None
+            # Parse the timestamp and reject stale cookies.
             try:
                 ts = int(ts_s)
             except ValueError:
@@ -299,6 +334,7 @@ def verify_state_cookie(hub, cookie: str) -> tuple | None:
 
 # ── discovery + authorize URL ───────────────────────────────────────────────
 
+# Per-tenant cache of discovery documents.
 _discovery_cache: dict = {}  # tenant_id -> (fetched_at, doc)
 
 
@@ -307,10 +343,12 @@ async def discover(cfg: OidcConfig, http: httpx.AsyncClient | None = None) -> di
     so JWKS rotation is picked up without a hub restart). Returns the doc with
     at least ``authorization_endpoint`` / ``token_endpoint`` / ``jwks_uri`` /
     ``issuer``."""
+    # Serve from cache when younger than five minutes.
     now = time.time()
     cached = _discovery_cache.get(cfg.tenant_id)
     if cached and now - cached[0] < 300:
         return cached[1]
+    # Fetch the document and cache it.
     async with shared_client(http, 15.0) as client:
         resp = await client.get(cfg.discovery_url())
         resp.raise_for_status()
@@ -327,8 +365,10 @@ def authorize_url(cfg: OidcConfig, discovery_doc: dict,
     ``redirect_uri`` overrides ``cfg.redirect_uri`` so the login flow can return
     the browser to the originating edge proxy; it MUST be a value the token
     exchange later reuses verbatim (Entra requires the two to match)."""
+    # Use the discovered endpoint, or the standard Entra one.
     endpoint = discovery_doc.get("authorization_endpoint") or \
         f"https://login.microsoftonline.com/{cfg.tenant_id}/oauth2/v2.0/authorize"
+    # Authorization Code + PKCE query parameters.
     params = {
         "response_type": "code",
         "client_id": cfg.client_id,
@@ -339,6 +379,7 @@ def authorize_url(cfg: OidcConfig, discovery_doc: dict,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
     }
+    # URL-encode each parameter and join onto the endpoint.
     return endpoint + "?" + "&".join(f"{k}={_url_quote(str(v), safe='')}"
                                      for k, v in params.items())
 
@@ -350,6 +391,7 @@ def cert_thumbprint_x5t(cert_pem: bytes) -> str:
 
     Entra maps a ``client_assertion`` to the uploaded certificate by this
     thumbprint; omit it and Entra rejects the assertion (AADSTS700027)."""
+    # Load the cert, take its DER bytes, SHA-1 them and base64url-encode.
     from cryptography import x509
     cert = x509.load_pem_x509_certificate(cert_pem)
     der = cert.public_bytes(serialization.Encoding.DER)
@@ -358,8 +400,10 @@ def cert_thumbprint_x5t(cert_pem: bytes) -> str:
 
 def _write_file(path: str, data: bytes, mode: int) -> None:
     """Write ``data`` to ``path`` with ``mode`` perms, creating parent dirs."""
+    # Ensure the parent directory exists.
     d = os.path.dirname(path) or "."
     os.makedirs(d, exist_ok=True)
+    # Open with the requested mode, write, always close, then enforce the mode.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     try:
         os.write(fd, data)
@@ -377,16 +421,19 @@ def generate_client_cert(key_path: str | None = None, cert_path: str | None = No
     the caller uploads ``cert_pem`` to the Entra app registration (Certificates &
     secrets → Certificates). Refuses to clobber an existing key unless ``force``
     (so a live credential isn't silently replaced)."""
+    # Lazily import the certificate-building pieces.
     from cryptography import x509
     from cryptography.x509.oid import NameOID
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import rsa
     import datetime as _dt
+    # Default paths; refuse to overwrite an existing key unless forced.
     key_path = key_path or os.path.join(_OIDC_DIR, "client-key.pem")
     cert_path = cert_path or os.path.join(_OIDC_DIR, "client-cert.pem")
     if os.path.exists(key_path) and not force:
         raise OidcError(f"a private key already exists at {key_path}; "
                         f"pass force=true to overwrite it")
+    # New RSA key and a self-signed certificate valid for ``days``.
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, subject)])
     now = _dt.datetime.now(_dt.timezone.utc)
@@ -397,6 +444,7 @@ def generate_client_cert(key_path: str | None = None, cert_path: str | None = No
             .not_valid_before(now - _dt.timedelta(minutes=5))
             .not_valid_after(now + _dt.timedelta(days=days))
             .sign(key, hashes.SHA256()))
+    # Encode key and cert as PEM and write them with tight/loose permissions.
     key_pem = key.private_bytes(serialization.Encoding.PEM,
                                 serialization.PrivateFormat.TraditionalOpenSSL,
                                 serialization.NoEncryption())
@@ -418,6 +466,7 @@ def _load_private_key(key_path: str):
     ``kv:<secret-name>`` reference / bare secret name resolved through the
     credential store (so the private key can live in Azure Key Vault). See
     ``security.credential_store.resolve_private_key_material``."""
+    # Resolve the key bytes (file or Key Vault) and parse the PEM.
     from .credential_store import resolve_private_key_material
     pem = resolve_private_key_material(key_path)
     if pem is None:
@@ -431,6 +480,7 @@ def build_client_assertion(cfg: OidcConfig, token_endpoint: str) -> str:
     Entra accepts this in place of a client secret for a confidential client
     (``client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer``).
     The JWT's ``aud`` is the token endpoint URI; ``iss==sub==client_id``."""
+    # Load the signing key and build the standard assertion claims (5-minute life).
     import secrets as _s
     key = _load_private_key(cfg.key_path)
     now = int(time.time())
@@ -470,9 +520,11 @@ async def exchange_code(cfg: OidcConfig, discovery_doc: dict,
 
     ``redirect_uri`` MUST equal the value used in the authorize request (Entra
     rejects the exchange otherwise); defaults to ``cfg.redirect_uri``."""
+    # Use the discovered token endpoint, or the standard Entra one.
     token_endpoint = discovery_doc.get("token_endpoint") or \
         f"https://login.microsoftonline.com/{cfg.tenant_id}/oauth2/v2.0/token"
     assertion = build_client_assertion(cfg, token_endpoint)
+    # Form fields for the authorization-code exchange.
     data = {
         "grant_type": "authorization_code",
         "client_id": cfg.client_id,
@@ -484,6 +536,7 @@ async def exchange_code(cfg: OidcConfig, discovery_doc: dict,
             "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
         "client_assertion": assertion,
     }
+    # POST the exchange; non-200 responses become an OidcError with Entra's reason.
     async with shared_client(http, 15.0) as client:
         resp = await client.post(token_endpoint, data=data)
     if resp.status_code != 200:
@@ -497,6 +550,7 @@ def _entra_error_detail(resp) -> str:
     failed token response so the callback surfaces WHY instead of a bare status.
     The AADSTS text is Entra's own diagnostic (no secret material) — safe to show.
     Returns ``" — <detail>"`` or ``""``."""
+    # Pull the error text from JSON, or fall back to the raw response body.
     try:
         j = resp.json()
         detail = j.get("error_description") or j.get("error") or ""
@@ -512,6 +566,7 @@ def _entra_error_detail(resp) -> str:
 
 async def fetch_jwks(jwks_uri: str, http: httpx.AsyncClient | None = None) -> list:
     """Fetch the JWKS keys (cached implicitly by the caller via discovery)."""
+    # GET the JWKS and return its keys list.
     async with shared_client(http, 15.0) as client:
         resp = await client.get(jwks_uri)
         resp.raise_for_status()
@@ -520,6 +575,7 @@ async def fetch_jwks(jwks_uri: str, http: httpx.AsyncClient | None = None) -> li
 
 def _jwk_to_key(jwk: dict):
     """Convert a JWK (RSA) to a cryptography key object for PyJWT verify."""
+    # Pick the right PyJWT converter for the key type.
     from cryptography.hazmat.primitives.asymmetric import ec
     kty = jwk.get("kty")
     if kty == "RSA":
@@ -540,15 +596,18 @@ def verify_id_token(cfg: OidcConfig, id_token: str, nonce: str,
     Conditional Access policy in Entra (see docs/entra-sso.md); Entra omits the
     ``amr`` claim when MFA is session-satisfied, so an in-token check would falsely
     reject valid logins."""
+    # Read the header without verifying, to find the key id.
     try:
         unverified_header = jwt.get_unverified_header(id_token)
     except jwt.PyJWTError as e:
         raise OidcError(f"malformed id_token: {e}") from e
+    # Prefer keys matching the kid; otherwise try them all.
     kid = unverified_header.get("kid")
     keys = [_jwk_to_key(k) for k in jwks_keys if k.get("kid") == kid] or \
            [_jwk_to_key(k) for k in jwks_keys]
     if not keys:
         raise OidcError("no matching JWKS key for id_token kid")
+    # Try each candidate key until one verifies the token.
     last_err: Exception | None = None
     claims = None
     for key in keys:
@@ -581,6 +640,7 @@ def extract_member_groups(claims: dict) -> list:
     ``_claim_names``/``_claim_sources`` pointer to a Graph endpoint instead.
     The lab is small so ``groups`` is present; the Graph fallback is a
     real-but-edge path handled by :func:`fetch_member_groups_via_graph`."""
+    # Return the groups claim as strings, or an empty list.
     g = claims.get("groups")
     if isinstance(g, list):
         return [str(x) for x in g]
@@ -591,6 +651,7 @@ async def fetch_member_groups_via_graph(access_token: str,
                                         http: httpx.AsyncClient | None = None) -> list:
     """Fall back to Microsoft Graph ``/me/transitiveMemberOf`` when the
     ``groups`` claim overflows (>200 groups). Returns group object IDs."""
+    # Ask Graph for the signed-in user's groups.
     async with shared_client(http, 15.0) as client:
         resp = await client.get(
             "https://graph.microsoft.com/v1.0/me/transitiveMemberOf?$select=id",
@@ -625,6 +686,8 @@ def forget_app_token(cfg: OidcConfig, scope: str) -> None:
 
 
 def _app_token_key(cfg: OidcConfig, scope: str) -> tuple:
+    """Cache key for an app token; includes the cert mtime so a new cert busts the cache."""
+    # Read the cert file's modification time, if the file exists.
     try:
         cert_mtime = os.path.getmtime(cfg.cert_path) if cfg.cert_path else None
     except OSError:
@@ -633,20 +696,26 @@ def _app_token_key(cfg: OidcConfig, scope: str) -> tuple:
 
 
 def _app_token_lock(key: tuple):
+    """Get (or create) the asyncio lock serialising mints for ``key`` on this loop."""
+    # Lazily import asyncio and key the lock by the running loop.
     import asyncio
     # asyncio locks belong to one event loop; key by loop so tests (a new loop
     # per test) never share a lock across loops.
     lock_key = (key, asyncio.get_running_loop())
+    # Create the lock the first time this key is used on this loop.
     if lock_key not in _app_token_locks:
         _app_token_locks[lock_key] = asyncio.Lock()
     return _app_token_locks[lock_key]
 
 
 def _cached_app_token(key: tuple, max_age: float | None) -> str | None:
+    """Return the cached token for ``key`` if present, unexpired and young enough."""
+    # No cached entry means no token.
     entry = _app_tokens.get(key)
     if not entry:
         return None
     token, minted_at, expires_at = entry
+    # Reject expired tokens and, if ``max_age`` is set, tokens older than that.
     now = time.time()
     if now >= expires_at:
         return None
@@ -669,15 +738,19 @@ async def fetch_app_token(cfg: OidcConfig, scope: str,
     for the same scope share one mint. ``max_age`` (seconds) forces a fresh mint
     when the cached token is older than that — the health check uses it so a
     broken cert or app registration still shows red within a few minutes."""
+    # Fast path: a usable cached token needs no lock.
     key = _app_token_key(cfg, scope)
     token = _cached_app_token(key, max_age)
     if token:
         return token
+    # Mint under the lock so concurrent callers share one request.
     async with _app_token_lock(key):
         # Another caller may have minted while we waited for the lock.
         token = _cached_app_token(key, max_age)
+        # Another caller may have just cached one.
         if token:
             return token
+        # Mint and cache, expiring a little before Entra's stated lifetime.
         token, expires_in = await _mint_app_token(cfg, scope, http)
         now = time.time()
         _app_tokens[key] = (token, now, now + max(0, expires_in - _APP_TOKEN_EXPIRY_MARGIN_S))
@@ -687,6 +760,7 @@ async def fetch_app_token(cfg: OidcConfig, scope: str,
 async def _mint_app_token(cfg: OidcConfig, scope: str,
                           http: httpx.AsyncClient | None) -> tuple:
     """Request a new app token from Entra. Returns ``(token, expires_in_seconds)``."""
+    # Client-credentials request authenticated by the signed assertion.
     token_endpoint = f"https://login.microsoftonline.com/{cfg.tenant_id}/oauth2/v2.0/token"
     data = {
         "grant_type": "client_credentials",
@@ -695,14 +769,17 @@ async def _mint_app_token(cfg: OidcConfig, scope: str,
         "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
         "client_assertion": build_client_assertion(cfg, token_endpoint),
     }
+    # POST the request and fail on any non-200 reply.
     async with shared_client(http, 15.0) as client:
         resp = await client.post(token_endpoint, data=data)
     if resp.status_code != 200:
         raise OidcError(f"app-token failed ({scope}): HTTP {resp.status_code} — "
                         f"{resp.text[:200]}")
+    # The response must contain a token.
     tok = resp.json().get("access_token")
     if not tok:
         raise OidcError("app-token response had no access_token")
+    # Parse the lifetime; unknown means zero (do not cache).
     try:
         expires_in = int(resp.json().get("expires_in") or 0)
     except (TypeError, ValueError):
@@ -715,6 +792,7 @@ async def fetch_app_graph_token(cfg: OidcConfig,
                                 max_age: float | None = None) -> str:
     """Microsoft Graph app-only token (see :func:`fetch_app_token`). Requires the
     app to hold a Graph **application** permission (e.g. ``Group.Read.All``)."""
+    # Request a Graph-scoped app token.
     return await fetch_app_token(cfg, "https://graph.microsoft.com/.default",
                                  http=http, max_age=max_age)
 
@@ -727,15 +805,18 @@ async def fetch_directory_groups(cfg: OidcConfig,
     :func:`fetch_app_graph_token`) and pages through ``@odata.nextLink`` up to
     ``limit``. Object IDs here are exactly what a permission group's
     ``ldap_group`` field matches at login."""
+    # Get an app token and page through the groups list.
     token = await fetch_app_graph_token(cfg, http=http)
     out: list = []
     url = "https://graph.microsoft.com/v1.0/groups?$select=id,displayName&$top=999"
+    # Request each page with the app token; any non-200 reply fails.
     async with shared_client(http, 20.0) as client:
         while url:
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
             if resp.status_code != 200:
                 raise OidcError(f"Graph groups list failed: HTTP {resp.status_code} — "
                                 f"{resp.text[:200]}")
+            # Collect id/displayName pairs, stopping at ``limit``.
             body = resp.json()
             for v in body.get("value", []):
                 gid = v.get("id")
@@ -743,6 +824,7 @@ async def fetch_directory_groups(cfg: OidcConfig,
                     out.append({"id": gid, "displayName": v.get("displayName") or gid})
                     if len(out) >= limit:
                         return out
+            # Follow the next page, if any.
             url = body.get("@odata.nextLink")
     return out
 
@@ -756,16 +838,19 @@ async def fetch_user_groups_via_app(cfg: OidcConfig, oid: str,
     claim — which is Entra's DEFAULT until an admin adds the groups claim in the
     app's Token Configuration. Unlike ``/me/transitiveMemberOf`` it doesn't depend
     on the user's token holding a group scope. Pages ``@odata.nextLink``."""
+    # Get an app token and page through the user's transitive groups.
     token = await fetch_app_graph_token(cfg, http=http)
     out: list = []
     url = (f"https://graph.microsoft.com/v1.0/users/{oid}"
            f"/transitiveMemberOf/microsoft.graph.group?$select=id&$top=999")
+    # Request each page with the app token; any non-200 reply fails.
     async with shared_client(http, 15.0) as client:
         while url:
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
             if resp.status_code != 200:
                 raise OidcError(f"Graph user-groups fetch failed: HTTP {resp.status_code} — "
                                 f"{resp.text[:200]}")
+            # Collect group ids and follow the next page.
             body = resp.json()
             out.extend(str(v["id"]) for v in body.get("value", []) if v.get("id"))
             url = body.get("@odata.nextLink")
@@ -805,9 +890,11 @@ def provision_or_sync_entra_user(hub, oid: str, email: str, name: str,
     # group's display name instead of its object ID, or the wrong group.
     # allowed_group may be a comma/space-separated LIST of Entra group object IDs;
     # membership in ANY one of them grants login.
+    # Split allowed_group into a list and refuse users in none of them.
     import re as _re_grp
     allowed = [g for g in _re_grp.split(r"[\s,]+", str(allowed_group or "")) if g.strip()]
     if allowed and not (set(member_of or []) & set(allowed)):
+        # Distinguish "no groups read at all" from "groups read but none allowed".
         if not member_of:
             raise OidcError(
                 "Entra user is not a member of the allowed group(s) — the hub read "
@@ -822,7 +909,9 @@ def provision_or_sync_entra_user(hub, oid: str, email: str, name: str,
             "entry must be the group's OBJECT ID (a UUID), not its display name."
         )
 
+    # Derive LM groups and tenants from the membership.
     group_ids, tenant_ids = groups_and_tenants_for_membership(hub, member_of)
+    # Look up the user's existing record.
     users = hub.state.system_state.setdefault("users", {})
     now = time.time()
     existing = users.get(oid)
@@ -839,6 +928,7 @@ def provision_or_sync_entra_user(hub, oid: str, email: str, name: str,
             "name": name,
             "updated_at": now,
         }
+        # Store the new record, mark state for saving, log and return it.
         users[oid] = record
         hub.state._mark_dirty()
         logger.info("Entra auto-provisioned user %s (groups=%s tenants=%s)",
@@ -847,12 +937,14 @@ def provision_or_sync_entra_user(hub, oid: str, email: str, name: str,
     # Re-sync: replace the directory-derived sets if they changed.
     changed = (existing.get("groups", []) != group_ids
                or existing.get("tenants", []) != tenant_ids)
+    # Update the record with the latest directory data.
     existing["groups"] = group_ids
     existing["tenants"] = tenant_ids
     existing["email"] = email or existing.get("email", "")
     existing["name"] = name or existing.get("name", "")
     existing["auth_type"] = "entra"
     existing["updated_at"] = now
+    # Persist and invalidate live sessions when access changed.
     if changed:
         hub.state._mark_dirty()
         # Reuse the hub's session-invalidation helper so a dropped group/tenant
@@ -872,10 +964,12 @@ def build_user_data(hub, user_record: dict, user_id: str) -> dict:
     same shape ``routes/auth.local_login`` builds for a local user). Entra
     users are never protected and never carry a tenant_id beyond their
     derived set."""
+    # Compute effective permissions and gather the fields the session needs.
     perms = resolve_effective_permissions(hub, user_record)
     tenants = list(user_record.get("tenants", []) or [])
     name = str(user_record.get("name") or "")
     email = str(user_record.get("email") or "")
+    # Session data in the shape local logins use.
     return {
         "user_id": user_id,           # the Entra oid GUID (stable key)
         "auth_type": "entra",

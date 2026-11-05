@@ -32,10 +32,12 @@ future change that reintroduces one fails a test instead of shipping.
 """
 from __future__ import annotations
 
+# logging reports refusals; re parses repo URLs; type hints only.
 import logging
 import re
 from typing import Optional, Tuple
 
+# Log to the hub's logger.
 logger = logging.getLogger("Hub")
 
 # owner/name pairs that no install may fetch, lowercased. Keyed by name only
@@ -78,17 +80,21 @@ def parse_repo(url: str) -> Optional[Tuple[str, str]]:
     have some other reason to distrust it. A self-hosted git URL is simply not
     what this policy is about.
     """
+    # Blank input is not a repo.
     s = (url or "").strip()
     if not s:
         return None
+    # Match the URL; anything not shaped like a GitHub repo returns None.
     m = _GITHUB_RE.match(s)
     if not m:
         return None
+    # Lowercase both halves so case cannot defeat the match.
     return m.group("owner").lower(), m.group("name").lower()
 
 
 def is_forbidden(url: str) -> bool:
     """Whether ``url`` names a repository no install may fetch."""
+    # Parse, then check membership; unparseable URLs are not forbidden.
     parsed = parse_repo(url)
     return parsed in FORBIDDEN_REPOS if parsed else False
 
@@ -100,8 +106,10 @@ def refuse_reason(url: str) -> str:
     something unreasonable -- they are trying to get threat content -- and a
     bare "refused" would leave them with no idea that a supported path exists.
     """
+    # Allowed URLs get no reason.
     if not is_forbidden(url):
         return ""
+    # Point the operator at the subscription instead.
     return ("this repository is not distributed as source; its content is "
             "delivered as a data subscription instead — enable the threat "
             "monitor subscription in Setup › Security")
@@ -114,8 +122,10 @@ def guard(url: str, *, context: str) -> bool:
     this is waiting for content that will never arrive, and a silent no-op
     would look exactly like a repository that is merely empty.
     """
+    # Allowed: let the caller continue.
     if not is_forbidden(url):
         return False
+    # Forbidden: log why and tell the caller to stop.
     logger.warning("%s: refusing to fetch %s — %s", context, url,
                    refuse_reason(url))
     return True

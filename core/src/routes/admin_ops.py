@@ -24,14 +24,22 @@ These are privileged, side-effecting operations, so they are intentionally NOT
 session/cookie gated (no CSRF surface — there's no browser session) and NOT
 reachable off-box.
 """
+# asyncio: concurrent spoke fan-out and timeouts used by the ops routes.
 import asyncio
+# os: file paths, env vars and low-level 0600 file writes for the token.
 import os
+# re: strict validation of diagnostic-bundle arguments.
 import re
+# time: timestamps in replies and elapsed-time measurement.
 import time
+# stat: permission bit constants for chmod'ing the token file to 0600.
 import stat
+# secrets: random token minting and constant-time token comparison.
 import secrets
 
+# Hub HTTP error type, request object and shared logger.
 from api import HTTPException, Request, logger
+# Helper that unwraps a spoke's relayed reply envelope.
 from access import unwrap_spoke
 
 # Argument-shape guard for the diagnostic bundle's unit / repo / log / lines
@@ -59,7 +67,9 @@ _DIAG_BUNDLE = (
 # may report. Nothing else — and X-Forwarded-* is ignored on purpose.
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 
+# Request header callers put the admin-ops token in (lower-case, as Starlette stores it).
 _ADMIN_TOKEN_HEADER = "x-lm-admin-token"
+# Environment variable an operator can set to inject a known token instead of minting one.
 _ADMIN_TOKEN_ENV = "LM_ADMIN_OPS_TOKEN"
 
 # Sentinel so "tenant_id absent" is distinguishable from an explicit null/"".
@@ -67,6 +77,8 @@ _UNSET = object()
 
 
 def _token_path(hub) -> str:
+    """Return the on-disk path of the persisted admin-ops token file."""
+    # The token lives in the hub data dir, which only the hub service user / root can read.
     return os.path.join(hub.state.data_dir, "admin_ops_token")
 
 
@@ -77,33 +89,43 @@ def _load_or_mint_token(hub) -> str:
     known token); otherwise we read the on-disk token, or mint a new random one
     and write it 0600 so only the hub service user / root can read it. Only the
     PATH is logged, never the value."""
+    # An explicit env-var token always wins over the on-disk one.
     env = os.environ.get(_ADMIN_TOKEN_ENV)
     if env:
         return env.strip()
+    # Otherwise try to reuse the token already persisted on disk.
     path = _token_path(hub)
     try:
         with open(path, "r") as fh:
             tok = fh.read().strip()
+        # Only accept a non-empty token; an empty file falls through to re-minting.
         if tok:
             return tok
+    # No token file yet: first run, so mint one below.
     except FileNotFoundError:
         pass
     except Exception:  # noqa: BLE001 — unreadable/corrupt → re-mint below
         logger.warning("admin_ops: existing token at %s unreadable — re-minting", path)
+    # Mint a fresh 32-byte URL-safe random token.
     tok = secrets.token_urlsafe(32)
     try:
+        # Make sure the data dir exists before writing the token file into it.
         os.makedirs(os.path.dirname(path), exist_ok=True)
         # Write with 0600 from the start (open + restrictive mode), then chmod
         # defensively in case a prior umask widened it.
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Write the token bytes, always closing the file descriptor even if the write fails.
         try:
             os.write(fd, tok.encode())
         finally:
             os.close(fd)
+        # Force owner read/write only, regardless of umask.
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
         logger.warning("admin_ops: minted new loopback admin-ops token at %s (0600)", path)
+    # Could not persist (e.g. read-only disk): keep the token in memory so the hub still works.
     except Exception:  # noqa: BLE001
         logger.exception("admin_ops: could not persist token to %s — using in-memory only", path)
+    # Hand back the token (env, on-disk, or freshly minted).
     return tok
 
 
@@ -124,62 +146,81 @@ def apply_cs_mode_entry(entry, enabled, tenant_id=_UNSET):
     explicitly clear.
 
     Pure: returns a NEW entry dict and never mutates the input."""
+    # Copy the entry and its client_simulation sub-dict so the input is never mutated.
     new_entry = dict(entry or {})
     cs_cfg = dict(new_entry.get("client_simulation") or {})
+    # Always apply the requested on/off state.
     cs_cfg["enabled"] = bool(enabled)
+    # Only touch the tenant when the caller explicitly passed one (None/"" means clear).
     if tenant_id is not _UNSET:
+        # Normalise the tenant to a stripped string, or None when blank/None.
         tenant_in = (str(tenant_id).strip() or None) if tenant_id is not None else None
+        # Store the tenant and pin it when non-empty so tenant inheritance can't override it.
         cs_cfg["tenant_id"] = tenant_in
         cs_cfg["tenant_pinned"] = bool(tenant_in)
+    # Put the updated CS config back on the copied entry and return it.
     new_entry["client_simulation"] = cs_cfg
     return new_entry
 
 
 def _peer_is_loopback(request: Request) -> bool:
+    """Return True when the request's TCP peer is a loopback address."""
+    # Use the real TCP peer (no proxy in front); X-Forwarded-* is deliberately ignored.
     client = request.client
     host = client.host if client else None
     return host in _LOOPBACK_HOSTS
 
 
 def register(app, hub, ctx):
+    """Register the loopback-only ``/admin/ops/*`` routes on the Hub app."""
     # Mint/load once at registration so the token exists on disk immediately
     # (an operator can `cat` it right after the hub starts).
     _token = _load_or_mint_token(hub)
 
     def _guard(request: Request):
         """Both gates: loopback peer AND a matching root-minted token."""
+        # Gate 1: reject any caller that isn't on the hub box itself, logging who tried.
         if not _peer_is_loopback(request):
             peer = request.client.host if request.client else "unknown"
             logger.warning("admin_ops: rejected non-loopback peer %s for %s",
                            peer, request.url.path)
             raise HTTPException(status_code=403, detail="loopback only")
+        # Gate 2: require the admin token, compared in constant time to avoid timing leaks.
         supplied = request.headers.get(_ADMIN_TOKEN_HEADER, "")
         if not supplied or not secrets.compare_digest(supplied, _token):
             raise HTTPException(status_code=403, detail="invalid admin token")
 
+    # Simple liveness/auth probe.
     @app.get("/admin/ops/ping")
     async def admin_ops_ping(request: Request):
         """Liveness + auth check. Confirms both gates pass and the hub is up."""
+        # Check both gates, then report the hub's time and process id.
         _guard(request)
         return {"status": "ok", "time": time.time(),
                 "hub_pid": os.getpid()}
 
+    # Hub-side connection telemetry (no spoke round-trips).
     @app.get("/admin/ops/connections")
     async def admin_ops_connections(request: Request):
         """Hub-side connection telemetry (no spoke fan-out, always instant):
         which spokes hold a live WebSocket right now, plus the approved-module
         map and each spoke's module type. Enough to see whether the agent's
         owning spoke is currently connected."""
+        # Check both gates; list spokes with a live WebSocket, sorted for stable output.
         _guard(request)
         active = sorted(hub.active_connections.keys())
+        # Copy the approved-modules map and the module metadata from hub state.
         approved = dict(hub.state.system_state.get("approved_modules", {}) or {})
         md = hub.state.system_state.get("module_metadata", {}) or {}
+        # Map each spoke id to its module type (e.g. hypervisor, simulation).
         spoke_types = {sid: (m or {}).get("module_type") for sid, m in md.items()}
+        # Return the connection snapshot.
         return {"active_connections": active,
                 "active_count": len(active),
                 "approved_modules": approved,
                 "spoke_module_types": spoke_types}
 
+    # Live agent roster, the same data the WebUI Agents tile shows.
     @app.get("/admin/ops/agents")
     async def admin_ops_agents(request: Request):
         """Live agent roster (connected + pending + offline-relayed) — the same
@@ -188,21 +229,27 @@ def register(app, hub, ctx):
         _guard(request)
         # Imported lazily to avoid any import-order coupling at module load.
         from routes.pxmx import _maybe_refresh_agents, _offline_relay_agents
+        # Agents live on hypervisor and simulation spokes; dedupe while keeping order.
         agent_spokes = list(dict.fromkeys(
             hub.get_all_spokes_by_type("hypervisor") + hub.get_all_spokes_by_type("simulation")
         ))
+        # No agent-capable spokes: return an empty roster marked as not connected.
         if not agent_spokes:
             live = {"agents": [], "pending_agents": [], "spoke_connected": False}
+        # Otherwise ask the spokes for their agents (forced refresh); fall back to empty lists.
         else:
             live = await _maybe_refresh_agents(hub, agent_spokes, force=True) \
                 or {"agents": [], "pending_agents": [], "spoke_connected": True}
+        # Collect the ids of every live or pending agent.
         live_ids = {a.get("agent_id") for a in live.get("agents", []) if a.get("agent_id")}
         live_ids |= {a.get("agent_id") for a in live.get("pending_agents", []) if a.get("agent_id")}
+        # Add relayed agents that are known but currently offline, plus the spokes queried.
         out = dict(live)
         out["offline_agents"] = _offline_relay_agents(hub, live_ids)
         out["agent_spokes"] = agent_spokes
         return out
 
+    # Force-unload a role from a generic agent (bypasses the WebUI tenant guard).
     @app.post("/admin/ops/unload-role")
     async def admin_ops_unload_role(request: Request):
         """Force-unload a role from a generic agent via loopback, bypassing
@@ -214,27 +261,33 @@ def register(app, hub, ctx):
         to roles the caller's own tenant loaded). Relays the same UNLOAD_ROLE
         RPC the WebUI uses; no new spoke-side surface. Body:
         {"spoke_id": ..., "role": ...}."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Pull the target spoke and the role name; both are required.
         spoke_id = (body or {}).get("spoke_id")
         role = (body or {}).get("role")
         if not spoke_id or not role:
             raise HTTPException(status_code=400, detail="spoke_id and role are required")
+        # The spoke must currently be connected to receive the RPC.
         if hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        # Relay UNLOAD_ROLE to the spoke; any failure is logged and returned as a 500.
         try:
             result = await hub.request_response(spoke_id, "UNLOAD_ROLE",
                                                 {"role": role}, timeout=60.0)
         except Exception as e:
             logger.exception("admin_ops: unload-role failed for %s/%s", spoke_id, role)
             raise HTTPException(status_code=500, detail=str(e))
+        # Log the privileged action (without secrets) and return the spoke's result.
         logger.warning("admin_ops: unload-role driven via loopback for spoke=%s role=%s",
                        spoke_id, role)
         return {"status": "ok", "target": spoke_id, "role": role, "result": result}
 
+    # Load role(s) on a generic agent from loopback.
     @app.post("/admin/ops/load-role")
     async def admin_ops_load_role(request: Request):
         """Load role(s) on a generic agent via loopback (the counterpart of
@@ -242,22 +295,28 @@ def register(app, hub, ctx):
         Uses the same dispatch as the WebUI route. Body:
         {"spoke_id": ..., "role": ..., "config": {...}} or {"spoke_id": ...,
         "roles": [{"role": ..., "config": {...}}]}."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Require a spoke id plus either a single role or a list of roles.
         spoke_id = (body or {}).get("spoke_id")
         if not spoke_id or not ((body or {}).get("role") or (body or {}).get("roles")):
             raise HTTPException(status_code=400, detail="spoke_id and role(s) are required")
+        # The spoke must currently be connected.
         if hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        # Reuse the WebUI's preflight checks and role-loading logic (imported lazily).
         from routes.agents import _agent_role_preflight, _load_roles_impl
         _agent_role_preflight(hub, spoke_id)
         result = await _load_roles_impl(hub, spoke_id, body)
+        # Log the privileged action and return the spoke's result.
         logger.warning("admin_ops: load-role driven via loopback for spoke=%s", spoke_id)
         return {"status": "ok", "target": spoke_id, "result": result}
 
+    # Uninstall (purge) a deploy role from a generic agent from loopback.
     @app.post("/admin/ops/uninstall-role")
     async def admin_ops_uninstall_role(request: Request):
         """Uninstall a deploy role from a generic agent via loopback.
@@ -269,27 +328,33 @@ def register(app, hub, ctx):
         packages, LM-authored sidecar units and config/state trees so a
         decommissioned node stops advertising a role it no longer runs.
         Body: {"spoke_id": ..., "role": ...}."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Pull the target spoke and the role name; both are required.
         spoke_id = (body or {}).get("spoke_id")
         role = (body or {}).get("role")
         if not spoke_id or not role:
             raise HTTPException(status_code=400, detail="spoke_id and role are required")
+        # The spoke must currently be connected.
         if hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        # Relay UNINSTALL_ROLE; the long 21-minute timeout covers slow package purges.
         try:
             result = await hub.request_response(spoke_id, "UNINSTALL_ROLE",
                                                 {"role": role}, timeout=1260.0)
         except Exception as e:
             logger.exception("admin_ops: uninstall-role failed for %s/%s", spoke_id, role)
             raise HTTPException(status_code=500, detail=str(e))
+        # Log the privileged action and return the spoke's result.
         logger.warning("admin_ops: uninstall-role driven via loopback for spoke=%s role=%s",
                        spoke_id, role)
         return {"status": "ok", "target": spoke_id, "role": role, "result": result}
 
+    # Read-only view of the role data the WebUI draws for an agent.
     @app.post("/admin/ops/agent-roles")
     async def admin_ops_agent_roles(request: Request):
         """Show exactly what the WebUI's role views see for a generic agent.
@@ -306,20 +371,24 @@ def register(app, hub, ctx):
 
         Strictly read-only: only GET_AVAILABLE_ROLES and GET_DEPLOY_STATUS are
         ever sent, so this adds no mutation surface. Body: {"spoke_id": ...}."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # A connected spoke id is required.
         spoke_id = (body or {}).get("spoke_id")
         if not spoke_id:
             raise HTTPException(status_code=400, detail="spoke_id is required")
         if hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        # Start the reply, then send each of the two read-only role RPCs.
         out = {"status": "ok", "target": spoke_id}
         for cmd, key in (("GET_AVAILABLE_ROLES", "roles"),
                          ("GET_DEPLOY_STATUS", "deploy_status")):
             try:
+                # Ask the agent, unwrapping the payload envelope when the reply is a dict.
                 result = await hub.request_response(spoke_id, cmd, {}, timeout=30.0)
                 data = result.get("payload", {}).get("data", result) \
                     if isinstance(result, dict) else result
@@ -327,7 +396,9 @@ def register(app, hub, ctx):
             except Exception as e:  # one command failing must not hide the other
                 out[key] = {"error": str(e)}
         # Mirror the two UI derivations so a disagreement is visible directly.
+        # Use the roles reply only if it came back as a dict.
         roles = out.get("roles") or {}
+        # Summarise the hosted (active) roles and the deploy roles as the UI shows them.
         if isinstance(roles, dict):
             out["ui_view"] = {
                 "hosted_active": [r.get("role") for r in (roles.get("active") or [])
@@ -335,58 +406,74 @@ def register(app, hub, ctx):
                 "installed_deploy_roles": roles.get("installed_deploy_roles"),
                 "active_deploy_roles": roles.get("active_deploy_roles"),
             }
+        # Add what the hub itself has recorded as assigned to this agent, for comparison.
         out["hub_recorded_roles"] = hub.agent_assigned_roles(spoke_id)
         return out
 
+    # Drive the monitoring spoke (status / hosts / sync / rebuild / config) from loopback.
     @app.post("/admin/ops/monitoring")
     async def admin_ops_monitoring(request: Request):
         """Drive the monitoring spoke from a hub shell (status / sync / rebuild).
         Body: {"command": "MON_STATUS"|"MON_HOSTS"|"MON_SYNC"|"MON_REBUILD", "dry_run": bool,
         "devices": [...]?}. Without ``devices`` the list is built from the hub's
         nw_devices inventory ({tenant, name, type, ip, snmp})."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Normalise the command (default MON_STATUS) and allow only the known commands.
         cmd = str((body or {}).get("command") or "MON_STATUS").upper()
         if cmd not in ("MON_STATUS", "MON_HOSTS", "MON_SYNC", "MON_REBUILD", "UPDATE_CONFIG"):
             raise HTTPException(status_code=400, detail="unsupported monitoring command")
+        # Find a connected monitoring spoke to send the command to.
         sid = hub.get_spoke_by_type("monitoring")
         if not sid:
             raise HTTPException(status_code=503, detail="no connected monitoring spoke")
+        # Payload sent to the spoke; empty for a plain status request.
         payload = {}
+        # UPDATE_CONFIG: store and push the supplied monitoring config instead of an RPC.
         if cmd == "UPDATE_CONFIG":
             payload = dict((body or {}).get("config") or {})
             # Persist so the hub re-pushes it on every reconnect/restart.
             hub.state.update_global_config({"monitoring": payload})
             await hub.push_config_to_spoke(sid)
             return {"status": "ok", "spoke": sid, "result": "config stored and pushed"}
+        # Host/sync/rebuild need a device list: use the caller's or build it from inventory.
         elif cmd != "MON_STATUS":
             devices = (body or {}).get("devices")
             if devices is None:
                 from routes.monitoring import inventory_devices
                 devices = await inventory_devices(hub)
+            # Send the device list along with the dry-run flag.
             payload = {"devices": devices, "dry_run": bool((body or {}).get("dry_run"))}
+        # Relay the command (5-minute timeout for big syncs); failures become a 500.
         try:
             res = await hub.request_response(sid, cmd, payload, timeout=300.0)
         except Exception as e:
             logger.exception("admin_ops: monitoring %s failed", cmd)
             raise HTTPException(status_code=500, detail=str(e))
+        # Log the action with the device count, then return the spoke's result.
         logger.warning("admin_ops: monitoring %s driven via loopback (%d devices)", cmd,
                        len(payload.get("devices", []) if cmd != "UPDATE_CONFIG" else []))
         return {"status": "ok", "spoke": sid, "result": res}
 
+    # Check SSH/SNMP vault credentials against a tenant's devices.
     @app.post("/admin/ops/nw-verify")
     async def admin_ops_nw_verify(request: Request):
         """Probe a tenant's known devices with SSH and SNMP credentials from the
         vault. Body: {"tenant": "default", "apply": bool}."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Lazily import the verifier to avoid import-order coupling.
         from routes.monitoring import verify_credentials
+        # Run the check for the tenant (default "default"); apply=True saves what works.
+        # Any failure is logged and surfaced as a 500.
         try:
             return await verify_credentials(hub, str((body or {}).get("tenant") or "default"),
                                             bool((body or {}).get("apply")))
@@ -394,18 +481,23 @@ def register(app, hub, ctx):
             logger.exception("admin_ops: nw-verify failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    # Poll one network device now, same as the WebUI "POLL NOW" button.
     @app.post("/admin/ops/nw-poll")
     async def admin_ops_nw_poll(request: Request):
         """POLL NOW for one network device (same path as the WebUI button).
         Body: {"device_id": "..."}. Returns status + device_info + errors."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # A device id is required.
         device_id = str((body or {}).get("device_id") or "")
         if not device_id:
             raise HTTPException(status_code=400, detail="device_id required")
+        # Poll the device and, if we got a result dict, store it in the network cache.
+        # Poll failures are logged and surfaced as a 500.
         try:
             res = await hub.poll_nw_device(device_id)
             if isinstance(res, dict):
@@ -413,63 +505,80 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.exception("admin_ops: nw-poll failed")
             raise HTTPException(status_code=500, detail=str(e))
+        # Return just the summary fields the operator cares about.
         return {k: (res or {}).get(k) for k in
                 ("status", "reachable", "device_info", "netbox_push", "errors", "message")}
 
+    # Merge duplicate network-device rows that are the same hardware.
     @app.post("/admin/ops/nw-dedupe")
     async def admin_ops_nw_dedupe(request: Request):
         """Merge network-device rows that are the same box (same path as Setup →
         Module Management → Merge duplicates). Body {"apply": bool}; default dry run."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Dry run unless the caller explicitly passes apply=true.
         return await hub.merge_nw_hardware_duplicates(bool((body or {}).get("apply")))
 
+    # Remove network devices from the LM fleet.
     @app.post("/admin/ops/nw-delete")
     async def admin_ops_nw_delete(request: Request):
         """Remove network devices from the LM fleet (same effect as the WebUI
         delete). Body: {"device_ids": [...]}. NetBox/Zabbix records are left to
         their own sync. Returns the removed names and re-pushed spokes."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # The set of device ids to delete (empty/falsy ids dropped); at least one is required.
         ids = {str(x) for x in ((body or {}).get("device_ids") or []) if x}
         if not ids:
             raise HTTPException(status_code=400, detail="device_ids required")
+        # Load the global device list from hub state.
         gc = hub.state.system_state.get("global_config", {}) or {}
         devices = gc.get("nw_devices", []) or []
+        # Remember the devices being removed, then remove them in place and mark state for saving.
         victims = [d for d in devices if isinstance(d, dict) and d.get("id") in ids]
         devices[:] = [d for d in devices if not (isinstance(d, dict) and d.get("id") in ids)]
         hub.state._mark_dirty()
+        # Spokes that owned a removed device need their device list re-pushed.
         spokes = {d.get("spoke_id") for d in victims if d.get("spoke_id")}
         pushed = []
+        # Re-push each affected spoke; a failed push is logged but doesn't fail the delete.
         for sid in spokes:
             try:
                 if await hub.nw_push_fleet(sid):
                     pushed.append(sid)
             except Exception as e:  # noqa: BLE001
                 logger.warning("admin_ops: nw-delete re-push %s failed: %s", sid, e)
+        # Log what was removed and report it plus which spokes were re-pushed.
         logger.warning("admin_ops: nw-delete removed %s", [d.get("name") for d in victims])
         return {"removed": [{"id": d.get("id"), "name": d.get("name"),
                              "address": d.get("address")} for d in victims],
                 "pushed": pushed}
 
+    # Run a tenant's saved-config network scan from loopback.
     @app.post("/admin/ops/nw-scan")
     async def admin_ops_nw_scan(request: Request):
         """Run the tenant's saved-config network scan (adds identified devices
         unless the schedule is preview-only or auto_add is off). Body: {"tenant": "default", optional
         "targets": [ips] to scan only those, "dry_run": bool to override the
         schedule's preview flag}. Detail is in the hub log ("nw scan tenant=...")."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # The tenant whose scan schedule to run (default "default").
         tenant = str((body or {}).get("tenant") or "default")
+        # Run the scan with optional explicit targets and a dry-run override
+        # (None keeps the schedule's own setting); failures are logged and returned as a 500.
         try:
             targets = [str(t) for t in ((body or {}).get("targets") or []) if t]
             dry_run = (body or {}).get("dry_run")
@@ -479,6 +588,8 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.exception("admin_ops: nw-scan failed")
             raise HTTPException(status_code=500, detail=str(e))
+        # Return the summary fields, trimming each listed device to a few key fields,
+        # merged with the moved-device lists.
         return {k: (res.get(k) if not isinstance(res.get(k), list) else
                     [{kk: x.get(kk) for kk in ("address", "hostname", "object_type", "method")}
                      for x in res[k] if isinstance(x, dict)])
@@ -487,23 +598,30 @@ def register(app, hub, ctx):
             # Devices moved into this tenant (verified as the same hardware).
             k: res.get(k) or [] for k in ("moved", "move_preview")}
 
+    # Show live LLDP neighbours for a tenant's devices.
     @app.post("/admin/ops/nw-neighbors")
     async def admin_ops_nw_neighbors(request: Request):
         """Live LLDP neighbours of a tenant's devices (what the topology map is
         drawn from). Body: {"tenant": "default"}."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Tenant to inspect, the access helpers, the global config and the result map.
         tenant = str((body or {}).get("tenant") or "default")
         import access
         gc = hub.state.system_state.get("global_config", {})
         out = {}
+        # Check every network device in the global config.
         for d in gc.get("nw_devices", []) or []:
+            # Skip devices of other tenants or without an id / owning spoke.
             if not isinstance(d, dict) or (d.get("tenant_id") or "default") != tenant \
                     or not d.get("id") or not d.get("spoke_id"):
                 continue
+            # Ask the owning spoke for the device's LLDP neighbours, unwrap the reply, and keep
+            # at most 6 whose remote name contains "tor" (top-of-rack), values cut to 80 chars.
             try:
                 res = await hub.request_response(
                     d["spoke_id"], "NW_GET_LLDP_NEIGHBORS",
@@ -514,10 +632,13 @@ def register(app, hub, ctx):
                     {k: str(v)[:80] for k, v in r.items()}
                     for r in (rows or []) if isinstance(r, dict)
                     and "tor" in str(r.get("remote_name", "")).lower()][:6]
+            # A failing device is reported inline so the others still show.
             except Exception as e:
                 out[f"{d.get('name')}@{d.get('address')}"] = f"error: {e}"
+        # One entry per device, keyed "name@address".
         return out
 
+    # Turn Client Simulation mode on/off for a pxmx node.
     @app.post("/admin/ops/set-cs-mode")
     async def admin_ops_set_cs_mode(request: Request):
         """Turn a pxmx node's **Client Simulation mode** on/off via loopback,
@@ -542,17 +663,20 @@ def register(app, hub, ctx):
         Body: {"agent_id": ..., "enabled": true|false,
                "tenant_id": "lrb"}   # optional — omit to keep the current pin
         """
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Normalise the body and require both agent_id and enabled.
         body = body or {}
         agent_id = body.get("agent_id")
         if not agent_id:
             raise HTTPException(status_code=400, detail="agent_id is required")
         if "enabled" not in body:
             raise HTTPException(status_code=400, detail="enabled is required")
+        # Requested state; an omitted tenant_id means keep the existing pin (_UNSET).
         enabled = bool(body.get("enabled"))
         tenant_id = body["tenant_id"] if "tenant_id" in body else _UNSET
 
@@ -560,13 +684,17 @@ def register(app, hub, ctx):
         # routes/pxmx.py imports from this package's siblings at load time.
         from routes.pxmx import push_pxmx_agent_config, bust_pxmx_agents_cache
 
+        # Agent config store, this agent's primary key and a copy of its current entry.
         store = hub.state.system_state.setdefault("agent_config", {})
         agent_pk = hub._agent_primary_key(agent_id)
         before = dict(store.get(agent_pk, {}))
+        # Compute the merged entry, store it and mark state for saving.
         entry = apply_cs_mode_entry(before, enabled, tenant_id)
         store[agent_pk] = entry
         hub.state._mark_dirty()
 
+        # Push the new CS config to the agent; the change is already saved, so a push
+        # failure is reported as "persisted but push failed".
         cs_cfg = entry["client_simulation"]
         try:
             pushed, queued = await push_pxmx_agent_config(
@@ -574,8 +702,10 @@ def register(app, hub, ctx):
         except Exception as e:  # noqa: BLE001 — persisted already; report push failure
             logger.exception("admin_ops: set-cs-mode push failed for %s", agent_id)
             raise HTTPException(status_code=500, detail=f"persisted but push failed: {e}")
+        # Drop the cached agent list so the next read shows the new mode.
         bust_pxmx_agents_cache()
 
+        # Log the before/after state and return it with the push/queue outcome.
         before_cs = (before.get("client_simulation") or {})
         logger.warning("admin_ops: set-cs-mode via loopback agent=%s enabled=%s->%s tenant=%s",
                        agent_id, before_cs.get("enabled"), cs_cfg.get("enabled"),
@@ -587,6 +717,7 @@ def register(app, hub, ctx):
                           "tenant_id": cs_cfg.get("tenant_id")},
                 "pushed": pushed, "queued": queued}
 
+    # Force-dismiss a stuck deploy-role badge on an agent.
     @app.post("/admin/ops/clear-deploy-status")
     async def admin_ops_clear_deploy_status(request: Request):
         """Force-dismiss a stuck deploy-role badge (e.g. "NetBox Server:
@@ -604,27 +735,33 @@ def register(app, hub, ctx):
         deploy, or affect the durable ``installed_deploy_roles`` marker;
         re-loading the role starts a fresh status regardless. Body:
         {"spoke_id": ..., "role": ...}."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Pull the target spoke and the role name; both are required.
         spoke_id = (body or {}).get("spoke_id")
         role = (body or {}).get("role")
         if not spoke_id or not role:
             raise HTTPException(status_code=400, detail="spoke_id and role are required")
+        # The spoke must currently be connected.
         if hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        # Relay CLEAR_DEPLOY_STATUS (only forgets the in-memory status); failures become a 500.
         try:
             result = await hub.request_response(spoke_id, "CLEAR_DEPLOY_STATUS",
                                                 {"role": role}, timeout=30.0)
         except Exception as e:
             logger.exception("admin_ops: clear-deploy-status failed for %s/%s", spoke_id, role)
             raise HTTPException(status_code=500, detail=str(e))
+        # Log the privileged action and return the spoke's result.
         logger.warning("admin_ops: clear-deploy-status driven via loopback for spoke=%s role=%s",
                        spoke_id, role)
         return {"status": "ok", "target": spoke_id, "role": role, "result": result}
 
+    # Run (and self-heal) a DHCP module's Kea diagnostics from loopback.
     @app.post("/admin/ops/dhcp-diagnostics")
     async def admin_ops_dhcp_diagnostics(request: Request):
         """Run (and self-heal) a DHCP module's Kea diagnostics via loopback,
@@ -639,56 +776,68 @@ def register(app, hub, ctx):
         nothing). This route is the only way to force that self-heal to run
         immediately rather than waiting for the next time someone happens to
         open the diagnostics page. Body: {"spoke_id": ...}."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # A connected spoke id is required.
         spoke_id = (body or {}).get("spoke_id")
         if not spoke_id:
             raise HTTPException(status_code=400, detail="spoke_id is required")
         if hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        # Relay DHCP_DIAGNOSTICS (which also self-heals Kea); failures become a 500.
         try:
             result = await hub.request_response(spoke_id, "DHCP_DIAGNOSTICS", {}, timeout=30.0)
         except Exception as e:
             logger.exception("admin_ops: dhcp-diagnostics failed for %s", spoke_id)
             raise HTTPException(status_code=500, detail=str(e))
+        # Log the privileged action and return the spoke's result.
         logger.warning("admin_ops: dhcp-diagnostics driven via loopback for spoke=%s", spoke_id)
         return {"status": "ok", "target": spoke_id, "result": result}
 
+    # Run a DHCP packet trace (optionally with a live capture) from loopback.
     @app.post("/admin/ops/dhcp-packet-trace")
     async def admin_ops_dhcp_packet_trace(request: Request):
         """Loopback twin of ``POST /api/dhcp/packet-trace``: relay
         ``DHCP_PACKET_TRACE`` to a DHCP module (HA modules fan out to both Kea
         nodes). Body: ``{"spoke_id", "mac", "minutes", "capture_seconds"}``."""
+        # Check both gates, then read the JSON body; anything but a dict becomes {}.
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
         body = body if isinstance(body, dict) else {}
+        # A connected spoke id is required.
         spoke_id = body.get("spoke_id")
         if not spoke_id:
             raise HTTPException(status_code=400, detail="spoke_id is required")
         if hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        # Clamp the live-capture length to 0..60 s; an unparseable value disables capture.
         try:
             capture = max(0, min(int(float(body.get("capture_seconds") or 0)), 60))
         except (TypeError, ValueError):
             capture = 0
+        # Build the trace request: MAC filter (blank = all), log window in minutes, capture time.
         payload = {"mac": str(body.get("mac") or ""), "minutes": body.get("minutes", 30),
                    "capture_seconds": capture}
+        # Relay the trace, allowing the capture time plus 45 s; failures become a 500.
         try:
             result = await hub.request_response(spoke_id, "DHCP_PACKET_TRACE", payload,
                                                 timeout=capture + 45.0)
         except Exception as e:
             logger.exception("admin_ops: dhcp-packet-trace failed for %s", spoke_id)
             raise HTTPException(status_code=500, detail=str(e))
+        # Log the action (MAC "*" when unfiltered) and return the spoke's result.
         logger.warning("admin_ops: dhcp-packet-trace driven via loopback for spoke=%s mac=%s",
                        spoke_id, payload["mac"] or "*")
         return {"status": "ok", "target": spoke_id, "result": result}
 
+    # Approve a pending relayed node-agent, same logic as the WebUI button.
     @app.post("/admin/ops/approve-agent")
     async def admin_ops_approve_agent(request: Request):
         """Approve a pending relayed node-agent — identical logic to the WebUI
@@ -697,16 +846,20 @@ def register(app, hub, ctx):
         reconnect flap). Body: {"spoke_id": ..., "agent_id": ...}. ``spoke_id``
         is a hint; the real owner is resolved from the agent index and used if
         found. Idempotent — safe to retry."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # The agent id is required; the spoke id is only a hint.
         agent_id = (body or {}).get("agent_id")
         spoke_id = (body or {}).get("spoke_id")
         if not agent_id:
             raise HTTPException(status_code=400, detail="agent_id required")
+        # Reuse the WebUI's approval logic and spoke-list cache buster (imported lazily).
         from routes.setup import _perform_agent_approval, _bust_spokes_cache
+        # Approve; failures become a 500, and the spoke cache is always busted afterwards.
         try:
             summary = await _perform_agent_approval(hub, spoke_id, agent_id)
         except Exception as e:
@@ -714,10 +867,12 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
         finally:
             _bust_spokes_cache()
+        # Log the action and return the approval summary.
         logger.warning("admin_ops: approve-agent driven via loopback for agent=%s → %s",
                        agent_id, summary)
         return {"status": "ok", **summary}
 
+    # Trigger the fleet self-update (pull repos, update hub and spokes).
     @app.post("/admin/ops/self-update")
     async def admin_ops_self_update(request: Request):
         """Trigger the fleet self-update (the Setup → Sync 'Sync now' action):
@@ -731,23 +886,28 @@ def register(app, hub, ctx):
         scripted/automation-driven, and forcing it booted logged-in operators
         mid-day on every deploy. Pass ``{"force": true}`` (or ``?force=true``)
         only when an immediate hub restart is genuinely required."""
+        # Check both gates; ``?force=`` in the query string can force an immediate hub restart.
         _guard(request)
         force = request.query_params.get("force", "").lower() in ("1", "true", "yes")
+        # A JSON body with "force": true also forces it; an empty/non-JSON body is ignored.
         try:
             body = await request.json()
             if isinstance(body, dict) and body.get("force") is True:
                 force = True
         except Exception:  # noqa: BLE001 — empty / non-JSON body → defaults
             pass
+        # Run the full repo sync; spokes are always told to update, the hub only if forced.
         try:
             result = await hub.run_repo_sync_all(force_spokes=True, force=force)
         except Exception as e:
             logger.exception("admin_ops: self-update failed")
             raise HTTPException(status_code=500, detail=str(e))
+        # Log whether the hub restart was forced or left to the update gate, and return.
         logger.warning("admin_ops: self-update driven via loopback (hub restart %s)",
                        "FORCED" if force else "gated by update_gate")
         return {"status": "ok", "force": force, "result": result}
 
+    # Force an immediate NetBox -> Unbound/Kea reconcile.
     @app.post("/admin/ops/force-dhcp-dns-sync")
     async def admin_ops_force_dhcp_dns_sync(request: Request):
         """Force an immediate NetBox → Unbound/Kea reconcile, bypassing the
@@ -763,18 +923,23 @@ def register(app, hub, ctx):
         cache first so the push is unconditional. Existing-only, so it is
         safe: DNS_SYNC/DHCP_SYNC add missing records/subnets, they never
         delete anything an operator added by hand on the resolver."""
+        # Check both gates.
         _guard(request)
+        # Clear the "unchanged" hash cache so the sync pushes unconditionally, then run it;
+        # failures are logged and returned as a 500.
         try:
             hub._last_sync_hashes = {}
             await hub._sync_dns_dhcp_once()
         except Exception as e:
             logger.exception("admin_ops: force-dhcp-dns-sync failed")
             raise HTTPException(status_code=500, detail=str(e))
+        # Log the action and return the latest DNS and DHCP sync status.
         logger.warning("admin_ops: force-dhcp-dns-sync driven via loopback")
         return {"status": "ok",
                 "dns": hub.dns_dhcp_sync_status.get("dns"),
                 "dhcp": hub.dns_dhcp_sync_status.get("dhcp")}
 
+    # Run the IPAM -> ClearPass endpoint sync (and NAD sync) for one tenant.
     @app.post("/admin/ops/endpoint-sync")
     async def admin_ops_endpoint_sync(request: Request):
         """Run the IPAM -> CPPM endpoint sync for one tenant now, plus the
@@ -786,21 +951,27 @@ def register(app, hub, ctx):
         endpoints even when that is more than half of the tenant's inventory
         (normally refused as a likely truncated batch). An empty batch is
         still never applied."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
             body = {}
+        # A tenant id is required.
         tid = str((body or {}).get("tenant_id") or "").strip()
         if not tid:
             raise HTTPException(status_code=400, detail="tenant_id required")
+        # Mass removal is only allowed when explicitly confirmed with a literal true.
         allow = (body or {}).get("allow_mass_remove") is True
+        # Sync endpoints, then the tenant's RADIUS/TACACS network devices.
         result = await hub.sync_tenant_endpoints(tid, allow_mass_remove=allow)
         nads = await hub.sync_tenant_nads(tid)
+        # Log both outcomes and return them.
         logger.warning("admin_ops: endpoint-sync tenant=%s allow_mass_remove=%s -> %s, nads %s",
                        tid, allow, (result or {}).get("status"), (nads or {}).get("status"))
         return {"status": "ok", "result": result, "nads": nads}
 
+    # Self-test the JIT 802.1X account backends for a tenant.
     @app.post("/admin/ops/dot1x-jit-selftest")
     async def admin_ops_dot1x_jit_selftest(request: Request):
         """Create, rotate and delete a throwaway JIT 802.1X account on each
@@ -808,64 +979,82 @@ def register(app, hub, ctx):
 
         Body: ``{"tenant_id": "...", "backends": ["entra","ldap","clearpass"]}``
         (backends optional, default all). See ``dot1x_jit.selftest``."""
+        # Check both gates and load the JIT module lazily.
         _guard(request)
         import dot1x_jit
+        # Read the JSON body (a bad/missing body becomes {}).
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
             body = {}
+        # A tenant id is required.
         tid = str((body or {}).get("tenant_id") or "").strip()
         if not tid:
             raise HTTPException(status_code=400, detail="tenant_id required")
+        # Use the requested backends (default all) and reject any unknown names.
         backends = (body or {}).get("backends") or list(dot1x_jit.BACKENDS)
         bad = [b for b in backends if b not in dot1x_jit.BACKENDS]
         if bad:
             raise HTTPException(status_code=400, detail=f"unknown backend(s): {bad}")
+        # Run the create/rotate/delete self-test on each backend.
         results = await dot1x_jit.selftest(hub, tid, backends)
+        # Log a pass/fail per backend and return the full results.
         logger.warning("admin_ops: dot1x-jit-selftest tenant=%s -> %s", tid,
                        {r["backend"]: r["ok"] for r in results})
         return {"status": "ok", "tenant_id": tid, "results": results}
 
+    # Re-push the saved directory (LDAP) config to every ldap-server node.
     @app.post("/admin/ops/ldap-directory-reapply")
     async def admin_ops_ldap_directory_reapply(request: Request):
         """Re-push the saved Setup -> Directory config (same password, vault
         untouched) to every ldap-server node. See ``ldap_cluster.reapply``."""
+        # Check both gates and load the LDAP cluster helper lazily.
         _guard(request)
         import ldap_cluster
+        # Re-apply the config; a known setup error is a caller problem, so return 400.
         try:
             res = await ldap_cluster.reapply(hub, actor="admin-ops")
         except ldap_cluster.LdapSetupError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        # Log each server's outcome and return the results.
         logger.warning("admin_ops: ldap-directory-reapply -> %s",
                        [(r["name"], r["status"]) for r in res["servers"]])
         return {"status": "ok", **res}
 
+    # Loopback read of the NetBox SSO status.
     @app.get("/admin/ops/netbox-sso")
     async def admin_ops_netbox_sso_get(request: Request):
         """Loopback mirror of GET /setup/netbox-sso (no secret/key echoed)."""
+        # Check both gates and return the status (secrets are never included).
         _guard(request)
         return await hub.netbox_sso_status()
 
+    # Loopback write of the NetBox SSO configuration.
     @app.post("/admin/ops/netbox-sso")
     async def admin_ops_netbox_sso_set(request: Request):
         """Loopback mirror of POST /setup/netbox-sso (the Settings → Azure →
         NetBox SSO knob): body ``{"config": {"enabled": true, "redirect_uri":
         ...}}``. Pushes the hub's Entra connection to the netbox-server agent."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Accept either {"config": {...}} or the config itself as the body, then apply it.
         res = await hub.netbox_sso_apply((body or {}).get("config", body) or {})
         logger.warning("admin_ops: netbox-sso applied via loopback")
         return res
 
+    # Loopback test of the NetBox SSO connection.
     @app.post("/admin/ops/netbox-sso/test")
     async def admin_ops_netbox_sso_test(request: Request):
         """Loopback mirror of POST /setup/netbox-sso/test."""
+        # Check both gates and run the hub's SSO test.
         _guard(request)
         return await hub.netbox_sso_test()
 
+    # Read-only preview of what a NetBox -> Kea DHCP sync would push.
     @app.get("/admin/ops/dhcp-sync-preview")
     async def admin_ops_dhcp_sync_preview(request: Request):
         """Read-only: show EXACTLY what a NetBox -> Kea DHCP sync would push,
@@ -889,30 +1078,37 @@ def register(app, hub, ctx):
         classifies every reservation as matched/unmatched, so the answer is
         one call instead of a config diff on each Kea node. Nothing is pushed.
         """
+        # Check both gates; load the IP helpers and the sync's own payload builder.
         _guard(request)
         import ipaddress
         from dns_dhcp_sync import build_dhcp_payload
+        # Fetch NetBox prefixes and IPs; failures are logged and returned as a 500.
         try:
             pfx_data, ips_data = await hub._netbox_prefixes_and_ips()
         except Exception as e:
             logger.exception("admin_ops: dhcp-sync-preview failed")
             raise HTTPException(status_code=500, detail=str(e))
+        # Build the scopes and reservations exactly as the real sync would.
         subnets, reservations = build_dhcp_payload(pfx_data, ips_data)
 
+        # Parse each scope's subnet, skipping any that aren't valid networks.
         nets = []
         for s in subnets:
             try:
                 nets.append((s["subnet"], ipaddress.ip_network(s["subnet"], strict=False)))
             except ValueError:
                 continue
+        # Sort each reservation into matched (inside some scope) or unmatched (would be dropped).
         matched, unmatched = [], []
         for r in reservations:
+            # Find the first scope containing the reservation's IP; a bad IP counts as no match.
             hit = None
             try:
                 addr = ipaddress.ip_address(r["ip"])
                 hit = next((label for label, net in nets if addr in net), None)
             except ValueError:
                 hit = None
+            # Record which scope matched (None when unmatched).
             (matched if hit else unmatched).append({**r, "subnet_match": hit})
 
         # Every prefix NetBox knows about, with the reason it is or isn't a
@@ -920,15 +1116,19 @@ def register(app, hub, ctx):
         # "tick dhcp_enabled on <prefix>".
         prefixes = []
         for p in (pfx_data.get("prefixes") or []):
+            # Read the prefix's custom fields and status.
             cf = p.get("custom_fields") or {}
             status = (p.get("status") or "")
+            # Explain why the prefix is not a scope: containers never are; others need dhcp_enabled.
             reason = ("container (aggregate prefix, never a scope)"
                       if status.lower() == "container"
                       else ("" if cf.get("dhcp_enabled")
                             else "custom_fields.dhcp_enabled is not set"))
+            # An empty reason means the prefix IS synced as a scope.
             prefixes.append({"prefix": p.get("prefix", ""), "status": status,
                              "synced_as_scope": not reason, "reason": reason})
 
+        # Return the scopes, totals, both reservation lists and the per-prefix reasons.
         return {"status": "ok",
                 "scopes": [s["subnet"] for s in subnets],
                 "totals": {"reservations": len(reservations),
@@ -938,6 +1138,7 @@ def register(app, hub, ctx):
                 "matched_reservations": matched,
                 "prefixes": prefixes}
 
+    # Read-only Kea HA pair status from the DHCP spoke.
     @app.get("/admin/ops/dhcp-ha-status")
     async def admin_ops_dhcp_ha_status(request: Request):
         """Read-only Kea HA pair status straight from the DHCP spoke's own
@@ -947,19 +1148,24 @@ def register(app, hub, ctx):
         ha-tls`` round-trip per host during a "is the HA pair actually up"
         check: one call here returns the pair's real state as Kea itself
         reports it, instead of inferring it from log lines on each node."""
+        # Check both gates and find a connected DHCP spoke.
         _guard(request)
         dhcp_spoke = hub.get_spoke_by_type("dhcp")
+        # No DHCP spoke: report HA as not enabled rather than erroring.
         if not dhcp_spoke:
             return {"status": "ok", "enabled": False,
                     "reason": "no DHCP spoke connected"}
+        # Ask the spoke for its HA status; failures are logged and returned as a 500.
         try:
             resp = await hub.request_response(dhcp_spoke, "DHCP_HA_STATUS", {},
                                               timeout=30.0)
         except Exception as e:
             logger.exception("admin_ops: dhcp-ha-status failed")
             raise HTTPException(status_code=500, detail=str(e))
+        # Unwrap the spoke's reply envelope before returning it.
         return {"status": "ok", "result": unwrap_spoke(resp)}
 
+    # Re-form the Kea HA pair from the two active DHCP Server roles.
     @app.post("/admin/ops/dhcp-ha-discover")
     async def admin_ops_dhcp_ha_discover(request: Request):
         """Re-form the Kea HA pair from the two active DHCP Server roles.
@@ -976,11 +1182,14 @@ def register(app, hub, ctx):
         both installed and active; that guard lives in the shared discovery
         path and is deliberately not relaxed here. Body: optional
         ``{"spoke_id": "<dhcp spoke>"}``, else the usual type-based pick."""
+        # Check both gates.
         _guard(request)
+        # Read the JSON body (a bad/missing body becomes {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # An explicit spoke id must be a known DHCP spoke; otherwise pick one by type.
         spoke_id = str((body or {}).get("spoke_id") or "").strip()
         if spoke_id:
             valid = set(hub.get_all_spokes_by_type("dhcp") or [])
@@ -990,35 +1199,44 @@ def register(app, hub, ctx):
                     detail=f"'{spoke_id}' is not a DHCP spoke; known: {sorted(valid)}")
         else:
             spoke_id = hub.get_spoke_by_type("dhcp")
+        # Give up if no DHCP spoke is connected.
         if not spoke_id:
             raise HTTPException(status_code=503, detail="no DHCP spoke connected")
+        # The discovery routine is published by the DHCP routes module; it must be loaded.
         discover = getattr(app.state, "dhcp_discover_locked", None)
         if discover is None:
             raise HTTPException(status_code=503,
                                 detail="DHCP routes are not registered on this hub")
+        # Log the action, run the shared (locked) discovery and return its result.
         logger.warning("admin_ops: dhcp-ha-discover spoke=%s via loopback", spoke_id)
         result = await discover(spoke_id)
         return {"status": "ok", "spoke_id": spoke_id, "result": result}
 
+    # Read-only DNS resolver-cluster status from the DNS spoke.
     @app.get("/admin/ops/dns-cluster-status")
     async def admin_ops_dns_cluster_status(request: Request):
         """Read-only resolver-cluster status straight from the DNS spoke's own
         ``DNS_CLUSTER_STATUS`` handler — the same RPC ``dns_spoke.py`` answers
         for the WebUI cluster tile (member state, convergence/drift,
         recommendations). Mirrors ``admin_ops_dhcp_ha_status``."""
+        # Check both gates and find a connected DNS spoke.
         _guard(request)
         dns_spoke = hub.get_spoke_by_type("dns")
+        # No DNS spoke: report the cluster as not enabled rather than erroring.
         if not dns_spoke:
             return {"status": "ok", "enabled": False,
                     "reason": "no DNS spoke connected"}
+        # Ask the spoke for its cluster status; failures are logged and returned as a 500.
         try:
             resp = await hub.request_response(dns_spoke, "DNS_CLUSTER_STATUS", {},
                                               timeout=30.0)
         except Exception as e:
             logger.exception("admin_ops: dns-cluster-status failed")
             raise HTTPException(status_code=500, detail=str(e))
+        # Unwrap the spoke's reply envelope before returning it.
         return {"status": "ok", "result": unwrap_spoke(resp)}
 
+    # Re-form the DNS resolver cluster from the active DNS Server roles.
     @app.post("/admin/ops/dns-cluster-discover")
     async def admin_ops_dns_cluster_discover(request: Request):
         """Re-form the DNS resolver cluster from the active DNS Server roles.
@@ -1032,11 +1250,13 @@ def register(app, hub, ctx):
         when the WebUI's own DNS views are erroring and the button is not
         reachable. Body: optional ``{"spoke_id": "<dns spoke>"}``, else the
         usual type-based pick."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # An explicit spoke id must be a known DNS spoke; otherwise pick one by type.
         spoke_id = str((body or {}).get("spoke_id") or "").strip()
         if spoke_id:
             valid = set(hub.get_all_spokes_by_type("dns") or [])
@@ -1046,16 +1266,20 @@ def register(app, hub, ctx):
                     detail=f"'{spoke_id}' is not a DNS spoke; known: {sorted(valid)}")
         else:
             spoke_id = hub.get_spoke_by_type("dns")
+        # Give up if no DNS spoke is connected.
         if not spoke_id:
             raise HTTPException(status_code=503, detail="no DNS spoke connected")
+        # The discovery routine is published by the DNS routes module; it must be loaded.
         discover = getattr(app.state, "dns_discover_locked", None)
         if discover is None:
             raise HTTPException(status_code=503,
                                 detail="DNS routes are not registered on this hub")
+        # Log the action, run the shared (locked) discovery and return its result.
         logger.warning("admin_ops: dns-cluster-discover spoke=%s via loopback", spoke_id)
         result = await discover(spoke_id)
         return {"status": "ok", "spoke_id": spoke_id, "result": result}
 
+    # Add/update/delete a DHCP reservation on a chosen DHCP spoke, returning its raw reply.
     @app.post("/admin/ops/dhcp-reservation")
     async def admin_ops_dhcp_reservation(request: Request):
         """Drive a reservation CRUD against a CHOSEN dhcp spoke and return
@@ -1073,17 +1297,20 @@ def register(app, hub, ctx):
         "<id>", "action": "add"|"update"|"delete", "ip": ..., "mac": ...,
         "old_ip": ..., "hostname": ..., "subnet": ...}``. ``spoke_id``
         defaults to the usual ``get_spoke_by_type("dhcp")`` pick."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Map the requested action (default "add") to the spoke command; reject anything else.
         action = str((body or {}).get("action") or "add").strip().lower()
         commands = {"add": "DHCP_ADD_RES", "update": "DHCP_UPDATE_RES",
                     "delete": "DHCP_DEL_RES"}
         if action not in commands:
             raise HTTPException(status_code=400,
                                 detail=f"action must be one of {sorted(commands)}")
+        # An explicit spoke id must be a known DHCP spoke; otherwise pick one by type.
         spoke_id = str((body or {}).get("spoke_id") or "").strip()
         if spoke_id:
             valid = set(hub.get_all_spokes_by_type("dhcp") or [])
@@ -1093,23 +1320,29 @@ def register(app, hub, ctx):
                     detail=f"'{spoke_id}' is not a DHCP spoke; known: {sorted(valid)}")
         else:
             spoke_id = hub.get_spoke_by_type("dhcp")
+        # Give up if no DHCP spoke is connected.
         if not spoke_id:
             raise HTTPException(status_code=503, detail="no DHCP spoke connected")
+        # Forward only the known reservation fields; an IP is mandatory.
         payload = {k: v for k, v in (body or {}).items()
                    if k in ("ip", "mac", "old_ip", "hostname", "subnet", "subnet_id")}
         if not payload.get("ip"):
             raise HTTPException(status_code=400, detail="ip is required")
+        # Log the action before sending it.
         logger.warning("admin_ops: dhcp-reservation %s ip=%s spoke=%s via loopback",
                        action, payload.get("ip"), spoke_id)
+        # Send the command (90 s timeout); failures are logged and returned as a 500.
         try:
             resp = await hub.request_response(spoke_id, commands[action],
                                               payload, timeout=90.0)
         except Exception as e:
             logger.exception("admin_ops: dhcp-reservation failed")
             raise HTTPException(status_code=500, detail=str(e))
+        # Return what was sent plus the spoke's unwrapped, untranslated reply.
         return {"status": "ok", "spoke_id": spoke_id, "action": action,
                 "sent": payload, "result": unwrap_spoke(resp)}
 
+    # Restart one allowlisted systemd unit on the hub or a connected spoke.
     @app.post("/admin/ops/restart-service")
     async def admin_ops_restart_service(request: Request):
         """Restart one allowlisted systemd unit on a target — hub or a
@@ -1130,11 +1363,13 @@ def register(app, hub, ctx):
         ``{"target": "hub"|"<spoke_id>", "unit": "lm"|"lm-dhcp-worker"|
         "lm-agent"|"lm-dns-worker"}`` (``unit`` must be ``"lm"`` when
         ``target == "hub"``)."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Target defaults to the hub; the unit must be one of a short fixed allowlist.
         target = str((body or {}).get("target") or "hub").strip()
         unit = str((body or {}).get("unit") or "").strip()
         allowed_units = {"lm", "lm-dhcp-worker", "lm-dns-worker", "lm-agent"}
@@ -1155,12 +1390,14 @@ def register(app, hub, ctx):
         # since spoke agents run as root already.
         logger.warning("admin_ops: restart-service via loopback target=%s unit=%s",
                        target, unit)
+        # Hub target: only the hub's own "lm" unit can be restarted here.
         if target == "hub":
             if unit != "lm":
                 raise HTTPException(status_code=400,
                                     detail="hub target only supports unit='lm' "
                                           "(use exec/restart-service against the "
                                           "specific spoke for worker units)")
+            # Run the fixed-argv sudo self-restart helper; shape its result like command_runner.
             import subprocess
             try:
                 proc = subprocess.run(
@@ -1169,18 +1406,23 @@ def register(app, hub, ctx):
                 res = {"ok": proc.returncode == 0, "rc": proc.returncode,
                       "stdout": proc.stdout, "stderr": proc.stderr,
                       "truncated": False, "error": "", "mode": "sudo-fixed-argv"}
+            # Helper failed to launch (e.g. sudo missing): log it and return a 500.
             except Exception as e:  # noqa: BLE001
                 logger.exception("admin_ops: restart-service failed for hub")
                 raise HTTPException(status_code=500, detail=str(e))
             return {"status": "ok", "target": target, "unit": unit, "result": res}
+        # Spoke target: relay an allowlisted "systemctl restart <unit>" command.
         command = f"systemctl restart {unit}"
         try:
             res = await _relay_exec(target, command, 30.0)
+        # Our own HTTP errors (e.g. spoke not connected) pass through unchanged.
         except HTTPException:
             raise
+        # Any other failure is logged and returned as a 500.
         except Exception as e:  # noqa: BLE001
             logger.exception("admin_ops: restart-service failed for target=%s", target)
             raise HTTPException(status_code=500, detail=str(e))
+        # Return the target's command result.
         return {"status": "ok", "target": target, "unit": unit, "result": res}
 
     # ── Diagnostics fan-out ──────────────────────────────────────────────────
@@ -1196,20 +1438,24 @@ def register(app, hub, ctx):
     # feature toggle (that toggle only gates the browser/arbitrary-shell path).
     def _unwrap_run_result(resp) -> dict:
         """{"payload":{"data":{"result": {...}}}} → the command_runner dict."""
+        # Dig down through the reply envelope to the command_runner result dict.
         payload = (resp or {}).get("payload", {}) or {}
         inner = payload.get("data", resp) or {}
         r = inner.get("result") if isinstance(inner, dict) else None
         if not isinstance(r, dict):
             # Surface the spoke's own error (rejected command, timeout, ...)
             # instead of a generic "no result".
+            # Find the first envelope level carrying an error/message to explain the failure.
             why = ""
             for env in (inner, payload, resp):
                 if isinstance(env, dict) and (env.get("message") or env.get("error")):
                     why = str(env.get("message") or env.get("error"))
                     break
+            # Return a runner-shaped failure dict so callers can treat every result the same way.
             return {"ok": False, "rc": None, "stdout": "", "stderr": "",
                     "truncated": False,
                     "error": why or "no result (offline / timed out?)"}
+        # Normal case: the runner dict itself.
         return r
 
     async def _relay_exec(target: str, command: str, timeout: float) -> dict:
@@ -1217,33 +1463,42 @@ def register(app, hub, ctx):
 
         ``target`` is ``hub``, a connected ``spoke_id``, or
         ``agent:<owning_spoke_id>:<agent_id>``. ``allow_shell`` is never set."""
+        # Map of currently connected spokes.
         conns = getattr(hub, "active_connections", {}) or {}
+        # Hub target: run the command locally in a worker thread (never with a shell).
         if target == "hub":
+            # Import works from the hub's own path or the test/bare-package path.
             try:
                 from command_runner import run_local_command
             except ImportError:  # test/bare-package path
                 from core.src.command_runner import run_local_command  # type: ignore
             return await asyncio.to_thread(run_local_command, command, False, timeout)
+        # Agent target "agent:<spoke>:<agent_id>": split out the owning spoke and agent ids.
         if target.startswith("agent:"):
             _, _, rest = target.partition(":")
             sid, _, aid = rest.partition(":")
+            # Both parts are required, and the owning spoke must be connected.
             if not sid or not aid:
                 raise HTTPException(status_code=400, detail="bad agent target (want agent:<spoke>:<agent_id>)")
             if hub._primary_key(sid) not in conns:
                 raise HTTPException(status_code=404, detail=f"agent's spoke '{sid}' not connected")
+            # Relay AGENT_RUN_COMMAND via the owning spoke (extra 20 s for the relay hop).
             resp = await hub.request_response(
                 sid, "AGENT_RUN_COMMAND",
                 {"agent_id": aid, "command": command, "allow_shell": False, "timeout": timeout},
                 timeout=timeout + 20.0)
             return _unwrap_run_result(resp)
+        # Otherwise the target is a spoke id, which must be connected.
         if hub._primary_key(target) not in conns:
             raise HTTPException(status_code=404, detail=f"spoke '{target}' not connected")
+        # Relay RUN_COMMAND to the spoke (extra 10 s for transport) and unwrap its result.
         resp = await hub.request_response(
             target, "RUN_COMMAND",
             {"command": command, "allow_shell": False, "timeout": timeout},
             timeout=timeout + 10.0)
         return _unwrap_run_result(resp)
 
+    # Run one allowlisted read-only command on a target.
     @app.post("/admin/ops/exec")
     async def admin_ops_exec(request: Request):
         """Run a single READ-ONLY (allowlisted) command on a target and return
@@ -1255,21 +1510,26 @@ def register(app, hub, ctx):
         no shell metacharacters — otherwise the spoke rejects it. Use this to
         query live log/service state from any connected spoke during this
         session (e.g. ``journalctl -u lm-agent -n 60 --no-pager``)."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Target defaults to the hub; a command is required.
         target = str((body or {}).get("target") or "hub").strip()
         command = str((body or {}).get("command") or "").strip()
         if not command:
             raise HTTPException(status_code=400, detail="command required")
+        # Parse the timeout (default 30 s on bad input) and clamp it to 1..120 s.
         try:
             timeout = float((body or {}).get("timeout") or 30.0)
         except (TypeError, ValueError):
             timeout = 30.0
         timeout = max(1.0, min(timeout, 120.0))
+        # Log the (truncated) command before running it.
         logger.warning("admin_ops: exec via loopback target=%s cmd=%r", target, command[:300])
+        # Run it; our own HTTP errors pass through, anything else becomes a logged 500.
         try:
             res = await _relay_exec(target, command, timeout)
         except HTTPException:
@@ -1277,8 +1537,10 @@ def register(app, hub, ctx):
         except Exception as e:  # noqa: BLE001
             logger.exception("admin_ops: exec failed for target=%s", target)
             raise HTTPException(status_code=500, detail=str(e))
+        # Return the command_runner result.
         return {"status": "ok", "target": target, "result": res}
 
+    # Run the curated diagnostic bundle on a target in one call.
     @app.post("/admin/ops/spoke-diag")
     async def admin_ops_spoke_diag(request: Request):
         """Run the curated read-only diagnostic BUNDLE on a target and return a
@@ -1291,26 +1553,32 @@ def register(app, hub, ctx):
         charset (no shell metacharacters); ``lines`` is clamped to 1..200. Each
         bundled command runs in allowlist mode, so this is safe to fan at a
         flapping spoke to see WHY it is restarting without opening a shell."""
+        # Check both gates, then read the JSON body (a bad/missing body becomes {}).
         _guard(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Target, unit, repo path and log file, each with a sensible default.
         target = str((body or {}).get("target") or "hub").strip()
         unit = str((body or {}).get("unit") or "lm-agent").strip()
         repo = str((body or {}).get("repo") or "/opt/lm").strip()
         log = str((body or {}).get("log") or "/var/log/lm/lm-agent.log").strip()
+        # Number of log/journal lines (default 40 on bad input), clamped to 1..200.
         try:
             lines = int((body or {}).get("lines") or 40)
         except (TypeError, ValueError):
             lines = 40
         lines = max(1, min(lines, 200))
+        # Validate the free-text arguments against the strict charset before they reach a spoke.
         for label, val in (("unit", unit), ("repo", repo), ("log", log)):
             if not _DIAG_ARG_RE.fullmatch(val):
                 raise HTTPException(status_code=400,
                                     detail=f"invalid {label!r}: letters, digits, and . _ / @ : - only")
+        # Values substituted into the command templates; log the run.
         subs = {"unit": unit, "repo": repo, "log": log, "lines": str(lines)}
         logger.warning("admin_ops: spoke-diag via loopback target=%s unit=%s", target, unit)
+        # Run each bundled command and collect its result under its key.
         checks: dict = {}
         for key, tmpl in _DIAG_BUNDLE:
             command = tmpl.format(**subs)
@@ -1320,8 +1588,10 @@ def register(app, hub, ctx):
                 # Target unreachable — surface once and stop (every check would
                 # 404 the same way).
                 raise
+            # Any other failure is recorded for that check so the remaining checks still run.
             except Exception as e:  # noqa: BLE001
                 checks[key] = {"ok": False, "rc": None, "stdout": "", "stderr": "",
                                "truncated": False, "error": str(e)}
+        # Return the arguments used and the per-check results.
         return {"status": "ok", "target": target, "unit": unit,
                 "repo": repo, "log": log, "lines": lines, "checks": checks}

@@ -17,6 +17,7 @@ fields appear without a migration. Sensitive values are encrypted at rest via
 ``docs/modules/core.md`` for the module-level overview.
 """
 
+# Standard-library imports: JSON, filesystem, logging, async, locking and time.
 import json
 import os
 import logging
@@ -24,6 +25,7 @@ import asyncio
 import threading
 import time
 from typing import Dict, Any, Optional
+# Encrypts state files at rest.
 from security.encryption import hub_encryption
 
 # Logging configured by the process entrypoint (hub main.py); see base_spoke.py.
@@ -41,6 +43,7 @@ class StateManager:
         # Use /var/lib/lm/state for production persistence to avoid being overwritten by git updates
         # Fallback to a local 'data' directory if /var/lib/lm is not writable (e.g. in dev environments)
         self.data_dir = "/var/lib/lm/state"
+        # Create the production directory if missing.
         try:
             if not os.path.exists(self.data_dir):
                 os.makedirs(self.data_dir, exist_ok=True)
@@ -56,6 +59,7 @@ class StateManager:
             with open(test_file, "w") as f:
                 f.write("test")
             os.remove(test_file)
+        # Not usable: fall back to a directory in the user's home.
         except Exception as e:
             logger.warning(f"Cannot use {self.data_dir} (Permission denied or error: {e}). Falling back to home directory state storage.")
             self.data_dir = os.path.expanduser("~/.local/share/lm/state")
@@ -65,6 +69,7 @@ class StateManager:
             except OSError:
                 pass
 
+        # Full paths of the system and tenant state files.
         self.system_path = os.path.join(self.data_dir, system_path)
         self.tenants_path = os.path.join(self.data_dir, tenants_path)
 
@@ -130,6 +135,7 @@ class StateManager:
             "tenants": {}
         }
 
+        # Replace the defaults with whatever is saved on disk.
         self.load_state()
 
         # Write coalescing: the persistence_loop is the backstop for in-memory
@@ -159,8 +165,10 @@ class StateManager:
 
     def _load_file(self, path: str) -> Optional[Dict]:
         """Helper to load and decrypt a state file, falling back to plain text."""
+        # A missing file means no saved state.
         if not os.path.exists(path):
             return None
+        # Read the raw bytes; an empty file also means no state.
         try:
             with open(path, "rb") as f:
                 content = f.read()
@@ -196,6 +204,7 @@ class StateManager:
                     # Fallback to plain text for migration (re-read as text)
                     with open(path, "r") as pf:
                         return json.load(pf)
+        # Any other read error is logged and treated as no state.
         except Exception as e:
             logger.error(f"Critical error reading state file {path}: {e}")
             return None
@@ -204,6 +213,7 @@ class StateManager:
         """Helper to save state file atomically with encryption and backup.
         Synchronous path (serialize + write together) for the immediate
         save_state() callers that want durability before returning."""
+        # Serialise and hand off to the encrypted writer.
         self._write_encrypted(path, json.dumps(data, indent=2, default=str))
 
     def _write_encrypted(self, path: str, json_data: str):
@@ -213,6 +223,7 @@ class StateManager:
         loop (atomic — json.dumps can't yield) and offload just THIS part — the
         multi-second encrypt + fsync + backup at scale — to a worker thread.
         Operates only on an immutable string, so it is thread-safe."""
+        # Temporary and backup file paths.
         tmp_path = path + ".tmp"
         bak_path = path + ".bak"
         try:
@@ -241,6 +252,7 @@ class StateManager:
 
             # 3. Atomic replace (the chmod'd tmp inode becomes the final path)
             os.replace(tmp_path, path)
+        # On failure, log, remove the temp file and re-raise.
         except Exception as e:
             logger.error(f"Failed to atomically save state to {path}: {e}")
             # Clean up tmp file if it exists
@@ -253,6 +265,7 @@ class StateManager:
 
     def _merge_defaults(self, loaded: Dict, defaults: Dict) -> Dict:
         """Merge loaded state with defaults to ensure all keys exist."""
+        # Add missing keys; for dicts also add missing sub-keys.
         for key, default_val in defaults.items():
             if key not in loaded:
                 loaded[key] = default_val
@@ -266,6 +279,7 @@ class StateManager:
     def load_state(self):
         """Loads state from dual JSON disk caches with backup recovery."""
         # Load System State
+        # Fall back to the .bak copy if the main file is unusable.
         sys_state = self._load_file(self.system_path)
         if sys_state is None and os.path.exists(self.system_path + ".bak"):
             logger.warning(f"System state {self.system_path} corrupted or missing, trying backup...")
@@ -313,6 +327,7 @@ class StateManager:
             logger.info("No valid system state found, using defaults.")
 
         # Load Tenant State
+        # Fall back to the .bak copy if the main file is unusable.
         ten_state = self._load_file(self.tenants_path)
         if ten_state is None and os.path.exists(self.tenants_path + ".bak"):
             logger.warning(f"Tenant state {self.tenants_path} corrupted or missing, trying backup...")
@@ -333,6 +348,7 @@ class StateManager:
         if self._needs_rekey:
             logger.warning("Re-encrypting state under the current key (fallback-key "
                            "load detected) …")
+            # Write both files under the write lock, then clear the dirty flag.
             try:
                 self.save_state()
             except Exception as e:  # noqa: BLE001
@@ -395,6 +411,7 @@ class StateManager:
         max staleness bound for an in-memory-only mutation (the crash-recovery
         safety net).
         """
+        # Sleep, then flush if anything changed.
         while True:
             await asyncio.sleep(interval)
             await self._flush_if_dirty()
@@ -406,6 +423,7 @@ class StateManager:
         during the write re-marks dirty and is picked up on the next tick (no
         loss). On write failure the flag is restored so the next tick retries.
         """
+        # Nothing to do unless dirty; clear the flag before writing.
         with self._dirty_lock:
             if not self._dirty:
                 return False
@@ -426,6 +444,7 @@ class StateManager:
             # flush succeeding is not news. Errors below still log at ERROR.
             logger.debug("State persisted to disk (dirty-flagged flush, offloaded)")
             return True
+        # On failure, log and re-mark dirty so the next tick retries.
         except Exception as e:
             logger.error(f"Persistence loop error: {e}")
             with self._dirty_lock:
@@ -447,12 +466,14 @@ class StateManager:
 
     def update_global_config(self, config: Dict):
         """Merge ``config`` into the global config (caller is responsible for saving)."""
+        # Merge in the changes and mark state for saving.
         gc = self.system_state.setdefault("global_config", {})
         gc.update(config)
         self._mark_dirty()
 
     def register_module(self, module_id: str, approved: bool = False, display_name: str = None):
         """Record a module as known, set its approval flag, and seed its metadata."""
+        # Add to the known list and record the approval flag.
         known_modules = self.system_state.setdefault("known_modules", [])
         if module_id not in known_modules:
             known_modules.append(module_id)
@@ -478,6 +499,7 @@ class StateManager:
         """Symmetric counterpart to register_module: drop a spoke/agent and all
         of its persisted metadata. Used by the "Delete" action in Setup → Spokes
         & Agents to remove a dead/unwanted registration entirely."""
+        # Remove the module from every module-keyed store.
         known = self.system_state.get("known_modules", [])
         if module_id in known:
             known.remove(module_id)
@@ -502,6 +524,7 @@ class StateManager:
     def decommission_module(self, module_id: str) -> bool:
         """Soft-retire a spoke/generic-agent: keep its record, but exclude it
         from the out-of-contact alert loop. Returns True if the flag changed."""
+        # Add to the decommissioned list (once) and save.
         lst = self.system_state.setdefault("decommissioned_spokes", [])
         if module_id in lst:
             return False
@@ -512,6 +535,7 @@ class StateManager:
     def restore_module(self, module_id: str) -> bool:
         """Un-decommission a spoke/generic-agent (re-enables out-of-contact
         alerting). Returns True if it was decommissioned."""
+        # Remove from the decommissioned list and save.
         lst = self.system_state.get("decommissioned_spokes", [])
         if module_id not in lst:
             return False
@@ -520,9 +544,12 @@ class StateManager:
         return True
 
     def is_module_decommissioned(self, module_id: str) -> bool:
+        """True if the spoke/generic agent is decommissioned."""
         return module_id in self.system_state.get("decommissioned_spokes", [])
 
     def decommission_agent(self, agent_id: str) -> bool:
+        """Soft-retire a relayed node-agent. Returns True if the flag changed."""
+        # Add to the decommissioned-agents list (once) and save.
         lst = self.system_state.setdefault("decommissioned_agents", [])
         if agent_id in lst:
             return False
@@ -531,6 +558,8 @@ class StateManager:
         return True
 
     def restore_agent(self, agent_id: str) -> bool:
+        """Un-decommission a relayed node-agent. Returns True if it was decommissioned."""
+        # Remove from the decommissioned-agents list and save.
         lst = self.system_state.get("decommissioned_agents", [])
         if agent_id not in lst:
             return False
@@ -539,10 +568,12 @@ class StateManager:
         return True
 
     def is_agent_decommissioned(self, agent_id: str) -> bool:
+        """True if the relayed node-agent is decommissioned."""
         return agent_id in self.system_state.get("decommissioned_agents", [])
 
     def update_module_metadata(self, module_id: str, metadata: Dict[str, Any]):
         """Updates the display name and description for a spoke."""
+        # Create the metadata record if needed, then apply the changes.
         module_metadata = self.system_state.setdefault("module_metadata", {})
         if module_id not in module_metadata:
             module_metadata[module_id] = {"display_name": module_id, "description": ""}
@@ -564,8 +595,10 @@ class StateManager:
         by agent_id) is handled separately by :meth:`rename_agent`. Idempotent if
         ``old_id == new_id`` or ``old_id`` is unknown.
         """
+        # Nothing to do when the id is unchanged.
         if old_id == new_id:
             return
+        # Move each module-keyed entry from the old id to the new one.
         ss = self.system_state
         am = ss.get("approved_modules", {})
         if old_id in am:
@@ -592,17 +625,21 @@ class StateManager:
         install UUID but a new agent id, so its client-simulation/tenant config
         carries over instead of being lost. Idempotent.
         """
+        # Nothing to do when the id is unchanged.
         if old_id == new_id:
             return
+        # Move the agent's config to the new id.
         ac = self.system_state.get("agent_config", {})
         if old_id in ac:
             ac[new_id] = ac.pop(old_id)
             self._mark_dirty()
 
     def set_module_name(self, module_id: str, name: str):
+        """Set a module's display name."""
         self.update_module_metadata(module_id, {"display_name": name})
 
     def get_module_name(self, module_id: str) -> str:
+        """Return a module's display name, defaulting to its id."""
         return self.system_state.get("module_metadata", {}).get(module_id, {}).get("display_name", module_id)
 
     def set_spoke_tenant(self, module_id: str, tenant_id: str):
@@ -611,6 +648,7 @@ class StateManager:
         self.update_module_metadata(module_id, {"tenant_id": tenant_id})
 
     def get_spoke_tenant(self, module_id: str) -> Optional[str]:
+        """Return the tenant a spoke is bound to, or None."""
         return self.system_state.get("module_metadata", {}).get(module_id, {}).get("tenant_id")
 
     def get_approved_modules(self) -> Dict[str, bool]:
@@ -639,12 +677,14 @@ class StateManager:
         within the 60s window loses at most one minute of last_seen granularity,
         which is fine for the 15-min staleness threshold the UI uses.
         """
+        # Ignore empty ids and non-numeric timestamps.
         if not spoke_id:
             return
         try:
             ts = float(ts)
         except (TypeError, ValueError):
             return
+        # Only mark dirty when the value actually changed.
         ls = self.system_state.setdefault("spoke_last_seen", {})
         if ls.get(spoke_id) != ts:
             ls[spoke_id] = ts
@@ -654,6 +694,7 @@ class StateManager:
         """Drop a spoke's persisted last-seen (on delete/recreate)."""
         if not spoke_id:
             return
+        # Remove the entry if present.
         ls = self.system_state.get("spoke_last_seen", {}) or {}
         if spoke_id in ls:
             ls.pop(spoke_id, None)
@@ -701,6 +742,7 @@ class StateManager:
 
     def update_tenant(self, tenant_id: str, data: Dict):
         """Merge ``data`` into a tenant's record, creating the tenant if new."""
+        # Create the tenant if needed, then merge the data.
         tenants = self.tenant_state.setdefault("tenants", {})
         if tenant_id not in tenants:
             tenants[tenant_id] = {}
@@ -716,6 +758,7 @@ class StateManager:
         the deleted tenant was the active one, the active pointer falls back to
         ``default``.
         """
+        # Find the tenant key, tolerating whitespace differences.
         tenants = self.tenant_state.setdefault("tenants", {})
         # Case-insensitive / whitespace-tolerant match, mirroring get_tenant.
         clean_id = str(tenant_id).strip()
@@ -727,12 +770,14 @@ class StateManager:
                 if str(key).strip() == clean_id:
                     match = key
                     break
+        # Unknown tenant: nothing removed.
         if match is None:
             return False
         tenants.pop(match, None)
         # Detach the tenant from every user's assignment list so stale grants
         # don't dangle after the tenant is gone.
         for user_data in (self.system_state.get("users", {}) or {}).values():
+            # Remove the tenant from each user's tenant list.
             uts = user_data.get("tenants")
             if isinstance(uts, list) and match in uts:
                 user_data["tenants"] = [t for t in uts if t != match]
@@ -744,6 +789,7 @@ class StateManager:
         return True
 
     def set_active_tenant(self, tenant_id: str):
+        """Switch the active tenant view and mark state for saving."""
         self.system_state["active_tenant"] = tenant_id
         logger.info(f"Active tenant switched to: {tenant_id}")
         self._mark_dirty()
@@ -753,6 +799,7 @@ class StateManager:
         Maps a resource to a tenant.
         The resource itself is system-level, but the mapping is tenant-level.
         """
+        # Create the resource record if needed and record its tenant and metadata.
         resources = self.system_state.setdefault("resources", {})
         if resource_id not in resources:
             resources[resource_id] = {}
@@ -766,6 +813,8 @@ class StateManager:
     # --- Quota Management ---
 
     def get_quota(self, tenant_id: str, resource_type: str) -> int:
+        """Return a tenant's quota for ``resource_type`` (0 if unknown)."""
+        # Unknown tenants have no quota.
         tenant = self.get_tenant(tenant_id)
         if not tenant:
             return 0
@@ -773,14 +822,17 @@ class StateManager:
 
     def assign_user_to_tenant(self, user_id: str, tenant_id: str):
         """Assigns a user to a specific tenant. Users can belong to multiple tenants."""
+        # Create the user record if needed.
         users = self.system_state.setdefault("users", {})
         if user_id not in users:
             users[user_id] = {"permissions": {}, "updated_at": time.time()}
 
+        # Make sure the user has a tenants list.
         user_data = users[user_id]
         if "tenants" not in user_data:
             user_data["tenants"] = []
 
+        # Add the tenant if missing, then log and save.
         if tenant_id not in user_data["tenants"]:
             user_data["tenants"].append(tenant_id)
             logger.info(f"User {user_id} assigned to tenant {tenant_id}")
@@ -788,6 +840,7 @@ class StateManager:
 
     def remove_user_from_tenant(self, user_id: str, tenant_id: str):
         """Removes a user from a specific tenant."""
+        # Remove the tenant from the user's list, then log and save.
         users = self.system_state.get("users", {})
         if user_id in users:
             user_data = users[user_id]
@@ -817,26 +870,31 @@ class StateManager:
         Does not create new admins — it only reconciles the two forms for users
         that are already admin by either measure.
         """
+        # Nothing to do without users.
         users = self.system_state.get("users", {})
         if not users:
             return False
         changed = False
 
         def _as_admin(perm):
+            """Return a copy of ``perm`` with both admin-flag forms set."""
             perm = dict(perm or {})
             perm["role"] = "admin"
             perm["admin"] = True
             return perm
 
+        # The first user must be a fully-flagged admin.
         first_uid = next(iter(users))
         first = users[first_uid]
         p = first.get("permissions", {})
+        # Give the first user both admin-flag forms if either is missing.
         if not (p.get("admin") or p.get("role") == "admin"):
             first["permissions"] = _as_admin(p)
             changed = True
         elif not p.get("admin") or p.get("role") != "admin":
             first["permissions"] = _as_admin(p)
             changed = True
+        # It must also be protected and tenant-free.
         if not first.get("protected"):
             first["protected"] = True
             changed = True
@@ -860,6 +918,7 @@ class StateManager:
                 up.pop("admin", None)
                 changed = True
 
+        # Log when anything was changed.
         if changed:
             logger.warning(
                 f"Anti-lockout: ensured admin/protected/no-tenant on '{first_uid}' "

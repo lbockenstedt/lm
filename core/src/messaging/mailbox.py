@@ -18,6 +18,7 @@ hadn't acked yet. Loaded on construction; saved after every mutation that
 actually changes pending_ack/spoke_queues.
 """
 
+# Standard-library imports: async, JSON, files, temp files, time, logging, dataclass conversion.
 import asyncio
 import json
 import os
@@ -26,6 +27,7 @@ import time
 import logging
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional
+# The message envelope types this mailbox stores.
 from .protocol import Message, MessageHeader, MessagePayload, Acknowledgement, MessagePriority
 
 # Logging configured by the process entrypoint (hub main.py); see base_spoke.py.
@@ -59,6 +61,7 @@ BACKLOG_SUPERSEDE_GRACE_S = 45
 
 
 def _is_spoke_update(message: Message) -> bool:
+    """True if ``message`` is a SPOKE_UPDATE."""
     try:
         return getattr(message.payload, "type", None) == "SPOKE_UPDATE"
     except Exception:
@@ -66,6 +69,7 @@ def _is_spoke_update(message: Message) -> bool:
 
 
 def _is_cs_config_update(message: Message) -> bool:
+    """True if ``message`` is a CS_CONFIG_UPDATE with a dict payload."""
     try:
         return (getattr(message.payload, "type", None) == "CS_CONFIG_UPDATE"
                 and isinstance(message.payload.data, dict))
@@ -77,6 +81,7 @@ def merge_cs_config_updates(older: Any, newer: Any) -> Dict[str, Any]:
     """Fold two partial CS_CONFIG_UPDATE patches: newer wins per key. The
     full-push meta (config_hash / full_config) survives only from ``newer`` —
     an older full push's hash no longer describes the merged content."""
+    # Start from the older patch without its full-push metadata, then apply the newer one.
     result = dict(older) if isinstance(older, dict) else {}
     result.pop("config_hash", None)
     result.pop("full_config", None)
@@ -88,13 +93,16 @@ def merge_cs_config_updates(older: Any, newer: Any) -> Dict[str, Any]:
 def _spoke_update_key(spoke_id: str, message: Message) -> str:
     """Coalesce/cooldown key: spoke + repo + branch (NOT message_id — a re-push
     of the same repo tip must collide with the prior one)."""
+    # Pull repo and branch from the payload (empty if missing).
     data = getattr(message.payload, "data", None) or {}
     repo = data.get("repo_url", "") if isinstance(data, dict) else ""
     branch = data.get("branch", "") if isinstance(data, dict) else ""
     return f"{spoke_id}|{repo}|{branch}"
 
 class Mailbox:
+    """Hub outbound queue: tracks unacked messages, retries them and queues for offline spokes."""
     def __init__(self, state_dir: Optional[str] = None):
+        """Set up the queues and tracking maps, pick the state directory and load saved messages."""
         # Messages sent by the Hub that are awaiting an Ack
         # { message_id: (message, first_sent_time, retry_count) }
         self.pending_ack: Dict[str, tuple[Message, float, int]] = {}
@@ -132,6 +140,7 @@ class Mailbox:
         # home-dir fallback) so the two files sit side by side.
         if state_dir is None:
             state_dir = "/var/lib/lm/state"
+            # Use the production dir if writable, otherwise a home-dir fallback.
             try:
                 os.makedirs(state_dir, exist_ok=True)
                 test_file = os.path.join(state_dir, ".write_test")
@@ -141,6 +150,7 @@ class Mailbox:
             except Exception:
                 state_dir = os.path.expanduser("~/.local/share/lm/state")
                 os.makedirs(state_dir, exist_ok=True)
+        # Where the mailbox is saved; load any saved contents now.
         self._path = os.path.join(state_dir, "mailbox.json")
         self._load()
 
@@ -148,16 +158,20 @@ class Mailbox:
 
     @staticmethod
     def _message_to_dict(message: Message) -> Dict[str, Any]:
+        """Convert a Message to a plain dict for saving."""
         return asdict(message)
 
     @staticmethod
     def _message_from_dict(d: Dict[str, Any]) -> Message:
+        """Rebuild a Message from its saved dict form."""
+        # Restore the priority enum, defaulting to NORMAL if unrecognised.
         h = dict(d.get("header") or {})
         if "priority" in h:
             try:
                 h["priority"] = MessagePriority(h["priority"])
             except Exception:
                 h["priority"] = MessagePriority.NORMAL
+        # Build the message from its header and payload parts.
         p = dict(d.get("payload") or {})
         return Message(header=MessageHeader(**h), payload=MessagePayload(**p),
                        signature=d.get("signature"))
@@ -167,6 +181,7 @@ class Mailbox:
         Never raises: a failed mailbox persist must not break message delivery."""
         try:
             from security.encryption import hub_encryption
+            # Serialise pending and queued messages.
             data = {
                 "pending_ack": {
                     mid: {"message": self._message_to_dict(msg),
@@ -178,6 +193,7 @@ class Mailbox:
                     for sid, msgs in self.spoke_queues.items()
                 },
             }
+            # Encrypt the JSON.
             json_data = json.dumps(data, indent=2, default=str)
             encrypted = hub_encryption.encrypt(json_data)
             # Unique temp file per write. ``_save`` is offloaded to a thread
@@ -192,6 +208,7 @@ class Mailbox:
             fd, tmp_path = tempfile.mkstemp(
                 dir=os.path.dirname(self._path) or ".",
                 prefix=".mailbox.", suffix=".tmp")
+            # Write, fsync, tighten permissions and atomically replace.
             try:
                 with os.fdopen(fd, "wb") as f:
                     f.write(encrypted)
@@ -229,8 +246,10 @@ class Mailbox:
     def _load(self) -> None:
         """Restore pending_ack/spoke_queues from disk (warm start after a hub
         restart). Best-effort: any failure just starts empty — never fatal."""
+        # Nothing saved yet.
         if not os.path.exists(self._path):
             return
+        # Read and decrypt the saved file; empty means nothing to restore.
         try:
             from security.encryption import hub_encryption
             with open(self._path, "rb") as f:
@@ -239,12 +258,14 @@ class Mailbox:
                 return
             json_data = hub_encryption.decrypt(encrypted)
             data = json.loads(json_data) or {}
+            # Restore pending messages, skipping unreadable ones.
             for mid, entry in (data.get("pending_ack") or {}).items():
                 try:
                     msg = self._message_from_dict(entry["message"])
                     self.pending_ack[mid] = (msg, float(entry["first_sent"]), int(entry["retries"]))
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"Mailbox load: dropping unreadable pending_ack entry {mid}: {e}")
+            # Restore offline queues, skipping unreadable messages.
             for sid, msgs in (data.get("spoke_queues") or {}).items():
                 restored = []
                 for m in msgs:
@@ -254,6 +275,7 @@ class Mailbox:
                         logger.warning(f"Mailbox load: dropping unreadable queued message for {sid}: {e}")
                 if restored:
                     self.spoke_queues[sid] = restored
+            # Log how many messages were restored.
             total = len(self.pending_ack) + sum(len(v) for v in self.spoke_queues.values())
             if total:
                 logger.info(f"Mailbox: restored {total} message(s) from {self._path} (warm start).")
@@ -279,6 +301,7 @@ class Mailbox:
             logger.warning(f"Immediate push failed for {message.header.message_id}: {e}")
             # If it fails here, it's already in the queue for the retry loop to handle if we add it
 
+        # Track it as awaiting an ack regardless, and save.
         self.pending_ack[message.header.message_id] = (message, time.time(), 0)
         await self._asave()
 
@@ -286,6 +309,7 @@ class Mailbox:
         """
         Processes an acknowledgement and removes the corresponding message from the pending queue.
         """
+        # Known message: note the ack time and remove it.
         if ack.correlation_id in self.pending_ack:
             logger.debug(f"Message {ack.correlation_id} acknowledged with status: {ack.status}")
             # Record per-spoke last-ack time (authoritative dest from the pending
@@ -317,6 +341,7 @@ class Mailbox:
         """
         Queues a message for a spoke that is currently offline.
         """
+        # Make sure the spoke has a queue.
         if spoke_id not in self.spoke_queues:
             self.spoke_queues[spoke_id] = []
 
@@ -358,6 +383,7 @@ class Mailbox:
                 logger.info(f"Merged {len(older)} queued CS_CONFIG_UPDATE(s) for {spoke_id} "
                             f"into {message.header.message_id}")
 
+        # Add the message and save.
         self.spoke_queues[spoke_id].append(message)
         logger.info(f"Queued message {message.header.message_id} for offline spoke {spoke_id}")
         await self._asave()
@@ -370,6 +396,7 @@ class Mailbox:
         so the hub knows whether the spoke is about to restart again.
         """
         updates_sent = 0
+        # Only flush when the spoke has queued messages.
         if spoke_id in self.spoke_queues and self.spoke_queues[spoke_id]:
             messages = self.spoke_queues[spoke_id][:]
             logger.info(f"Flushing mailbox for spoke {spoke_id} ({len(messages)} messages)")
@@ -413,10 +440,12 @@ class Mailbox:
             was passed over and won't be acked. Drops in ~45s instead of 1h.
 
         Returns the count expired. Non-raising; caller persists if non-zero."""
+        # Absolute age cap (None if disabled) and the set of connected spokes.
         cap = self.backlog_max_age_s if self.backlog_max_age_s and self.backlog_max_age_s > 0 else None
         connected = connected or set()
 
         def _superseded(msg: Message, stamp: float) -> bool:
+            """True if a connected spoke has acked newer traffic since this message was sent."""
             sid = getattr(msg.header, "destination_id", None)
             if not sid or sid not in connected:
                 return False
@@ -427,14 +456,17 @@ class Mailbox:
             return last_ack > (stamp + BACKLOG_SUPERSEDE_GRACE_S)
 
         def _expired(msg: Message, stamp: float) -> bool:
+            """True if the message is superseded or older than its limit."""
             if _superseded(msg, stamp):
                 return True
+            # Age versus the smaller of its own ttl and the cap.
             age = now - float(stamp or now)
             limit = float(getattr(msg.header, "ttl", 86400) or 86400)
             if cap is not None:
                 limit = min(limit, cap)
             return age >= limit
 
+        # Drop expired pending messages, counting by type.
         dropped = 0
         by_type: Dict[str, int] = {}
         for mid in [m for m, (msg, first_sent, _r) in self.pending_ack.items()
@@ -444,6 +476,7 @@ class Mailbox:
                 by_type.get(getattr(msg.payload, "type", "?") or "?", 0) + 1
             del self.pending_ack[mid]
             dropped += 1
+        # Drop expired queued messages, keeping the rest.
         for sid in list(self.spoke_queues.keys()):
             keep: List[Message] = []
             for msg in self.spoke_queues[sid]:
@@ -454,6 +487,7 @@ class Mailbox:
                 else:
                     keep.append(msg)
             self.spoke_queues[sid] = keep
+        # Log a summary of what was dropped.
         if dropped:
             logger.warning("[backlog-expiry] dropped %d stale backlog message(s) "
                            "(older than %ss): %s", dropped,
@@ -465,7 +499,9 @@ class Mailbox:
         Periodically checks for messages that haven't been acknowledged and retries them.
         send_func_map: { spoke_id: send_func }
         """
+        # Loop forever, once a second.
         while True:
+            # Messages to retry this pass.
             now = time.time()
             to_retry = []
 
@@ -476,6 +512,7 @@ class Mailbox:
                 self._last_expiry_sweep = now
                 if self._expire_stale(now, connected=set(send_func_map or {})):
                     changed = True
+            # Find messages due a retry; give up on those past the last interval.
             for msg_id, (msg, last_sent, retries) in list(self.pending_ack.items()):
                 if retries >= len(self.retry_intervals):
                     # Include spoke_id (destination) + message type so triage
@@ -490,10 +527,12 @@ class Mailbox:
                     changed = True
                     continue
 
+                # Due once its backoff interval has passed.
                 wait_time = self.retry_intervals[retries]
                 if now - last_sent >= wait_time:
                     to_retry.append((msg_id, msg, retries))
 
+            # Retry each due message, or move it to the offline queue if the spoke is gone.
             for msg_id, msg, retries in to_retry:
                 spoke_id = msg.header.destination_id
                 send_func = send_func_map.get(spoke_id)
@@ -521,6 +560,7 @@ class Mailbox:
                     await self.queue_for_spoke(spoke_id, msg)  # saves its own change
                     del self.pending_ack[msg_id]
 
+            # Save if anything changed, then wait a second.
             if changed:
                 await self._asave()
 
@@ -538,14 +578,17 @@ class Mailbox:
         the full backoff schedule per stranded message). Returns the number of
         messages dropped (best-effort, non-raising).
         """
+        # Drop pending messages for this spoke.
         dropped = 0
         for msg_id in [mid for mid, (msg, _, _) in self.pending_ack.items()
                        if msg.header.destination_id == spoke_id]:
             del self.pending_ack[msg_id]
             dropped += 1
+        # Drop its offline queue too.
         if spoke_id in self.spoke_queues:
             dropped += len(self.spoke_queues[spoke_id])
             del self.spoke_queues[spoke_id]
+        # Log and save if anything was dropped.
         if dropped:
             logger.info(f"Cleared {dropped} queued message(s) for spoke {spoke_id}.")
             await self._asave()
@@ -564,6 +607,7 @@ class Mailbox:
         migration is the reboot backstop. Idempotent (no-op if
         ``old_id == new_id`` or ``old_id`` has no state). Best-effort,
         non-raising."""
+        # Nothing to do when the id is unchanged.
         if old_id == new_id:
             return False
         moved = False
@@ -571,6 +615,7 @@ class Mailbox:
         # a later flush delivers to the new id even before send_to_spoke
         # resolves the destination via _primary_key.
         if old_id in self.spoke_queues:
+            # Move the offline queue, re-pointing each message's destination.
             queued = self.spoke_queues.pop(old_id)
             for _q in queued:
                 if getattr(_q.header, "destination_id", None) == old_id:
@@ -597,6 +642,7 @@ class Mailbox:
             if getattr(msg.header, "destination_id", None) == old_id:
                 msg.header.destination_id = new_id
                 moved = True
+        # Log when something was re-keyed.
         if moved:
             logger.info(f"Re-keyed mailbox for spoke {old_id} → {new_id}")
         return moved
@@ -612,6 +658,7 @@ class Mailbox:
         ``old_id == new_id`` or ``old_id`` has no state). Best-effort,
         non-raising. The sync core is ``rename_spoke_inplace``; this wrapper
         persists via ``_asave`` (call from async contexts)."""
+        # Persist only if something moved.
         if self.rename_spoke_inplace(old_id, new_id):
             await self._asave()
 
@@ -620,6 +667,7 @@ class Mailbox:
         Returns a list of all messages currently awaiting acknowledgement
         or queued for offline spokes.
         """
+        # Collect pending messages, then all queued ones.
         all_pending = []
         for msg, _, _ in self.pending_ack.values():
             all_pending.append(msg)
@@ -635,20 +683,24 @@ class Mailbox:
         backlog that won't drain shows up here: e.g. a pile of SPOKE_UPDATE to
         one flapping spoke, or many entries all destined for the same spoke.
         Non-raising (best-effort)."""
+        # Counters for the breakdown, and the age of the oldest entry.
         now = time.time()
         by_type: Dict[str, int] = {}
         by_spoke: Dict[str, int] = {}
         oldest = 0.0
 
         def _tally(m: Message) -> None:
+            """Count ``m`` by type and by destination spoke."""
             t = getattr(m.payload, "type", None) or "?"
             by_type[t] = by_type.get(t, 0) + 1
             sid = getattr(m.header, "destination_id", None) or "?"
             by_spoke[sid] = by_spoke.get(sid, 0) + 1
 
+        # Tally pending messages and track the oldest.
         for msg, first_sent, _retries in self.pending_ack.values():
             _tally(msg)
             oldest = max(oldest, now - float(first_sent or now))
+        # Tally queued messages and track the oldest.
         queued = 0
         for q in self.spoke_queues.values():
             for msg in q:
@@ -656,6 +708,7 @@ class Mailbox:
                 _tally(msg)
                 oldest = max(oldest, now - float(getattr(msg.header, "timestamp", now) or now))
         pending = len(self.pending_ack)
+        # Totals plus the breakdowns.
         return {
             "total": pending + queued,
             "pending_ack": pending,
@@ -671,11 +724,13 @@ class Mailbox:
         count dropped. Backs the Hub Status 'Drop Backlog' button so an operator
         can clear a stuck backlog (e.g. undeliverable SPOKE_UPDATE to a flapping
         spoke) without deleting the spoke. Non-raising."""
+        # Drop matching pending messages.
         dropped = 0
         for mid in [m for m, (msg, _, _) in self.pending_ack.items()
                     if msg_type is None or getattr(msg.payload, "type", None) == msg_type]:
             del self.pending_ack[mid]
             dropped += 1
+        # Drop matching queued messages, keeping the rest.
         for sid in list(self.spoke_queues.keys()):
             keep: List[Message] = []
             for msg in self.spoke_queues[sid]:
@@ -684,6 +739,7 @@ class Mailbox:
                 else:
                     keep.append(msg)
             self.spoke_queues[sid] = keep
+        # Log and save if anything was dropped.
         if dropped:
             logger.info("Purged %d backlog message(s)%s (diag).", dropped,
                         f" of type {msg_type}" if msg_type else "")

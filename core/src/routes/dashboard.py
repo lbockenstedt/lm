@@ -1,11 +1,15 @@
 """Dashboard summary/all-tenants + cross-system search routes."""
+# json gives a stable key for de-duplicating identical requests; time gives "now".
 import json
 import time
+# Friendly spoke names for the roster.
 from display_names import node_name  # sibling leaf
 
+# Shared Hub helpers: errors, request, spoke-reply unwrap, access checks, prefix filter, logger.
 from api import (
     HTTPException, Request, _unwrap_spoke, access, filter_items_by_prefixes, get_tenant_scoping, logger,
 )
+# Helpers for the cross-system search index.
 from search_index import search_scope_key, search_result_matches, is_ip_query, cold_live_legs, topup_cold_legs
 
 # GREEN/YELLOW/RED age bands for a relayed agent, matching HeartbeatManager.get_status
@@ -31,11 +35,13 @@ def relayed_agent_last_seen(hub) -> dict:
     Never raises: a malformed hub degrades to an empty index, which just means
     the caller falls back to the spoke-only test (previous behaviour).
     """
+    # Take each agent's last relayed frame time.
     out: dict = {}
     for pk, info in (getattr(hub, "agent_info", {}) or {}).items():
         ls = (info or {}).get("last_seen")
         if isinstance(ls, (int, float)):
             out[pk] = max(out.get(pk, 0.0), float(ls))
+    # Then any newer time from the persisted "{spoke}:{agent}" heartbeat keys.
     hb = getattr(hub, "heartbeat", None)
     for key, ts in (getattr(hb, "last_seen", {}) or {}).items():
         k = str(key)
@@ -58,14 +64,17 @@ def infra_item_status(hub, sid, tier, connected, agent_last, now=None):
     ago — the same spoke-vs-agent confusion ``spoke_alert_sync`` already fixed
     for the out-of-contact alerts.
     """
+    # A live spoke connection counts as online.
     now = time.time() if now is None else now
     online = hub._primary_key(sid) in connected
     agent_age = None
+    # Otherwise try it as a relayed agent, judged by how long since it was seen.
     if not online:
         last = (agent_last or {}).get(hub._agent_primary_key(sid))
         if isinstance(last, (int, float)) and last > 0:
             agent_age = max(0.0, now - last)
             online = agent_age < _AGENT_RED_S
+    # Offline or erroring is red; a warning or an ageing agent is yellow; else green.
     if not online or tier == "error":
         return online, "red"
     if tier == "warning" or (agent_age is not None and agent_age >= _AGENT_GREEN_S):
@@ -89,14 +98,17 @@ def _spoke_rosters(hub) -> dict:
       * not approved → skipped (pending onboarding, not a "down system").
     down_spokes entries: ``{spoke_id, name, module_type, last_seen_epoch}``.
     Never raises — best-effort so the overview never blanks on a bad state."""
+    # Read the module metadata and the live connections.
     try:
         md = hub.state.system_state.get("module_metadata", {}) or {}
         connected = set((hub.active_connections or {}).keys())
         out: dict = {}
         def _bucket(tid):
+            """Return (creating if needed) the roster counts for a tenant ("" -> shared)."""
             return out.setdefault(tid or "__shared__",
                                   {"up": 0, "down": 0, "decommissioned": 0,
                                    "down_spokes": []})
+        # Sort every known spoke into decommissioned, up or down (pending ones are skipped).
         for sid in (hub.state.system_state.get("known_modules", []) or []):
             pk = hub._primary_key(sid)
             meta = (md.get(sid) or {}) if isinstance(md, dict) else {}
@@ -127,6 +139,7 @@ def _spoke_rosters(hub) -> dict:
 
 def register(app, hub, ctx):
     """Register dashboard routes on the Hub app."""
+    # Session, admin and tenant helpers from the shared route context.
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
     _resolve_tenant = ctx._resolve_tenant
@@ -149,10 +162,13 @@ def register(app, hub, ctx):
             task. Tenants that need the exact same answer (e.g. the
             untagged ``PXMX_LIST_VMS {}`` to a shared hypervisor spoke) await
             ONE request instead of sending one each."""
+        # Local import for running the requests in parallel.
         import asyncio as _asyncio
+        # Read the tenant's NetBox slug and Proxmox tag (None when unset).
         nb_slug  = scoping["netbox_tenant_slug"] or None
         pxmx_tag = scoping["proxmox_tag"]        or None
 
+        # The NetBox spoke.
         spoke_ipam       = hub.get_spoke_by_type("ipam")
         # Tenant-aware VM counting. Count VMs from EVERY hypervisor spoke VISIBLE
         # to this tenant, not just the single one directly BOUND to it — the
@@ -222,6 +238,7 @@ def register(app, hub, ctx):
                     owned_agent_reqs.append((_apk, _sp))
 
         def _mark_failed(spoke):
+            """Remember that ``spoke`` failed so the rest of the fan-out skips it."""
             if failed_spokes is not None:
                 failed_spokes.add(spoke)
 
@@ -233,8 +250,10 @@ def register(app, hub, ctx):
             only ITS wait, not the request other tenants are also awaiting.
             Spoke replies are only read here (counted, merged into new
             dicts), never mutated, so sharing one reply object is safe."""
+            # Outside a fan-out, just send the request.
             if shared_calls is None:
                 return hub.request_response(spoke, cmd, payload, timeout=timeout)
+            # Reuse an identical in-flight request, or start one and share it.
             key = (spoke, cmd, json.dumps(payload, sort_keys=True, default=str))
             task = shared_calls.get(key)
             if task is None:
@@ -248,6 +267,7 @@ def register(app, hub, ctx):
             return _asyncio.shield(task)
 
         async def _req(spoke, cmd, payload=None):
+            """Send ``cmd`` to ``spoke``; return the unwrapped reply ({} on any failure)."""
             if not spoke:
                 return {}
             # A connected-but-WEDGED spoke (WS open but not answering) makes each
@@ -262,6 +282,7 @@ def register(app, hub, ctx):
             # keeps the dashboard responsive; a slow NetBox shows a stale/0 count
             # (memoized 60s) instead of hanging the whole page.
             timeout = 8.0 if isinstance(cmd, str) and cmd.startswith("NETBOX_") else 5.0
+            # Send it; a raised error marks the spoke failed.
             try:
                 r = await _send(spoke, cmd, payload, timeout)
             except Exception:
@@ -286,6 +307,7 @@ def register(app, hub, ctx):
                 return {}
             return _unwrap_spoke(r) if isinstance(r, dict) else {}
 
+        # Fetch devices, prefixes, IPs, sessions and VMs all at once.
         _core = await _asyncio.gather(
             _req(spoke_ipam, "NETBOX_GET_DEVICES", {"tenant": nb_slug}),
             _req(spoke_ipam, "NETBOX_GET_PREFIXES", {"tenant": nb_slug}),
@@ -307,11 +329,13 @@ def register(app, hub, ctx):
                                          "prefer_cache": True})
               for apk, sp in owned_agent_reqs],
         )
+        # Split the results: the first four, then the per-spoke VMs, then the pinned-agent VMs.
         devices_r, prefixes_r, ips_r, sessions_r = _core[:4]
         _n_hv = len(hv_spokes)
         _vm_envelopes   = _core[4:4 + _n_hv]
         _owned_envelopes = _core[4 + _n_hv:]
 
+        # Count devices, prefixes and used IPs.
         devices  = len(devices_r.get("devices",   []))
         prefixes = len(prefixes_r.get("prefixes", []))
         ips_used = len(ips_r.get("ip_addresses",  []))
@@ -331,6 +355,7 @@ def register(app, hub, ctx):
                 if isinstance(_v, dict):
                     _key = _v.get("unique_id") or (_v.get("node"), _v.get("vmid"))
                     (_spoke_owned if _owner else _seen)[_key] = _v
+        # Keep shared-spoke VMs not already owned by a dedicated spoke; read the sessions list.
         all_vms  = [v for k, v in _seen.items() if k not in _spoke_owned]
         sessions_list = sessions_r.get("sessions", sessions_r.get("data", []))
         # Scope the VM + active-session counts by the tenant so the dashboard
@@ -367,6 +392,7 @@ def register(app, hub, ctx):
                            for v in all_vms}
                 _merged.update(_owned)
                 all_vms = list(_merged.values())
+        # Add the dedicated-spoke VMs too.
         if _spoke_owned:
             _merged = {(v.get("unique_id") or (v.get("node"), v.get("vmid"))): v
                        for v in all_vms}
@@ -383,9 +409,11 @@ def register(app, hub, ctx):
         else:
             sessions_list = (filter_items_by_prefixes(sessions_list, sess_prefixes, ["ip"])
                              if sess_prefixes else [])
+        # Count running VMs and sessions.
         vms      = sum(1 for v in all_vms if v.get("status") == "running")
         sessions = len(sessions_list)
 
+        # Return the counts.
         return {
             "devices":   devices,
             "vms":       vms,
@@ -394,6 +422,7 @@ def register(app, hub, ctx):
             "ips_used":  ips_used,
         }
 
+    # Counts for the active tenant.
     @app.get("/api/dashboard/summary")
     async def dashboard_summary(request: Request, tenant: str = None):
         """
@@ -401,11 +430,13 @@ def register(app, hub, ctx):
         Returns: devices (NetBox), vms (Proxmox running), sessions (CPPM), prefixes, ips_used.
         All counts are scoped by the tenant's netbox_tenant_slug / proxmox_tag.
         """
+        # Resolve the tenant's scope and compute its counts.
         hub = app.state.hub
         scoping = get_tenant_scoping(hub, _resolve_tenant(request, tenant))
         counts = await _compute_tenant_counts(hub, scoping)
         return {"tenant": scoping["tenant_id"], **counts}
 
+    # Up/down status of the hub and each spoke/agent.
     @app.get("/api/dashboard/infra-status")
     async def infra_status(request: Request, tenant: str = None):
         """Hub + spoke/agent up-down summary (green/yellow/red) for the Overview.
@@ -415,10 +446,12 @@ def register(app, hub, ctx):
         WARNING tier; red = offline or ERROR tier. Hub is always green (it served
         this request)."""
         hub = app.state.hub
+        # Admins with no tenant chosen see everything; others see their tenant plus shared infra.
         sess = _session_user(request)
         is_admin = _is_admin(sess)
         tid = _resolve_tenant(request, tenant)
         want_all = is_admin and (tenant in (None, "", "all"))
+        # Spoke metadata, live connections and the current alert tier per spoke.
         md = hub.state.system_state.get("module_metadata", {}) or {}
         connected = set((hub.active_connections or {}).keys())
         try:
@@ -431,6 +464,7 @@ def register(app, hub, ctx):
         agent_last = relayed_agent_last_seen(hub)
         now = time.time()
 
+        # One row per spoke, skipping those bound to another tenant.
         items = []
         for sid, meta in md.items():
             meta = meta or {}
@@ -448,6 +482,7 @@ def register(app, hub, ctx):
                 "tenant": stid or "",
                 "online": online, "tier": tier, "status": status,
             })
+        # Red first, then yellow, then green (by name); count each colour.
         items.sort(key=lambda i: ({"red": 0, "yellow": 1, "green": 2}.get(i["status"], 3), i["name"]))
         counts = {c: sum(1 for i in items if i["status"] == c) for c in ("green", "yellow", "red")}
         return {"hub": {"status": "green", "name": "Hub"}, "items": items,
@@ -456,21 +491,26 @@ def register(app, hub, ctx):
     # Admin all-tenants overview: memoized 60s so repeated renders don't re-fan-out.
     _all_tenants_summary_cache: dict = {"ts": 0.0, "data": None}
 
+    # Per-tenant counts for admins.
     @app.get("/api/dashboard/all-tenants")
     async def dashboard_all_tenants(request: Request, refresh: int = 0):
         """Admin-only: one row per tenant with the same counts as the
         single-tenant summary, fanned out in parallel (bounded) and memoized
         for 60s. ``?refresh=1`` bypasses the memo. ``default`` is excluded
         (unscoped — its counts would be global/all and misleading)."""
+        # Local imports for the parallel fan-out and the memo clock.
         import asyncio as _asyncio, time as _time
         hub = app.state.hub
+        # Admins only.
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="Admin only")
+        # Serve the memo if it's under 60s old (unless a refresh was asked for).
         if not refresh and _all_tenants_summary_cache["data"] is not None \
                 and (_time.time() - _all_tenants_summary_cache["ts"]) < 60:
             return _all_tenants_summary_cache["data"]
 
+        # Every tenant except "default".
         tenants = hub.state.tenant_state.get("tenants", {})
         tids = [tid for tid in tenants.keys() if tid != "default"]
 
@@ -479,6 +519,7 @@ def register(app, hub, ctx):
         # hide. Built once, merged per row.
         rosters = _spoke_rosters(hub)
 
+        # At most five tenants at a time.
         sem = _asyncio.Semaphore(5)
         # Shared across the fan-out: a spoke that times out for one tenant is
         # skipped for the rest (it's the same ipam/hypervisor spoke for all), so a
@@ -488,6 +529,7 @@ def register(app, hub, ctx):
         shared_calls: dict = {}
 
         async def _one(tid):
+            """Build one tenant's overview row (counts plus spoke roster)."""
             cfg = tenants.get(tid) or {}
             scoping = get_tenant_scoping(hub, tid)
             async with sem:
@@ -507,6 +549,7 @@ def register(app, hub, ctx):
                 **counts,
             }
 
+        # Run every tenant; a failed one gets a row of zeros.
         rows = await _asyncio.gather(*[_one(tid) for tid in tids], return_exceptions=True)
         out = []
         for tid, row in zip(tids, rows):
@@ -524,6 +567,7 @@ def register(app, hub, ctx):
                 })
             else:
                 out.append(row)
+        # Sort the rows by name.
         out.sort(key=lambda r: r["name"].lower())
         # Untagged (shared / unassigned) spokes are not bound to a tenant row;
         # surface them separately so an offline shared spoke is never lost from
@@ -531,11 +575,13 @@ def register(app, hub, ctx):
         shared = rosters.get("__shared__",
                              {"up": 0, "down": 0, "decommissioned": 0,
                               "down_spokes": []})
+        # Memo the result and return it.
         data = {"tenants": out, "shared_spokes": shared}
         _all_tenants_summary_cache["ts"] = _time.time()
         _all_tenants_summary_cache["data"] = data
         return data
 
+    # Search every module at once.
     @app.get("/api/search")
     # ── Dashboard + global search (/api/search, /api/dashboard) ──────────────
     # cross_system_search fans `q` to every spoke type (NETBOX/VMs/SESSIONS/
@@ -561,6 +607,7 @@ def register(app, hub, ctx):
         The hypervisor leg is routed to the tenant-bound spoke so a non-admin
         never reaches another tenant's hypervisor at all.
         """
+        # Local imports for MAC matching and the parallel fan-out; an empty query is a 400.
         import re, asyncio as _asyncio
         hub = app.state.hub
         if not q or not q.strip():
@@ -580,6 +627,7 @@ def register(app, hub, ctx):
         is_mac = bool(_MAC_RE.match(raw_q))
         q_search = access.norm_mac(raw_q) if is_mac else raw_q
 
+        # Work out the tenant scope and whether the caller is an admin.
         resolved = _resolve_tenant(request, tenant)
         scoping = get_tenant_scoping(hub, resolved)
         sess = _session_user(request)
@@ -596,6 +644,7 @@ def register(app, hub, ctx):
         # picks a tenant still gets that tenant's scope.
         if is_admin and not tenant:
             nb_slug = ""
+        # The tenant's Proxmox tag ("" when unset).
         proxmox_tag = scoping.get("proxmox_tag") or ""
         # Scope key for the in-memory search index. Derived from the scope-
         # identifying inputs ONLY (tenant slug + proxmox tag + admin flag) — a
@@ -604,6 +653,7 @@ def register(app, hub, ctx):
         # are a deterministic function of the slug, so this key needs no prefix
         # fetch (that cost moves to the background populate). See SearchIndexMixin.
         scope_key = search_scope_key(nb_slug, proxmox_tag, is_admin)
+        # Is the search index on, and the lower-cased text to match.
         idx_on = hub.search_index_enabled()
         needle = q_search.lower()
         # ── Spoke resolution (needed by the live fan-out and by reporting). ──
@@ -618,6 +668,7 @@ def register(app, hub, ctx):
         else:
             _gs = hub.get_hypervisor_spoke()
             spoke_hypervisor = _gs if access.spoke_is_unbound(hub, _gs) else None
+        # The tenant's own (or shared) ClearPass spoke.
         _scoped_t = resolved if resolved and resolved != "default" else None
         spoke_nac        = access.scoped_spoke_of_type(hub, _scoped_t, "nac")
         # Tenant-bound directory: a non-admin only reaches the LDAP spoke bound
@@ -630,6 +681,7 @@ def register(app, hub, ctx):
                                    else hub.get_spoke_by_type("directory")))
         else:
             spoke_directory = hub.get_spoke_by_type("directory")
+        # The tenant's firewall spoke, then the list of (spoke, search command) legs.
         spoke_firewall   = access.scoped_spoke_of_type(hub, _scoped_t, "firewall")
         _legs = [
             (spoke_ipam,       "NETBOX_SEARCH"),
@@ -639,9 +691,11 @@ def register(app, hub, ctx):
             (spoke_firewall,   "SEARCH_DHCP"),
         ]
 
+        # Is the query an IP or prefix?
         is_ip = is_ip_query(raw_q)
 
         def _envelope(results, cached, warming=False):
+            """Build the search response: the results plus which modules were searched."""
             env = {
                 "query":       q,
                 "query_type":  "ip" if is_ip else ("mac" if is_mac else "name"),
@@ -722,6 +776,7 @@ def register(app, hub, ctx):
         }
 
         async def _call(spoke, cmd):
+            """Run one search leg; spoke errors come back as an error row ([] if no spoke)."""
             if not spoke:
                 return []
             try:
@@ -794,6 +849,7 @@ def register(app, hub, ctx):
                 logger.warning(f"search: prefix fetch for '{resolved}' failed: {e}")
         payload["prefixes"] = prefixes  # opnsense DHCP filter
 
+        # Run every leg at once, then add the console and vault hits.
         all_results = await _asyncio.gather(*[_call(s, c) for s, c in _legs])
         merged = [item for sublist in all_results for item in sublist]
         merged.extend(console_hits)

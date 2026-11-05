@@ -16,7 +16,7 @@ from simulations.check_eval import count_for_check, normalize_counts  # noqa: E4
 # cs repo's test_check_eval.py pins the SAME constant across its three copies;
 # this pins the lm copy. Bump EXPECTED_SHA in BOTH repos when you legitimately
 # change check_eval.py.
-EXPECTED_SHA = "1bbe785c49d4406dbc9f4453d9c3f663c9ff4b5f75af22c67e31a239db0f5ade"
+EXPECTED_SHA = "5a9f981ab495608d35d8c3c50c57a7a4524fcfac0d81363ce2ca65976d6c2b70"
 
 
 def test_lm_check_eval_in_sync():

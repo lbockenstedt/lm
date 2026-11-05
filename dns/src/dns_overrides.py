@@ -25,18 +25,29 @@ and re-render it locally, so nothing a coordinator sends can inject arbitrary
 Unbound directives (see ``validate_overrides``).
 """
 
+# Deep copies so callers' data is never changed.
 import copy
+# Hashing for the override-set fingerprint.
 import hashlib
+# IP/subnet parsing and validation.
 import ipaddress
+# JSON for the persisted state and fingerprints.
 import json
+# Logging for warnings.
 import logging
+# Filesystem paths and atomic file replacement.
 import os
+# Name/text validation patterns.
 import re
+# Timestamps for persisted state.
 import time
+# Type hints.
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+# Module logger.
 logger = logging.getLogger("DNSOverrides")
 
+# Persisted state path, rendered config file name, and the prefix for generated view names.
 DEFAULT_OVERRIDES_STATE = "/var/lib/lm-dns/overrides.json"
 OVERRIDES_CONF_NAME = "lm-overrides.conf"
 VIEW_PREFIX = "lm-ov-"
@@ -44,6 +55,7 @@ VIEW_PREFIX = "lm-ov-"
 #: so workers still serving the old rendering report drift and get re-pushed.
 RENDER_REVISION = 2
 
+# Allowed record types and size/TTL limits.
 OVERRIDE_RECORD_TYPES = ("A", "AAAA", "CNAME")
 MAX_PROFILES = 64
 MAX_ENTRIES_PER_PROFILE = 500
@@ -52,6 +64,7 @@ MIN_TTL = 1
 MAX_TTL = 604800
 DEFAULT_TTL = 300
 
+# Profile names and DNS labels: letters, digits and a few safe punctuation characters.
 _PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,46}[A-Za-z0-9])?$")
 _LABEL_RE = re.compile(r"^(?!-)[a-z0-9_-]{1,63}(?<!-)$")
 #: Free text never reaches the Unbound config, but it is still echoed into the
@@ -68,11 +81,23 @@ class DnsOverrideStateUnavailable(RuntimeError):
 
 
 def _text(value: Any, field: str, limit: int) -> str:
+    """Validate a free-text field: single line and within a length limit.
+
+    Args:
+        value: Raw value (None becomes "").
+        field: Field name for error messages.
+        limit: Maximum length.
+
+    Returns:
+        The stripped text.
+    """
+    # Strip it, then reject line breaks/NULs and over-long values.
     out = str(value if value is not None else "").strip()
     if _TEXT_BAD.search(out):
         raise DnsOverrideError(f"{field} must be a single line")
     if len(out) > limit:
         raise DnsOverrideError(f"{field} must be at most {limit} characters")
+    # Return the clean text.
     return out
 
 
@@ -83,25 +108,32 @@ def normalize_name(raw: Any, allow_wildcard: bool = True) -> str:
     the only wildcard forms. Labels are restricted to letters, digits, ``-``
     and ``_`` so a name can never break out of a quoted Unbound string.
     """
+    # Lower-case, trim and drop the trailing dot.
     name = str(raw if raw is not None else "").strip().lower().rstrip(".")
+    # Empty is invalid.
     if not name:
         raise DnsOverrideError("name is required")
+    # "*" alone is allowed only when wildcards are.
     if name == "*":
         if not allow_wildcard:
             raise DnsOverrideError("a wildcard is not allowed here")
         return name
+    # For "*.zone", validate the zone part.
     body = name
     if name.startswith("*."):
         if not allow_wildcard:
             raise DnsOverrideError("a wildcard is not allowed here")
         body = name[2:]
+    # Enforce the total-length limit and every label's allowed characters.
     if len(body) > 253 or not all(_LABEL_RE.match(label) for label in body.split(".")):
         raise DnsOverrideError(f"invalid DNS name: {raw!r}")
+    # Return the normalized name.
     return name
 
 
 def _zone_of(name: str) -> str:
     """Wildcard name -> the Unbound zone it redirects ("" for exact names)."""
+    # "*" redirects the root zone; "*.zone" redirects that zone; exact names have none.
     if name == "*":
         return "."
     if name.startswith("*."):
@@ -111,21 +143,38 @@ def _zone_of(name: str) -> str:
 
 def _under(name: str, zone: str) -> bool:
     """True if ``name`` is ``zone`` or a name below it."""
+    # Exact match or a proper subdomain.
     return name == zone or name.endswith("." + zone)
 
 
 def _wild(zone: str) -> str:
+    """Turn a zone back into its wildcard display form ("." becomes "*")."""
+    # The root zone is shown as "*".
     return "*" if zone == "." else f"*.{zone}"
 
 
 def _validate_entry(raw: Any) -> Dict[str, Any]:
+    """Validate one override record and return it in canonical form.
+
+    Args:
+        raw: Record dict with name, type, value and optional ttl.
+
+    Returns:
+        Dict with normalized name, type, value and ttl.
+
+    Raises:
+        DnsOverrideError: If any field is invalid.
+    """
+    # Must be an object.
     if not isinstance(raw, dict):
         raise DnsOverrideError("each override record must be an object")
+    # Normalize the name and record type.
     name = normalize_name(raw.get("name"))
     rtype = str(raw.get("type") or "A").strip().upper()
     if rtype not in OVERRIDE_RECORD_TYPES:
         raise DnsOverrideError(
             f"{name}: type must be one of {', '.join(OVERRIDE_RECORD_TYPES)}")
+    # Validate the value for the record type.
     value = str(raw.get("value") if raw.get("value") is not None else "").strip()
     try:
         if rtype == "A":
@@ -136,17 +185,20 @@ def _validate_entry(raw: Any) -> Dict[str, Any]:
             value = normalize_name(value, allow_wildcard=False)
     except ValueError:
         raise DnsOverrideError(f"{name}: invalid {rtype} value {value!r}")
+    # TTL defaults when absent, must be an integer and within limits.
     try:
         ttl = int(raw.get("ttl") if raw.get("ttl") not in (None, "") else DEFAULT_TTL)
     except (TypeError, ValueError):
         raise DnsOverrideError(f"{name}: ttl must be an integer")
     if not MIN_TTL <= ttl <= MAX_TTL:
         raise DnsOverrideError(f"{name}: ttl must be between {MIN_TTL} and {MAX_TTL}")
+    # Return the canonical record.
     return {"name": name, "type": rtype, "value": value, "ttl": ttl}
 
 
 def validate_profile(raw: Any) -> Dict[str, Any]:
     """Return a canonical profile or raise :class:`DnsOverrideError`."""
+    # Must be an object with a valid profile name.
     if not isinstance(raw, dict):
         raise DnsOverrideError("profile must be an object")
     name = str(raw.get("name") or "").strip()
@@ -154,8 +206,10 @@ def validate_profile(raw: Any) -> Dict[str, Any]:
         raise DnsOverrideError(
             "profile name must be 1-48 characters: letters, digits, '-', '_' or "
             "'.', starting and ending with a letter or digit")
+    # Optional single-line description.
     description = _text(raw.get("description"), "description", 200)
 
+    # Records and block lists must be lists within the total entry limit.
     records_in = raw.get("records") or []
     block_in = raw.get("block") or []
     if not isinstance(records_in, list) or not isinstance(block_in, list):
@@ -164,13 +218,16 @@ def validate_profile(raw: Any) -> Dict[str, Any]:
         raise DnsOverrideError(
             f"a profile may hold at most {MAX_ENTRIES_PER_PROFILE} entries")
 
+    # Validate and de-duplicate records by (name, type, value).
     records: Dict[tuple, Dict[str, Any]] = {}
     for item in records_in:
         entry = _validate_entry(item)
         records[(entry["name"], entry["type"], entry["value"])] = entry
+    # Group record types by name.
     by_name: Dict[str, set] = {}
     for entry in records.values():
         by_name.setdefault(entry["name"], set()).add(entry["type"])
+    # DNS rules: a CNAME cannot sit beside other types, and only one CNAME per name.
     for rname, types in by_name.items():
         if "CNAME" in types and len(types) > 1:
             raise DnsOverrideError(f"{rname}: a CNAME cannot coexist with other record types")
@@ -178,13 +235,16 @@ def validate_profile(raw: Any) -> Dict[str, Any]:
                 1 for k in records if k[0] == rname and k[1] == "CNAME") > 1:
             raise DnsOverrideError(f"{rname}: only one CNAME is allowed per name")
 
+    # Normalize blocked names, storing wildcards as their zone.
     block = set()
     for item in block_in:
         bname = normalize_name(item)
         # Blocking a zone already covers every name below it.
         block.add(_zone_of(bname) or bname)
+    # Blocking the root zone would break all DNS for the client.
     if "." in block:
         raise DnsOverrideError("blocking every name ('*') is not supported")
+    # A name cannot be both answered and blocked.
     answered = {(_zone_of(n) or n) for n in by_name}
     for owner in sorted(answered):
         for zone in sorted(block):
@@ -194,6 +254,7 @@ def validate_profile(raw: Any) -> Dict[str, Any]:
     # An Unbound redirect zone answers every name below it from its apex, so
     # an exact entry inside a wildcard's zone would be silently ignored (or,
     # at the apex itself, merged into the wildcard's answers).
+    # Exact names must not fall inside a wildcard zone in the same profile.
     wildcard_zones = sorted({_zone_of(n) for n in by_name if _zone_of(n)})
     for rname in sorted(n for n in by_name if not _zone_of(n)):
         for zone in wildcard_zones:
@@ -201,6 +262,7 @@ def validate_profile(raw: Any) -> Dict[str, Any]:
                 raise DnsOverrideError(
                     f"{rname} overlaps the wildcard {_wild(zone)} in the same "
                     f"profile; use one or the other")
+    # Wildcard zones must not nest inside each other.
     for zone in wildcard_zones:
         for other in wildcard_zones:
             if other != zone and (other == "." or _under(zone, other)):
@@ -208,6 +270,7 @@ def validate_profile(raw: Any) -> Dict[str, Any]:
                     f"wildcards {_wild(zone)} and {_wild(other)} overlap in the "
                     f"same profile")
 
+    # Return the canonical profile with sorted entries.
     return {
         "name": name,
         "description": description,
@@ -219,22 +282,37 @@ def validate_profile(raw: Any) -> Dict[str, Any]:
 
 def normalize_target(raw: Any) -> str:
     """Client IP or subnet -> canonical CIDR (a bare IP becomes /32 or /128)."""
+    # Empty input is invalid.
     text = str(raw if raw is not None else "").strip()
     if not text:
         raise DnsOverrideError("target IP or subnet is required")
+    # Parse as a network; a bare IP becomes a single-host network.
     try:
         net = ipaddress.ip_network(text, strict=False)
     except ValueError:
         raise DnsOverrideError(f"invalid target IP or subnet: {text!r}")
+    # Refuse a /0 that would match every client.
     if net.prefixlen == 0:
         raise DnsOverrideError("a /0 target would override every client; "
                                "use a narrower subnet")
+    # Return the canonical CIDR.
     return str(net)
 
 
 def validate_assignment(raw: Any) -> Dict[str, Any]:
+    """Validate one client-to-profile assignment.
+
+    Args:
+        raw: Dict with target (or ip), profile, and optional label/comment.
+
+    Returns:
+        Canonical assignment dict. The profile name is checked against the profile
+        list by the caller.
+    """
+    # Must be an object.
     if not isinstance(raw, dict):
         raise DnsOverrideError("assignment must be an object")
+    # Return the canonical target, profile name and bounded label/comment.
     return {
         "target": normalize_target(raw.get("target") or raw.get("ip")),
         "profile": str(raw.get("profile") or "").strip(),
@@ -245,10 +323,12 @@ def validate_assignment(raw: Any) -> Dict[str, Any]:
 
 def validate_overrides(raw: Any) -> Dict[str, Any]:
     """Canonical ``{"profiles": [...], "assignments": [...]}`` or raise."""
+    # None means "no overrides".
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
         raise DnsOverrideError("overrides must be an object")
+    # Both parts must be lists within the size limits.
     profiles_in = raw.get("profiles") or []
     assignments_in = raw.get("assignments") or []
     if not isinstance(profiles_in, list) or not isinstance(assignments_in, list):
@@ -258,6 +338,7 @@ def validate_overrides(raw: Any) -> Dict[str, Any]:
     if len(assignments_in) > MAX_ASSIGNMENTS:
         raise DnsOverrideError(f"at most {MAX_ASSIGNMENTS} assignments are allowed")
 
+    # Validate profiles; names must be unique ignoring case.
     profiles: Dict[str, Dict[str, Any]] = {}
     for item in profiles_in:
         profile = validate_profile(item)
@@ -266,6 +347,7 @@ def validate_overrides(raw: Any) -> Dict[str, Any]:
             raise DnsOverrideError(f"duplicate profile name {profile['name']!r}")
         profiles[key] = profile
 
+    # Validate assignments: each must name an existing profile and target a distinct network.
     assignments: Dict[str, Dict[str, Any]] = {}
     for item in assignments_in:
         assignment = validate_assignment(item)
@@ -273,6 +355,7 @@ def validate_overrides(raw: Any) -> Dict[str, Any]:
         if key not in profiles:
             raise DnsOverrideError(
                 f"{assignment['target']}: unknown profile {assignment['profile']!r}")
+        # Use the profile's canonical name spelling.
         assignment["profile"] = profiles[key]["name"]
         if assignment["target"] in assignments:
             raise DnsOverrideError(
@@ -280,9 +363,12 @@ def validate_overrides(raw: Any) -> Dict[str, Any]:
         assignments[assignment["target"]] = assignment
 
     def _net_key(a):
+        """Sort key: IP version, network address, prefix length."""
+        # Parse the stored CIDR.
         net = ipaddress.ip_network(a["target"])
         return (net.version, int(net.network_address), net.prefixlen)
 
+    # Return profiles sorted by name and assignments sorted by network.
     return {
         "profiles": sorted(profiles.values(), key=lambda p: p["name"].lower()),
         "assignments": sorted(assignments.values(), key=_net_key),
@@ -292,61 +378,79 @@ def validate_overrides(raw: Any) -> Dict[str, Any]:
 def overrides_digest(clean: Dict[str, Any]) -> str:
     """Digest of the DNS-affecting content (descriptions/labels/comments
     excluded so a cosmetic edit does not count as a different resolver config)."""
+    # Keep only the fields that change DNS answers.
     canonical = {
         "profiles": [{k: p[k] for k in ("name", "records", "block")}
                      for p in clean.get("profiles") or []],
         "assignments": [{k: a[k] for k in ("target", "profile")}
                         for a in clean.get("assignments") or []],
     }
+    # Hash canonical JSON so key order does not matter.
     raw = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+# Digest of an empty override set, used as the default.
 EMPTY_DIGEST = overrides_digest({"profiles": [], "assignments": []})
 
 
 def _fqdn(name: str) -> str:
+    """Return a name as a fully qualified domain name with a trailing dot."""
+    # The root zone is already ".".
     return "." if name == "." else name + "."
 
 
 def view_name(profile_name: str) -> str:
+    """Return the Unbound view name generated for a profile."""
+    # Prefix plus lower-cased profile name.
     return VIEW_PREFIX + profile_name.lower()
 
 
 def render_unbound(clean: Dict[str, Any]) -> str:
     """Render a VALIDATED override set as an Unbound include file."""
+    # File header.
     lines = ["# Managed by Lab Manager — do not edit manually\n",
              "# Per-client DNS override profiles (one view per profile).\n"]
+    # Bind each assigned client to its profile's view.
     assignments = clean.get("assignments") or []
     if assignments:
         # Logs "<zone> <action> <client>@<port> <name> <type> IN" for every
         # locally answered query — the proof an override actually answered.
         lines.append("server:\n    log-local-actions: yes\n")
+        # One access-control-view line per assignment.
         for a in assignments:
             lines.append(f"    access-control-view: {a['target']} {view_name(a['profile'])}\n")
+    # One view clause per profile; view-first lets unmentioned names fall through.
     for profile in clean.get("profiles") or []:
         lines.extend(["view:\n",
                       f'    name: "{view_name(profile["name"])}"\n',
                       "    view-first: yes\n"])
+        # Blocked zones answer NXDOMAIN.
         for zone in profile.get("block") or []:
             lines.append(f'    local-zone: "{_fqdn(zone)}" always_nxdomain\n')
+        # Collect each wildcard's zone once, in order.
         redirect_zones = []
         for record in profile.get("records") or []:
             zone = _zone_of(record["name"])
             if zone and zone not in redirect_zones:
                 redirect_zones.append(zone)
+        # Wildcard zones are redirect zones: every name below answers from the apex data.
         for zone in redirect_zones:
             lines.append(f'    local-zone: "{_fqdn(zone)}" redirect\n')
+        # Add each record as local data on its owner (zone apex for wildcards).
         for record in profile.get("records") or []:
             owner = _fqdn(_zone_of(record["name"]) or record["name"])
             value = record["value"]
+            # CNAME targets must be fully qualified.
             if record["type"] == "CNAME":
                 value = value + "."
             lines.append(
                 f'    local-data: "{owner} {record["ttl"]} IN {record["type"]} {value}"\n')
+    # Return the whole file.
     return "".join(lines)
 
 
+# Matches Unbound's log-local-actions line: zone, action, client IP, name, type.
 _LOCAL_ACTION_RE = re.compile(
     r"info:\s+(?P<zone>\S+)\s+(?P<action>[a-z_]+)\s+(?P<ip>[0-9a-fA-F.:]+)@\d+\s+"
     r"(?P<name>\S+?)\.?\s+(?P<type>\w+)\s+IN\s*$")
@@ -355,28 +459,35 @@ _LOCAL_ACTION_RE = re.compile(
 def parse_rendered(text: str) -> Dict[str, Any]:
     """The views and client bindings in a rendered ``lm-overrides.conf``:
     ``{"views": {view: [zone]}, "data": {view: [[name, type]]}, "targets": [(cidr, view)]}``."""
+    # Collected views, their data names, client bindings, and the view being parsed.
     views: Dict[str, List[str]] = {}
     data: Dict[str, List[List[str]]] = {}
     targets = []
     current = None
+    # Scan line by line.
     for raw in (text or "").splitlines():
         line = raw.strip()
+        # A view's name line starts a new view.
         m = re.match(r'name:\s*"([^"]+)"', line)
         if m:
             current = m.group(1)
             views[current], data[current] = [], []
             continue
+        # A local-zone line inside a view: record the zone.
         m = re.match(r'local-zone:\s*"([^"]+)"', line)
         if m and current:
             views[current].append(m.group(1).rstrip(".").lower())
             continue
+        # A local-data line inside a view: record name and type.
         m = re.match(r'local-data:\s*"(\S+)\s+\d+\s+IN\s+(\w+)', line)
         if m and current:
             data[current].append([m.group(1).rstrip(".").lower(), m.group(2).upper()])
             continue
+        # A client-to-view binding.
         m = re.match(r"access-control-view:\s*(\S+)\s+(\S+)", line)
         if m:
             targets.append((m.group(1), m.group(2)))
+    # Return what was found.
     return {"views": views, "data": data, "targets": targets}
 
 
@@ -391,17 +502,22 @@ def override_hits(lines: Iterable[str], rendered: Dict[str, Any], since: float,
     ``transparent`` zone at the parent domain (``devices.x.com`` → ``x.com.``),
     so such a line counts only when the view holds data for that exact name —
     any type, since a query for a type it lacks gets NODATA from the view."""
+    # Parse each binding, skipping invalid CIDRs.
     nets = []
     for cidr, view in rendered.get("targets") or []:
         try:
             nets.append((ipaddress.ip_network(cidr, strict=False), view))
         except ValueError:
             continue
+    # Most specific network first, matching Unbound's longest-prefix choice.
     nets.sort(key=lambda item: item[0].prefixlen, reverse=True)
+    # Zones and exact names for each view.
     views = rendered.get("views") or {}
     names = {v: {name for name, _type in items}
              for v, items in (rendered.get("data") or {}).items()}
+    # Collect matching log lines.
     hits = []
+    # Keep only local-action lines inside the time window.
     for line in lines:
         m = _LOCAL_ACTION_RE.search(line)
         if not m:
@@ -409,20 +525,25 @@ def override_hits(lines: Iterable[str], rendered: Dict[str, Any], since: float,
         ts = line_epoch(line)
         if ts < since:
             continue
+        # Skip lines with an unparsable client address.
         try:
             addr = ipaddress.ip_address(m.group("ip"))
         except ValueError:
             continue
+        # Find the client's view; clients not bound to a view are skipped.
         view = next((v for net, v in nets if addr.version == net.version and addr in net), None)
         if not view:
             continue
+        # Count the line only if the answering zone or exact name belongs to that view.
         zone = m.group("zone").rstrip(".").lower()
         name, rtype = m.group("name").lower(), m.group("type").upper()
         if zone not in views.get(view, []) and name not in names.get(view, set()):
             continue
+        # Record the hit, labeling NXDOMAIN blocks.
         hits.append({"time": ts, "client": m.group("ip"), "name": name,
                      "type": rtype, "view": view,
                      "action": "blocked" if m.group("action") == "always_nxdomain" else "answered"})
+    # Newest first, capped at the limit.
     hits.sort(key=lambda h: h["time"], reverse=True)
     return hits[:limit]
 
@@ -431,60 +552,82 @@ class DnsOverrideState:
     """Persisted, versioned desired override set (coordinator side)."""
 
     def __init__(self, state_path: str = ""):
+        """Load the persisted override state, if any.
+
+        Args:
+            state_path: JSON state file path; empty keeps the state in memory only.
+        """
+        # Defaults: empty set, version 0, nothing broken.
         self.state_path = state_path
         self.version = 0
         self.data: Dict[str, Any] = {"profiles": [], "assignments": []}
         self.digest = EMPTY_DIGEST
         self.updated_at = 0.0
         self.broken = ""
+        # Load the persisted state over the defaults.
         self._load()
 
     def _load(self) -> None:
+        """Load and validate the persisted state, marking it broken (fail closed) if bad."""
+        # No path or file yet: keep the defaults.
         if not self.state_path or not os.path.exists(self.state_path):
             return
+        # Read and re-validate the stored overrides.
         try:
             with open(self.state_path) as fh:
                 raw = json.load(fh)
             clean = validate_overrides(raw.get("overrides"))
+        # Unreadable or invalid: block changes until repaired.
         except Exception as e:  # noqa: BLE001
             self.broken = f"override state at {self.state_path} could not be read: {e}"
             logger.error("%s — DNS override changes are blocked until it is "
                          "repaired or removed", self.broken)
             return
+        # Stored digest must match the content; a mismatch means corruption.
         if overrides_digest(clean) != raw.get("digest"):
             self.broken = (f"override state at {self.state_path} is corrupt: its "
                            f"recorded digest does not match its content")
             logger.error("%s — DNS override changes are blocked until it is "
                          "repaired or removed", self.broken)
             return
+        # Good state: adopt it.
         self.version = int(raw.get("version") or 0)
         self.data = clean
         self.digest = overrides_digest(clean)
         self.updated_at = float(raw.get("updated_at") or 0.0)
 
     def require_usable(self) -> None:
+        """Raise DnsOverrideStateUnavailable if the persisted state is broken."""
+        # Refuse to work on top of broken state.
         if self.broken:
             raise DnsOverrideStateUnavailable(self.broken)
 
     def persist(self, clean: Dict[str, Any], version: int) -> None:
         """Atomically write then promote in memory. Raises on failure."""
+        # Fingerprint and timestamp for the new state.
         digest = overrides_digest(clean)
         updated_at = time.time()
+        # Write to disk only when a path is configured.
         if self.state_path:
+            # Any write failure raises so memory is not updated.
             try:
+                # Create the parent directory if needed.
                 directory = os.path.dirname(self.state_path)
                 if directory:
                     os.makedirs(directory, exist_ok=True)
+                # Write to a temp file and fsync it.
                 tmp = self.state_path + ".tmp"
                 with open(tmp, "w") as fh:
                     json.dump({"version": version, "digest": digest,
                                "updated_at": updated_at, "overrides": clean}, fh)
                     fh.flush()
                     os.fsync(fh.fileno())
+                # Atomically replace the real file.
                 os.replace(tmp, self.state_path)
             except Exception as e:  # noqa: BLE001
                 raise DnsOverrideStateUnavailable(
                     f"could not persist DNS override state to {self.state_path}: {e}")
+        # Disk write succeeded (or no path): update the in-memory copy.
         self.data = clean
         self.digest = digest
         self.version = version
@@ -492,13 +635,26 @@ class DnsOverrideState:
 
     def payload(self, clean: Optional[Dict[str, Any]] = None,
                 version: Optional[int] = None) -> Dict[str, Any]:
+        """Build the push payload for workers.
+
+        Args:
+            clean: Override set to send; defaults to the current one.
+            version: Version to send; defaults to the current one.
+
+        Returns:
+            Dict with version, digest and overrides.
+        """
+        # Default to the current state.
         clean = self.data if clean is None else clean
         return {"version": self.version if version is None else version,
                 "digest": overrides_digest(clean), "overrides": clean}
 
 
 def _reply_reason(reply: Any) -> str:
+    """Pull a short error explanation out of a worker reply."""
+    # Treat a non-dict reply as empty.
     reply = reply if isinstance(reply, dict) else {}
+    # Prefer message, then error, else "no response".
     return str(reply.get("message") or reply.get("error") or "no response").strip()
 
 
@@ -514,6 +670,14 @@ class DnsOverrideCoordinator:
 
     def __init__(self, transport, state: DnsOverrideState,
                  lock_provider: Callable[[], Any]):
+        """Create the coordinator.
+
+        Args:
+            transport: Cluster transport used to reach workers.
+            state: Persisted override state.
+            lock_provider: Returns the lock serializing changes.
+        """
+        # Keep the transport, state and lock source.
         self.transport = transport
         self.state = state
         self._lock_provider = lock_provider
@@ -525,13 +689,23 @@ class DnsOverrideCoordinator:
     # ── Read ────────────────────────────────────────────────────────────────
 
     def _connected_ids(self) -> List[str]:
+        """Return the ids of workers currently connected."""
+        # Only members whose link is up.
         return [m["id"] for m in self.transport.member_links() if m.get("connected")]
 
     async def refresh(self, timeout: float = 10.0) -> None:
+        """Ask every worker which override set it is running and record the answers.
+
+        Args:
+            timeout: Seconds to wait for replies.
+        """
+        # No workers: nothing to ask.
         ids = self.transport.member_ids()
         if not ids:
             return
+        # Query every worker's current override digest/version.
         fan = await self.transport.fanout("DNSW_OVERRIDES_STATE", {}, timeout=timeout)
+        # Record successes and clear old errors; record failures and forget their old report.
         for member_id, reply in (fan.get("results") or {}).items():
             if isinstance(reply, dict) and reply.get("status") == "SUCCESS":
                 self.reported[member_id] = {"digest": reply.get("digest"),
@@ -543,9 +717,13 @@ class DnsOverrideCoordinator:
                 self.member_errors[member_id] = _reply_reason(reply)
 
     def member_report(self) -> List[Dict[str, Any]]:
+        """Return each worker's connection and convergence status for the UI."""
         out = []
+        # One row per known worker.
         for link in self.transport.member_links():
+            # What the worker last reported, if anything.
             state = self.reported.get(link["id"]) or {}
+            # Unreachable, unknown, converged (matches desired digest) or drifted.
             if not link.get("connected"):
                 status = "unreachable"
             elif not state:
@@ -554,16 +732,21 @@ class DnsOverrideCoordinator:
                 status = "converged"
             else:
                 status = "drifted"
+            # Add the worker's row.
             out.append({"id": link["id"],
                         "display_name": link.get("display_name") or link.get("hostname") or "",
                         "connected": bool(link.get("connected")),
                         "convergence": status,
                         "error": self.member_errors.get(link["id"], "")})
+        # Return all rows.
         return out
 
     async def snapshot(self) -> Dict[str, Any]:
+        """Return the desired override set plus fresh per-worker convergence."""
+        # Get fresh worker reports first.
         await self.refresh()
         members = self.member_report()
+        # Copy of the desired set, version info, members and overall convergence.
         out = {"status": "SUCCESS",
                "profiles": copy.deepcopy(self.state.data["profiles"]),
                "assignments": copy.deepcopy(self.state.data["assignments"]),
@@ -571,6 +754,7 @@ class DnsOverrideCoordinator:
                "updated_at": self.state.updated_at, "members": members,
                "converged": bool(members) and all(
                    m["convergence"] == "converged" for m in members)}
+        # Broken persisted state turns the reply into an error.
         if self.state.broken:
             out.update({"status": "ERROR", "state_unavailable": True,
                         "message": self.state.broken})
@@ -579,34 +763,45 @@ class DnsOverrideCoordinator:
     async def verify(self, minutes: int = 60) -> Dict[str, Any]:
         """Live proof from every resolver: is each profile's view loaded in the
         RUNNING Unbound, and which assigned clients were answered from it."""
+        # Clamp the window to 1 minute .. 7 days, defaulting to 60.
         try:
             minutes = max(1, min(int(minutes or 60), 7 * 1440))
         except (TypeError, ValueError):
             minutes = 60
+        # Map view names back to profile names.
         names = {view_name(p["name"]): p["name"] for p in self.state.data["profiles"]}
+        # Ask every worker to check its loaded views and recent hits.
         fan = await self.transport.fanout("DNSW_OVERRIDES_VERIFY", {"minutes": minutes},
                                           timeout=20.0)
         results = fan.get("results") or {}
+        # Build one row per worker, plus a combined hits list.
         members, hits = [], []
+        # Gather each worker's reply.
         for link in self.transport.member_links():
+            # This worker's reply and display label.
             reply = results.get(link["id"]) or {}
             ok = reply.get("status") == "SUCCESS"
             label = link.get("display_name") or link.get("hostname") or link["id"]
+            # The views this worker reported, by view name.
             loaded = {v["view"]: v for v in reply.get("views") or []}
+            # Whether each profile's view is loaded, with answer counts and errors.
             views = [{"profile": name, "view": view,
                       "loaded": bool((loaded.get(view) or {}).get("loaded")),
                       "answers": (loaded.get(view) or {}).get("answers", 0),
                       "error": (loaded.get(view) or {}).get("error", "")}
                      for view, name in names.items()]
+            # Add the worker's row.
             members.append({"id": link["id"], "display_name": label,
                             "connected": bool(link.get("connected")),
                             "ok": ok, "error": "" if ok else _reply_reason(reply),
                             "log_local_actions": reply.get("log_local_actions"),
                             "log_source": reply.get("log_source", ""),
                             "views": views})
+            # Add this worker's hits, labeled with worker and profile.
             for h in reply.get("hits") or []:
                 hits.append({**h, "member": label,
                              "profile": names.get(h.get("view"), h.get("view"))})
+        # Newest hits first; return up to 500 with the assignments.
         hits.sort(key=lambda h: h.get("time") or 0, reverse=True)
         return {"status": "SUCCESS", "minutes": minutes, "version": self.state.version,
                 "members": members, "hits": hits[:500],
@@ -616,20 +811,26 @@ class DnsOverrideCoordinator:
 
     async def mutate(self, change: Callable[[Dict[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
         """Apply ``change(copy_of_current) -> candidate`` to every resolver."""
+        # Serialize all changes.
         async with self._lock_provider():
+            # Refuse to work on broken persisted state.
             self.state.require_usable()
+            # Build and validate the candidate from a copy of the current set.
             candidate = validate_overrides(change(copy.deepcopy(self.state.data)))
             digest = overrides_digest(candidate)
+            # Same DNS content: nothing to push to workers.
             if digest == self.state.digest:
                 # Description/label/comment-only edits still need persisting.
                 if candidate != self.state.data:
                     self.state.persist(candidate, self.state.version)
                 return {"status": "SUCCESS", "changed": False,
                         "version": self.state.version, **candidate}
+            # Real change: push the next version to every worker.
             version = self.state.version + 1
             payload = self.state.payload(candidate, version)
             fan = await self.transport.fanout("DNSW_OVERRIDES_APPLY", payload, timeout=30.0)
             results = fan.get("results") or {}
+            # Sort workers into applied, rejected (connected but failed) and offline.
             connected = set(self._connected_ids())
             applied, rejected, offline = [], {}, []
             for member_id in self.transport.member_ids():
@@ -641,6 +842,7 @@ class DnsOverrideCoordinator:
                 else:
                     offline.append(member_id)
 
+            # Any rejection, or nobody applied it: roll back and report why.
             if rejected or not applied:
                 logger.warning("DNS override change v%s not applied: rejected=%s offline=%s",
                                version, rejected, offline)
@@ -656,20 +858,24 @@ class DnsOverrideCoordinator:
                 return {"status": "ERROR", "message": message,
                         "member_errors": rejected, "members_offline": offline,
                         "rollback_failed": rollback}
+            # Persist; if that fails, roll workers back too.
             try:
                 self.state.persist(candidate, version)
             except DnsOverrideStateUnavailable as e:
                 rollback = await self._rollback(applied)
                 return {"status": "ERROR", "message": str(e),
                         "rollback_failed": rollback}
+            # Record the confirmed digest for the workers that applied it.
             for member_id in applied:
                 self.reported[member_id] = {"digest": digest, "version": version,
                                             "at": time.time()}
                 self.member_errors.pop(member_id, None)
+            # Log the commit.
             logger.info("DNS overrides v%s committed: %d profile(s), %d assignment(s); "
                         "applied on %s%s", version, len(candidate["profiles"]),
                         len(candidate["assignments"]), applied,
                         f"; offline {offline}" if offline else "")
+            # SUCCESS, or PARTIAL if some workers were offline.
             out = {"status": "SUCCESS" if not offline else "PARTIAL",
                    "changed": True, "version": version,
                    "members_applied": applied, "members_offline": offline,
@@ -681,9 +887,19 @@ class DnsOverrideCoordinator:
             return out
 
     async def _rollback(self, member_ids: Iterable[str]) -> List[str]:
+        """Push the current (previous) override set back to the given workers.
+
+        Args:
+            member_ids: Workers that already took the abandoned change.
+
+        Returns:
+            Ids of workers where the rollback failed.
+        """
+        # Nothing to roll back if no worker took the change.
         member_ids = list(member_ids)
         if not member_ids:
             return []
+        # Re-send the current committed payload to just those workers.
         fan = await self.transport.fanout(
             "DNSW_OVERRIDES_APPLY", self.state.payload(), timeout=30.0,
             member_ids=member_ids)
@@ -693,22 +909,28 @@ class DnsOverrideCoordinator:
 
     async def reconcile(self) -> Dict[str, Any]:
         """Re-push the desired set to connected workers that drifted from it."""
+        # Skip when there are no workers, the state is broken, or nothing was ever committed.
         if not self.transport.member_ids():
             return {"status": "SKIPPED", "reason": "no workers"}
         if self.state.broken:
             return {"status": "ERROR", "message": self.state.broken}
         if self.state.version == 0:
             return {"status": "SKIPPED", "reason": "no override set committed yet"}
+        # Serialize with other changes.
         async with self._lock_provider():
+            # Get fresh reports, then find connected workers running a different digest.
             await self.refresh()
             stale = [mid for mid in self._connected_ids()
                      if mid in self.reported
                      and self.reported[mid].get("digest") != self.state.digest]
+            # Everyone is in sync.
             if not stale:
                 return {"status": "SUCCESS", "reconciled": []}
+            # Re-push the current payload to the stale workers.
             payload = self.state.payload()
             fan = await self.transport.fanout("DNSW_OVERRIDES_APPLY", payload,
                                               timeout=30.0, member_ids=stale)
+            # Record which workers now match.
             repaired = []
             for member_id in stale:
                 reply = (fan.get("results") or {}).get(member_id) or {}
@@ -719,6 +941,7 @@ class DnsOverrideCoordinator:
                                                 "at": time.time()}
                 else:
                     self.member_errors[member_id] = _reply_reason(reply)
+            # Report repaired and still-failing workers.
             failed = [m for m in stale if m not in repaired]
             if repaired:
                 logger.info("DNS overrides reconcile re-pushed v%s to %s",
@@ -731,36 +954,65 @@ class DnsOverrideCoordinator:
 
 def upsert_profile(profile: Dict[str, Any], old_name: Optional[str] = None):
     """Return a ``change`` callable that creates/replaces/renames a profile."""
+    # Validate the profile up front so errors surface before taking the lock.
     clean = validate_profile(profile)
 
     def change(data):
+        """Replace or add the profile in the given override set.
+
+        Args:
+            data: Copy of the current override set.
+
+        Returns:
+            The modified override set.
+        """
+        # The profile being replaced (old name for renames).
         target = (old_name or clean["name"]).strip().lower()
+        # Remove it; a rename must find the old one.
         profiles = [p for p in data["profiles"] if p["name"].lower() != target]
         if old_name and len(profiles) == len(data["profiles"]):
             raise DnsOverrideError(f"profile {old_name!r} not found")
+        # The new name must not clash with another profile.
         if any(p["name"].lower() == clean["name"].lower() for p in profiles):
             raise DnsOverrideError(f"profile {clean['name']!r} already exists")
+        # Add the new profile.
         profiles.append(clean)
+        # Point assignments for the old name at the new name.
         for a in data["assignments"]:
             if a["profile"].lower() == target:
                 a["profile"] = clean["name"]
+        # Store and return the updated set.
         data["profiles"] = profiles
         return data
     return change
 
 
 def delete_profile(name: str, force: bool = False):
+    """Return a change callable that deletes a profile.
+
+    Args:
+        name: Profile to delete.
+        force: Also delete its assignments instead of refusing.
+
+    Returns:
+        A function taking the current set and returning the updated set.
+    """
+    # Case-insensitive match key.
     key = str(name or "").strip().lower()
 
     def change(data):
+        """Remove the profile (and, if forced, its assignments) from the given set."""
+        # The profile must exist.
         if not any(p["name"].lower() == key for p in data["profiles"]):
             raise DnsOverrideError(f"profile {name!r} not found")
+        # Refuse to delete a profile still in use unless forced.
         in_use = [a["target"] for a in data["assignments"] if a["profile"].lower() == key]
         if in_use and not force:
             raise DnsOverrideError(
                 f"profile {name!r} is still assigned to {', '.join(in_use[:5])}"
                 + (" …" if len(in_use) > 5 else "")
                 + " — remove those assignments first")
+        # Remove the profile and any assignments to it.
         data["profiles"] = [p for p in data["profiles"] if p["name"].lower() != key]
         data["assignments"] = [a for a in data["assignments"] if a["profile"].lower() != key]
         return data
@@ -771,14 +1023,18 @@ def assign(target: Any, profile: str, label: Any = "", comment: Any = "",
            old_target: Any = None):
     """Apply ``profile`` to ``target``. ``old_target`` (an edit that moves the
     override to a different IP/subnet) is removed in the same change."""
+    # Validate the new assignment; normalize the old target if moving.
     clean = validate_assignment({"target": target, "profile": profile,
                                  "label": label, "comment": comment})
     old = normalize_target(old_target) if old_target else clean["target"]
 
     def change(data):
+        """Replace any assignment for the old/new target with the new one."""
+        # An edit's old target must currently be assigned.
         targets = {a["target"] for a in data["assignments"]}
         if old != clean["target"] and old not in targets:
             raise DnsOverrideError(f"{old} has no override assigned")
+        # Drop the old and new targets' entries, then add the new one.
         data["assignments"] = [a for a in data["assignments"]
                                if a["target"] not in (old, clean["target"])]
         data["assignments"].append(clean)
@@ -787,9 +1043,20 @@ def assign(target: Any, profile: str, label: Any = "", comment: Any = "",
 
 
 def unassign(target: Any):
+    """Return a change callable that removes the override for a target.
+
+    Args:
+        target: Client IP or subnet.
+
+    Returns:
+        A function taking the current set and returning the updated set.
+    """
+    # Normalize the target now so errors surface early.
     net = normalize_target(target)
 
     def change(data):
+        """Remove the target's assignment; error if it had none."""
+        # Remove the matching assignment; nothing removed means it was not assigned.
         before = len(data["assignments"])
         data["assignments"] = [a for a in data["assignments"] if a["target"] != net]
         if len(data["assignments"]) == before:

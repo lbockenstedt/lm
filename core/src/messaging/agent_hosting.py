@@ -21,6 +21,7 @@ gate). Subclass hooks (``_on_agent_telemetry``, ``_on_agent_registered``) carry
 the pxmx-specific telemetry caching + config re-push; the base mixin is generic.
 """
 
+# Standard-library imports plus the websockets server and HTTP status codes.
 import asyncio
 import json
 import uuid
@@ -36,6 +37,7 @@ import websockets
 from http import HTTPStatus
 from typing import Any, Dict, List, Optional
 
+# Base control plane and frame-signing helpers (package or bare-module layout).
 try:
     from .control_plane import BaseControlPlane, _ws_keepalive_env
     from ..security.signer import MessageSigner, split_frame
@@ -107,6 +109,9 @@ class AgentHostingControlPlane(BaseControlPlane):
     def __init__(self, spoke_id: str, secret: str = None, hub_secret: str = None,
                  hub_url: str = None, onboarding_psk: str = None,
                  tenant_id_hint: str = None):
+        """Set up the base spoke, load the agent config and secret, and create agent tracking state.
+        """
+        # Base spoke setup, then take this subclass's module type.
         super().__init__(spoke_id, secret, hub_secret, hub_url,
                          onboarding_psk=onboarding_psk, tenant_id_hint=tenant_id_hint)
         if self.MODULE_TYPE:
@@ -128,6 +133,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         except Exception as e:
             logger.error(f"Could not load agent config: {e}")
 
+        # Agent secret and the signer built from it.
         self.agent_secret: Optional[str] = self.config.get("agent_secret")
         if not self.agent_secret:
             logger.warning("agent_secret not set — zero-touch provisioning only "
@@ -181,6 +187,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         ``LM_CS_AGENT_LISTENER=1`` (set by ``install_cs.sh --agent-listener``),
         so an all-in-one / relay-only cs spoke never binds ``:443``.
         """
+        # Always on unless opt-in; then the env flag decides.
         if not self.AGENT_LISTENER_OPT_IN:
             return True
         return os.environ.get(self.AGENT_LISTENER_ENV, "").strip() in ("1", "true", "True")
@@ -209,6 +216,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             "AGENT_OS_FIX_ACCESS": ("OS_FIX_ACCESS", 150.0),
             "AGENT_OS_MAINTENANCE": ("OS_MAINTENANCE", 50.0),
         }
+        # OS-update commands: forward the matching agent command and options.
         if cmd_type in _osu_relay:
             _agent_cmd, _to = _osu_relay[cmd_type]
             _fwd = {"refresh": bool(data.get("refresh", True))}
@@ -227,6 +235,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                 return resp
             return {"status": "ERROR", "message": "no response from agent"}
 
+        # Remote command: run it on the agent with a little extra time for the round trip.
         if cmd_type == "AGENT_RUN_COMMAND":
             _to = float(data.get("timeout", 30.0) or 30.0)
             resp = await self.send_to_agent(
@@ -267,6 +276,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             # (update_sources.agent / .hub), which IS the device-mode agent's own
             # repo, so the agent pulls the right thing.
             await self._push_agent_update_to_devices(data)
+        # Let the base class handle the command; also pass log-level changes to agents.
         result = await super().handle_system_command(cmd_type, data)
         if cmd_type in ("SET_LOG_LEVEL", "SPOKE_SET_LOG_LEVEL"):
             if self.connected_agents:
@@ -284,6 +294,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         self-heal cover a missed delivery."""
         if not self.connected_agents:
             return
+        # Forward the hub's repo details.
         payload = {
             "repo_url": update_data.get("repo_url"),
             "core_repo_url": update_data.get("core_repo_url"),
@@ -293,6 +304,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             # Nothing to forward (hub didn't thread a repo_url) — leave the
             # agents on their current code; the next SPOKE_UPDATE carries it.
             return
+        # Send to each agent, logging failures.
         for aid in list(self.connected_agents):
             try:
                 await self.send_raw_to_agent(aid, "AGENT_UPDATE", payload)
@@ -340,6 +352,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             key = os.environ.get(self.AGENT_TLS_KEY_ENV, "").strip()
             if cert and key:
                 return cert, key
+        # 1b. The shared cert env pair, then the on-disk LE fallback.
         cert = os.environ.get("LM_TLS_CERT", "").strip()
         key = os.environ.get("LM_TLS_KEY", "").strip()
         if cert and key:
@@ -357,11 +370,14 @@ class AgentHostingControlPlane(BaseControlPlane):
         domain > most-recently-renewed. The downstream agent→spoke leg is
         TLS-unverified (same as the spoke→hub leg), so a hostname-mismatched but
         valid cert still upgrades the listener from plaintext ``ws`` to ``wss``."""
+        # Need a live-cert directory to search.
         live_dir = os.environ.get("LM_LE_LIVE_DIR", "/etc/letsencrypt/live").strip()
         if not live_dir or not os.path.isdir(live_dir):
             return "", ""
 
         def _pair(name):
+            """Return (fullchain, privkey) for a live-cert dir if both are readable, else ('', '').
+            """
             d = os.path.join(live_dir, name)
             fc = os.path.join(d, "fullchain.pem")
             pk = os.path.join(d, "privkey.pem")
@@ -370,6 +386,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                 return fc, pk
             return "", ""
 
+        # An explicit domain choice wins.
         override = os.environ.get("LM_AGENT_LISTENER_LE_DOMAIN", "").strip()
         if override:
             fc, pk = _pair(override)
@@ -377,6 +394,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                 logger.info("Agent listener using LE cert for %s (LM_AGENT_LISTENER_LE_DOMAIN)", override)
             return fc, pk
 
+        # List the candidate cert dirs.
         try:
             names = [n for n in os.listdir(live_dir)
                      if os.path.isdir(os.path.join(live_dir, n))]
@@ -386,6 +404,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         fqdn = socket.getfqdn().lower()
 
         def _rank(n):
+            """Sort key: exact hostname match, then covering wildcard, then newest."""
             nl = n.lower()
             exact = (nl == fqdn)
             wild = nl.startswith("*.") and bool(nl[2:]) and fqdn.endswith("." + nl[2:])
@@ -395,6 +414,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                 mtime = 0.0
             return (exact, wild, mtime)
 
+        # Take the best-ranked usable pair.
         for name in sorted(names, key=_rank, reverse=True):
             fc, pk = _pair(name)
             if fc:
@@ -425,6 +445,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         suppress a handshake that would otherwise succeed: the library requires
         the exact same two headers, so anything we short-circuit here would have
         failed the handshake anyway."""
+        # Read the Upgrade header and every Connection header value.
         try:
             upgrade = (request.headers.get("Upgrade", "") or "").strip().lower()
         except Exception:  # noqa: BLE001 — duplicate/odd headers → treat as non-WS
@@ -435,6 +456,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                 else [hdrs.get("Connection", "") or ""]
         except Exception:  # noqa: BLE001
             conn_values = []
+        # A real upgrade needs both; anything else gets a plain 200.
         conn_has_upgrade = any(
             tok.strip().lower() == "upgrade"
             for value in conn_values for tok in str(value).split(","))
@@ -459,6 +481,7 @@ class AgentHostingControlPlane(BaseControlPlane):
 
         Retries up to 10× on EADDRINUSE.
         """
+        # Work out the mode from the loopback flag and cert availability.
         loopback = os.environ.get(self.AGENT_LOOPBACK_ENV, "").strip() in ("1", "true", "True")
         cert, key = self._agent_listener_tls_paths()
         cert = (cert or "").strip()
@@ -470,6 +493,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             serve_kwargs = {}
             scheme = "ws"
         elif cert and key:
+            # Cert available: serve TLS on all interfaces.
             host = "0.0.0.0"
             port = int(os.environ.get(self.AGENT_PORT_ENV, str(self.AGENT_WSS_PORT)))
             server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -484,6 +508,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             serve_kwargs = {"ssl": server_ctx}
             scheme = "wss"
         else:
+            # No cert: plaintext fallback port, unless TLS is required.
             host = "0.0.0.0"
             port = int(os.environ.get(self.AGENT_PORT_ENV, str(self.AGENT_FALLBACK_PORT)))
             serve_kwargs = {}
@@ -504,6 +529,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                     f"plaintext on 0.0.0.0:{port} — no TLS cert found "
                     f"(set LM_TLS_CERT/LM_TLS_KEY, or deploy an LE cert). "
                     f"Worker secrets must never cross the network unencrypted.")
+        # Try to bind, retrying when the port is busy.
         for attempt in range(10):
             try:
                 # Websocket keepalive on the /ws/agent server: use the same
@@ -541,6 +567,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                     self._agent_server_error = f"could not bind {host}:{port}: {e}"
                     self._signal_listener_failure()
                     raise
+            # Any other error is recorded and re-raised.
             except Exception as e:
                 logger.error(f"Agent server unexpected error: {e}", exc_info=True)
                 self._agent_server_error = str(e)
@@ -554,6 +581,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         garbage-collect it mid-flight."""
 
         async def _run_agent_server_logged():
+            """Run the agent server forever, restarting it after errors."""
             # Self-heal: if the agent listener ever exits (e.g. its serve task is
             # GC'd and raises "coroutine ignored GeneratorExit"), restart it after
             # a short backoff instead of leaving the port dark until a unit restart.
@@ -581,6 +609,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         restarts. Connected agents drop and reconnect — the spoke re-onboards
         them on reconnect (agent_id is stable), so this is safe during a cert
         renew. No-op when the listener isn't running or isn't enabled."""
+        # Cancel the old listener task and wait for it to finish.
         self._agent_server_endpoint = ""
         old = self._agent_server_task
         if old is not None and not old.done():
@@ -590,6 +619,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             except (asyncio.CancelledError, Exception):
                 pass
             self._agent_server_task = None
+        # Start a new one if the listener is enabled.
         if self._agent_listener_enabled():
             logger.info("Re-binding /ws/agent listener to serve the new TLS cert")
             self._start_agent_server_task()
@@ -616,14 +646,17 @@ class AgentHostingControlPlane(BaseControlPlane):
         would no longer match and bounce it back to pending). Best-effort — a
         persist failure still sets the in-process secret so the immediate
         approval succeeds. Idempotent: a no-op once a secret exists."""
+        # Nothing to do if a secret already exists.
         if self.agent_secret:
             return
+        # Mint a new secret and add it to the config.
         self.agent_secret = secrets.token_hex(32)
         self.agent_signer = MessageSigner(self.agent_secret)
         cfg = self.config if isinstance(getattr(self, "config", None), dict) else {}
         cfg["agent_secret"] = self.agent_secret
         self.config = cfg
         path = self.AGENT_CONFIG_PATH
+        # Save the config atomically with owner-only permissions.
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             tmp = path + ".tmp"
@@ -654,6 +687,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         old value would silently stop authenticating even though the operator's
         change was rejected. ``previous == ""`` means there was none, so the
         stored secret is removed rather than left as a half-applied new one."""
+        # Put back a previous secret, or clear it when there wasn't one.
         if previous:
             return self.set_agent_secret(previous)
         self.agent_secret = None
@@ -662,6 +696,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         cfg.pop("agent_secret", None)
         self.config = cfg
         path = self.AGENT_CONFIG_PATH
+        # Save the config without the secret.
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             tmp = path + ".tmp"
@@ -683,15 +718,18 @@ class AgentHostingControlPlane(BaseControlPlane):
         pending-approval loop that exists for hub-approved node agents. Rotating
         it disconnects any worker still holding the old value — expected, they
         reconnect once re-provisioned. Returns True when persisted to disk."""
+        # Ignore an empty secret.
         secret = str(secret or "").strip()
         if not secret:
             return False
+        # Use the new secret and add it to the config.
         self.agent_secret = secret
         self.agent_signer = MessageSigner(secret)
         cfg = self.config if isinstance(getattr(self, "config", None), dict) else {}
         cfg["agent_secret"] = secret
         self.config = cfg
         path = self.AGENT_CONFIG_PATH
+        # Save the config atomically with owner-only permissions.
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             tmp = path + ".tmp"
@@ -712,6 +750,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         spoke's ``/ws/agent``; a single-host module owns none and must not open
         a port. Asked of the module (which holds the member list) rather than an
         env flag so enabling a cluster at runtime is enough."""
+        # Ask each hosted module whether it needs a cluster listener.
         for module in (getattr(self, "modules", None) or {}).values():
             hook = getattr(module, "cluster_listener_required", None)
             try:
@@ -735,6 +774,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         under ``AGENT_CONFIG_PATH``'s directory (0600 key) and exported via
         LM_TLS_CERT/LM_TLS_KEY for ``_agent_listener_tls_paths``. Idempotent and
         best-effort: an existing cert (installer- or LE-provided) wins."""
+        # Only needed when TLS is required, and only if no cert exists yet.
         if not self.AGENT_LISTENER_REQUIRE_TLS:
             return
         cert, key = self._agent_listener_tls_paths()
@@ -745,6 +785,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         base = os.path.join(os.path.dirname(self.AGENT_CONFIG_PATH), "tls")
         cert = os.path.join(base, "coordinator.crt")
         key = os.path.join(base, "coordinator.key")
+        # Generate a self-signed cert with openssl if one isn't already on disk.
         if not (os.path.isfile(cert) and os.path.isfile(key)):
             try:
                 os.makedirs(base, mode=0o750, exist_ok=True)
@@ -779,17 +820,20 @@ class AgentHostingControlPlane(BaseControlPlane):
         the API had already told the operator the cluster was configured. It now
         blocks until the socket is genuinely serving or the attempt has failed,
         and the caller reports ERROR on failure."""
+        # Listener not wanted: just stop any running one.
         wanted = self._agent_listener_enabled()
         if not wanted:
             await self._rebind_agent_server()
             return {"ok": True, "serving": False, "endpoint": "", "error": ""}
 
+        # Make sure a secret and cert exist, reset the readiness state and restart the listener.
         self._ensure_agent_secret()
         self._provision_listener_cert()
         self._agent_server_error = ""
         self._agent_server_endpoint = ""
         self._agent_server_ready = asyncio.Event()
         await self._rebind_agent_server()
+        # Wait for the listener to report ready or failed.
         try:
             await asyncio.wait_for(self._agent_server_ready.wait(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -809,6 +853,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         """Called when the LM hub approves a pending agent. Sends the
         provisioned secret (this spoke's ``agent_secret``) so the agent can
         reconnect authenticated + sign its frames."""
+        # Log state for debugging, then find the pending agent.
         logger.info(
             "approve_pending_agent: ENTER agent=%r — pending_agents=%s "
             "connected_agents=%s have_agent_secret=%s",
@@ -842,6 +887,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                 "self-heal via _ensure_agent_secret (callable=%s)",
                 agent_id, callable(ensure))
             if callable(ensure):
+                # Send the approval with the secret and release the waiting handler.
                 try:
                     ensure()
                     logger.info(
@@ -872,6 +918,7 @@ class AgentHostingControlPlane(BaseControlPlane):
     async def revoke_agent(self, agent_id: str):
         """Disconnect a connected or pending agent — it will auto-heal and
         re-enter pending."""
+        # Connected agent: close its socket and forget it.
         agent = self.connected_agents.get(agent_id)
         if agent:
             try:
@@ -881,6 +928,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             self.connected_agents.pop(agent_id, None)
             logger.info(f"Agent '{agent_id}' revoked (was connected)")
             return
+        # Pending agent: close it, release its waiter and forget it.
         pending = self.pending_agents.get(agent_id)
         if pending:
             try:
@@ -891,6 +939,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             self.pending_agents.pop(agent_id, None)
             logger.info(f"Agent '{agent_id}' revoked (was pending)")
             return
+        # Unknown agent.
         logger.warning(f"Revoke requested for unknown agent '{agent_id}'")
 
     # ── WS path dispatch (agent listener + edge-proxy console relay) ─────────
@@ -899,6 +948,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         """Route by path on the shared agent-listener server: an edge proxy dials
         ``/ws/console-relay/{session_id}`` (Phase 2), everything else is the agent
         on ``/ws/agent``. Keeps the console relay off the agent's PSK path."""
+        # Work out the path, then route console relay paths separately.
         if path is None:
             path = getattr(websocket, "path", None) or getattr(
                 getattr(websocket, "request", None), "path", None)
@@ -926,12 +976,14 @@ class AgentHostingControlPlane(BaseControlPlane):
         DOWN frames go to ``down_handler(cmd, data)`` when given (serial: the
         console spoke writes to its own /dev/tty*), else to the agent via
         ``send_raw_to_agent(agent_id, ...)`` (VNC/shell)."""
+        # Store the token, agent and handler for this session.
         tokens, _ = self._console_relay_state()
         tokens[str(session_id)] = {"token": str(relay_token or ""),
                                    "agent_id": str(agent_id or ""), "kind": kind,
                                    "down_handler": down_handler}
 
     def unregister_console_relay(self, session_id: str) -> None:
+        """Forget a session's relay token and proxy socket."""
         tokens, sinks = self._console_relay_state()
         tokens.pop(str(session_id), None)
         sinks.pop(str(session_id), None)
@@ -941,11 +993,13 @@ class AgentHostingControlPlane(BaseControlPlane):
         return True (hub relay skipped). Otherwise return False → hub relay (the
         existing path). Inert when no sink is registered, so normal console is
         unaffected."""
+        # Find the proxy socket for this session, if any.
         _, sinks = self._console_relay_state()
         sid = (data or {}).get("session_id")
         sink = sinks.get(str(sid)) if sid else None
         if sink is None:
             return False
+        # Send the frame to it; drop a dead socket and fall back to the hub.
         try:
             await sink.send(json.dumps({"type": msg_type, "data": data}))
             return True
@@ -958,27 +1012,32 @@ class AgentHostingControlPlane(BaseControlPlane):
         per-session relay_token minted by the hub at *_START (NOT agent_secret).
         DOWN frames (proxy→Proxmox/PTY) are forwarded to the agent via the existing
         send_raw_to_agent; UP frames are routed here by _route_console_up."""
+        # Session id comes from the URL; read the proxy's auth message.
         session_id = path.rsplit("/", 1)[-1]
         tokens, sinks = self._console_relay_state()
         try:
             auth = json.loads(await asyncio.wait_for(websocket.recv(), timeout=5.0))
         except Exception:  # noqa: BLE001
             await websocket.close(1008, "no auth"); return
+        # The relay token must match the one registered for the session.
         rec = tokens.get(session_id)
         token = (auth or {}).get("relay_token")
         if not rec or not token or not hmac.compare_digest(str(token), str(rec["token"])):
             await websocket.close(1008, "bad relay token"); return
+        # Accept the proxy and register it as the session's sink.
         agent_id = rec.get("agent_id") or ""
         down_handler = rec.get("down_handler")
         await websocket.send(json.dumps({"status": "RELAY_OK"}))
         sinks[session_id] = websocket
         logger.info("Console relay leg attached for session %s (agent %s)", session_id, agent_id)
+        # Read frames from the proxy until it disconnects.
         try:
             async for raw in websocket:
                 try:
                     msg = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8", "replace"))
                 except Exception:  # noqa: BLE001
                     continue
+                # Tag the frame with its session id.
                 cmd = msg.get("type")
                 d = msg.get("data") or {}
                 d["session_id"] = session_id
@@ -998,6 +1057,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             pass
         except Exception as e:  # noqa: BLE001
             logger.warning("console relay leg error (session %s): %s", session_id, e)
+        # Unregister the proxy when it goes away.
         finally:
             if sinks.get(session_id) is websocket:
                 sinks.pop(session_id, None)
@@ -1006,6 +1066,8 @@ class AgentHostingControlPlane(BaseControlPlane):
     # ── Agent connection handler ────────────────────────────────────────────
 
     async def _agent_handler(self, websocket, path=None):
+        """Handle one agent connection: check the path, authenticate (or hold it pending) and process its frames.
+        """
         agent_id = None
         try:
             # 0. Path enforcement — an agent dials ``/ws/agent`` (the hub proxies
@@ -1041,6 +1103,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             onboarding_psk = auth.get("onboarding_psk") or ""
             tenant_hint    = (auth.get("tenant_hint") or "").strip()
 
+            # An agent id is required.
             if not agent_id:
                 await websocket.close(1008, "Missing agent_id"); return
 
@@ -1052,6 +1115,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                     "must relay APPROVAL_SUCCESS with target_agent_id matching "
                     "this key to provision it.",
                     agent_id, agent_id, agent_hostname, agent_install_uuid)
+                # Track it as pending and tell it approval is needed.
                 event = asyncio.Event()
                 self.pending_agents[agent_id] = {"ws": websocket, "event": event}
                 await websocket.send(json.dumps({"status": "APPROVAL_REQUIRED"}))
@@ -1103,6 +1167,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             if ack.get("status") != "HUB_OK":
                 await websocket.close(1008, "Agent failed mutual auth"); return
 
+            # Register the connected agent.
             logger.info(f"Agent '{agent_id}' connected")
             self.connected_agents[agent_id] = {
                 "ws":           websocket,
@@ -1158,12 +1223,14 @@ class AgentHostingControlPlane(BaseControlPlane):
                     logger.warning(f"Undecodable agent frame dropped: {e}")
                     continue
 
+                # Pull out the type, data and correlation id.
                 payload  = msg.get("payload", {})
                 msg_type = payload.get("type")
                 data     = payload.get("data", {})
                 corr_id  = msg.get("header", {}).get("correlation_id")
 
                 if msg_type == "AGENT_HEARTBEAT":
+                    # Heartbeat: note when we last heard from the agent.
                     if agent_id in self.connected_agents:
                         self.connected_agents[agent_id]["last_seen"] = time.time()
                     # Relay up so the hub's HeartbeatManager tracks per-agent
@@ -1173,6 +1240,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                     await self._relay_agent_msg_up(agent_id, "AGENT_HEARTBEAT", data)
 
                 elif msg_type == "AGENT_TELEMETRY":
+                    # Telemetry: refresh the agent's last-seen time, hostname and version.
                     rec = self.connected_agents.get(agent_id)
                     if rec is not None:
                         rec["last_seen"] = time.time()
@@ -1184,6 +1252,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                     await self._on_agent_telemetry(agent_id, rec, data)
 
                 elif msg_type == "AGENT_RESPONSE":
+                    # Reply to a command: resolve the waiting future.
                     if corr_id in self.pending_responses:
                         fut = self.pending_responses.pop(corr_id)
                         if not fut.done():
@@ -1241,6 +1310,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         except Exception as e:
             logger.error(f"Agent handler error: {e}", exc_info=True)
         finally:
+            # Forget the agent on disconnect.
             if agent_id:
                 self.connected_agents.pop(agent_id, None)
                 self.pending_agents.pop(agent_id, None)
@@ -1254,6 +1324,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         relay branches: the hub's AGENT_RELAY_UP handler logs AGENT_LOG and
         routes CS_* payloads to the cs spoke. Never raises — relay failures
         must not tear down the agent connection."""
+        # No hub connection: log agent logs locally and drop everything else.
         hub_ws = getattr(self, "_hub_ws", None)
         if not hub_ws:
             if msg_type == "AGENT_LOG":
@@ -1271,6 +1342,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             else:
                 logger.debug("[agent:%s no-hub-relay] %s dropped", agent_id, msg_type)
             return
+        # Can't sign without an authenticated hub session.
         if not self.signer:
             logger.warning(
                 "Cannot relay %s from '%s': spoke has no session signer "
@@ -1322,6 +1394,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         ``timeout`` bounds the wait for the agent's correlated response
         (default 15s; pass a longer window for slow ops like qm stop/snapshot).
         """
+        # Pick the named agent or the first connected one.
         if agent_id:
             rec = self.connected_agents.get(agent_id)
             if not rec:
@@ -1333,6 +1406,7 @@ class AgentHostingControlPlane(BaseControlPlane):
             rec = next(iter(self.connected_agents.values()))
             ws = rec["ws"]
 
+        # Build the command message with a fresh correlation id.
         corr_id = str(uuid.uuid4())
         msg = {
             "header": {
@@ -1351,6 +1425,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         # and the agent flapped after every auth. Frame it like the hub↔spoke legs.
         wire = self.agent_signer.encode_frame(msg)
 
+        # Register a future for the reply and its extendable deadlines.
         fut = asyncio.get_running_loop().create_future()
         self.pending_responses[corr_id] = fut
         now = time.time()
@@ -1358,6 +1433,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                 "hard": now + timeout * self._agent_progress_hard_mult,
                 "grace": timeout}
         self.pending_progress[corr_id] = prog
+        # Send the command, then wait for the reply.
         try:
             await ws.send(wire)
             # Extendable-deadline wait: normally resolves at `soft` (== base
@@ -1371,6 +1447,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                     raise asyncio.TimeoutError
                 try:
                     return await asyncio.wait_for(asyncio.shield(fut), timeout=remaining)
+                # Timed out or failed: clean up and return an error.
                 except asyncio.TimeoutError:
                     # Slice elapsed — re-check the (possibly-extended) deadline
                     # rather than giving up, unless we've hit the hard ceiling.
@@ -1398,9 +1475,11 @@ class AgentHostingControlPlane(BaseControlPlane):
         AGENT_RESPONSE (if any) is dropped by the ``AGENT_RESPONSE`` branch
         above (no pending corr_id). Returns True on a successful send, False if
         the agent is gone or the send failed. Caller MUST NOT await a result."""
+        # The agent must be connected.
         rec = (self.connected_agents or {}).get(agent_id)
         if not rec or not rec.get("ws"):
             return False
+        # Build the message.
         msg = {
             "header": {
                 "message_id": str(uuid.uuid4()), "timestamp": time.time(),
@@ -1429,11 +1508,14 @@ class AgentHostingControlPlane(BaseControlPlane):
         sem = asyncio.Semaphore(16)
 
         async def _one(aid):
+            """Send the command to one agent, within the semaphore."""
             async with sem:
                 return await self.send_to_agent(cmd_type, data, agent_id=aid)
 
+        # Send to every agent at once.
         tasks = [_one(aid) for aid in list(self.connected_agents)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Label each result with its agent id.
         out = []
         for aid, res in zip(self.connected_agents, results):
             if isinstance(res, Exception):
