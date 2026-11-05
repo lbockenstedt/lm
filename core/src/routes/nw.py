@@ -4,6 +4,7 @@ import ipaddress
 import time
 
 import instance_vault
+import nw_seen_hosts
 from api import (
     HTTPException, Request, _hub_msg, _unwrap_spoke, access, get_spoke_or_503,
     logger, uuid,
@@ -28,6 +29,8 @@ _NW_SERVE_MAX_AGE_S = 60.0
 # revalidate per key (fleet: "__fleet__"; device: "<id>:<endpoint>"). The task
 # set keeps a strong ref so the fire-and-forget tasks aren't GC'd mid-flight.
 _NW_BG_INFLIGHT: set = set()
+# tenant -> IPs waiting for the seen-hosts NetBox push (drained by one task).
+_NW_SEEN_PENDING: dict = {}
 _NW_BG_TASKS: set = set()
 
 
@@ -273,6 +276,12 @@ _NW_SWEEP_BATCH = 1024
 # how long a finished gateway pass waits before it runs again.
 _NW_GW_SWEEP_BLOCKS = 1024
 _NW_GW_RESWEEP_SECONDS = 7 * 86400
+# Responders are pushed to NetBox under their own source tag (never
+# replace-deleted by the ARP push), at most this many pings per request, and at
+# most this many ping-only hosts get the SNMP/port follow-up per scan.
+_NW_SEEN_SOURCE = "Network Sweep"
+_NW_PING_CHUNK = 2048
+_NW_PINGED_PROBE_MAX = 1024
 
 
 # A prefix wider than this (more than 1024 hosts) is never expanded by the
@@ -1605,11 +1614,37 @@ def register(app, hub, ctx):
             prefixes = []
         return split_leaf_and_supernets(prefixes)
 
+    def _seen_registry(tid):
+        """``{ip: entry}`` of hosts seen answering for the tenant (nw_seen_hosts)."""
+        gc = hub.state.system_state.setdefault("global_config", {})
+        return gc.setdefault("nw_seen_hosts", {}).setdefault(tid, {})
+
+    async def _nw_netbox_known_ips(tid):
+        """Every IP NetBox records for the tenant (or tenant group). [] when
+        the tenant has no NetBox mapping or NetBox is unreachable."""
+        scope = access.netbox_tenant_scope(hub, tid)
+        req = ({"tenant_group": scope["tenant_group"]} if scope.get("tenant_group")
+               else {"tenant": scope["tenant"]} if scope.get("tenant") else None)
+        nb = access.get_netbox_spoke(hub)
+        if not req or not nb:
+            return []
+        try:
+            res = access.unwrap_spoke(await hub.request_response(
+                nb, "NETBOX_GET_IPS", req, timeout=60.0)) or {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("scan aggregate tenant=%s known NetBox IPs skipped: %s", tid, e)
+            return []
+        return [str(r.get("address") or "").split("/")[0]
+                for r in (res.get("ip_addresses") or []) if isinstance(r, dict)]
+
     async def _aggregate_scan_targets(hub, tenant_id, sources, extra_subnets,
                                       extra_targets, cap):
         """Build the candidate host-IP list for a tenant scan, in priority order
         (each tier fully included before the next; deduped, IPv4-only):
 
+          0. known hosts (with ``netbox``): every IP NetBox records for the
+          tenant plus every host the scan/sweep has seen answer
+          (``nw_seen_hosts``), so each known device is re-checked every cycle,
           1. DNS records (``dns``), 2. DHCP leases (``dhcp``), 3. NAC endpoints
           (``nac``), 4. NetBox LEAF prefixes (``netbox`` — prefixes that contain
           other prefixes are supernets, left to the background sweep), 5. the
@@ -1674,6 +1709,12 @@ def register(app, hub, ctx):
                         tenant_id, source, sid, len(rows), c,
                         "" if rows else " (resp=%s)" % str(data)[:200])
 
+        if "netbox" in sources and tenant_id:
+            c = 0
+            for ip in (await _nw_netbox_known_ips(tenant_id)) + list(_seen_registry(tenant_id)):
+                c += _add(ip)
+            if c:
+                per_source["known"] = c
         await _pull("dns", hub.get_dns_spoke_for_tenant, "DNS_LIST")
         await _pull("dhcp", hub.get_dhcp_spoke_for_tenant, "DHCP_LIST_LEASES")
         await _pull("nac", hub.get_cppm_spoke_for_tenant, "LIST_ENDPOINTS")
@@ -2193,6 +2234,9 @@ def register(app, hub, ctx):
             "max_targets": cap,
             "max_depth": int(data.get("max_depth") or 2),
         }
+        # Ping every target too: a host that only answers ping is still a
+        # device (NetBox + Zabbix), and a missed reply is what ages it out.
+        alive = await _nw_ping_all(spoke_id, targets)
         batches = [targets[i:i + cap] for i in range(0, len(targets), cap)]
         sem = asyncio.Semaphore(_NW_SCAN_PARALLEL_BATCHES)
 
@@ -2220,6 +2264,25 @@ def register(app, hub, ctx):
                            tenant_id, len(failed), len(outcomes), failed[0])
             per_source["failed_batches"] = len(failed)
         scans = [o for o in outcomes if isinstance(o, dict)]
+        answered = {str(d.get("address") or "").strip() for o in scans
+                    for d in (o.get("reachable") or []) + (o.get("identified") or [])}
+        answered |= {str(a or "").strip()
+                     for d in (hub.state.system_state.get("global_config", {}) or {}).get("nw_devices") or []
+                     if isinstance(d, dict) for a in [d.get("address")] + list(d.get("alt_addresses") or [])}
+        quiet = [ip for ip in targets if ip in alive and ip not in answered]
+        pinged = {}
+        if quiet:
+            # Answered ping but no management port: try SNMP + the profile
+            # probe, least-known hosts first.
+            reg = _seen_registry(tenant_id)
+            quiet.sort(key=lambda ip: bool((reg.get(ip) or {}).get("hostname")
+                                           or (reg.get(ip) or {}).get("profile")))
+            try:
+                # Recorded as sightings only: never auto-added or monitored as SNMP.
+                pinged = await _nw_probe_pinged(tenant_id, spoke_id, quiet[:_NW_PINGED_PROBE_MAX],
+                                                bool(saved.get("try_snmp", True)))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("nw scan tenant=%s ping-only probe failed: %s", tenant_id, e)
         identified = [d for o in scans for d in (o.get("identified") or [])]
         # Hosts that answered a TCP probe but were not classified into a device
         # family. Always reported now — on a discovery-only (credential-free)
@@ -2391,6 +2454,12 @@ def register(app, hub, ctx):
             logger.info("nw scan tenant=%s monitor-only SNMP hosts: %s", tenant_id,
                         [(d["address"], d.get("hostname")) for d in snmp_only])
 
+        if not data.get("dry_run"):
+            await _nw_note_responders(
+                tenant_id, identified + reachable + (pinged.get("reachable") or [])
+                + (pinged.get("identified") or []) + [{"address": ip} for ip in sorted(alive)],
+                known)
+
         # Also backfill any device on THIS spoke that was auto-added by a scan
         # before the hostname never got read (display name still == its raw
         # address — the "source" discovery devices never named because the
@@ -2480,7 +2549,14 @@ def register(app, hub, ctx):
             return gw  # one batch per tick: finish the gateway pass first
         st = _sweep_state(hub, tid)
         leaves, supers = await _nw_netbox_prefix_split(hub, tid)
-        ranges = sweep_ranges(supers, leaves)
+        # The directed (6h) scan already covers its leaf prefixes and the
+        # tenant's saved scan subnets: never sweep those again.
+        for sub in saved.get("subnets") or []:
+            try:
+                leaves.append(ipaddress.ip_network(str(sub).strip(), strict=False))
+            except ValueError:
+                pass
+        ranges = sweep_ranges(supers, [n for n in leaves if n.version == 4])
         if not ranges:
             st.update(total=0, cursor=0, last_status="no-supernets", last_run_at=time.time())
             hub.state._mark_dirty()
@@ -2488,8 +2564,9 @@ def register(app, hub, ctx):
         covered, _ps = await _aggregate_scan_targets(
             hub, tid, ["dns", "dhcp", "nac"], saved.get("subnets") or [], [], _NW_SCAN_MAX_TOTAL)
         gc = hub.state.system_state.get("global_config", {}) or {}
-        covered = set(covered) | {str((d or {}).get("address", "")).strip()
-                                  for d in (gc.get("nw_devices") or []) if isinstance(d, dict)}
+        covered = set(covered) | set(_seen_registry(tid)) | {
+            str((d or {}).get("address", "")).strip()
+            for d in (gc.get("nw_devices") or []) if isinstance(d, dict)}
         batch, cursor, total = sweep_take(ranges, st.get("cursor") or 0,
                                           _NW_SWEEP_BATCH, skip=frozenset(covered))
         options = {"tcp_ports": list(_NW_SWEEP_PORTS), "try_snmp": True, "use_nmap": False,
@@ -2523,6 +2600,16 @@ def register(app, hub, ctx):
                         hostname=r.get("hostname") or prev.get("hostname") or "",
                         snmp=bool(r.get("snmp_ok")) or bool(prev.get("snmp")))
             found[ip] = prev
+        fleet = {str(a or "").strip() for d in (gc.get("nw_devices") or []) if isinstance(d, dict)
+                 for a in [d.get("address")] + list(d.get("alt_addresses") or [])}
+        heard = ((res or {}).get("reachable") or []) + ((res or {}).get("identified") or [])
+        owner = access.spoke_owner_tenant(hub, spoke_id)
+        if heard and not (owner and access.tenant_in(owner, tid)):
+            # A shared agent can reach another tenant's nested prefix.
+            foreign = await access.foreign_tenant_ips(
+                hub, tid, {str(h.get("address") or "").strip() for h in heard})
+            heard = [h for h in heard if str(h.get("address") or "").strip() not in foreign]
+        await _nw_note_responders(tid, heard, fleet)
         wrapped = cursor == 0 and bool(batch)
         st.update(cursor=cursor, total=total, scanned=int(st.get("scanned") or 0) + len(batch),
                   discovered=sorted(found.values(), key=lambda d: -d.get("last_seen", 0))[:2000],
@@ -2549,6 +2636,73 @@ def register(app, hub, ctx):
         if str(res.get("status", "")).upper() != "SUCCESS":
             return None
         return list(res.get("alive") or [])
+
+    async def _nw_ping_all(spoke_id, targets):
+        """Set of ``targets`` answering ping (empty when the spoke can't ping)."""
+        alive = set()
+        for i in range(0, len(targets), _NW_PING_CHUNK):
+            try:
+                got = await _nw_ping(spoke_id, targets[i:i + _NW_PING_CHUNK])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("nw ping spoke=%s failed: %s", spoke_id, e)
+                got = None
+            if got is None:
+                break
+            alive.update(got)
+        return alive
+
+    async def _nw_probe_pinged(tid, spoke_id, ips, snmp=True):
+        """NW_SCAN of hosts known to answer ping: sweep ports + SNMP + profile."""
+        options = {"tcp_ports": list(_NW_SWEEP_PORTS), "try_snmp": snmp, "use_nmap": False,
+                   "concurrency": 32, "crawl": False, "max_targets": len(ips),
+                   "max_depth": 1, "pinged": True}
+        return access.unwrap_spoke(await hub.request_response(
+            spoke_id, "NW_SCAN", {"targets": ips,
+                                  "credentials": await _nw_snmp_creds(tid) if snmp else [],
+                                  "options": options, "tenant": tid},
+            timeout=600.0)) or {}
+
+    async def _nw_note_responders(tid, hosts, skip):
+        """Record the hosts that answered in the tenant's seen-host registry
+        and push the ones outside the fleet (``skip`` addresses) to NetBox."""
+        reg = _seen_registry(tid)
+        now = time.time()
+        ips = set(nw_seen_hosts.record(reg, hosts, now))
+        nw_seen_hosts.prune(reg, now)
+        hub.state._mark_dirty()
+        fresh = ips - set(skip or ())
+        if fresh:
+            # A push already running picks these up when it finishes.
+            _NW_SEEN_PENDING.setdefault(tid, set()).update(fresh)
+            _nw_spawn_refresh(f"seen-push:{tid}", lambda: _nw_drain_seen(tid))
+
+    async def _nw_drain_seen(tid):
+        while _NW_SEEN_PENDING.get(tid):
+            ips = _NW_SEEN_PENDING.pop(tid)
+            reg = _seen_registry(tid)
+            await _nw_push_seen(tid, [reg[ip] for ip in sorted(ips) if ip in reg])
+
+    async def _nw_push_seen(tid, entries):
+        """Push sightings to NetBox (NETBOX_SYNC_DEVICES, own source tag, no
+        replace): creates unknown hosts, refreshes ``last_seen`` on known ones."""
+        slug = access.netbox_tenant_scope(hub, tid).get("tenant")
+        nb = access.get_netbox_spoke(hub)
+        if not slug or not nb:
+            logger.info("nw seen-hosts tenant=%s: %d host(s) not pushed (%s)", tid, len(entries),
+                        "no NetBox tenant" if not slug else "NetBox spoke offline")
+            return
+        cfg = hub._nw_discovery_cfg() if callable(getattr(hub, "_nw_discovery_cfg", None)) else {}
+        payload = {"tenant_id": tid, "tenant_slug": slug, "source": _NW_SEEN_SOURCE,
+                   "replace": False, "devices": nw_seen_hosts.netbox_records(entries),
+                   "defaults": (cfg or {}).get("defaults") or {}}
+        try:
+            res = access.unwrap_spoke(await hub.request_response(
+                nb, "NETBOX_SYNC_DEVICES", payload, timeout=600.0)) or {}
+            logger.info("nw seen-hosts tenant=%s NetBox push: sent=%d pushed=%s skipped=%s errors=%s %s",
+                        tid, len(entries), res.get("pushed"), res.get("skipped"),
+                        res.get("errors"), res.get("message") or "")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[sync-error] nw seen-hosts tenant=%s NetBox push failed: %s", tid, e)
 
     def _gw_state(hub, tid):
         gc = hub.state.system_state.setdefault("global_config", {})
@@ -2640,10 +2794,14 @@ def register(app, hub, ctx):
         known = {str((d or {}).get("address", "")).strip()
                  for d in ((hub.state.system_state.get("global_config", {}) or {}).get("nw_devices") or [])
                  if isinstance(d, dict)}
-        st["discovered"] = [d for d in st.get("discovered", []) if d.get("address") not in known]
+        st["found"] = sum(1 for d in st.pop("discovered", None) or [] if d.get("address") not in known)
         st["enabled"] = _sweep_enabled(hub, tid)
+        # The loop ticks every ~3 min; a batch can take up to ~10.
+        st["running"] = st["enabled"] and time.time() - float(st.get("last_run_at") or 0) < 900
         st["tenant"] = tid
         st["gateway"] = dict(_gw_state(hub, tid))
+        st["unidentified"] = nw_seen_hosts.unidentified(
+            ((hub.state.system_state.get("global_config", {}) or {}).get("nw_seen_hosts") or {}).get(tid) or {})
         return st
 
     @app.post("/api/nw/sweep")
