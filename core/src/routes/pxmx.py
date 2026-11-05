@@ -1,11 +1,16 @@
 """Proxmox agents/nodes/VMs + aggregate + VM-detail + console-create routes."""
+# asyncio for concurrent fan-out to spokes, locks and the fan-out semaphore.
 import asyncio
 
+# List of every tenant id, used when warming per-tenant caches.
 from access import all_tenant_ids
+# Request/exception types and shared helpers re-exported by the main API module (access checks,
+# tenant scoping, logger, spoke lookup, and the secrets/time/uuid modules).
 from api import (
     HTTPException, Request, access, get_tenant_scoping, logger, secrets,
     spoke_or_503, time, uuid,
 )
+# Background warm-cache job type, and the marker meaning "visible to every admin".
 from warm_cache import ALL_SCOPE, CacheJob
 
 # Shared freshest-wins dedup (also used inside pxmx_node_vm_aggregation to
@@ -24,6 +29,8 @@ try:
 except ImportError:  # imported as part of the core.src.routes package
     from ..messaging.pxmx_node_vm_aggregation import _freshest_by_key
 
+# Module-level cache of the aggregated agents payload: data, when it was built, and whether a
+# refresh is running.
 # ── /api/pxmx/agents cache (stale-while-revalidate) ─────────────────────────
 # The Agents tile + the Setup → Spokes & Agents page fans GET_AGENTS out to
 # EVERY agent-hosting spoke (hypervisor + simulation) with a 5s request_timeout
@@ -43,11 +50,13 @@ _AGENTS_STALE_S = 30.0   # still servable (background refresh kicks in here)
 # without cross-loop coupling.
 _agents_locks: dict = {}
 
+# At most 8 spoke requests in flight at once for the aggregate fan-outs.
 # Bounded fan-out for the aggregate /agents, /vms, hypervisor-tile gathers so
 # the hub doesn't open N simultaneous request_response calls when the fleet of
 # agent-hosting / opnsense / hypervisor spokes grows.
 _FANOUT_SEM = asyncio.Semaphore(8)
 
+# Drive-health results per scope: {key: {"data", "ts"}}.
 # ── drive-health fresh-TTL memo ──────────────────────────────────────────────
 # /api/pxmx/nodes and /api/pxmx/vms are served from the hub data cache
 # (warm_cache.cache_read; see pxmx_nodes_job / pxmx_vms_job). Drive health keeps
@@ -56,9 +65,13 @@ _DRIVE_HEALTH_CACHE: dict = {}
 
 
 class _SpokeConnectionError(RuntimeError):
+    """Raised when a spoke cannot be reached for a request."""
     pass
+# Node/VM live results are reused for 10 seconds before refetching.
 _PXMX_FRESH_S = 10.0
+# Drive health is reused for 60 seconds before refetching.
 _DRIVE_HEALTH_FRESH_S = 60.0
+# Per-(loop, cache, key) locks so concurrent identical fetches collapse into one.
 _ttl_locks: dict = {}
 # Every _ttl_* structure is keyed per warm_key (tenant/agent scope), so a hub
 # serving many tenants would otherwise accumulate one entry per scope forever.
@@ -76,18 +89,23 @@ def _prune(d: dict, max_entries: int, ts_of, keep=None) -> None:
     lock, for instance. If everything left is kept, stop rather than spin.
     Never raises: a pruning failure must not fail the request that triggered it.
     """
+    # Any failure is swallowed (see docstring).
     try:
+        # Keep evicting until the dict is small enough.
         while len(d) > max_entries:
             victim = None
             victim_ts = None
+            # Find the oldest entry that is not protected by keep().
             for k, v in d.items():
                 if keep is not None and keep(v):
                     continue
                 ts = ts_of(v)
                 if victim_ts is None or ts < victim_ts:
                     victim, victim_ts = k, ts
+            # Everything left is protected; give up rather than loop forever.
             if victim is None:
                 return
+            # Remove the oldest entry and check again.
             del d[victim]
     except Exception:  # noqa: BLE001
         pass
@@ -103,6 +121,7 @@ def bust_pxmx_agents_cache():
     ``_AGENTS_STALE_S`` = 30s, e.g. a just-toggled CS enable/disable not
     reflecting on an immediate page refresh) get the same treatment without
     duplicating the try/except at each call site. Never raises."""
+    # Clearing data and resetting the timestamp forces the next read to rebuild.
     try:
         _AGENTS_CACHE["data"] = None
         _AGENTS_CACHE["ts"] = 0.0
@@ -111,8 +130,11 @@ def bust_pxmx_agents_cache():
 
 
 def _agents_lock() -> "asyncio.Lock":
+    """Return the agents-cache lock for the currently running event loop (created on first use)."""
+    # Look up this loop's lock by the loop's id.
     loop = asyncio.get_running_loop()
     lk = _agents_locks.get(id(loop))
+    # First use on this loop: create and remember a lock.
     if lk is None:
         lk = asyncio.Lock()
         _agents_locks[id(loop)] = lk
@@ -120,14 +142,20 @@ def _agents_lock() -> "asyncio.Lock":
 
 
 def _ttl_lock(cache_name: str, key: str) -> "asyncio.Lock":
+    """Return the lock serialising fetches for one cache key on the current loop (created on first
+    use).
+    """
+    # Locks are per loop, per cache and per key.
     loop = asyncio.get_running_loop()
     lk_key = (id(loop), cache_name, key)
     entry = _ttl_locks.get(lk_key)
+    # New key: create the lock, stamp it, and prune old entries (never one currently held).
     if entry is None:
         entry = {"lock": asyncio.Lock(), "ts": time.time()}
         _ttl_locks[lk_key] = entry
         _prune(_ttl_locks, _TTL_CACHE_MAX, lambda v: v["ts"],
                keep=lambda v: v["lock"].locked())
+    # Existing key: refresh its last-used time so it is not pruned.
     else:
         entry["ts"] = time.time()
     return entry["lock"]
@@ -139,15 +167,19 @@ async def _ttl_cached(cache: dict, cache_name: str, key: str, fetch, ttl: float 
     same scope collapse into one fan-out) and refresh the entry. Raises
     whatever ``fetch`` raises on a cold/expired entry — callers already fall
     back to ``hub.warm_get`` for that, same as before this cache existed."""
+    # Fast path: a fresh enough entry is returned without taking the lock.
     if not force_refresh:
         entry = cache.get(key)
         if entry is not None and (time.time() - entry["ts"]) < ttl:
             return entry["data"]
+    # Slow path: one fetch per key at a time.
     async with _ttl_lock(cache_name, key):
+        # Another request may have refreshed the entry while we waited for the lock.
         if not force_refresh:
             entry = cache.get(key)
             if entry is not None and (time.time() - entry["ts"]) < ttl:
                 return entry["data"]
+        # Fetch live, store with a timestamp and keep the cache bounded.
         data = await fetch()
         cache[key] = {"data": data, "ts": time.time()}
         _prune(cache, _TTL_CACHE_MAX, lambda v: v["ts"])
@@ -165,6 +197,7 @@ async def _aggregate_agents(hub, agent_spokes):
     Module-level (not a route closure) so it depends only on ``hub`` and the
     spoke list, and is unit-testable with a stub hub.
     """
+    # Per-agent config, display names and the current time, used to enrich each row.
     agent_cfg = hub.state.system_state.get("agent_config", {})
     names = hub.state.system_state.get("agent_display_names", {})
     now = time.time()
@@ -176,7 +209,9 @@ async def _aggregate_agents(hub, agent_spokes):
         (with ``"agent "`` in the detail), so scan that and return the newest
         one newer than the agent's ``change_acked_ts``.
         """
+        # Only events newer than the last acknowledgement count.
         acked_ts = float(cfg.get("change_acked_ts") or 0.0)
+        # Scan the parent spoke's recent events for a rename/reimage that mentions this agent.
         for ev in hub.get_spoke_events(parent_spoke, limit=30):
             if ev.get("event") in ("identity_changed", "hostname_changed", "reimaged"):
                 detail = ev.get("detail", "") or ""
@@ -185,6 +220,7 @@ async def _aggregate_agents(hub, agent_spokes):
         return None
 
     async def _one(parent_spoke):
+        """Ask one spoke for its agents (at most 8 in flight); returns None on any failure."""
         try:
             async with _FANOUT_SEM:
                 return await hub.request_response(parent_spoke, "GET_AGENTS", {}, timeout=30.0)
@@ -192,15 +228,19 @@ async def _aggregate_agents(hub, agent_spokes):
             logger.warning("GET_AGENTS failed for spoke %s: %s", parent_spoke, exc)
             return None
 
+    # Query every spoke at once, then merge the results.
     results = await asyncio.gather(*[_one(s) for s in agent_spokes])
     all_agents: list = []
     all_pending: list = []
+    # Walk each spoke's reply in the same order as the spoke list.
     for parent_spoke, result in zip(agent_spokes, results):
+        # Skip spokes that failed or returned something that is not a dict.
         if result is None:
             continue
         data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
         if not isinstance(data, dict):
             continue
+        # Enrich every live agent with its parent spoke, ids, config and liveness.
         for a in data.get("agents", []) or []:
             aid = a["agent_id"]
             a["spoke_id"] = parent_spoke
@@ -211,11 +251,13 @@ async def _aggregate_agents(hub, agent_spokes):
             agent_pk = hub._agent_primary_key(aid)
             spoke_pk = hub._primary_key(parent_spoke)
             a["spoke_guid"] = spoke_pk
+            # Display name: the configured one wins, then the stored name.
             cfg = agent_cfg.get(agent_pk, {})
             if cfg.get("display_name"):
                 a["display_name"] = cfg["display_name"]
             elif agent_pk in names:
                 a["display_name"] = names[agent_pk]
+            # Attach the agent's client-simulation settings when configured.
             if cfg.get("client_simulation"):
                 a["client_simulation"] = cfg["client_simulation"]
             # Hub-tracked per-agent heartbeat (keyed spoke_pk:agent_pk, fed by
@@ -238,16 +280,22 @@ async def _aggregate_agents(hub, agent_spokes):
                 hb_last = ai_last
                 _el = now - ai_last
                 hb_status_s = "GREEN" if _el < 120 else ("YELLOW" if _el < 300 else "RED")
+            # Seconds since last contact (None if never seen) and the matching colour status.
             a["heartbeat_age_s"] = max(0, int(now - hb_last)) if isinstance(hb_last, (int, float)) else None
             a["heartbeat_status"] = hb_status_s
+            # Hostname (config, then the agent's own report, then the id), install id, identity
+            # change and decommission flag.
             a["hostname"] = cfg.get("hostname", "") or a.get("hostname", "") or aid
             a["install_uuid"] = cfg.get("install_uuid", "")
             a["identity_change"] = _agent_identity_change_for(hub, parent_spoke, aid, cfg)
             a["decommissioned"] = bool(hub.state.is_agent_decommissioned(agent_pk))
+            # Collect the enriched agent.
             all_agents.append(a)
+        # Pending (unapproved) agents just get tagged with their parent spoke.
         for p in data.get("pending_agents", []) or []:
             p["spoke_id"] = parent_spoke
             all_pending.append(p)
+    # Return the merged lists; spoke_connected tells the UI at least one spoke answered.
     return {"agents": all_agents, "pending_agents": all_pending, "spoke_connected": True}
 
 
@@ -268,7 +316,9 @@ def _offline_relay_agents(hub, live_ids):
     ``live_ids`` = agent ids already returned live (skipped). ``known_modules``
     ids (true spokes / generic hub-direct agents — they have their own offline
     handling) are excluded. Never raises."""
+    # Any failure returns what we have (see docstring).
     try:
+        # Persisted state: per-agent config, names, the known hub-direct modules and their metadata.
         ss = hub.state.system_state
         agent_cfg = ss.get("agent_config", {}) or {}
         names = ss.get("agent_display_names", {}) or {}
@@ -285,21 +335,27 @@ def _offline_relay_agents(hub, live_ids):
             parent_of[agent_pk] = spoke_pk
             last_of[agent_pk] = ts
 
+        # Any agent we know something about is a candidate.
         candidate_pks = set(parent_of) | set(agent_cfg) | set(names)
         live = set(live_ids or [])
         out = []
+        # Build an offline row for each candidate that is not live and not a real spoke.
         for apk in candidate_pks:
             if not apk or apk in known:
                 continue  # true spoke / generic hub agent — handled elsewhere
+            # The agent's stored config and raw id (falls back to the key).
             cfg = agent_cfg.get(apk, {}) or {}
             raw = cfg.get("agent_id") or apk
             if apk in live or raw in live:
                 continue  # already represented by a live/pending row
+            # The parent spoke this agent was last seen through.
             spoke_pk = parent_of.get(apk, "")
             # Only surface agents whose parent spoke is currently OFFLINE — a
             # live parent already lists its agents via GET_AGENTS.
             if spoke_pk and hub.is_spoke_in_contact(spoke_pk):
                 continue
+            # How long ago (seconds) this agent was last heard from, and its parent spoke's
+            # metadata.
             last = last_of.get(apk)
             age = max(0, int(now - last)) if isinstance(last, (int, float)) else None
             spoke_meta = meta.get(spoke_pk, {}) or {}
@@ -318,6 +374,7 @@ def _offline_relay_agents(hub, live_ids):
                 or str(spoke_meta.get("tenant_id") or "").strip()
             if eff_tid:
                 cs["tenant_id"] = eff_tid
+            # The offline row, shaped like a live row so the same UI renders it.
             out.append({
                 "agent_id": raw,
                 "spoke_id": spoke_pk,
@@ -335,7 +392,9 @@ def _offline_relay_agents(hub, live_ids):
                 "offline": True,
                 "decommissioned": bool(hub.state.is_agent_decommissioned(apk)),
             })
+        # Every reconstructed offline agent.
         return out
+    # Any failure is logged and an empty roster returned (see docstring).
     except Exception:  # noqa: BLE001 — the offline roster must never blank the tile
         logger.exception("offline relay-agent reconstruction failed")
         return []
@@ -346,29 +405,35 @@ def _purge_agent_state(hub, agent_id):
     DELETE removes an OFFLINE agent for good (parent spoke down) and it never
     re-appears as a ghost offline row. Mirrors ``_evict_spoke`` for the agent-
     relay path. Best-effort; returns True if anything was removed."""
+    # Match the agent by both its primary (guid) key and the raw id given.
     ss = hub.state.system_state
     apk = hub._agent_primary_key(agent_id)
     keys = {apk, agent_id}
     dirty = False
+    # Remove the agent's config and display name.
     for store in ("agent_config", "agent_display_names"):
         d = ss.get(store, {}) or {}
         for k in keys:
             if k in d:
                 d.pop(k, None)
                 dirty = True
+    # Remove every composite heartbeat entry ending in this agent, in memory and on disk.
     # composite heartbeat keys {spoke_pk}:{agent_pk} — in-mem + persisted
     for k in list((hub.heartbeat.last_seen or {}).keys()):
         if ":" in k and k.split(":", 1)[1] in keys:
             hub.heartbeat.last_seen.pop(k, None)
+            # Persisted copy cleanup is best effort.
             try:
                 hub.state.clear_spoke_last_seen(k)
             except Exception:  # noqa: BLE001
                 pass
             dirty = True
+    # Remove any approval record for the agent.
     for k in list((getattr(hub, "approved_modules", {}) or {}).keys()):
         if k in keys:
             hub.approved_modules.pop(k, None)
             dirty = True
+    # Match by key or by the agent_id recorded inside the entry.
     # in-memory agent_info (evicted on disconnect, but purge if the hub restarted
     # with a stale entry or the agent is somehow still half-tracked)
     for k in list((getattr(hub, "agent_info", {}) or {}).keys()):
@@ -381,6 +446,7 @@ def _purge_agent_state(hub, agent_id):
         if _guid in keys or _name in keys:
             hub.agent_id_alias.pop(_name, None)
             dirty = True
+    # Only flag state for saving when something was actually removed.
     if dirty:
         hub.state._mark_dirty()
     return dirty
@@ -399,31 +465,41 @@ async def _maybe_refresh_agents(hub, agent_spokes, force=False):
     concurrent caller refreshed while this one waited on the lock, the cache
     is now fresh and serving it (rather than re-fanning) is the whole point
     of serializing here. So the fresh-cache re-check below is unconditional."""
+    # Only one refresh at a time (per event loop).
     async with _agents_lock():
+        # A fresh enough cached payload is served as-is.
         cached = _AGENTS_CACHE["data"]
         age = (time.time() - _AGENTS_CACHE["ts"]) if cached is not None else None
         if cached is not None and age is not None and age < _AGENTS_FRESH_S:
             return cached
+        # Flag the refresh so other callers do not start another one.
         _AGENTS_CACHE["refreshing"] = True
         try:
+            # Rebuild the payload from every spoke and store it with a timestamp.
             result = await _aggregate_agents(hub, agent_spokes)
             _AGENTS_CACHE["data"] = result
             _AGENTS_CACHE["ts"] = time.time()
             try:  # warm-start snapshot (off-thread) so the Agents tile seeds on restart
+                # Snapshot writer and hub encryption, so the cache is saved encrypted.
                 from tenant_sharded import snapshot_save
                 from security.encryption import hub_encryption
                 import os as _os
+                # Write the snapshot in a worker thread so the event loop is not blocked by disk
+                # I/O.
                 await asyncio.to_thread(
                     snapshot_save,
                     _os.path.join(hub.state.data_dir, "pxmx", "agents_cache.json"),
                     {"data": result, "ts": _AGENTS_CACHE["ts"]},
                     encrypt=lambda s: hub_encryption.encrypt(s))
+            # A failed snapshot only costs the warm start; ignore it.
             except Exception:  # noqa: BLE001
                 pass
             return result
+        # A failed refresh is logged and the previous (stale) payload is served instead.
         except Exception:
             logger.exception("agents cache refresh failed")
             return cached  # serve stale rather than blanking the tile
+        # Always clear the refreshing flag, whatever happened.
         finally:
             _AGENTS_CACHE["refreshing"] = False
 
@@ -448,22 +524,29 @@ async def push_pxmx_agent_config(hub, agent_id, push_cfg, owning_spoke=None):
     (freshly resolved, possibly before the agent's first relayed frame, so
     ``get_spoke_for_agent`` can't yet resolve it and the default's hypervisor
     fallback would be wrong for a cs-dialed agent)."""
+    # Track whether the config was delivered live or queued for later.
     pushed = False
     queued = False
+    # Owning spoke: the given one, else the spoke the agent is connected through, else any
+    # hypervisor spoke.
     owning_spoke = owning_spoke or hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
         or hub.get_hypervisor_spoke()
+    # Nothing to push to when no spoke can be found.
     if owning_spoke:
         try:
+            # Prefer the mailbox-backed push (queues for an offline spoke) when the hub supports it.
             push = getattr(hub, "push_or_queue_to_spoke", None)
             if callable(push):
                 outcome = await push(owning_spoke, "SET_AGENT_CONFIG", {
                     "agent_id": agent_id,
                     "config": push_cfg,
                 })
+                # Unwrap the reply; a queued push or a SUCCESS reply both count as delivered.
                 queued = bool(outcome.get("queued"))
                 rdata = outcome.get("result") or {}
                 rdata = rdata.get("payload", {}).get("data", rdata) if isinstance(rdata, dict) else rdata
                 pushed = queued or (isinstance(rdata, dict) and rdata.get("status") == "SUCCESS")
+            # Older hubs: a plain request/response, delivered only on a SUCCESS reply.
             else:
                 res = await hub.request_response(owning_spoke, "SET_AGENT_CONFIG", {
                     "agent_id": agent_id,
@@ -471,6 +554,7 @@ async def push_pxmx_agent_config(hub, agent_id, push_cfg, owning_spoke=None):
                 })
                 rdata = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
                 pushed = rdata.get("status") == "SUCCESS"
+        # Delivery failed: log it; the spoke re-pushes on the agent's next connect.
         except Exception as e:
             logger.info(f"SET_AGENT_CONFIG push for '{agent_id}' failed (will re-push on reconnect): {e}")
     return pushed, queued
@@ -497,16 +581,19 @@ async def pxmx_agents_payload(hub, tid):
     Agents (and My Devices) instant on repeat loads and stops a single slow /
     reconnecting spoke from blocking the tile every page view. Module-level
     (not a route closure) so both callers share the ONE cache."""
+    # Every hypervisor and simulation spoke, de-duplicated in order.
     agent_spokes = list(dict.fromkeys(
         hub.get_all_spokes_by_type("hypervisor") + hub.get_all_spokes_by_type("simulation")
     ))
 
     if not agent_spokes:
+        # Empty live roster, flagged as "no spoke connected".
         # No agent-hosting spoke connected → no live roster, but STILL surface
         # any relayed agents whose parent spoke is offline so they can be
         # seen + deleted (was: empty, agents invisible/undeletable).
         live = {"agents": [], "pending_agents": [], "spoke_connected": False}
     else:
+        # Age of the cached payload (None when there is none).
         cached = _AGENTS_CACHE["data"]
         age = (time.time() - _AGENTS_CACHE["ts"]) if cached is not None else None
         # Inside the stale window → serve instantly; past fresh-TTL, kick ONE
@@ -521,12 +608,15 @@ async def pxmx_agents_payload(hub, tid):
             live = await _maybe_refresh_agents(hub, agent_spokes, force=True) \
                 or {"agents": [], "pending_agents": [], "spoke_connected": True}
 
+    # Ids already shown as live or pending, so the offline roster skips them.
     # Append the offline relayed-agent roster (reconstructed from persisted
     # side-data) without mutating the shared SWR cache object.
     live_ids = {a.get("agent_id") for a in live.get("agents", []) if a.get("agent_id")}
     live_ids |= {a.get("agent_id") for a in live.get("pending_agents", []) if a.get("agent_id")}
+    # Copy so the shared cache object is not modified.
     out = dict(live)
     out["offline_agents"] = _offline_relay_agents(hub, live_ids)
+    # Resolve which tenants this request may see (None = unfiltered).
     # Tenant scope (picker): an explicit tenant shows ONLY agents EFFECTIVELY
     # scoped to it — the agent's OWN pinned tenant (per-agent Tenant button →
     # agent_config.client_simulation.tenant_id, the same value the tile
@@ -545,17 +635,22 @@ async def pxmx_agents_payload(hub, tid):
     # per-request copy.
     scope = access.tenant_scope_ids(tid)
     if scope is not None:
+        # Spoke metadata, for tenants inherited from the parent spoke.
         md = hub.state.system_state.get("module_metadata", {}) or {}
         def _agent_tid(a):
+            """Effective tenant of an agent: its own pinned tenant, else its parent spoke's tenant.
+            """
             pin = str(((a.get("client_simulation") or {})
                        .get("tenant_id")) or "").strip()
             if pin:
                 return pin
             return (md.get(a.get("spoke_id"), {}) or {}).get("tenant_id")
+        # Filter all three lists down to agents in scope.
         for _k in ("agents", "pending_agents", "offline_agents"):
             if isinstance(out.get(_k), list):
                 out[_k] = [a for a in out[_k]
                            if access.in_tenant_scope(_agent_tid(a), scope)]
+    # Return the (possibly filtered) roster.
     return out
 
 
@@ -565,10 +660,13 @@ def _spoke_data_or_raise(sid, cmd, res):
     not an exception — raise it so the fan-out counts that spoke as FAILED.
     Otherwise the empty error envelope would be treated as a good answer and
     the hub cache would replace the last-known VM / node lists with nothing."""
+    # Unwrap the spoke envelope to its data.
     data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+    # Raise if either the envelope or the data reports an ERROR status.
     for env in (res, data):
         if isinstance(env, dict) and str(env.get("status", "")).upper() == "ERROR":
             raise RuntimeError(f"{cmd} on {sid}: {env.get('message') or env.get('error') or 'error'}")
+    # Otherwise the data is a good answer.
     return data
 
 
@@ -594,26 +692,34 @@ async def _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0, failed=None):
     Module-level (depends only on ``hub`` + the spoke list) for testability.
     """
     async def _one(sid):
+        """Ask one spoke for its VMs (at most 8 in flight) and unwrap or raise on error."""
         async with _FANOUT_SEM:
             res = await hub.request_response(sid, "PXMX_LIST_VMS", payload, timeout=timeout)
         return _spoke_data_or_raise(sid, "PXMX_LIST_VMS", res)
 
+    # Query every spoke at once; failures come back as exception objects rather than raising.
     results = await asyncio.gather(*(_one(sid) for sid in spokes), return_exceptions=True)
+    # Merged VM and node rows, extra keys, and whether any spoke answered.
     vm_rows: list = []
     node_rows: list = []
     extras: dict = {}
     any_ok = False
     last_err = None
+    # Merge each spoke's answer.
     for sid, r in zip(spokes, results):
+        # A failed spoke is logged, recorded in failed (if asked) and skipped.
         if isinstance(r, Exception):
             last_err = r
             logger.warning("PXMX_LIST_VMS fan-out: spoke %s failed: %s", sid, r)
             if failed is not None:
                 failed.append(sid)
             continue
+        # At least one spoke answered.
         any_ok = True
+        # Successful answer: collect its VMs and nodes.
         if isinstance(r, dict):
             vms = r.get("vms")
+            # Each VM row is (identity key, telemetry timestamp, row) so the freshest copy can win.
             if isinstance(vms, list):
                 for vm in vms:
                     if not isinstance(vm, dict):
@@ -625,6 +731,7 @@ async def _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0, failed=None):
                     # dropping genuinely distinct VMs from different hosts.
                     key = vm.get("unique_id") or (vm.get("node"), vm.get("vmid"))
                     vm_rows.append((key, vm.get("telemetry_ts", 0) or 0, vm))
+            # Node rows likewise, keyed by hostname.
             nodes = r.get("nodes")
             if isinstance(nodes, list):
                 for node in nodes:
@@ -644,6 +751,7 @@ async def _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0, failed=None):
         # Every spoke failed → re-raise so the caller falls back to the warm cache.
         raise last_err if last_err else RuntimeError(
             "no agent-hosting spoke answered PXMX_LIST_VMS")
+    # Start from the extra keys, then add the de-duplicated (freshest) VMs and nodes.
     # Cluster-mate spokes (a real N-node PVE cluster split across N
     # dedicated/cs-hosted spokes) each self-report the FULL cluster, so a
     # naive extend() here reproduces the N-spokes x N-nodes duplication
@@ -681,6 +789,7 @@ async def _merge_pinned_agent_vms(hub, data, tid, visible_spokes, timeout=10.0, 
     could return VMs from other agents pinned to the same tenant, violating
     the endpoint's documented single-agent contract.
     """
+    # Nothing to merge without a tenant or a usable dict.
     if not tid or not isinstance(data, dict):
         return data
     # Case-insensitive compare: a pin recorded as "Default" must match a scope
@@ -688,22 +797,28 @@ async def _merge_pinned_agent_vms(hub, data, tid, visible_spokes, timeout=10.0, 
     # use everywhere else, so an agent explicitly pinned to a tenant isn't
     # silently dropped by a capitalisation mismatch.
     norm_tid = tid.strip().casefold()
+    # Collect (agent, spoke) pairs for every agent pinned to this tenant.
     acfg = hub.state.system_state.get("agent_config", {}) or {}
     reqs = []
     for apk, cfg in acfg.items():
+        # When a single agent was requested, ignore all others.
         if agent_id and apk != agent_id:
             continue
+        # The agent's pinned tenant (blank when not pinned).
         pin = str(((cfg or {}).get("client_simulation") or {})
                   .get("tenant_id") or "").strip()
         if pin.casefold() != norm_tid:
             continue
+        # The agent's spoke must be known and visible to the caller.
         sp = hub.get_spoke_for_agent(apk, fallback_hypervisor=False)
         if sp and (visible_spokes is None or sp in visible_spokes):
             reqs.append((apk, sp))
+    # No pinned agents: nothing to add.
     if not reqs:
         return data
 
     async def _one(apk, sp):
+        """Fetch one pinned agent's VMs from its spoke; returns {} on failure."""
         # agent_config is keyed by the hub-side guid, but the spoke indexes its
         # connected agents by the agent's raw name — sending the guid made the
         # spoke answer "not connected" and every pinned host's VMs were dropped.
@@ -718,12 +833,14 @@ async def _merge_pinned_agent_vms(hub, data, tid, visible_spokes, timeout=10.0, 
             logger.warning("pinned-agent VM merge: agent %s (spoke %s) failed: %s",
                            apk, sp, e)
             return {}
+        # Unwrap the reply; an ERROR status is logged (its empty VM list simply adds nothing).
         env = r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
         if isinstance(env, dict) and env.get("status") == "ERROR":
             logger.warning("pinned-agent VM merge: agent %s (as %r, spoke %s) returned error: %s",
                            apk, wire_id, sp, env.get("message") or env.get("error"))
         return env
 
+    # Fetch all pinned agents' VMs in parallel and index them by VM identity.
     envs = await asyncio.gather(*(_one(apk, sp) for apk, sp in reqs))
     owned: dict = {}
     for env in envs:
@@ -731,11 +848,14 @@ async def _merge_pinned_agent_vms(hub, data, tid, visible_spokes, timeout=10.0, 
             if isinstance(vm, dict):
                 key = vm.get("unique_id") or (vm.get("node"), vm.get("vmid"))
                 owned[key] = vm
+    # Nothing came back: keep the original data.
     if not owned:
         return data
+    # Index the existing VMs the same way, then let the pinned agents' copies win.
     merged = {(v.get("unique_id") or (v.get("node"), v.get("vmid"))): v
              for v in (data.get("vms") or []) if isinstance(v, dict)}
     merged.update(owned)
+    # Return a copy with the merged VM list.
     out = dict(data)
     out["vms"] = list(merged.values())
     return out
@@ -753,21 +873,27 @@ async def _aggregate_pxmx_nodes(hub, spokes, timeout=30.0):
     raises only if EVERY spoke fails so the caller's warm-cache fallback fires.
     """
     async def _one(sid):
+        """Ask one spoke for its node stats (at most 8 in flight) and unwrap or raise on error."""
         async with _FANOUT_SEM:
             res = await hub.request_response(sid, "GET_NODE_STATS", {}, timeout=timeout)
         return _spoke_data_or_raise(sid, "GET_NODE_STATS", res)
 
+    # Query every spoke at once; failures come back as exception objects rather than raising.
     results = await asyncio.gather(*(_one(sid) for sid in spokes), return_exceptions=True)
+    # Merged node rows, extra keys, and whether any spoke answered.
     node_rows: list = []
     extras: dict = {}
     any_ok = False
     last_err = None
+    # Merge each spoke's answer; failed spokes are logged and skipped.
     for sid, r in zip(spokes, results):
         if isinstance(r, Exception):
             last_err = r
             logger.warning("GET_NODE_STATS fan-out: spoke %s failed: %s", sid, r)
             continue
+        # At least one spoke answered.
         any_ok = True
+        # Collect each node as (hostname key, telemetry timestamp, row).
         if isinstance(r, dict):
             nodes = r.get("nodes")
             if isinstance(nodes, list):
@@ -779,12 +905,15 @@ async def _aggregate_pxmx_nodes(hub, spokes, timeout=30.0):
                     # above) — a real pvesh payload always carries "node".
                     key = node.get("node") or id(node)
                     node_rows.append((key, node.get("telemetry_ts", 0) or 0, node))
+            # Keep other top-level keys from the first spoke that set them.
             for k, v in r.items():
                 if k not in ("nodes", "spoke_connected"):
                     extras.setdefault(k, v)
+    # Every spoke failed: raise so the caller falls back to the warm cache.
     if not any_ok:
         raise last_err if last_err else RuntimeError(
             "no agent-hosting spoke answered GET_NODE_STATS")
+    # Return the extras plus the de-duplicated node list.
     # Cluster-mate spokes each self-report the FULL cluster (see
     # _aggregate_pxmx_vms above for the full explanation) — dedup by node
     # hostname, keeping whichever spoke's report is freshest.
@@ -796,22 +925,28 @@ async def _aggregate_pxmx_nodes(hub, spokes, timeout=30.0):
 
 def register(app, hub, ctx):
     """Register pxmx routes on the Hub app."""
+    # Pull the shared session helpers out of ctx once for the route closures below.
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
     # Warm-start the aggregated agents cache so the Agents tile seeds on restart
     # instead of blanking until every agent spoke reconnects (stale-while-revalidate).
     try:
+        # Snapshot loader and hub encryption for the encrypted cache snapshot.
         from tenant_sharded import snapshot_load
         from security.encryption import hub_encryption
         import os as _os
+        # Load the snapshot written by the last refresh.
         _snap = snapshot_load(
             _os.path.join(hub.state.data_dir, "pxmx", "agents_cache.json"),
             decrypt=lambda b: hub_encryption.decrypt(b))
+        # Seed the cache only from a valid snapshot.
         if isinstance(_snap, dict) and _snap.get("data") is not None:
             _AGENTS_CACHE["data"] = _snap["data"]
             _AGENTS_CACHE["ts"] = float(_snap.get("ts", 0) or 0)
+    # A missing or unreadable snapshot just means a cold start.
     except Exception:  # noqa: BLE001
         pass
+    # Tenant resolution and tenant filtering helpers.
     _resolve_tenant = ctx._resolve_tenant
     _filter_tenant = ctx._filter_tenant
 
@@ -823,11 +958,14 @@ def register(app, hub, ctx):
         (403) on an unattributable VM. Mirrors _assert_vm_control in pxmx_vm.py.
         Console is a control-tier action (full keyboard/mouse), so view users are
         rejected even for their own VM."""
+        # Global Admins may console any VM.
         sess = _session_user(request)
         if _is_admin(sess):
             return
+        # View-only users may never use the console.
         if not access.has_edit_access(sess):
             raise HTTPException(status_code=403, detail="Edit access required for VM console")
+        # The spoke hosting this VM: the agent's own spoke, else the default hypervisor spoke.
         hub = app.state.hub
         spoke = (hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
                  if agent_id else None) or hub.get_hypervisor_spoke()
@@ -845,6 +983,8 @@ def register(app, hub, ctx):
         # per-VM attribution below can't prove ownership. OFF by default (safe).
         if await access.tenant_admin_console_allowed(hub, sess, spoke):
             return
+        # Ask the spoke for the VM's IPs, tags and pool; any failure leaves it empty (and so denied
+        # below).
         info = {}
         if spoke:
             try:
@@ -853,6 +993,7 @@ def register(app, hub, ctx):
                 info = raw.get("payload", {}).get("data", {}) if isinstance(raw, dict) else {}
             except Exception:  # noqa: BLE001 — fail-closed below
                 info = {}
+        # The facts used to attribute the VM to a tenant.
         vm_record = {"ips": info.get("ips") or [], "tags": info.get("tags") or [],
                      "pool": info.get("pool") or ""}
         # A stopped / guest-agent-silent VM reports no live IP, so a subnet-owned
@@ -871,6 +1012,7 @@ def register(app, hub, ctx):
         # Toggle-independent, fail-closed ownership (subnet or tenant tag) — NOT
         # _filter_tenant, which fails OPEN when the hypervisor display filter is off.
         if not await access.vm_in_tenant_scope(hub, sess, vm_record, spoke_id=spoke):
+            # Log enough detail for an admin to see why access was denied (never fails the request).
             try:
                 _u = (sess or {}).get("user", {}) or {}
                 logger.warning(
@@ -884,17 +1026,24 @@ def register(app, hub, ctx):
                     vm_record["tags"], vm_record["ips"])
             except Exception:  # noqa: BLE001
                 pass
+            # Deny.
             raise HTTPException(status_code=403, detail="not authorized for this VM's tenant")
 
     @app.get("/vm/{vm_id}/details")
     async def get_vm_details(request: Request, vm_id: str):
+        """Return a VM's combined details: hub metadata, Proxmox info, OPNsense rules/DHCP lease and
+        ClearPass policy.
+        """
+        # Any logged-in user; tenant ownership is checked below.
         hub = app.state.hub
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
+        # The hub's cached record for this VM and its known IP.
         res_info = hub.state.system_state.get("resources", {}).get(vm_id, {})
         ip = res_info.get("metadata", {}).get("ip")
 
+        # Start with every source marked OFFLINE; each section is filled in if its spoke answers.
         details = {
             "vm_id": vm_id,
             "ip": ip,
@@ -904,6 +1053,7 @@ def register(app, hub, ctx):
             "cppm": {"status": "OFFLINE", "policy": "Unknown"}
         }
 
+        # Ask the hypervisor spoke for the VM's live info.
         pxmx_spoke = hub.get_hypervisor_spoke()
         px_res: dict = {}
         if pxmx_spoke:
@@ -921,6 +1071,7 @@ def register(app, hub, ctx):
         # bypass. Prevents enumerating another tenant's VM proxmox/opnsense/
         # cppm data by vm_id.
         if not _is_admin(sess):
+            # The facts used to attribute the VM to a tenant.
             vm_record = {
                 "ips": (px_res.get("ips") or ([ip] if ip else [])),
                 "tags": px_res.get("tags") or [],
@@ -932,23 +1083,28 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=403,
                                     detail="not authorized for this VM's tenant")
 
+        # Look up the VM's firewall rules and DHCP lease on the OPNsense spokes (needs an IP).
         opn_spokes = hub.get_all_spokes_by_type("firewall")
         if opn_spokes and ip:
             rules_data = None
             lease = None
 
+            # Try each firewall spoke until one knows this IP.
             for spoke_id in opn_spokes:
                 try:
+                    # Fetch the rules that match the IP and the full DHCP lease table.
                     rules_raw = await hub.request_response(spoke_id, "OPNSENSE_GET_RULES_BY_IP", {"ip": ip})
                     dhcp_raw = await hub.request_response(spoke_id, "OPNSENSE_GET_DHCP_LEASES", {})
 
                     rules_res = rules_raw.get("payload", {}).get("data", {}) if isinstance(rules_raw, dict) else {}
                     dhcp_res = dhcp_raw.get("payload", {}).get("data", []) if isinstance(dhcp_raw, dict) else []
 
+                    # Matching rules found: use this spoke.
                     if rules_res.get("status") == "SUCCESS" and rules_res.get("rules"):
                         rules_data = rules_res
                         break
 
+                    # Otherwise, a DHCP lease for the IP also identifies the right firewall.
                     if isinstance(dhcp_res, list):
                         lease = next((l for l in dhcp_res if l.get("ip") == ip), None)
                         if lease:
@@ -957,6 +1113,7 @@ def register(app, hub, ctx):
                 except Exception as e:
                     logger.error(f"Error querying OPNsense spoke {spoke_id} for VM {vm_id}: {e}")
 
+            # Record what was found, or mark OPNsense offline.
             if rules_data:
                 details["opnsense"] = {
                     "status": "ONLINE",
@@ -966,12 +1123,14 @@ def register(app, hub, ctx):
             else:
                 details["opnsense"] = {"status": "OFFLINE", "rules": [], "dhcp": None}
 
+        # Look up the VM's ClearPass policy on the NAC spoke (needs an IP).
         cppm_spoke = hub.get_spoke_by_type("nac")
         if cppm_spoke and ip:
             cppm_res_raw = await hub.request_response(cppm_spoke, "CPPM_GET_POLICY_BY_IP", {"ip": ip})
             cppm_res = cppm_res_raw.get("payload", {}).get("data", {}) if isinstance(cppm_res_raw, dict) else {}
             details["cppm"] = cppm_res if cppm_res.get("status") == "SUCCESS" else {"status": "ERROR", "error": cppm_res.get("message", "Unknown error")}
 
+        # Return the combined details.
         return details
 
     @app.get("/api/aggregate/opnsense")
@@ -981,6 +1140,7 @@ def register(app, hub, ctx):
         across all tenants, not a per-tenant view — a non-admin enumerating this
         would see other tenants' infra. The per-tenant firewall view is
         /api/firewall/{fwId}/... (already tenant-scoped)."""
+        # Admins only (see docstring).
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
@@ -990,6 +1150,7 @@ def register(app, hub, ctx):
         opn_spokes = hub.get_all_spokes_by_type("firewall")
 
         async def _one(sid):
+            """Fetch one firewall's health and interface status, or an ERROR row if it fails."""
             try:
                 # Health + interface status are independent — fetch both at once
                 # per spoke, and all spokes run concurrently so the dashboard
@@ -1006,6 +1167,7 @@ def register(app, hub, ctx):
             except Exception as e:
                 return {"spoke_id": sid, "spoke_online": False, "status": "ERROR", "error": str(e)}
 
+        # Query every firewall at once.
         results = await asyncio.gather(*(_one(sid) for sid in opn_spokes))
         return {"hosts": list(results)}
 
@@ -1016,17 +1178,20 @@ def register(app, hub, ctx):
         across all tenants — a non-admin enumerating this would see other
         tenants' full VM lists. The per-tenant view is /api/pxmx/vms (already
         tenant-scoped)."""
+        # Admins only (see docstring).
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="Admin only")
         hub = app.state.hub
+        # Every hypervisor and simulation spoke, de-duplicated in order.
         pxmx_spokes = list(dict.fromkeys(
             hub.get_all_spokes_by_type("hypervisor")
             + hub.get_all_spokes_by_type("simulation")))
 
         async def _one(sid):
+            """Fetch one spoke's full VM inventory, or an ERROR row if it fails."""
             try:
                 async with _FANOUT_SEM:
                     res_raw = await hub.request_response(sid, "GET_VM_INFO", {"vm_id": "all"})
@@ -1035,6 +1200,7 @@ def register(app, hub, ctx):
             except Exception as e:
                 return {"spoke_id": sid, "spoke_online": False, "status": "ERROR", "error": str(e)}
 
+        # Query every spoke at once.
         results = await asyncio.gather(*(_one(sid) for sid in pxmx_spokes))
         return {"hosts": list(results)}
 
@@ -1056,9 +1222,11 @@ def register(app, hub, ctx):
         + port + path (see the pxmx agent's discovery.resolve_agent_url). We
         still compute the expected URL below for the modal to display.
         """
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
         import socket as _socket
+        # The host the browser used to reach the hub, else this machine's own IP.
         host = request.headers.get("host", "").split(":")[0] or _socket.gethostbyname(_socket.gethostname())
         hub = app.state.hub
         # Co-located/all-in-one: the pxmx agent listener on the hub box is wss on
@@ -1071,6 +1239,7 @@ def register(app, hub, ctx):
             spoke_url = f"wss://{host}" if agent_port == 443 else f"wss://{host}:{agent_port}"
         else:
             spoke_url = f"ws://{host}:8766"
+        # The one-line installer command shown in the modal.
         cmd = (
             f"curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh "
             f"| sudo bash -s -- "
@@ -1083,12 +1252,15 @@ def register(app, hub, ctx):
         """Agents tile data source. See ``pxmx_agents_payload`` (module-level,
         reused by the tenant-self-service ``/tenant/{tenant}/agents`` route in
         onboarding.py) for the aggregation + tenant-scoping logic itself."""
+        # Resolve the tenant scope and build the payload.
         hub = app.state.hub
         tid = _resolve_tenant(request, tenant)
         return await pxmx_agents_payload(hub, tid)
 
     @app.post("/api/pxmx/agents/{agent_id}/revoke")
     async def revoke_pxmx_agent(agent_id: str, request: Request):
+        """Disconnect a pxmx node agent by telling its spoke to revoke it (admin only)."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
@@ -1097,17 +1269,21 @@ def register(app, hub, ctx):
         # always targeting the hypervisor spoke.
         owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
             or hub.get_hypervisor_spoke()
+        # No spoke to send the revoke through.
         if not owning_spoke:
             raise HTTPException(status_code=503, detail="No spoke connected")
+        # Relay REVOKE_AGENT to the agent through its spoke.
         try:
             result = await hub.request_response(owning_spoke, "SPOKE_RELAY", {
                 "target_agent_id": hub._agent_relay_name(agent_id),
                 "command": "REVOKE_AGENT",
             })
+            # Unwrap the reply; anything but SUCCESS becomes a 502.
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             if data.get("status") != "SUCCESS":
                 raise HTTPException(status_code=502, detail=data.get("message", "Relay failed"))
             return {"status": "ok", "message": f"Agent '{agent_id}' disconnected"}
+        # Pass HTTP errors through; anything else becomes a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -1117,9 +1293,11 @@ def register(app, hub, ctx):
     @app.post("/api/pxmx/agents/{agent_id}/ack-change")
     async def ack_agent_identity_change(agent_id: str, request: Request):
         """Dismiss the amber "renamed" banner for a pxmx node agent (idempotent)."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
+        # Record when the change was acknowledged, which hides the banner.
         try:
             agent_pk = hub._agent_primary_key(agent_id)
             cfg = hub.state.system_state.setdefault("agent_config", {}).setdefault(agent_pk, {})
@@ -1132,13 +1310,17 @@ def register(app, hub, ctx):
 
     @app.post("/api/pxmx/agents/{agent_id}/rename")
     async def rename_pxmx_agent(agent_id: str, request: Request):
+        """Set a pxmx agent's display name (admin only)."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
+        # A non-blank display name is required.
         data = await request.json()
         display_name = (data.get("display_name") or "").strip()
         if not display_name:
             raise HTTPException(status_code=400, detail="display_name required")
+        # Store it under the agent's primary key.
         hub.state.system_state.setdefault("agent_display_names", {})[hub._agent_primary_key(agent_id)] = display_name
         hub.state._mark_dirty()
         return {"status": "ok", "message": f"Agent '{agent_id}' renamed to '{display_name}'"}
@@ -1146,9 +1328,11 @@ def register(app, hub, ctx):
     @app.get("/api/pxmx/agents/{agent_id}/config")
     async def get_pxmx_agent_config(agent_id: str, request: Request):
         """Return the stored per-agent config (display name + Client Simulation mode)."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
+        # The stored config for this agent (empty when none).
         agent_pk = hub._agent_primary_key(agent_id)
         cfg = hub.state.system_state.get("agent_config", {}).get(agent_pk, {})
         # Fall back to the legacy display-name override if agent_config has none yet.
@@ -1165,10 +1349,12 @@ def register(app, hub, ctx):
         the client_simulation config down to the agent via the pxmx spoke.
         Reuses the spoke's SET_AGENT_CONFIG command, which persists in the spoke and
         re-pushes UPDATE_CONFIG to the agent on reconnect (see proxmox_spoke.py:55-64)."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
         try:
+            # Read the requested display name, Client Simulation settings and tenant.
             data = await request.json()
             display_name = (data.get("display_name") or "").strip() or None
             cs = data.get("client_simulation") or {}
@@ -1219,6 +1405,7 @@ def register(app, hub, ctx):
             # cached pre-save snapshot for up to _AGENTS_STALE_S (30s).
             bust_pxmx_agents_cache()
 
+            # Report whether the config was pushed, queued or only saved.
             return {
                 "status": "ok" if pushed else "partial_success",
                 "message": ("Config queued — spoke temporarily unreachable, will apply on reconnect." if queued
@@ -1231,6 +1418,7 @@ def register(app, hub, ctx):
                 # KeyError'd and 500'd the save even though the config had persisted.
                 "config": store.get(agent_pk, entry),
             }
+        # Any failure is logged and returned as a 500.
         except Exception as e:
             logger.exception("set_pxmx_agent_config failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -1246,18 +1434,23 @@ def register(app, hub, ctx):
         90000 floor or a protected container — comes back as ERROR with the
         guard's message). Sync only: long ops (delete/reclone/reseed/backup) are
         not exposed here (they'd exceed the spoke's 15s relay window)."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
+        # Read the JSON body; a bad body counts as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # The command name is required.
         action = (body.get("action") or "").strip()
         if not action:
             raise HTTPException(status_code=400, detail="missing 'action'")
+        # The hypervisor spoke, or a 503 when none is connected.
         pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "hypervisor")
         try:
+            # Relay the command to the agent through the spoke and return the agent's reply.
             result = await hub.request_response(pxmx_spoke, "SPOKE_RELAY", {
                 "target_agent_id": hub._agent_relay_name(agent_id),
                 "command": "CS_COMMAND",
@@ -1265,6 +1458,7 @@ def register(app, hub, ctx):
             })
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             return data
+        # A failed relay is a 502.
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"CS command relay failed: {e}")
 
@@ -1274,9 +1468,11 @@ def register(app, hub, ctx):
         (relayed through the hypervisor spoke) plus removal of any persisted
         display-name override. If the agent is already dead / the hypervisor
         spoke is offline, the relay is skipped and we still clear the override."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
+        # Try a live disconnect first, if the hypervisor spoke is connected.
         relayed = False
         pxmx_spoke = hub.get_hypervisor_spoke()
         if pxmx_spoke:
@@ -1294,6 +1490,7 @@ def register(app, hub, ctx):
         # agent (parent spoke down) is removed for good and never re-appears as a
         # ghost offline row — not just the display-name override as before.
         _purge_agent_state(hub, agent_id)
+        # Report whether the agent was live when removed.
         msg = ("Agent disconnected and removed." if relayed else "Agent removed (was not connected).")
         return {"status": "ok", "message": msg}
 
@@ -1304,20 +1501,25 @@ def register(app, hub, ctx):
         badged it grey and (for relayed agents surfaced out-of-contact) it's a
         don't-alert marker. Works while the parent spoke is offline — the whole
         point of cleanup. Reversible via /restore; for a full wipe use DELETE."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
         try:
+            # Flag the agent's record as decommissioned.
             apk = hub._agent_primary_key(agent_id)
             changed = hub.state.decommission_agent(apk)
             if changed:
                 logger.info("Agent '%s' decommissioned (soft-retire).", agent_id)
+            # Drop the agents cache so the tile shows the change immediately.
             try:
                 _AGENTS_CACHE["data"] = None
                 _AGENTS_CACHE["ts"] = 0.0
             except Exception:  # noqa: BLE001
                 pass
+            # Report whether anything actually changed.
             return {"status": "ok", "decommissioned": True, "changed": changed}
+        # Any failure is logged and returned as a 500.
         except Exception as e:
             logger.exception("decommission_pxmx_agent failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -1326,20 +1528,25 @@ def register(app, hub, ctx):
     async def restore_pxmx_agent(request: Request, agent_id: str):
         """Un-decommission a soft-retired Proxmox node-agent. The record was
         never removed."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
         try:
+            # Clear the decommissioned flag.
             apk = hub._agent_primary_key(agent_id)
             changed = hub.state.restore_agent(apk)
             if changed:
                 logger.info("Agent '%s' restored from decommission.", agent_id)
+            # Drop the agents cache so the tile shows the change immediately.
             try:
                 _AGENTS_CACHE["data"] = None
                 _AGENTS_CACHE["ts"] = 0.0
             except Exception:  # noqa: BLE001
                 pass
+            # Report whether anything actually changed.
             return {"status": "ok", "decommissioned": False, "changed": changed}
+        # Any failure is logged and returned as a 500.
         except Exception as e:
             logger.exception("restore_pxmx_agent failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -1354,32 +1561,39 @@ def register(app, hub, ctx):
         else the agent whose hostname matches ``node`` is used. VM data is served
         live from connected agents, so a server that's STILL online will
         re-appear on the next poll — this is for removing dead/stale ones."""
+        # Admins only.
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
+        # Read the JSON body; a bad body counts as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # The agent id and node hostname from the body.
         agent_id = str((body or {}).get("agent_id") or "").strip()
         node = str((body or {}).get("node") or (body or {}).get("hostname") or "").strip()
         # Resolve the agent by hostname when the UI couldn't map the node → agent.
         if not agent_id and node:
+            # First look for a configured agent whose hostname matches.
             ss = hub.state.system_state
             for pk, cfg in (ss.get("agent_config", {}) or {}).items():
                 if str((cfg or {}).get("hostname", "")).strip().lower() == node.lower():
                     agent_id = pk
                     break
+            # Then look among connected agents.
             if not agent_id:
                 for pk, info in (getattr(hub, "agent_info", {}) or {}).items():
                     if str((info or {}).get("hostname", "")).strip().lower() == node.lower():
                         agent_id = (info or {}).get("agent_id") or pk
                         break
+        # The agent that was purged (None when none was found).
         purged = None
         if agent_id:
             # Best-effort live disconnect through the owning spoke (mirrors
             # delete_pxmx_agent), then purge ALL persisted + in-mem agent state.
             try:
+                # The agent's own spoke, else the default hypervisor spoke.
                 owning = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
                     or hub.get_hypervisor_spoke()
                 if owning:
@@ -1389,10 +1603,13 @@ def register(app, hub, ctx):
                             "command": "REVOKE_AGENT"}, timeout=8.0)
                     except Exception:  # noqa: BLE001 — agent may be dead already
                         pass
+                # Remove everything the hub stores for this agent.
                 _purge_agent_state(hub, agent_id)
                 purged = agent_id
+            # A failed purge is logged but does not fail the request.
             except Exception as e:  # noqa: BLE001
                 logger.info("delete_pxmx_server: purge of '%s' failed: %s", agent_id, e)
+        # Add the node to the hidden list (once).
         # HIDE the node persistently — the Hypervisors nodes come from a LIVE
         # GET_NODE_STATS, and a shut-down host is still reported (status=offline)
         # by its cluster peers, so purging the agent + clearing the cache alone
@@ -1417,11 +1634,13 @@ def register(app, hub, ctx):
             hub.warm_drop("pxmx_vms", ("",))  # memory + on-disk file
         except Exception:  # noqa: BLE001
             pass
+        # Drop the agents cache too.
         try:
             _AGENTS_CACHE["data"] = None
             _AGENTS_CACHE["ts"] = 0.0
         except Exception:  # noqa: BLE001
             pass
+        # Report what was done.
         return {"status": "ok", "purged_agent": purged, "hidden": hidden_added or bool(node),
                 "message": ("Server hidden from the Hypervisors view + cached VMs cleared"
                             + (f"; agent {purged} purged" if purged else "")
@@ -1433,6 +1652,7 @@ def register(app, hub, ctx):
         refresher follows spokes coming and going). Returns None when the only
         candidate is a global spoke bound to ANOTHER tenant — the caller must
         then show a clean empty list (never another tenant's cached nodes)."""
+        # Which spokes apply depends on the tenant scope.
         hub = app.state.hub
         if tid:
             # Every agent-hosting spoke (pxmx AND cs) BOUND to this tenant — a
@@ -1451,6 +1671,7 @@ def register(app, hub, ctx):
             # "servers I just added don't show up" bug).
             node_spokes = hub.get_hypervisor_spokes_for_tenant(tid)
             if not node_spokes:
+                # The global hypervisor spoke and the tenant it is bound to (if any).
                 # Fall back to the global hypervisor spoke ONLY when it is
                 # UNBOUND (no tenant): an unbound host's Overview should still
                 # match its (subnet-filtered) VM list. A spoke BOUND to a
@@ -1485,6 +1706,7 @@ def register(app, hub, ctx):
             node_spokes = list(dict.fromkeys(
                 hub.get_all_spokes_by_type("hypervisor")
                 + hub.get_all_spokes_by_type("simulation")))
+        # Non-admins without a tenant cannot list nodes.
         else:
             raise HTTPException(status_code=403, detail="Select a tenant to view its hypervisor nodes")
         return node_spokes
@@ -1495,15 +1717,19 @@ def register(app, hub, ctx):
         aggregate is cached; hidden-node and offline-host merges are applied
         per read."""
         async def fetch():
+            """Aggregate node stats from every spoke in scope; raises when none is available."""
+            # Spokes visible to this scope; None or empty means none to ask.
             spokes = pxmx_node_spokes(tid, admin)
             if not spokes:
                 raise _SpokeConnectionError("No spoke connected")
             # 30s: a cold telemetry cache makes the spoke orchestrate live
             # per-agent pvesh round-trips.
             data = await _aggregate_pxmx_nodes(app.state.hub, spokes, timeout=30.0)
+            # A reply without a node list counts as a failure.
             if not (isinstance(data, dict) and isinstance(data.get("nodes"), list)):
                 raise _SpokeConnectionError("hypervisor spokes returned no node list")
             return data
+        # Cached per tenant (or _all_) in the pxmx lane.
         return CacheJob("pxmx_nodes", tid or "_all_", fetch,
                         (tid,) if tid else (ALL_SCOPE,), lane="pxmx")
 
@@ -1515,9 +1741,12 @@ def register(app, hub, ctx):
         branch fails OPEN. Mirrors pxmx_node_spokes: tenant-bound + shared
         spokes, plus the global spoke only when it is itself unbound. None =
         no restriction (admin with no tenant scope at all)."""
+        # Tenant view: the spokes bound to (or shared with) this tenant.
         hub = app.state.hub
         if tid:
             visible = set(hub.get_hypervisor_spokes_for_tenant(tid))
+            # Plus the global hypervisor spoke when it is unbound and the tenant has no spoke of its
+            # own.
             gs = hub.get_hypervisor_spoke()
             gs_tid = ((hub.state.system_state.get("module_metadata", {}) or {})
                       .get(gs, {}) or {}).get("tenant_id") if gs else None
@@ -1525,8 +1754,10 @@ def register(app, hub, ctx):
                     hub, tid, access.spoke_module_type(hub, gs)):
                 visible.add(gs)
             return visible
+        # Admins without a tenant see everything (no restriction).
         if admin:
             return None
+        # Non-admins without a tenant cannot list VMs.
         raise HTTPException(status_code=403, detail="Select a tenant to view its hypervisor VMs")
 
     def pxmx_vms_job(tid, agent_id, admin: bool) -> CacheJob:
@@ -1534,10 +1765,15 @@ def register(app, hub, ctx):
         ``<tid|_all_>|agent=<agent_id>`` — keyed by tenant id, NOT proxmox tag,
         because two tenants can both have an empty tag and must never share an
         entry. Spokes are resolved on every fetch (current connections)."""
+        # Cache key: tenant (or _all_) plus the requested agent.
         key = f"{tid or '_all_'}|agent={agent_id or ''}"
 
         async def fetch():
+            """Aggregate the VM list from every spoke visible to this scope; raises when none is
+            available.
+            """
             hub = app.state.hub
+            # Spokes this scope may query (None = all).
             visible = pxmx_visible_spokes(tid, admin)
             # A Proxmox host can sit behind a hypervisor (pxmx) spoke OR a
             # simulation (cs) spoke, so fan out across every agent-hosting
@@ -1545,16 +1781,20 @@ def register(app, hub, ctx):
             # spoke — only if that spoke is itself visible (no guessing an
             # agent_id to reach another tenant's VMs).
             if agent_id:
+                # The agent's own spoke, else the default hypervisor spoke.
                 one = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
                     or hub.get_hypervisor_spoke()
                 spokes = [one] if one and (visible is None or one in visible) else []
             else:
+                # Every hypervisor and simulation spoke, limited to the visible ones.
                 all_spokes = list(dict.fromkeys(
                     hub.get_all_spokes_by_type("hypervisor")
                     + hub.get_all_spokes_by_type("simulation")))
                 spokes = all_spokes if visible is None else [x for x in all_spokes if x in visible]
+            # No spoke to ask.
             if not spokes:
                 raise _SpokeConnectionError("No spoke connected")
+            # Build the request: the agent filter and the tenant's Proxmox tag filter.
             payload: dict = {}
             if agent_id:
                 payload["agent_id"] = agent_id
@@ -1564,20 +1804,26 @@ def register(app, hub, ctx):
             # 30s: a large fleet with guest-IP annotation routinely exceeds 5s.
             return await _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0)
 
+        # Cached per tenant and agent in the pxmx lane; agent-specific entries count as detail.
         return CacheJob("pxmx_vms", key, fetch, (tid,) if tid else (ALL_SCOPE,),
                         lane="pxmx", detail=bool(agent_id))
 
     def pxmx_cache_feed(_hub):
         """Feed: VM list + node list for every tenant and the admin view."""
+        # The admin view (None) first, then every tenant.
         for tid in [None] + all_tenant_ids(app.state.hub):
             yield pxmx_vms_job(tid, None, True)
             yield pxmx_nodes_job(tid, True)
 
+    # Register the feed with the hub cache (when supported).
     if hasattr(hub, "cache_register_feed"):
         hub.cache_register_feed("pxmx", pxmx_cache_feed)
 
     @app.get("/api/pxmx/nodes")
     async def get_pxmx_nodes(request: Request, tenant: str = None):
+        """Return the Hypervisors Overview node list for the selected tenant, with hidden nodes
+        removed and offline hosts added.
+        """
         hub = app.state.hub
         sess = _session_user(request)
         # Node stats are per-SPOKE (the whole cluster behind the hypervisor spoke).
@@ -1591,6 +1837,7 @@ def register(app, hub, ctx):
         # selected ("All") → the global spoke (every node). A non-admin with no
         # resolvable tenant still fails closed rather than the old flat 403.
         tid = _resolve_tenant(request, tenant)
+        # Non-admins must have a tenant.
         if not tid and not _is_admin(sess):
             raise HTTPException(status_code=403, detail="Select a tenant to view its hypervisor nodes")
         if pxmx_node_spokes(tid, _is_admin(sess)) is None:
@@ -1599,24 +1846,29 @@ def register(app, hub, ctx):
             # pre-fix leaky fetch, and serving it would re-leak them.
             return {"nodes": [], "spoke_connected": False}
         def _apply_hidden(data):
+            """Remove operator-hidden nodes from the data, unhiding any that are back online."""
             # Operator-hidden (deleted) servers: filter them out of the feed so a
             # shut-down host that cluster peers still report as offline stays
             # gone. AUTO-UNHIDE any hidden node that reports back ONLINE (the host
             # returned) so a live node is never permanently hidden. Applied to
             # LIVE and warm-cached data alike.
             if isinstance(data, dict) and isinstance(data.get("nodes"), list):
+                # The current hidden-node list.
                 ss = hub.state.system_state
                 hidden = list(ss.get("pxmx_hidden_nodes", []) or [])
                 if hidden:
                     hset = set(hidden)
+                    # Hidden nodes that now report online.
                     back = {str(n.get("node") or "") for n in data["nodes"]
                             if isinstance(n, dict) and str(n.get("status") or "").lower() == "online"
                             and str(n.get("node") or "") in hset}
                     if back:
+                        # Unhide those and save.
                         remaining = [h for h in hidden if h not in back]
                         ss["pxmx_hidden_nodes"] = remaining
                         hub.state._mark_dirty()
                         hset -= back
+                    # Drop the still-hidden nodes from a copy of the data.
                     data = dict(data)
                     data["nodes"] = [n for n in data["nodes"]
                                      if not (isinstance(n, dict) and str(n.get("node") or "") in hset)]
@@ -1640,13 +1892,16 @@ def register(app, hub, ctx):
             ``pxmx_hidden_nodes`` (an
             operator-deleted host stays gone). Never raises — a roster failure
             leaves the live node list untouched."""
+            # Nothing to merge into without a node list.
             if not isinstance(data, dict) or not isinstance(data.get("nodes"), list):
                 return data
+            # The offline roster; any failure leaves the data unchanged.
             try:
                 offline = _offline_relay_agents(hub, set())
             except Exception:  # noqa: BLE001
                 logger.debug("merge offline hosts: roster unavailable", exc_info=True)
                 return data
+            # No offline agents: nothing to add.
             if not offline:
                 return data
             # Tenant scope: mirror pxmx_agents_payload's per-agent filter (the
@@ -1660,14 +1915,17 @@ def register(app, hub, ctx):
                            if access.in_tenant_scope((a or {}).get("tenant_id"), scope)]
                 if not offline:
                     return data
+            # Hostnames already shown, and hidden hostnames, both lowercased.
             present = {str(n.get("node") or "").strip().lower()
                        for n in data["nodes"] if isinstance(n, dict)}
             hidden = {str(h).strip().lower() for h in
                       (hub.state.system_state.get("pxmx_hidden_nodes", []) or [])}
+            # Build an offline node row for each offline host not already shown or hidden.
             added = []
             for a in offline:
                 if not isinstance(a, dict):
                     continue
+                # The host's name: hostname, else display name, else agent id.
                 host = str(a.get("hostname") or a.get("display_name")
                            or a.get("agent_id") or "").strip()
                 if not host:
@@ -1676,6 +1934,7 @@ def register(app, hub, ctx):
                 if hl in present or hl in hidden:
                     continue
                 present.add(hl)
+                # The offline node row, using the last-seen time as its telemetry time.
                 last = a.get("last_seen")
                 added.append({
                     "node": host,
@@ -1685,12 +1944,14 @@ def register(app, hub, ctx):
                     "agent_id": a.get("agent_id"),
                     "telemetry_ts": last if isinstance(last, (int, float)) else 0,
                 })
+            # Return a copy with the offline rows appended.
             if not added:
                 return data
             out = dict(data)
             out["nodes"] = list(data["nodes"]) + added
             return out
 
+        # Read the node list through the hub cache.
         job = pxmx_nodes_job(tid, _is_admin(sess))
         try:
             data = await hub.cache_read(job.ns, job.key, job.fetch, tenants=job.tenants,
@@ -1704,10 +1965,15 @@ def register(app, hub, ctx):
                 merged = dict(merged)
                 merged["stale"] = True
             return merged
+        # Mark cache status, remove hidden nodes, and add offline hosts.
         out = hub.cache_annotate(_apply_hidden(data), job.ns, job.key)
         return await _merge_offline_hosts(out)
 
     def _normalize_drive_summary(raw_summary: dict, drives: list) -> dict:
+        """Return a drive summary (counts by health) from the agent's summary, else computed from
+        the drives.
+        """
+        # Use the agent's own summary when it has any counts (accepting both key spellings).
         if isinstance(raw_summary, dict) and any(
             raw_summary.get(k) is not None for k in ("healthy", "healthy_drives", "total_drives")
         ):
@@ -1718,6 +1984,7 @@ def register(app, hub, ctx):
                 "critical": int(raw_summary.get("critical", raw_summary.get("critical_drives", 0)) or 0),
                 "unknown": int(raw_summary.get("unknown", raw_summary.get("unknown_drives", 0)) or 0),
             }
+        # Otherwise count each drive by its health status.
         s = {"total_drives": len(drives), "healthy": 0, "warning": 0, "critical": 0, "unknown": 0}
         for d in drives:
             st = str(d.get("health_status") or "").lower()
@@ -1728,6 +1995,7 @@ def register(app, hub, ctx):
                 s["warning"] += 1
             elif st in ("critical", "crit", "error", "failed"):
                 s["critical"] += 1
+            # No status: judge by SSD wear level (90%+ critical, 80%+ warning).
             elif isinstance(wear, (int, float)):
                 if wear >= 90:
                     s["critical"] += 1
@@ -1742,6 +2010,7 @@ def register(app, hub, ctx):
     async def _collect_drive_health(hub, spokes, target_nodes, warm_key):
         """Poll PXMX_DRIVE_HEALTH on every (spoke, node), aggregate, and store the
         result in the warm cache. Shared by the route and the 6h background feed."""
+        # Collected nodes, nodes with a real answer, error-only placeholders, and overall status.
         aggregated_nodes = []
         seen_nodes = set()
         error_nodes = {}  # node -> placeholder entry, used only if no real reply ever arrives
@@ -1758,29 +2027,36 @@ def register(app, hub, ctx):
             return_exceptions=True,
         )
 
+        # Process each answer.
         for (sid, target_node), res in zip(requests, responses):
             if isinstance(res, Exception):
                 last_err = res
                 logger.debug("PXMX_DRIVE_HEALTH failed for spoke %s node %s: %s", sid, target_node, res)
                 continue
 
+            # Unwrap the reply; anything but a dict is skipped.
             data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
             if not isinstance(data, dict):
                 continue
 
+            # At least one spoke answered.
             spoke_connected = True
 
+            # Shared details from the reply envelope.
             diagnostics = data.get("diagnostics") or {}
             agent_version = data.get("agent_version")
             error_msg = data.get("message") if data.get("status") == "ERROR" else None
 
+            # Multi-node reply: one entry per node.
             if isinstance(data.get("nodes"), list):
                 for n in data["nodes"]:
                     if not isinstance(n, dict):
                         continue
+                    # Skip nodes that already have a real answer.
                     n_name = n.get("node") or target_node or "default"
                     if n_name in seen_nodes:
                         continue
+                    # Build the node's entry.
                     drives = n.get("drives") or []
                     summary = _normalize_drive_summary(n.get("summary"), drives)
                     entry = {
@@ -1801,6 +2077,7 @@ def register(app, hub, ctx):
                     else:
                         seen_nodes.add(n_name)
                         aggregated_nodes.append(entry)
+            # Single-node reply: the reply itself describes one node.
             else:
                 n_name = data.get("node") or target_node or "default"
                 if n_name in seen_nodes:
@@ -1818,6 +2095,7 @@ def register(app, hub, ctx):
                     "agent_version": agent_version,
                     "diagnostics": diagnostics,
                 }
+                # Error answers are held back as placeholders; real answers win.
                 if data.get("status") == "ERROR":
                     error_nodes.setdefault(n_name, entry)
                 else:
@@ -1832,10 +2110,12 @@ def register(app, hub, ctx):
                 aggregated_nodes.append(entry)
                 seen_nodes.add(n_name)
 
+        # No spoke answered at all.
         if not spoke_connected:
             msg = str(last_err) if last_err is not None else "No hypervisor spoke answered PXMX_DRIVE_HEALTH"
             raise _SpokeConnectionError(msg)
 
+        # Fleet-wide totals across every node.
         total_summary = {
             "total_drives": 0,
             "healthy": 0,
@@ -1848,6 +2128,7 @@ def register(app, hub, ctx):
             for k in ("total_drives", "healthy", "warning", "critical", "unknown"):
                 total_summary[k] += int(ns.get(k, 0) or 0)
 
+        # The result, stamped with when it was collected.
         now_ts = time.time()
         res = {
             "nodes": aggregated_nodes,
@@ -1864,6 +2145,7 @@ def register(app, hub, ctx):
         return res
 
     def _has_real_drive_data(res):
+        """True when at least one node in the result has real (non-error) drive data."""
         nodes = (res or {}).get("nodes") if isinstance(res, dict) else None
         return any(isinstance(n, dict) and n.get("status") != "ERROR" for n in (nodes or []))
 
@@ -1877,29 +2159,38 @@ def register(app, hub, ctx):
         missing). Called every few minutes by hub.run_pxmx_drive_health_loop; the
         warm cache is persisted, so a hub restart doesn't re-poll fresh scopes.
         Best-effort; never raises."""
+        # Every tenant id (empty if the tenant list cannot be read).
         try:
             tenants = {str(t) for t in (hub.state.tenant_state.get("tenants", {}) or {})}
         except Exception:  # noqa: BLE001
             tenants = set()
+        # Results already collected this cycle, keyed by the set of spokes polled.
         done = {}
+        # Every tenant, plus the admin "default" scope.
         for tid in sorted(tenants | {"default"}):
             warm_key = f"{tid}|node="
+            # Skip scopes whose cached data is under 6h old and real.
             fetched = hub.warm_fetched_at("pxmx_drive_health", warm_key)
             if (fetched and time.time() - fetched < _DRIVE_HEALTH_FEED_S
                     and _has_real_drive_data(hub.warm_get("pxmx_drive_health", warm_key))):
                 continue
             try:
+                # The spokes for this tenant; none means nothing to poll.
                 spokes = list(hub.get_hypervisor_spokes_for_tenant(tid) or [])
                 if not spokes:
                     continue
+                # Several tenants sharing the same spokes reuse one poll.
                 sig = tuple(sorted(spokes))
                 if sig in done:  # shared spokes: reuse this cycle's poll
                     await hub.warm_set("pxmx_drive_health", warm_key, done[sig])
                     continue
+                # Poll and cache this scope.
                 done[sig] = await _collect_drive_health(hub, spokes, [""], warm_key)
+            # One tenant's failure must not stop the others.
             except Exception as e:  # noqa: BLE001
                 logger.debug("drive-health feed for tenant %s failed: %s", tid, e)
 
+    # Expose the feed on the hub so its background loop can call it.
     hub.pxmx_drive_health_feed_once = _drive_health_feed_once
 
     @app.get("/api/pxmx/drive-health")
@@ -1910,10 +2201,12 @@ def register(app, hub, ctx):
         bypasses the cache to guarantee a live poll.
         """
         hub = app.state.hub
+        # Any logged-in user.
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
 
+        # Resolve the tenant and the hypervisor spokes in its scope.
         tid = _resolve_tenant(request, tenant)
         # ``default`` is the ADMIN tenant, not "All" — scoped like any other
         # tenant via get_hypervisor_spokes_for_tenant (UNASSIGNED + explicitly
@@ -1944,12 +2237,14 @@ def register(app, hub, ctx):
             ``expired`` (24h, per the shared StalenessPolicy) is the point where
             silence stops being a blip and the data is no longer worth showing.
             """
+            # Nothing cached for this scope.
             state = hub.warm_state("pxmx_drive_health", warm_key)
             if state == "missing":
                 return None
             cached = hub.warm_get("pxmx_drive_health", warm_key)
             if not isinstance(cached, dict):
                 return None
+            # Return a copy marked stale and disconnected, with when it was collected.
             out = dict(cached)
             out["stale"] = True
             out["spoke_connected"] = False
@@ -1964,6 +2259,7 @@ def register(app, hub, ctx):
                 cached = _cached_diagnostics()
                 if cached is not None:
                     return cached
+            # An empty result with zero counts.
             empty = {
                 "nodes": [],
                 "spoke_connected": False,
@@ -2009,6 +2305,7 @@ def register(app, hub, ctx):
                     out["cached_at"] = hub.warm_fetched_at("pxmx_drive_health", warm_key)
                     return out
 
+        # The nodes to poll: the one requested, else every online node visible to this tenant.
         target_nodes = [node.strip()] if node and node.strip() else []
         if not target_nodes:
             try:
@@ -2021,16 +2318,20 @@ def register(app, hub, ctx):
                                 target_nodes.append(str(n_name))
             except Exception as e:
                 logger.debug("get_pxmx_drive_health visible nodes resolution: %s", e)
+        # No known nodes: send one request with no node filter.
         if not target_nodes:
             target_nodes = [""]
 
         async def _fetch_drive_health():
+            """Poll the spokes and cache the result."""
             return await _collect_drive_health(hub, spokes, target_nodes, warm_key)
 
+        # Fetch through the short in-memory cache (forced live on refresh).
         try:
             return await _ttl_cached(
                 _DRIVE_HEALTH_CACHE, "drive_health", warm_key, _fetch_drive_health,
                 ttl=_DRIVE_HEALTH_FRESH_S, force_refresh=refresh)
+        # No spoke answered: serve the last known data, else an empty result.
         except _SpokeConnectionError as e:
             logger.debug("get_pxmx_drive_health fetch failed: %s", e)
             cached = _cached_diagnostics()
@@ -2063,6 +2364,7 @@ def register(app, hub, ctx):
         ``_filter_tenant`` so an admin acting as a tenant sees only that
         tenant's VMs — the toggle is the ``hypervisor`` subnet-filter module.
         """
+        # The hub; the request is logged for debugging.
         hub = app.state.hub
         # see _netbox_list_get (variant: hypervisor spoke, proxmox_tag payload, and
         # a non-503 spoke-down shape {vms:[], spoke_connected:False} — inline).
@@ -2077,9 +2379,13 @@ def register(app, hub, ctx):
         # live, warm, and cached reads alike.
         protected_set = hub.simulations_store.get_all_protected_vms()
 
+        # Hostnames of operator-hidden (deleted) servers.
         _hidden_nodes = set(hub.state.system_state.get("pxmx_hidden_nodes", []) or [])
 
         def _with_tpl(data):
+            """Return a copy of the data with template pools added, hidden-node VMs removed and each
+            VM flagged protected or not.
+            """
             if isinstance(data, dict):
                 data = dict(data)
                 data["template_pools"] = template_pools
@@ -2108,11 +2414,13 @@ def register(app, hub, ctx):
         tid = _resolve_tenant(request, tenant)
         visible_spokes = pxmx_visible_spokes(tid, _is_admin(sess))
         job = pxmx_vms_job(tid, agent_id, _is_admin(sess))
+        # Read the VM list through the hub cache; no spoke connected returns an empty list.
         try:
             data = await hub.cache_read(job.ns, job.key, job.fetch, tenants=job.tenants,
                                         lane=job.lane, detail=job.detail)
         except _SpokeConnectionError:
             return _with_tpl({"vms": [], "spoke_connected": False})
+        # Pass HTTP errors through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -2124,7 +2432,9 @@ def register(app, hub, ctx):
                                    spoke_of=lambda vm: hub.get_spoke_for_agent(
                                        vm.get("agent_id"), fallback_hypervisor=False)
                                    if vm.get("agent_id") else None)
+        # Add every VM from hosts pinned to this tenant.
         out = await _merge_pinned_agent_vms(hub, out, tid, visible_spokes, agent_id=agent_id)
+        # Add the template pools and protected flags, and mark cache status.
         return _with_tpl(hub.cache_annotate(out, job.ns, job.key))
 
     @app.post("/api/pxmx/shell")
@@ -2135,6 +2445,7 @@ def register(app, hub, ctx):
         Admin (any host) or Tenant Admin (own tenant's hypervisor only) + audit.
         Mints a session + ws_token; the browser connects to
         /ws/console-shell/{session_id}?token=."""
+        # Must be logged in, and a Global or Tenant Admin.
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
@@ -2142,15 +2453,19 @@ def register(app, hub, ctx):
         is_ga = _is_admin(sess)
         if not (is_ga or access.is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="Global or Tenant Admin required for the host shell")
+        # Read the JSON body; a bad body counts as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # The target agent and VM.
         agent_id = str((body or {}).get("agent_id") or "").strip()
         unique_id = str((body or {}).get("unique_id") or "").strip()
+        # The agent's spoke, else the default hypervisor spoke (503 when none).
         pxmx_spoke = spoke_or_503((hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
                                    if agent_id else None) or hub.get_hypervisor_spoke(),
                                   "Hypervisor")
+        # A Tenant Admin may only open a shell on their own tenant's hypervisor.
         tenant_id = sess.get("tenant_id") or ""
         spoke_tenant = hub.state.get_spoke_tenant(pxmx_spoke) or ""
         if not is_ga and spoke_tenant and spoke_tenant != tenant_id:
@@ -2164,16 +2479,20 @@ def register(app, hub, ctx):
         if not (hv or {}).get("host_shell_enabled", False):
             raise HTTPException(status_code=403,
                                 detail="Host terminal is disabled for this hypervisor — enable it in Setup → Hypervisors")
+        # New session id, browser websocket token and relay token.
         session_id = str(uuid.uuid4())
         ws_token = secrets.token_urlsafe(32)
         relay_token = secrets.token_urlsafe(32)   # edge-proxy relay leg (Phase 2)
+        # Register the session so the websocket route can find it.
         hub.register_shell_session(session_id, {
             "spoke_id": pxmx_spoke, "tenant_id": tenant_id,
             "agent_id": agent_id, "ws_token": ws_token, "relay_token": relay_token,
         })
+        # Audit log: who opened a shell where.
         logger.info("AUDIT host-shell OPEN user=%s tenant=%s spoke=%s agent=%s session=%s",
                     sess.get("username") or sess.get("user_id"), tenant_id or "-",
                     pxmx_spoke, agent_id or "-", session_id)
+        # Ask the agent (through its spoke) to start the shell; on failure drop the session.
         try:
             res = await hub.request_response(pxmx_spoke, "SHELL_START", {
                 "session_id": session_id, "unique_id": unique_id,
@@ -2184,10 +2503,12 @@ def register(app, hub, ctx):
             hub.unregister_shell_session(session_id)
             logger.exception("pxmx_create_shell SHELL_START failed")
             raise HTTPException(status_code=502, detail=f"failed to start shell: {e}")
+        # An ERROR reply also drops the session.
         data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
         if isinstance(data, dict) and data.get("status") == "ERROR":
             hub.unregister_shell_session(session_id)
             raise HTTPException(status_code=502, detail=data.get("message", "agent refused SHELL_START"))
+        # Return what the browser needs to connect.
         return {"session_id": session_id, "ws_token": ws_token,
                 "ws_url": f"/ws/console-shell/{session_id}",
                 # Phase 2 edge-proxy relay descriptor (shell reuses the VNC relay path).
@@ -2207,18 +2528,22 @@ def register(app, hub, ctx):
         browser then connects to ``/ws/console/{session_id}?token=<ws_token>`` for the
         noVNC byte relay. Fire-and-forget VNC_START — the agent emits
         VNC_READY/VNC_ERROR up, which the browser WS picks up."""
+        # Must be logged in.
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
+        # Read the JSON body; a bad body counts as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Split unique_id into cluster, node and vmid (all required).
         unique_id = str((body or {}).get("unique_id", "")).strip()
         parts = unique_id.split("/")
         if len(parts) < 3:
             raise HTTPException(status_code=400, detail="invalid unique_id (expect <cluster>/<node>/<vmid>)")
         cluster, node, vmid_s = parts[0], parts[1], parts[2]
+        # The vmid must be a number.
         try:
             vmid = int(vmid_s)
         except ValueError:
@@ -2237,6 +2562,7 @@ def register(app, hub, ctx):
         pxmx_spoke = spoke_or_503((hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
                                    if agent_id else None) or hub.get_hypervisor_spoke(),
                                   "Hypervisor")
+        # New session id and browser websocket token.
         session_id = str(uuid.uuid4())
         ws_token = secrets.token_urlsafe(32)
         # Edge-proxy relay token (Phase 2): scopes an edge proxy's /ws/console-relay
@@ -2245,6 +2571,7 @@ def register(app, hub, ctx):
         # the proxy to dial the spoke directly (hub out of the console byte path).
         # Purely additive — the browser flow ignores `relay` and still works via the hub.
         relay_token = secrets.token_urlsafe(32)
+        # Register the session so the websocket route can find it.
         tenant_id = sess.get("tenant_id") or ""
         hub.register_vnc_session(session_id, {
             "spoke_id": pxmx_spoke,
@@ -2294,8 +2621,10 @@ def register(app, hub, ctx):
                 vnc_res = vnc_res.get("payload", {}).get("data", vnc_res)
             else:
                 break
+        # The Proxmox ticket (VNC password) from the reply.
         ticket = ""
         if isinstance(vnc_res, dict):
+            # Anything but SUCCESS/OK drops the session and is reported as a 502.
             if vnc_res.get("status") not in ("SUCCESS", "OK"):
                 hub.unregister_vnc_session(session_id)
                 # "ACCEPTED" (no ticket) = the agent is on the OLD VNC code that
@@ -2309,6 +2638,7 @@ def register(app, hub, ctx):
                     detail = vnc_res.get("message") or vnc_res.get("error") or "agent refused VNC_START"
                 raise HTTPException(status_code=502, detail=f"failed to start console: {detail}")
             ticket = str(vnc_res.get("ticket") or "")
+        # Return what the browser needs to connect.
         return {"session_id": session_id, "ws_token": ws_token,
                 "ticket": ticket, "expires_in": 60, "read_only": not is_writer,
                 # Phase 2 edge-proxy relay descriptor. A co-located proxy snoops this
@@ -2330,20 +2660,25 @@ def register(app, hub, ctx):
         viewer count. Authorized exactly like opening the console — admin sees
         any VM, otherwise the caller must OWN the VM (same _assert_vm_owned gate),
         so a tenant cannot enumerate viewers on another tenant's VM."""
+        # Must be logged in.
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
+        # Split unique_id into node and vmid (all parts required).
         unique_id = str(request.query_params.get("unique_id", "")).strip()
         parts = unique_id.split("/")
         if len(parts) < 3:
             raise HTTPException(status_code=400, detail="invalid unique_id")
         node = parts[1]
+        # The vmid must be a number.
         try:
             vmid = int(parts[2])
         except ValueError:
             raise HTTPException(status_code=400, detail="invalid vmid in unique_id")
+        # Same ownership check as opening the console.
         await _assert_vm_owned(request, unique_id=unique_id, vmid=vmid, node=node,
                                agent_id=str(request.query_params.get("agent_id") or "").strip())
+        # Return the current viewers.
         hub = app.state.hub
         viewers = hub.vnc_viewers(unique_id)
         return {"unique_id": unique_id, "count": len(viewers), "viewers": viewers}
@@ -2355,28 +2690,35 @@ def register(app, hub, ctx):
         ownership gate as opening a console (control-tier, _assert_vm_owned) —
         a viewer who can open the console read-only is not automatically
         allowed to force a takeover from someone else."""
+        # Must be logged in.
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
+        # The session must still exist.
         hub = app.state.hub
         vsess = hub.get_vnc_session(session_id)
         if not vsess:
             raise HTTPException(status_code=404, detail="console session not found or expired")
+        # Its VM's node and vmid, from the stored unique_id.
         unique_id = str(vsess.get("unique_id") or "")
         parts = unique_id.split("/")
         if len(parts) < 3:
             raise HTTPException(status_code=400, detail="console session has no valid unique_id")
         node = parts[1]
+        # The vmid must be a number.
         try:
             vmid = int(parts[2])
         except ValueError:
             raise HTTPException(status_code=400, detail="invalid vmid in unique_id")
+        # Read the JSON body; a bad body counts as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Same ownership check as opening the console.
         await _assert_vm_owned(request, unique_id=unique_id, vmid=vmid, node=node,
                                agent_id=str((body or {}).get("agent_id") or "").strip())
+        # Take the write lock and tell the previous writer they are now read-only.
         previous_writer = hub.vnc_takeover(unique_id, session_id)
         if previous_writer:
             await hub.notify_vnc_downgraded(previous_writer)

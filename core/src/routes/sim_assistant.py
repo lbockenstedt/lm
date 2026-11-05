@@ -47,12 +47,18 @@ today.
 HARD REQUIREMENT: only usable when ab is connected — /api/sim-assistant/available
 reports that, mirroring /api/help/available.
 """
+# base64 decodes file contents returned by GitHub's Contents API.
 import base64
+# json encodes/decodes tool-call arguments and results for the model.
 import json
+# re validates sim names and path segments against safe patterns.
 import re
+# time measures how long a turn takes.
 import time
 
+# Request/error types, the hub-wide logger and os (for env vars), re-exported by api.
 from api import HTTPException, Request, logger, os
+# Finds the connected AppBuilder (ab) agent that runs the LLM.
 from routes.console_llm_identify import find_ab
 
 # ── existing-sim source reading (read-only, hub-side tool loop) ─────────────
@@ -64,6 +70,7 @@ from routes.console_llm_identify import find_ab
 # intentionally its own tiny client, not a shared import — that module is
 # tenant-scoped (per-tenant token/repo/branch); this one is a single fixed,
 # public, read-only target.
+# Fixed GitHub location of the canonical cs repo that the tools may read.
 _GITHUB_API = "https://api.github.com"
 _CS_REPO_OWNER = "lbockenstedt"
 _CS_REPO_NAME = "cs"
@@ -95,12 +102,16 @@ async def _github_get_contents(path):
     httpx Response so callers branch on status_code (404 vs 200 vs error).
     A thin, directly-monkeypatchable seam for tests — no local client/token
     plumbing to fake."""
+    # httpx is the async HTTP client; imported lazily so tests can patch this function.
     import httpx
     import os
+    # Ask GitHub for its JSON format.
     headers = {"Accept": "application/vnd.github+json"}
+    # Use a GitHub token from the environment when set (higher rate limits / private access).
     token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN") or os.getenv("LM_HELP_SOURCE_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    # One GET with a 15s timeout against the fixed repo and branch.
     async with httpx.AsyncClient(timeout=15.0) as client:
         return await client.get(
             f"{_GITHUB_API}/repos/{_CS_REPO_OWNER}/{_CS_REPO_NAME}/contents/{path}",
@@ -111,18 +122,24 @@ async def _github_get_contents(path):
 async def _tool_list_available_sims(_args):
     """The names of existing sims (Linux/Windows script pairs), so the model
     can pick a real name instead of guessing before calling read_sim_source."""
+    # List the Linux sim directory; every sim has a Linux .sh script.
     try:
         resp = await _github_get_contents("clients/linux")
+    # Network failure: tell the model rather than raising.
     except Exception as e:  # noqa: BLE001
         return {"error": f"could not list sims: {e}"}
+    # Any non-200 answer is reported as an error to the model.
     if resp.status_code != 200:
         return {"error": f"GitHub returned {resp.status_code} listing sims"}
+    # Parse the JSON listing.
     try:
         entries = resp.json()
     except Exception:  # noqa: BLE001
         return {"error": "could not parse sim listing"}
+    # A directory listing must be a JSON list.
     if not isinstance(entries, list):
         return {"error": "unexpected sim listing shape"}
+    # Sim names are the .sh files (without extension), minus platform plumbing files.
     names = sorted({
         e["name"][:-3] for e in entries
         if isinstance(e, dict) and e.get("type") == "file"
@@ -137,32 +154,43 @@ async def _tool_read_sim_source(args):
     read-only, so the model can base a new/varied sim on real behavior
     instead of guessing. sim_name is regex-validated before it ever reaches
     a path — see _SIM_NAME_RE above."""
+    # Normalise the requested sim name and platform ("both" by default).
     sim_name = str(args.get("sim_name") or "").strip().lower()
     platform = str(args.get("platform") or "both").strip().lower()
+    # Reject names that could form an unsafe path.
     if not _SIM_NAME_RE.match(sim_name):
         return {"error": "invalid sim_name — use the exact name from "
                          "list_available_sims (lowercase, letters/digits/underscore)"}
+    # Platforms to fetch; anything unrecognised means both.
     plats = {"linux": ["linux"], "windows": ["windows"],
             "both": ["linux", "windows"]}.get(platform, ["linux", "windows"])
+    # Collect one result string per platform.
     out = {}
+    # Fetch each platform's script.
     for plat in plats:
+        # Linux sims are .sh, Windows sims are .ps1.
         ext = "sh" if plat == "linux" else "ps1"
         path = f"clients/{plat}/{sim_name}.{ext}"
+        # Network failure for this platform: record it and try the next.
         try:
             resp = await _github_get_contents(path)
         except Exception as e:  # noqa: BLE001
             out[plat] = f"(fetch error: {e})"
             continue
+        # Missing script on this platform.
         if resp.status_code == 404:
             out[plat] = "(not found)"
             continue
+        # Other GitHub errors.
         if resp.status_code != 200:
             out[plat] = f"(GitHub returned {resp.status_code})"
             continue
+        # Decode the base64 file body, capped at 12,000 chars to keep the model's context small.
         try:
             node = resp.json()
             b64 = (node.get("content") or "").replace("\n", "")
             out[plat] = base64.b64decode(b64).decode("utf-8", "replace")[:12000]
+        # Malformed reply: record it as undecodable.
         except Exception:  # noqa: BLE001
             out[plat] = "(could not decode file)"
     return out
@@ -181,6 +209,7 @@ async def _tool_read_sim_source(args):
 # the canonical cs repo, still only under clients/ — _safe_cs_path blocks
 # absolute paths, traversal, and anything outside clients/ before the value
 # ever becomes a Contents-API path.
+# Each path segment may contain only these safe filename characters.
 _CS_SEG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -190,11 +219,15 @@ def _safe_cs_path(path):
     root, or None if it escapes the boundary (absolute, traversal, or outside
     clients/). This is the actual security boundary for the browse/read tools
     below — every path is validated here before it reaches _github_get_contents."""
+    # Trim spaces and leading/trailing slashes.
     p = str(path or "").strip().strip("/")
+    # Empty or exactly "clients" means the root of the allowed tree.
     if not p or p == "clients":
         return "clients"
+    # Anything outside clients/ is rejected.
     if not p.startswith("clients/"):
         return None
+    # Reject "." / ".." and any segment with unsafe characters.
     segs = p.split("/")
     if any(s in (".", "..") or not _CS_SEG_RE.match(s) for s in segs):
         return None
@@ -205,23 +238,29 @@ async def _tool_list_cs_dir(args):
     """List a directory anywhere under the cs repo's clients/ tree, so the
     model can discover the companion files (the .py senders, shared libs,
     config templates) a sim's .sh/.ps1 wrapper actually sources or execs."""
+    # Validate the path (default: the clients/ root).
     path = _safe_cs_path(args.get("path") or "clients")
     if path is None:
         return {"error": "invalid path — must be a directory under clients/"}
+    # Fetch the listing; network failure is reported to the model.
     try:
         resp = await _github_get_contents(path)
     except Exception as e:  # noqa: BLE001
         return {"error": f"could not list {path}: {e}"}
+    # Missing directory or other GitHub errors are reported to the model.
     if resp.status_code == 404:
         return {"error": f"no such directory: {path}"}
     if resp.status_code != 200:
         return {"error": f"GitHub returned {resp.status_code} listing {path}"}
+    # Parse the JSON reply.
     try:
         entries = resp.json()
     except Exception:  # noqa: BLE001
         return {"error": "could not parse listing"}
+    # GitHub returns a dict (not a list) when the path is a file.
     if not isinstance(entries, list):
         return {"error": f"{path} is a file, not a directory — use read_cs_file"}
+    # Keep just name and type, directories first, then alphabetical.
     items = [{"name": e.get("name"), "type": e.get("type")}
              for e in entries if isinstance(e, dict) and e.get("name")]
     items.sort(key=lambda x: (x.get("type") != "dir", x.get("name") or ""))
@@ -233,24 +272,30 @@ async def _tool_read_cs_file(args):
     the general counterpart to read_sim_source, for the companion .py/.conf
     files and shared libs where the real sim behavior lives. Path is validated
     by _safe_cs_path before it ever becomes a path."""
+    # Validate the path; the clients/ root itself is a directory, not a file.
     path = _safe_cs_path(args.get("path"))
     if path is None or path == "clients":
         return {"error": "invalid path — give a file under clients/, "
                          "e.g. clients/linux/collab.py"}
+    # Fetch the file; network failure is reported to the model.
     try:
         resp = await _github_get_contents(path)
     except Exception as e:  # noqa: BLE001
         return {"error": f"fetch error: {e}"}
+    # Missing file or other GitHub errors are reported to the model.
     if resp.status_code == 404:
         return {"error": f"not found: {path}"}
     if resp.status_code != 200:
         return {"error": f"GitHub returned {resp.status_code}"}
+    # Parse the JSON reply.
     try:
         node = resp.json()
     except Exception:  # noqa: BLE001
         return {"error": "could not parse response"}
+    # A list reply means the path is a directory.
     if isinstance(node, list):
         return {"error": f"{path} is a directory — use list_cs_dir"}
+    # Decode the base64 body, capped at 16,000 chars to keep the model's context small.
     try:
         b64 = (node.get("content") or "").replace("\n", "")
         return {"path": path,
@@ -259,6 +304,8 @@ async def _tool_read_cs_file(args):
         return {"error": "could not decode file"}
 
 
+# Tool definitions (OpenAI function-calling format) offered to the model; each maps to
+# one of the read-only _tool_* functions above via _exec_sim_tool.
 _SIM_TOOLS = [
     {"type": "function", "function": {
         "name": "list_available_sims",
@@ -317,6 +364,8 @@ _SIM_TOOLS = [
 
 
 async def _exec_sim_tool(name, args):
+    """Run the tool the model asked for by ``name`` and return its JSON-able result."""
+    # Dispatch on the tool name.
     if name == "list_available_sims":
         return await _tool_list_available_sims(args)
     if name == "read_sim_source":
@@ -325,11 +374,17 @@ async def _exec_sim_tool(name, args):
         return await _tool_list_cs_dir(args)
     if name == "read_cs_file":
         return await _tool_read_cs_file(args)
+    # Unknown names are reported back to the model instead of raising.
     return {"error": f"unknown tool: {name}"}
 
 
 def register(app, hub, ctx):
+    """Register the Simulation Build Assistant routes on the Hub app.
 
+    Args: app is the FastAPI app, hub is the running hub, ctx carries shared auth/tenant helpers.
+    """
+
+    # Locate the docs folder: try both possible layouts, falling back to the first path.
     _DOCS_DIR = next(
         (d for d in (
             os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../docs")),
@@ -338,6 +393,8 @@ def register(app, hub, ctx):
         os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../docs")))
 
     def _read_doc(name, cap=6000):
+        """Return the first ``cap`` characters of docs/<name>.md, or "" if it cannot be read."""
+        # Read the file; any error is logged and treated as an empty doc.
         try:
             with open(os.path.join(_DOCS_DIR, name + ".md"), encoding="utf-8") as f:
                 return f.read()[:cap]
@@ -357,25 +414,39 @@ def register(app, hub, ctx):
                "iot-device-catalog-quota", "central-on-prem", "mist")
 
     def _select_cs_docs(question, k=3):
+        """Pick up to ``k`` whitelisted docs most relevant to ``question`` (keyword overlap).
+
+        Returns a {doc name: text} dict; always at least the "cs" doc.
+        """
+        # Split the question into lowercase words longer than 2 letters.
         words = {w for w in ''.join(c.lower() if c.isalnum() else ' '
                                     for c in question).split() if len(w) > 2}
+        # Load every whitelisted doc.
         docs = {n: _read_doc(n) for n in _CS_DOCS}
+        # Score each doc by how often the question's words appear in it.
         scored = []
         for name, text in docs.items():
+            # Skip docs that could not be read.
             if not text:
                 continue
             tl = text.lower()
+            # Body matches count once each; a word in the doc's name counts 5 times.
             score = sum(tl.count(w) for w in words) + 5 * sum(w in name.lower() for w in words)
             scored.append((score, name))
+        # Best scores first; keep the top k docs that matched at all.
         scored.sort(reverse=True)
         picked = [n for s, n in scored if s > 0][:k]
         if not picked:
             picked = ["cs"]  # always-relevant fallback — the module's own doc
+        # Return the picked docs with their text.
         return {n: docs[n] for n in picked}
 
     def _system_prompt(question):
+        """Build the system prompt: scope rules, the assistant's jobs, and the relevant docs."""
+        # Pick the docs for this question and join them into one reference block.
         picked_docs = _select_cs_docs(question)
         doc_ctx = "\n\n".join(f"=== DOC: {n} ===\n{t}" for n, t in picked_docs.items())
+        # The fixed instructions followed by the reference docs.
         return (
             "You are the Lab Manager (LM) Simulation Build Assistant, embedded in the "
             "Simulations module.\n\n"
@@ -444,7 +515,9 @@ def register(app, hub, ctx):
         for tool-picking. Returns "" on any failure so callers can fall back
         to whatever text they already have.
         """
+        # Any failure returns "" so the caller can fall back.
         try:
+            # Ask ab for one final answer with tools disabled, waiting up to 90s.
             res = await hub.request_response(
                 agent, "HELP_ASK",
                 {"messages": messages + [{"role": "user", "content": (
@@ -454,9 +527,11 @@ def register(app, hub, ctx):
                     "or parameters.")}],
                  "tools": None, "system": system, "role": "final"},
                 timeout=90.0)
+            # Unwrap the reply; on SUCCESS return the assistant's text.
             data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
             if isinstance(data, dict) and data.get("status") == "SUCCESS":
                 return (data.get("assistant") or {}).get("content") or ""
+        # Log the failure and fall through to the empty answer.
         except Exception as e:
             logger.warning("sim_assistant _final_answer synthesis failed: %s", e)
         return ""
@@ -471,37 +546,61 @@ def register(app, hub, ctx):
     # AB that doesn't know these commands never answers the PING, so
     # /available reports sessions=false and the WebUI keeps the legacy
     # /chat flow above.
+    # Cached result of the last session-capability probe: when, which agent, and the outcome.
     _caps = {"ts": 0.0, "agent": None, "sessions": False, "reason": ""}
 
     async def _sessions_capability(agent):
+        """Ask ab whether it supports interactive sim sessions, with a short cache.
+
+        Returns a (supported, reason) tuple; reason explains why it is not supported.
+        """
+        # Current time, used to judge cache freshness.
         now = time.time()
+        # Reuse the cached answer for the same agent: 60s when supported, 20s when not, so a
+        # freshly updated ab is noticed quickly.
         if _caps["agent"] == agent and now - _caps["ts"] < (60 if _caps["sessions"] else 20):
             return _caps["sessions"], _caps["reason"]
+        # Assume unsupported until the probe says otherwise.
         ok, reason = False, ""
         try:
+            # Ping ab; an older ab never answers, which ends in a timeout exception below.
             res = await hub.request_response(agent, "SIM_SESSION_PING", {}, timeout=8.0)
+            # Unwrap the reply to the inner data dict.
             data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+            # SUCCESS means ab understands the command; "ready" says whether sessions can start now.
             if isinstance(data, dict) and data.get("status") == "SUCCESS":
                 ok = bool(data.get("ready"))
                 reason = "; ".join(data.get("reasons") or [])
+            # ab answered but not with SUCCESS, so it is an older version.
             else:
                 reason = "AppBuilder does not support interactive sessions (update AppBuilder)"
+        # Timeout or relay error: treat as unsupported and keep the reason for the UI.
         except Exception as e:  # noqa: BLE001
             reason = f"capability probe failed: {e}"
+        # Cache this probe result and return it.
         _caps.update(ts=now, agent=agent, sessions=ok, reason=reason)
         return ok, reason
 
     def _session_owner(request):
+        """Check Simulations access and identify the caller for ab.
+
+        Returns (session, owner dict with user, tenant, admin flag and audit-only fields).
+        """
+        # Read the session; only users with Simulations access may use the assistant.
         sess = ctx._session_user(request)
         if not ctx._has_cs_access(sess):
             raise HTTPException(status_code=403, detail="Simulations access required")
+        # The session may carry a nested user dict; use it as a fallback source of identity.
         s = sess or {}
         u = s.get("user") if isinstance(s.get("user"), dict) else {}
+        # Pick the first available user identifier.
         user = s.get("user_id") or s.get("username") or u.get("username") or u.get("id")
+        # Resolve the tenant being viewed; any lookup error just means no tenant.
         try:
             tenant = ctx._resolve_tenant(request) or ""
         except Exception:  # noqa: BLE001
             tenant = ""
+        # The "default" tenant is stored as an empty tenant id.
         if tenant == "default":
             tenant = ""
         # auth_type/ip are audit-only (recorded on submitted specs so an in-place
@@ -511,18 +610,28 @@ def register(app, hub, ctx):
                       "auth_type": str(u.get("auth_type") or ""), "ip": str(s.get("client_ip") or "")}
 
     async def _relay(cmd, data, timeout=20.0):
+        """Send ``cmd`` to the AppBuilder agent and return its reply data.
+
+        Maps ab failures to HTTP errors: 409 not connected/refused, 404 unknown session, 504
+        timeout, 502 relay failure.
+        """
+        # Find the AppBuilder agent; without it no session can run.
         agent = find_ab(hub)
         if not agent:
             raise HTTPException(status_code=409, detail="Simulation assistant unavailable — "
                                                         "the AppBuilder agent is not connected.")
+        # Send the command and wait for ab's reply.
         try:
             res = await hub.request_response(agent, cmd, data, timeout=timeout)
         except Exception as e:  # noqa: BLE001
+            # Relay error or timeout talking to ab.
             logger.warning("sim_assistant %s relay failed: %s", cmd, e)
             raise HTTPException(status_code=502, detail=f"Simulation assistant error: {e}")
+        # Unwrap the reply to the inner data dict.
         out = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
         if not isinstance(out, dict):
             raise HTTPException(status_code=502, detail="Simulation assistant error")
+        # ab refused: map its error to the matching HTTP status.
         if out.get("status") != "SUCCESS":
             msg = str(out.get("message") or "Simulation assistant error")
             if out.get("code") == "not_found":
@@ -530,15 +639,19 @@ def register(app, hub, ctx):
             if "Timed out" in msg:
                 raise HTTPException(status_code=504, detail="AppBuilder did not answer in time — retry")
             raise HTTPException(status_code=409, detail=msg)
+        # Return a copy without the status field.
         out = dict(out)
         out.pop("status", None)
         return out
 
     async def _json_message(request):
+        """Read the JSON body and return its non-empty "message" string (400 if missing)."""
+        # A missing or invalid JSON body is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Take the trimmed message, only when the body is a JSON object.
         msg = str((body or {}).get("message") or "").strip() if isinstance(body, dict) else ""
         if not msg:
             raise HTTPException(status_code=400, detail="message is required")
@@ -550,10 +663,13 @@ def register(app, hub, ctx):
         interactive sessions; can_submit tells the UI whether this user may hand
         a finished spec straight to AppBuilder (Global Admin) or must file it
         for admin approval."""
+        # No ab agent means the assistant is unavailable.
         agent = find_ab(hub)
         if agent is None:
             return {"available": False, "sessions": False}
+        # Probe (or reuse the cached answer) for interactive session support.
         sessions, reason = await _sessions_capability(agent)
+        # Only Global Admins may submit a spec straight to AppBuilder.
         try:
             can_submit = bool(ctx._is_admin(ctx._session_user(request)))
         except Exception:  # noqa: BLE001
@@ -563,20 +679,27 @@ def register(app, hub, ctx):
 
     @app.post("/api/sim-assistant/session")
     async def sim_session_start(request: Request):
+        """Start a new interactive sim session on ab with the user's first message."""
+        # Check access, read the message, and ask ab to start the session.
         _sess, owner = _session_owner(request)
         msg = await _json_message(request)
         out = await _relay("SIM_SESSION_START", {"owner": owner, "message": msg})
+        # Log who started which session.
         logger.info("sim_assistant: session %s started by %s", out.get("session_id"), owner["user"])
         return out
 
     @app.get("/api/sim-assistant/session/{session_id}")
     async def sim_session_poll(session_id: str, request: Request, since: int = 0):
+        """Fetch session updates from ab since event index ``since``."""
+        # Check access, then relay the poll to ab.
         _sess, owner = _session_owner(request)
         return await _relay("SIM_SESSION_POLL",
                             {"owner": owner, "session_id": session_id, "since": since})
 
     @app.post("/api/sim-assistant/session/{session_id}/reply")
     async def sim_session_reply(session_id: str, request: Request):
+        """Send the user's reply into an existing session."""
+        # Check access, read the message, and relay it to ab.
         _sess, owner = _session_owner(request)
         msg = await _json_message(request)
         return await _relay("SIM_SESSION_REPLY",
@@ -584,6 +707,8 @@ def register(app, hub, ctx):
 
     @app.post("/api/sim-assistant/session/{session_id}/cancel")
     async def sim_session_cancel(session_id: str, request: Request):
+        """Cancel an interactive session."""
+        # Check access, then relay the cancel to ab.
         _sess, owner = _session_owner(request)
         return await _relay("SIM_SESSION_CANCEL", {"owner": owner, "session_id": session_id})
 
@@ -594,23 +719,33 @@ def register(app, hub, ctx):
         requests go through, so it is gated on the same role that approves
         them. Everyone else files the spec via /api/bug-report (pending
         approval)."""
+        # Identify the caller and reject anyone who is not a Global Admin.
         sess, owner = _session_owner(request)
         if not ctx._is_admin(sess):
             raise HTTPException(status_code=403, detail="Only a Global Admin can send a spec "
                                                         "straight to AppBuilder — file it for approval instead.")
+        # Ask ab to file the spec; this can take longer, so allow 60s.
         out = await _relay("SIM_SESSION_SUBMIT", {"owner": owner, "session_id": session_id},
                            timeout=60.0)
+        # Log the submitted issue URLs for audit.
         logger.info("sim_assistant: session %s submitted by %s -> %s", session_id, owner["user"],
                     [s.get("url") for s in out.get("submitted") or []])
         return out
 
     @app.post("/api/sim-assistant/chat")
     async def sim_assistant_chat(request: Request):
+        """Legacy one-POST chat turn: relay the client's transcript to ab, run the tool loop, and
+           return the answer.
+
+        Returns {"answer": text}.
+        """
+        # The LLM runs on ab, so it must be connected.
         agent = find_ab(hub)
         if not agent:
             raise HTTPException(status_code=409,
                                 detail="Simulation assistant unavailable — the AppBuilder "
                                        "LLM agent is not connected.")
+        # A missing or invalid JSON body is treated as empty.
         try:
             body = await request.json()
         except Exception:
@@ -622,6 +757,7 @@ def register(app, hub, ctx):
         history = body.get("messages")
         if not isinstance(history, list) or not history:
             raise HTTPException(status_code=400, detail="messages is required")
+        # Keep only well-formed user/assistant turns with non-empty text.
         messages = [{"role": m.get("role"), "content": m.get("content")}
                    for m in history
                    if isinstance(m, dict) and m.get("role") in ("user", "assistant")
@@ -641,9 +777,12 @@ def register(app, hub, ctx):
         # NOT echoed back to the client's own history (it only round-trips
         # user/assistant content), so each POST starts the loop fresh; that's
         # fine since a prior turn's answer already incorporated whatever it read.
+        # Work on a copy so tool turns are added only for this request.
         turn_messages = list(messages)
         answer = ""
+        # Allow up to 5 model rounds; the for-else below runs if all 5 are used.
         for _ in range(5):
+            # Ask the model, offering the read-only tools.
             try:
                 res = await hub.request_response(
                     agent, "HELP_ASK",
@@ -652,29 +791,38 @@ def register(app, hub, ctx):
             except Exception as e:  # noqa: BLE001
                 logger.warning("sim_assistant chat relay failed: %s", e)
                 raise HTTPException(status_code=502, detail=f"Simulation assistant error: {e}")
+            # Unwrap the reply; anything but SUCCESS is a 502.
             data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
             if not isinstance(data, dict) or data.get("status") != "SUCCESS":
                 raise HTTPException(status_code=502,
                                     detail=(data or {}).get("message") or "Simulation assistant error")
+            # Pull out the tool calls and text from the model's reply.
             assistant = data.get("assistant") or {}
             tool_calls = assistant.get("tool_calls") or []
             text = assistant.get("content") or ""
+            # No tool calls means the model is done.
             if not tool_calls:
+                # If tools ran this turn, do one stronger synthesis pass; else use the reply as is.
                 if len(turn_messages) > len(messages):
                     synth = await _final_answer(hub, agent, turn_messages, system)
                     answer = synth if synth.strip() else text
                 else:
                     answer = text
                 break
+            # Record the model's tool request in the transcript.
             turn_messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+            # Run each requested tool and append its result for the next round.
             for tc in tool_calls:
+                # Tool name and arguments may be nested under "function" or at the top level.
                 fn = tc.get("function") or {}
                 name = fn.get("name") or tc.get("name")
                 raw = fn.get("arguments") if fn else tc.get("arguments")
+                # Arguments usually arrive as a JSON string; bad JSON means no arguments.
                 try:
                     args = json.loads(raw) if isinstance(raw, str) else (raw or {})
                 except Exception:
                     args = {}
+                # Run the tool; results are capped at 12,000 chars of JSON.
                 out = await _exec_sim_tool(name, args)
                 turn_messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                       "name": name, "content": json.dumps(out)[:12000]})
@@ -688,6 +836,7 @@ def register(app, hub, ctx):
             relay_error = None
             synth_failed = False
             try:
+                # Ask for a final answer with tools disabled.
                 final_req = {
                     "messages": turn_messages + [{"role": "user", "content": "Please synthesize and summarize your findings into a final response now."}],
                     "tools": None,
@@ -695,14 +844,17 @@ def register(app, hub, ctx):
                     "role": "final"
                 }
                 res = await hub.request_response(agent, "HELP_ASK", final_req, timeout=90.0)
+                # Unwrap the reply; on SUCCESS take its text.
                 data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
                 if isinstance(data, dict) and data.get("status") == "SUCCESS":
                     assistant = data.get("assistant") or {}
                     answer = assistant.get("content") or ""
+                # ab answered with an error: remember it to raise below.
                 else:
                     msg = (data or {}).get("message") if isinstance(data, dict) else None
                     relay_error = f"Simulation assistant error: {msg}" if msg \
                         else "Simulation assistant error"
+            # The request itself failed (e.g. timeout).
             except Exception as e:  # noqa: BLE001
                 logger.warning("sim_assistant forced synthesis turn failed: %s", e)
                 synth_failed = True
@@ -711,6 +863,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=502, detail=relay_error)
             # "the synthesis call never completed" and "it completed but produced
             # nothing / the tool budget ran out" are different states; say which.
+            # Fall back to a message that explains which failure happened.
             answer = answer or (
                 "I couldn't reach the simulation assistant to summarize what I found "
                 "— try asking again."
@@ -718,6 +871,7 @@ def register(app, hub, ctx):
                 "I wasn't able to finish looking up the existing sim source "
                 "in time — try asking again, or narrow down which sim you mean.")
 
+        # Never return an empty answer.
         if not answer.strip():
             answer = ("I didn't get a usable response from the current LLM provider. "
                       "Try again, or switch the AppBuilder provider in Settings.")

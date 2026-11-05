@@ -1,10 +1,13 @@
 """Setup: updates, modules, tenants, users routes."""
+# node_name gives the human-readable name of a spoke/node.
 from display_names import node_name  # sibling leaf
+# Hub-wide helpers: HTTP errors, password hashing, spoke messaging and unwrapping, logging.
 from api import (
     HTTPException, Request, _hash_password, _hub_msg, _invalidate_user_sessions,
     _unwrap_spoke, get_spoke_or_503, get_tenant_scoping,
     logger, time,
 )
+# Access-control helpers: permission resolution, shared-tenant cache and input validators.
 from access import (
     ENFORCED_RIGHTS, resolve_effective_permissions, refresh_shared_tenant,
     valid_display_name as _valid_display_name,
@@ -14,6 +17,10 @@ from access import (
 
 
 def register(app, hub, ctx):
+    """Register the update, module, spoke-name, tenant and user routes on the Hub app.
+
+    Args: app is the FastAPI app, hub is the running hub, ctx carries shared helpers.
+    """
     # Prime the shared-tenant cache at startup so the visibility gate is correct
     # before the first /setup/tenants load (refreshed again on every tenant write).
     try:
@@ -42,15 +49,20 @@ def register(app, hub, ctx):
         nothing — ``perform_update`` only restarts on ``hub_updated or
         stale_reload``, both False when current.
         """
+        # Read whether the caller asked to force the spoke fan-out.
         hub = app.state.hub
         force_spokes = request.query_params.get("force_spokes", "false").lower() == "true"
         logger.info(f"API: Manual update — run_repo_sync_all(force_spokes={force_spokes}, force=True)")
+        # Run the same sync cycle the scheduler runs, but right now.
         result = await hub.run_repo_sync_all(force_spokes=force_spokes, force=True)
+        # Pull out the hub's own sub-result, defaulting to an empty dict.
         hub_r = result.get("hub") if isinstance(result, dict) else None
         hub_r = hub_r if isinstance(hub_r, dict) else {}
         status = hub_r.get("status") or "checked"
+        # Count auxiliary provisioning repos that actually changed.
         prov = (result.get("provisioning_repos") if isinstance(result, dict) else None) or []
         prov_changed = sum(1 for r in prov if r.get("changed"))
+        # Build the user-facing message, noting any updated auxiliary repos.
         message = (hub_r.get("message") or (result.get("message") if isinstance(result, dict) else None)
                    or "Update cycle complete.")
         if prov_changed:
@@ -67,11 +79,13 @@ def register(app, hub, ctx):
         # (the tip just pulled by run_repo_sync_all — what it'll restart into).
         # Same sources as the footer version indicator + the watchdog. Best-effort.
         def _read_ver(path):
+            """Return the stripped contents of the file at ``path``, or "" if it cannot be read."""
             try:
                 with open(path) as _f:
                     return _f.read().strip()
             except Exception:  # noqa: BLE001
                 return ""
+        # Report the outcome plus the running and target versions.
         return {"status": status, "message": message,
                 "running_version": _read_ver("/var/lib/lm/state/running-version"),
                 "target_version": _read_ver("/opt/lm/VERSION")}
@@ -85,6 +99,7 @@ def register(app, hub, ctx):
         Returns 200 with a summary once all SPOKE_UPDATE messages have been queued
         (spoke restarts happen asynchronously — poll GET /status for reconnection).
         """
+        # Queue SPOKE_UPDATE for every approved spoke and return the summary.
         hub = app.state.hub
         logger.info("API: /setup/update/spokes — queuing SPOKE_UPDATE for all approved spokes")
         result = await hub.update_spokes_only()
@@ -92,10 +107,16 @@ def register(app, hub, ctx):
 
     @app.get("/setup/modules")
     async def get_modules():
+        """List installable modules and whether each one is already connected.
+
+        Returns {"single_server_mode": bool, "modules": {id: {path, installed}}}.
+        """
+        # Read whether the hub runs in single-server mode.
         hub = app.state.hub
         global_config = hub.state.system_state.get("global_config", {})
         is_single_server = global_config.get("single_server_mode", False)
 
+        # Known modules and their installer scripts; all start as not installed.
         modules = {
             "cppm":     {"path": "cppm/install.sh",              "installed": False},
             "cs":       {"path": "cs/install_cs.sh",             "installed": False},
@@ -108,6 +129,7 @@ def register(app, hub, ctx):
             "pxmx":     {"path": "pxmx/install_pxmx.sh",        "installed": False},
         }
 
+        # A module counts as installed when any connected spoke id contains its name.
         for mod in modules:
             if any(mod in sid for sid in hub.active_connections):
                 modules[mod]["installed"] = True
@@ -119,17 +141,24 @@ def register(app, hub, ctx):
 
     @app.post("/setup/install-module")
     async def install_module(request: Request):
+        """Install a module on demand in single-server mode by loading its role on the local agent.
+
+        Returns the agent's LOAD_ROLE result.
+        """
+        # On-demand install is only allowed in single-server mode.
         hub = app.state.hub
         global_config = hub.state.system_state.get("global_config", {})
         if not global_config.get("single_server_mode", False):
             raise HTTPException(status_code=403, detail="On-demand installation is only supported in single-server mode.")
 
+        # Read the requested module and optional fields from the body.
         try:
             data = await request.json()
             module_id = data.get("module_id")
             custom_spoke_id = data.get("spoke_id")
             display_name = data.get("display_name")
 
+            # The module id is required.
             if not module_id:
                 raise HTTPException(status_code=400, detail="Missing module_id")
 
@@ -146,12 +175,15 @@ def register(app, hub, ctx):
                 "ldap": "ldap", "netbox": "netbox", "opnsense": "opnsense",
                 "pxmx": "proxmox", "nw": "network", "le": "le", "console": "console",
             }
+            # Map the module id to its role name (unknown ids are used as-is).
             role = _MODULE_ROLE.get(module_id, module_id)
+            # Find the local generic agent that will host the role.
             agent_id = hub.get_spoke_by_type("agent")
             if not agent_id:
                 raise HTTPException(status_code=409,
                     detail="No generic agent connected to host the role — install the "
                            "agent first (install_all.sh / install_agent.sh).")
+            # Ask the agent to load the role and unwrap its reply.
             result = await hub.request_response(agent_id, "LOAD_ROLE", {"role": role})
             rdata = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             return {"status": "ok",
@@ -165,6 +197,11 @@ def register(app, hub, ctx):
 
     @app.post("/setup/spoke-name")
     async def rename_spoke(request: Request):
+        """Rename a spoke and optionally change its OS hostname.
+
+        Returns a status message; the hostname change is queued if the spoke is offline.
+        """
+        # Read the spoke id, new display name and optional hostname.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -172,6 +209,7 @@ def register(app, hub, ctx):
             new_name = data.get("display_name")
             new_hostname = data.get("hostname")
 
+            # Both spoke id and display name are required.
             if not spoke_id or not new_name:
                 raise HTTPException(status_code=400, detail="Missing spoke_id or display_name")
             # Validate identifiers/hostnames BEFORE they're stored or sent to a
@@ -187,13 +225,16 @@ def register(app, hub, ctx):
             if new_hostname and not _valid_hostname(new_hostname):
                 raise HTTPException(status_code=400, detail="Invalid hostname")
 
+            # The spoke must be one the hub knows about.
             known_modules = hub.state.system_state.get("known_modules", [])
             if spoke_id not in known_modules:
                 raise HTTPException(status_code=404, detail="Spoke not found")
 
+            # Save the new display name.
             hub.state.set_module_name(spoke_id, new_name)
             hub.state._mark_dirty()
 
+            # Hostname change: send it now if the spoke is connected, else queue it in the mailbox.
             if new_hostname:
                 if hub._primary_key(spoke_id) in hub.active_connections:
                     msg = _hub_msg(spoke_id, "SPOKE_SET_HOSTNAME", {"hostname": new_hostname})
@@ -216,8 +257,14 @@ def register(app, hub, ctx):
     # ── Tenants + users (/setup/tenants/*, /setup/users/*) ───────────────────
     @app.get("/setup/tenants")
     async def get_tenants():
+        """List all tenants for the WebUI, always including the built-in ADMIN tenant.
+
+        Returns {"tenants": [...], "shared_tenant_id": id or None}.
+        """
+        # Read the stored tenants.
         hub = app.state.hub
         tenants = hub.state.tenant_state.get("tenants", {})
+        # Build one display record per tenant.
         tenant_list = [
             {
                 "id": tid,
@@ -242,6 +289,7 @@ def register(app, hub, ctx):
             }
             for tid, cfg in tenants.items()
         ]
+        # Add the default (ADMIN) tenant if it is not stored.
         if "default" not in [t["id"] for t in tenant_list]:
             tenant_list.insert(0, {"id": "default", "name": "ADMIN", "slug": "default", "netbox_id": None, "description": "", "shared": False, "is_group": False, "group_slug": "", "members": []})
         # Keep the shared-tenant cache fresh whenever the list is loaded.
@@ -251,8 +299,10 @@ def register(app, hub, ctx):
     @app.post("/setup/sync-tenants")
     async def sync_tenants_from_netbox():
         """Pull tenants from NetBox and upsert them into hub tenant state."""
+        # NetBox (the ipam spoke) must be connected.
         hub = app.state.hub
         spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
+        # Ask NetBox for its tenants; a non-SUCCESS reply is a 502.
         try:
             result = await hub.request_response(spoke_id, "NETBOX_GET_TENANTS", {})
             data = _unwrap_spoke(result)
@@ -260,10 +310,12 @@ def register(app, hub, ctx):
             if data.get("status") != "SUCCESS":
                 raise HTTPException(status_code=502, detail=data.get("message", "NetBox error"))
 
+            # Track which tenants were added vs updated.
             added, updated = [], []
             existing_ids = set(hub.state.tenant_state.get("tenants", {}).keys())
             nb_slugs = {t["slug"] for t in nb_tenants}
 
+            # Upsert each NetBox tenant, keeping any extra hub-only fields it already had.
             for t in nb_tenants:
                 slug = t["slug"]
                 exists = slug in existing_ids
@@ -275,14 +327,18 @@ def register(app, hub, ctx):
                     "description": t.get("description", ""),
                     **{k: v for k, v in cfg.items() if k not in ("name", "netbox_tenant_slug", "netbox_id", "description")},
                 })
+                # Record whether this was an update or an add.
                 (updated if exists else added).append(slug)
 
+            # Mark state for saving.
             hub.state._mark_dirty()
+            # Report what changed.
             return {
                 "status": "ok",
                 "added": added, "updated": updated,
                 "message": f"Synced {len(nb_tenants)} tenant(s) from NetBox: {len(added)} added, {len(updated)} updated",
             }
+        # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -291,6 +347,8 @@ def register(app, hub, ctx):
 
     @app.get("/setup/tenants/{tenant_id}")
     async def get_tenant_details(tenant_id: str):
+        """Return one tenant's stored config, or 404 if it does not exist."""
+        # Look up the tenant in hub state.
         hub = app.state.hub
         logger.info(f"API: Fetching details for tenant {tenant_id}")
         tenant = hub.state.get_tenant(tenant_id)
@@ -303,10 +361,16 @@ def register(app, hub, ctx):
     async def get_current_tenant_scoping(tenant: str = None):
         """Returns the active tenant's spoke-scoping config (netbox slug, proxmox tag, ldap base DN)."""
         hub = app.state.hub
+        # Look up the scoping config for the given (or active) tenant.
         return get_tenant_scoping(hub, tenant)
 
     @app.post("/setup/tenants")
     async def create_tenant(request: Request):
+        """Create an empty tenant record and provision its LDAP OU (best effort).
+
+        Expects JSON {"tenant_id": ...}.
+        """
+        # Read the tenant id from the body; it is required.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -314,6 +378,7 @@ def register(app, hub, ctx):
             if not tenant_id:
                 raise HTTPException(status_code=400, detail="Missing tenant_id")
 
+            # Create the tenant with an empty config and mark state for saving.
             hub.state.update_tenant(tenant_id, {})
             hub.state._mark_dirty()
             # TENANT == OU (1:1): stand up the tenant's directory OU
@@ -326,6 +391,7 @@ def register(app, hub, ctx):
             except Exception:  # noqa: BLE001
                 logger.debug("create_tenant: OU provisioning skipped", exc_info=True)
             return {"status": "ok", "message": f"Tenant {tenant_id} created."}
+        # Any failure (including a missing tenant_id) is reported as a 500.
         except Exception as e:
             logger.exception("create_tenant failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -343,10 +409,12 @@ def register(app, hub, ctx):
         Data first if it must be moved/purged; this only removes the tenant
         shell + user assignments.
         """
+        # Normalise the id; the default tenant can never be deleted.
         hub = app.state.hub
         clean = (tenant_id or "").strip()
         if clean.lower() == "default":
             raise HTTPException(status_code=400, detail="The default tenant cannot be deleted.")
+        # The tenant must exist.
         if hub.state.get_tenant(clean) is None:
             raise HTTPException(status_code=404, detail=f"Tenant {clean} not found")
 
@@ -369,6 +437,7 @@ def register(app, hub, ctx):
                 ),
             )
 
+        # Remove the tenant, save immediately and refresh the shared-tenant cache.
         removed = hub.state.delete_tenant(clean)
         if not removed:
             raise HTTPException(status_code=404, detail=f"Tenant {clean} not found")
@@ -383,8 +452,10 @@ def register(app, hub, ctx):
         the /setup gate). Idempotent case-insensitively, so it's safe to re-run;
         covers tenants created before the directory spoke existed and the
         sync-tenants path."""
+        # Read all stored tenants.
         hub = app.state.hub
         tenants = (hub.state.tenant_state.get("tenants", {}) or {})
+        # Provision each tenant's OU, recording success or the error per tenant.
         results = {}
         for tid in list(tenants.keys()):
             try:
@@ -396,6 +467,11 @@ def register(app, hub, ctx):
 
     @app.post("/setup/tenant")
     async def update_tenant(request: Request):
+        """Create or update a tenant's config, optionally making it shared or active.
+
+        Expects JSON {"tenant_id": ..., "config": {...}}.
+        """
+        # Read the tenant id (default: "default") and the config changes.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -409,22 +485,31 @@ def register(app, hub, ctx):
                     if other_tid != tenant_id and isinstance(other_cfg, dict) and other_cfg.get("shared"):
                         hub.state.update_tenant(other_tid, {"shared": False})
 
+            # Save the config changes.
             hub.state.update_tenant(tenant_id, config)
 
+            # Optionally make this the active tenant.
             if config.get("active"):
                 hub.state.set_active_tenant(tenant_id)
 
+            # Mark state for saving.
             hub.state._mark_dirty()
             # Refresh the cached shared-tenant id so the visibility gate is
             # correct on the very next request.
             refresh_shared_tenant(hub)
 
             return {"status": "ok", "message": f"Tenant {tenant_id} updated."}
+        # Any failure is reported as a bad request.
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
 
     @app.post("/setup/generate-secret")
     async def generate_secret(request: Request):
+        """Generate a first-connection secret for a spoke so it can enrol.
+
+        Returns {"spoke_id": ..., "secret": ...}.
+        """
+        # Read the spoke id; it is required.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -432,6 +517,7 @@ def register(app, hub, ctx):
             if not spoke_id:
                 raise HTTPException(status_code=400, detail="Missing spoke_id")
 
+            # Create the secret under the spoke's primary key.
             secret = hub.key_manager.generate_first_secret(hub._primary_key(spoke_id))
             return {"spoke_id": spoke_id, "secret": secret}
         except HTTPException:
@@ -442,6 +528,8 @@ def register(app, hub, ctx):
 
     @app.post("/setup/users/assign-tenant")
     async def assign_user_tenant(request: Request):
+        """Add a user to a tenant and log out their existing sessions."""
+        # Read user and tenant ids; both are required.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -451,13 +539,16 @@ def register(app, hub, ctx):
             if not user_id or not tenant_id:
                 raise HTTPException(status_code=400, detail="Missing user_id or tenant_id")
 
+            # The tenant must exist.
             if not hub.state.get_tenant(tenant_id):
                 raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
 
+            # The protected admin account may not be tenant-scoped.
             users = hub.state.system_state.get("users", {})
             if users.get(user_id, {}).get("protected"):
                 raise HTTPException(status_code=403, detail="The protected admin account cannot be assigned to a tenant")
 
+            # Assign the user, then end their sessions so new access applies at next login.
             hub.state.assign_user_to_tenant(user_id, tenant_id)
             _invalidate_user_sessions(hub, user_id)
             return {"status": "ok", "message": f"User {user_id} assigned to tenant {tenant_id}"}
@@ -469,6 +560,8 @@ def register(app, hub, ctx):
 
     @app.post("/setup/users/remove-tenant")
     async def remove_user_tenant(request: Request):
+        """Remove a user from a tenant and log out their existing sessions."""
+        # Read user and tenant ids; both are required.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -478,6 +571,7 @@ def register(app, hub, ctx):
             if not user_id or not tenant_id:
                 raise HTTPException(status_code=400, detail="Missing user_id or tenant_id")
 
+            # Remove the membership, then end the user's sessions.
             hub.state.remove_user_from_tenant(user_id, tenant_id)
             _invalidate_user_sessions(hub, user_id)
             return {"status": "ok", "message": f"User {user_id} removed from tenant {tenant_id}"}
@@ -493,30 +587,37 @@ def register(app, hub, ctx):
         edit form sends its full add/remove delta here instead of one
         assign-tenant / remove-tenant POST per changed tenant. Adds + removes are
         applied, then the user's sessions are invalidated ONCE."""
+        # Read the user id and the lists of tenants to add and remove.
         hub = app.state.hub
         try:
             data = await request.json()
             user_id = data.get("user_id")
             add = data.get("add") or []
             remove = data.get("remove") or []
+            # Validate the input.
             if not user_id:
                 raise HTTPException(status_code=400, detail="Missing user_id")
             if not isinstance(add, list) or not isinstance(remove, list):
                 raise HTTPException(status_code=400, detail="add/remove must be lists")
+            # The protected admin account may not be added to any tenant.
             users = hub.state.system_state.get("users", {})
             if users.get(user_id, {}).get("protected") and add:
                 raise HTTPException(status_code=403,
                     detail="The protected admin account cannot be assigned to a tenant")
+            # Track what was done and any problems.
             assigned, removed, errors = [], [], []
+            # Add each existing tenant; unknown tenants are reported as errors.
             for tid in add:
                 if not hub.state.get_tenant(tid):
                     errors.append(f"tenant {tid} not found")
                     continue
                 hub.state.assign_user_to_tenant(user_id, tid)
                 assigned.append(tid)
+            # Remove each listed tenant.
             for tid in remove:
                 hub.state.remove_user_from_tenant(user_id, tid)
                 removed.append(tid)
+            # End the user's sessions once, only if something changed.
             if assigned or removed:
                 _invalidate_user_sessions(hub, user_id)
             return {"status": "ok", "assigned": assigned, "removed": removed, "errors": errors}
@@ -528,12 +629,15 @@ def register(app, hub, ctx):
 
     @app.get("/setup/users")
     async def get_users():
+        """List all users without password hashes, with their effective permissions."""
+        # Read the stored users.
         hub = app.state.hub
         raw = hub.state.system_state.get("users", {})
         # Strip password hashes; surface the RBAC-resolved effective permissions
         # (group + per-user union) alongside the stored per-user overrides so the
         # UI can show what a user actually gets vs. what's set directly on them.
         safe = {}
+        # Copy each user without the hash and add groups and effective permissions.
         for uid, u in raw.items():
             rec = {k: v for k, v in u.items() if k != "password_hash"}
             rec["groups"] = u.get("groups", [])
@@ -543,6 +647,8 @@ def register(app, hub, ctx):
 
     @app.post("/setup/users")
     async def update_user(request: Request):
+        """Create or update a user: permissions, password, auth type, tenant and groups."""
+        # Read the fields from the body; groups=None means leave groups unchanged.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -553,9 +659,11 @@ def register(app, hub, ctx):
             tenant_id = data.get("tenant_id")
             groups = data.get("groups")  # None = leave unchanged; list = replace
 
+            # The user id is required.
             if not user_id:
                 raise HTTPException(status_code=400, detail="Missing user_id")
 
+            # Get (or create) the users table and this user's current record.
             users = hub.state.system_state.setdefault("users", {})
             existing = users.get(user_id, {})
 
@@ -592,6 +700,7 @@ def register(app, hub, ctx):
                 permissions.pop("tenant_admin", None)
                 permissions["role"] = "tenant_admin"
 
+            # Merge the changes into the existing record and stamp the update time.
             entry = {
                 **existing,
                 "permissions": permissions,
@@ -602,10 +711,12 @@ def register(app, hub, ctx):
             # `groups` list, so older edit payloads that omit it don't wipe it.
             # Protected accounts stay admin regardless, so groups are moot there.
             if groups is not None and not existing.get("protected"):
+                # groups must be a list; unknown group names are dropped.
                 if not isinstance(groups, list):
                     raise HTTPException(status_code=400, detail="groups must be a list")
                 valid = hub.state.system_state.get("permission_groups", {})
                 entry["groups"] = [g for g in groups if g in valid]
+            # Store a new password hash only when a password was given.
             if password:
                 entry["password_hash"] = _hash_password(password)
             # Assigned tenants. Accept a `tenants` LIST (the Add/Edit User modal's
@@ -614,15 +725,19 @@ def register(app, hub, ctx):
             # protected accounts (anti-lockout; tenant_id was cleared above). This
             # is the Global-admin path, so no ownership filtering — that is the
             # tenant-scoped /tenant/... route's job.
+            # The optional tenants list must be a list.
             tenants_list = data.get("tenants")
             if tenants_list is not None and not isinstance(tenants_list, list):
                 raise HTTPException(status_code=400, detail="tenants must be a list")
+            # Protected accounts keep their tenants untouched.
             if not existing.get("protected"):
+                # A tenants list replaces membership (plus any legacy tenant_id).
                 if tenants_list is not None:
                     wanted = {t for t in tenants_list if t}
                     if tenant_id:
                         wanted.add(tenant_id)
                     entry["tenants"] = sorted(wanted)
+                # Only a single tenant_id: add it to the existing list.
                 elif tenant_id:
                     entry.setdefault("tenants", [])
                     if tenant_id not in entry["tenants"]:
@@ -636,6 +751,7 @@ def register(app, hub, ctx):
                     status_code=400,
                     detail="Tenant Admin requires at least one assigned tenant",
                 )
+            # Store the record and save immediately.
             users[user_id] = entry
             await hub.state.save_state_now()
             # Drop this user's existing sessions so the change (password, perms,
@@ -646,6 +762,7 @@ def register(app, hub, ctx):
             _invalidate_user_sessions(hub, user_id)
 
             return {"status": "ok", "message": f"User {user_id} updated."}
+        # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
             raise  # 400/409 (e.g. "User already exists") must reach the client, not become 500
         except Exception as e:
@@ -654,15 +771,19 @@ def register(app, hub, ctx):
 
     @app.post("/setup/users/{user_id}/set-password")
     async def set_user_password(user_id: str, request: Request):
+        """Set a new password for an existing user and log out their sessions."""
+        # Read the new password; it is required.
         hub = app.state.hub
         try:
             data = await request.json()
             password = data.get("password", "")
             if not password:
                 raise HTTPException(status_code=400, detail="Password required")
+            # The user must exist.
             users = hub.state.system_state.get("users", {})
             if user_id not in users:
                 raise HTTPException(status_code=404, detail="User not found")
+            # Store the new hash and save immediately.
             users[user_id]["password_hash"] = _hash_password(password)
             await hub.state.save_state_now()
             # Force re-login: the old credential is no longer valid, so any
@@ -716,18 +837,23 @@ def register(app, hub, ctx):
         return sess
 
     def _admin_tenants(sess) -> set:
+        """Return the set of tenant ids assigned to the session's user."""
         return set((sess or {}).get("user", {}).get("tenants") or [])
 
     def _is_target_admin_tier(target_user: dict) -> bool:
+        """Return True if the user is a Global Admin or a Tenant Admin."""
+        # Admin tier means the admin flag or an admin/tenant_admin role.
         tp = (target_user or {}).get("permissions", {}) or {}
         return bool(tp.get("admin") or tp.get("role") in ("admin", "tenant_admin"))
 
     def _reject_role_escalation(permissions: dict):
         """A tenant Admin may only grant module rights, never an admin tier."""
+        # Refuse the Global Admin role in either form (flag or role).
         _p = permissions or {}
         if _p.get("admin") or _p.get("role") == "admin":
             raise HTTPException(status_code=400,
                                 detail="Tenant admin cannot grant Global Admin")
+        # Refuse the Tenant Admin role in either form (flag or role).
         if _p.get("role") == "tenant_admin" or _p.get("tenant_admin"):
             raise HTTPException(status_code=400,
                                 detail="Tenant admin cannot grant the tenant Admin role")
@@ -736,6 +862,7 @@ def register(app, hub, ctx):
         """Drop the admin/tenant_admin keys a client might send and keep only
         the recognised module rights (so a tenant_admin's grant is always a
         plain module-right set, never a tier). Mirrors upsert_group's allowlist."""
+        # Copy and drop every admin-tier key.
         _p = dict(permissions or {})
         _p.pop("admin", None)
         _p.pop("tenant_admin", None)
@@ -749,8 +876,10 @@ def register(app, hub, ctx):
         """List the users who are members of {tenant} (tenant ∈ their tenants).
         A tenant Admin sees its own tenant's roster; a Global Admin may list
         any. Password hashes are stripped; effective_permissions are resolved."""
+        # Check the caller may manage users in this tenant.
         sess = _ta_gate(request, tenant)
         hub = app.state.hub
+        # Collect members of this tenant, without password hashes, with effective rights.
         raw = hub.state.system_state.get("users", {})
         out = {}
         for uid, u in raw.items():
@@ -768,23 +897,28 @@ def register(app, hub, ctx):
         user starts with tenants=[{tenant}] — additional owned tenants can be
         added later via the edit route. Reject if the user_id already exists
         (the WebUI Add-User modal sends create=true semantics)."""
+        # Check the caller may manage users in this tenant.
         sess = _ta_gate(request, tenant)
         hub = app.state.hub
         try:
+            # Read the new user's fields.
             data = await request.json()
             user_id = data.get("user_id")
             permissions = data.get("permissions", {})
             password = data.get("password", "")
             auth_type = data.get("auth_type", "local")
 
+            # The user id is required, and no admin role may be granted.
             if not user_id:
                 raise HTTPException(status_code=400, detail="Missing user_id")
             _reject_role_escalation(permissions)
 
+            # Refuse to overwrite an existing user.
             users = hub.state.system_state.setdefault("users", {})
             if user_id in users:
                 raise HTTPException(status_code=409, detail="User already exists")
 
+            # Build the record with only module rights and this tenant.
             perms = _normalize_tenant_admin_perms(permissions)
             entry = {
                 "permissions": perms,
@@ -793,14 +927,18 @@ def register(app, hub, ctx):
                 "created_at": time.time(),
                 "updated_at": time.time(),
             }
+            # Store a password hash only when a password was given.
             if password:
                 entry["password_hash"] = _hash_password(password)
+            # Store the user, save immediately and end any sessions under that id.
             users[user_id] = entry
             await hub.state.save_state_now()
             _invalidate_user_sessions(hub, user_id)
+            # Audit log of who created whom.
             logger.info("tenant admin %s created user %s in tenant %s",
                         (sess.get("user") or {}).get("user_id", "?"), user_id, tenant)
             return {"status": "ok", "message": f"User {user_id} created in tenant {tenant}."}
+        # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -815,15 +953,18 @@ def register(app, hub, ctx):
         only assign tenants it owns. A Global Admin is unconstrained but still
         cannot demote the protected account. Tenant membership for the path
         tenant is never removed here — use the DELETE route for that."""
+        # Check the caller may manage users in this tenant.
         sess = _ta_gate(request, tenant)
         hub = app.state.hub
         try:
+            # Read the requested changes.
             data = await request.json()
             permissions = data.get("permissions", {})
             password = data.get("password", "")
             auth_type = data.get("auth_type")
             extra_tenants = data.get("tenants")  # list = replace membership (intersect w/ owned)
 
+            # The target user must exist and must not be the protected account.
             users = hub.state.system_state.get("users", {})
             existing = users.get(user_id)
             if not existing:
@@ -831,6 +972,7 @@ def register(app, hub, ctx):
             if existing.get("protected"):
                 raise HTTPException(status_code=403,
                                     detail="The protected admin account cannot be modified")
+            # Global Admins skip the tenant-admin restrictions.
             is_global = ctx._is_admin(sess)
             if not is_global:
                 # Tenant-admin constraints: no touching admin-tier users, and
@@ -844,6 +986,7 @@ def register(app, hub, ctx):
                                         detail="User extends beyond your tenants — ask a Global admin")
                 _reject_role_escalation(permissions)
 
+            # Normalise the permissions according to the caller's tier.
             _p = dict(permissions or {})
             if is_global:
                 # Global admin: reuse the /setup/users normalization so the two
@@ -859,11 +1002,14 @@ def register(app, hub, ctx):
             else:
                 permissions = _normalize_tenant_admin_perms(_p)
 
+            # Merge the changes into the existing record and stamp the update time.
             entry = {**existing, "permissions": permissions, "updated_at": time.time()}
+            # Optional auth type and password changes.
             if auth_type:
                 entry["auth_type"] = auth_type
             if password:
                 entry["password_hash"] = _hash_password(password)
+            # A tenants list replaces membership, limited to tenants the caller owns.
             if extra_tenants is not None:
                 if not isinstance(extra_tenants, list):
                     raise HTTPException(status_code=400, detail="tenants must be a list")
@@ -875,13 +1021,16 @@ def register(app, hub, ctx):
                 if owned is not None:
                     wanted &= owned | {tenant}  # drop tenants the admin doesn't own
                 entry["tenants"] = sorted(wanted)
+            # A Tenant Admin must keep at least one tenant.
             if entry.get("permissions", {}).get("role") == "tenant_admin" and not entry.get("tenants"):
                 raise HTTPException(status_code=400,
                                     detail="Tenant Admin requires at least one assigned tenant")
+            # Store, save immediately and end the user's sessions.
             users[user_id] = entry
             await hub.state.save_state_now()
             _invalidate_user_sessions(hub, user_id)
             return {"status": "ok", "message": f"User {user_id} updated."}
+        # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -893,13 +1042,16 @@ def register(app, hub, ctx):
         """Set/reset a user's password. The user must be a member of {tenant}
         (an owned tenant). A tenant admin may not reset an admin-tier or
         protected user's password (no credential takeover of admins)."""
+        # Check the caller may manage users in this tenant.
         sess = _ta_gate(request, tenant)
         hub = app.state.hub
         try:
+            # Read the new password; it is required.
             data = await request.json()
             password = data.get("password", "")
             if not password:
                 raise HTTPException(status_code=400, detail="Password required")
+            # The user must exist, not be protected, and belong to this tenant.
             users = hub.state.system_state.get("users", {})
             existing = users.get(user_id)
             if not existing:
@@ -910,14 +1062,17 @@ def register(app, hub, ctx):
             if tenant not in (existing.get("tenants") or []):
                 raise HTTPException(status_code=403,
                                     detail="User is not a member of this tenant")
+            # A Tenant Admin may not reset an admin-tier user's password.
             if not ctx._is_admin(sess) and _is_target_admin_tier(existing):
                 raise HTTPException(status_code=403,
                                     detail="Tenant admin cannot reset an admin-tier user's password")
+            # Store the new hash, save immediately and end the user's sessions.
             existing["password_hash"] = _hash_password(password)
             existing["updated_at"] = time.time()
             await hub.state.save_state_now()
             _invalidate_user_sessions(hub, user_id)
             return {"status": "ok"}
+        # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -931,9 +1086,11 @@ def register(app, hub, ctx):
         with no tenants is inert (deny-by-default). The protected account and
         admin-tier users are never removable by a tenant admin. Deleting the
         user RECORD entirely stays Global-Admin-only (/setup/users)."""
+        # Check the caller may manage users in this tenant.
         sess = _ta_gate(request, tenant)
         hub = app.state.hub
         try:
+            # The user must exist and not be protected.
             users = hub.state.system_state.get("users", {})
             existing = users.get(user_id)
             if not existing:
@@ -941,14 +1098,17 @@ def register(app, hub, ctx):
             if existing.get("protected"):
                 raise HTTPException(status_code=403,
                                     detail="The protected admin account cannot be modified")
+            # A Tenant Admin may not remove an admin-tier user.
             if not ctx._is_admin(sess) and _is_target_admin_tier(existing):
                 raise HTTPException(status_code=403,
                                     detail="Tenant admin cannot remove an admin-tier user from a tenant")
+            # Remove only this tenant's membership and end the user's sessions.
             hub.state.remove_user_from_tenant(user_id, tenant)
             _invalidate_user_sessions(hub, user_id)
             return {"status": "ok",
                     "message": f"User {user_id} removed from tenant {tenant}",
                     "remaining_tenants": list((users.get(user_id) or {}).get("tenants") or [])}
+        # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -973,6 +1133,7 @@ def register(app, hub, ctx):
     # into its own view — a cross-tenant escalation. Re-scoping + setting the
     # system-wide active tenant stay Global-Admin-only (`/setup/tenant`).
     # Onboarding-PSK management has its own tenant-scoped routes (Phase 1).
+    # Tenant fields a Tenant Admin may edit on its own tenant.
     _TA_TENANT_EDITABLE = ("name", "description", "quotas")
 
     @app.get("/api/tenant/{tenant}")
@@ -982,11 +1143,13 @@ def register(app, hub, ctx):
         only its editable fields plus the current scoping values read-only for
         display. The path {tenant} must be in the caller's `user.tenants`
         (enforced by `_ta_gate` → `_check_tenant_access`)."""
+        # Check the caller may manage this tenant, and that the tenant exists.
         sess = _ta_gate(request, tenant)
         hub = app.state.hub
         tenant_rec = hub.state.get_tenant(tenant)
         if tenant_rec is None:
             raise HTTPException(status_code=404, detail=f"Tenant {tenant} not found")
+        # Global Admins get the full record.
         if ctx._is_admin(sess):
             return {"tenant_id": tenant, "config": dict(tenant_rec)}
         # tenant_admin: editable fields + read-only scoping for display.
@@ -1002,9 +1165,11 @@ def register(app, hub, ctx):
         A Global admin may set any field (same semantics as `/setup/tenant`),
         so this route is also a valid edit path for Global. The path {tenant}
         must be in the caller's `user.tenants` (enforced by `_ta_gate`)."""
+        # Check the caller may manage this tenant.
         sess = _ta_gate(request, tenant)
         hub = app.state.hub
         try:
+            # Read the requested config changes.
             data = await request.json()
             config = data.get("config", {}) or {}
             # This is the EDIT path: the tenant must already exist. Creating a
@@ -1018,14 +1183,17 @@ def register(app, hub, ctx):
             else:
                 # tenant_admin — allowlist only; scoping/active silently dropped.
                 merged = {k: v for k, v in config.items() if k in _TA_TENANT_EDITABLE}
+            # Refuse an edit with nothing allowed in it.
             if not merged:
                 raise HTTPException(
                     status_code=400,
                     detail="No editable fields supplied (a tenant admin may only set name, description, quotas)")
+            # Apply the changes and mark state for saving.
             hub.state.update_tenant(tenant, merged)
             hub.state._mark_dirty()
             return {"status": "ok", "message": f"Tenant {tenant} updated.",
                     "updated": merged}
+        # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -1039,27 +1207,38 @@ def register(app, hub, ctx):
 
     def _slug_group_id(name: str) -> str:
         """Derive a stable id from a group name (lowercase, non-alnum→-)."""
+        # re turns the name into a URL-safe slug.
         import re
+        # Replace runs of non-alphanumerics with "-" and trim; fall back to "group".
         base = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
         return base or "group"
 
     @app.get("/setup/groups")
     async def get_groups():
+        """List permission groups with member counts, plus the list of enforced rights."""
+        # Read the stored groups.
         hub = app.state.hub
         groups = hub.state.system_state.get("permission_groups", {})
         # Report membership counts so the UI can warn before deleting a group
         # that still has members.
+        # Count members per group across all users.
         users = hub.state.system_state.get("users", {})
         counts = {}
         for u in users.values():
             for gid in u.get("groups", []) or []:
                 counts[gid] = counts.get(gid, 0) + 1
+        # Add the member count to each group.
         enriched = {gid: {**g, "member_count": counts.get(gid, 0)}
                     for gid, g in groups.items()}
         return {"groups": enriched, "enforced_rights": list(ENFORCED_RIGHTS)}
 
     @app.post("/setup/groups")
     async def upsert_group(request: Request):
+        """Create or update a permission group: name, rights, LDAP group and granted tenants.
+
+        Returns {"status": "ok", "group_id": ...}.
+        """
+        # Read the group id and name; at least one is required.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -1067,16 +1246,19 @@ def register(app, hub, ctx):
             name = (data.get("name") or "").strip()
             if not name and not group_id:
                 raise HTTPException(status_code=400, detail="Group name required")
+            # Get (or create) the groups table.
             groups = hub.state.system_state.setdefault("permission_groups", {})
             # New group → derive an id from the name (avoid clobbering an
             # existing id); edit → the client sends the existing group_id.
             if not group_id:
                 group_id = _slug_group_id(name)
+                # Add -2, -3, ... when the derived id is already taken.
                 if group_id in groups:
                     n = 2
                     while f"{group_id}-{n}" in groups:
                         n += 1
                     group_id = f"{group_id}-{n}"
+            # Current record for an edit (empty for a new group).
             existing = groups.get(group_id, {})
             # Only persist recognised right-keys (+ admin/tenant_admin tiers) so
             # a group can't smuggle an arbitrary/unknown flag into a user's
@@ -1086,6 +1268,7 @@ def register(app, hub, ctx):
             raw_perms = data.get("permissions", {}) or {}
             allowed = set(ENFORCED_RIGHTS) | {"admin", "tenant_admin"}
             perms = {k: True for k, v in raw_perms.items() if v and k in allowed}
+            # Set the matching role so both admin forms stay in sync; Global wins.
             if perms.get("admin"):
                 perms["role"] = "admin"
             elif perms.get("tenant_admin"):
@@ -1101,6 +1284,7 @@ def register(app, hub, ctx):
                 # explicit send (list = replace, empty list = clear).
                 granted_tenants = existing.get("tenants", [])
             else:
+                # Keep only real, distinct tenant ids from the list.
                 known_tenants = set(
                     (hub.state.tenant_state.get("tenants", {}) or {}).keys())
                 granted_tenants = []
@@ -1108,6 +1292,7 @@ def register(app, hub, ctx):
                     t = str(tid).strip()
                     if t and t in known_tenants and t not in granted_tenants:
                         granted_tenants.append(t)
+            # Store the merged group record.
             groups[group_id] = {
                 **existing,
                 "name": name or existing.get("name", group_id),
@@ -1117,6 +1302,7 @@ def register(app, hub, ctx):
                 "tenants": granted_tenants,
                 "updated_at": time.time(),
             }
+            # Mark state for saving.
             hub.state._mark_dirty()
             # A group's permissions feed every member's effective permission set
             # (union of group bundles + per-user rights). Invalidate members'
@@ -1127,6 +1313,7 @@ def register(app, hub, ctx):
                 if group_id in (u.get("groups", []) or []):
                     _invalidate_user_sessions(hub, uid)
             return {"status": "ok", "group_id": group_id}
+        # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -1135,9 +1322,13 @@ def register(app, hub, ctx):
 
     @app.delete("/setup/groups/{group_id}")
     async def delete_group(group_id: str):
+        """Delete a permission group, detaching it from all members (404/403 for missing/protected).
+        """
+        # Get the groups table.
         hub = app.state.hub
         try:
             groups = hub.state.system_state.setdefault("permission_groups", {})
+            # The group must exist and not be protected.
             if group_id not in groups:
                 raise HTTPException(status_code=404, detail="Group not found")
             if groups[group_id].get("protected"):
@@ -1149,6 +1340,7 @@ def register(app, hub, ctx):
                 if group_id in (u.get("groups", []) or []):
                     u["groups"] = [g for g in u["groups"] if g != group_id]
                     member_ids.append(uid)
+            # Remove the group and mark state for saving.
             del groups[group_id]
             hub.state._mark_dirty()
             # Detaching the group changes each member's effective permissions —
@@ -1157,6 +1349,7 @@ def register(app, hub, ctx):
             for uid in member_ids:
                 _invalidate_user_sessions(hub, uid)
             return {"status": "ok"}
+        # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
             raise
         except Exception as e:

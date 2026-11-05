@@ -59,6 +59,8 @@ just ABOVE it (a HIGHER number), and both sit below Azure's default allow on 443
 carry one description each) and surfaced in the WebUI Security view. A leaf-ish
 module: stdlib + azure_nsg.
 """
+# Standard-library imports: asyncio for background reconciles, ipaddress for IP checks,
+# json/os for persistence, time for timestamps, deque for the bounded event feed.
 import asyncio
 import ipaddress
 import json
@@ -68,9 +70,11 @@ import time
 from collections import deque
 from typing import Any, Dict, List, Optional
 
+# General logger plus the dedicated security audit stream.
 logger = logging.getLogger("ThreatMonitor")
 sec_log = logging.getLogger("Security")  # dedicated audit stream (relayed + on-box)
 
+# Default policy settings; stored config overrides these key by key.
 _DEFAULTS = {
     "enabled": True,          # detect + log
     "auto_block": False,      # actually edit the NSG (opt-in; log-only until on)
@@ -93,6 +97,7 @@ _DEFAULTS = {
     # below the 1000 default-allow on 443 → allow(300) < block(400) < 1000.
     "block_priority": 400,
 }
+# Maximum number of recent events kept.
 _EVENTS_MAX = 500
 
 
@@ -102,6 +107,7 @@ def _bound_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     non-numeric value coerced to a <=512-char string. Returns {} for empties."""
     if not meta:
         return {}
+    # Keep up to 32 keys, truncating names and non-numeric values.
     out: Dict[str, Any] = {}
     for k, v in list(meta.items())[:32]:
         out[str(k)[:64]] = v if isinstance(v, (int, float, bool)) else str(v)[:512]
@@ -109,9 +115,11 @@ def _bound_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _now() -> float:
+    """Current time as epoch seconds."""
     return time.time()
 
 
+# Priority of Azure's default allow rule; ours must sit below it.
 _DEFAULT_ALLOW_ON_443 = 1000  # Azure's built-in AllowVnetInBound-style default
 
 
@@ -126,11 +134,13 @@ def validate_nsg_priorities(allow_priority: Any, block_priority: Any) -> tuple:
 
     Pure function. Returns ``(ok: bool, message: str)`` — ``ok`` iff the invariant
     holds; ``message`` names the exact violation(s) (empty when ok)."""
+    # Both priorities must be integers.
     try:
         ap = int(allow_priority)
         bp = int(block_priority)
     except (TypeError, ValueError):
         return (False, "Allow and Deny priorities must both be integers.")
+    # Collect every ordering violation.
     problems = []
     if not (ap < bp):
         problems.append(
@@ -145,6 +155,7 @@ def validate_nsg_priorities(allow_priority: Any, block_priority: Any) -> tuple:
         problems.append(
             f"Allow priority ({ap}) must be below {_DEFAULT_ALLOW_ON_443} — "
             f"Azure's default allow on 443 is {_DEFAULT_ALLOW_ON_443}.")
+    # Report all violations together, or success.
     if problems:
         return (False, " ".join(problems))
     return (True, "")
@@ -152,7 +163,10 @@ def validate_nsg_priorities(allow_priority: Any, block_priority: Any) -> tuple:
 
 
 class ThreatMonitor:
+    """Tracks auth failures and anomalies per IP and blocks offenders, optionally via cloud NSG."""
     def __init__(self, hub) -> None:
+        """Set up in-memory state, load saved state, and migrate the legacy never-block list."""
+        # In-memory tracking tables.
         self.hub = hub
         self._events: deque = deque(maxlen=_EVENTS_MAX)   # recent auth failures
         self._ip_fails: Dict[str, List[float]] = {}       # ip -> [ts] in-window
@@ -175,6 +189,7 @@ class ThreatMonitor:
             "since": _now(),     # first-init epoch
             "last_ts": 0.0,      # last signal epoch
         }
+        # Start from defaults, then load saved config and state from disk.
         self._cfg: Dict[str, Any] = dict(_DEFAULTS)
         self._nsg_dirty = False
         self._load()
@@ -193,9 +208,12 @@ class ThreatMonitor:
 
     # ── config ───────────────────────────────────────────────────────────────
     def config(self) -> Dict[str, Any]:
+        """Return a copy of the current policy config."""
         return dict(self._cfg)
 
     def set_config(self, patch: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply a partial config update, coercing values to each default's type."""
+        # Copy each known key from the patch, coerced to the right type.
         for k, default in _DEFAULTS.items():
             if k in patch:
                 v = patch[k]
@@ -208,6 +226,7 @@ class ThreatMonitor:
                         pass
                 else:
                     self._cfg[k] = str(v)
+        # Threshold must be at least 1; then save.
         self._cfg["threshold"] = max(1, int(self._cfg["threshold"]))
         self._persist()
         # A block_rule_name / block_priority / auto_block change must be re-pushed
@@ -222,6 +241,7 @@ class ThreatMonitor:
 
         Called for every auth failure and every anomaly so the operator can tell
         the system is evaluating traffic even after all active blocks expire."""
+        # Bump the total, the failure/anomaly count, the per-kind count and the last-seen time.
         t = self._totals
         t["signals"] = int(t.get("signals", 0)) + 1
         t["anomalies" if anomaly else "failures"] = int(
@@ -248,9 +268,11 @@ class ThreatMonitor:
         passes a short ``max_ttl_s`` and ``allow_permanent=False`` so that even a
         corroborated report can only ever place a short, self-expiring block —
         never a permanent one — capping the blast radius of a compromised edge."""
+        # Ignore empty IPs or a disabled monitor.
         ip = (ip or "").strip()
         if not ip or not self._cfg.get("enabled"):
             return
+        # Count the signal and build the event record.
         now = _now()
         self._bump_signal(kind, anomaly=False)
         evt = {"ts": now, "ip": ip, "kind": kind,
@@ -258,27 +280,33 @@ class ThreatMonitor:
         m = _bound_meta(meta)
         if m:
             evt["meta"] = m
+        # Add to the recent-events feed.
         self._events.appendleft(evt)
         if ip in self._blocks or self._is_exempt(ip):
             return  # already blocked, or trusted — still logged above
+        # Keep only failures inside the window, then add this one.
         window = self._cfg["window_s"]
         hits = [t for t in self._ip_fails.get(ip, []) if t > now - window]
         hits.append(now)
         self._ip_fails[ip] = hits
         if len(self._ip_fails) > 4096:  # memory hygiene under spoofed-source rotation
             self._prune_fails()
+        # Over the threshold: block the IP.
         if len(hits) > self._cfg["threshold"]:
             self._block(ip, reason=self._reason(ip, kind, username, len(hits)),
                         kind=kind, source="auto",
                         max_ttl_s=max_ttl_s, allow_permanent=allow_permanent)
 
     def record_success(self, ip: str) -> None:
+        """Note a successful login from ``ip``: exempt it for a while and clear its failures."""
         ip = (ip or "").strip()
         if ip:
             self._recent_success[ip] = _now()
             self._ip_fails.pop(ip, None)
 
     def _reason(self, ip: str, kind: str, username: Optional[str], count: int) -> str:
+        """Build a human-readable block reason such as "21 failed logins within 10m"."""
+        # Optional username plus a friendly label for the failure kind.
         who = f" as '{username}'" if username else ""
         label = {"login": "failed logins", "session": "invalid session tokens",
                  "api_key": "invalid API keys",
@@ -286,6 +314,7 @@ class ThreatMonitor:
                  "http_probe": "HTTPS-port scan probes (paths we never serve)",
                  "app_login": "failed app-edge logins",
                  "session_hijack": "concurrent admin session-cookie use"}.get(kind, f"{kind} failures")
+        # Express the window in minutes.
         mins = max(1, int(self._cfg["window_s"] / 60))
         return f"{count} {label}{who} within {mins}m"
 
@@ -293,6 +322,7 @@ class ThreatMonitor:
     def _block(self, ip: str, reason: str, kind: str, source: str,
                *, max_ttl_s: Optional[float] = None,
                allow_permanent: bool = True) -> None:
+        """Record a block for ``ip``, persist it and schedule an NSG reconcile."""
         # Validate before anything is recorded. `ip` reaches here from request
         # headers (X-Forwarded-For and friends), i.e. it is attacker-controlled
         # text, and it becomes a key in `_offense`/`_blocked` that is persisted
@@ -306,13 +336,16 @@ class ThreatMonitor:
                             ip[:64], kind, source)
             return
         now = _now()
+        # Add a strike; permanent if manual-permanent or the strike limit is reached.
         self._offense[ip] = self._offense.get(ip, 0) + 1
         permanent = (source == "manual_perm"
                      or (allow_permanent
                          and self._offense[ip] >= self._cfg["permanent_after"]))
+        # Block lifetime, capped by ``max_ttl_s`` if given.
         ttl = self._cfg["ttl_s"]
         if max_ttl_s is not None:
             ttl = min(ttl, max_ttl_s)
+        # Build and store the block record, clearing the failure history.
         rec = {
             "ip": ip, "reason": reason, "kind": kind, "source": source,
             "blocked_at": now, "offense_count": self._offense[ip],
@@ -321,9 +354,11 @@ class ThreatMonitor:
         }
         self._blocks[ip] = rec
         self._ip_fails.pop(ip, None)
+        # Update the lifetime counters.
         self._totals["blocks_placed"] = int(self._totals.get("blocks_placed", 0)) + 1
         if permanent:
             self._totals["blocks_permanent"] = int(self._totals.get("blocks_permanent", 0)) + 1
+        # Save, log and push to the NSG.
         self._nsg_dirty = True
         self._persist()
         sec_log.warning("THREAT BLOCK %s (%s) — %s%s", ip, source, reason,
@@ -332,6 +367,8 @@ class ThreatMonitor:
         self._schedule_reconcile()
 
     def block_manual(self, ip: str, reason: str = "", permanent: bool = False) -> Dict[str, Any]:
+        """Operator block of a single IP (optionally permanent), bypassing exemptions."""
+        # Require a single valid IP address (no CIDR ranges).
         ip = (ip or "").strip()
         if not ip:
             return {"status": "ERROR", "message": "ip required"}
@@ -363,6 +400,7 @@ class ThreatMonitor:
         ip = (ip or "").strip()
         if not ip:
             return {"status": "ERROR", "message": "ip required"}
+        # Spare trusted or recently-authenticated IPs.
         if self._is_exempt(ip):
             sec_log.warning(
                 "THREAT hijack-response: %s SPARED (trusted/allow-listed or "
@@ -390,6 +428,7 @@ class ThreatMonitor:
         (e.g. the offending request's method/path/headers) that the operator can
         drill into from the Security UI. It is stored verbatim on the event and
         persisted with it, so keep it small and JSON-serializable."""
+        # Count the anomaly and build the event record.
         try:
             now = _now()
             self._bump_signal(kind, anomaly=True)
@@ -399,10 +438,12 @@ class ThreatMonitor:
             m = _bound_meta(meta)
             if m:
                 evt["meta"] = m
+            # Add to the feed and log at a level matching the severity.
             self._events.appendleft(evt)
             level = logging.ERROR if severity == "critical" else logging.WARNING
             sec_log.log(level, "SECURITY ANOMALY %s [%s]%s — %s", kind, severity,
                         f" from {ip}" if ip else "", detail)
+            # Critical anomalies with an IP trigger an exemption-respecting block.
             if severity == "critical" and (ip or "").strip():
                 self.block_ip_unless_trusted(ip, reason=f"{kind}: {detail}", kind=kind)
         except Exception:
@@ -417,6 +458,7 @@ class ThreatMonitor:
         NEVER places an NSG block. It increments the lifetime tallies under the
         ``selftest`` kind (clearly labelled, easy to discount) and lands in the
         recent-events feed. Returns the post-test totals for immediate display."""
+        # Record one harmless synthetic anomaly, then report the totals.
         self.note_anomaly("selftest", "operator-initiated detection self-test "
                           "(synthetic; no IP → never blocks)", ip=None, severity="warning")
         t = dict(self._totals)
@@ -444,16 +486,19 @@ class ThreatMonitor:
         Lifetime ``_totals`` are untouched either way — they are monotonic
         evidence of what the pipeline saw, not a policy input.
         """
+        # Remove the block; nothing more to do if there wasn't one.
         ip = (ip or "").strip()
         existed = self._blocks.pop(ip, None)
         if not existed:
             return {"status": "SUCCESS", "removed": False, "strikes": self._offense.get(ip, 0)}
+        # Optionally drop the strike this block added.
         forgiven = False
         if forgive and self._offense.get(ip):
             self._offense[ip] -= 1
             forgiven = True
             if self._offense[ip] <= 0:
                 self._offense.pop(ip, None)
+        # Count, save, log and push the change.
         self._totals["unblocks"] = int(self._totals.get("unblocks", 0)) + 1
         self._nsg_dirty = True
         self._persist()
@@ -474,6 +519,7 @@ class ThreatMonitor:
         is the cleanup for that backlog. Blocking is unaffected — if the address
         misbehaves it simply starts earning strikes again from zero.
         """
+        # Drop all strikes for the address.
         ip = (ip or "").strip()
         cleared = int(self._offense.pop(ip, 0))
         if cleared:
@@ -493,6 +539,7 @@ class ThreatMonitor:
     # ── shared trusted / allow list (== global_config["azure_nsg"]["entries"]) ──
     def _shared_entries(self) -> List[Dict[str, str]]:
         """The canonical shared list, normalized ([{ip: CIDR, description}])."""
+        # Read and normalise the shared list; any failure gives an empty list.
         try:
             import azure_nsg as _nsg
             gc = self.hub.state.system_state.get("global_config", {}) or {}
@@ -502,11 +549,14 @@ class ThreatMonitor:
             return []
 
     def _save_shared_entries(self, entries: List[Dict[str, str]]) -> None:
+        """Write ``entries`` back to global_config and mark state for saving."""
+        # Replace the entries list in the azure_nsg section.
         gc = self.hub.state.system_state.get("global_config", {})
         az = dict(gc.get("azure_nsg", {}) or {})
         az["entries"] = entries
         gc["azure_nsg"] = az
         self.hub.state.system_state["global_config"] = gc
+        # Mark state for saving (best effort).
         try:
             self.hub.state._mark_dirty()
         except Exception:  # noqa: BLE001
@@ -517,12 +567,14 @@ class ThreatMonitor:
         ``azure_nsg.entries`` (union, dedup by CIDR, normalized; new ones tagged
         'migrated from never-block' — existing descriptions preserved), then empty
         ``_never`` so the shared list is the sole source of truth going forward."""
+        # Nothing to migrate.
         if not self._never:
             return
         try:
             import azure_nsg as _nsg
         except Exception:  # noqa: BLE001
             return
+        # Merge each legacy entry not already in the shared list.
         try:
             entries = _nsg.normalize_entries(self._shared_entries())
             have = {e["ip"] for e in entries}
@@ -533,10 +585,12 @@ class ThreatMonitor:
                         [{"ip": c, "description": "migrated from never-block"}])
                 except Exception:  # noqa: BLE001
                     continue
+                # Add the entry if it is new.
                 if norm and norm[0]["ip"] not in have:
                     entries.append(norm[0])
                     have.add(norm[0]["ip"])
                     added += 1
+            # Save the merged list, empty the legacy list and persist.
             self._save_shared_entries(entries)
             self._never = []
             self._persist()
@@ -549,6 +603,7 @@ class ThreatMonitor:
         """Add an IP/CIDR to the shared trusted list (never-block + NSG allow).
         Immediately unblocks any now-exempt IP and marks the deny/allow rules for
         reconcile. Callers should ``await reconcile_allow()`` to push to Azure."""
+        # Require a value, then normalise the list with the new entry added.
         raw = (ip or "").strip()
         if not raw:
             return {"status": "ERROR", "message": "ip required"}
@@ -565,6 +620,7 @@ class ThreatMonitor:
             if self._in_cidr(bip, ips):
                 self._blocks.pop(bip, None)
                 self._nsg_dirty = True
+        # Save and push the deny-rule change.
         self._persist()
         self._schedule_reconcile()  # deny rule (any unblocked IPs removed)
         return {"status": "SUCCESS", "entries": entries}
@@ -572,12 +628,14 @@ class ThreatMonitor:
     def remove_trusted(self, ip: str) -> Dict[str, Any]:
         """Remove an IP/CIDR from the shared trusted list. Callers should
         ``await reconcile_allow()`` to close the NSG hole in Azure."""
+        # Normalise the address so it matches the stored form.
         raw = (ip or "").strip()
         try:
             import azure_nsg as _nsg
             target = _nsg.normalize_entries([{"ip": raw}])
         except Exception:  # noqa: BLE001
             target = []
+        # Remove matching entries and save.
         tip = target[0]["ip"] if target else raw
         entries = [e for e in self._shared_entries() if e["ip"] != tip]
         self._save_shared_entries(entries)
@@ -586,6 +644,7 @@ class ThreatMonitor:
 
     def allow_priority(self) -> int:
         """The Azure NSG allow rule's priority (for Deny<Allow ordering checks)."""
+        # Read the allow rule's priority, defaulting to 300.
         try:
             gc = self.hub.state.system_state.get("global_config", {}) or {}
             return int((gc.get("azure_nsg", {}) or {}).get("priority") or 300)
@@ -594,6 +653,7 @@ class ThreatMonitor:
 
     # ── exemptions ─────────────────────────────────────────────────────────────
     def _is_exempt(self, ip: str) -> bool:
+        """True if ``ip`` must never be auto-blocked."""
         # (0) loopback. The hub's own self-calls arrive as 127.0.0.1/::1, and a
         # cloud NSG never sees loopback traffic at all — so such a deny prefix
         # can only ever be inert noise in the rule while recording the hub as
@@ -618,6 +678,7 @@ class ThreatMonitor:
         """True for 127.0.0.0/8 / ::1 / the unspecified address — the sources a
         cloud NSG can never act on. Unparseable input is NOT treated as loopback
         (fail closed: it stays blockable)."""
+        # Unparseable addresses are not loopback.
         try:
             addr = ipaddress.ip_address(ip)
         except ValueError:
@@ -625,14 +686,17 @@ class ThreatMonitor:
         return bool(addr.is_loopback or addr.is_unspecified)
 
     def _allowlist_ips(self) -> List[str]:
+        """The IPs/CIDRs on the shared trusted list."""
         return [e["ip"] for e in self._shared_entries() if e.get("ip")]
 
     @staticmethod
     def _in_cidr(ip: str, cidrs: List[str]) -> bool:
+        """True if ``ip`` falls inside any of ``cidrs``."""
         try:
             addr = ipaddress.ip_address(ip)
         except ValueError:
             return False
+        # Check each network, skipping malformed ones.
         for c in cidrs:
             try:
                 if addr in ipaddress.ip_network(c, strict=False):
@@ -642,6 +706,7 @@ class ThreatMonitor:
         return False
 
     def _prune_fails(self) -> None:
+        """Drop IPs with no failures inside the current window."""
         now = _now()
         window = self._cfg["window_s"]
         self._ip_fails = {ip: hs for ip, hs in self._ip_fails.items()
@@ -651,9 +716,11 @@ class ThreatMonitor:
     def sweep(self) -> None:
         """Expire temporary blocks whose TTL has elapsed; mark NSG dirty when the
         block set changed. Called on a timer from the hub."""
+        # Find temporary blocks whose expiry time has passed.
         now = _now()
         expired = [ip for ip, r in self._blocks.items()
                    if not r.get("permanent") and r.get("expires_at") and r["expires_at"] <= now]
+        # Release each expired block.
         for ip in expired:
             self._blocks.pop(ip, None)
             self._nsg_dirty = True
@@ -669,6 +736,7 @@ class ThreatMonitor:
         self._persist()
 
     def _schedule_reconcile(self) -> None:
+        """Start an NSG reconcile in the background if an event loop is running."""
         try:
             asyncio.get_running_loop().create_task(self.reconcile_nsg())
         except RuntimeError:
@@ -683,10 +751,13 @@ class ThreatMonitor:
         is. Azure/OCI can never both be active — ``cloud_nsg.active_provider``
         is the single source of truth for which one is — so the result is
         always a single flat shape, never a per-provider breakdown."""
+        # Find which cloud NSG provider (if any) is active.
         import cloud_nsg
         provider = cloud_nsg.active_provider(self.hub)
+        # No provider enabled: the list is saved but not pushed anywhere.
         if provider is None:
             return {"status": "SKIPPED", "message": "no cloud NSG provider enabled — list saved, not applied"}
+        # Dispatch to the provider-specific allow-rule push.
         gc = self.hub.state.system_state.get("global_config", {}) or {}
         if provider == "azure":
             return await self._reconcile_allow_azure(dict(gc.get("azure_nsg", {}) or {}))
@@ -696,14 +767,18 @@ class ThreatMonitor:
         """Push the shared trusted list onto the Azure NSG ALLOW rule (the same
         rule the Azure NSG tile manages). No-op unless azure_nsg is configured
         (``enabled`` is already checked by the caller)."""
+        # Import the Azure helpers lazily.
         try:
             import azure_nsg as _nsg
             from security.oidc import get_oidc_config
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "message": f"nsg import: {e}"}
+        # Skip when the NSG is not fully configured.
         if not all(azcfg.get(k) for k in ("subscription_id", "resource_group", "nsg_name")):
             return {"status": "SKIPPED", "message": "Azure NSG not configured"}
+        # Push the trusted IPs to the allow rule and report the result.
         ips = _nsg.entries_to_ips(azcfg.get("entries") or [])
+        # Import the OCI helpers lazily.
         try:
             res = await _nsg.reconcile_allowlist(get_oidc_config(self.hub), azcfg, ips)
             sec_log.info("THREAT NSG allow-rule reconciled: %d IP(s) on %s/%s",
@@ -729,20 +804,24 @@ class ThreatMonitor:
             import oci_nsg as _nsg
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "message": f"nsg import: {e}"}
+        # Skip when the NSG is not fully configured.
         if not all(occfg.get(k) for k in ("nsg_id", "region")):
             return {"status": "SKIPPED", "message": "OCI NSG not configured"}
         # Uses the SAME shared trusted list as Azure (canonically stored under
         # azure_nsg.entries — see the module docstring) — entries are not
         # duplicated per-provider.
         ips = _nsg.entries_to_ips(self._shared_entries())
+        # Optional note about block handling, and the subtraction report.
         block_note = ""
         report = None
+        # With auto-block on, remove blocked IPs from the allowed prefixes.
         if self._cfg.get("auto_block") and self._blocks:
             try:
                 ips, report = _nsg.subtract_blocked(ips, sorted(self._blocks.keys()))
             except Exception as e:  # noqa: BLE001 — never lose the allow push
                 logger.warning("oci allow-list subtraction failed: %s", e)
                 report = None
+            # Too many prefixes needed: skip auto-block and explain why.
             if report and report.get("truncated"):
                 block_note = (
                     f" — auto-block NOT applied: excluding "
@@ -755,9 +834,11 @@ class ThreatMonitor:
                 sec_log.warning("THREAT OCI auto-block skipped (fragmentation): "
                                 "%d block(s) would need %d prefixes",
                                 len(self._blocks), report["projected"])
+            # Otherwise note how many blocked IPs were excluded.
             elif report and report.get("removed"):
                 block_note = (f" — {len(report['removed'])} blocked IP(s) "
                               f"excluded from the allow list")
+        # Push the allow prefixes and report the result.
         try:
             res = await _nsg.reconcile_allowlist(_nsg.get_oci_config(self.hub), occfg, ips)
             sec_log.info("THREAT NSG allow-rule reconciled: %d IP(s) on OCI NSG %s",
@@ -785,15 +866,18 @@ class ThreatMonitor:
         all — even though their trusted list was perfectly syncable. Running
         both and merging the outcomes makes the button meaningful on either
         provider, and honest about which half a given provider supports."""
+        # Run the allow half, then force and run the deny half.
         allow = await self.reconcile_allow()
         self._nsg_dirty = True
         deny = await self.reconcile_nsg()
 
+        # Summarise each half.
         parts = [f"allow list: {allow.get('message') or allow.get('status', '').lower()}",
                  f"blocked IPs: {deny.get('message') or deny.get('status', '').lower()}"]
         # ERROR anywhere dominates; otherwise OK if either half actually pushed.
         if "ERROR" in (allow.get("status"), deny.get("status")):
             status = "ERROR"
+        # Combine the two results into one overall status.
         elif "OK" in (allow.get("status"), deny.get("status")):
             status = "OK"
         else:
@@ -821,9 +905,11 @@ class ThreatMonitor:
         the name actually confirmed pushed, so a burst of rapid renames
         before a reconcile fires still deletes the ORIGINAL live name, not
         an intermediate one that was never actually created in Azure."""
+        # Nothing changed since the last push.
         if not self._nsg_dirty:
             return {"status": "SKIPPED", "message": "no change"}
         self._nsg_dirty = False
+        # Log-only mode never touches the NSG.
         if not self._cfg.get("auto_block"):
             return {"status": "SKIPPED", "message": "auto-block off (log-only)"}
         # Deny rules are an Azure-only capability. If OCI is the active
@@ -835,32 +921,38 @@ class ThreatMonitor:
             _provider = cloud_nsg.active_provider(self.hub)
         except Exception:  # noqa: BLE001
             _provider = None
+        # OCI has no deny rule, so explain and stop.
         if _provider == "oci":
             return {"status": "SKIPPED",
                     "message": "OCI is the active NSG provider — OCI network "
                                "security groups have no deny rule, so blocked "
                                "IPs are enforced by excluding them from the "
                                "allow list instead (see the allow-list result)."}
+        # Import the Azure helpers lazily.
         try:
             import azure_nsg as _nsg
             from security.oidc import get_oidc_config
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "message": f"nsg import: {e}"}
+        # Skip when the Azure NSG is not fully configured.
         gc = self.hub.state.system_state.get("global_config", {}) or {}
         azcfg = dict(gc.get("azure_nsg", {}) or {})
         if not all(azcfg.get(k) for k in ("subscription_id", "resource_group", "nsg_name")):
             return {"status": "SKIPPED",
                     "message": "no cloud NSG provider is configured — blocked "
                                "IPs are logged and enforced in-app only"}
+        # Build the deny-rule config from the Azure settings.
         deny_cfg = dict(azcfg)
         new_name = self._cfg.get("block_rule_name") or "lm-threat-block"
         deny_cfg["rule_name"] = new_name
         deny_cfg["access"] = "Deny"
         deny_cfg["direction"] = "Inbound"
         deny_cfg["priority"] = int(self._cfg.get("block_priority") or 400)
+        # The IPs to block, the previously-pushed rule name and the deny priority.
         ips = sorted(self._blocks.keys())
         old_name = self._nsg_live_rule_name
         block_prio = int(self._cfg.get("block_priority") or 400)
+        # Clear conflicting rules, handle renames, then push the deny rule.
         try:
             # Clear whatever rule currently occupies the deny slot
             # (block_priority + Inbound) under ANY name other than the one we're
@@ -880,6 +972,7 @@ class ThreatMonitor:
                                  cleared, block_prio, new_name)
             except Exception as e:  # noqa: BLE001 — slot-clear is best-effort
                 logger.warning("threat NSG deny-slot clear failed: %s", e)
+            # The rule was renamed: delete the old-named rule first.
             if old_name and old_name != new_name:
                 # Delete is 404-tolerant (reconcile_allowlist treats a missing
                 # rule as already-gone), so this is safe even if the old rule
@@ -889,6 +982,7 @@ class ThreatMonitor:
                 await _nsg.reconcile_allowlist(get_oidc_config(self.hub), old_cfg, [])
                 sec_log.info("THREAT NSG deny-rule renamed: deleted old rule '%s' before creating '%s'",
                              old_name, new_name)
+            # Push the blocked IPs and remember the live rule name.
             res = await _nsg.reconcile_allowlist(get_oidc_config(self.hub), deny_cfg, ips)
             self._nsg_live_rule_name = new_name
             sec_log.info("THREAT NSG deny-rule reconciled: %d IP(s) on %s/%s",
@@ -900,11 +994,15 @@ class ThreatMonitor:
 
     # ── snapshot for the WebUI ─────────────────────────────────────────────────
     def snapshot(self) -> Dict[str, Any]:
+        """Build the Security-view data: config, blocks, trusted list, events, strikes and totals.
+        """
+        # Gather blocks, the trusted list and the NSG settings.
         blocks = list(self._blocks.values())
         trusted = self._shared_entries()  # shared list [{ip, description}]
         gc = self.hub.state.system_state.get("global_config", {}) or {}
         az = gc.get("azure_nsg", {}) or {}
         oc = gc.get("oci_nsg", {}) or {}
+        # Azure allow-rule summary.
         allow_rule = {
             "name": az.get("rule_name") or "lm-allowlist",
             "priority": self.allow_priority(),
@@ -914,11 +1012,13 @@ class ThreatMonitor:
         # CIDR — see oci_nsg.py) so this is deliberately a smaller shape than
         # allow_rule above; additive key, doesn't change any existing field.
         oci_allow = {"enabled": bool(oc.get("enabled")), "nsg_id": oc.get("nsg_id") or ""}
+        # Up to 100 unblocked IPs with strikes, most strikes first.
         limit = int(self._cfg["permanent_after"])
         strikes = sorted(
             ({"ip": ip, "strikes": n, "permanent_after": limit, "at_limit": n >= limit}
              for ip, n in self._offense.items() if n > 0 and ip not in self._blocks),
             key=lambda r: (-r["strikes"], r["ip"]))[:100]
+        # Snapshot payload for the WebUI.
         return {
             "config": self.config(),
             "permanent": [b for b in blocks if b.get("permanent")],
@@ -950,9 +1050,12 @@ class ThreatMonitor:
 
     # ── persistence ─────────────────────────────────────────────────────────────
     def _file(self) -> str:
+        """Path of the JSON file holding saved monitor state."""
         return os.path.join(self.hub.state.data_dir, "threat_monitor.json")
 
     def _persist(self) -> None:
+        """Write config, blocks, strikes, totals and events to disk (best effort)."""
+        # Write the state as JSON; failures are only logged.
         try:
             with open(self._file(), "w", encoding="utf-8") as f:
                 json.dump({"config": self._cfg, "blocks": self._blocks,
@@ -967,6 +1070,8 @@ class ThreatMonitor:
             logger.debug("threat_monitor persist failed: %s", e)
 
     def _load(self) -> None:
+        """Restore saved state from disk, if any."""
+        # Read the saved file and restore known config keys, blocks, strikes and the legacy list.
         try:
             with open(self._file(), encoding="utf-8") as f:
                 data = json.load(f) or {}
@@ -975,6 +1080,7 @@ class ThreatMonitor:
             self._offense = data.get("offense") or {}
             self._never = data.get("never") or []
             _saved_totals = data.get("totals") or {}
+            # Merge saved lifetime counters over the defaults.
             if isinstance(_saved_totals, dict):
                 # Merge over defaults so a counter added in a later version starts
                 # at 0 rather than KeyError-ing, while preserving the running tally.
@@ -982,11 +1088,13 @@ class ThreatMonitor:
                                      if k in self._totals or k == "by_kind"})
                 self._totals.setdefault("by_kind", {})
             _saved_events = data.get("events")
+            # Restore the recent-events feed.
             if isinstance(_saved_events, list):
                 # Rehydrate newest-first into a fresh bounded deque (drops the
                 # oldest if the persisted list somehow exceeds the cap).
                 self._events = deque(_saved_events, maxlen=_EVENTS_MAX)
             self._nsg_dirty = True  # re-push on boot so Azure matches our state
+        # No saved file yet: start fresh.
         except FileNotFoundError:
             pass
         except Exception as e:  # noqa: BLE001

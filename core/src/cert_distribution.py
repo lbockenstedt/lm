@@ -16,10 +16,14 @@ without constructing a LabManagerHub (which pulls in at-rest encryption).
 wrappers that pass ``self.request_response`` / ``self.get_spoke_by_type`` /
 ``self.CERT_CAPABLE_MODULES``.
 """
+# asyncio runs the per-spoke mTLS status checks in parallel.
 import asyncio
+# Standard-library logging.
 import logging
+# Type hints.
 from typing import Any, Callable, Dict, List, Optional, Set
 
+# Strips the request_response envelope from a spoke reply.
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
 
 # Hub-side cert distribution logs to the "le.distribution" logger so they surface
@@ -77,6 +81,7 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
     target must route there, not to a connected-but-agent-less pxmx spoke
     (which would return 'No agent resolved for cert install'). Non-agent-
     hosting types ignore the identifier and resolve by module_type."""
+    # Per-target results returned to the caller.
     summary: List[Dict[str, Any]] = []
     if not targets or not domain:
         # A cert with no targets (or no domain) is a SILENT no-op without this
@@ -85,6 +90,7 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
         logger.info("[cert] %s: no targets configured — nothing to distribute",
                      domain or "<unknown>")
         return summary
+    # Log the start of the run.
     logger.info("[cert] distributing %s to %d target(s)", domain, len(targets))
     # Push the "hub" target LAST. Installing a (non-wildcard) cert on the hub
     # itself (install_on_hub) schedules a full `systemctl restart lm`, which
@@ -97,20 +103,25 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
     # final act of the sweep, so every other target (and its ledger mark)
     # completes first. Stable sort — non-hub relative order is preserved.
     targets = sorted(targets, key=lambda _t: 1 if _t.get("module_type") == "hub" else 0)
+    # Fetch cert material from the le spoke.
     mat = await rr(le_spoke_id, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
     mat_ret = unwrap_spoke(mat)
+    # Without material nothing can be pushed; return one error entry.
     if not (isinstance(mat_ret, dict) and mat_ret.get("status") == "SUCCESS"):
         msg = mat_ret.get("message") if isinstance(mat_ret, dict) else "LE_GET_CERT failed"
         logger.warning("[cert] %s: LE_GET_CERT failed — %s", domain, msg)
         return [{"module_type": None, "identifier": None,
                  "status": "ERROR", "message": msg}]
+    # Pull out the PEM parts and the content hash.
     cert = mat_ret.get("data") or {}
     fullchain = cert.get("fullchain", "")
     privkey = cert.get("privkey", "")
     chain = cert.get("chain", "")
     material_hash = cert.get("material_hash")
 
+    # Handle each target in turn.
     for t in targets:
+        # Target type and identifier, plus a summary entry and a log label.
         mt = t.get("module_type")
         ident = t.get("identifier", "") or ""
         entry: Dict[str, Any] = {"domain": domain, "module_type": mt, "identifier": ident}
@@ -139,6 +150,7 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
             logger.info("[cert] %s → %s: pushing — cert material changed since last push",
                         domain, tgt_label)
 
+        # Not cert-capable: record an error.
         if mt not in capable:
             entry.update(status="ERROR",
                          message=f"module type '{mt}' does not support cert install yet")
@@ -165,6 +177,7 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                                  message=(hret.get("message") if isinstance(hret, dict)
                                           else "hub self-install failed"))
                     logger.warning("[cert] %s → hub: FAILED — %s", domain, entry["message"])
+        # Normal spoke target: find the spoke for this type/identifier.
         else:
             target_sid = get_by_type(mt, ident)
             if not target_sid:
@@ -186,6 +199,7 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                 # statuspage) stay at 120s — the timeout is just the upper
                 # bound, not the time they take.
                 install_timeout = 640.0 if mt in ("hypervisor", "simulation") else 120.0
+                # INSTALL_CERT payload.
                 payload = {
                     "domain": domain, "fullchain": fullchain,
                     "privkey": privkey, "chain": chain, "identifier": ident,
@@ -198,12 +212,14 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                         payload.update(await target_payload(mt, ident, target_sid) or {})
                     except Exception as e:  # noqa: BLE001 — fall back to the spoke default
                         logger.warning("[cert] %s → %s: target payload failed: %s", domain, tgt_label, e)
+                # Send it and unwrap the reply.
                 res = await rr(target_sid, "INSTALL_CERT", payload, timeout=install_timeout)
                 rret = unwrap_spoke(res)
                 # Fleet spokes (nw) return a per-device breakdown — carry it so the
                 # hub can stash it for the drill-down report.
                 if isinstance(rret, dict) and rret.get("devices") is not None:
                     entry["devices"] = rret["devices"]
+                # Record success, deferred or error.
                 if isinstance(rret, dict) and rret.get("status") == "SUCCESS":
                     entry.update(status="SUCCESS",
                                  message=rret.get("message") or "installed")
@@ -221,6 +237,7 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                                           else "INSTALL_CERT failed"))
                     logger.warning("[cert] %s → %s: FAILED — %s", domain, tgt_label, entry["message"])
 
+        # On success, remember the device fingerprint.
         if device_tracker and entry.get("status") == "SUCCESS":
             device_tracker.record(domain, t)
         # Record the push on the le ledger (gates re-pushes + surfaces in UI).
@@ -231,7 +248,9 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                 "message": entry["message"]}, timeout=5.0)
         except Exception as e:
             logger.debug("LE_MARK_DISTRIBUTED failed for %s/%s: %s", domain, mt, e)
+        # Add this target's result.
         summary.append(entry)
+    # Log the overall tally and return.
     ok = sum(1 for s in summary if s.get("status") == "SUCCESS")
     logger.info("[cert] distributed %s: %d/%d target(s) OK", domain, ok, len(summary))
     return summary
@@ -273,7 +292,9 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
     so the fleet can mutually verify once mTLS is enabled. Requires
     ``get_primary_spokes`` + ``push`` (a durable push_or_queue_to_spoke-style
     callable). No-op when disabled."""
+    # Flat result list for the whole sweep.
     aggregate: List[Dict[str, Any]] = []
+    # Ask le for every managed cert.
     res = await rr(le_spoke_id, "LE_LIST_CERTS", {}, timeout=15.0)
     ret = unwrap_spoke(res)
     if not (isinstance(ret, dict) and ret.get("status") == "SUCCESS"):
@@ -294,10 +315,13 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
     # from the full ledger; ledger-derived so it auto-toggles (deploy a unique cert
     # → excluded next run; remove it → wildcard resumes).
     _claimed_ids, _claimed_group_types = _build_claimed_targets(list_data.get("certs") or [])
+    # Handle each cert.
     for cert in list_data.get("certs") or []:
+        # Domain, targets and current material hash.
         domain = cert.get("domain") or ""
         targets = cert.get("targets") or []
         cur_hash = cert.get("material_hash")
+        # Should the wildcard and mTLS fan-outs run for this cert?
         is_wc = wildcard_enabled and _is_wildcard(domain)
         is_mtls = (mtls_auto_provision and _is_wildcard(domain)
                    and get_primary_spokes is not None and push is not None
@@ -321,6 +345,7 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
                                       "status": "SKIPPED",
                                       "message": f"all {len(targets)} target(s) current",
                                       "skipped": True})
+        # Some targets are stale: push to them and tag results with the domain.
         else:
             explicit_summary = await distribute_cert_to_targets(
                 rr, get_by_type, capable, le_spoke_id, domain, targets,
@@ -362,6 +387,7 @@ def _is_wildcard(domain: str) -> bool:
     certbot issues these via a DNS-01 challenge; the resulting cert matches every
     subdomain, so the hub can fan it out to ALL cert-capable spokes without each
     one being an explicit target."""
+    # Leftmost label is "*".
     return bool(domain) and domain.lstrip().startswith("*.")
 
 
@@ -411,10 +437,13 @@ async def distribute_mtls_materials_to_all_spokes(
     Returns a per-target summary (each entry tagged with ``domain`` + ``mtls``
     so the UI can distinguish this flow from a cert push).
     """
+    # Per-target results.
     summary: List[Dict[str, Any]] = []
+    # Only wildcard certs carry the shared mTLS identity.
     if not _is_wildcard(domain):
         return summary
 
+    # Connected primary spokes.
     primary = list(get_primary_spokes() or [])
 
     # Exclude spokes that already hold their OWN unique (non-wildcard) LE cert — a
@@ -426,6 +455,8 @@ async def distribute_mtls_materials_to_all_spokes(
     # distribute_wildcard_to_all_spokes; ledger-derived + recomputed each run, so
     # deploying/removing a unique cert auto-toggles the skip. The caller passes the
     # claim-set; a direct caller that omits it gets a one-shot LE_LIST_CERTS lookup.
+    # Claim set not supplied: look it up. Note `_unwrap` is not defined in this module, so the
+    # resulting NameError is caught below and the claim set falls back to empty.
     if claimed_ids is None or claimed_group_types is None:
         try:
             _res = _unwrap(await rr(le_spoke_id, "LE_LIST_CERTS", {}, timeout=15.0))
@@ -434,6 +465,7 @@ async def distribute_mtls_materials_to_all_spokes(
             claimed_ids, claimed_group_types = _build_claimed_targets(_ld.get("certs") or [])
         except Exception:  # noqa: BLE001 - never block the fan-out on a claim-set lookup
             claimed_ids, claimed_group_types = set(), set()
+    # Drop spokes that hold their own unique cert.
     _excluded = [(sid, mt) for (sid, mt) in primary
                  if sid in claimed_ids or mt in claimed_group_types]
     if _excluded:
@@ -442,7 +474,9 @@ async def distribute_mtls_materials_to_all_spokes(
         primary = [(sid, mt) for (sid, mt) in primary
                    if sid not in claimed_ids and mt not in claimed_group_types]
 
+    # The hub is a target only if a self-install callable was given.
     include_hub = install_on_hub is not None
+    # Nothing to do.
     if not primary and not include_hub:
         logger.info("[mtls] %s: no connected primary spokes — nothing to fan out",
                     domain)
@@ -457,9 +491,11 @@ async def distribute_mtls_materials_to_all_spokes(
         # "to arm verification", flapping the whole fleet. Mirrors the sibling
         # ``distribute_wildcard_to_all_spokes`` key (``f"{domain}|{sid}"``); the
         # ``mtls|`` prefix keeps it disjoint from that flow's INSTALL_CERT stamps.
+        """Push-state key for one target, qualified by domain."""
         return f"{_MTLS_PUSH_PREFIX}|{domain}|{sid}"
 
     def _current(sid: str) -> bool:
+        """Whether this target already has the current material hash."""
         return bool(material_hash) and push_state.get(_key(sid)) == material_hash
 
     # Incident: mipbe-svcs01/02 + RSVBE-LM-AGENT sat "missing materials" in the
@@ -487,6 +523,7 @@ async def distribute_mtls_materials_to_all_spokes(
     _stamped_current = [(sid, mt) for (sid, mt) in primary if _current(sid)]
 
     async def _verify_still_present(sid: str) -> Optional[Dict[str, Any]]:
+        """Ask a spoke for its on-disk mTLS status; None if it doesn't answer properly."""
         try:
             res = await rr(sid, "SPOKE_GET_MTLS_STATUS", {}, timeout=4.0)
         except Exception:  # noqa: BLE001 - no reply == unreachable, NOT "missing"
@@ -496,6 +533,7 @@ async def distribute_mtls_materials_to_all_spokes(
             return d["mtls"]
         return None  # malformed/failed reply — treat like no answer, never like "missing"
 
+    # Clear stamps that the spoke's own report contradicts.
     if _stamped_current:
         _verify_results = await asyncio.gather(
             *[_verify_still_present(sid) for sid, _mt in _stamped_current])
@@ -511,9 +549,11 @@ async def distribute_mtls_materials_to_all_spokes(
                     mstat.get("client_cert_present"), mstat.get("client_key_present"))
                 push_state.pop(_key(sid), None)
 
+    # Targets still needing a push, and whether the hub is current.
     stale_spokes = [(sid, mt) for (sid, mt) in primary if not _current(sid)]
     hub_current = (not include_hub) or (bool(material_hash)
                                         and push_state.get(_key("hub")) == material_hash)
+    # Everything current: return one skipped entry.
     if not stale_spokes and hub_current:
         logger.info("[mtls] %s: all %d target(s) current — skipping",
                     domain, len(primary) + (1 if include_hub else 0))
@@ -530,12 +570,14 @@ async def distribute_mtls_materials_to_all_spokes(
         logger.warning("[mtls] %s: LE_GET_CERT failed — %s", domain, msg)
         return [{"domain": domain, "module_type": None, "identifier": None,
                  "status": "ERROR", "message": msg, "mtls": True}]
+    # Pull out the PEM parts and hash.
     cert = mat_ret.get("data") or {}
     fullchain = cert.get("fullchain", "")
     privkey = cert.get("privkey", "")
     chain = cert.get("chain", "")
     cur_hash = material_hash or cert.get("material_hash")
 
+    # All three parts are needed.
     if not fullchain or not privkey or not chain:
         logger.warning("[mtls] %s: LE_GET_CERT returned incomplete material "
                        "(fullchain/privkey/chain) — cannot provision mTLS", domain)
@@ -544,18 +586,22 @@ async def distribute_mtls_materials_to_all_spokes(
                  "message": "incomplete cert material (need fullchain+privkey+chain)",
                  "mtls": True}]
 
+    # Log the fan-out.
     logger.info("[mtls] %s: fanning out mTLS materials to %d primary spoke(s)%s",
                 domain, len(stale_spokes),
                 " + hub" if (include_hub and not hub_current) else "")
 
+    # Same payload for every spoke: chain as CA, wildcard as client cert/key.
     payload = {"ca_bundle": chain, "client_cert": fullchain, "client_key": privkey}
 
+    # Push to each stale spoke.
     for sid, mt in stale_spokes:
         entry = {"domain": domain, "module_type": mt, "identifier": sid, "mtls": True}
         # Durable push: an offline spoke is queued (mailbox) and provisioned on
         # reconnect instead of orphaned. 120s upper bound for the live path; a
         # queued push returns immediately.
         res = await push(sid, "SPOKE_SET_MTLS_MATERIALS", payload, timeout=120.0)
+        # Was it queued (spoke offline)? Unwrap the live reply if any.
         queued = bool(isinstance(res, dict) and res.get("queued"))
         rret = res.get("result") if isinstance(res, dict) else None
         rret = unwrap_spoke(rret) if rret is not None else {}
@@ -570,6 +616,7 @@ async def distribute_mtls_materials_to_all_spokes(
                          queued=True)
             logger.info("[mtls] %s → %s/%s: queued (offline) — delivers on reconnect",
                         domain, mt, sid)
+        # Installed: stamp the hash.
         elif isinstance(rret, dict) and rret.get("status") == "SUCCESS":
             entry.update(status="SUCCESS",
                          message=(rret.get("message") or "installed"),
@@ -578,6 +625,7 @@ async def distribute_mtls_materials_to_all_spokes(
                 push_state[_key(sid)] = cur_hash
             logger.info("[mtls] %s → %s/%s: installed — %s",
                         domain, mt, sid, entry["message"])
+        # Failed.
         else:
             msg = (rret.get("message") if isinstance(rret, dict)
                    else (res.get("message") if isinstance(res, dict) else "push failed"))
@@ -607,6 +655,7 @@ async def distribute_mtls_materials_to_all_spokes(
             logger.warning("[mtls] %s → hub: FAILED — %s", domain, hentry["message"])
         summary.append(hentry)
 
+    # Log the tally and return.
     ok = sum(1 for s in summary if s.get("status") == "SUCCESS")
     logger.info("[mtls] %s: fanned out mTLS materials %d/%d target(s) OK",
                 domain, ok, len(summary))
@@ -622,11 +671,14 @@ def _build_claimed_targets(certs: List[Dict[str, Any]]):
     = module_types a non-wildcard cert claims wholesale (empty identifier = the
     ‘all nodes of this type’ target). A WILDCARD cert's own targets are ignored
     (it doesn't claim anything against itself)."""
+    # Sets of claimed identifiers and claimed whole types.
     claimed_ids: Set[str] = set()
     claimed_group_types: Set[str] = set()
+    # Only non-wildcard certs claim targets.
     for cert in certs or []:
         if _is_wildcard(cert.get("domain") or ""):
             continue
+        # An identifier claims one node; no identifier claims every node of the type.
         for t in cert.get("targets") or []:
             mt = (t.get("module_type") or "").strip()
             ident = (t.get("identifier") or "").strip()
@@ -664,7 +716,9 @@ async def distribute_wildcard_to_all_spokes(
     Returns a per-target summary (each entry tagged with ``domain`` + ``wildcard``
     so the UI toast can distinguish wildcard fan-out from explicit-target pushes).
     """
+    # Per-target results.
     summary: List[Dict[str, Any]] = []
+    # Only wildcard certs are fanned out.
     if not _is_wildcard(domain):
         return summary
 
@@ -687,6 +741,8 @@ async def distribute_wildcard_to_all_spokes(
     # pushes skip it; removing that cert re-enables the wildcard. The caller
     # (distribute_all_certs) passes the claim-set; a direct caller that omits it
     # gets a one-shot LE_LIST_CERTS lookup here.
+    # Claim set not supplied: look it up. Note `_unwrap` is not defined in this module, so the
+    # resulting NameError is caught below and the claim set falls back to empty.
     if claimed_ids is None or claimed_group_types is None:
         try:
             _res = _unwrap(await rr(le_spoke_id, "LE_LIST_CERTS", {}, timeout=15.0))
@@ -695,6 +751,7 @@ async def distribute_wildcard_to_all_spokes(
             claimed_ids, claimed_group_types = _build_claimed_targets(_ld.get("certs") or [])
         except Exception:  # noqa: BLE001 - never block the fan-out on a claim-set lookup
             claimed_ids, claimed_group_types = set(), set()
+    # Drop spokes that hold their own unique cert.
     _excluded = [t for t in spoke_targets
                  if t["spoke_id"] in claimed_ids or t["module_type"] in claimed_group_types]
     if _excluded:
@@ -710,6 +767,7 @@ async def distribute_wildcard_to_all_spokes(
     # CA-only path in distribute_mtls_materials_to_all_spokes.
     include_hub = False
 
+    # Nothing to do.
     if not spoke_targets and not include_hub:
         logger.info("[cert] wildcard %s: no connected cert-capable spokes — nothing to fan out", domain)
         return summary
@@ -717,11 +775,14 @@ async def distribute_wildcard_to_all_spokes(
     # Skip check against hub-side push-state. material_hash may be None (issue
     # path) → treat as "stale" so we pull + push (issue is rare + the cert is fresh).
     def _current(sid: str) -> bool:
+        """Whether this spoke already has the current material hash."""
         return bool(material_hash) and push_state.get(f"{domain}|{sid}") == material_hash
 
+    # Targets still needing a push, and whether the hub is current.
     stale_spokes = [t for t in spoke_targets if not _current(t["spoke_id"])]
     hub_current = (not include_hub) or (bool(material_hash)
                                         and push_state.get(f"{domain}|hub") == material_hash)
+    # Everything current: return one skipped entry.
     if not stale_spokes and hub_current:
         logger.info("[cert] wildcard %s: all %d target(s) current — skipping",
                      domain, len(spoke_targets) + (1 if include_hub else 0))
@@ -739,15 +800,18 @@ async def distribute_wildcard_to_all_spokes(
         logger.warning("[cert] wildcard %s: LE_GET_CERT failed — %s", domain, msg)
         return [{"domain": domain, "module_type": None, "identifier": None,
                  "status": "ERROR", "message": msg, "wildcard": True}]
+    # Pull out the PEM parts and hash.
     cert = mat_ret.get("data") or {}
     fullchain = cert.get("fullchain", "")
     privkey = cert.get("privkey", "")
     chain = cert.get("chain", "")
     cur_hash = material_hash or cert.get("material_hash")
 
+    # Log the fan-out.
     logger.info("[cert] wildcard %s: fanning out to %d spoke(s)%s",
                 domain, len(stale_spokes), " + hub" if (include_hub and not hub_current) else "")
 
+    # Push to each stale spoke.
     for t in stale_spokes:
         sid = t["spoke_id"]; mt = t["module_type"]
         entry = {"domain": domain, "module_type": mt, "identifier": sid, "wildcard": True}
@@ -763,9 +827,11 @@ async def distribute_wildcard_to_all_spokes(
             "domain": domain, "fullchain": fullchain, "privkey": privkey,
             "chain": chain, "identifier": sid, "module_type": mt,
         }, timeout=install_timeout)
+        # Unwrap the reply; keep any per-device breakdown.
         rret = unwrap_spoke(res)
         if isinstance(rret, dict) and rret.get("devices") is not None:
             entry["devices"] = rret["devices"]
+        # Installed: stamp the hash.
         if isinstance(rret, dict) and rret.get("status") == "SUCCESS":
             entry.update(status="SUCCESS", message=rret.get("message") or "installed")
             if cur_hash:
@@ -779,6 +845,7 @@ async def distribute_wildcard_to_all_spokes(
                          message=rret.get("message") or "deferred — target offline, retries on reconnect")
             logger.info("[cert] wildcard %s → %s/%s: deferred — %s",
                         domain, mt, sid, entry["message"])
+        # Failed.
         else:
             entry.update(status="ERROR",
                          message=(rret.get("message") if isinstance(rret, dict)
@@ -793,6 +860,7 @@ async def distribute_wildcard_to_all_spokes(
                 "message": entry["message"], "wildcard": True}, timeout=5.0)
         except Exception as e:
             logger.debug("LE_MARK_DISTRIBUTED failed for wildcard %s/%s: %s", domain, sid, e)
+        # Add this target's result.
         summary.append(entry)
 
     # Hub self-install (one TLS endpoint; identifier "hub").
@@ -821,6 +889,7 @@ async def distribute_wildcard_to_all_spokes(
             logger.debug("LE_MARK_DISTRIBUTED failed for wildcard %s/hub: %s", domain, e)
         summary.append(hentry)
 
+    # Log the tally and return.
     ok = sum(1 for s in summary if s.get("status") == "SUCCESS")
     logger.info("[cert] wildcard %s: fanned out %d/%d target(s) OK",
                 domain, ok, len(summary))
@@ -856,8 +925,11 @@ def build_available_targets(spoke_module_types: Dict[str, str],
     agent-hosting spoke with ZERO agents emits NO entry (it has no device to
     install a cert on — the "no device added" case). The hub itself is always
     installed, so a ``hub`` self-install entry is always present."""
+    # Types whose devices are pxmx agents.
     agent_hosting = {"hypervisor", "simulation"}
+    # Display names (guard against a bad value).
     names = module_names if isinstance(module_names, dict) else {}
+    # Result list.
     targets: List[Dict[str, Any]] = []
     # The hub is always installed — its self-install target (install_on_hub in
     # distribute_cert_to_targets) is always selectable. No spoke advertises
@@ -873,6 +945,7 @@ def build_available_targets(spoke_module_types: Dict[str, str],
     # spoke display name is appended to disambiguate (mirrors the agent-hosting
     # "all nodes (<spoke>)" multi-spoke suffix).
     _friendly = {"nw": "Network Devices"}
+    # Count connected spokes per cert-capable type, to know when to add a name suffix.
     _type_counts = {}
     for _sid, _mt in spoke_module_types.items():
         if _sid in active_connections and _mt in capable and _mt not in agent_hosting:
@@ -883,6 +956,7 @@ def build_available_targets(spoke_module_types: Dict[str, str],
             continue
         if mt not in capable or mt in agent_hosting:
             continue
+        # Label: friendly name for nw, else "type — name".
         name = names.get(sid, sid) or sid
         if mt in _friendly:
             label = (_friendly[mt] if _type_counts.get(mt, 0) <= 1
@@ -905,9 +979,11 @@ def build_available_targets(spoke_module_types: Dict[str, str],
     # non-simulation pxmx agent has no client_simulation tenant pin to fall back
     # on, so without this it would drop out of a tenant-admin's target list.
     for a in agents or []:
+        # Skip agents whose spoke type can't install certs.
         mt = spoke_module_types.get(a.get("spoke_id"))
         if mt not in capable:
             continue
+        # Label from display name, then hostname, then id.
         aid = a.get("agent_id") or ""
         dn = a.get("display_name")
         label = (dn if dn and dn != aid else None) or a.get("hostname") or aid
@@ -927,6 +1003,7 @@ def build_available_targets(spoke_module_types: Dict[str, str],
         if (_sid in active_connections and _mt in capable and _mt in agent_hosting
                 and _sid in agent_spoke_ids):
             _by_type.setdefault(_mt, []).append(_sid)
+    # One "all nodes" entry per spoke; name suffix only if the type has several.
     for mt, sids in _by_type.items():
         multi = len(sids) > 1
         for sid in sids:
@@ -962,6 +1039,7 @@ def build_available_targets(spoke_module_types: Dict[str, str],
         nm = names.get(sid, sid) or sid
         targets.append({"module_type": "zabbix-server", "identifier": sid,
                         "label": f"Monitoring Server (Zabbix UI) — {nm}", "spoke_id": sid})
+    # Return the full list.
     return targets
 
 
@@ -1002,12 +1080,16 @@ def target_owner_tenant(target, spoke_tenant, agent_spoke, agent_tenant=None):
     ``agent_tenant``: optional callable ``agent_id -> tenant_id`` (the node's own
         pinned/effective tenant, "" if none/unknown). Applied only to per-node
         agent-hosting targets."""
+    # Not a dict: no tenant.
     if not isinstance(target, dict):
         return ""
+    # The hub target is shared infrastructure.
     mt = (target.get("module_type") or "").strip()
     if mt == "hub":
         return ""
+    # Explicit spoke id, if stamped.
     spoke_id = (target.get("spoke_id") or "").strip()
+    # Agent-hosting types: per-node or "all nodes".
     if mt in ("hypervisor", "simulation"):
         # A non-empty agent id/identifier ⇒ a per-node agent target; an empty one
         # with a spoke_id ⇒ the "all nodes" broadcast (spoke-level).
@@ -1022,6 +1104,7 @@ def target_owner_tenant(target, spoke_tenant, agent_spoke, agent_tenant=None):
         return (spoke_tenant(spoke_id) or "").strip() if spoke_id else ""
     # Non-agent-hosting spoke-level target: identifier IS the spoke_id when the
     # explicit spoke_id isn't set.
+    # Other types: the identifier is the spoke id.
     sid = spoke_id or str(target.get("identifier") or "").strip()
     if not sid:
         return ""
@@ -1040,18 +1123,23 @@ class TargetDeviceTracker:
 
     def __init__(self, device_key: Callable, store: Dict[str, str],
                  on_change: Optional[Callable] = None):
+        """Store the fingerprint function, the persisted store and the change callback."""
         self._key = device_key
         self._store = store
         self._on_change = on_change
 
     @staticmethod
     def _k(domain: str, t: Dict[str, Any]) -> str:
+        """Store key for one target."""
         return f"{domain}|{t.get('module_type')}|{t.get('identifier') or ''}"
 
     def changed(self, domain: str, t: Dict[str, Any]) -> bool:
+        """True if the device behind the target changed since the last recorded push."""
+        # Current fingerprint; None means not tracked.
         cur = self._key(t.get("module_type"), t.get("identifier") or "")
         if cur is None:
             return False
+        # First sighting: record a baseline and report no change.
         k = self._k(domain, t)
         prev = self._store.get(k)
         if prev is None:
@@ -1059,12 +1147,16 @@ class TargetDeviceTracker:
             if self._on_change:
                 self._on_change()
             return False
+        # Changed if the fingerprint differs.
         return prev != cur
 
     def record(self, domain: str, t: Dict[str, Any]) -> None:
+        """Remember the target's current device fingerprint after a successful push."""
+        # Current fingerprint; None means not tracked.
         cur = self._key(t.get("module_type"), t.get("identifier") or "")
         if cur is None:
             return
+        # Save it if it differs and report the change.
         k = self._k(domain, t)
         if self._store.get(k) != cur:
             self._store[k] = cur

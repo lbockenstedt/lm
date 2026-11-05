@@ -29,15 +29,19 @@ Audience: Hub developers.
 
 from __future__ import annotations
 
+# asyncio; datetime for timestamps; logging; type hints.
 import asyncio
 import datetime as _dt
 import logging
 from typing import Any, Dict, List, Optional
 
+# Shared schedule and loop helpers.
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
+# Unwrap spoke replies.
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
 
+# Log to the hub's logger.
 logger = logging.getLogger("Hub")
 
 
@@ -52,8 +56,10 @@ def _dedupe_by_cluster_vmid(raw_vms: List[Dict[str, Any]]) -> List[Dict[str, Any
     (highest ``telemetry_ts``; first seen wins a tie) per (cluster, vmid).
     Rows without a cluster or vmid are kept as-is.
     """
+    # Freshest row per (cluster, vmid), plus rows without either.
     best: Dict[tuple, Dict[str, Any]] = {}
     out: List[Dict[str, Any]] = []
+    # Rows missing cluster or vmid pass through.
     for vm in raw_vms or []:
         vm = vm or {}
         cluster = str(vm.get("cluster") or "").strip()
@@ -61,10 +67,12 @@ def _dedupe_by_cluster_vmid(raw_vms: List[Dict[str, Any]]) -> List[Dict[str, Any
         if not cluster or not vmid:
             out.append(vm)
             continue
+        # Keep the row with the newest telemetry_ts.
         key = (cluster, vmid)
         cur = best.get(key)
         if cur is None or (vm.get("telemetry_ts") or 0) > (cur.get("telemetry_ts") or 0):
             best[key] = vm
+    # Pass-through rows, then the deduplicated ones.
     return out + list(best.values())
 
 
@@ -121,11 +129,13 @@ class VmSyncMixin:
 
     def _vm_sync_cfg(self) -> Dict[str, Any]:
         """Read the sync config fresh (enabled/source/mode/interval/daily_time)."""
+        # The config block from global_config, or {}.
         return (self.state.system_state.get("global_config", {})
                 .get(self._VM_SYNC_CFG_KEY, {})) or {}
 
     def _vm_sync_source(self) -> Dict[str, str]:
         """Resolve the configured hypervisor source registry entry (falls back to Proxmox)."""
+        # Configured source name, falling back to proxmox.
         name = str(self._vm_sync_cfg().get("source", "proxmox")).strip().lower()
         return self.HYPERVISOR_SOURCES.get(name) or self.HYPERVISOR_SOURCES["proxmox"]
 
@@ -135,6 +145,7 @@ class VmSyncMixin:
         ``global_config.source_of_truth.vm_sync``. An unknown/blank value falls
         back to the default so a config typo never sends a garbage owner to the
         spoke."""
+        # Configured owner, normalised; anything unknown means external.
         raw = str((self.state.system_state.get("global_config", {}) or {})
                  .get("source_of_truth", {}).get("vm_sync", "external")
                  ).strip().lower()
@@ -142,6 +153,7 @@ class VmSyncMixin:
 
     def _vm_sync_tenants(self) -> List[str]:
         """Tenant ids bound to the configured hypervisor source (have its scope field set)."""
+        # Tenants whose config sets the source's scope field.
         out: List[str] = []
         se = self._vm_sync_source()
         field = se.get("tenant_scope_field", "")
@@ -158,6 +170,7 @@ class VmSyncMixin:
         per-tenant scope value; otherwise the trigger falls back to the acting
         user's tenant.
         """
+        # Scope field and the lowercase value; either missing gives None.
         se = self._vm_sync_source()
         field = se.get("tenant_scope_field", "")
         val = str(scope_value or "").strip().lower()
@@ -166,6 +179,7 @@ class VmSyncMixin:
         # Case-insensitive: Proxmox tags are free-form, so a VM carrying the
         # tenant's proxmox_tag in a different case must still attribute to it
         # (mirrors the spoke's tag_filter lowercasing in PXMX_LIST_VMS).
+        # First tenant whose scope value matches.
         tenants = (self.state.tenant_state or {}).get("tenants", {}) or {}
         for tid, cfg in tenants.items():
             if str((cfg or {}).get(field) or "").strip().lower() == val:
@@ -184,8 +198,10 @@ class VmSyncMixin:
         first); ``netbox_tenant_slug`` / ``name`` only fill keys no proxmox_tag
         has claimed. Returns ``(tag_to_tid, tid_to_cfg)``.
         """
+        # Two maps, filled in two passes.
         tag_to_tid: Dict[str, str] = {}
         tid_to_cfg: Dict[str, Dict[str, Any]] = {}
+        # Pass 1: proxmox_tag values, which take priority.
         for tid, cfg in (tenants or {}).items():
             cfg = cfg or {}
             tid_s = str(tid)
@@ -193,6 +209,7 @@ class VmSyncMixin:
             tag = str(cfg.get("proxmox_tag") or "").strip().lower()
             if tag:
                 tag_to_tid[tag] = tid_s
+        # Pass 2: slug and name, only where no tag already claimed the key.
         for tid, cfg in (tenants or {}).items():
             cfg = cfg or {}
             tid_s = str(tid)
@@ -215,14 +232,17 @@ class VmSyncMixin:
         so a VM labeled with the tenant name still lands on the right NetBox
         tenant. No match → (None, None) (NetBox creates the VM unassigned).
         """
+        # First tag that maps to a tenant.
         tid: Optional[str] = None
         for t in (tags or []):
             key = str(t or "").strip().lower()
             if key and key in tag_to_tid:
                 tid = tag_to_tid[key]
                 break
+        # No match: unassigned.
         if not tid:
             return None, None
+        # Tenant slug, or its name when no slug is set.
         cfg = tid_to_cfg.get(tid) or {}
         tslug = str(cfg.get("netbox_tenant_slug") or "").strip() or None
         if tslug is None:
@@ -254,11 +274,13 @@ class VmSyncMixin:
         best-effort: a hypervisor/netbox outage yields an error result, never
         an unhandled exception (the background loop depends on this).
         """
+        # Timestamp, source, label, and both spokes.
         now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         se = self._vm_sync_source()
         label = se.get('label', 'Hypervisor')
         hyp = self.get_spoke_by_type(se.get("module_type", "hypervisor"))
         netbox = self.get_spoke_by_type(self._VM_SYNC_TARGET_MODULE)
+        # Either spoke missing: return an error.
         if not hyp or not netbox:
             logger.info("vm sync ALL SKIP: %s or NetBox spoke not connected "
                         "(hyp=%r netbox=%r)", label, bool(hyp), bool(netbox))
@@ -269,6 +291,7 @@ class VmSyncMixin:
 
         # Tag → tenant attribution map (lowercased tag → tid): a VM label may be
         # the tenant's proxmox_tag, NetBox slug, or display name (case-insensitive).
+        # Build the tag-to-tenant maps.
         tenants = (self.state.tenant_state or {}).get("tenants", {}) or {}
         tag_to_tid, tid_to_cfg = self._vm_sync_tag_to_tid(tenants)
 
@@ -278,6 +301,8 @@ class VmSyncMixin:
         # deleted every other cluster's VMs from NetBox, and which spoke came
         # "first" changed with reconnects — the inventory flapped 213 <-> 25.
         list_payload: Dict[str, Any] = {}
+        # A configured agent_id narrows the pull to that agent's spoke; otherwise use every
+        # hypervisor spoke.
         agent_id = str(self._vm_sync_cfg().get("agent_id") or "").strip()
         if agent_id:
             list_payload["agent_id"] = agent_id
@@ -285,7 +310,9 @@ class VmSyncMixin:
         else:
             spokes = self.get_all_spokes_by_type(
                 se.get("module_type", "hypervisor")) or [hyp]
+        # Spokes that did not answer.
         failed: List[str] = []
+        # Aggregate the VM lists; total failure returns an error.
         try:
             from routes.pxmx import _aggregate_pxmx_vms
             data = await _aggregate_pxmx_vms(self, spokes, list_payload,
@@ -297,6 +324,7 @@ class VmSyncMixin:
             return {"status": "error", "pushed": 0, "errors": 0, "skipped": 0,
                     "deleted": 0, "vms_total": 0, "per_tenant": {},
                     "results": [], "message": f"{label}: {e}"}
+        # One row per cluster VM.
         raw_vms = _dedupe_by_cluster_vmid(raw_vms)
         # Replace-delete is only safe on a COMPLETE inventory: if any spoke
         # failed to answer, its VMs are missing from this batch and would be
@@ -309,14 +337,17 @@ class VmSyncMixin:
 
         # Attribute + normalize each VM. tagged → that tenant's netbox slug;
         # untagged/no-match → tenant_slug None (NetBox creates it unassigned).
+        # Normalised VMs and per-tenant counts.
         vms: List[Dict[str, Any]] = []
         attr_counts: Dict[str, int] = {}  # tid | __unassigned__ → VMs attributed
         UNASSIGNED = self._VM_SYNC_UNASSIGNED_KEY
+        # Normalise each VM with a unique_id.
         for vm in raw_vms:
             vm = vm or {}
             uid = str(vm.get("unique_id") or "").strip()
             if not uid:
                 continue  # nothing to match in NetBox by
+            # Resolve its tenant from tags.
             tags = vm.get("tags") or []
             tid, tslug = self._vm_sync_resolve_tenant(tags, tag_to_tid, tid_to_cfg)
             # Normalise ips (string or {address}/{ip} dict) → bare address list.
@@ -328,6 +359,7 @@ class VmSyncMixin:
                     s = str(ip or "").split("/")[0].strip()
                 if s:
                     ip_list.append(s)
+            # Memory in bytes.
             mem_bytes = int(vm.get("mem_bytes") or 0)
             # Per-interface network records from the pxmx agent (QGA/LXC
             # hardware-address + guest IPs, with a qm/pct config MAC fallback).
@@ -343,6 +375,7 @@ class VmSyncMixin:
                     "ips":  [str(x).split("/")[0].strip()
                              for x in (ifc.get("ips") or []) if str(x or "").strip()],
                 })
+            # NetBox VM record.
             vms.append({
                 "unique_id": uid,
                 "name":      str(vm.get("name") or "").strip(),
@@ -359,18 +392,22 @@ class VmSyncMixin:
                 "tags":      tags,
                 "tenant_slug": tslug,
             })
+            # Count it under its tenant or unassigned.
             bkey = tid or UNASSIGNED
             attr_counts[bkey] = attr_counts.get(bkey, 0) + 1
 
         # Source of truth for VMs: "external" (Proxmox owns → overwrite) or
         # "netbox" (NetBox owns → only-add-missing). Default external (Proxmox).
         sot = self._vm_sync_sot()
+        # Push payload.
         payload = {"source": se.get("label", "Hypervisor"),
                    "replace": replace, "vms": vms,
                    "source_of_truth": sot}
+        # Push to NetBox; an exception returns an error.
         try:
             rr = await self.request_response(netbox, self._VM_SYNC_PUSH_COMMAND,
                                              payload, timeout=180.0)
+            # Unwrap the reply and read its counters.
             rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
             pushed = int((rd or {}).get("pushed", len(vms)) or 0)
@@ -385,6 +422,7 @@ class VmSyncMixin:
                     "deleted": 0, "vms_total": len(vms), "per_tenant": {},
                     "results": [], "message": str(e)}
 
+        # Overall outcome.
         overall = "success" if rstatus != "ERROR" else "error"
 
         # Per-tenant status rows. Every bound tenant (has a proxmox_tag) gets a
@@ -394,11 +432,15 @@ class VmSyncMixin:
 
         def _row(key: str, tid: str, name: str, total: int,
                  note: str = "") -> Dict[str, Any]:
+            """Return the status row for tenant tid, using NetBox's per-tenant counters under key."""
+            # NetBox counters for this key, and the message.
             b = per_tenant.get(key, {}) or {}
             msg = message or (f"{total} VM(s) sent"
                               if overall != "error" else "NetBox error")
+            # Append any note.
             if note:
                 msg = f"{msg} — {note}" if msg else note
+            # Status row.
             return {"tenant_id": tid, "tenant_name": name, "status": overall,
                     "pushed": int(b.get("pushed", 0) or 0),
                     "errors": int(b.get("errors", 0) or 0),
@@ -406,12 +448,16 @@ class VmSyncMixin:
                     "deleted": int(b.get("deleted", 0) or 0),
                     "message": msg, "last_sync_ts": now, "vms_total": total}
 
+        # A row for each bound tenant, saved to the store.
         for tid, cfg in tid_to_cfg.items():
+            # Skip tenants without a proxmox_tag.
             cfg = cfg or {}
             if not str(cfg.get("proxmox_tag") or "").strip():
                 continue  # not bound → no row (the scheduled loop ignores these too)
+            # Slug and display name.
             slug = str(cfg.get("netbox_tenant_slug") or "").strip()
             name = cfg.get("name") or tid
+            # Has a slug: use its NetBox counters.
             if slug:
                 st = _row(slug, tid, name, int(per_tenant.get(slug, {}).get("vms_total", 0) or 0))
             else:
@@ -419,10 +465,12 @@ class VmSyncMixin:
                 # VMs as unassigned. Surface the count we attributed honestly.
                 st = _row(UNASSIGNED, tid, name, attr_counts.get(tid, 0),
                           note="no NetBox tenant slug; VMs synced as unassigned")
+            # Record and persist the row.
             results.append(st)
             await self.simulations_store.set_vm_sync_status(tid, st)
 
         # Unassigned bucket (untagged VMs + tenants-without-slug) — synthetic row.
+        # Unassigned row when there are such VMs.
         un_total = int(per_tenant.get(UNASSIGNED, {}).get("vms_total", 0) or 0)
         if un_total or attr_counts.get(UNASSIGNED):
             st = _row(UNASSIGNED, UNASSIGNED, "Unassigned (no tenant tag)", un_total)
@@ -432,6 +480,7 @@ class VmSyncMixin:
         # Hub-authoritative sync log: clean run → INFO; any errors/failure →
         # [sync-error] WARNING carrying the sink's message (first-error text) so
         # the cause lands in the hub log + GET_ERROR_LOGS (ab).
+        # Errors go to the error-log feed; a clean run logs at info.
         if errors > 0 or overall == "error":
             logger.warning("[sync-error] vm-sync result status=%s sent=%d pushed=%d "
                            "skipped=%d deleted=%d errors=%d rows=%d — %s",
@@ -446,8 +495,10 @@ class VmSyncMixin:
         # + re-fetch the netbox_devices tenant cache so a non-admin viewer sees
         # new/removed/re-tagged VM-backed devices immediately. Only when the
         # sync actually touched NetBox (pushed or deleted > 0). Best-effort.
+        # Refresh the device cache if NetBox changed.
         if pushed > 0 or deleted > 0:
             self.refresh_module_cache("netbox_devices")
+        # Overall result.
         return {"status": overall, "pushed": pushed, "errors": errors,
                 "skipped": skipped, "deleted": deleted, "vms_total": len(vms),
                 "per_tenant": per_tenant, "results": results,
@@ -463,6 +514,7 @@ class VmSyncMixin:
         pxmx-edit trigger. A blank ``tenant_id`` returns the unassigned row.
         Every bound tenant's status is refreshed each call (one pull, one push).
         """
+        # Sync everything, then find this tenant's row.
         agg = await self.sync_all_vms()
         tid = tenant_id or self._VM_SYNC_UNASSIGNED_KEY
         for st in agg.get("results", []):
@@ -470,6 +522,7 @@ class VmSyncMixin:
                 return st
         # Tenant not in the results (not bound / no matched VMs) — synthesize a
         # row so the caller gets a well-formed status dict either way.
+        # Not found: build a row.
         cfg = self.state.get_tenant(tid) or {}
         msg = ("no VMs matched tenant tag"
                if tid != self._VM_SYNC_UNASSIGNED_KEY
@@ -493,12 +546,14 @@ class VmSyncMixin:
         no running loop. A blank tenant_id (e.g. a superadmin with no tenant)
         is a no-op — the scheduled loop covers unbound/global tenants.
         """
+        # No tenant, sync disabled, or no NetBox spoke: do nothing.
         if not tenant_id:
             return
         if not self._vm_sync_cfg().get("enabled", False):
             return
         if not self.get_spoke_by_type(self._VM_SYNC_TARGET_MODULE):
             return
+        # Start the sync in the background; no loop means skip.
         try:
             asyncio.create_task(self.sync_tenant_vms(tenant_id))
         except RuntimeError:
@@ -517,6 +572,8 @@ class VmSyncMixin:
         syncs don't simultaneous-fire on startup.
         """
         def _guard() -> bool:
+            """Return True when enabled and both the hypervisor and NetBox spokes are connected."""
+            # Config and source, then all three conditions.
             cfg = self._vm_sync_cfg()
             se = self._vm_sync_source()
             return bool(cfg.get("enabled", False)
@@ -524,15 +581,20 @@ class VmSyncMixin:
                         and self.get_spoke_by_type(self._VM_SYNC_TARGET_MODULE))
 
         async def _body():
+            """Run one full VM sync, logging any error that escapes."""
+            # Errors are logged so the loop keeps going.
             try:
                 await self.sync_all_vms()
             except Exception as e:  # sync_all_vms already swallows; never let one cycle kill the loop
                 logger.warning("[sync-error] vm-sync loop cycle failed: %s", e)
 
         def _delay() -> float:
+            """Return seconds until the next cycle: 60 while disabled, else per the schedule."""
+            # Disabled: re-check in a minute.
             cfg = self._vm_sync_cfg()
             if not cfg.get("enabled", False):
                 return 60
+            # Enabled: daily or interval schedule.
             return next_schedule_delay(cfg, default_daily_time="03:00",
                                        log_name="vm sync")
 

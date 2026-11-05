@@ -10,30 +10,40 @@ Under ``/setup/`` so the access-control middleware admin-gates it.
 """
 from __future__ import annotations
 
+# Shared Hub helpers: HTTP error type, request and logger.
 from api import HTTPException, Request, logger
 
+# The saved settings and their defaults (off; thresholds in seconds; max_runs is a count).
 _FIELDS = ("enabled", "service_s", "reboot_s", "reboot_grace_s", "sleep_s", "max_runs")
 _DEFAULTS = {"enabled": False, "service_s": 300, "reboot_s": 900,
              "reboot_grace_s": 300, "sleep_s": 3600, "max_runs": 3}
 
 
 def register(app, hub, ctx):
+    """Register the hub-contact watchdog routes on ``app``."""
     def _cfg() -> dict:
+        """Return the saved watchdog settings filled in with defaults."""
         c = dict(_DEFAULTS)
         c.update((hub.state.get_global_config().get("hub_contact_watchdog") or {}))
         return c
 
+    # Read the watchdog settings.
     @app.get("/setup/hub-watchdog")
     async def get_hub_watchdog():
+        """Return the current watchdog settings."""
         return {"config": _cfg()}
 
+    # Change the watchdog settings.
     @app.post("/setup/hub-watchdog")
     async def set_hub_watchdog(request: Request):
+        """Save new watchdog settings and push them to every spoke."""
+        # Read the JSON body (defaulting to {}); settings may be under "config".
         try:
             body = await request.json()
         except Exception:
             body = {}
         incoming = (body or {}).get("config", body) or {}
+        # Start from the current settings and apply the changes.
         cur = _cfg()
         cur["enabled"] = bool(incoming.get("enabled", cur["enabled"]))
         # reboot_s must exceed service_s (reboot is the escalation AFTER the restart)
@@ -43,14 +53,17 @@ def register(app, hub, ctx):
                     cur[k] = max(1, int(incoming[k]))
                 except (TypeError, ValueError):
                     cur[k] = _DEFAULTS[k]
+        # Same for max_runs (bad numbers fall back to the default).
         if incoming.get("max_runs") is not None:
             try:
                 cur["max_runs"] = max(1, int(incoming["max_runs"]))
             except (TypeError, ValueError):
                 cur["max_runs"] = _DEFAULTS["max_runs"]
+        # The reboot threshold must be above the restart threshold.
         if cur["reboot_s"] <= cur["service_s"]:
             raise HTTPException(status_code=400,
                                 detail="reboot threshold must be greater than the service-restart threshold")
+        # Keep only known fields and save.
         clean = {k: cur[k] for k in _FIELDS}
         gc = hub.state.get_global_config()
         gc["hub_contact_watchdog"] = clean

@@ -19,14 +19,19 @@ the failure is silent: every task raises and the caller sees an empty result.
 Always prefer it over ``async with (http or httpx.AsyncClient(...))``.
 """
 
+# asynccontextmanager turns the generator below into an "async with" context manager.
 from contextlib import asynccontextmanager
+# Type hints only; they document what the context manager yields.
 from typing import AsyncIterator, Optional
 
+# httpx is the async HTTP library whose client objects we lend out or create.
 import httpx
 
+# Public API of this module: only shared_client should be imported by other code.
 __all__ = ["shared_client"]
 
 
+# Decorator that makes shared_client usable as "async with shared_client(http) as c:".
 @asynccontextmanager
 async def shared_client(http: Optional[httpx.AsyncClient],
                         timeout: float = 20.0) -> AsyncIterator[httpx.AsyncClient]:
@@ -35,8 +40,10 @@ async def shared_client(http: Optional[httpx.AsyncClient],
     The borrowed client is neither entered nor closed — its owner keeps that
     responsibility. A client created here is closed on exit as usual.
     """
+    # Caller supplied its own client: hand it back untouched and do not close it.
     if http is not None:
         yield http
         return
+    # No client supplied: create one, and let "async with" close it when the caller is done.
     async with httpx.AsyncClient(timeout=timeout) as client:
         yield client

@@ -12,23 +12,34 @@ this module only selects which secret to feed it. The wire envelope that carries
 the resulting signatures is defined in ``messaging/protocol.py``.
 """
 
+# secrets mints the random tokens used as secrets.
 import secrets
+# hashlib/hmac compute and compare HMAC-SHA256 signatures.
 import hashlib
 import hmac
+# time stamps key creation and expiry.
 import time
+# json serialises the secret stores before encryption.
 import json
+# os handles paths, directories and file permissions.
 import os
+# uuid mints unique key ids.
 import uuid  # used by generate_first_secret / rotate_key to mint key_ids
 import logging
+# Type hints and the dataclass helpers for ManagedKey.
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
+# MessageSigner does the actual sign/verify; hub_encryption encrypts files at rest.
 from .signer import MessageSigner
 from .encryption import hub_encryption
 
+# Module-wide logger.
 logger = logging.getLogger("KeyManager")
 
+# One spoke session key with its id and lifetime.
 @dataclass
 class ManagedKey:
+    """A spoke session secret plus its id, creation time and expiry time."""
     key_id: str
     secret: str
     created_at: float
@@ -48,6 +59,7 @@ class KeyManager:
     """
     def __init__(self, system_path="keys.json", hub_secret_path="hub_secret.json",
                  recovery_root_path="hub_recovery_root.json"):
+        """Set up storage paths and load (or create) all hub and spoke secrets."""
         # Resolve absolute paths to avoid PermissionErrors under systemd/different CWDs
         base_dir = os.path.dirname(os.path.abspath(__file__))
         data_dir = os.path.abspath(os.path.join(base_dir, "../../data"))
@@ -63,11 +75,13 @@ class KeyManager:
         except OSError as e:  # noqa: BLE001
             logger.warning("Could not tighten %s to 0700: %s", data_dir, e)
 
+        # File locations and the in-memory key tables.
         self.storage_path = os.path.join(data_dir, system_path)
         self.hub_secret_path = os.path.join(data_dir, hub_secret_path)
         self.keys: Dict[str, ManagedKey] = {} # { spoke_id: current_key }
         self.history: Dict[str, List[ManagedKey]] = {} # { spoke_id: [previous_keys] }
         self.recovery_root_path = os.path.join(data_dir, recovery_root_path)
+        # Load or create the hub root secrets, the recovery root and the spoke keys.
         self.hub_secrets = self._load_or_generate_hub_secrets()
         self._recovery_root = self._load_or_generate_recovery_root()
         self.load_keys()
@@ -80,17 +94,20 @@ class KeyManager:
         ``LM_ALLOW_PLAINTEXT_FALLBACK=0`` to fail-closed so a botched rotation
         or lost key can NOT silently flip the highest-value secret stores to a
         plaintext read (the incident this guards against)."""
+        # Treat 1/true/yes as enabled; the default is enabled.
         return os.environ.get("LM_ALLOW_PLAINTEXT_FALLBACK", "1").strip() in ("1", "true", "yes")
 
     def _load_or_generate_hub_secrets(self) -> List[str]:
         """Loads or generates the persistent secrets used by the Hub.
         Maintains a window of the last 3 secrets.
         """
+        # Load the existing secret file if there is one.
         if os.path.exists(self.hub_secret_path):
             try:
                 with open(self.hub_secret_path, "rb") as f:
                     content = f.read()
                     try:
+                        # Decrypt and parse; keep at most the newest three secrets.
                         decrypted = hub_encryption.decrypt(content)
                         data = json.loads(decrypted)
                         if isinstance(data, list):
@@ -110,12 +127,15 @@ class KeyManager:
                                 "plaintext fallback. Re-run rotate_fernet_key "
                                 "or set LM_FERNET_KEY_PREVIOUS to the old key.")
                             raise
+                        # Plaintext allowed: warn loudly so the operator knows.
                         logger.warning(
                             "hub_secret.json decrypted as PLAINTEXT (pre-"
                             "encryption migration). Set "
                             "LM_ALLOW_PLAINTEXT_FALLBACK=0 to fail-closed.")
+                        # Read as plain text: a comma-separated list or a single secret.
                         text = content.decode().strip()
                         return [text] if "," not in text else text.split(",")
+            # Any load failure falls through to generating a fresh secret.
             except Exception as e:
                 logger.error(f"Failed to load hub secrets: {e}")
 
@@ -144,11 +164,13 @@ class KeyManager:
         against a spoke whose hub_secret is already stale — which already
         requires MITM position. Stored Fernet-encrypted at 0600 like the root
         secrets."""
+        # Load the existing recovery root if there is one.
         if os.path.exists(self.recovery_root_path):
             try:
                 with open(self.recovery_root_path, "rb") as f:
                     content = f.read()
                 try:
+                    # Decrypt and use the stored value if it is a non-empty string.
                     data = json.loads(hub_encryption.decrypt(content))
                     if isinstance(data, str) and data:
                         return data
@@ -162,7 +184,9 @@ class KeyManager:
                             "LM_ALLOW_PLAINTEXT_FALLBACK=0 — refusing plaintext "
                             "fallback.")
                         raise
+                    # Read the file as plain text.
                     text = content.decode().strip()
+                    # Use the plaintext value if the file was not empty.
                     if text:
                         logger.warning(
                             "hub_recovery_root.json decrypted as PLAINTEXT "
@@ -171,20 +195,25 @@ class KeyManager:
             except Exception as e:  # noqa: BLE001
                 logger.error(f"Failed to load hub recovery root: {e}")
 
+        # None loaded: mint a new recovery root, save it and use it.
         root = secrets.token_urlsafe(64)
         self._save_recovery_root(root)
         logger.info("Minted a new Hub recovery root (spoke recovery PSK seed).")
         return root
 
     def _save_recovery_root(self, root: str) -> None:
+        """Encrypt and write the recovery root to disk with owner-only permissions."""
         try:
+            # Encrypt the JSON-encoded root and write it out.
             encrypted = hub_encryption.encrypt(json.dumps(root, separators=(',', ':')))
             with open(self.recovery_root_path, "wb") as f:
                 f.write(encrypted)
+            # Restrict the file to the owner (best effort).
             try:
                 os.chmod(self.recovery_root_path, 0o600)
             except OSError:
                 pass
+        # Log save failures rather than crashing.
         except Exception as e:  # noqa: BLE001
             logger.error(f"Failed to save hub recovery root: {e}")
 
@@ -196,6 +225,7 @@ class KeyManager:
         then re-added, which is precisely the "delete and re-add didn't help"
         case. Each spoke learns only its own value, and HMAC is one-way, so a
         rogue spoke cannot walk back to the root or sideways to a peer's PSK."""
+        # HMAC the spoke id with the recovery root.
         return hmac.new(self._recovery_root.encode(), spoke_id.encode(),
                         hashlib.sha256).hexdigest()
 
@@ -206,11 +236,14 @@ class KeyManager:
         third, rotation-independent proof of Hub identity. A spoke that has
         fallen outside the root-secret window verifies THIS instead and can then
         safely drop its stale hub_secrets and let the Hub re-provision."""
+        # HMAC the challenge with this spoke's recovery PSK.
         return hmac.new(self.recovery_psk_for(spoke_id).encode(), challenge_bytes,
                         hashlib.sha256).hexdigest()
 
     def _save_hub_secrets(self, secrets_list: List[str]):
+        """Encrypt and write the hub root secret list to disk with owner-only permissions."""
         try:
+            # Serialise compactly, encrypt and write the file.
             json_data = json.dumps(secrets_list, separators=(',', ':'))
             encrypted_secret = hub_encryption.encrypt(json_data)
             with open(self.hub_secret_path, "wb") as f:
@@ -219,6 +252,7 @@ class KeyManager:
                 os.chmod(self.hub_secret_path, 0o600)  # hub root secrets: not world-readable
             except OSError:
                 pass
+        # Log save failures rather than crashing.
         except Exception as e:
             logger.error(f"Failed to save hub secrets: {e}")
 
@@ -239,6 +273,7 @@ class KeyManager:
         Returns:
             The new root secret as a string.
         """
+        # Mint a new secret, put it first, keep three, and save.
         new_secret = secrets.token_urlsafe(64)
         self.hub_secrets.insert(0, new_secret)
         self.hub_secrets = self.hub_secrets[:3]
@@ -247,6 +282,7 @@ class KeyManager:
 
     def sign_hub_challenge(self, challenge_bytes: bytes) -> str:
         """Signs a challenge using the most recent Hub secret."""
+        # HMAC the challenge with the newest hub secret.
         return hmac.new(
             self.hub_secrets[0].encode(),
             challenge_bytes,
@@ -271,28 +307,37 @@ class KeyManager:
         canonical field for legacy spokes — this is an additive companion,
         not a replacement.
         """
+        # One HMAC per retained hub secret, newest first.
         return [
             hmac.new(hs.encode(), challenge_bytes, hashlib.sha256).hexdigest()
             for hs in self.hub_secrets
         ]
 
     def _save_keys(self):
+        """Encrypt and write all spoke keys (current and history) to disk."""
+        # Build the JSON document of current keys and history.
         data = {
             "current": {sid: asdict(k) for sid, k in self.keys.items()},
             "history": {sid: [asdict(k) for k in ks] for sid, ks in self.history.items()}
         }
+        # Serialise deterministically, encrypt and write the file.
         json_data = json.dumps(data, sort_keys=True, separators=(',', ':'))
         encrypted_data = hub_encryption.encrypt(json_data)
         with open(self.storage_path, "wb") as f:
             f.write(encrypted_data)
+        # Restrict the file to the owner (best effort).
         try:
             os.chmod(self.storage_path, 0o600)  # spoke session keys: not world-readable
         except OSError:
             pass
 
     def load_keys(self):
+        """Load spoke keys from disk, migrating a plaintext file to encrypted form."""
+        # Nothing to load if the key file does not exist yet.
         if os.path.exists(self.storage_path):
+            # Tracks whether we accepted a plaintext file that needs re-encrypting.
             migrated_from_plaintext = False
+            # Read the raw file contents.
             try:
                 with open(self.storage_path, "rb") as f:
                     content = f.read()
@@ -316,18 +361,22 @@ class KeyManager:
                                 "plaintext fallback. Re-run rotate_fernet_key "
                                 "or set LM_FERNET_KEY_PREVIOUS to the old key.")
                             raise
+                        # Plaintext allowed: warn and plan to re-encrypt on the next save.
                         logger.warning(
                             "keys.json decrypted as PLAINTEXT (pre-encryption "
                             "migration); will re-encrypt on next save. Set "
                             "LM_ALLOW_PLAINTEXT_FALLBACK=0 to fail-closed.")
+                        # Re-read the file as plain JSON and remember to re-encrypt it.
                         with open(self.storage_path, "r") as pf:
                             data = json.load(pf)
                         migrated_from_plaintext = True
 
+                    # Rebuild ManagedKey objects for current keys and history.
                     for sid, k in data["current"].items():
                         self.keys[sid] = ManagedKey(**k)
                     for sid, ks in data["history"].items():
                         self.history[sid] = [ManagedKey(**k) for k in ks]
+            # On any load error, log it and keep the tables empty.
             except Exception as e:
                 logger.error(f"Error loading keys from {self.storage_path}: {e}")
                 return
@@ -340,6 +389,7 @@ class KeyManager:
             # plaintext file as ciphertext is safe and closes the gap where a
             # never-populated keys.json stayed plaintext forever.
             if migrated_from_plaintext:
+                # Re-save under encryption; a failure is only a warning.
                 try:
                     self._save_keys()
                     logger.info("Migrated keys.json to Fernet at-rest encryption.")
@@ -357,8 +407,10 @@ class KeyManager:
         overwriting ``keys[spoke_id]`` destroys the only key the spoke still
         holds with no fallback, and one dropped delivery = permanent skew.
         """
+        # Move any existing key into history before replacing it.
         existing = self.keys.get(spoke_id)
         if existing is not None:
+            # Make sure the spoke has a history list to insert into.
             if spoke_id not in self.history:
                 self.history[spoke_id] = []
             self.history[spoke_id].insert(0, existing)
@@ -373,6 +425,7 @@ class KeyManager:
             # re-onboard. 3 deep tolerates that double-miss.
             self.history[spoke_id] = self.history[spoke_id][:3]
 
+        # Mint a short-lived first secret, store it and save.
         secret = secrets.token_urlsafe(32)
         key = ManagedKey(
             key_id=str(uuid.uuid4()),
@@ -380,6 +433,7 @@ class KeyManager:
             created_at=time.time(),
             expires_at=time.time() + 3600 # First secret expires in 1 hour
         )
+        # Make it the spoke's current key and persist.
         self.keys[spoke_id] = key
         self._save_keys()
         return secret
@@ -388,6 +442,7 @@ class KeyManager:
         """
         Rotates the session key for a specific spoke.
         """
+        # Move the current key into history.
         if spoke_id in self.keys:
             old_key = self.keys[spoke_id]
             if spoke_id not in self.history:
@@ -398,6 +453,7 @@ class KeyManager:
             # (mirrors the hub root secret's 3-deep rotation window).
             self.history[spoke_id] = self.history[spoke_id][:3]
 
+        # Mint a new 30-day key, store it and save.
         new_key = ManagedKey(
             key_id=str(uuid.uuid4()),
             secret=secrets.token_urlsafe(32),
@@ -413,6 +469,7 @@ class KeyManager:
         Completely removes all keys and history for a spoke.
         This forces the spoke to undergo a new 'first-secret' onboarding.
         """
+        # Drop the spoke's current key and history, then save.
         self.keys.pop(spoke_id, None)
         self.history.pop(spoke_id, None)
         self._save_keys()
@@ -428,15 +485,20 @@ class KeyManager:
         has no key and falls into pending-negotiation, making approval carryover
         useless. Idempotent. Caller persists via the internal ``_save_keys``.
         """
+        # Nothing to do if the id did not change.
         if old_id == new_id:
             return
+        # Move current key and history to the new id, tracking whether anything moved.
         moved = False
+        # Move the current key, if any.
         if old_id in self.keys:
             self.keys[new_id] = self.keys.pop(old_id)
             moved = True
+        # Move the key history, if any.
         if old_id in self.history:
             self.history[new_id] = self.history.pop(old_id)
             moved = True
+        # Save and log only if something was moved.
         if moved:
             self._save_keys()
             logger.info(f"Re-keyed spoke keys {old_id} → {new_id}")
@@ -474,14 +536,17 @@ class KeyManager:
         ``expires_at`` is ``created_at + 30d``, so the two clauses agree for
         full keys — no double-rotation.
         """
+        # Age threshold in seconds and the list of due spokes.
         now = time.time()
         threshold = days * 24 * 3600
         due = []
+        # Due if too old, or if its own expiry time has passed.
         for sid, key in self.keys.items():
             if (now - key.created_at) > threshold:
                 due.append(sid)
             elif key.expires_at and now > key.expires_at:
                 due.append(sid)
+        # Spokes whose keys need rotating.
         return due
 
     def sign_message(self, spoke_id: str, message_dict: Dict[str, Any]) -> str:
@@ -489,10 +554,12 @@ class KeyManager:
         Signs a message dictionary using the current secret for the spoke.
         Uses canonical serialization for deterministic results.
         """
+        # The spoke must have a key to sign with.
         key = self.keys.get(spoke_id)
         if not key:
             raise ValueError(f"No key found for spoke {spoke_id}")
 
+        # Sign with the spoke's current secret.
         return MessageSigner(key.secret).sign(message_dict)
 
     def current_session_secret(self, spoke_id: str) -> Optional[str]:
@@ -505,6 +572,7 @@ class KeyManager:
         installed). None means the spoke is pending (no secret) — it accepts
         the delivery unauthenticated.
         """
+        # Return the current secret, or None if the spoke has no key.
         key = self.keys.get(spoke_id)
         return key.secret if key else None
 
@@ -513,14 +581,17 @@ class KeyManager:
         using the spoke's current key. The receiver verifies the RECEIVED body
         bytes directly (no re-serialization), so this replaces the sign()+dumps()
         that dominated per-frame CPU."""
+        # The spoke must have a key to encode with.
         key = self.keys.get(spoke_id)
         if not key:
             raise ValueError(f"No key found for spoke {spoke_id}")
+        # Sign and serialise with the current secret.
         return MessageSigner(key.secret).encode_frame(message_dict)
 
     def encode_frame_with_secret(self, secret: str, message_dict: Dict[str, Any]) -> str:
         """``encode_frame`` with an EXPLICIT secret (SPOKE_UPDATE_SESSION_KEY
         delivery — signed with the PREVIOUS secret the spoke still holds)."""
+        # Sign and serialise with the given secret.
         return MessageSigner(secret).encode_frame(message_dict)
 
     def verify_signature_source(self, spoke_id: str, message_bytes: bytes,
@@ -541,7 +612,9 @@ class KeyManager:
         can adopt it without a full re-onboard (see
         ``main.py::_maybe_redeliver_session_key``).
         """
+        # Try the current key first.
         key = self.keys.get(spoke_id)
+        # Signature matches the current key.
         if key and MessageSigner(key.secret).verify_bytes(message_bytes, signature):
             return "current"
         # Rotation window: tolerate frames signed with the previous key.
@@ -552,6 +625,7 @@ class KeyManager:
 
     def verify_signature(self, spoke_id: str, message_bytes: bytes, signature: str) -> bool:
         """Verifies the HMAC signature of a message (current key OR history)."""
+        # Valid if any key (current or history) verified it.
         return self.verify_signature_source(spoke_id, message_bytes, signature) is not None
 
     def previous_session_secret(self, spoke_id: str) -> Optional[str]:
@@ -566,5 +640,6 @@ class KeyManager:
         that (2 or 3 rotations back) needs a full ``SPOKE_UPDATE_SESSION_KEY``
         redelivery signed some other way, not this shortcut.
         """
+        # Newest history entry, if any.
         hist = self.history.get(spoke_id, [])
         return hist[0].secret if hist else None

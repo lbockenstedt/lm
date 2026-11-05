@@ -34,13 +34,16 @@ is ``main → truenas_cache`` only). Audience: Hub developers. Mirrors nw_cache.
 
 from __future__ import annotations
 
+# logging; os for paths; time for fetched_at stamps; type hints.
 import logging
 import os
 import time
 from typing import Any, Dict, Optional
 
+# Shared JSON cache-file persistence and staleness policy.
 from cache_core import JsonCacheFile, StalenessPolicy
 
+# Log to the hub's logger.
 logger = logging.getLogger("Hub")
 
 
@@ -54,6 +57,7 @@ class TruenasCacheMixin:
     ``cache/truenas_data.json`` and reloaded on startup to seed the UI.
     """
 
+    # Cache file name and the per-appliance endpoints that may be cached.
     TRUENAS_CACHE_FILE = "truenas_data.json"
     _TRUENAS_CACHE_ENDPOINTS = ("info", "pools", "datasets", "disks", "shares",
                                 "alerts", "services", "capacity")
@@ -66,9 +70,11 @@ class TruenasCacheMixin:
 
     def truenas_cache_init(self) -> None:
         """Initialize the in-memory cache slots. Call once from ``__init__``."""
+        # Empty fleet and per-appliance caches, plus a staleness policy.
         self.truenas_fleet_cache: Dict[str, Any] = {}
         self.truenas_appliance_cache: Dict[str, Dict[str, Any]] = {}
         self.truenas_policy = StalenessPolicy()
+        # Persistence: snapshot both caches, coalescing writes.
         self._truenas_cache_file = JsonCacheFile(
             "truenas cache", self._truenas_cache_path,
             lambda: {"fleet": self.truenas_fleet_cache,
@@ -76,6 +82,8 @@ class TruenasCacheMixin:
             flush_delay_s=self._TRUENAS_CACHE_FLUSH_DELAY_S)
 
     def _truenas_cache_path(self) -> str:
+        """Return the path of the TrueNAS cache file under cache_dir."""
+        # cache_dir/truenas_data.json.
         return os.path.join(getattr(self, "cache_dir", "."), self.TRUENAS_CACHE_FILE)
 
     def truenas_cache_load(self) -> None:
@@ -86,21 +94,25 @@ class TruenasCacheMixin:
         The read itself is ``cache_core``'s, so a truncated or non-JSON file
         degrades identically here and in every other module.
         """
+        # Read the file; anything but a dict leaves the cache empty.
         data = self._truenas_cache_file.load()
         if not isinstance(data, dict):
             return
+        # Restore the fleet snapshot.
         fleet = data.get("fleet")
         if isinstance(fleet, dict):
             self.truenas_fleet_cache = {
                 "appliances": fleet.get("appliances"),
                 "fetched_at": float(fleet.get("fetched_at", 0.0) or 0.0),
             }
+        # Restore the per-appliance entries that are dicts.
         appliances = data.get("appliances")
         if isinstance(appliances, dict):
             self.truenas_appliance_cache = {
                 str(aid): dict(v) for aid, v in appliances.items()
                 if isinstance(v, dict)
             }
+        # Log what was restored.
         if self.truenas_fleet_cache or self.truenas_appliance_cache:
             logger.info("truenas cache: restored %d appliance(s) + fleet snapshot from %s",
                         len(self.truenas_appliance_cache), self._truenas_cache_path())
@@ -109,6 +121,7 @@ class TruenasCacheMixin:
 
     def truenas_cache_get_fleet(self) -> Optional[Dict[str, Any]]:
         """Last-known fleet envelope + ``fetched_at``, or None if never cached."""
+        # Return the fleet entry only if it holds data.
         f = self.truenas_fleet_cache
         if not f or f.get("appliances") is None:
             return None
@@ -122,22 +135,27 @@ class TruenasCacheMixin:
         cache. Same shape as ``truenas_cache_get_fleet`` so the route serves the
         filtered snapshot exactly as the full one. Requires the cached rows to
         carry ``tenant_id`` so the predicate can decide visibility per row."""
+        # Nothing cached: None.
         f = self.truenas_fleet_cache
         if not f or f.get("appliances") is None:
             return None
+        # Filter the cached list down to rows the predicate allows.
         env = f["appliances"]
         data = env.get("data") if isinstance(env, dict) else None
         if isinstance(data, list):
             env = {**env, "data": [r for r in data
                                    if isinstance(r, dict) and predicate(r)]}
+        # Same shape as the unfiltered fleet entry.
         return {"appliances": env, "fetched_at": f["fetched_at"]}
 
     def truenas_cache_get_appliance(self, appliance_id: str,
                                     endpoint: str) -> Optional[Any]:
         """Last-known raw envelope for one appliance endpoint, or None."""
+        # Unknown appliance: None.
         entry = self.truenas_appliance_cache.get(appliance_id)
         if not entry:
             return None
+        # The cached envelope for the endpoint, if any.
         val = entry.get(endpoint)
         return val if val is not None else None
 
@@ -145,14 +163,17 @@ class TruenasCacheMixin:
 
     async def truenas_cache_set_fleet(self, data: Any) -> None:
         """Store a fresh TRUENAS_LIST_APPLIANCES envelope + persist."""
+        # Replace the fleet entry and schedule a save.
         self.truenas_fleet_cache = {"appliances": data, "fetched_at": time.time()}
         self._truenas_cache_file.schedule_save()
 
     async def truenas_cache_set_appliance(self, appliance_id: str, endpoint: str,
                                           data: Any) -> None:
         """Store a fresh per-appliance endpoint envelope + persist."""
+        # Ignore endpoints that are not cached.
         if endpoint not in self._TRUENAS_CACHE_ENDPOINTS and endpoint != "poll":
             return
+        # Store the envelope, stamp it, and schedule a save.
         entry = self.truenas_appliance_cache.setdefault(appliance_id, {})
         entry[endpoint] = data
         entry["fetched_at"] = time.time()
@@ -167,10 +188,13 @@ class TruenasCacheMixin:
         (spoke offline) still reflects the last poll. Each sub-resource is
         mirrored into its endpoint slot, wrapped in a SUCCESS envelope so the
         routes' unwrapping contract is preserved."""
+        # Ignore malformed results.
         if not isinstance(poll_result, dict):
             return
+        # Keep the raw poll result.
         entry = self.truenas_appliance_cache.setdefault(appliance_id, {})
         entry["poll"] = poll_result
+        # Copy each sub-resource into its endpoint slot as a SUCCESS envelope.
         data = poll_result.get("data") if isinstance(poll_result.get("data"), dict) else {}
         for key in ("system_info", "pools", "datasets", "disks", "shares",
                     "alerts", "services", "capacity"):
@@ -179,6 +203,7 @@ class TruenasCacheMixin:
                 continue
             slot = "info" if key == "system_info" else key
             entry[slot] = {"status": "SUCCESS", "data": val}
+        # Stamp and schedule a save.
         entry["fetched_at"] = time.time()
         self._truenas_cache_file.schedule_save()
 
@@ -188,12 +213,14 @@ class TruenasCacheMixin:
 
     async def truenas_cache_flush_now(self) -> None:
         """Immediate persist (shutdown path) — skips the coalescing delay."""
+        # Write now, skipping the delay.
         await self._truenas_cache_file.flush_now()
 
     # ── staleness ─────────────────────────────────────────────────────────────
 
     def truenas_cache_fleet_fetched_at(self) -> float:
         """Epoch of the last fleet-cache write (0.0 if never cached)."""
+        # 0.0 when nothing is cached, else the stored timestamp.
         f = self.truenas_fleet_cache
         if not f or f.get("appliances") is None:
             return 0.0
@@ -201,6 +228,7 @@ class TruenasCacheMixin:
 
     def truenas_cache_appliance_fetched_at(self, appliance_id: str) -> float:
         """Epoch of the most recent write to one appliance's cache entry."""
+        # 0.0 for an unknown appliance, else its timestamp.
         entry = self.truenas_appliance_cache.get(appliance_id)
         if not entry:
             return 0.0

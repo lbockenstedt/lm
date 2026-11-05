@@ -160,6 +160,7 @@ def unwrap_spoke(result):
     keeps any ``status``/``message`` fields visible to
     ``_spoke_payload_or_raise``.
     """
+    # Look for {"payload": {"data": ...}}.
     if isinstance(result, dict):
         payload = result.get("payload")
         if isinstance(payload, dict):
@@ -181,9 +182,11 @@ def norm_mac(m) -> str:
     canonical form flows hub → NetBox.
     """
     import re as _re
+    # Normalize; treat placeholder values as no MAC.
     s = str(m or "").strip().lower()
     if not s or s in ("unknown", "none", "incomplete"):
         return ""
+    # Keep only hex digits; 12 of them form a real MAC.
     hexd = _re.sub(r"[^0-9a-f]", "", s)
     if len(hexd) == 12:
         return ":".join(hexd[i:i + 2] for i in range(0, 12, 2))
@@ -192,6 +195,7 @@ def norm_mac(m) -> str:
 
 def filter_config(hub) -> dict:
     """Resolved per-module subnet-filter toggles (stored overrides defaults)."""
+    # Stored toggles, falling back to the defaults.
     stored = hub.state.system_state.get("subnet_filter_modules", {}) or {}
     return {m: bool(stored.get(m, _FILTER_DEFAULTS.get(m, False)))
             for m in _FILTER_MODULES}
@@ -224,10 +228,12 @@ def valid_hostname(s) -> bool:
     alphanumeric start/end with internal ``-`` only; total ≤253 chars; dots
     separate labels. No leading/trailing dot or dash, no underscores, no
     spaces, no shell metacharacters."""
+    # Overall length and edge checks.
     if not s or not isinstance(s, str) or len(s) > 253:
         return False
     if s.startswith(("-", ".")) or s.endswith(("-", ".")):
         return False
+    # Check each dot-separated label.
     labels = s.split(".")
     for label in labels:
         if not label or len(label) > 63:
@@ -251,6 +257,7 @@ def valid_display_name(s) -> bool:
     """True if ``s`` is an acceptable display name: non-empty, ≤128 chars, no
     control chars and no shell metacharacters. Most printable text passes
     (spaces, punctuation like ``(`` ``,`` ``:`` are fine)."""
+    # Length check, then reject any forbidden character.
     if not s or not isinstance(s, str) or len(s) > 128:
         return False
     return not any(c in _BAD_DISPLAY_CHARS for c in s)
@@ -279,6 +286,7 @@ def is_internal_ip(ip_str: str) -> bool:
     """True if ``ip_str`` parses as a loopback / private / link-local / reserved
     / unspecified / multicast IP — i.e. an address the hub must NOT be pointed
     at over a user-supplied URL (it would be SSRF to internal services)."""
+    # Not an IP literal means not an internal IP.
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
@@ -290,6 +298,8 @@ def is_internal_ip(ip_str: str) -> bool:
 
 
 def _looks_internal_hostname(host: str) -> bool:
+    """True if the hostname is a known internal name or ends in .internal / .local."""
+    # Exact internal names, then internal suffixes.
     host = (host or "").lower()
     if host in _INTERNAL_HOSTNAMES:
         return True
@@ -312,17 +322,20 @@ def safe_external_url(s, *, require_https: bool = True) -> bool:
     Pair with ``host_resolves_external`` for a DNS-resolution pass that blocks
     DNS-rebinding to an internal IP at the moment of save.
     """
+    # Parse the URL; anything unparsable is unsafe.
     if not s or not isinstance(s, str):
         return False
     try:
         parts = urlsplit(s.strip())
     except Exception:
         return False
+    # Scheme must be http(s), and https when required.
     scheme = (parts.scheme or "").lower()
     if scheme not in ("http", "https"):
         return False
     if require_https and scheme != "https":
         return False
+    # Host must be present and not look internal.
     host = parts.hostname  # lowercased, port stripped, brackets removed
     if not host:
         return False
@@ -350,6 +363,7 @@ def host_resolves_external(host: str) -> bool:
     if not host:
         return True
     import socket
+    # Resolve the host to its set of addresses.
     try:
         infos = socket.getaddrinfo(host, None)
     except Exception:
@@ -370,6 +384,7 @@ def get_netbox_spoke(hub):
 def get_tenant_scoping(hub, tenant_id: str = None) -> dict:
     """Return the scoping config for a tenant (or the active one)."""
     try:
+        # Tenant id (or the active one) and its config.
         tid = tenant_id or hub.state.system_state.get("active_tenant", "default") or "default"
         cfg = hub.state.get_tenant(tid) or {}
         return {
@@ -378,6 +393,7 @@ def get_tenant_scoping(hub, tenant_id: str = None) -> dict:
             "ldap_base_dn":       cfg.get("ldap_base_dn", ""),
             "tenant_id":          tid,
         }
+    # Any failure: return empty scoping for the default tenant.
     except Exception:
         return {"netbox_tenant_slug": "", "proxmox_tag": "", "ldap_base_dn": "", "tenant_id": "default"}
 
@@ -405,6 +421,7 @@ def netbox_tenant_scope(hub, tenant_id: str = None) -> dict:
     stable cache-scope signature that can never collide between the two forms.
     A group record with no usable group slug degrades to the unscoped plain
     result rather than raising."""
+    # Scoping plus the tenant record.
     scoping = get_tenant_scoping(hub, tenant_id)
     tid = scoping.get("tenant_id")
     try:
@@ -412,6 +429,7 @@ def netbox_tenant_scope(hub, tenant_id: str = None) -> dict:
     except Exception:  # noqa: BLE001
         record = {}
 
+    # Tenant group: scope by the group slug, with member slugs for writes.
     if record.get("is_tenant_group"):
         group_slug = str(record.get("netbox_tenant_group_slug") or "").strip()
         if not group_slug and str(tid or "").startswith(TENANT_GROUP_PREFIX):
@@ -426,6 +444,7 @@ def netbox_tenant_scope(hub, tenant_id: str = None) -> dict:
                     "is_group": True, "tenant_id": tid,
                     "key": TENANT_GROUP_PREFIX + group_slug}
 
+    # Plain tenant: scope by its NetBox slug.
     tenant = scoping.get("netbox_tenant_slug") or None
     if not tenant and tid == ADMIN_TENANT_ID:
         # The built-in Admin tenant (id "default") doubles as the unscoped/
@@ -480,6 +499,7 @@ def ldap_tenant_slug(hub, tenant_id: str) -> str:
     directory aligned), then a stored ``slug``, else the tenant_id itself — then
     LOWER-CASES it to match the server's canonical OU RDN (``ou=lrb,<base>``).
     Callers compare with :func:`tenant_slug_matches` (case-insensitive)."""
+    # Look up the tenant config and pick the slug source.
     tid = str(tenant_id or "").strip()
     if not tid:
         return ""
@@ -523,17 +543,21 @@ def resolve_module_tenant(is_admin_flag, acting_tenants, requested, label="modul
 
     ``label`` customizes the human-facing error messages only (e.g. "NAC",
     "DNS") — it never affects the resolution logic."""
+    # Normalize the requested tenant and the caller's own tenants.
     req = str(requested or "").strip()
     acting = [str(t).strip() for t in (acting_tenants or []) if str(t).strip()]
+    # Global admin: any tenant, but one must be named.
     if is_admin_flag:
         if not req:
             return None, 400, f"Select a tenant to manage its {label}"
         return req, None, None
+    # Others: a requested tenant must be one of their own.
     if req:
         for t in acting:
             if tenant_slug_matches(t, req):
                 return t, None, None  # own stored case wins over client casing
         return None, 403, f"You may only manage your own tenant's {label}"
+    # Nothing requested: use the only owned tenant, or ask/deny.
     if len(acting) == 1:
         return acting[0], None, None
     if not acting:
@@ -570,6 +594,7 @@ def _bind_prefix(env_var: str, default: int, floor: int, width: int) -> int:
     time, nor silently widen the bind to something meaningless (``/0`` would
     make every address in the family equivalent and disable the control).
     """
+    # Unset means the default; otherwise it must be an in-range integer.
     raw = os.environ.get(env_var)
     if raw is None or str(raw).strip() == "":
         return default
@@ -595,6 +620,7 @@ def _norm_bind_addr(value):
     rendered as mapped IPv6 would share a ``/64`` and be treated as the same
     client — which would defeat the bind entirely. Returns None if unparseable.
     """
+    # Parse, then unwrap IPv4-mapped IPv6.
     try:
         addr = ipaddress.ip_address(value)
     except (ValueError, TypeError):
@@ -622,12 +648,17 @@ def set_bind_networks_provider(fn) -> None:
 
 
 def _bind_networks() -> list:
+    """Extra egress networks (env + provider) that count as one client; overly broad ones are
+    dropped.
+    """
+    # CIDRs from the env, plus the registered provider's list.
     raw = [c for c in os.environ.get("LM_SESSION_IP_BIND_NETWORKS", "").split(",") if c.strip()]
     try:
         if _bind_networks_provider is not None:
             raw.extend(_bind_networks_provider() or [])
     except Exception:  # noqa: BLE001 — never break auth on a provider hiccup
         pass
+    # Parse each, keeping only networks at least as narrow as the floor.
     nets = []
     for c in raw:
         try:
@@ -650,20 +681,24 @@ def same_bind_subnet(a, b) -> bool:
     (``LM_SESSION_IP_BIND_NETWORKS`` / trusted list) are also "same".
     Blanks, mixed families and unparseable values are never "same".
     """
+    # Blanks never match; identical always does.
     if not a or not b:
         return False
     if a == b:
         return True
+    # Normalize both; families must match.
     ia = _norm_bind_addr(a)
     ib = _norm_bind_addr(b)
     if ia is None or ib is None or ia.version != ib.version:
         return False
+    # Same subnet at the configured prefix length?
     plen = _IP_BIND_PREFIX4 if ia.version == 4 else _IP_BIND_PREFIX6
     try:
         if ib in ipaddress.ip_network(f"{ia}/{plen}", strict=False):
             return True
     except ValueError:
         return False
+    # Otherwise, both inside one configured egress network.
     return any(ia in n and ib in n for n in _bind_networks())
 
 
@@ -673,6 +708,7 @@ def set_session_idle_timeout(seconds) -> None:
     ``global_config.session_idle_timeout_minutes`` so a WebUI change takes effect
     without a restart."""
     global _SESSION_IDLE_TIMEOUT_S
+    # Ignore None; clamp to >= 0 and ignore junk.
     if seconds is None:
         return
     try:
@@ -702,11 +738,14 @@ def set_client_ip_resolver(fn) -> None:
 
 
 def _resolve_client_ip(request) -> Optional[str]:
+    """Client IP via the registered resolver, falling back to the socket peer."""
     try:
+        # Prefer the trusted-proxy-aware resolver.
         if _client_ip_resolver is not None:
             return _client_ip_resolver(request)
     except Exception:  # noqa: BLE001 — never break auth on a resolver hiccup
         pass
+    # Fall back to the raw socket peer.
     try:
         return request.client.host if request.client else None
     except Exception:  # noqa: BLE001
@@ -724,20 +763,25 @@ def session_user(sessions: dict, request: "Request"):
     close of the admin session-cookie hijack (surface H); the HTTP middleware
     adds the active NSG response for admin cookies, but this backstop also
     covers non-HTTP (WebSocket) callers that bypass the middleware."""
+    # Look up the cookie's session.
     token = request.cookies.get("lm_session")
     if not token:
         return None
     sess = sessions.get(token)
+    # Expired by absolute TTL: drop it.
     if not sess or sess["expires"] < time.time():
         sessions.pop(token, None)
         return None
+    # Idle too long: drop it.
     if _SESSION_IDLE_TIMEOUT_S > 0:
         last = sess.get("last_seen") or sess.get("created") or sess["expires"]
         if time.time() - float(last) > _SESSION_IDLE_TIMEOUT_S:
             sessions.pop(token, None)
             return None
+    # Enforce the source-IP bind.
     bound = sess.get("client_ip")
     if bound:
+        # Where is this request coming from?
         ip = _resolve_client_ip(request)
         if ip and ip != bound:
             if same_bind_subnet(ip, bound):
@@ -749,6 +793,7 @@ def session_user(sessions: dict, request: "Request"):
                 sess["client_ip"] = ip
                 seen = sess.setdefault("ip_seen", {})
                 seen[ip] = time.time()
+            # Different subnet: treat as stolen and drop the session.
             else:
                 sessions.pop(token, None)
                 return None
@@ -791,6 +836,7 @@ def resolve_effective_permissions(hub, user_record: dict) -> dict:
     Returns a fresh flat ``{right: True}`` dict suitable to drop straight into
     ``sess["user"]["permissions"]`` — so all existing middleware/frontend gates
     keep working unchanged. Never mutates the stored record."""
+    # Load the permission-group store.
     user_record = user_record or {}
     groups_store = {}
     try:
@@ -803,6 +849,7 @@ def resolve_effective_permissions(hub, user_record: dict) -> dict:
     is_tadm = False
 
     def _absorb(perms: dict):
+        """OR one permissions dict into the result, noting admin / tenant-admin flags."""
         nonlocal is_adm, is_tadm
         for k, v in (perms or {}).items():
             if k == "role":
@@ -829,6 +876,7 @@ def resolve_effective_permissions(hub, user_record: dict) -> dict:
             _absorb(grp.get("permissions", {}))
     _absorb(user_record.get("permissions", {}))
 
+    # Apply the admin tier on top.
     if is_adm:
         eff["admin"] = True
         eff["role"] = "admin"
@@ -859,9 +907,11 @@ def groups_and_tenants_for_membership(hub, member_of) -> tuple:
 
     Phase-2 hook: local ``/auth/login`` does not consult a directory; this is
     driven by the OIDC callback (``routes/oidc.py``)."""
+    # Normalize the membership list.
     member_of = [str(m).strip().lower() for m in (member_of or []) if m]
     if not member_of:
         return [], []
+    # Load the permission groups.
     try:
         groups_store = hub.state.system_state.get("permission_groups", {}) or {}
     except Exception:  # noqa: BLE001
@@ -870,6 +920,7 @@ def groups_and_tenants_for_membership(hub, member_of) -> tuple:
     tenant_ids: list = []
     seen_groups: set = set()
     seen_tenants: set = set()
+    # Collect matching groups and their granted tenants, in order, without duplicates.
     for gid, grp in groups_store.items():
         lg = str(grp.get("ldap_group") or "").strip().lower()
         if lg and lg in member_of and gid not in seen_groups:
@@ -900,6 +951,7 @@ def is_admin(sess) -> bool:
     satisfied by the tenant-admin tier (see :func:`is_tenant_admin`), which is
     tenant-confined and carries no ``admin`` flag.
     """
+    # Permissions from the session.
     p = (sess or {}).get("user", {}).get("permissions", {})
     return bool(p.get("admin") or p.get("role") == "admin")
 
@@ -937,6 +989,7 @@ def has_cs_access(sess) -> bool:
     ``filter_session``. Mirrors the frontend ``canSeeModule`` gate in
     WebUI/main.js so nav-hiding and API/WebSocket access agree.
     """
+    # Admins pass; otherwise check the right.
     if is_admin(sess) or is_tenant_admin(sess):
         return True
     p = (sess or {}).get("user", {}).get("permissions", {})
@@ -953,6 +1006,7 @@ def has_module_access(sess, right: str) -> bool:
     access agree. A tenant Admin is tenant-confined downstream.
     ``right`` is the permissions key (``"nw"`` / ``"ipam"`` / ``"cs"`` …).
     """
+    # Admins pass; otherwise check the named right.
     if is_admin(sess) or is_tenant_admin(sess):
         return True
     p = (sess or {}).get("user", {}).get("permissions", {})
@@ -1038,6 +1092,7 @@ def has_edit_access(sess) -> bool:
     configs. Global Admin and tenant Admin always; otherwise the explicit global
     ``edit`` right (a non-admin write user). Does NOT grant editing SHARED infra
     (see :func:`can_edit_shared`)."""
+    # Admins pass; otherwise the global edit right.
     if is_admin(sess) or is_tenant_admin(sess):
         return True
     p = (sess or {}).get("user", {}).get("permissions", {})
@@ -1056,6 +1111,7 @@ def has_console_write_access(sess) -> bool:
     """Console config-WRITE gate. The global ``edit`` write-user tier subsumes it;
     the legacy per-module ``console_write`` right still grants it (backward
     compat). Admin/tenant-admin pass via has_edit_access."""
+    # Write users pass; else the legacy console_write right.
     if has_edit_access(sess):
         return True
     p = (sess or {}).get("user", {}).get("permissions", {})
@@ -1073,12 +1129,14 @@ def read_scope(sess, tenant_id) -> str:
     (it's theirs). The SHARED tenant → filtered (shared infra, scoped to the
     viewer). Other-tenant / unassigned → deny. Mirrors spoke_visible_to_session
     but distinguishes own-dedicated (full) from shared (filtered)."""
+    # Admin: full. No owner: deny. Shared: filtered.
     if is_admin(sess):
         return "full"
     if not tenant_id:
         return "deny"
     if tenant_is_shared(tenant_id):
         return "filtered"
+    # Own tenant: full; anything else: deny.
     allowed = (sess or {}).get("user", {}).get("tenants") or []
     if allowed and tenant_id in allowed:
         return "full"
@@ -1098,12 +1156,14 @@ def write_scope(sess, tenant_id) -> str:
     can't write). SHARED tenant → constrained iff the caller may edit shared
     (tenant-admin), else deny (a view/write user can't change shared). Other/
     unassigned → deny."""
+    # Admin: full. No owner: deny. Shared: constrained for tenant-admins.
     if is_admin(sess):
         return "full"
     if not tenant_id:
         return "deny"
     if tenant_is_shared(tenant_id):
         return "constrained" if can_edit_shared(sess) else "deny"
+    # Own tenant: full for write users; anything else: deny.
     allowed = (sess or {}).get("user", {}).get("tenants") or []
     if allowed and tenant_id in allowed:
         return "full" if has_edit_access(sess) else "deny"
@@ -1129,12 +1189,15 @@ _GROUP_MEMBERS: dict = {}
 
 
 def _compute_group_members(tenants: dict) -> dict:
+    """Map each tenant group to all its member tenant ids, including those of sub-groups."""
+    # Group records and their NetBox group slugs.
     groups = {tid: cfg for tid, cfg in tenants.items()
               if isinstance(cfg, dict) and cfg.get("is_tenant_group")}
     gslug = {tid: str(cfg.get("netbox_tenant_group_slug")
                       or str(tid)[len(TENANT_GROUP_PREFIX):]).strip()
              for tid, cfg in groups.items()}
     out = {}
+    # For each group, collect its slug plus every descendant group's slug.
     for tid in groups:
         family, changed = {gslug[tid]}, True
         while changed:
@@ -1143,16 +1206,19 @@ def _compute_group_members(tenants: dict) -> dict:
                 if gslug[gid] not in family and str(gcfg.get("parent_group_slug") or "") in family:
                     family.add(gslug[gid])
                     changed = True
+        # Members listed on any group in the family.
         members = set()
         for gid, gcfg in groups.items():
             if gslug[gid] in family:
                 members.update(str(x).strip() for x in (gcfg.get("member_tenant_slugs") or []) if x)
+        # Plain tenants whose group is in the family (id and NetBox slug).
         for mid, mcfg in tenants.items():
             if (isinstance(mcfg, dict) and not mcfg.get("is_tenant_group")
                     and str(mcfg.get("tenant_group_slug") or "") in family):
                 members.add(str(mid))
                 if mcfg.get("netbox_tenant_slug"):
                     members.add(str(mcfg["netbox_tenant_slug"]))
+        # Store with normalized keys and members.
         out[_norm_tenant_id(tid)] = {_norm_tenant_id(m) for m in members if m}
     return out
 
@@ -1162,11 +1228,13 @@ def refresh_shared_tenant(hub):
     the id (or None). Safe to call often; called on state load + tenant writes."""
     global _SHARED_TENANT_ID, _GROUP_MEMBERS
     try:
+        # Tenant records, then the cached group membership.
         tenants = (getattr(hub.state, "tenant_state", {}) or {}).get("tenants", {}) or {}
         try:
             _GROUP_MEMBERS = _compute_group_members(tenants)
         except Exception:  # noqa: BLE001
             _GROUP_MEMBERS = {}
+        # The first tenant flagged shared.
         _SHARED_TENANT_ID = next(
             (tid for tid, cfg in tenants.items()
              if isinstance(cfg, dict) and cfg.get("shared")), None)
@@ -1195,6 +1263,7 @@ def _norm_tenant_id(tenant_id) -> str:
 
 
 def tenant_is_shared(tenant_id) -> bool:
+    """True if the tenant is the configured shared tenant (or literally "shared")."""
     normalized = _norm_tenant_id(tenant_id)
     return bool(normalized) and (normalized == _norm_tenant_id(_SHARED_TENANT_ID)
                                  or normalized == "shared")
@@ -1215,9 +1284,11 @@ def tenant_may_manage(manager_tenant, target_tenant) -> bool:
     any tenant (e.g. an LRB agent must never manage a DXP agent, but a shared
     DHCP coordinator may manage everyone's Kea workers). Unassigned ("") only
     matches unassigned; capitalisation never matters."""
+    # Same tenant always may.
     m = _norm_tenant_id(manager_tenant)
     if m == _norm_tenant_id(target_tenant):
         return True
+    # Otherwise only the shared tenant may manage others.
     return tenant_is_shared(m)
 
 
@@ -1242,12 +1313,14 @@ def tenant_scope_ids(requested) -> Optional[set]:
     set is only ever consumed by ``in_tenant_scope``, which canonicalises the
     resource side the same way, so the two can never disagree on spelling.
     """
+    # No selection (or blank) means unscoped.
     if requested is None:
         return None
     normalized = _norm_tenant_id(requested)
     if not normalized:
         return None
 
+    # Admin covers unassigned + default; others cover themselves (and group members).
     if normalized == ADMIN_TENANT_ID:
         scope = {"", ADMIN_TENANT_ID}
     else:
@@ -1255,6 +1328,7 @@ def tenant_scope_ids(requested) -> Optional[set]:
         # A tenant GROUP selection covers every member tenant underneath it.
         scope |= _GROUP_MEMBERS.get(normalized, set())
 
+    # Shared infra is always in scope.
     shared_id = shared_tenant_id()
     if shared_id:
         scope.add(_norm_tenant_id(shared_id))
@@ -1269,6 +1343,7 @@ def in_tenant_scope(tenant_id, scope: Optional[set]) -> bool:
     decides visibility."""
     if scope is None:
         return True
+    # Direct match, or the shared tenant.
     normalized = _norm_tenant_id(tenant_id)
     if normalized in scope:
         return True
@@ -1292,11 +1367,13 @@ def spoke_is_unbound(hub, spoke_id) -> bool:
     failure, and returns True."""
     if not spoke_id:
         return False
+    # Read the spoke's tenant binding; fail closed.
     try:
         md = (hub.state.system_state.get("module_metadata", {}) or {})
         tenant_id = (md.get(spoke_id, {}) or {}).get("tenant_id")
     except Exception:  # noqa: BLE001 - unreadable binding → never leak
         return False
+    # Unassigned, shared, or admin-bound counts as unbound.
     normalized = str(tenant_id or "").strip()
     if not normalized:
         return True
@@ -1324,12 +1401,14 @@ def nw_poll_cfg_for_tenant(hub, tenant_id) -> dict:
     (``nw_tenant_cfg[tenant]['poll']``) falling back per-key to the global
     admin defaults (``nw_poll_*``). Values may be None → the spoke applies its
     own built-in default. Returns the four UPDATE_CONFIG payload keys."""
+    # Global config and this tenant's poll override.
     gc = hub.state.system_state.get("global_config", {}) or {}
     ov = {}
     if tenant_id:
         ov = (((gc.get("nw_tenant_cfg") or {}).get(tenant_id) or {}).get("poll") or {})
 
     def pick(okey, gkey):
+        """The tenant override if set, else the global default."""
         v = ov.get(okey)
         return v if v is not None else gc.get(gkey)
 
@@ -1354,12 +1433,14 @@ def spoke_visible_to_session(sess, tenant_id) -> bool:
     ``filter_tenant`` / ``gate_record`` paths, and WRITES still go through the
     shared-infra-write gate (tenant-admin, ``?tenant=`` owned), unchanged.
     """
+    # Admin sees all; unassigned is admin-only; shared is visible to everyone.
     if is_admin(sess):
         return True
     if not tenant_id:
         return False
     if tenant_is_shared(tenant_id):
         return True
+    # Otherwise the user's own tenants.
     allowed = (sess or {}).get("user", {}).get("tenants") or []
     return bool(allowed) and tenant_id in allowed
 
@@ -1382,16 +1463,19 @@ def hypervisor_owned_by_caller(hub, sess, spoke_id: str) -> bool:
     False, so a multi-tenant host still falls through to per-VM tag/subnet
     attribution (isolation preserved). Mirrors ``can_bind_spoke`` + the host-shell
     gate. Admin → True."""
+    # Admin always; nothing to check without a spoke id.
     if is_admin(sess):
         return True
     if not spoke_id:
         return False
+    # The tenant the hypervisor spoke is bound to.
     try:
         spoke_tenant = hub.state.get_spoke_tenant(spoke_id) or ""
     except Exception:  # noqa: BLE001
         spoke_tenant = ""
     if not spoke_tenant:
         return False
+    # Caller's tenants (falling back to their primary tenant).
     user = (sess or {}).get("user", {}) or {}
     allowed = [str(t).strip() for t in (user.get("tenants") or []) if str(t).strip()]
     if not allowed:
@@ -1408,6 +1492,7 @@ def spoke_owner_tenant(hub, spoke_id) -> Optional[str]:
     if not spoke_id:
         return None
     try:
+        # The spoke's bound tenant; shared or none means no owner.
         tid = str(hub.state.get_spoke_tenant(spoke_id) or "").strip()
     except Exception:  # noqa: BLE001
         return None
@@ -1423,6 +1508,7 @@ def tenant_in(tenant, selected) -> bool:
 
 
 def _session_tenants(sess) -> list:
+    """The session user's tenant ids, falling back to their primary tenant_id."""
     user = (sess or {}).get("user", {}) or {}
     tids = [str(t).strip() for t in (user.get("tenants") or []) if str(t).strip()]
     if not tids and str(user.get("tenant_id") or "").strip():
@@ -1435,6 +1521,7 @@ def firewall_owner_tenant(hub, firewall_id) -> Optional[str]:
     else its spoke's (``spoke_owner_tenant``). None for a shared firewall."""
     if not firewall_id:
         return None
+    # Find the firewall's config record.
     try:
         fws = hub.state.system_state.get("global_config", {}).get("firewalls", []) or []
         fw = next((f for f in fws if isinstance(f, dict) and f.get("id") == firewall_id), None)
@@ -1442,6 +1529,7 @@ def firewall_owner_tenant(hub, firewall_id) -> Optional[str]:
         fw = None
     if not fw:
         return None
+    # Its own dedicated tenant, else its spoke's.
     tid = str(fw.get("tenant_id") or "").strip()
     if tid and not tenant_is_shared(tid):
         return tid
@@ -1465,11 +1553,14 @@ def canon_module_type(module_type) -> str:
 
 
 def _dict_attr(obj, name) -> dict:
+    """Attribute ``name`` of ``obj`` if it is a dict, else an empty dict."""
     val = getattr(obj, name, None)
     return val if isinstance(val, dict) else {}
 
 
 def _module_metadata(hub) -> dict:
+    """The hub's persisted module_metadata dict (empty if missing)."""
+    # Fetch system_state.module_metadata defensively.
     ss = _dict_attr(getattr(hub, "state", None), "system_state")
     md = ss.get("module_metadata")
     return md if isinstance(md, dict) else {}
@@ -1480,11 +1571,13 @@ def spoke_module_type(hub, spoke_id) -> str:
     persisted in ``module_metadata`` (covers offline spokes)."""
     if not spoke_id:
         return ""
+    # Resolve the spoke's primary key.
     try:
         pk = hub._primary_key(spoke_id)
     except Exception:  # noqa: BLE001
         pk = spoke_id
     pk = pk if isinstance(pk, str) else spoke_id
+    # Live registry first, then persisted metadata.
     live = _dict_attr(hub, "spoke_module_types")
     md = _module_metadata(hub)
     mt = live.get(pk) or live.get(spoke_id)
@@ -1500,10 +1593,12 @@ def tenant_has_own_spoke(hub, tenant_id, module_type) -> bool:
     the shared environment for that module: shared/unassigned spokes of the
     type are hidden from it, never IP-routed. A group owns only a spoke bound
     to the group itself. The ADMIN tenant never counts (it is the admin view)."""
+    # Admin, shared, or blank tenants never own spokes.
     t = _norm_tenant_id(tenant_id)
     mt = canon_module_type(module_type)
     if not t or not mt or t == ADMIN_TENANT_ID or tenant_is_shared(t):
         return False
+    # Scan every known spoke for one of this type bound to this tenant.
     md = _module_metadata(hub)
     for sid in set(md) | set(_dict_attr(hub, "spoke_module_types")):
         meta = md.get(sid)
@@ -1524,9 +1619,11 @@ def tenant_has_own_firewall(hub, tenant_id) -> bool:
     record whose owner — its own tenant_id, else its spoke's — is exactly this
     tenant) or a firewall spoke of its own. Such a tenant no longer sees
     shared firewalls."""
+    # Admin, shared, or blank tenants never own firewalls.
     t = _norm_tenant_id(tenant_id)
     if not t or t == ADMIN_TENANT_ID or tenant_is_shared(t):
         return False
+    # Any configured firewall owned by this tenant?
     gc = _dict_attr(getattr(hub, "state", None), "system_state").get("global_config")
     fws = (gc.get("firewalls") if isinstance(gc, dict) else None) or []
     for fw in fws:
@@ -1534,6 +1631,7 @@ def tenant_has_own_firewall(hub, tenant_id) -> bool:
             owner = firewall_owner_tenant(hub, fw.get("id")) if fw.get("id") else None
             if owner and _norm_tenant_id(owner) == t:
                 return True
+    # Or a firewall spoke of its own.
     return tenant_has_own_spoke(hub, t, "firewall")
 
 
@@ -1550,8 +1648,10 @@ def scoped_spoke_of_type(hub, tenant_id, module_type) -> Optional[str]:
     """Single-spoke pick for ``module_type``: the tenant's own connected spoke
     when it owns one (None if all of them are offline — never a shared
     fallback), else the first connected spoke of that type (legacy)."""
+    # Tenant has no own spoke: fall back to any spoke of the type.
     if not tenant_has_own_spoke(hub, tenant_id, module_type):
         return hub.get_spoke_by_type(module_type)
+    # Find the tenant's connected, approved spoke of this type.
     t = _norm_tenant_id(tenant_id)
     want = canon_module_type(module_type)
     active = getattr(hub, "active_connections", None) or {}
@@ -1566,6 +1666,7 @@ def scoped_spoke_of_type(hub, tenant_id, module_type) -> Optional[str]:
 def _shared_spoke_masked(hub, spoke_id, tid, firewall_id=None) -> bool:
     """A shared/unassigned spoke's (or shared firewall's) data is hidden from
     ``tid`` because ``tid`` owns its own of that module."""
+    # Firewall data uses the firewall rule; spokes use their module type.
     mt = "firewall" if firewall_id else spoke_module_type(hub, spoke_id)
     return bool(mt) and tenant_left_shared(hub, tid, mt)
 
@@ -1578,20 +1679,25 @@ def _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant=None,
     unassigned spoke is hidden (False) from a tenant that owns a spoke of the
     same module type (``tenant_has_own_spoke``). None otherwise (the IP filter
     applies)."""
+    # Find the owner; nothing to decide for unidentified data.
     owner = owner or spoke_owner_tenant(hub, spoke_id)
     if not owner and not (spoke_id or firewall_id):
         return None
+    # Unauthenticated: hide owned data.
     sess = session_user(sessions, request)
     if not sess:
         return False if owner else None
+    # Selected tenant from the query string, if not passed in.
     if explicit_tenant is None:
         try:
             explicit_tenant = request.query_params.get("tenant")
         except Exception:  # noqa: BLE001
             explicit_tenant = None
     tid = effective_tenant(sessions, request, explicit_tenant)
+    # Shared spoke: hidden if the tenant has its own; otherwise let the IP filter decide.
     if not owner:
         return False if tid and _shared_spoke_masked(hub, spoke_id, tid, firewall_id) else None
+    # Owned spoke: admins see it with no selection; otherwise the owner must match.
     if not tid:
         return is_admin(sess)
     return tenant_in(owner, tid)
@@ -1603,15 +1709,18 @@ def _owned_spoke_writable(hub, sess, spoke_id, owner=None,
     caller's tenants owns (or is a group containing) the dedicated spoke's
     tenant. A shared/unassigned spoke is not writable when every one of the
     caller's tenants owns its own spoke of that type. None otherwise."""
+    # Owner of the spoke; admins may write dedicated spokes.
     owner = owner or spoke_owner_tenant(hub, spoke_id)
     if is_admin(sess):
         return True if owner else None
+    # Shared spoke: not writable if every caller tenant has its own.
     if not owner:
         tids = _session_tenants(sess)
         if (spoke_id or firewall_id) and tids and all(
                 _shared_spoke_masked(hub, spoke_id, t, firewall_id) for t in tids):
             return False
         return None
+    # Owned spoke: writable if any caller tenant matches the owner.
     return any(tenant_in(owner, t) for t in _session_tenants(sess))
 
 
@@ -1638,8 +1747,10 @@ async def tenant_admin_console_allowed(hub, sess, spoke_id: str) -> bool:
     hypervisor, whose isolation still relies on per-VM attribution until an
     operator deliberately flattens it. A hypervisor bound to a DIFFERENT tenant
     is NEVER opened this way. Global Admin is handled by the callers (bypass)."""
+    # Tenant admins only.
     if not is_tenant_admin(sess):
         return False
+    # The tenant the hypervisor is bound to.
     try:
         spoke_tenant = hub.state.get_spoke_tenant(spoke_id) or ""
     except Exception:  # noqa: BLE001
@@ -1655,6 +1766,7 @@ async def tenant_admin_console_allowed(hub, sess, spoke_id: str) -> bool:
             allowed = [primary] if primary else []
         if spoke_tenant not in allowed:
             return False
+    # Is tenant console (or host shell) enabled for this hypervisor?
     try:
         hv = await hub.simulations_store.get_hypervisors_config(spoke_tenant) or {}
     except Exception:  # noqa: BLE001
@@ -1677,16 +1789,19 @@ def last_known_vm_record(hub, unique_id="", vmid=None, node="") -> dict:
     the CALLER's own prefixes/tags by the gate — a foreign VM's cached IP won't
     match the caller's prefixes, so this only ever recovers the caller's OWN VMs.
     Returns ``{}`` when nothing is cached. Never raises."""
+    # Normalize the lookup keys.
     uid = str(unique_id or "").strip()
     want_vmid = str(vmid).strip() if vmid is not None else ""
     want_node = str(node or "").strip()
     ips: list = []
     tags: list = []
     pool = ""
+    # The pxmx_vms warm cache.
     try:
         cache = getattr(hub, "warm_cache", {}).get("pxmx_vms", {}) or {}
     except Exception:  # noqa: BLE001
         return {}
+    # Scan each cached VM list for the matching VM.
     for entry in cache.values():
         data = entry.get("data") if isinstance(entry, dict) else None
         vms = data.get("vms") if isinstance(data, dict) else (data if isinstance(data, list) else None)
@@ -1705,6 +1820,7 @@ def last_known_vm_record(hub, unique_id="", vmid=None, node="") -> dict:
                     continue
             else:
                 continue
+            # Merge this VM's IPs, tags, and pool.
             for x in (vm.get("ips") or []):
                 if x and x not in ips:
                     ips.append(x)
@@ -1712,6 +1828,7 @@ def last_known_vm_record(hub, unique_id="", vmid=None, node="") -> dict:
                 if t and t not in tags:
                     tags.append(t)
             pool = pool or (vm.get("pool") or "")
+    # Nothing found: empty dict.
     if not ips and not tags and not pool:
         return {}
     return {"ips": ips, "tags": tags, "pool": pool}
@@ -1726,10 +1843,12 @@ def can_bind_spoke(hub, sess, spoke_id: str) -> bool:
     connection config is admin-tier). This is the gate for the tenant-scoped
     "Add Firewall / NAC / DNS / DHCP / IPAM / Network device" flows.
     """
+    # Admin: any spoke; non-tenant-admins: none.
     if is_admin(sess):
         return True
     if not is_tenant_admin(sess):
         return False
+    # Tenant admin: only a spoke bound to one of their tenants.
     try:
         spoke_tenant = hub.state.get_spoke_tenant(spoke_id) or ""
     except Exception:  # noqa: BLE001
@@ -1751,6 +1870,7 @@ def check_tenant_access(sess, tenant_id: str) -> bool:
     ANY tenant. This now matches the deny-by-default posture of
     :func:`effective_tenant`.
     """
+    # No session denies; admin allows; others need the tenant in their list.
     if not sess:
         return False
     if is_admin(sess):
@@ -1765,6 +1885,7 @@ def resolve_tenant(sessions: dict, request: "Request", explicit: str = None) -> 
     Priority: explicit ?tenant= param > session user's assigned tenant_id > None
     (None lets get_tenant_scoping fall back to the hub's active_tenant).
     """
+    # Explicit tenant wins, then the session's tenant.
     if explicit:
         return explicit
     sess = session_user(sessions, request)
@@ -1787,10 +1908,12 @@ def effective_tenant(sessions: dict, request: "Request", explicit: str = None) -
 
 def session_effective_tenant(sess, explicit: str = None) -> str | None:
     """``effective_tenant`` for an already-resolved session."""
+    # No session: no tenant. Admin: whatever was asked for.
     if not sess:
         return None
     if is_admin(sess):
         return explicit
+    # Non-admin: the explicit tenant only if they own it, else their own.
     if explicit:
         allowed = sess.get("user", {}).get("tenants") or []
         if allowed and explicit in allowed:
@@ -1800,6 +1923,7 @@ def session_effective_tenant(sess, explicit: str = None) -> str | None:
 
 def request_effective_tenant(sess, request, explicit: str = None) -> str | None:
     """``session_effective_tenant`` with ``explicit`` defaulting to ``?tenant=``."""
+    # Default the explicit tenant from the query string.
     if explicit is None:
         try:
             explicit = request.query_params.get("tenant")
@@ -1814,6 +1938,7 @@ def acting_tenant(sessions: dict, request: "Request") -> str | None:
     tenant (a multi-tenant user working in their second tenant must not have
     new objects filed under the first). Admin → unchanged
     :func:`resolve_tenant` behavior (their session tenant)."""
+    # Non-admins use their selected tenant; admins use their session tenant.
     sess = session_user(sessions, request)
     if sess and not is_admin(sess):
         return effective_tenant(sessions, request, request.query_params.get("tenant"))
@@ -1830,6 +1955,7 @@ def effective_tenant_slug(hub, sessions: dict, request: "Request", explicit: str
     applies here too — otherwise a caller scoping by the selected tenant would
     resolve Admin to "no scope" even though NetBox objects are stamped into
     its real "default" tenant (see ``netbox_tenant_scope``)."""
+    # Selected tenant, mapped to its NetBox slug.
     tid = effective_tenant(sessions, request, explicit)
     if not tid:
         return None
@@ -1881,6 +2007,7 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
         if not scope.get("tenant_group"):
             return []
         payload = {"tenant_group": scope["tenant_group"]}
+    # Serve from the cache while fresh.
     key = payload.get("tenant") or ("group:" + str(payload.get("tenant_group")))
     cache = _hub_prefix_cache(hub)
     hit = cache.get(key) if cache is not None else None
@@ -1888,6 +2015,7 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
         return list(hit[0])
 
     def _remember(prefixes, ttl):
+        """Cache ``prefixes`` for ``ttl`` seconds and return them."""
         if cache is not None:
             cache[key] = (list(prefixes), time.time() + ttl)
         return prefixes
@@ -1895,6 +2023,7 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
     def _from_warm():
         # Last-known prefixes for this scope (same cache the NetBox page uses),
         # so a restarting/unreachable spoke doesn't make a tenant look empty.
+        """Last-known prefixes for this scope from the warm cache, or []."""
         try:
             cached = hub.warm_get("nb_netbox_prefixes", key)
             data = unwrap_spoke(cached) if cached is not None else None
@@ -1904,11 +2033,13 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
         except Exception:
             return []
 
+    # No NetBox spoke: use last-known prefixes.
     spoke_id = get_netbox_spoke(hub)
     if not spoke_id:
         logger.warning("fetch_tenant_prefixes tenant=%s: no connected NetBox spoke", tenant_id)
         return _from_warm()
     try:
+        # Ask the spoke and pull out the prefix strings.
         result = await hub.request_response(spoke_id, "NETBOX_GET_PREFIXES", payload, timeout=30.0)
         data = unwrap_spoke(result)
         out = [p["prefix"] for p in (data.get("prefixes", []) if isinstance(data, dict) else []) if p.get("prefix")]
@@ -1924,6 +2055,7 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
                 tenant_id, payload, spoke_id, str(data)[:200])
             return _remember(_from_warm(), _PREFIX_CACHE_TTL if ok_empty else _PREFIX_FAIL_TTL)
         return _remember(out, _PREFIX_CACHE_TTL)
+    # Request failed: last-known prefixes, retried sooner.
     except Exception as e:
         logger.warning(f"Failed to fetch prefixes for tenant '{tenant_id}': {e}")
         return _remember(_from_warm(), _PREFIX_FAIL_TTL)
@@ -1932,6 +2064,7 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
 async def _tenant_networks(hub) -> Dict[str, List[Any]]:
     """{tenant_id: [ip_network]} from each tenant's NetBox prefixes (tenant
     groups excluded; the built-in Admin tenant always included)."""
+    # Every non-group tenant id.
     tenants = (hub.state.tenant_state or {}).get("tenants", {}) or {}
     tids = [str(tid) for tid, c in tenants.items()
             if not (isinstance(c, dict) and c.get("is_tenant_group"))]
@@ -1944,11 +2077,13 @@ async def _tenant_networks(hub) -> Dict[str, List[Any]]:
         # DHCP/ARP discovery whose IP falls in one of them is wrongly dropped
         # or mis-attributed to another tenant's broader prefix.
         tids.append(ADMIN_TENANT_ID)
+    # Fetch every tenant's prefixes concurrently, at most 8 at a time.
     nets_by_tid: Dict[str, List[Any]] = {}
     if fetch_tenant_prefixes is not None and tids:
         sem = asyncio.Semaphore(8)
 
         async def _nets_for(tid: str):
+            """Fetch one tenant's prefixes and parse them into networks; returns (tid, nets)."""
             async with sem:
                 try:
                     prefs = await fetch_tenant_prefixes(hub, tid)
@@ -1962,6 +2097,7 @@ async def _tenant_networks(hub) -> Dict[str, List[Any]]:
                         pass
                 return tid, nets
 
+        # Collect the results.
         for tid, nets in await asyncio.gather(*(_nets_for(tid) for tid in tids)):
             nets_by_tid[tid] = nets
 
@@ -1976,13 +2112,16 @@ def _prefix_owner(addr, nets_by_tid: Dict[str, List[Any]], hint: str = "") -> Op
     its agent only sees its own VRF, so an address outside that tenant's
     prefixes is unattributed rather than given to another tenant. Admin/shared
     hints only break ties (their agents may see every tenant's space)."""
+    # The hinted tenant, and every tenant with a prefix containing the address.
     hint_tid = next((t for t in nets_by_tid if same_tenant(t, hint)), None) if hint else None
     owners = [(net.prefixlen, tid) for tid, nets in nets_by_tid.items()
               for net in nets or [] if addr in net]
+    # A dedicated tenant's hint is strict.
     if hint_tid and not tenant_is_shared(hint_tid) and not same_tenant(hint_tid, ADMIN_TENANT_ID):
         return hint_tid if any(tid == hint_tid for _, tid in owners) else None
     if not owners:
         return None
+    # Otherwise the most specific prefix wins; the hint breaks ties.
     best_len = max(plen for plen, _ in owners)
     best = [tid for plen, tid in owners if plen == best_len]
     return hint_tid if hint_tid in best else best[0]
@@ -2009,9 +2148,11 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
     path. ``records`` carry an ``ip`` field (anything else is opaque to this
     helper); the caller normalizes MACs etc.
     """
+    # Build the tenant->networks map once.
     nets_by_tid = await _tenant_networks(hub)
     buckets: Dict[str, List[Dict[str, Any]]] = {}
     dropped = 0
+    # Bucket each record by owner; count the ones without a valid IP or an owner.
     for rec in records:
         ip_s = (rec.get("ip") or "").split("/")[0].strip()
         if not ip_s:
@@ -2022,6 +2163,7 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
         except Exception:
             dropped += 1
             continue
+        # A dedicated-spoke owner wins; otherwise attribute by prefix.
         owner = str(rec.get("owner_tenant_id") or "").strip()
         if owner:
             matched = next((t for t in nets_by_tid if same_tenant(t, owner)), owner)
@@ -2039,15 +2181,18 @@ async def foreign_tenant_ips(hub, tenant_id, ips) -> set:
     specific prefix wins; on a tie — the same prefix in two tenants' VRFs —
     ``tenant_id`` keeps it). Unowned IPs, IPs of the shared tenant and, for a
     tenant group, IPs of its member tenants are not foreign. Empty when NetBox is unreachable."""
+    # Tenant networks, this tenant, and its group members.
     nets_by_tid = await _tenant_networks(hub)
     mine = str(tenant_id or ADMIN_TENANT_ID)
     # A tenant group owns no prefixes itself; its member tenants' are its own.
     members = _GROUP_MEMBERS.get(_norm_tenant_id(mine), set())
 
     def _own(tid):
+        """True if ``tid`` is this tenant or one of its group members."""
         return same_tenant(tid, mine) or _norm_tenant_id(tid) in members
 
     foreign = set()
+    # For each IP, find the most specific owning tenant (ties go to us).
     for ip in ips:
         try:
             addr = ipaddress.ip_address(str(ip).split("/")[0].strip())
@@ -2061,6 +2206,7 @@ async def foreign_tenant_ips(hub, tenant_id, ips) -> set:
                 if (best is None or net.prefixlen > best[1]
                         or (net.prefixlen == best[1] and _own(tid))):
                     best = (tid, net.prefixlen)
+        # Owned by someone else and not shared: foreign.
         if best and not _own(best[0]) and not tenant_is_shared(best[0]):
             foreign.add(str(ip))
     return foreign
@@ -2072,16 +2218,19 @@ async def resolve_prefixes(hub, sess) -> list:
     means "no filter"). Extracted from /auth/prefixes so the UI endpoint and the
     server-side filter share one source of truth.
     """
+    # Admins get no filter; return the cached list while it's fresh.
     if not sess or is_admin(sess):
         return []
     cached = sess.get("prefixes")
     if cached is not None and sess.get("prefixes_at", 0) > time.time() - _PREFIX_CACHE_TTL:
         return cached or []
+    # No tenant: cache and return empty.
     tenant_id = sess.get("user", {}).get("tenant_id")
     if not tenant_id:
         sess["prefixes"] = []
         sess["prefixes_at"] = time.time()
         return []
+    # Fetch and cache on the session.
     prefixes = await fetch_tenant_prefixes(hub, tenant_id)
     sess["prefixes"] = prefixes
     sess["prefixes_at"] = time.time()
@@ -2095,12 +2244,14 @@ async def resolve_prefixes_for_session_tenant(hub, sess, tenant_id) -> list:
     :func:`resolve_prefixes`; a separate ``prefixes_by_tid`` map so the two
     caches never clobber each other. Empty for admins / unconfigured tenants.
     """
+    # Per-tenant cache on the session.
     if not sess or is_admin(sess) or not tenant_id:
         return []
     cache = sess.setdefault("prefixes_by_tid", {})
     ent = cache.get(tenant_id)
     if ent is not None and ent[1] > time.time() - _PREFIX_CACHE_TTL:
         return ent[0] or []
+    # Fetch and cache.
     prefixes = await fetch_tenant_prefixes(hub, tenant_id)
     cache[tenant_id] = (prefixes, time.time())
     return prefixes
@@ -2113,9 +2264,11 @@ async def resolve_owned_prefixes(hub, sess) -> list:
     Empty for admins / users with no tenant."""
     if not sess or is_admin(sess):
         return []
+    # All the user's tenants, deduplicated.
     user = sess.get("user", {}) or {}
     tids = dict.fromkeys(t for t in (user.get("tenants") or []) + [user.get("tenant_id")] if t)
     out = []
+    # Merge each tenant's prefixes.
     for tid in tids:
         for p in await resolve_prefixes_for_session_tenant(hub, sess, tid) or []:
             if p not in out:
@@ -2133,6 +2286,7 @@ async def resolve_prefixes_for_tenant(hub, tenant_id) -> list:
 # ── Subnet filtering ──────────────────────────────────────────────────────────
 
 def filter_enabled(hub, module: str) -> bool:
+    """True if subnet filtering is enabled for ``module``."""
     return filter_config(hub).get(module, False)
 
 
@@ -2163,20 +2317,25 @@ async def filter_session(hub, sessions: dict, request: "Request", data, module: 
     unowned selection, so a crafted ``?tenant=`` can never widen the filter —
     the cross-tenant backstop is preserved.
     """
+    # Data merged from several spokes: filter each spoke's part separately.
     if spoke_of is not None:
         return await filter_by_source_spoke(
             hub, sessions, request, data, spoke_of,
             lambda d: filter_session(hub, sessions, request, d, module, ip_fields))
+    # Dedicated-spoke data: all or nothing.
     visible = _owned_spoke_visible(hub, sessions, request, spoke_id, None)
     if visible is not None:
         return data if visible else _empty_filter_result(data)
+    # Admins, and disabled modules, see everything.
     sess = session_user(sessions, request)
     if not sess or is_admin(sess):
         return data
     if not filter_enabled(hub, module):
         return data
+    # Non-admin with no tenant: nothing.
     if not sess.get("user", {}).get("tenant_id"):
         return [] if isinstance(data, list) else ({} if isinstance(data, dict) else data)
+    # Filter by the effective tenant's prefixes; none means nothing.
     try:
         selected = request.query_params.get("tenant")
     except Exception:
@@ -2210,6 +2369,7 @@ async def _fw_alias_map(hub, firewall_id) -> "dict | None":
     if not firewall_id:
         return None
     try:
+        # Find the firewall and make sure its spoke is connected.
         firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", []) or []
         fw = next((f for f in firewalls if isinstance(f, dict) and f.get("id") == firewall_id), None)
         if not fw:
@@ -2217,10 +2377,12 @@ async def _fw_alias_map(hub, firewall_id) -> "dict | None":
         spoke_id = fw.get("spoke_id")
         if not spoke_id or hub._primary_key(spoke_id) not in getattr(hub, "active_connections", {}):
             return None
+        # Serve from the memo while fresh.
         now = time.monotonic()
         memo = _FW_ALIAS_MEMO.get((spoke_id, firewall_id))
         if memo and (now - memo[0]) < _FW_ALIAS_TTL:
             return memo[1]
+        # Fetch aliases from the spoke, build the map, and memoize it.
         result = await hub.request_response(spoke_id, "OPNSENSE_GET_ALIASES", {})
         data = unwrap_spoke(result)
         # OPNSENSE_GET_ALIASES → {status, data: [{name, type, content}, ...]}
@@ -2251,14 +2413,17 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
     ``filter_tenant``. The ``firewall`` subnet-filter toggle gates both
     paths; an empty prefix list FAILS CLOSED (empty result) — a tenant with no
     prefixes sees nothing, not the whole fleet."""
+    # Endpoint's filter spec.
     spec = _FW_FILTER_SPEC.get(endpoint)
     if not spec:
         return data  # health / unknown → no IP to filter on
+    # Dedicated firewall/spoke: all or nothing.
     visible = _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant,
                                    owner=firewall_owner_tenant(hub, firewall_id),
                                    firewall_id=firewall_id)
     if visible is not None:
         return data if visible else _empty_filter_result(data)
+    # Prefixes for the selected tenant, or the session tenant (admins pass).
     mode, fields = spec
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
@@ -2272,6 +2437,7 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
         if not filter_enabled(hub, "firewall"):
             return data
         prefixes = await resolve_prefixes(hub, sess)
+    # No prefixes: shared sees all, others see nothing.
     if not prefixes:
         if tenant_is_shared(tid):
             return data
@@ -2285,10 +2451,12 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
         t = hub.state.get_tenant(tid) or {}
         cats = [t.get("name"), t.get("slug"), t.get("netbox_tenant_slug"), tid]
         tenant_cat = sorted({str(c).strip() for c in cats if c}) or None
+    # Log the pre-filter state.
     before = _list_len(data)
     logger.debug("DIAG filter_fw[%s] tid=%r enabled=%s prefixes=%d "
                    "items_before=%d mode=%s tenant_cat=%r", endpoint, tid, True,
                    len(prefixes), before, mode, tenant_cat)
+    # Rules: source/destination match with alias resolution.
     if mode == "fw":
         alias_map = await _fw_alias_map(hub, firewall_id) if firewall_id else None
         out = filter_firewall_rules(data, prefixes, alias_map, tenant_category=tenant_cat)
@@ -2331,14 +2499,17 @@ async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload
       own tenant name and pass. We pass ``tenant_category=None`` so attribution is
       strictly by subnet (alias_map is the firewall's own server-side map, not
       caller data). Endpoints with no IP spec (health/interfaces) → False."""
+    # Endpoint's filter spec; none means deny.
     spec = _FW_FILTER_SPEC.get(endpoint)
     if not spec:
         return False
+    # Dedicated firewall/spoke: ownership decides.
     owned = _owned_spoke_writable(hub, sess, spoke_id,
                                   owner=firewall_owner_tenant(hub, firewall_id),
                                   firewall_id=firewall_id)
     if owned is not None:
         return owned
+    # Match the payload against all the caller's prefixes (no category trust).
     mode, fields = spec
     prefixes = await resolve_owned_prefixes(hub, sess)
     if not prefixes:
@@ -2378,11 +2549,13 @@ async def vm_in_tenant_scope(hub, sess, vm_record, spoke_id=None) -> bool:
         short-circuits to "keep all" on empty prefixes, so the tag path is checked
         directly and the no-prefix case denies rather than delegating to it.)
     """
+    # Admin, then dedicated-spoke ownership.
     if is_admin(sess):
         return True
     owned = _owned_spoke_writable(hub, sess, spoke_id)
     if owned is not None:
         return owned
+    # Caller's tenants (falling back to the primary tenant).
     user = (sess or {}).get("user", {}) or {}
     tenant_ids = [str(t).strip() for t in (user.get("tenants") or []) if str(t).strip()]
     if not tenant_ids:
@@ -2392,6 +2565,7 @@ async def vm_in_tenant_scope(hub, sess, vm_record, spoke_id=None) -> bool:
         tenant_ids = [primary] if primary else []
     if not tenant_ids:
         return False
+    # Match by tenant tag, then by subnet, for each tenant.
     vm_tags = {str(t).strip().lower() for t in (vm_record.get("tags") or [])}
     for tid in tenant_ids:
         tenant_tags = _tenant_tag_set(hub, tid) or set()
@@ -2418,6 +2592,7 @@ async def record_in_tenant_scope(hub, sess, record, fields, spoke_id=None) -> bo
     subnets (any of their tenants'); anything else is a Global-Admin action."""
     if not isinstance(record, dict):
         return False
+    # Dedicated spoke: ownership decides; otherwise match the caller's prefixes.
     owned = _owned_spoke_writable(hub, sess, spoke_id)
     if owned is not None:
         return owned
@@ -2441,12 +2616,15 @@ async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str
     MAC/ARP use drop_no_ip=False (a MAC-only row leaks no cross-tenant IP);
     interfaces keep the strict default.
     """
+    # Endpoint's filter spec.
     spec = _NW_FILTER_SPEC.get(endpoint)
     if not spec:
         return data  # devices / info / unknown → no IP to filter on
+    # Dedicated spoke: all or nothing.
     visible = _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant)
     if visible is not None:
         return data if visible else _empty_filter_result(data)
+    # Prefixes for the selected tenant, or the session tenant (admins pass).
     mode, fields = spec
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
@@ -2460,10 +2638,12 @@ async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str
         if not filter_enabled(hub, "nw"):
             return data
         prefixes = await resolve_prefixes(hub, sess)
+    # No prefixes: shared sees all, others see nothing.
     if not prefixes:
         if tenant_is_shared(tid):
             return data
         return _empty_filter_result(data)
+    # MAC-style views keep rows with no IP.
     drop_no_ip = endpoint not in ("macs", "arp", "endpoints")
     before = _list_len(data)
     out = filter_items_by_prefixes(data, prefixes, fields, drop_no_ip=drop_no_ip)
@@ -2479,9 +2659,11 @@ async def gate_record(hub, sessions: dict, request: "Request", record, module: s
     if it may be shown, else ``None``. No-op for admins / disabled modules. A
     non-admin whose tenant has no prefixes FAILS CLOSED (``None``): a tenant
     unconfigured for subnets may not enrich a foreign device's record."""
+    # Dedicated spoke: all or nothing.
     visible = _owned_spoke_visible(hub, sessions, request, spoke_id, None)
     if visible is not None:
         return record if visible else None
+    # Admins and disabled modules pass; otherwise match the session prefixes.
     sess = session_user(sessions, request)
     if not sess or is_admin(sess):
         return record
@@ -2495,6 +2677,7 @@ async def gate_record(hub, sessions: dict, request: "Request", record, module: s
 
 def _list_len(data) -> int:
     """Best-effort record count of a spoke envelope (for DIAG logging)."""
+    # Locate the record list.
     container, key = _find_list_slot(data)
     if container is None:
         return -1
@@ -2521,6 +2704,7 @@ def _empty_filter_result(data):
     transient NetBox outage can also yield an empty prefix list; the session
     prefix cache (``_PREFIX_CACHE_TTL``) mitigates this for established
     sessions, and fail-closed is the safe default regardless."""
+    # Locate the record list inside the envelope.
     container, key = _find_list_slot(data)
     if container is None:
         return [] if isinstance(data, list) else ({} if isinstance(data, dict) else data)
@@ -2558,6 +2742,7 @@ def _template_pools(hub) -> list:
     ``pxmx_template_pool`` (string / comma-separated). Defaults to
     ``["Templates", "Template"]`` (case-insensitive match covers 'templates').
     """
+    # Configured pools (list or comma-separated string), else the defaults.
     gc = hub.state.system_state.get("global_config", {}) or {}
     pools = gc.get("pxmx_template_pools")
     if pools is None:
@@ -2575,6 +2760,7 @@ def _tenant_tag_set(hub, tid) -> set:
     """Lowercased set of identifiers a VM's Proxmox tag can match to count as
     'tagged for this tenant': the tenant id, display name, slug, netbox slug,
     and proxmox_tag (the per-tenant hypervisor scope)."""
+    # Tenant record identifiers, lowercased.
     t = hub.state.get_tenant(tid) or {}
     return {str(x).strip().lower() for x in
             [tid, t.get("name"), t.get("slug"), t.get("netbox_tenant_slug"), t.get("proxmox_tag")]
@@ -2585,11 +2771,13 @@ def _keep_owned_items(data, tid: str, nets_by_tid: Dict[str, List[Any]], ip_fiel
     """Keep only records whose address belongs to ``tid`` by most-specific
     prefix (``_prefix_owner``). A CIDR record (a DHCP subnet) counts by its
     network address."""
+    # Locate the record list.
     container, key = _find_list_slot(data)
     if container is None:
         return data
 
     def owned(item) -> bool:
+        """True if any of the item's addresses is owned by ``tid`` (non-dicts pass)."""
         if not isinstance(item, dict):
             return True
         for f in ip_fields:
@@ -2602,6 +2790,7 @@ def _keep_owned_items(data, tid: str, nets_by_tid: Dict[str, List[Any]], ip_fiel
                     return True
         return False
 
+    # Keep owned items and put them back into the envelope.
     lst = container if key is None else container[key]
     kept = [i for i in lst if owned(i)]
     return kept if key is None else _replace_slot(data, container, key, kept)
@@ -2636,15 +2825,18 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
     others (``_owned_spoke_visible``). ``spoke_of(item)`` does the same per
     item of a list aggregated across spokes (``filter_by_source_spoke``).
     """
+    # Data merged from several spokes: filter per source spoke.
     if spoke_of is not None:
         return await filter_by_source_spoke(
             hub, sessions, request, data, spoke_of,
             lambda d: filter_tenant(hub, sessions, request, d, module, ip_fields,
                                     explicit_tenant, shared_source),
             explicit_tenant)
+    # Dedicated-spoke data: all or nothing.
     visible = _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant)
     if visible is not None:
         return data if visible else _empty_filter_result(data)
+    # Explicit tenant selected: scope by its prefixes, even for admins.
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
         enabled = filter_enabled(hub, module)
@@ -2669,6 +2861,7 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
             if module == "hypervisor" or tenant_is_shared(tid):
                 return data
             return _empty_filter_result(data)
+        # Apply the module's filter.
         if module == "hypervisor":
             out = filter_hypervisor_vms(data, prefixes,
                                         template_pools=_template_pools(hub),
@@ -2706,9 +2899,11 @@ async def gate_record_tenant(hub, sessions: dict, request: "Request", record, mo
     """Tenant-aware single-record gate (device-enrich). Returns ``record`` if its
     IP is in the selected tenant's prefixes, else ``None``; no explicit tenant →
     legacy ``gate_record`` (no-op for admins)."""
+    # Dedicated spoke: all or nothing.
     visible = _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant)
     if visible is not None:
         return record if visible else None
+    # Explicit tenant: check against its prefixes; otherwise the legacy gate.
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
         if not filter_enabled(hub, module):
@@ -2725,9 +2920,11 @@ async def filter_by_source_spoke(hub, sessions: dict, request: "Request", data, 
     source spoke is ``spoke_of(item)``: an item from a tenant-dedicated spoke is
     kept whole or dropped (``_owned_spoke_visible``); the rest go through
     ``await ip_filter(data)``, the usual IP/prefix filter. Order is preserved."""
+    # Locate the record list; without one, just IP-filter.
     container, key = _find_list_slot(data)
     if container is None:
         return await ip_filter(data)
+    # Sort items into dedicated-visible, dedicated-hidden, and the rest.
     lst = container if key is None else container[key]
     verdict: Dict[Any, Optional[bool]] = {}
     owned, rest = set(), []
@@ -2739,8 +2936,10 @@ async def filter_by_source_spoke(hub, sessions: dict, request: "Request", data, 
             rest.append(item)
         elif verdict[sid]:
             owned.add(id(item))
+    # All from shared spokes: plain IP filter.
     if len(rest) == len(lst):
         return await ip_filter(data)
+    # IP-filter the rest, then merge back in original order.
     out = await ip_filter(rest if key is None else _replace_slot(data, container, key, rest))
     c2, k2 = _find_list_slot(out)
     kept = owned | {id(i) for i in ((c2 if k2 is None else c2[k2]) if c2 is not None else [])}

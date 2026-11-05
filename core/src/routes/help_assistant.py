@@ -11,9 +11,12 @@ HARD REQUIREMENT: the feature is only usable when ab is connected —
 otherwise. Routes live under ``/api/help/*`` so the access-control middleware
 gates them (valid session required) like every other ``/api/`` route.
 """
+# Shared Hub helpers: errors, request, logger, os, json, asyncio and tenant access.
 from api import HTTPException, Request, logger, os, json, asyncio, access
+# Finds the connected AppBuilder (LLM) agent.
 from routes.console_llm_identify import find_ab
 
+# Doc metadata parsing and the GitHub-backed source corpus.
 from . import frontmatter, github_source
 
 # Tool rounds to allow on the fast cheap model before escalating the remaining
@@ -38,6 +41,7 @@ _TOOL_ROUNDS = 4
 
 # Follow-up history limits. History is re-sent on every turn of the loop, so an
 # unbounded transcript would recreate the prompt-bloat that made Ask AI slow.
+# Keep at most 4 earlier turns, trimming each question and answer to these sizes.
 _HISTORY_TURNS = 4
 _HISTORY_Q_MAX = 600
 _HISTORY_A_MAX = 1500
@@ -67,6 +71,7 @@ def _source_terms(q, query_terms):
     query like "how does it work" still searches something rather than matching
     everything.
     """
+    # Drop stopwords, keeping the original terms if nothing is left.
     terms = query_terms(q)
     kept = [t for t in terms if t not in _STOPWORDS]
     return kept or terms
@@ -82,6 +87,7 @@ def _empty_result(out):
     collection value in it being empty, as "found nothing". A dict with no
     collection values at all (e.g. a scalar status) is NOT empty.
     """
+    # Non-dict results are empty if falsy; an explicit error counts as empty.
     if not isinstance(out, dict):
         return not out
     if out.get("error"):
@@ -94,15 +100,19 @@ def _empty_result(out):
     total = out.get("total")
     if isinstance(total, int):
         return total == 0
+    # Otherwise empty means every list/dict value is empty.
     seqs = [v for v in out.values() if isinstance(v, (list, tuple, dict))]
     return bool(seqs) and all(len(v) == 0 for v in seqs)
 
 
 def register(app, hub, ctx):
+    """Register the Help assistant routes on ``app``."""
 
+    # Session and admin helpers from the shared route context.
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
 
+    # The docs folder: the first of these that exists (else the first one).
     _DOCS_DIR = next(
         (d for d in (
             os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../docs")),
@@ -133,6 +143,7 @@ def register(app, hub, ctx):
     _SRC_SKIP_FILE_HINTS = (".env", "secret", "credential", ".key", ".pem",
                             ".crt", ".p12", ".pfx", "id_rsa", ".pyc")
     _SRC_MAX_BYTES = 4_000_000        # per file; sim-views.js is ~1MB — keep it searchable
+    # Max hits returned and files scanned per source search.
     _SRC_MAX_MATCHES = 14
     _SRC_MAX_FILES = 6000
     _SRC_SNIPPET_CTX = 4              # lines of context above/below a hit
@@ -146,10 +157,12 @@ def register(app, hub, ctx):
         re-sending it to the model would work against the whole point of
         excerpting. The metadata is kept alongside for scoring instead.
         """
+        # Start empty (clearing any old metadata).
         docs = {}
         _DOC_META.clear()
 
         def _add(path, name):
+            """Read one doc, storing its body and any metadata (unreadable files are skipped)."""
             try:
                 with open(path, encoding="utf-8") as f:
                     meta, body = frontmatter.split(f.read())
@@ -160,6 +173,7 @@ def register(app, hub, ctx):
             if meta:
                 _DOC_META[name] = meta
 
+        # Every .md file in our docs folder.
         try:
             for fn in sorted(os.listdir(_DOCS_DIR)):
                 if fn.endswith(".md"):
@@ -181,6 +195,7 @@ def register(app, hub, ctx):
             siblings = sorted(os.listdir(parent))
         except Exception:  # noqa: BLE001
             siblings = []
+        # Each sibling repo's docs folder, skipping hidden dirs and lm itself.
         for repo in siblings:
             if repo in ("lm", ".", "..") or repo.startswith("."):
                 continue
@@ -191,6 +206,7 @@ def register(app, hub, ctx):
                 names = sorted(os.listdir(sib))
             except Exception:  # noqa: BLE001
                 continue
+            # Add docs we don't already have, prefixed with the repo name.
             for fn in names:
                 if not fn.endswith(".md") or fn[:-3] in docs:
                     continue
@@ -221,6 +237,7 @@ def register(app, hub, ctx):
         if not words:
             words = {w for w in ''.join(c.lower() if c.isalnum() else ' '
                                         for c in question).split() if len(w) > 2}
+        # Score each doc.
         scored = []
         for name, text in docs.items():
             tl = text.lower()
@@ -261,6 +278,7 @@ def register(app, hub, ctx):
             if historical:
                 score *= 0.35
             scored.append((score, name))
+        # Take the top k with a positive score, or fall back to the overview docs.
         scored.sort(reverse=True)
         picked = [n for s, n in scored if s > 0][:k]
         if not picked:  # fallback to the overview docs
@@ -286,9 +304,11 @@ def register(app, hub, ctx):
         Short docs are returned whole -- there is nothing to gain by trimming
         something already under budget.
         """
+        # Use the default budget; short docs are returned whole.
         budget = budget or _DOC_EXCERPT_BUDGET
         if len(text) <= budget:
             return text
+        # Split into sections at each heading.
         lines = text.split("\n")
         sections, cur = [], []
         for ln in lines:
@@ -300,9 +320,11 @@ def register(app, hub, ctx):
         if cur:
             sections.append("\n".join(cur))
 
+        # Always keep the opening (up to a third of the budget).
         head = sections[0] if sections else text[:budget // 3]
         head = head[:budget // 3]
         rest = sections[1:] if sections else []
+        # Score the other sections by how densely they mention the terms.
         scored = []
         for i, sec in enumerate(rest):
             sl = sec.lower()
@@ -313,6 +335,7 @@ def register(app, hub, ctx):
                 scored.append(((1000.0 * hits) / (len(sl) + 500.0), i, sec))
         scored.sort(key=lambda x: (-x[0], x[1]))
 
+        # Add the best sections until the budget is used.
         out, used = [head], len(head)
         for _score, _i, sec in scored:
             if used >= budget:
@@ -322,6 +345,7 @@ def register(app, hub, ctx):
                 break
             out.append(take)
             used += len(take)
+        # Join the pieces with "[...]" between them.
         return "\n\n[...]\n\n".join(out)
 
     # ── Phase 2 tools (executed hub-side, scoped to the CALLER) ──────────────
@@ -331,11 +355,13 @@ def register(app, hub, ctx):
         admin sees the whole fleet; a non-admin sees only spokes bound to their
         own tenant(s) (+ shared), so opening Ask AI to every user can't reveal
         another tenant's infrastructure."""
+        # Who is asking, and the spoke lists and live connections.
         sess = _session_user(request)
         is_admin = _is_admin(sess)
         known = hub.state.system_state.get("known_modules", []) or []
         meta = hub.state.system_state.get("module_metadata", {}) or {}
         conns = getattr(hub, "active_connections", {}) or {}
+        # One row per spoke the caller may see.
         out = []
         for sid in known:
             if not is_admin:
@@ -357,10 +383,12 @@ def register(app, hub, ctx):
         the CALLER's own request, so a non-admin only ever sees their tenant's
         resources — never a hub-wide view. Falls back to a hub-wide fan-out only
         for admins if the shared handler isn't wired up."""
+        # A query is required.
         q = str(args.get("query") or "").strip()
         if not q:
             return {"error": "query required"}
 
+        # Use the shared tenant-scoped search when it's available (top 50 results).
         scoped = getattr(app.state, "cross_system_search", None)
         if scoped is not None:
             try:
@@ -379,6 +407,7 @@ def register(app, hub, ctx):
         payload = {"q": q, "tenant": "default"}
 
         async def _call(spoke, cmd):
+            """Run one search on one spoke ([] if no spoke; errors become an error row)."""
             if not spoke:
                 return []
             try:
@@ -388,6 +417,7 @@ def register(app, hub, ctx):
             except Exception as e:  # noqa: BLE001
                 return [{"source": cmd, "type": "error", "name": str(e)}]
 
+        # Search each module's spoke at once and merge the results (top 50).
         pairs = [
             (hub.get_spoke_by_type("ipam"), "NETBOX_SEARCH"),
             (hub.get_hypervisor_spoke(), "SEARCH_VMS"),
@@ -400,16 +430,19 @@ def register(app, hub, ctx):
         return {"query": q, "total": len(merged), "results": merged[:50]}
 
     def _query_terms(q):
+        """Split ``q`` into lower-case words longer than two characters."""
         return [w for w in ''.join(c.lower() if c.isalnum() else ' ' for c in q).split()
                 if len(w) > 2]
 
     def _snippets(text, terms, query, max_snips=3, ctx=160):
         """Up to ``max_snips`` context windows around the first matches of the
         full query (preferred) or its individual terms — collapsed to one line."""
+        # Look for the whole query if it appears, else the single terms.
         tl = text.lower()
         needles = [query.lower()] if query and query.lower() in tl else \
                   [t for t in terms if t in tl]
         out, seen = [], []
+        # Take windows around each match, skipping ones close to a window we already have.
         for nd in needles:
             start = 0
             while len(out) < max_snips:
@@ -430,11 +463,13 @@ def register(app, hub, ctx):
         """Full-text search across the ENTIRE doc corpus (not just the 4 docs
         pre-selected into the prompt) — lets the model pull a relevant doc the
         keyword pre-selection missed (e.g. a Proxmox question → docs/pxmx.md)."""
+        # A query is required.
         q = str(args.get("query") or "").strip()
         if not q:
             return {"error": "query required"}
         terms = _query_terms(q)
         docs = _load_docs()
+        # Score every doc (whole-query hits, term hits, and name hits) and keep its snippets.
         results = []
         for name, text in docs.items():
             tl = text.lower()
@@ -444,9 +479,11 @@ def register(app, hub, ctx):
                 continue
             results.append({"doc": name, "score": score,
                             "snippets": _snippets(text, terms, q)})
+        # Best six first.
         results.sort(key=lambda r: r["score"], reverse=True)
         return {"query": q, "total": len(results), "results": results[:6]}
 
+    # The client simulation scripts, fetched from GitHub.
     _gh_source = github_source.GitHubSourceCache()
 
     # A file may contribute at most this many PARTIAL hits. Without it a single
@@ -479,17 +516,21 @@ def register(app, hub, ctx):
         # back with a full page of confident-looking results, which is also the
         # case where the loop most needs to see zero hits and escalate.
         min_hits = 1 if len(terms) <= 1 else 2
+        # Last strict/loose hit lines (to space hits out) and loose hits so far in this file.
         last_s = last_l = -999
         loose_here = 0
+        # Check each line; skip lines that match too few terms.
         for ln, line in enumerate(lines, 1):
             ll = line.lower()
             strict = ql in ll or (terms and all(t in ll for t in terms))
             hits = sum(1 for t in terms if t in ll) if terms else 0
             if not strict and hits < min_hits and not (path_hits and hits):
                 continue
+            # Grab a few lines either side as the snippet.
             a = max(0, ln - 1 - _SRC_SNIPPET_CTX)
             b = min(len(lines), ln + _SRC_SNIPPET_CTX)
             snip = ''.join(lines[a:b]).rstrip("\n")[:600]
+            # Record a strict hit, or else (within limits) a scored loose hit.
             if strict and len(strict_out) < cap and ln - last_s >= _SRC_SNIPPET_CTX:
                 last_s = ln
                 strict_out.append({"file": rel, "line": ln, "snippet": snip})
@@ -515,12 +556,14 @@ def register(app, hub, ctx):
         content, which is always. Per-root budgets make coverage independent of
         ordering.
         """
+        # Walk each source root, skipping ignored folders.
         for base in _SRC_ROOTS:
             label = os.path.basename(base)
             seen = 0
             for root, dirs, files in os.walk(base):
                 dirs[:] = [d for d in dirs
                            if d not in _SRC_SKIP_DIRS and not d.startswith(".")]
+                # Yield each source file (right type, not secret-looking, not too big, readable).
                 for fn in files:
                     if seen >= cap_files:
                         break
@@ -556,6 +599,7 @@ def register(app, hub, ctx):
         that corpus is small and curated, so it can't be crowded out by the much
         larger local tree.
         """
+        # A query is required; split it into terms.
         q = str(args.get("query") or "").strip()
         if not q:
             return {"error": "query required"}
@@ -564,6 +608,7 @@ def register(app, hub, ctx):
         strict, loose = [], []
         scanned = 0
 
+        # Scan the GitHub scripts first.
         gh = await _gh_source.files()
         for rel, text in sorted(gh.items()):
             if len(strict) >= _SRC_MAX_MATCHES:
@@ -572,6 +617,7 @@ def register(app, hub, ctx):
             _scan_text(rel, text.splitlines(keepends=True), ql, terms,
                        _SRC_MAX_MATCHES, strict, loose)
 
+        # Then local files, if we still need more exact hits.
         if len(strict) < _SRC_MAX_MATCHES:
             for rel, lines in _iter_local(_SRC_MAX_FILES):
                 if len(strict) >= _SRC_MAX_MATCHES:
@@ -594,12 +640,14 @@ def register(app, hub, ctx):
             if (m["file"], m["line"]) not in seen:
                 seen.add((m["file"], m["line"]))
                 results.append(m)
+        # Report how the results were found, with scan stats.
         mode = "exact" if strict else ("partial" if results else "none")
         return {"query": q, "match_mode": mode, "total": len(results),
                 "exact_matches": len(strict),
                 "files_scanned": scanned, "sources": _gh_source.stats(),
                 "results": results}
 
+    # The tools the model may call, in OpenAI function-call format.
     _TOOLS = [
         {"type": "function", "function": {
             "name": "get_spokes_status",
@@ -643,6 +691,7 @@ def register(app, hub, ctx):
     ]
 
     async def _exec_tool(name, args, request):
+        """Run the named tool and return its result (an error dict for unknown names)."""
         if name == "get_spokes_status":
             return _tool_spokes_status(args, request)
         if name == "search_devices":
@@ -662,6 +711,7 @@ def register(app, hub, ctx):
         any failure so callers can fall back to whatever text they already have
         -- this must never be able to turn a working answer into an error.
         """
+        # Ask AppBuilder for one tool-free turn on the strongest model.
         try:
             res = await hub.request_response(
                 agent, "HELP_ASK",
@@ -674,6 +724,7 @@ def register(app, hub, ctx):
                     "above, say so rather than guessing.")}],
                  "tools": None, "system": system, "role": "final"},
                 timeout=90.0)
+            # Return its text if it succeeded.
             data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
             if isinstance(data, dict) and data.get("status") == "SUCCESS":
                 return (data.get("assistant") or {}).get("content") or ""
@@ -682,18 +733,23 @@ def register(app, hub, ctx):
         return ""
 
     # ── routes ───────────────────────────────────────────────────────────────
+    # Is the help assistant usable?
     @app.get("/api/help/available")
     async def help_available():
         """Whether the LLM help assistant is usable (ab connected)."""
         return {"available": find_ab(hub) is not None}
 
+    # Ask the help assistant a question.
     @app.post("/api/help/ask")
     async def help_ask(request: Request):
+        """Answer a question from the docs, source and live data via the LLM tool loop."""
+        # AppBuilder must be connected.
         agent = find_ab(hub)
         if not agent:
             raise HTTPException(status_code=409,
                                 detail="Help assistant unavailable — the AppBuilder LLM "
                                        "agent is not connected.")
+        # Read the JSON body (defaulting to {}); a question is required.
         try:
             body = await request.json()
         except Exception:
@@ -719,16 +775,19 @@ def register(app, hub, ctx):
                 if hq and ha:
                     history.append({"question": hq, "answer": ha})
 
+        # Load the docs.
         docs = _load_docs()
         # A follow-up ("what about windows?") is often too terse to retrieve on
         # its own, so doc selection sees the recent questions too. Only the
         # questions: including the answers would let one bad retrieval pin the
         # same wrong docs to the rest of the conversation.
         retrieval_q = " ".join([h["question"] for h in history] + [question])
+        # Pick the most relevant docs and excerpt them for the prompt.
         picked = _select_docs(retrieval_q, docs)
         _doc_terms = _source_terms(retrieval_q, _query_terms)
         doc_ctx = "\n\n".join(
             f"### DOC: {n}\n{_doc_excerpt(docs[n], _doc_terms)}" for n in picked)
+        # The system prompt: instructions plus the doc excerpts.
         system = (
             "You are the Lab Manager (LM) help assistant. Answer the user's question "
             "using the documentation below, the wider docs/source (via tools), and any "
@@ -761,6 +820,7 @@ def register(app, hub, ctx):
             messages.append({"role": "user", "content": h["question"]})
             messages.append({"role": "assistant", "content": h["answer"]})
         messages.append({"role": "user", "content": question})
+        # Tools used and the answer so far.
         used_tools = []
         answer = ""
         # Evidence-based escalation. The gathering turns run on the fastest cheap
@@ -776,8 +836,10 @@ def register(app, hub, ctx):
         # remain, and tool-picking is not the expensive part of the job. The one
         # turn that DOES get the best model is the final one.
         struggling = False
+        # Each round: one model turn, then run any tools it asked for.
         for _round in range(_TOOL_ROUNDS):
             role = "tool_hard" if struggling else "tool"
+            # Send the turn to AppBuilder; a relay failure is a 502.
             try:
                 res = await hub.request_response(
                     agent, "HELP_ASK",
@@ -787,10 +849,12 @@ def register(app, hub, ctx):
             except Exception as e:  # noqa: BLE001
                 logger.warning("help_ask relay failed: %s", e)
                 raise HTTPException(status_code=502, detail=f"Help assistant error: {e}")
+            # An unsuccessful reply is a 502.
             data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
             if not isinstance(data, dict) or data.get("status") != "SUCCESS":
                 raise HTTPException(status_code=502,
                                     detail=(data or {}).get("message") or "Help assistant error")
+            # Read the model's tool calls and text.
             assistant = data.get("assistant") or {}
             tool_calls = assistant.get("tool_calls") or []
             text = assistant.get("content") or ""
@@ -813,6 +877,7 @@ def register(app, hub, ctx):
             # result -- so running them serially just adds up their latencies.
             # A GitHub corpus fetch plus a device query is the common case, and
             # concurrently they cost the slower one instead of the sum.
+            # Read each tool call's name and arguments (bad JSON args become {}).
             planned = []
             for tc in tool_calls:
                 fn = tc.get("function") or {}
@@ -824,6 +889,7 @@ def register(app, hub, ctx):
                     args = {}
                 planned.append((tc, name, args))
 
+            # Run them all at once.
             results = await asyncio.gather(
                 *[_exec_tool(name, args, request) for _tc, name, args in planned],
                 return_exceptions=True)
@@ -842,6 +908,7 @@ def register(app, hub, ctx):
                     struggling = True
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                  "name": name, "content": json.dumps(out)[:8000]})
+            # Escalate after enough rounds.
             if _round + 1 >= _ESCALATE_AFTER:
                 struggling = True
         else:
@@ -867,12 +934,14 @@ def register(app, hub, ctx):
                     answer = (data.get("assistant") or {}).get("content") or answer
             except Exception as e:  # noqa: BLE001
                 logger.warning("help_ask forced-synthesis turn failed: %s", e)
+            # Still nothing: a polite fallback message.
             if not answer:
                 answer = ("I gathered documentation and code for this but couldn't "
                           "compose a final answer. Please try rephrasing, or ask about "
                           "a narrower part of it.")
 
         def _degenerate(a):
+            """True if ``a`` is empty or just a leaked tool-call token rather than an answer."""
             # Some local models emit a broken/empty function call instead of a real
             # tool call or a text answer — the literal token leaks through as
             # content. Two known shapes:
@@ -898,6 +967,7 @@ def register(app, hub, ctx):
             # gets a doc-grounded answer instead of the raw "tool_calls" token.
             logger.info("help_ask: degenerate tool-loop answer (%r) — retrying tool-free",
                         answer[:40])
+            # Ask again with just the question and no tools.
             try:
                 res = await hub.request_response(
                     agent, "HELP_ASK",
@@ -911,11 +981,13 @@ def register(app, hub, ctx):
                     answer = (data.get("assistant") or {}).get("content") or answer
             except Exception as e:  # noqa: BLE001
                 logger.warning("help_ask tool-free fallback failed: %s", e)
+            # Still broken: a fallback message.
             if _degenerate(answer):
                 answer = ("I couldn't get a usable answer from the current LLM provider "
                           "(it didn't return a proper response). Try again, or switch the "
                           "AppBuilder provider in Settings.")
 
+        # Cite the docs the answer mentions (or the top two), and report what was used.
         citations = [n for n in picked if f"[doc:{n}]" in answer] or picked[:2]
         return {"answer": answer, "citations": citations,
                 "used_docs": picked, "used_tools": sorted(set(used_tools))}

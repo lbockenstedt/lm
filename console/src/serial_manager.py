@@ -15,18 +15,23 @@ Design notes:
   WITHOUT pyserial so they stay unit-testable on a node that hasn't installed the
   role deps yet (the agent pip-installs pyserial on LOAD_ROLE).
 """
+# Postponed evaluation of type hints.
 from __future__ import annotations
 
+# glob: find tty devices; json: state files; logging; os: paths and env.
 import glob
 import json
 import logging
 import os
+# re: prompt and path patterns; threading: reader/writer threads; time: timing.
 import re
 import threading
 import time
+# Path for state files; typing helpers.
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+# Optional pyserial; None until the role's requirements are installed.
 try:  # pyserial is installed on the node by the agent's LOAD_ROLE (requirements.txt)
     import serial
     from serial.tools import list_ports as _list_ports
@@ -34,6 +39,7 @@ except Exception:  # pragma: no cover - absent until the role is installed
     serial = None
     _list_ports = None
 
+# Module logger (shared with the console spoke).
 logger = logging.getLogger("ConsoleSpoke")
 
 # 8N1 baud candidates. 115200 then 9600 lead the sweep — between them they cover
@@ -80,6 +86,7 @@ _BAUD_CONFIDENT_SCORE = 0.8
 # what makes 115200 and 9600 reliably answer on that gear.
 _BAUD_NUDGE_ATTEMPTS = 3
 
+# Default line settings for a port with nothing saved: 115200 8N1, no flow control.
 _DEFAULT_SETTINGS = {"baud": DEFAULT_BAUD, "bytesize": 8, "parity": "N", "stopbits": 1, "flow": "none"}
 
 
@@ -93,7 +100,10 @@ def derive_port_id(dev: str, serial_number: Optional[str] = None,
     USB adapters key on serial#/vid:pid+location; on-board UARTs key on the fixed
     device path (hardware position is stable). Deliberately avoids udev.
     """
+    # Device file name, used by the fallback ids.
     base = os.path.basename(dev)
+    # Prefer the adapter serial number, then vid:pid plus physical location,
+    # then vid:pid plus device name, else the on-board UART path.
     if serial_number:
         return f"usb-{serial_number}"
     if vid is not None and pid is not None and location:
@@ -105,10 +115,13 @@ def derive_port_id(dev: str, serial_number: Optional[str] = None,
 
 def score_sample(sample: bytes) -> float:
     """Heuristic 'is this baud right?' score: printable-ASCII ratio + a prompt bonus."""
+    # Empty sample scores 0.
     if not sample:
         return 0.0
+    # Share of printable bytes (tabs and line breaks count).
     printable = sum(1 for b in sample if b in (9, 10, 13) or 32 <= b < 127)
     score = printable / len(sample)
+    # Bonus when it looks like a prompt or banner.
     if _PROMPT_HINTS.search(sample):
         score += 0.5
     return score
@@ -117,12 +130,14 @@ def score_sample(sample: bytes) -> float:
 def _uart_present(dev: str) -> bool:
     """True if an on-board tty is a real device (drops the dozens of phantom
     ``/dev/ttyS*`` stubs that have no backing hardware)."""
+    # A real UART has a backing device in sysfs.
     base = os.path.basename(dev)
     return os.path.exists(f"/sys/class/tty/{base}/device")
 
 
 def _by_id_map() -> Dict[str, str]:
     """Map each real /dev path → its /dev/serial/by-id stable symlink name."""
+    # Resolve each by-id symlink to its device; skip broken links.
     out: Dict[str, str] = {}
     for link in glob.glob("/dev/serial/by-id/*"):
         try:
@@ -132,6 +147,7 @@ def _by_id_map() -> Dict[str, str]:
     return out
 
 
+# Matches the "bus-port" part (e.g. "1-2.3") of a sysfs USB path segment.
 _USB_BUSPORT_RE = re.compile(r"^\d+-[\d.]+(?=:)")
 
 
@@ -147,6 +163,7 @@ def usb_physical_path(dev: str) -> Optional[str]:
     more than one identical adapter is attached). Walking sysfs directly gives
     the same by-path string pyserial would have, so the stable branch of
     ``derive_port_id`` actually gets used."""
+    # Resolve the tty's sysfs device link.
     base = os.path.basename(dev)
     try:
         real = os.path.realpath(f"/sys/class/tty/{base}/device")
@@ -154,6 +171,7 @@ def usb_physical_path(dev: str) -> Optional[str]:
         return None
     # The sysfs chain ends .../usb1/1-2/1-2.3/1-2.3:1.0/ttyUSB0 — "1-2.3" (the
     # bus-port path) is the directory name right before the ":<iface>" suffix.
+    # Walk from the end and return the first bus-port segment found.
     for part in reversed(real.split(os.sep)):
         m = _USB_BUSPORT_RE.match(part)
         if m:
@@ -163,12 +181,15 @@ def usb_physical_path(dev: str) -> Optional[str]:
 
 def enumerate_ports() -> List[Dict[str, Any]]:
     """Discover serial ports (USB adapters + on-board UARTs) with a stable port_id."""
+    # Results, devices already listed, and the by-id lookup.
     ports: List[Dict[str, Any]] = []
     seen: set = set()
     byid = _by_id_map()
 
+    # USB and other ports that pyserial reports.
     if _list_ports is not None:
         for p in _list_ports.comports():
+            # Record the device and its USB identifiers.
             dev = p.device
             seen.add(dev)
             sn = getattr(p, "serial_number", None)
@@ -179,9 +200,12 @@ def enumerate_ports() -> List[Dict[str, Any]]:
             # straight out of sysfs so a serial-less ("lame") adapter still
             # keys on its stable physical port rather than ttyUSBn order.
             loc = getattr(p, "location", None) or usb_physical_path(dev)
+            # Prefer the by-id name as the id, else derive one.
             stable = byid.get(os.path.realpath(dev))
             port_id = f"byid-{stable}" if stable else derive_port_id(dev, sn, vid, pid, loc)
+            # USB if it has a vendor id or a USB tty name.
             is_usb = bool(vid) or "ttyUSB" in dev or "ttyACM" in dev
+            # Add its entry.
             ports.append({
                 "port_id": port_id,
                 "device": dev,
@@ -195,20 +219,25 @@ def enumerate_ports() -> List[Dict[str, Any]]:
 
     # On-board UARTs frequently aren't reported by comports(); add real ttys.
     for dev in sorted(glob.glob("/dev/ttyAMA*") + glob.glob("/dev/ttyS*") + glob.glob("/dev/ttyO*")):
+        # Skip ports already listed and phantom UARTs.
         if dev in seen or not _uart_present(dev):
             continue
+        # Add the UART entry.
         ports.append({
             "port_id": derive_port_id(dev), "device": dev, "kind": "uart",
             "vendor": "", "product": "on-board UART", "serial": "", "vid": "", "pid": "",
         })
+    # All ports found.
     return ports
 
 
 def open_raw(dev: str, baud: int = DEFAULT_BAUD, timeout: float = 0.3):
     """Open a transient serial handle (for baud-detect / fingerprint), bypassing
     the session machinery. Caller must close it."""
+    # Needs pyserial.
     if serial is None:
         raise RuntimeError("pyserial not installed")
+    # Open at the given baud (default when unset).
     return serial.Serial(dev, int(baud or DEFAULT_BAUD), timeout=timeout)
 
 
@@ -224,19 +253,25 @@ def detect_baud(dev: str, candidates: Optional[List[int]] = None,
     nudges rather than multiplied by them — so a full sweep takes no longer than
     it did with a single Enter, and the reply is accumulated across nudges so a
     device that answers slowly is not missed either."""
+    # Needs pyserial.
     if serial is None:
         raise RuntimeError("pyserial not installed")
+    # Candidate list and best result so far.
     candidates = candidates or DEFAULT_BAUD_CANDIDATES
     best = {"baud": None, "score": -1.0, "sample": b""}
+    # Try each rate.
     for baud in candidates:
         try:
+            # Number of Enter presses at this rate.
             tries = max(1, int(nudges or 1))
             # Split, don't multiply: the whole point is more Enters, not a
             # proportionally longer sweep across eight candidate rates.
             per_try = max(0.25, float(read_secs) / tries)
+            # Open the port and clear old input.
             with serial.Serial(dev, baud, timeout=0.3) as ser:
                 ser.reset_input_buffer()
                 buf = b""
+                # Press Enter and read for this try's share of the time (up to 4 KiB).
                 for _ in range(tries):
                     ser.write(b"\r\n")
                     try:
@@ -249,8 +284,10 @@ def detect_baud(dev: str, candidates: Optional[List[int]] = None,
                         if chunk:
                             buf += chunk
                     # Already talking sense — stop nudging this rate.
+                    # Stop early once the reply is big enough or clearly readable.
                     if len(buf) >= 4096 or score_sample(buf) >= _BAUD_CONFIDENT_SCORE:
                         break
+            # Score what this rate produced.
             s = score_sample(buf)
             # Strictly better always wins; on an exact tie a priority rate
             # (115200, then 9600) takes the crown from an exotic one, so a
@@ -267,8 +304,10 @@ def detect_baud(dev: str, candidates: Optional[List[int]] = None,
             # This is what makes detection reliably settle back on 115200/9600.
             if baud in PRIORITY_BAUDS and s >= _BAUD_CONFIDENT_SCORE:
                 break
+        # A rate that fails to open is skipped.
         except Exception as e:  # noqa: BLE001
             logger.debug("baud probe %s@%d failed: %s", dev, baud, e)
+    # Best result, with the default rate when not confident.
     return {
         # An inconclusive sweep must NOT hand back a noise-scored guess: report
         # the preferred default so callers always come back to 115200 rather
@@ -289,14 +328,17 @@ def _state_dir() -> Path:
     """A writable dir for the port registry: ``LM_CONSOLE_STATE_DIR`` if set,
     else /var/lib/lm/console, falling back to a repo-local .lm-state/console when
     /var/lib/lm isn't writable (mirrors BaseControlPlane._spoke_state_dir)."""
+    # Candidate directories, most preferred first.
     candidates = [
         Path("/var/lib/lm/console"),
         Path(__file__).resolve().parent.parent / ".lm-state" / "console",
         Path("/tmp/lm-console"),
     ]
+    # An environment override goes first.
     override = os.environ.get("LM_CONSOLE_STATE_DIR", "").strip()
     if override:
         candidates.insert(0, Path(override))
+    # Use the first one we can create and write to.
     for p in candidates:
         try:
             p.mkdir(parents=True, exist_ok=True)
@@ -306,6 +348,7 @@ def _state_dir() -> Path:
             return p
         except Exception:  # noqa: BLE001
             continue
+    # Last resort.
     return Path("/tmp")
 
 
@@ -314,17 +357,26 @@ class PortStore:
     ``port_id`` (survives restart/replug)."""
 
     def __init__(self, path: Optional[Path] = None):
+        """Load the registry.
+
+        Args:
+            path: JSON file to use (default: ports.json in the state dir).
+        """
+        # File path and the in-memory records.
         self.path = path or (_state_dir() / "ports.json")
         self._data: Dict[str, Dict[str, Any]] = {}
         self._load()
 
     def _load(self) -> None:
+        """Load the JSON file, starting empty if it is missing or corrupt."""
         try:
             self._data = json.loads(self.path.read_text())
         except Exception:  # noqa: BLE001 - missing/corrupt → start empty
             self._data = {}
 
     def _save(self) -> None:
+        """Write the records to disk atomically (temp file, then rename)."""
+        # Write the temp file and swap it in; failures are only logged.
         tmp = self.path.with_suffix(".json.tmp")
         try:
             tmp.write_text(json.dumps(self._data, indent=2))
@@ -333,11 +385,13 @@ class PortStore:
             logger.warning("PortStore save failed: %s", e)
 
     def get(self, port_id: str) -> Dict[str, Any]:
+        """Return the stored record for a port (empty dict if none)."""
         return self._data.get(port_id, {})
 
     def delete(self, port_id: str) -> None:
         """Drop a port's record entirely (device gone for good, or its record was
         just migrated to a new port_id by find_by_identity's caller)."""
+        # Remove and save if present.
         if port_id in self._data:
             del self._data[port_id]
             self._save()
@@ -361,10 +415,12 @@ class PortStore:
         hostnames collide (generic defaults, operator naming conventions) in a
         way serial#/MAC don't, so trusting one would risk silently merging two
         different devices' alias/tenant assignments."""
+        # Serial and MAC from the identity; nothing to match without one.
         serial = str((identity or {}).get("serial") or "").strip()
         mac = str((identity or {}).get("mac") or "").strip().lower()
         if not serial and not mac:
             return None
+        # Return the first other port whose saved identity has the same serial or MAC.
         for pid, rec in self._data.items():
             if pid == exclude_port_id:
                 continue
@@ -376,15 +432,20 @@ class PortStore:
         return None
 
     def settings(self, port_id: str) -> Dict[str, Any]:
+        """Return the port's line settings: defaults overlaid with saved values."""
         return {**_DEFAULT_SETTINGS, **self._data.get(port_id, {}).get("settings", {})}
 
     def update(self, port_id: str, **fields) -> Dict[str, Any]:
+        """Merge fields into the port's record (dicts are merged one level), save, and return it."""
+        # Get or create the record.
         entry = self._data.setdefault(port_id, {})
+        # Merge dict values; replace everything else.
         for k, v in fields.items():
             if isinstance(v, dict) and isinstance(entry.get(k), dict):
                 entry[k].update(v)
             else:
                 entry[k] = v
+        # Save and return.
         self._save()
         return entry
 
@@ -408,17 +469,26 @@ class DeviceCache:
     the port_id that used to hold that record is gone for good."""
 
     def __init__(self, path: Optional[Path] = None):
+        """Load the cache.
+
+        Args:
+            path: JSON file to use (default: devices.json in the state dir).
+        """
+        # File path and the in-memory records.
         self.path = path or (_state_dir() / "devices.json")
         self._data: Dict[str, Dict[str, Any]] = {}
         self._load()
 
     def _load(self) -> None:
+        """Load the JSON file, starting empty if it is missing or corrupt."""
         try:
             self._data = json.loads(self.path.read_text())
         except Exception:  # noqa: BLE001 - missing/corrupt → start empty
             self._data = {}
 
     def _save(self) -> None:
+        """Write the cache to disk atomically (temp file, then rename)."""
+        # Write the temp file and swap it in; failures are only logged.
         tmp = self.path.with_suffix(".json.tmp")
         try:
             tmp.write_text(json.dumps(self._data, indent=2))
@@ -434,9 +504,11 @@ class DeviceCache:
         key on; a hostname-only passive glean on a "lame" cable can't be
         reconciled across a port_id change — an accepted limitation shared
         with ConsolePi, see adapters.md)."""
+        # Serial number first.
         serial = str((identity or {}).get("serial") or "").strip()
         if serial:
             return f"serial:{serial.lower()}"
+        # Then MAC.
         mac = str((identity or {}).get("mac") or "").strip().lower()
         if mac:
             return f"mac:{mac}"
@@ -447,12 +519,14 @@ class DeviceCache:
                  alias: str = "", tenant_id: str = "") -> None:
         """Record/refresh the last-known state for whichever device ``identity``
         describes. A no-op when the identity is too thin to key on."""
+        # Device key and the record to store.
         key = self.device_key(identity)
         rec = {
             "identity": dict(identity or {}), "port_id": port_id, "vendor": vendor,
             "product": product, "alias": alias, "tenant_id": tenant_id,
             "updated": time.time(),
         }
+        # Store under the device key when there is one.
         changed = False
         if key:
             self._data[key] = rec
@@ -460,19 +534,23 @@ class DeviceCache:
         # Per-PORT last-known profile too: unlike the device-keyed record this
         # accepts a hostname-only identity (no cross-port merge is ever keyed on
         # it — it only restores THIS port_id's own last name after a restart).
+        # Also store under the port so hostname-only devices are remembered per port.
         if port_id and identity:
             self._data[self.port_key(port_id)] = rec
             changed = True
+        # Save if anything changed.
         if changed:
             self._save()
 
     @staticmethod
     def port_key(port_id: str) -> str:
+        """Return the cache key for a port record."""
         return f"port:{port_id}"
 
     def lookup(self, identity: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Last-known cache record for ``identity`` (by serial, then MAC), or
         ``None`` if this device was never recorded."""
+        # Look up by device key, if any.
         key = self.device_key(identity)
         return self._data.get(key) if key else None
 
@@ -482,14 +560,17 @@ class DeviceCache:
         return self._data.get(self.port_key(port_id)) if port_id else None
 
     def all_items(self) -> Dict[str, Dict[str, Any]]:
+        """Return a shallow copy of all records."""
         return dict(self._data)
 
 
+# Shared DeviceCache, created on first use.
 _DEVICE_CACHE: Optional[DeviceCache] = None
 
 
 def device_cache() -> DeviceCache:
     """Process-wide device cache (lazy so tests can substitute ``_DEVICE_CACHE``)."""
+    # Create it on first call.
     global _DEVICE_CACHE
     if _DEVICE_CACHE is None:
         _DEVICE_CACHE = DeviceCache()
@@ -506,9 +587,16 @@ class TelemetryStore:
     updates them on every read burst, so writes are debounced (at most one file
     write per ``SAVE_INTERVAL``) and guarded by a lock."""
 
+    # Seconds between debounced writes.
     SAVE_INTERVAL = 10.0
 
     def __init__(self, path: Optional[Path] = None):
+        """Load the counters.
+
+        Args:
+            path: JSON file to use (default: telemetry.json in the state dir).
+        """
+        # File path and the lock that guards the data.
         self.path = path or (_state_dir() / "telemetry.json")
         self._lock = threading.Lock()
         # None = never saved this process; the FIRST record always persists so a
@@ -518,6 +606,7 @@ class TelemetryStore:
         self._data: Dict[str, Dict[str, Any]] = self._load()
 
     def _load(self) -> Dict[str, Dict[str, Any]]:
+        """Read the JSON file; return {} if missing, corrupt or not a dict."""
         try:
             data = json.loads(self.path.read_text())
             return data if isinstance(data, dict) else {}
@@ -525,6 +614,8 @@ class TelemetryStore:
             return {}
 
     def _save_locked(self) -> None:
+        """Write to disk atomically and note the time (caller holds the lock)."""
+        # Write the temp file and swap it in; failures are only logged.
         tmp = self.path.with_suffix(".json.tmp")
         try:
             tmp.write_text(json.dumps(self._data))
@@ -535,6 +626,7 @@ class TelemetryStore:
 
     def get(self, port_id: str) -> Dict[str, Any]:
         """Last-known ``{last_activity, capture_bytes}`` for a port (zeros if new)."""
+        # Read under the lock; missing fields become zero.
         with self._lock:
             rec = self._data.get(port_id) or {}
             return {"last_activity": float(rec.get("last_activity") or 0.0),
@@ -542,6 +634,7 @@ class TelemetryStore:
 
     def record(self, port_id: str, *, last_activity: float, capture_bytes: int) -> None:
         """Update a port's counters; persists at most once per ``SAVE_INTERVAL``."""
+        # Store the new values; save if the last save is old enough.
         with self._lock:
             self._data[port_id] = {"last_activity": last_activity,
                                    "capture_bytes": capture_bytes}
@@ -551,15 +644,18 @@ class TelemetryStore:
 
     def flush(self) -> None:
         """Force an immediate save (channel close / shutdown)."""
+        # Save under the lock.
         with self._lock:
             self._save_locked()
 
 
+# Shared TelemetryStore, created on first use.
 _TELEMETRY: Optional[TelemetryStore] = None
 
 
 def telemetry_store() -> TelemetryStore:
     """Process-wide telemetry store (lazy so tests can substitute ``_TELEMETRY``)."""
+    # Create it on first call.
     global _TELEMETRY
     if _TELEMETRY is None:
         _TELEMETRY = TelemetryStore()
@@ -576,11 +672,19 @@ class HealthStore:
     spoke, so :meth:`load` hands back the live dict and the spoke calls
     :meth:`save` (debounced) after each update."""
 
+    # Seconds between debounced writes.
     SAVE_INTERVAL = 15.0
 
     def __init__(self, path: Optional[Path] = None):
+        """Load health records.
+
+        Args:
+            path: JSON file to use (default: health.json in the state dir).
+        """
+        # File path; not saved yet.
         self.path = path or (_state_dir() / "health.json")
         self._last_save: Optional[float] = None  # None = never saved (see TelemetryStore)
+        # Read the file, starting empty if it is missing, corrupt or not a dict.
         try:
             data = json.loads(self.path.read_text())
         except Exception:  # noqa: BLE001 - missing/corrupt → start empty
@@ -592,6 +696,8 @@ class HealthStore:
         return self._data
 
     def _write(self, data: Dict[str, Dict[str, Any]]) -> None:
+        """Write records to disk atomically and note the time."""
+        # Write the temp file and swap it in; failures are only logged.
         tmp = self.path.with_suffix(".json.tmp")
         try:
             tmp.write_text(json.dumps(data))
@@ -602,6 +708,7 @@ class HealthStore:
 
     def save(self, data: Dict[str, Dict[str, Any]]) -> None:
         """Persist, debounced — health records are touched on every probe cycle."""
+        # Write only if enough time has passed since the last save.
         if self._last_save is None or \
                 time.monotonic() - self._last_save >= self.SAVE_INTERVAL:
             self._write(data)
@@ -615,11 +722,13 @@ class HealthStore:
 
         Empties the dict IN PLACE so the spoke's ``_health`` reference (handed
         out by :meth:`load`) stays the same object."""
+        # Clear the records in place and delete the file.
         self._data.clear()
         try:
             self.path.unlink(missing_ok=True)
         except Exception:  # noqa: BLE001
             pass
+        # Reset the debounce, then delete again in case a save raced the first delete.
         self._last_save = None
         try:
             self.path.unlink(missing_ok=True)
@@ -639,6 +748,7 @@ CAPTURE_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB per console device
 def _capture_max_bytes() -> int:
     """Per-device capture cap. Override with LM_CONSOLE_CAPTURE_BYTES (0 keeps the
     recording in memory only — disk persistence disabled)."""
+    # Environment override (never negative), else the default.
     try:
         v = int(os.environ.get("LM_CONSOLE_CAPTURE_BYTES", "") or CAPTURE_MAX_BYTES)
         return max(0, v)
@@ -647,6 +757,8 @@ def _capture_max_bytes() -> int:
 
 
 def _capture_dir() -> Path:
+    """Return the capture directory, creating it if needed."""
+    # State dir plus "capture"; creation errors are ignored.
     d = _state_dir() / "capture"
     try:
         d.mkdir(parents=True, exist_ok=True)
@@ -657,6 +769,7 @@ def _capture_dir() -> Path:
 
 def _safe_port_name(port_id: str) -> str:
     """A filesystem-safe stem for a port_id (which may contain '/', ':' etc.)."""
+    # Replace unsafe characters and cap the length.
     return re.sub(r"[^A-Za-z0-9._-]", "_", str(port_id))[:180] or "port"
 
 
@@ -671,18 +784,30 @@ class CaptureLog:
 
     def __init__(self, port_id: str, max_bytes: int = CAPTURE_MAX_BYTES,
                  path: Optional[Path] = None):
+        """Set up the log for one port.
+
+        Args:
+            port_id: port the log belongs to.
+            max_bytes: how much recent output to keep.
+            path: log file (default: capture dir / safe port name + .log).
+        """
+        # Port, size cap, file path and lock.
         self.port_id = port_id
         self.max_bytes = max_bytes
         self.path = path or (_capture_dir() / f"{_safe_port_name(port_id)}.log")
         self._lock = threading.Lock()
+        # Current file size (0 if it does not exist).
         try:
             self._size = self.path.stat().st_size
         except Exception:  # noqa: BLE001
             self._size = 0
 
     def append(self, data: bytes) -> None:
+        """Append bytes to the log, compacting when it reaches twice the cap."""
+        # Nothing to write.
         if not data:
             return
+        # Append under the lock; compact when it gets too big.
         with self._lock:
             try:
                 with open(self.path, "ab") as fh:
@@ -695,11 +820,13 @@ class CaptureLog:
 
     def _compact_locked(self) -> None:
         """Rewrite the file down to the last ``max_bytes`` (atomic)."""
+        # Read only the last max_bytes.
         try:
             with open(self.path, "rb") as fh:
                 if self._size > self.max_bytes:
                     fh.seek(self._size - self.max_bytes)
                 tail = fh.read()
+            # Write them to a temp file and swap it in.
             tmp = self.path.with_suffix(".log.tmp")
             with open(tmp, "wb") as fh:
                 fh.write(tail)
@@ -710,6 +837,7 @@ class CaptureLog:
 
     def load_tail(self, cap: int) -> bytes:
         """Return the last ``cap`` bytes of the on-disk capture (warm start)."""
+        # Read the last cap bytes; any error returns empty.
         with self._lock:
             try:
                 size = self.path.stat().st_size
@@ -750,15 +878,27 @@ class PortChannel:
 
     def __init__(self, port_id: str, dev: str, settings: Dict[str, Any],
                  on_data: Callable[[str, bytes], None]):
+        """Open the serial port with the given settings.
+
+        Args:
+            port_id: stable port id.
+            dev: device path, e.g. /dev/ttyUSB0.
+            settings: baud, bytesize, parity, stopbits, flow and paste pacing.
+            on_data: callback(session_id, bytes) for each read.
+        """
+        # Needs pyserial.
         if serial is None:
             raise RuntimeError("pyserial not installed")
+        # Identity, callback and baud.
         self.port_id = port_id
         self.dev = dev
         self.on_data = on_data
         self.baud = int(settings.get("baud", DEFAULT_BAUD) or DEFAULT_BAUD)
+        # Attached sessions, the writer, and the passive-monitor flag.
         self.sessions: set = set()
         self.writer: Optional[str] = None
         self.monitored: bool = False  # kept open for passive capture w/o a user
+        # Reader thread control.
         self._stop = threading.Event()
         self._reader: Optional[threading.Thread] = None
         self._reader_alive: bool = True  # cleared when the read loop exits (device pulled/error)
@@ -767,11 +907,13 @@ class PortChannel:
         # durable per-device circular recording on disk (default 5 MiB, override
         # LM_CONSOLE_CAPTURE_BYTES; 0 disables persistence) that survives a spoke
         # restart and backs warm-start scrollback for a (re)connecting viewer.
+        # On-disk capture log (when enabled) and in-memory capture buffer.
         self._capture_log: Optional[CaptureLog] = (
             CaptureLog(port_id, _capture_max_bytes()) if _capture_max_bytes() else None)
         self.capture = bytearray()
         # Seeded from the persisted telemetry so a restart doesn't report a
         # long-known device as "never seen" / 0 bytes until it next speaks.
+        # Activity counters, seeded from the saved telemetry.
         _tel = telemetry_store().get(port_id)
         self.last_activity: float = float(_tel.get("last_activity") or 0.0)
         self.bytes_seen: int = int(_tel.get("capture_bytes") or 0)
@@ -783,14 +925,18 @@ class PortChannel:
         # _user_recently_active. Not persisted: irrelevant across a restart.
         self.last_user_write_at: float = 0.0
         # Outbound write-pacing state (drained by the writer thread).
+        # Outgoing paste buffer, its lock, wake-up event and writer thread.
         self._outbuf = bytearray()
         self._outlock = threading.Lock()
         self._outwake = threading.Event()
         self._writer_thread: Optional[threading.Thread] = None
+        # Pacing settings from the port settings or class defaults.
         self._pace_chunk = max(1, int(settings.get("paste_chunk", self.PACE_CHUNK)))
         self._pace_line = max(0.0, float(settings.get("paste_line_delay_ms", self.PACE_LINE_DELAY * 1000)) / 1000.0)
         self._pace_char = max(0.0, float(settings.get("paste_char_delay_ms", self.PACE_CHAR_DELAY * 1000)) / 1000.0)
+        # Parity letters to pyserial constants.
         parity = {"N": serial.PARITY_NONE, "E": serial.PARITY_EVEN, "O": serial.PARITY_ODD}
+        # Open the port.
         self.ser = serial.Serial(
             port=dev,
             baudrate=int(settings.get("baud", DEFAULT_BAUD) or DEFAULT_BAUD),
@@ -804,8 +950,11 @@ class PortChannel:
         )
 
     def start(self) -> None:
+        """Start the reader and paced-writer threads."""
+        # Reader thread.
         self._reader = threading.Thread(target=self._read_loop, name=f"console-{self.port_id}", daemon=True)
         self._reader.start()
+        # Writer thread.
         self._writer_thread = threading.Thread(target=self._write_loop, name=f"console-tx-{self.port_id}", daemon=True)
         self._writer_thread.start()
 
@@ -814,20 +963,27 @@ class PortChannel:
         telemetry, and mirror to the on-disk circular log so the full recording
         survives a restart. The in-memory tail stays bounded at ``CAPTURE_MAX``
         (used for gleaning); the durable scrollback lives on disk."""
+        # Add to the in-memory tail and trim it.
         self.capture += data
         if len(self.capture) > self.CAPTURE_MAX:
             del self.capture[:-self.CAPTURE_MAX]
+        # Mirror to disk.
         if self._capture_log is not None:
             self._capture_log.append(data)
+        # Update counters and save telemetry (debounced).
         self.bytes_seen += len(data)
         self.last_activity = time.time()
         telemetry_store().record(self.port_id, last_activity=self.last_activity,
                                  capture_bytes=self.bytes_seen)
 
     def _read_loop(self) -> None:
+        """Read from the port and fan the bytes out to every attached session until stopped."""
+        # Read until stopped.
         while not self._stop.is_set():
             try:
                 data = self.ser.read(1024)
+            # Read error: exit quietly if we are stopping; otherwise mark the reader dead
+            # and send each session an empty chunk.
             except Exception as e:  # noqa: BLE001 - device pulled / error / closed under us
                 if self._stop.is_set():
                     # Benign: close() closed the handle under the in-flight read
@@ -840,10 +996,12 @@ class PortChannel:
                 for sid in list(self.sessions):
                     self.on_data(sid, b"")  # empty → caller may emit CONSOLE_ERROR
                 return
+            # Record the data and pass it to each session.
             if data:
                 self._record(data)  # always capture, even with no attached user
                 for sid in list(self.sessions):
                     self.on_data(sid, data)
+        # Loop ended.
         self._reader_alive = False
 
     def reader_alive(self) -> bool:
@@ -856,15 +1014,19 @@ class PortChannel:
         time, breaking each slice at the next newline, then pauses ``_pace_line``
         after a line (or ``_pace_char`` per chunk). Blocks on ``_outwake`` when
         idle so interactive typing incurs no extra latency."""
+        # Wait for work (or check stop every 0.5s).
         while not self._stop.is_set():
             self._outwake.wait(timeout=0.5)
             if self._stop.is_set():
                 return
+            # Drain the buffer slice by slice.
             while True:
                 with self._outlock:
+                    # Empty: clear the wake flag and go back to waiting.
                     if not self._outbuf:
                         self._outwake.clear()
                         break
+                    # Cut at the next newline when it fits in a chunk, else a full chunk.
                     nl = self._outbuf.find(b"\n")
                     if nl != -1 and nl + 1 <= self._pace_chunk:
                         cut = nl + 1
@@ -872,6 +1034,7 @@ class PortChannel:
                         cut = min(self._pace_chunk, len(self._outbuf))
                     chunk = bytes(self._outbuf[:cut])
                     del self._outbuf[:cut]
+                # Write it; on failure drop the rest of the paste.
                 try:
                     self.ser.write(chunk)
                     self.ser.flush()
@@ -880,6 +1043,7 @@ class PortChannel:
                     with self._outlock:
                         self._outbuf.clear()
                     break
+                # Pause after a line, or per chunk if configured.
                 if chunk.endswith(b"\n") and self._pace_line:
                     time.sleep(self._pace_line)
                 elif self._pace_char:
@@ -887,9 +1051,12 @@ class PortChannel:
 
     def attach(self, session_id: str, writable: bool) -> bool:
         """Attach a session. Returns True if it got the writer lock."""
+        # Add the session.
         self.sessions.add(session_id)
+        # Read-only sessions never get the writer lock.
         if not writable:
             return False
+        # Take the writer lock if it is free.
         with self._outlock:
             if self.writer is None:
                 self.writer = session_id
@@ -901,6 +1068,7 @@ class PortChannel:
         be an attached session), evicting whoever currently holds it. Returns
         the PREVIOUS writer's session_id, or None if the channel had no
         writer or ``session_id`` already held it."""
+        # Swap the writer under the lock.
         with self._outlock:
             prev = self.writer
             if prev == session_id:
@@ -914,10 +1082,12 @@ class PortChannel:
             # write already in flight from the OUTGOING writer can't land its
             # timestamp after this reset (see write()'s re-check comment).
             self.last_user_write_at = 0.0
+        # Return the previous writer.
         return prev
 
     def detach(self, session_id: str) -> bool:
         """Detach a session. Returns True if the channel is now empty (closeable)."""
+        # Remove the session; release the writer lock if it held it.
         self.sessions.discard(session_id)
         with self._outlock:
             if self.writer == session_id:
@@ -929,13 +1099,16 @@ class PortChannel:
                 # masquerade as "recently active" the instant the real typist
                 # leaves. Locked for the same reason as force_attach().
                 self.last_user_write_at = 0.0
+        # True when no sessions remain.
         return not self.sessions
 
     def write(self, session_id: str, data: bytes) -> bool:
         """Enqueue writer bytes for paced draining. Non-blocking: a big paste is
         buffered and streamed out by ``_write_loop`` at a device-safe rate."""
+        # Empty data: just report whether this session is the writer.
         if not data:
             return self.writer == session_id
+        # Under the lock: only the writer may write, and the buffer has a size cap.
         with self._outlock:
             # Re-check identity INSIDE the same lock detach()/force_attach()
             # use to clear the writer + timestamp, so a write already past the
@@ -949,18 +1122,22 @@ class PortChannel:
                 logger.warning("outbound buffer full on %s; dropping %d bytes",
                                self.port_id, len(data))
                 return False
+            # Queue the bytes and note the time.
             self._outbuf += data
             self.last_user_write_at = time.time()
+        # Wake the writer thread.
         self._outwake.set()
         return True
 
     def pending_out(self) -> int:
         """Bytes still queued to be paced out (how far behind a big paste is)."""
+        # Size of the queue under the lock.
         with self._outlock:
             return len(self._outbuf)
 
     def capture_tail(self, n: Optional[int] = None) -> bytes:
         """Last ``n`` bytes of the LIVE in-memory capture (all if None)."""
+        # Copy, then slice.
         buf = bytes(self.capture)
         return buf[-n:] if n else buf
 
@@ -969,15 +1146,18 @@ class PortChannel:
         full 5 MiB log), falling back to the live in-memory tail when disk
         persistence is disabled. Used for warm-start scrollback so a viewer that
         connects — even after a spoke restart — sees recent device output."""
+        # Prefer the on-disk log.
         if self._capture_log is not None:
             data = self._capture_log.load_tail(n or self._capture_log.max_bytes)
             if data:
                 return data
+        # Fall back to memory.
         return self.capture_tail(n)
 
     def snapshot(self) -> Dict[str, Any]:
         """Live telemetry for the port listing. ``last_activity``/``capture_bytes``
         are seeded from the persisted telemetry, so they carry across restarts."""
+        # Current state for the listing.
         return {
             "monitoring": self.monitored,
             "last_activity": self.last_activity,
@@ -990,8 +1170,11 @@ class PortChannel:
         }
 
     def send_break(self, session_id: str) -> bool:
+        """Send a serial break if this session is the writer; return True on success."""
+        # Only the writer may send a break.
         if self.writer != session_id or serial is None:
             return False
+        # Send a 0.25s break; failures are logged.
         try:
             self.ser.send_break(duration=0.25)
             return True
@@ -1000,12 +1183,16 @@ class PortChannel:
             return False
 
     def close(self) -> None:
+        """Stop the threads, save telemetry and close the serial port."""
+        # Signal both threads to stop.
         self._stop.set()
         self._outwake.set()  # wake the writer thread so it can exit
+        # Save telemetry now.
         try:
             telemetry_store().flush()  # don't lose the debounced tail on shutdown
         except Exception:  # noqa: BLE001
             pass
+        # Close the port.
         try:
             self.ser.close()
         except Exception:  # noqa: BLE001
@@ -1017,6 +1204,12 @@ class SessionManager:
     session_id → the channel it's attached to."""
 
     def __init__(self, on_data: Callable[[str, bytes], None]):
+        """Create the manager.
+
+        Args:
+            on_data: callback(session_id, bytes) passed to each channel.
+        """
+        # Callback, channels, session-to-port map and last monitor open errors.
         self._on_data = on_data
         self._channels: Dict[str, PortChannel] = {}
         self._session_port: Dict[str, str] = {}
@@ -1024,6 +1217,12 @@ class SessionManager:
 
     def open(self, session_id: str, port_id: str, dev: str,
              settings: Dict[str, Any], writable: bool) -> Dict[str, Any]:
+        """Attach a session to the port, opening a channel if needed.
+
+        Returns:
+            dict with writer, busy, created, settings and had_capture.
+        """
+        # Existing channel, if any.
         chan = self._channels.get(port_id)
         created = False
         # A channel whose serial reader has already died (device errored/pulled,
@@ -1031,25 +1230,31 @@ class SessionManager:
         # user to a dead channel yields a console that connects then immediately
         # goes silent / disconnects. Tear it down and rebuild so every open gets
         # a LIVE handle (mirrors ensure_monitor's dead-channel recovery).
+        # Replace a channel whose reader has died.
         if chan is not None and not chan.reader_alive():
             chan.close()
             self._channels.pop(port_id, None)
             chan = None
+        # Open and start a new channel if needed.
         if chan is None:
             chan = PortChannel(port_id, dev, settings, self._on_data)
             chan.start()
             self._channels[port_id] = chan
             created = True
+        # Attach the session and remember its port.
         got_writer = chan.attach(session_id, writable)
         self._session_port[session_id] = port_id
         # A user attaching to a channel a passive monitor already holds = the
         # "stream the existing session to the user" handoff (they share the one
         # OS handle and the monitor's live output); the caller replays the tail.
+        # Report the result.
         return {"writer": got_writer, "busy": (writable and not got_writer),
                 "created": created, "settings": settings,
                 "had_capture": bool(chan.capture)}
 
     def write(self, session_id: str, data: bytes) -> bool:
+        """Write bytes from a session to its port; True if accepted."""
+        # Find the session's channel and write.
         port_id = self._session_port.get(session_id)
         chan = self._channels.get(port_id) if port_id else None
         return bool(chan and chan.write(session_id, data))
@@ -1059,23 +1264,30 @@ class SessionManager:
         port. Returns the dispossessed session_id, or None if there was no
         prior writer / the caller already held it / the session isn't
         attached to any port."""
+        # Find the session's channel and take the writer lock.
         port_id = self._session_port.get(session_id)
         chan = self._channels.get(port_id) if port_id else None
         return chan.force_attach(session_id) if chan else None
 
     def send_break(self, session_id: str) -> bool:
+        """Send a serial break from a session's port; True on success."""
+        # Find the session's channel and send.
         port_id = self._session_port.get(session_id)
         chan = self._channels.get(port_id) if port_id else None
         return bool(chan and chan.send_break(session_id))
 
     def close(self, session_id: str) -> None:
+        """Detach a session; close the channel when it is empty and not monitored."""
+        # Forget the session and detach it.
         port_id = self._session_port.pop(session_id, None)
         chan = self._channels.get(port_id) if port_id else None
         if chan and chan.detach(session_id):
             # Empty of users — but keep the handle open if a passive monitor
             # still wants it (so capture continues after the user leaves).
+            # Monitored channels stay open.
             if chan.monitored:
                 return
+            # Otherwise close and drop it.
             chan.close()
             self._channels.pop(port_id, None)
 
@@ -1087,6 +1299,7 @@ class SessionManager:
         port can't be opened right now (faulty/absent — see :meth:`monitor_error`).
         A channel whose reader has died (device pulled) is torn down and reopened
         so a port that starts working again recovers on its own."""
+        # Replace a dead channel that has no users.
         chan = self._channels.get(port_id)
         if chan is not None and not chan.sessions and not chan.reader_alive():
             chan.close()
@@ -1096,6 +1309,7 @@ class SessionManager:
         # holds the handle and the requested baud differs from the open one, tear
         # down and reopen at the new rate (so a wrong-baud garbage capture becomes
         # readable — critical for catching a device that just powered on).
+        # No users: reopen if the wanted baud changed.
         if chan is not None and not chan.sessions:
             want_baud = int(settings.get("baud", DEFAULT_BAUD) or DEFAULT_BAUD)
             if want_baud != getattr(chan, "baud", want_baud):
@@ -1104,6 +1318,7 @@ class SessionManager:
                 chan.close()
                 self._channels.pop(port_id, None)
                 chan = None
+        # Open a new channel; record the error and return None if it fails.
         if chan is None:
             try:
                 chan = PortChannel(port_id, dev, settings, self._on_data)
@@ -1112,27 +1327,33 @@ class SessionManager:
                 self._monitor_errors[port_id] = str(e)
                 logger.debug("monitor open %s failed: %s", port_id, e)
                 return None
+            # Track it.
             self._channels[port_id] = chan
+        # Clear any old error and mark it monitored.
         self._monitor_errors.pop(port_id, None)  # opened cleanly → healthy
         chan.monitored = True
         return chan
 
     def monitor_error(self, port_id: str) -> Optional[str]:
         """Last passive-open failure for a port (None once it opens cleanly)."""
+        # Last recorded error, if any.
         return self._monitor_errors.get(port_id)
 
     def stop_monitor(self, port_id: str) -> None:
         """Release the passive hold. Closes the OS handle unless a user is on it
         (used to hand the exclusive handle to an active probe/detect/config op)."""
+        # Nothing to release.
         chan = self._channels.get(port_id)
         if not chan:
             return
+        # Unmark; close it unless users are attached.
         chan.monitored = False
         if not chan.sessions:
             chan.close()
             self._channels.pop(port_id, None)
 
     def channel(self, port_id: str) -> Optional[PortChannel]:
+        """Return the open channel for a port, or None."""
         return self._channels.get(port_id)
 
     def persisted_capture(self, port_id: str, limit: Optional[int] = None) -> bytes:
@@ -1141,9 +1362,11 @@ class SessionManager:
         Lets the capture view serve a port's recorded history straight after a
         service restart (or for a port that isn't currently open), instead of
         returning nothing because the in-memory tail is empty."""
+        # Disk capture disabled.
         cap = _capture_max_bytes()
         if not cap:
             return b""
+        # Read the tail from the port's log file.
         try:
             return CaptureLog(port_id, cap).load_tail(limit or cap)
         except Exception:  # noqa: BLE001
@@ -1151,6 +1374,7 @@ class SessionManager:
 
     def has_user_sessions(self, port_id: str) -> bool:
         """A human/relay session is attached (as opposed to only the monitor)."""
+        # True when the channel has sessions.
         chan = self._channels.get(port_id)
         return bool(chan and chan.sessions)
 
@@ -1160,10 +1384,13 @@ class SessionManager:
         ``last_activity`` (device OUTPUT). Lets a caller tell an attached
         session that's actively being typed into from one that's merely
         attached (idle tab, abandoned relay leg)."""
+        # Writer's last keystroke time, or 0.
         chan = self._channels.get(port_id)
         return float(chan.last_user_write_at) if chan else 0.0
 
     def snapshot(self, port_id: str) -> Dict[str, Any]:
+        """Return the port's live state, or saved counters when no channel is open."""
+        # Open channel, if any.
         chan = self._channels.get(port_id)
         if not chan:
             # No live channel (never opened, or not yet re-opened after a restart)
@@ -1173,7 +1400,9 @@ class SessionManager:
             return {"monitoring": False, "last_activity": tel["last_activity"],
                     "capture_bytes": tel["capture_bytes"], "pending_out": 0,
                     "has_user": False, "writer": None, "baud": 0}
+        # Live state from the channel.
         return chan.snapshot()
 
     def is_open(self, port_id: str) -> bool:
+        """Return True when a channel is open for the port."""
         return port_id in self._channels

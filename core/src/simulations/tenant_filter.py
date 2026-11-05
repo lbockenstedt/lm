@@ -32,10 +32,14 @@ no tenant address on either side (e.g. ``any → any``, or both sides off-prefix
 and not the tenant's aliases) is dropped.
 """
 
+# Postponed annotations: type hints are not evaluated at runtime.
 from __future__ import annotations
 
+# ipaddress does the subnet containment/overlap math.
 import ipaddress
+# Regular expressions find IPs in free-text fields and split token lists.
 import re
+# Type hints only.
 from typing import Any, Iterable, List, Optional, Sequence
 
 # Reserved per-record marker: a truthy value means the caller has already
@@ -59,8 +63,11 @@ _NON_IP = {"", "any", "*", "—", "-"}
 
 
 def _parse_network(cidr: str) -> Optional[ipaddress._BaseNetwork]:
+    """Parse a network/CIDR string loosely, returning None if it is not valid."""
+    # strict=False accepts host bits set (e.g. 10.0.0.5/24) instead of rejecting them.
     try:
         return ipaddress.ip_network(cidr, strict=False)
+    # Not an IP network at all.
     except ValueError:
         return None
 
@@ -72,11 +79,14 @@ def extract_addrs(val: Any) -> Optional[List[str]]:
     caller can distinguish "field had addresses, none matched" from "field had
     no addresses to test". Mirrors ``_extractAddrs`` (main.js:363).
     """
+    # Missing value: no addresses to test.
     if val is None:
         return None
+    # Normalise to text and treat wildcard/placeholder values as non-IP.
     s = str(val).strip()
     if s.lower() in _NON_IP or s in _NON_IP:
         return None
+    # Pull every IPv4 or IPv4/CIDR substring out of the value.
     hits = _ADDR_RE.findall(s)
     return hits or None
 
@@ -87,21 +97,27 @@ def _addr_in_prefixes(addr: str, nets: Sequence[ipaddress._BaseNetwork]) -> bool
     Mirrors ``_addrInPrefixes`` (main.js:371): a CIDR item overlaps a prefix;
     a bare IP is contained in a prefix.
     """
+    # No tenant networks means nothing can match.
     if not nets:
         return False
+    # A CIDR item matches when it overlaps any tenant network.
     if "/" in addr:
         a = _parse_network(addr)
         if a is None:
             return False
         return any(a.overlaps(n) for n in nets)
+    # A bare IP matches when it is contained in any tenant network.
     try:
         ip = ipaddress.ip_address(addr)
+    # Not a valid IP: cannot match.
     except ValueError:
         return False
     return any(ip in n for n in nets)
 
 
 def _nets(prefixes: Iterable[str]) -> List[ipaddress._BaseNetwork]:
+    """Parse prefix strings into network objects, silently skipping invalid ones."""
+    # Keep only prefixes that parse.
     out: List[ipaddress._BaseNetwork] = []
     for p in prefixes:
         n = _parse_network(p)
@@ -121,20 +137,27 @@ def _find_list_slot(data: Any):
     put the filtered list back with :func:`_replace_slot`, which COPIES —
     the input is never modified.
     """
+    # Bare list: the list itself holds the records.
     if isinstance(data, list):
         return (data, None)
+    # Envelope dict: try the known locations in the same order as the WebUI.
     if isinstance(data, dict):
+        # Top-level "data" list.
         v = data.get("data")
         if isinstance(v, list):
             return (data, "data")
+        # Nested payload.data list.
         payload = data.get("payload")
         if isinstance(payload, dict) and isinstance(payload.get("data"), list):
             return (payload, "data")
+        # A "rows" list.
         if isinstance(data.get("rows"), list):
             return (data, "rows")
+        # Fallback: the first non-empty list whose first element is a dict.
         for k, v in data.items():
             if isinstance(v, list) and v and isinstance(v[0], dict):
                 return (data, k)
+    # No record list found.
     return (None, None)
 
 
@@ -145,6 +168,7 @@ def _replace_slot(data: Any, container: Any, key: str, filtered: list) -> Any:
     The input is often the hub data cache's own stored object (shared by every
     reader and persisted to disk): filtering it in place would turn the cached
     RAW list into one tenant's narrowed view."""
+    # The list is directly on data: copy data and swap in the filtered list.
     if container is data:
         out = dict(data)
         out[key] = filtered
@@ -158,11 +182,15 @@ def _replace_slot(data: Any, container: Any, key: str, filtered: list) -> Any:
 
 
 def _filter_list(lst: list, keep) -> list:
+    """Return the items of lst for which keep(item) is True; non-dict items always pass."""
+    # Build a new list so the input is untouched.
     out: list = []
     for item in lst:
+        # Non-record entries cannot be judged, so they are passed through.
         if not isinstance(item, dict):
             out.append(item)
             continue
+        # Keep records the predicate accepts.
         if keep(item):
             out.append(item)
     return out
@@ -195,36 +223,47 @@ def filter_items_by_prefixes(
     passes whichever apply). Only pass it for modules that use categories
     (rules/nat/aliases); ``None`` (default) disables the check.
     """
+    # No prefixes means show everything.
     if not prefixes:
         return items
+    # Parse the prefixes; if none are valid there is nothing to filter against.
     nets = _nets(prefixes)
     if not nets:
         return items
 
     def keep(item: dict) -> bool:
+        """Decide whether one record should be shown to this tenant."""
         if isinstance(item, dict) and item.get(OWN_SOURCE_MARKER):
             return True  # tenant's own data source (e.g. own CPPM) — never subnet-filtered
         if tenant_category and _category_matches(item.get(category_field), tenant_category):
             return True  # explicitly attributed to this tenant via category
+        # Track whether any field had concrete IPs to compare.
         has_concrete = False
+        # Check each configured IP field on the record.
         for f in ip_fields:
             addrs = extract_addrs(item.get(f))
             if addrs is None:
                 continue  # alias / 'any' — skip this field
+            # This field had real addresses; keep the record if any is in a tenant prefix.
             has_concrete = True
             if any(_addr_in_prefixes(a, nets) for a in addrs):
                 return True
+        # Concrete addresses existed but none matched.
         if has_concrete:
             return False  # concrete IPs but none matched → drop
         return not drop_no_ip  # no concrete IP → drop by default (err on hiding)
 
+    # Find where the record list lives in the input.
     container, key = _find_list_slot(items)
+    # No record list: return the input unchanged.
     if container is None:
         return items
+    # Filter a copy of the record list.
     filtered = _filter_list(container if key is None else container[key], keep)
     if key is None:
         # bare list — return the filtered copy
         return filtered
+    # Envelope: return a copy of it with the filtered list substituted.
     return _replace_slot(items, container, key, filtered)
 
 
@@ -244,22 +283,28 @@ def filter_firewall_rules(data: Any, prefixes: Sequence[str], alias_map: Any = N
     of its source/destination (the admin explicitly tagged it to this tenant).
     ``None`` (default) disables the category check.
     """
+    # No prefixes means show everything.
     if not prefixes:
         return data
+    # Parse the prefixes; if none are valid there is nothing to filter against.
     nets = _nets(prefixes)
     if not nets:
         return data
+    # Find where the rule list lives; return the input unchanged if there is none.
     container, key = _find_list_slot(data)
     if container is None:
         return data
+    # Keep only rules that belong to this tenant by IP, alias or category.
     filtered = _filter_list(
         container if key is None else container[key],
         lambda r: firewall_rule_in_prefixes(r, prefixes, alias_map,
                                              tenant_category=tenant_category,
                                              category_field=category_field),
     )
+    # Bare list: return the filtered copy directly.
     if key is None:
         return filtered
+    # Envelope: return a copy with the filtered list substituted.
     return _replace_slot(data, container, key, filtered)
 
 
@@ -272,21 +317,28 @@ def filter_record_by_prefixes(record: Any, prefixes: Sequence[str], ip_fields: S
     device-enrich) rather than a list. A record with no concrete IP is dropped
     by default (``drop_no_ip=True``); pass ``False`` for the legacy keep behavior.
     """
+    # No prefixes or not a record: nothing to filter.
     if not prefixes or not isinstance(record, dict):
         return record
+    # Records from the tenant's own source always pass.
     if record.get(OWN_SOURCE_MARKER):
         return record  # tenant's own data source (e.g. own CPPM) — never subnet-filtered
+    # Parse the prefixes; if none are valid there is nothing to filter against.
     nets = _nets(prefixes)
     if not nets:
         return record
+    # Track whether any field had concrete IPs to compare.
     has_concrete = False
+    # Check each configured IP field on the record.
     for f in ip_fields:
         addrs = extract_addrs(record.get(f))
         if addrs is None:
             continue
+        # This field had real addresses; return the record if any is in a tenant prefix.
         has_concrete = True
         if any(_addr_in_prefixes(a, nets) for a in addrs):
             return record
+    # Concrete addresses existed but none matched.
     if has_concrete:
         return None  # concrete IPs but none matched → drop
     return None if drop_no_ip else record  # no concrete IP → drop by default
@@ -295,11 +347,14 @@ def filter_record_by_prefixes(record: Any, prefixes: Sequence[str], ip_fields: S
 def _vm_tags(vm: dict) -> set:
     """Lowercased set of a VM's Proxmox tags (``tags`` is a list from the agent,
     but tolerate a comma/space-separated string)."""
+    # Normal case: the agent sends a list of tags.
     tags = vm.get("tags")
     if isinstance(tags, list):
         return {str(t).strip().lower() for t in tags if str(t).strip()}
+    # Tolerate a single comma/space-separated string.
     if isinstance(tags, str):
         return {t.strip().lower() for t in re.split(r"[,\s]+", tags) if t.strip()}
+    # Anything else means no tags.
     return set()
 
 
@@ -325,15 +380,20 @@ def filter_hypervisor_vms(data: Any, prefixes: Sequence[str], *,
     prefixes → unchanged (nothing to filter against; overrides irrelevant).
     Comparison is case-insensitive and whitespace-trimmed.
     """
+    # No prefixes means show everything.
     if not prefixes:
         return data
+    # Parse the prefixes; if none are valid there is nothing to filter against.
     nets = _nets(prefixes)
     if not nets:
         return data
+    # Normalised sets of template pools and tenant tags for override checks.
     tp = {str(p).strip().lower() for p in (template_pools or []) if str(p).strip()}
     tt = {str(t).strip().lower() for t in (tenant_tags or []) if str(t).strip()}
 
     def keep(vm: dict) -> bool:
+        """Decide whether one VM should be shown to this tenant."""
+        # Non-dict entries cannot be judged, so they pass.
         if not isinstance(vm, dict):
             return True
         # template-pool override (global — visible to every tenant)
@@ -343,38 +403,52 @@ def filter_hypervisor_vms(data: Any, prefixes: Sequence[str], *,
         if tt and (_vm_tags(vm) & tt):
             return True
         # normal subnet match on the ips list
+        # Treat a missing or malformed ips field as no IPs.
         ips = vm.get("ips")
         ip_list = ips if isinstance(ips, list) else []
+        # Track whether any concrete IP was seen.
         has_concrete = False
+        # Check each IP the VM reports.
         for ip in ip_list:
             s = str(ip).strip()
+            # Skip blank entries.
             if not s:
                 continue
+            # A real IP; keep the VM if it is in a tenant prefix.
             has_concrete = True
             if _addr_in_prefixes(s, nets):
                 return True
+        # Concrete IPs existed but none matched.
         if has_concrete:
             return False  # concrete IPs but none matched → drop
         return not drop_no_ip  # no concrete IP → drop by default
 
+    # Find where the VM list lives; return the input unchanged if there is none.
     container, key = _find_list_slot(data)
     if container is None:
         return data
+    # Filter a copy of the VM list.
     filtered = _filter_list(container if key is None else container[key], keep)
+    # Bare list: return the filtered copy directly.
     if key is None:
         return filtered
+    # Envelope: return a copy with the filtered list substituted.
     return _replace_slot(data, container, key, filtered)
 
 
 def _is_wildcard(val: Any) -> bool:
     """True when a firewall source/destination means "any address"."""
+    # Missing value means any address.
     if val is None:
         return True
+    # Normalise; blank, "any" and "*" mean any address.
     s = str(val).strip().lower()
     if not s or s in ("any", "*"):
         return True
+    # The IPv4 default route covers every address.
     if s == "0.0.0.0/0":
         return True
+    # "any" optionally followed by a port (e.g. "any:443") is also a wildcard.
     return bool(re.match(r"^any(:\S+)?$", s))
 
 
@@ -388,15 +462,20 @@ def _category_matches(val: Any, tenant_category: Any) -> bool:
     'acme', and 'ACME ' all match a tenant named 'Acme'. ``None``/empty disables
     the check (returns ``False``).
     """
+    # Category matching is disabled.
     if not tenant_category:
         return False
+    # Normalise the record's category; blank never matches.
     s = str(val or "").strip().lower()
     if not s:
         return False
+    # Single string: one direct comparison.
     if isinstance(tenant_category, (str, bytes)):
         return s == str(tenant_category).strip().lower()
+    # Iterable: match any acceptable category.
     try:
         return any(s == str(c).strip().lower() for c in tenant_category if c)
+    # Not actually iterable: fall back to a single comparison.
     except TypeError:
         return s == str(tenant_category).strip().lower()
 
@@ -417,44 +496,58 @@ def build_alias_map(aliases: Any) -> Dict[str, "dict"]:
     OPNsense category verbatim (``""`` when absent) — the firewall matcher uses it
     to decide whether an alias belongs to a given tenant.
     """
+    # Raw content and category per alias, keyed by lowercased name.
     raw: Dict[str, str] = {}
     cat: Dict[str, str] = {}
+    # Index each well-formed, named alias from the spoke list.
     if isinstance(aliases, list):
         for a in aliases:
+            # Skip malformed entries.
             if not isinstance(a, dict):
                 continue
+            # Skip aliases without a name.
             name = str(a.get("name") or "").strip()
             if not name:
                 continue
+            # Remember the alias body and its category.
             raw[name.lower()] = str(a.get("content") or "")
             cat[name.lower()] = str(a.get("category") or "").strip()
 
     def resolve(name_lower: str, visited: set) -> List[str]:
+        """Recursively expand an alias to concrete IP/CIDR strings, guarding against cycles."""
+        # Already visited: stop to avoid an infinite loop on cyclic aliases.
         if name_lower in visited:
             return []
         visited.add(name_lower)
+        # Collected concrete addresses for this alias.
         out: List[str] = []
+        # Unknown or empty alias resolves to nothing.
         content = raw.get(name_lower)
         if not content:
             return out
+        # Walk each token of the alias body.
         for tok in re.split(r"[\s,]+", content.strip()):
             if not tok:
                 continue
+            # Concrete addresses are kept directly.
             hits = _ADDR_RE.findall(tok)
             if hits:
                 out.extend(hits)
                 continue
+            # Other tokens that name a known alias are expanded recursively.
             tok_l = tok.lower()
             if tok_l in raw:
                 out.extend(resolve(tok_l, visited))
         return out
 
+    # Resolve every alias and attach its category.
     return {name: {"nets": resolve(name, set()), "category": cat.get(name, "")}
             for name in raw}
 
 
 # Strip a trailing ``:port`` so values like ``LAN_net:443`` / ``10.0.5.0/24:443``
 # resolve their address part. A port is all-digits, ``any``, or a port range/list.
+# Matches a trailing ":port", ":port-range", ":list,of,ports" or ":any".
 _PORT_SUFFIX = re.compile(r":(?:\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*|any)$")
 
 
@@ -462,11 +555,14 @@ def _alias_entry(alias_map: Any, name_lower: str) -> Optional[dict]:
     """Look up an alias by lowercased name in ``alias_map`` (whole-token first,
     then any whitespace/comma-separated token). Returns the ``{nets, category}``
     entry or ``None`` when the name isn't a known alias."""
+    # No alias map: nothing is a known alias.
     if not isinstance(alias_map, dict):
         return None
+    # Try the whole value first.
     e = alias_map.get(name_lower)
     if e is not None:
         return e
+    # Then try each individual token.
     for tok in re.split(r"[\s,]+", name_lower):
         if tok and tok in alias_map:
             return alias_map[tok]
@@ -484,11 +580,14 @@ def _side_qualifies(val: Any, nets: Sequence[ipaddress._BaseNetwork],
     interface/alias name, or an off-prefix concrete IP all yield ``False`` — the
     side simply contributes nothing; the *other* side can still qualify the rule.
     """
+    # Missing side contributes nothing.
     if val is None:
         return False
+    # Normalise to text; wildcards contribute nothing.
     s = str(val).strip()
     if _is_wildcard(s):
         return False  # wildcard → no address on this side (other side may qualify)
+    # Strip any port suffix and look only at the address part.
     addr_part = _PORT_SUFFIX.sub("", s).strip()
     if not addr_part or _is_wildcard(addr_part):
         return False
@@ -537,15 +636,19 @@ def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any
     string or an iterable of acceptable categories. ``None`` disables both the
     alias-category and rule-category checks.
     """
+    # No prefixes means show everything.
     if not prefixes:
         return True
+    # Non-dict entries cannot be judged, so they are shown.
     if not isinstance(rule, dict):
         return True
     if tenant_category and _category_matches(rule.get(category_field), tenant_category):
         return True  # rule explicitly attributed to this tenant via its category
+    # Parse the prefixes; if none are valid there is nothing to filter against.
     nets = _nets(prefixes)
     if not nets:
         return True
+    # The two sides of the rule that may carry tenant addresses or aliases.
     src_raw = rule.get("source")
     dst_raw = rule.get("destination")
     # Either side belonging to the tenant → show; otherwise drop.
@@ -553,4 +656,5 @@ def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any
         return True
     if _side_qualifies(dst_raw, nets, alias_map, tenant_category):
         return True
+    # Neither side belongs to this tenant.
     return False

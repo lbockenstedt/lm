@@ -21,6 +21,7 @@ schedule belongs to one tenant and only ever sees that tenant's VMs
 """
 from __future__ import annotations
 
+# asyncio; logging; re validates prefixes; time for names and schedules; uuid for ids.
 import asyncio
 import logging
 import re
@@ -28,8 +29,10 @@ import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+# Log to the hub's logger.
 logger = logging.getLogger("Hub")
 
+# Config key, loop tick, and spoke action timeouts.
 SCHEDULES_KEY = "vm_snapshot_schedules"
 _TICK_S = 300.0
 _ACTION_TIMEOUT_S = 60.0
@@ -37,6 +40,7 @@ _DELETE_TIMEOUT_S = 130.0
 # Proxmox snapshot names: a letter, then letters/digits/_/-, at most 40 chars.
 # The timestamp suffix is 14 chars, so a prefix may be up to 26.
 _PREFIX_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,25}$")
+# Schedule ids currently running.
 _running: set = set()
 
 
@@ -44,10 +48,14 @@ _running: set = set()
 def all_vms(hub, scope: str = "_all_") -> List[Dict[str, Any]]:
     """Every VM/container in one warm-cache scope (default: all tenants),
     templates excluded."""
+    # Cached VM list for this scope, if the hub has a warm cache.
     data = hub.warm_get("pxmx_vms", f"{scope}|agent=") if hasattr(hub, "warm_get") else None
+    # Unwrap a data envelope.
     if isinstance(data, dict) and isinstance(data.get("data"), dict):
         data = data["data"]
+    # The vms list (or the data itself if it is a list).
     vms = data.get("vms") if isinstance(data, dict) else data
+    # Real VMs only: dicts with a vmid that are not templates.
     return [vm for vm in (vms or []) if isinstance(vm, dict) and vm.get("vmid") is not None
             and not vm.get("template")]
 
@@ -56,36 +64,46 @@ async def tenant_vms(hub, tenant: str) -> List[Dict[str, Any]]:
     """The VMs a tenant sees on its Hypervisors page: its spokes / Proxmox tag
     (the tenant's warm-cache entry), narrowed to its subnets when the
     hypervisor subnet filter is on, plus every VM on a host pinned to it."""
+    # No tenant: every VM.
     if not tenant:
         return all_vms(hub)
+    # Lazy import of access helpers; this tenant's cached VMs.
     import access
     vms = all_vms(hub, tenant)
     # A VM on a tenant-dedicated spoke is that tenant's (never subnet/tag
     # attributed); the rest go through the hypervisor filter.
     owned, rest = [], []
+    # Split each VM into owned (dedicated spoke) or rest (shared spoke).
     for vm in vms:
+        # Resolve the VM's spoke and that spoke's owner.
         aid = vm.get("agent_id")
         sid = hub.get_spoke_for_agent(aid, fallback_hypervisor=False) \
             if aid and hasattr(hub, "get_spoke_for_agent") else None
         owner = access.spoke_owner_tenant(hub, sid)
+        # Shared spoke: keep unless masked for this tenant.
         if not owner:
             if not access._shared_spoke_masked(hub, sid, tenant):
                 rest.append(vm)
+        # Dedicated spoke owned by this tenant.
         elif access.tenant_in(owner, tenant):
             owned.append(vm)
+    # Subnet filter on: narrow the shared VMs to the tenant's prefixes.
     if access.filter_enabled(hub, "hypervisor"):
         prefixes = await access.resolve_prefixes_for_tenant(hub, tenant)
         if prefixes:
             rest = access.filter_hypervisor_vms(
                 rest, prefixes, template_pools=access._template_pools(hub),
                 tenant_tags=access._tenant_tag_set(hub, tenant))
+    # Keep only VMs that survived, in original order.
     keep = {id(vm) for vm in owned + rest}
     vms = [vm for vm in vms if id(vm) in keep]
+    # Hosts whose agent is pinned to this tenant.
     pinned_hosts = set()
     for apk, cfg in (hub.state.system_state.get("agent_config") or {}).items():
         pin = str(((cfg or {}).get("client_simulation") or {}).get("tenant_id") or "")
         if pin.strip().casefold() == tenant.strip().casefold():
             pinned_hosts.add(str((hub.agent_info.get(apk) or {}).get("hostname") or ""))
+    # Add VMs on pinned hosts that are not already listed.
     pinned_hosts.discard("")
     if pinned_hosts:
         have = {vm.get("unique_id") for vm in vms}
@@ -95,6 +113,8 @@ async def tenant_vms(hub, tenant: str) -> List[Dict[str, Any]]:
 
 
 def _short(name: Any) -> str:
+    """Return name as a lowercase short hostname (text before the first dot)."""
+    # First label, trimmed and lowercased.
     return str(name or "").split(".")[0].strip().lower()
 
 
@@ -105,29 +125,38 @@ def find_vm(hub, names: Iterable[str], ips: Iterable[str] = (),
     several do, the one that also has one of ``ips`` wins. An IP alone is never
     enough (a NATed spoke reports its gateway's address), and two equally good
     candidates are never guessed between."""
+    # Normalise names and IPs; default to all VMs.
     names = {_short(n) for n in names} - {""}
     ips = {str(i) for i in ips if i}
     vms = all_vms(hub) if vms is None else vms
+    # Match by short name.
     by_name = [vm for vm in vms if _short(vm.get("name")) in names]
+    # Several matches: prefer those with a matching IP.
     if len(by_name) > 1 and ips:
         by_ip = [vm for vm in by_name if ips & set(vm.get("ips") or [])]
         by_name = by_ip or by_name
+    # Exactly one: found.
     if len(by_name) == 1:
         return by_name[0], ""
+    # Still ambiguous: list a few.
     if by_name:
         return None, "several VMs match: " + ", ".join(
             f"{vm.get('name')} ({vm.get('vmid')}@{vm.get('node')})" for vm in by_name[:4])
+    # No match.
     return None, "no VM with this hostname"
 
 
 def vm_ref(vm: Dict[str, Any]) -> Dict[str, Any]:
     """The fields needed to act on a VM later (stored on nodes/schedules)."""
+    # The identifying fields only.
     return {k: vm.get(k) for k in ("unique_id", "name", "vmid", "node", "type", "cluster",
                                    "agent_id")}
 
 
 # ── snapshot + prune ──────────────────────────────────────────────────────────
 def snapshot_name(prefix: str, now: Optional[float] = None) -> str:
+    """Return the snapshot name: prefix plus a UTC timestamp (YYYYmmddHHMMSS)."""
+    # Prefix plus UTC time.
     return prefix + time.strftime("%Y%m%d%H%M%S", time.gmtime(now or time.time()))
 
 
@@ -136,20 +165,25 @@ def _route(hub, vm: Dict[str, Any]) -> Tuple[Optional[str], str]:
     runs where the VM lives. Next, the agent that reported the VM: it is in the
     VM's cluster and the spoke snapshots through the cluster API. Last, any
     hypervisor spoke (it then picks an agent in the VM's cluster)."""
+    # Agent on the VM's own node first.
     node = _short(vm.get("node"))
     for info in (getattr(hub, "agent_info", None) or {}).values():
         if isinstance(info, dict) and info.get("spoke_id") and node and node in (
                 _short(info.get("hostname")), _short(info.get("agent_id"))):
             return info["spoke_id"], str(info.get("agent_id") or "")
+    # Then the agent that reported the VM.
     reporter = str(vm.get("agent_id") or "")
     if reporter and hasattr(hub, "get_spoke_for_agent"):
         spoke = hub.get_spoke_for_agent(reporter, fallback_hypervisor=False)
         if spoke:
             return spoke, reporter
+    # Finally any hypervisor spoke.
     return hub.get_hypervisor_spoke(), ""
 
 
 def _unwrap(resp: Any) -> Dict[str, Any]:
+    """Return the data dict from a spoke reply, unwrapping payload/data envelopes; {} if not a dict."""
+    # Try payload.data, then data, then the reply itself.
     if isinstance(resp, dict):
         inner = resp.get("payload")
         if isinstance(inner, dict) and "data" in inner:
@@ -157,25 +191,32 @@ def _unwrap(resp: Any) -> Dict[str, Any]:
         if isinstance(resp.get("data"), dict):
             return resp["data"]
         return resp
+    # Not a dict.
     return {}
 
 
 async def _vm_action(hub, vm: Dict[str, Any], action: str, name: str = "",
                      timeout: float = _ACTION_TIMEOUT_S) -> Dict[str, Any]:
+    """Send a PXMX_VM_ACTION for vm through its routed spoke and return the reply data."""
+    # Pick the spoke and agent; none means an error.
     spoke, agent = _route(hub, vm)
     if not spoke:
         return {"status": "ERROR", "message": "no Proxmox spoke connected"}
+    # Action payload, with the agent when known.
     payload = {"unique_id": vm.get("unique_id", ""), "vmid": vm.get("vmid"),
                "node": vm.get("node", ""), "type": vm.get("type") or "qemu",
                "action": action, "snapshot_name": name or None}
     if agent:
         payload["agent_id"] = agent
+    # Send it; an exception becomes an error reply.
     try:
         d = _unwrap(await hub.request_response(spoke, "PXMX_VM_ACTION", payload, timeout=timeout))
     except Exception as exc:  # noqa: BLE001 — reported to the caller
         d = {"status": "ERROR", "message": str(exc)}
+    # Guard against a malformed reply.
     if not isinstance(d, dict):
         d = {"status": "ERROR", "message": "malformed response"}
+    # No agent for this node: say which host.
     msg = str(d.get("message") or "")
     if not agent and d.get("status") != "SUCCESS" and (
             "No agents connected" in msg or "not connected" in msg):
@@ -183,6 +224,7 @@ async def _vm_action(hub, vm: Dict[str, Any], action: str, name: str = "",
         # host's agent is offline. Say which host.
         d = {**d, "message": f"no LM agent connected for Proxmox node "
                              f"'{vm.get('node')}' ({msg})"}
+    # The reply.
     return d
 
 
@@ -192,31 +234,40 @@ async def take_snapshot(hub, vm: Dict[str, Any], prefix: str, keep: int = 0,
     ``<prefix>*`` snapshots beyond ``keep`` (0 = keep all). Returns
     ``{status, snapshot, pruned, message}``; a failed prune is reported in
     ``message`` but does not fail the snapshot."""
+    # Reject invalid prefixes.
     if not _PREFIX_RE.match(prefix):
         return {"status": "ERROR", "message": f"bad snapshot prefix {prefix!r}"}
+    # Label for logs and the new snapshot name.
     label = f"{vm.get('name')} ({vm.get('vmid')}@{vm.get('node')})"
     name = snapshot_name(prefix)
+    # Take the snapshot; on failure log and return an error.
     d = await _vm_action(hub, vm, "snapshot", name)
     if d.get("status") != "SUCCESS":
         logger.warning("[vm-snapshot] %s: snapshot FAILED (%s) by %s", label,
                        d.get("message", ""), actor or "?")
         return {"status": "ERROR", "message": d.get("message") or "snapshot failed"}
+    # Success.
     logger.info("[vm-snapshot] %s: took %s by %s", label, name, actor or "?")
     res = {"status": "SUCCESS", "snapshot": name, "pruned": [], "message": ""}
+    # keep 0: no pruning.
     if keep <= 0:
         return res
+    # List snapshots; if that fails, report it and stop.
     listing = await _vm_action(hub, vm, "list_snapshots")
     if listing.get("status") != "SUCCESS":
         res["message"] = f"old snapshots not pruned: {listing.get('message', '')}"
         return res
+    # Our snapshots, oldest first.
     ours = [s["name"] for s in listing.get("snapshots") or []
             if str(s.get("name", "")).startswith(prefix)]
+    # Delete the oldest beyond keep; failures are noted in message.
     for old in ours[:max(0, len(ours) - keep)]:
         r = await _vm_action(hub, vm, "delete_snapshot", old, timeout=_DELETE_TIMEOUT_S)
         if r.get("status") == "SUCCESS":
             res["pruned"].append(old)
         else:
             res["message"] = f"could not delete {old}: {r.get('message', '')}"
+    # Log what was pruned.
     if res["pruned"]:
         logger.info("[vm-snapshot] %s: pruned %s", label, ", ".join(res["pruned"]))
     return res
@@ -224,6 +275,8 @@ async def take_snapshot(hub, vm: Dict[str, Any], prefix: str, keep: int = 0,
 
 # ── schedules ─────────────────────────────────────────────────────────────────
 def _store(hub) -> Dict[str, Dict[str, Any]]:
+    """Return the schedules dict in global_config, creating it if missing."""
+    # global_config, then the schedules dict.
     gc = hub.state.system_state.setdefault("global_config", {})
     return gc.setdefault(SCHEDULES_KEY, {})
 
@@ -232,18 +285,23 @@ def list_schedules(hub, tenant: Optional[str] = None) -> List[Dict[str, Any]]:
     """All schedules, or one tenant's. A schedule made before schedules had a
     tenant (``tenant`` "") covers all VMs and is listed for every tenant until
     it is edited, which moves it to the tenant it was edited from."""
+    # Read the stored schedules; no state gives {}.
     try:
         store = hub.state.system_state.get("global_config", {}).get(SCHEDULES_KEY) or {}
     except Exception:  # noqa: BLE001 — hub without state (tests)
         store = {}
+    # This tenant's (or untenanted) schedules, sorted by name.
     out = [s for s in store.values()
            if tenant is None or s.get("tenant", "") in ("", tenant)]
     return sorted(out, key=lambda s: s.get("name", "").lower())
 
 
 def _clean_list(value: Any) -> List[str]:
+    """Return the non-empty strings of list value, de-duplicated and sorted; ValueError if not a list."""
+    # Must be a list.
     if not isinstance(value, list):
         raise ValueError("vms, tags and pools must be lists")
+    # Trimmed, non-empty, unique, sorted.
     return sorted({str(v).strip() for v in value if str(v).strip()})
 
 
@@ -254,12 +312,15 @@ def save_schedule(hub, body: Dict[str, Any], sid: str = "", tenant: str = "") ->
     ``{name, enabled, vms: [unique_id], tags: [...], pools: [...],
     every_hours, keep}`` — a VM is included if it is listed, or carries one of
     the tags, or is in one of the pools."""
+    # Existing sid must exist and belong to this tenant.
     store = _store(hub)
     if sid and (sid not in store or store[sid].get("tenant", "") not in ("", tenant)):
         raise KeyError(sid)
+    # Name is required.
     name = str(body.get("name") or "").strip()
     if not name:
         raise ValueError("name is required")
+    # Interval and keep must be numbers, within range.
     try:
         every = float(body.get("every_hours"))
         keep = int(body.get("keep"))
@@ -269,11 +330,14 @@ def save_schedule(hub, body: Dict[str, Any], sid: str = "", tenant: str = "") ->
         raise ValueError("every_hours must be between 1 and 8760")
     if not 1 <= keep <= 100:
         raise ValueError("keep must be between 1 and 100")
+    # Targets: VMs, tags, and pools; at least one is required.
     targets = {k: _clean_list(body.get(k) or []) for k in ("vms", "tags", "pools")}
     if not any(targets.values()):
         raise ValueError("pick at least one VM, tag or pool")
+    # Keep the prefix and last-run info from the existing schedule.
     old = store.get(sid, {})
     sid = sid or uuid.uuid4().hex[:6]
+    # Store the schedule and mark state dirty.
     store[sid] = {"id": sid, "tenant": tenant, "name": name, "enabled": bool(body.get("enabled", True)),
                   **targets, "every_hours": every, "keep": keep,
                   "prefix": old.get("prefix") or f"lms-{sid}-",
@@ -283,68 +347,92 @@ def save_schedule(hub, body: Dict[str, Any], sid: str = "", tenant: str = "") ->
 
 
 def delete_schedule(hub, sid: str) -> None:
+    """Delete schedule sid; KeyError if unknown."""
+    # Remove it, or fail if missing.
     if _store(hub).pop(sid, None) is None:
         raise KeyError(sid)
+    # Persist.
     hub.state._mark_dirty()
 
 
 def schedule_vms(sched: Dict[str, Any], vms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return the VMs in vms that schedule sched covers (listed id, tag, or pool)."""
+    # Wanted VM ids, tags, and pools.
     want_vms, tags, pools = set(sched.get("vms") or []), set(sched.get("tags") or []), \
         set(sched.get("pools") or [])
+    # VMs matching any of them.
     return [vm for vm in vms if vm.get("unique_id") in want_vms
             or tags & set(vm.get("tags") or []) or (vm.get("pool") and vm.get("pool") in pools)]
 
 
 async def run_schedule(hub, sid: str, actor: str = "schedule") -> Dict[str, Any]:
     """Snapshot every VM of one schedule now (one at a time)."""
+    # Unknown schedule fails; a running one is refused.
     sched = _store(hub).get(sid)
     if sched is None:
         raise KeyError(sid)
     if sid in _running:
         return {"status": "ERROR", "message": "this schedule is already running"}
+    # The tenant's VMs; none loaded yet is an error.
     known = await tenant_vms(hub, sched.get("tenant", ""))
     if not known:
         return {"status": "ERROR", "message": "the VM list hasn't loaded yet"}
+    # VMs this schedule covers.
     vms = schedule_vms(sched, known)
+    # Mark running for the duration.
     _running.add(sid)
     try:
+        # Snapshot each VM in turn.
         results = []
         for vm in vms:
             r = await take_snapshot(hub, vm, sched["prefix"], sched["keep"], actor)
             results.append({"vm": vm.get("name"), "vmid": vm.get("vmid"), **r})
+    # Always clear the running mark.
     finally:
         _running.discard(sid)
+    # Failures and up to 10 error lines.
     failed = [r for r in results if r["status"] != "SUCCESS"]
     errors = [f"{r['vm']}: {r['message']}" for r in failed][:10]
+    # No matching VMs is an error.
     if not vms:
         errors = ["no VMs match this schedule"]
+    # Summary, saved on the schedule.
     summary = {"at": time.time(), "ok": len(results) - len(failed), "failed": len(failed),
                "errors": errors}
     sched.update(last_run=summary["at"], last_result=summary)
     hub.state._mark_dirty()
+    # Overall status, summary, and per-VM results.
     return {"status": "SUCCESS" if not errors else "ERROR", **summary, "results": results}
 
 
 def due_schedules(hub, now: float) -> List[str]:
+    """Return ids of enabled, not-running schedules whose interval has elapsed by now."""
+    # Enabled, not running, and past the interval.
     return [s["id"] for s in list_schedules(hub)
             if s.get("enabled") and s["id"] not in _running
             and now - float(s.get("last_run") or 0) >= s["every_hours"] * 3600]
 
 
 def is_running(sid: str) -> bool:
+    """Return True if schedule sid is running right now."""
+    # Look it up in the running set.
     return sid in _running
 
 
 async def run_loop(hub) -> None:
     """Every few minutes, run the schedules that are due. Never raises."""
+    # Shared loop runner.
     from sync_loop import run_sync_loop  # sibling leaf
 
     async def _tick():
+        """Run each due schedule once and warn on failures."""
+        # Run each due schedule; log failures.
         for sid in due_schedules(hub, time.time()):
             res = await run_schedule(hub, sid)
             if res.get("status") != "SUCCESS":
                 logger.warning("[vm-snapshot] schedule %s: %s", sid,
                                res.get("message") or "; ".join(res.get("errors") or []))
 
+    # Start after 2 minutes, then tick on the interval.
     await run_sync_loop(stagger=120, body=_tick, delay=lambda: _TICK_S,
                         error_label="vm snapshot schedule loop failed")
