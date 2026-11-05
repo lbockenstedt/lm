@@ -25,13 +25,16 @@ gate (api.py, ``path.startswith("/tenant/")``) covers it for free — this
 file only adds the per-tenant ownership check on top (a tenant-admin may
 manage only their OWN tenant's PSKs).
 """
+# Cryptographically strong random generator used to mint new PSKs.
 import secrets
 
+# Request/exception types and the shared logger from the main API module.
 from api import HTTPException, Request, logger
 
 
 def register(app, hub, ctx):
     """Register the generic onboarding-PSK routes on the Hub app."""
+    # Pull the shared session/role helpers out of ctx once for the route closures below.
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
     _is_tenant_admin = ctx._is_tenant_admin
@@ -43,11 +46,14 @@ def register(app, hub, ctx):
         alone), plus the per-tenant ownership check a tenant-admin needs
         (never another tenant's PSKs — mirrors tenant_devices.py's
         ``_owns``)."""
+        # Global Admins may manage any tenant.
         sess = _session_user(request)
         if _is_admin(sess):
             return sess
+        # Otherwise the caller must at least be a tenant-admin.
         if not (sess and _is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="Admin access required")
+        # ...and the tenant in the URL must be one of the tenants their account belongs to.
         allowed = (sess or {}).get("user", {}).get("tenants") or []
         if tenant not in allowed:
             raise HTTPException(status_code=403,
@@ -64,6 +70,7 @@ def register(app, hub, ctx):
         silently fell back to ``location.host`` (the proxy serving the WebUI,
         e.g. the legacy ``labmanager`` alias) instead of the real hub. Not a
         secret: this exact address is printed in the install command below it."""
+        # Read global_config.hub.url defensively; any missing level yields an empty string.
         try:
             return str((((hub.state.system_state.get("global_config") or {})
                          .get("hub") or {}).get("url") or "")).strip()
@@ -72,7 +79,11 @@ def register(app, hub, ctx):
 
     @app.get("/tenant/{tenant}/onboarding-psk", operation_id="tenant_list_onboarding_psks")
     async def list_onboarding_psks(request: Request, tenant: str):
+        """List the tenant's onboarding PSKs plus the hub URL the install command should point at.
+        """
+        # Refuse unless the caller owns this tenant.
         _require_owns_tenant(request, tenant)
+        # Return the tenant's PSKs from the shared PSK store and the configured hub URL.
         return {"psks": await hub.simulations_store.get_psks(tenant),
                 "hub_url": _configured_hub_url()}
 
@@ -81,18 +92,28 @@ def register(app, hub, ctx):
         """Mint a new onboarding PSK for ``tenant``. The caller pastes it (with
         the tenant id) into a new box's install command — see
         ``agent/install_agent.sh --onboarding-psk``/``--tenant-hint``."""
+        # Refuse unless the caller owns this tenant.
         _require_owns_tenant(request, tenant)
+        # 24 random bytes encoded URL-safe (32 chars): unguessable and safe to paste on a shell
+        # command line.
         psk = secrets.token_urlsafe(24)
+        # Store it against the tenant so a spoke presenting it is auto-approved and bound there.
         await hub.simulations_store.add_psk(tenant, psk)
         logger.info("onboarding-psk: generated for tenant %s", tenant)
+        # Hand the PSK back once so the tenant-admin can copy it into the install command.
         return {"psk": psk, "tenant_id": tenant}
 
     @app.delete("/tenant/{tenant}/onboarding-psk", operation_id="tenant_revoke_onboarding_psk")
     async def revoke_onboarding_psk(request: Request, tenant: str):
+        """Revoke one of the tenant's onboarding PSKs so it can no longer onboard new spokes."""
+        # Refuse unless the caller owns this tenant.
         _require_owns_tenant(request, tenant)
+        # The PSK to revoke is sent in the JSON body.
         body = await request.json()
         psk = body.get("psk") if isinstance(body, dict) else None
+        # Remove it from the store (nothing to do when no PSK was given).
         removed = await hub.simulations_store.remove_psk(tenant, psk) if psk else False
+        # Only log when something was actually revoked.
         if removed:
             logger.info("onboarding-psk: revoked for tenant %s", tenant)
         return {"removed": removed}
@@ -108,7 +129,10 @@ def register(app, hub, ctx):
         Global Admin may pass any tenant. Module-agnostic (nac/dns/dhcp/nw/
         certificates/simulation/…), mirroring the tenant-agnostic PSK the same
         file mints."""
+        # Refuse unless the caller owns this tenant.
         _require_owns_tenant(request, tenant)
+        # Gather the hub's registries: known spokes, display names, metadata, live connections,
+        # module types and telemetry.
         st = hub.state.system_state
         known = st.get("known_modules", []) or []
         names = st.get("module_names", {}) or {}
@@ -116,13 +140,16 @@ def register(app, hub, ctx):
         conns = getattr(hub, "active_connections", {}) or {}
         live_types = getattr(hub, "spoke_module_types", {}) or {}
         telemetry = getattr(hub, "spoke_telemetry", {}) or {}
+        # Walk every known spoke and keep only those bound to this tenant.
         out = []
         for sid in known:
             # Tenant binding is the ownership signal — never a client claim.
             if (hub.state.get_spoke_tenant(sid) or "") != tenant:
                 continue
+            # Live data is keyed by the spoke's primary key, so resolve it once.
             pk = hub._primary_key(sid)
             m = meta.get(sid, {}) or {}
+            # Build the row the My Devices page shows for this spoke.
             out.append({
                 "spoke_id": sid,
                 "display_name": names.get(sid) or m.get("hostname") or sid,
@@ -137,6 +164,7 @@ def register(app, hub, ctx):
                 "revoked_by": m.get("revoked_by", "") or "",
                 "tenant_id": tenant,
             })
+        # Sort by module type then id so the list is stable between refreshes.
         out.sort(key=lambda s: (s["module_type"], s["spoke_id"]))
         return {"tenant_id": tenant, "spokes": out}
 
@@ -153,9 +181,12 @@ def register(app, hub, ctx):
         surface independent of per-module rights). Reuses the same cached
         aggregation + tenant filter as the admin tile
         (``routes.pxmx.pxmx_agents_payload``) — one cache, two surfaces."""
+        # Refuse unless the caller owns this tenant.
         _require_owns_tenant(request, tenant)
         from routes.pxmx import pxmx_agents_payload  # lazy: avoid import cycle
+        # Reuse the cached, tenant-filtered aggregation the admin Proxmox tile uses.
         payload = await pxmx_agents_payload(hub, tenant)
+        # Return the three agent lists the My Devices page renders.
         return {"tenant_id": tenant,
                 "agents": payload.get("agents", []),
                 "pending_agents": payload.get("pending_agents", []),
@@ -174,17 +205,23 @@ def register(app, hub, ctx):
         different tenants) must still go through an admin, or the agent can
         skip this click entirely with a tenant-scoped onboarding PSK (see
         main.py's ``_try_psk_agent_auto_approve``)."""
+        # Refuse unless the caller owns this tenant.
         _require_owns_tenant(request, tenant)
+        # The spoke the agent connects through must be bound to exactly this tenant; anything else
+        # looks like "not found".
         bound = hub.state.get_spoke_tenant(spoke_id) or ""
         if bound != tenant:
             raise HTTPException(status_code=404, detail="Not found")
         from routes.setup import _perform_agent_approval  # lazy: avoid import cycle
+        # Run the same approval routine the admin screen uses, pinning the agent to this tenant.
         try:
             summary = await _perform_agent_approval(hub, spoke_id, agent_id,
                                                      explicit_tenant=tenant)
+        # Unexpected failures are logged with a traceback and surfaced as a 500.
         except Exception as e:  # noqa: BLE001
             logger.exception("approve_tenant_agent failed")
             raise HTTPException(status_code=500, detail=str(e))
+        # Audit-log who approved which agent.
         logger.info("tenant agent approve: agent '%s' approved by tenant %s via spoke '%s'",
                     agent_id, tenant, spoke_id)
         return {"status": "ok", **summary}
@@ -204,26 +241,33 @@ def register(app, hub, ctx):
         or admin-approved agent may be bound to a tenant whose OWN spoke
         isn't (e.g. approved via a shared spoke), so the agent's tenant_id is
         the authoritative ownership signal here."""
+        # Refuse unless the caller owns this tenant.
         _require_owns_tenant(request, tenant)
+        # The desired on/off state comes from the JSON body (anything malformed means off).
         body = await request.json()
         enabled = bool(body.get("enabled")) if isinstance(body, dict) else False
+        # Look up (creating if needed) the agent's stored config and its client-simulation block.
         agent_pk = hub._agent_primary_key(agent_id)
         store = hub.state.system_state.setdefault("agent_config", {})
         entry = dict(store.get(agent_pk, {}))
         cs_cfg = dict(entry.get("client_simulation") or {})
+        # The agent must already be pinned to this tenant; otherwise pretend it does not exist.
         bound = (cs_cfg.get("tenant_id") or "").strip()
         if bound != tenant:
             raise HTTPException(status_code=404, detail="Not found")
+        # Flip only the enabled flag and write the config back, flagging state for saving.
         cs_cfg["enabled"] = enabled
         entry["client_simulation"] = cs_cfg
         store[agent_pk] = entry
         hub.state._mark_dirty()
         from routes.pxmx import push_pxmx_agent_config, bust_pxmx_agents_cache  # lazy: avoid import cycle
+        # Push the new client-simulation config to the agent (or queue it if offline).
         pushed, queued = await push_pxmx_agent_config(
             hub, agent_id, {"client_simulation": cs_cfg})
         # So the toggle reflects immediately on the next My Devices refresh
         # instead of a cached pre-toggle snapshot for up to 30s.
         bust_pxmx_agents_cache()
+        # Audit-log the change and report whether it was pushed live or queued.
         logger.info("tenant agent cs-config: agent '%s' enabled=%s set by tenant %s",
                     agent_id, enabled, tenant)
         return {"status": "ok", "enabled": enabled, "pushed": pushed, "queued": queued}
@@ -238,6 +282,7 @@ def register(app, hub, ctx):
         as not-found so existence never leaks across tenants (anti-IDOR, mirrors
         tenant_devices.py ``_owns``). The actual teardown reuses the shared
         ``hard_delete_spoke`` helper so admin + tenant deletes stay identical."""
+        # Refuse unless the caller owns this tenant.
         _require_owns_tenant(request, tenant)
         # Ownership by tenant binding — never a client claim. A tenant-admin may
         # only delete a spoke homed to a tenant they own; the shared tenant is
@@ -247,6 +292,7 @@ def register(app, hub, ctx):
         bound = hub.state.get_spoke_tenant(spoke_id) or ""
         if bound != tenant and not _is_admin(sess):
             raise HTTPException(status_code=404, detail="Not found")
+        # Do the full teardown; any failure is logged with a traceback and surfaced as a 500.
         try:
             from routes.setup import hard_delete_spoke  # lazy: avoid import cycle
             await hard_delete_spoke(hub, spoke_id)

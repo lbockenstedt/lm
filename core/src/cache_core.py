@@ -34,23 +34,34 @@ A leaf: stdlib only. MUST NOT import ``main`` or ``api`` (dependency direction i
 ``main → cache_core`` only). Audience: Hub developers.
 """
 
+# Postpone evaluation of type hints so annotations are never evaluated at runtime.
 from __future__ import annotations
 
+# asyncio provides the write lock, debounced flush tasks and off-thread file writes.
 import asyncio
+# json serialises cache contents.
 import json
+# Standard-library logging for load/persist warnings.
 import logging
+# os handles paths, directory creation, permissions and atomic rename.
 import os
+# time.time() timestamps entries and measures their age.
 import time
+# Type hints only.
 from typing import Any, Callable, Dict, Optional, Set
 
+# Use the hub's main logger so cache warnings appear alongside other hub output.
 logger = logging.getLogger("Hub")
 
+# Default timings (seconds): write debounce, then the three staleness thresholds
+# (refresh in background, show "cached" badge, treat as expired) described above.
 DEFAULT_FLUSH_DELAY_S = 5.0
 DEFAULT_REFRESH_AFTER_S = 30.0
 DEFAULT_STALE_AFTER_S = 300.0
 DEFAULT_EXPIRE_AFTER_S = 86400.0
 
 
+# Staleness classes returned by StalenessPolicy.classify(), mildest first.
 FRESH = "fresh"
 REFRESH = "refresh"
 STALE = "stale"
@@ -81,14 +92,17 @@ class JsonCacheFile:
         :param snapshot_fn: Callable returning dict to serialize at write time
         :param flush_delay_s: Debounce delay for writes
         """
+        # Remember the configuration.
         self._label = label
         self._path_fn = path_fn
         self._snapshot_fn = snapshot_fn
         self._flush_delay_s = flush_delay_s
 
+        # Lock is created lazily (see _get_lock); _tasks holds the pending flusher.
         self._lock: Optional[asyncio.Lock] = None
         self._lock_loop: Any = None
         self._tasks: Set[asyncio.Task] = set()
+        # True when there are changes not yet written.
         self._dirty = False
 
     def _get_lock(self) -> asyncio.Lock:
@@ -103,10 +117,12 @@ class JsonCacheFile:
         under load. Binding lazily keeps the behaviour identical across
         interpreter versions.
         """
+        # The loop we are running on, or None if called outside a loop.
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
+        # Create a new lock if none exists yet or the loop has changed.
         if self._lock is None or self._lock_loop is not loop:
             self._lock = asyncio.Lock()
             self._lock_loop = loop
@@ -120,16 +136,20 @@ class JsonCacheFile:
         Catches all expected exceptions and logs at WARNING.
         Never raises.
         """
+        # Kept for the log message if anything fails.
         path = ""
+        # Resolve the path; a missing or empty file means "no cache yet".
         try:
             path = self._path_fn()
             if not os.path.exists(path) or os.path.getsize(path) == 0:
                 return None
+            # Parse the file; only a dict is a valid cache.
             with open(path) as f:
                 data = json.load(f)
             if not isinstance(data, dict):
                 return None
             return data
+        # Unreadable/corrupt file: warn and start empty.
         except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
             logger.warning("%s load failed (%s): %s — starting empty", self._label, path, exc)
             return None
@@ -141,10 +161,13 @@ class JsonCacheFile:
         Ensures exactly one flusher is pending. If one already exists,
         it will pick up the change.
         """
+        # Remember there is something to write.
         self._dirty = True
+        # A flusher already pending will write this change too.
         if any(not t.done() for t in self._tasks):
             return  # a flusher is already pending — it will pick this up
 
+        # Start a delayed flusher task, keeping a reference so it is not garbage-collected.
         coro = self._flush_after_delay()
         try:
             task = asyncio.create_task(coro)
@@ -162,10 +185,13 @@ class JsonCacheFile:
 
         Used during shutdown or forced sync.
         """
+        # Clear the dirty flag, then write immediately.
         self._dirty = False
         await self._persist()
 
     async def _flush_after_delay(self) -> None:
+        """Wait the debounce delay, then persist; repeat while new changes arrived meanwhile."""
+        # Clear the flag before sleeping so changes made during the wait trigger another round.
         while self._dirty:
             self._dirty = False
             await asyncio.sleep(self._flush_delay_s)
@@ -178,10 +204,12 @@ class JsonCacheFile:
         Locks, calls snapshot_fn(), writes via asyncio.to_thread.
         Logs WARNING on failure (best-effort).
         """
+        # One writer at a time; take the snapshot and write it in a worker thread.
         async with self._get_lock():
             try:
                 snapshot = self._snapshot_fn()
                 await asyncio.to_thread(self._write, snapshot)
+            # Persistence is best-effort: log and carry on.
             except Exception as exc:  # noqa: BLE001 - best-effort persist
                 logger.warning("%s persist failed: %s", self._label, exc)
 
@@ -192,10 +220,12 @@ class JsonCacheFile:
         Creates parent dir, writes to tmp file with json.dump(..., default=str),
         chmod 0o600, then os.replace(tmp, path).
         """
+        # Make sure the target directory exists.
         path = self._path_fn()
         d = os.path.dirname(path)
         if d and not os.path.exists(d):
             os.makedirs(d, exist_ok=True)
+        # Write to a temp file, lock down permissions, then atomically replace the real file.
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(snapshot, f, default=str)
@@ -224,6 +254,7 @@ class StalenessPolicy:
         :param stale_after_s: Age after which data is "cached" but still usable
         :param expire_after_s: Age after which data is no longer trustworthy
         """
+        # Store the three thresholds.
         self.refresh_after_s = refresh_after_s
         self.stale_after_s = stale_after_s
         self.expire_after_s = expire_after_s
@@ -235,10 +266,13 @@ class StalenessPolicy:
         Returns None if fetched_at is invalid.
         Clamps at 0.0 to prevent negative ages from clock skew.
         """
+        # No (or a non-numeric) timestamp means we cannot tell the age.
         if not fetched_at or not isinstance(fetched_at, (int, float)):
             return None
+        # Default to the current time.
         if now is None:
             now = time.time()
+        # Clamp to zero in case of clock skew.
         return max(0.0, now - fetched_at)
 
     def classify(self, fetched_at: Optional[float], now: Optional[float] = None) -> str:
@@ -248,7 +282,9 @@ class StalenessPolicy:
         Returns one of FRESH, REFRESH, STALE, EXPIRED, MISSING.
         Checked in order of severity.
         """
+        # Age of the data.
         a = self.age(fetched_at, now)
+        # Check from most to least severe.
         if a is None:
             return MISSING
         if a > self.expire_after_s:
@@ -265,6 +301,7 @@ class StalenessPolicy:
 
         True for STALE and EXPIRED.
         """
+        # STALE and EXPIRED both show the "cached data" badge.
         c = self.classify(fetched_at, now)
         return c in (STALE, EXPIRED)
 
@@ -306,6 +343,7 @@ class StalenessPolicy:
 #   * A namespace whose compressed content is byte-identical to the last write
 #     is skipped (no pointless re-encrypt + disk write every refresh).
 
+# File format markers (see the layout above) and the file extension.
 CACHE_FILE_MAGIC = b"LMC1"
 CACHE_MODE_ENCRYPTED = b"E"
 CACHE_MODE_PLAIN = b"Z"
@@ -316,10 +354,13 @@ def _ns_filename(ns: str) -> str:
     """Filesystem-safe file name for a namespace. Normal names
     (letters/digits/``_.-``) map to themselves so the directory is readable by
     a human; anything else is hashed (the real name is stored inside)."""
+    # Imported lazily; only needed when naming files.
     import hashlib
     import re
+    # Safe, non-hidden names are used as-is so the directory stays human-readable.
     if re.fullmatch(r"[A-Za-z0-9_.\-]{1,100}", ns or "") and not ns.startswith("."):
         return ns + CACHE_FILE_SUFFIX
+    # Anything else is hashed into a safe name.
     return "ns-" + hashlib.sha1((ns or "").encode()).hexdigest() + CACHE_FILE_SUFFIX
 
 
@@ -341,21 +382,27 @@ class ShardedCacheFile:
                  encrypt: Optional[Callable[[bytes], bytes]] = None,
                  decrypt: Optional[Callable[[bytes], bytes]] = None,
                  flush_delay_s: float = DEFAULT_FLUSH_DELAY_S) -> None:
+        """Store the configuration; see the class docstring for the parameters."""
+        # Remember the configuration and encryption hooks.
         self._label = label
         self._dir_fn = dir_fn
         self._snapshot_fn = snapshot_fn
         self.encrypt = encrypt
         self.decrypt = decrypt
         self._flush_delay_s = flush_delay_s
+        # Lock is created lazily (see _get_lock); _tasks holds the pending flusher.
         self._lock: Optional[asyncio.Lock] = None
         self._lock_loop: Any = None
         self._tasks: Set[asyncio.Task] = set()
         self._dirty = False            # any namespace pending (kept for tests/compat)
+        # Namespaces with changes not yet written.
         self._dirty_ns: Set[str] = set()
         self._last_digest: Dict[str, str] = {}   # ns → sha256 of last written zlib bytes
+        # Per-namespace write time and file size, for status display.
         self.last_write_at: Dict[str, float] = {}
         self.last_size: Dict[str, int] = {}
 
+    # Reuse JsonCacheFile's loop-aware lazy lock.
     _get_lock = JsonCacheFile._get_lock
 
     # ── encode / decode (pure, synchronous, unit-testable) ────────────────────
@@ -363,32 +410,44 @@ class ShardedCacheFile:
     def encode(self, ns: str, entries: Dict[str, Any]) -> tuple:
         """``(file_bytes, digest)`` for one namespace. Raises if encryption is
         configured and fails (caller must then NOT write)."""
+        # Imported lazily: hashing and compression.
         import hashlib
         import zlib
+        # Serialise compactly with the namespace name inside the payload.
         raw = json.dumps({"ns": ns, "entries": entries}, default=str,
                          separators=(",", ":")).encode()
+        # Compress, and fingerprint the compressed bytes to detect unchanged content.
         packed = zlib.compress(raw, 6)
         digest = hashlib.sha256(packed).hexdigest()
+        # Encrypted mode when an encrypt function is configured (it raises on failure).
         if self.encrypt is not None:
             return CACHE_FILE_MAGIC + CACHE_MODE_ENCRYPTED + self.encrypt(packed), digest
+        # Otherwise plain (compressed, unencrypted) mode, for tests/dev.
         return CACHE_FILE_MAGIC + CACHE_MODE_PLAIN + packed, digest
 
     def decode(self, blob: bytes) -> tuple:
         """``(ns, entries)`` from file bytes. Raises ``ValueError`` on any
         format problem (wrong magic/mode, missing key, bad payload)."""
+        # Imported lazily: decompression.
         import zlib
+        # Check the magic header.
         if not blob.startswith(CACHE_FILE_MAGIC) or len(blob) < 5:
             raise ValueError("not a hub cache file (bad magic/version)")
+        # Split the mode byte from the body.
         mode, body = blob[4:5], blob[5:]
+        # Encrypted files need the decrypt function.
         if mode == CACHE_MODE_ENCRYPTED:
             if self.decrypt is None:
                 raise ValueError("file is encrypted but no decrypt key is configured")
             body = self.decrypt(body)
+        # Anything other than the two known modes is rejected.
         elif mode != CACHE_MODE_PLAIN:
             raise ValueError("unknown cache file mode %r" % mode)
+        # Decompress and parse, then check the payload shape.
         doc = json.loads(zlib.decompress(body).decode())
         if not isinstance(doc, dict) or not isinstance(doc.get("entries"), dict):
             raise ValueError("cache file payload is not {ns, entries}")
+        # Return the namespace name and its entries.
         return str(doc.get("ns") or ""), doc["entries"]
 
     # ── load ──────────────────────────────────────────────────────────────────
@@ -396,25 +455,33 @@ class ShardedCacheFile:
     def load_all(self) -> Dict[str, Dict[str, Any]]:
         """Read every ``*.bin`` in the directory → ``{ns: entries}``.
         Unreadable files are skipped (logged), never fatal."""
+        # Result and directory (kept for the log message).
         out: Dict[str, Dict[str, Any]] = {}
         d = ""
+        # List the directory; a missing directory just means an empty cache.
         try:
             d = self._dir_fn()
             names = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        # Cannot read the directory: warn and start empty.
         except OSError as exc:
             logger.warning("%s: cannot list %s: %s — starting empty", self._label, d, exc)
             return out
+        # Read each cache file.
         for name in names:
+            # Ignore unrelated files.
             if not name.endswith(CACHE_FILE_SUFFIX):
                 continue
             path = os.path.join(d, name)
+            # Decode the file; it must name its namespace.
             try:
                 with open(path, "rb") as f:
                     ns, entries = self.decode(f.read())
                 if not ns:
                     raise ValueError("missing namespace name")
+                # Keep its entries and remember its size.
                 out[ns] = entries
                 self.last_size[ns] = os.path.getsize(path)
+            # A bad file is skipped so the others still load.
             except Exception as exc:  # noqa: BLE001 - one bad file must not stop the rest
                 logger.warning("%s: ignoring unreadable %s: %s", self._label, path, exc)
         return out
@@ -425,32 +492,41 @@ class ShardedCacheFile:
         """Mark ``ns`` (or, if None, nothing new) dirty and ensure exactly one
         delayed flusher is pending — a refresh burst becomes one write per
         namespace, not one per set."""
+        # Mark this namespace dirty.
         if ns is not None:
             self._dirty_ns.add(ns)
         self._dirty = bool(self._dirty_ns)
+        # A flusher already pending will write this change too.
         if any(not t.done() for t in self._tasks):
             return
+        # Start a delayed flusher task, keeping a reference so it is not garbage-collected.
         coro = self._flush_after_delay()
         try:
             task = asyncio.create_task(coro)
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
+        # No running loop (startup): close the coroutine to avoid a "never awaited" warning.
         except RuntimeError:  # pragma: no cover - no running loop (startup path)
             coro.close()
 
     async def _flush_after_delay(self) -> None:
+        """Wait the debounce delay and persist; repeat while namespaces are still dirty."""
         while self._dirty_ns:
             await asyncio.sleep(self._flush_delay_s)
             await self._persist()
 
     async def flush_now(self) -> None:
         """Write every dirty namespace immediately (shutdown path)."""
+        # Write all dirty namespaces without waiting.
         await self._persist()
 
     async def _persist(self) -> None:
+        """Write every dirty namespace; ones changed mid-write are re-queued for the next flush."""
+        # One writer at a time; take ownership of the dirty set.
         async with self._get_lock():
             pending, self._dirty_ns = self._dirty_ns, set()
             self._dirty = False
+            # Write each namespace's snapshot in a worker thread.
             for ns in sorted(pending):
                 try:
                     snap = self._snapshot_fn(ns)
@@ -461,12 +537,14 @@ class ShardedCacheFile:
                     self._dirty_ns.add(ns)
                     self._dirty = True
                     logger.debug("%s: %s busy (%s) — will retry", self._label, ns, exc)
+                # Any other failure is logged; persistence is best-effort.
                 except Exception as exc:  # noqa: BLE001 - best-effort persist
                     logger.warning("%s: persist %s failed: %s", self._label, ns, exc)
 
     def write_all_sync(self, namespaces) -> None:
         """Synchronous write of the given namespaces (startup migration only,
         before an event loop exists)."""
+        # Write each namespace directly; failures are logged and skipped.
         for ns in namespaces:
             try:
                 self._write_ns(ns, self._snapshot_fn(ns))
@@ -474,6 +552,8 @@ class ShardedCacheFile:
                 logger.warning("%s: persist %s failed: %s", self._label, ns, exc)
 
     def _write_ns(self, ns: str, entries: Dict[str, Any]) -> None:
+        """Write one namespace's file atomically (or delete it if the namespace is empty)."""
+        # Target file path.
         d = self._dir_fn()
         path = os.path.join(d, _ns_filename(ns))
         if not entries:
@@ -484,16 +564,20 @@ class ShardedCacheFile:
             self._last_digest.pop(ns, None)
             self.last_size.pop(ns, None)
             return
+        # Encode (and encrypt) the entries.
         blob, digest = self.encode(ns, entries)
         if self._last_digest.get(ns) == digest and os.path.exists(path):
             return  # identical content already on disk
+        # Make sure the owner-only directory exists.
         os.makedirs(d, mode=0o700, exist_ok=True)
+        # Write to an owner-only temp file, then atomically replace the real file.
         tmp = path + ".tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(blob)
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
+        # Remember what was written, when, and how big.
         self._last_digest[ns] = digest
         self.last_write_at[ns] = time.time()
         self.last_size[ns] = len(blob)

@@ -16,10 +16,14 @@ NOTE: unlike Azure NSG, OCI NSGs support ALLOW rules only — there is no
 carries no ``priority`` ordering guard against the threat-monitor block
 config (see ``oci_nsg.py``'s module docstring for the full explanation).
 """
+# Postponed evaluation of annotations so type hints stay plain strings at runtime.
 from __future__ import annotations
 
+# Shared OCI auth helpers: region catalog, credential diagnosis and key upload.
 import oci_auth
+# Request/exception types and the shared logger from the main API module.
 from api import HTTPException, Request, logger
+# The OCI NSG client (rule normalisation, live read, reconcile, connection test).
 import oci_nsg as _nsg
 
 # Whitelisted, persisted config fields. Auth (tenancy_ocid/user_ocid/
@@ -41,13 +45,23 @@ _KEY_UPLOAD_FILENAME = "oci-nsg-api-key.pem"
 
 
 def register(app, hub, ctx):
+    """Attach the OCI NSG setup routes to the web app.
+
+    Args: app is the web application, hub is the running LM hub, ctx carries shared route helpers
+    (unused here).
+    """
     def _cfg() -> dict:
+        """Return a copy of the stored OCI NSG config (empty dict when never configured)."""
+        # Copy so callers can modify the result without changing the live state by accident.
         return dict(hub.state.system_state.get("global_config", {}).get("oci_nsg", {}) or {})
 
     def _save(cfg: dict) -> None:
+        """Store the OCI NSG config in global_config and flag the state for saving to disk."""
+        # Replace the oci_nsg block inside global_config and write global_config back.
         gc = hub.state.system_state.get("global_config", {})
         gc["oci_nsg"] = cfg
         hub.state.system_state["global_config"] = gc
+        # Mark the state dirty so the hub's persistence loop writes it out.
         hub.state._mark_dirty()
 
     @app.get("/setup/oci-regions")
@@ -67,6 +81,12 @@ def register(app, hub, ctx):
 
     @app.get("/setup/oci-nsg")
     async def get_oci_nsg():
+        """Return the stored OCI NSG config together with the CIDRs currently live on the NSG.
+
+        Live rules we manage but did not know about are imported into the local list; rules created
+        by someone else are only reported.
+        """
+        # Load the config and clean up the stored allow-list entries.
         cfg = _cfg()
         cfg["entries"] = _nsg.normalize_entries(cfg.get("entries") or [])
         # Read the CIDRs currently on our managed rules and import any we
@@ -75,6 +95,7 @@ def register(app, hub, ctx):
         live = None
         unmanaged = None
         warning = ""
+        # Only query OCI when the NSG and region are configured.
         if cfg.get("nsg_id") and cfg.get("region"):
             try:
                 split = await _nsg.get_live_prefixes(_nsg.get_oci_config(hub), cfg)
@@ -89,8 +110,11 @@ def register(app, hub, ctx):
                     if added:
                         cfg["entries"] = merged
                         _save(cfg)
+            # An OCI failure must not break the page; show it as a warning instead.
             except Exception as e:  # noqa: BLE001
                 warning = str(e)
+        # Return the config, our managed live CIDRs, the operator's own (unmanaged) CIDRs and any
+        # warning.
         return {"config": cfg, "live_prefixes": live,
                 "unmanaged_prefixes": unmanaged, "warning": warning}
 
@@ -99,25 +123,33 @@ def register(app, hub, ctx):
         """Persist the config and reconcile the NSG's managed allow rules to
         match ``ips`` (unless disabled). Returns the applied prefixes or a
         warning if OCI refused."""
+        # Read the JSON body; a missing or broken body is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Accept either {"config": {...}} or the bare config object.
         incoming = (body or {}).get("config", body) or {}
+        # Keep only the known fields so arbitrary keys can never be stored.
         clean = {}
         for k in _FIELDS:
             if k in incoming:
                 clean[k] = incoming[k]
+        # Validate/normalise the allow-list entries; a bad CIDR is the caller's mistake (400).
         try:
             clean["entries"] = _nsg.normalize_entries(clean.get("entries") or [])
         except _nsg.OciNsgError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        # Coerce "enabled" to a real boolean (it defaults to off).
         clean["enabled"] = bool(clean.get("enabled", False))
+        # Only one cloud NSG provider may be active at a time, so refuse to enable OCI while Azure
+        # NSG is on.
         if clean["enabled"]:
             import cloud_nsg
             if cloud_nsg.other_provider_enabled(hub, "oci"):
                 raise HTTPException(status_code=400,
                                     detail="Azure NSG is currently enabled — disable it before enabling OCI NSG")
+        # Save first so the config is kept even if the OCI call below fails.
         _save(clean)
         applied = None
         warning = ""
@@ -130,15 +162,20 @@ def register(app, hub, ctx):
             _problems = oci_auth.diagnose_auth(_nsg.get_oci_config(hub))
         except Exception:  # noqa: BLE001 — diagnosis must never block a save
             _problems = []
+        # Report any locally detectable credential problems as the warning.
         if _problems:
             warning = " ".join(_problems)
+        # Push the allow-list to OCI only when enabled and fully configured.
         if clean["enabled"] and clean.get("nsg_id") and clean.get("region"):
             try:
                 applied = await _nsg.reconcile_allowlist(
                     _nsg.get_oci_config(hub), clean, _nsg.entries_to_ips(clean["entries"]))
+            # OCI refused or was unreachable: log it and return the reason as a warning (the save
+            # itself succeeded).
             except Exception as e:  # noqa: BLE001
                 logger.warning("oci-nsg reconcile failed: %s", e)
                 warning = str(e)
+        # Return the saved config, the CIDRs that were applied (None if skipped) and any warning.
         return {"status": "ok", "config": clean, "applied": applied, "warning": warning}
 
     @app.post("/setup/oci-nsg/upload-key")
@@ -150,7 +187,10 @@ def register(app, hub, ctx):
         a raw body. Validates the upload actually parses as an unencrypted PEM
         private key BEFORE writing anything, so a bad paste/upload can't
         silently brick the integration or leave garbage on disk."""
+        # Work out whether this is a multipart form upload or a raw body.
         ctype = (request.headers.get("content-type") or "").lower()
+        # Read the uploaded key bytes from the form's "file" field or, failing that, the raw request
+        # body.
         try:
             if "multipart/form-data" in ctype:
                 form = await request.form()
@@ -160,15 +200,20 @@ def register(app, hub, ctx):
                 data = await up.read()
             else:
                 data = await request.body()
+        # Our own 400 for a missing field passes straight through.
         except HTTPException:
             raise
+        # Any other read failure is reported to the user as a bad upload.
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"could not read upload: {e}")
+        # Validate the key and write it to disk; an invalid/encrypted key becomes a 400 with the
+        # reason.
         try:
             path = oci_auth.write_uploaded_private_key(
                 hub, _KEY_UPLOAD_SUBDIR, _KEY_UPLOAD_FILENAME, data)
         except oci_auth.OciAuthError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        # Point the stored config at the newly written key file right away.
         cfg = _cfg()
         cfg["key_path"] = path
         _save(cfg)
@@ -179,16 +224,21 @@ def register(app, hub, ctx):
         """Test the signing key + NSG reachability (GET the NSG). Uses the
         posted config if present, else the stored one, so an admin can test
         before saving."""
+        # Read the optional posted config; a missing or broken body is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Prefer the posted (unsaved) config, otherwise test the saved one.
         cfg = ((body or {}).get("config") or _cfg())
+        # Try to reach the NSG and return its summary details on success.
         try:
             summary = await _nsg.test_connection(_nsg.get_oci_config(hub), cfg)
             return {"status": "ok", **summary}
+        # Expected NSG errors (auth, not found, ...) are shown as a friendly error message.
         except _nsg.OciNsgError as e:
             return {"status": "error", "message": str(e)}
+        # Unexpected errors are logged with a traceback and also reported back to the UI.
         except Exception as e:  # noqa: BLE001
             logger.exception("oci-nsg test failed")
             return {"status": "error", "message": str(e)}

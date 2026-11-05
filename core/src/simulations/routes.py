@@ -10,34 +10,59 @@ Audience: Hub developers; endpoint reference in ``docs/api.md`` (Simulations
 section). This is the LM-side port of the legacy solutions-hpe Client-Sim UI.
 """
 
+# FastAPI building blocks for the HTTP and WebSocket routes.
 from fastapi import WebSocket, Depends, HTTPException, Request
+# Explicit JSON responses for non-200 status codes.
 from fastapi.responses import JSONResponse
+# Type hints only.
 from typing import Any, Dict, List, Optional
+# asyncio for background loops, timeouts and parallel spoke requests.
 import asyncio
+# Friendly display names for nodes/spokes.
 from display_names import node_name
+# Parses simulation.conf INI text.
 import configparser
+# Timestamps for reports and status payloads.
 from datetime import datetime, timezone
+# Constant-time comparisons for secrets.
 import hmac
+# Detects whether a helper returned an awaitable.
 import inspect
+# JSON encoding for config hashes and payloads.
 import json
+# Standard-library logging.
 import logging
+# Regular expressions for input validation.
 import re
+# Wall-clock time for caches and status stamps.
 import time
+# Builds the tenant-filtered UI views; pass/fail markers for checks.
 from .service import SimulationsService, _PASS, _FAIL
+# Per-tenant persisted Client-Sim configuration.
 from .store import SimulationsStore
+# Hub-side Aruba Central probes and inventory.
 from .aruba import test_central_from_config, get_central_available_from_config, browse_all_from_config
+# Hub-side Juniper Mist probes, inventory and host validation.
 from .mist import (
     test_mist_from_config, get_mist_available_from_config, browse_mist_from_config,
     validate_mist_host, _KNOWN_MIST_HOSTS, _DEFAULT_MIST_HOST,
 )
+# Sim-Quota validation, catalog building and alert-id prefix helpers.
 from .sim_quota import validate_sim_quotas, guard_sim_quota_wipe, sim_quota_catalog_from_ini, available_sims_from_ini, prefixed_alert_id, parse_alert_source
+# Sim-Quota helpers referenced through the module.
 from . import sim_quota
+# Scheduled email health reports.
 from . import email_report
+# GitHub-backed simulation config sync.
 from . import github_config_client
+# Decrypts/resolves stored Central credentials.
 from . import central_secrets
+# SSRF guards and edit-permission checks.
 from access import safe_external_url, host_resolves_external, has_edit_access
+# URL parsing for host validation.
 from urllib.parse import urlsplit
 
+# Logger for these routes.
 logger = logging.getLogger("SimRoutes")
 
 # Fleet-wide actions safe to queue for delivery on spoke reconnect (idempotent,
@@ -53,7 +78,9 @@ def _cs_config_hash(payload: dict) -> str:
     """Stable sha256 of a per-spoke cs config payload (meta keys excluded). The
     spoke echoes the hash of the last full push it applied in CS_TELEMETRY
     (``cs_config_hash``); a mismatch with this value means it drifted."""
+    # Local import: only needed here.
     import hashlib
+    # Hash the config with the meta keys removed, in a stable key order.
     body = {k: v for k, v in (payload or {}).items() if k not in _CS_CONFIG_META_KEYS}
     return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -91,15 +118,19 @@ def _compute_stale_push(eff_quotas: list, spoke_counts: dict) -> list:
     spoke_count 0 + ``missing=True`` instead of silently skipping it (the old
     ``sc is not None`` guard hid exactly this case). A quota with hub count 0
     that's also absent/0 on the spoke is not flagged (nothing to push)."""
+    # Compare each effective quota's hub count with the spoke's count.
     out: list = []
     for q in eff_quotas or []:
+        # Look up the spoke's count for this quota (None when missing).
         k = sim_quota.quota_dedup_key(q)
         sc = spoke_counts.get(k)
         hc = int(q.get("count") or 0)
+        # Flag mismatches, unless both sides are zero.
         sc_num = 0 if sc is None else sc
         if sc_num != hc and (sc_num > 0 or hc > 0):
             out.append({"key": k, "spoke_count": sc_num,
                         "hub_count": hc, "missing": sc is None})
+    # Return the stale quotas.
     return out
 
 
@@ -124,14 +155,17 @@ def _reduce_spoke_effective_counts(results) -> dict:
     a spoke that didn't reply (None data) contributes 0, so its missing share
     drops the sum and a genuine missed push still flags. Pure so the unit test
     can drive it without a hub/spoke."""
+    # Sum each quota's count across the spokes that replied.
     counts: dict = {}
     for _sid, data in results or []:
+        # Skip spokes that returned nothing usable.
         if not isinstance(data, dict):
             continue
         for q in (data.get("effective") or []):
             if isinstance(q, dict):
                 k = sim_quota.quota_dedup_key(q)
                 counts[k] = counts.get(k, 0) + int(q.get("count") or 0)
+    # Return the totals.
     return counts
 
 
@@ -147,13 +181,16 @@ def _reduce_spoke_producing_counts(results) -> dict:
     ``_quota_key``, which mirrors ``quota_dedup_key`` (see its docstring), so
     it directly keys against a quota's ``quota_dedup_key(q)``. Pure so the
     unit test can drive it without a hub/spoke."""
+    # Sum each quota's producing count across the spokes that replied.
     counts: dict = {}
     for _sid, data in results or []:
+        # Skip spokes that returned nothing usable.
         if not isinstance(data, dict):
             continue
         for d in (data.get("diagnostics") or []):
             if isinstance(d, dict) and d.get("key"):
                 counts[d["key"]] = counts.get(d["key"], 0) + int(d.get("producing") or 0)
+    # Return the totals.
     return counts
 
 
@@ -182,6 +219,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # resolve_tenant_fn is a sync helper (_resolve_tenant); await only if a
         # caller ever passes an async resolver (awaiting a plain str raises
         # TypeError -> 500 on every aggregate route).
+        """Return the tenant id for this request (explicit query parameter or the session's tenant).
+        """
         explicit = (request.query_params.get("tenant_id")
                     or request.query_params.get("tenant"))
         if explicit:
@@ -193,7 +232,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                     detail=f"Not authorized for tenant '{explicit}'")
             tid = explicit
         else:
+            # No explicit tenant: use the session's tenant.
             tid = resolve_tenant_fn(request)
+        # Support resolvers that return an awaitable.
         if inspect.isawaitable(tid):
             tid = await tid
         return tid
@@ -209,12 +250,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.get("/sim/api/init")
     async def sim_api_init():
         """cs /api/init contract: mode + versions. Public (in api.py _PUBLIC)."""
+        # Static mode and version info.
         return {"mode": "hub", "app_version": "1.00", "installer_version": "1.00"}
 
     @app.get("/sim/api/health")
     async def sim_api_health():
         """cs /api/health contract. Public (in api.py _PUBLIC)."""
+        # Local import: only needed here.
         import os
+        # Version and branch from the environment.
         sha = os.getenv("APP_VERSION", "dev")
         branch = os.getenv("APP_BRANCH", "local")
         return {"status": "ok", "version": sha, "branch": branch, "sha": sha}
@@ -229,16 +273,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     def _tenant_name(tid: str) -> str:
         """Return a tenant's display name, falling back to its id."""
+        # Look up the tenant; fall back to the id when it has no name.
         tenant = hub.state.get_tenant(tid) if tid else None
         return (tenant or {}).get("name") or tid
 
     def _user_tenants(sess) -> list:
         """Tenant ids this session user acts on. Admins see all tenants."""
+        # No session: no tenants.
         if not sess:
             return []
+        # Admins act on every tenant.
         if is_admin_fn(sess):
             all_tenants = (hub.state.tenant_state or {}).get("tenants", {})
             return list(all_tenants.keys())
+        # Others act on the tenants listed on their user record.
         return list(sess.get("user", {}).get("tenants", []) or [])
 
     @app.get("/sim/api/auth/me")
@@ -246,9 +294,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Map the LM session into the cs UserResponse shape
         {id, username, is_superadmin, tenant_roles:[{tenant_id, role, tenant_name}]}.
         Cookie-gated by access_control_middleware (not in _PUBLIC)."""
+        # Not logged in: 401.
         sess = session_user_fn(request)
         if not sess:
             return JSONResponse(status_code=401, content={"authenticated": False})
+        # User id and whether they are a Global Admin.
         user = sess.get("user", {})
         user_id = user.get("user_id") or sess.get("user_id") or "unknown"
         is_superadmin = bool(is_admin_fn(sess))
@@ -256,11 +306,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Admin admins every tenant. is_superadmin (top-level) stays Global-only
         # so the cs superadmin dashboard remains a Global-Admin surface.
         is_tadm = bool(is_tenant_admin_fn(sess)) if is_tenant_admin_fn else False
+        # Role shown in the cs UI.
         role = "admin" if (is_superadmin or is_tadm) else "member"
+        # One admin/member role entry per tenant the user acts on.
         tenant_roles = [
             {"tenant_id": tid, "role": role, "tenant_name": _tenant_name(tid)}
             for tid in _user_tenants(sess)
         ]
+        # Return the cs UserResponse shape.
         return {
             "id": user_id,
             "username": user_id,
@@ -270,9 +323,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     def _require_admin(request: Request):
         """Raise 403 unless the request's session is an admin; return the admin session."""
+        # Reject non-admin sessions.
         sess = session_user_fn(request)
         if not sess or not is_admin_fn(sess):
             raise HTTPException(status_code=403, detail="Admin access required")
+        # Return the admin session.
         return sess
 
     def _require_tenant_admin_or_admin(request: Request):
@@ -286,28 +341,35 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         (it lets the holder enroll a rogue spoke into the tenant). Returns the
         session.
         """
+        # Allow Global Admins and tenant Admins; block everyone else.
         sess = session_user_fn(request)
         if not sess or not (is_admin_fn(sess) or (is_tenant_admin_fn and is_tenant_admin_fn(sess))):
             raise HTTPException(status_code=403, detail="Admin access required")
+        # Return the session.
         return sess
 
     @app.get("/sim/api/superadmin/tenants")
     async def sim_superadmin_tenants(request: Request):
         """cs /superadmin/tenants contract: list of {id, name, ...}. Admin-only.
         Feeds the superadmin dashboard tenant rows (app.js loadUserContext)."""
+        # Admin-only.
         _require_admin(request)
+        # One row per tenant, with its name defaulting to the id.
         tenants = (hub.state.tenant_state or {}).get("tenants", {})
         rows = []
         for tid, t in tenants.items():
             t = t or {}
             rows.append({"id": tid, "name": t.get("name") or tid, **t})
+        # Return the rows.
         return rows
 
     @app.get("/sim/api/superadmin/users")
     async def sim_superadmin_users(request: Request):
         """cs /superadmin/users contract (subset): list of users with
         tenant_roles, so buildTenantUserCounts (app.js:8743) works. Admin-only."""
+        # Admin-only.
         _require_admin(request)
+        # One row per user with a member role for each of their tenants.
         users = hub.state.system_state.get("users", {})
         rows = []
         for uid, u in users.items():
@@ -319,6 +381,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     for tid in (u.get("tenants", []) or [])
                 ],
             })
+        # Return the rows.
         return rows
 
     # ── superadmin global USB dongle-type approval (applies to all tenants) ──
@@ -328,6 +391,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.get("/sim/api/superadmin/global-usb-vidpids")
     async def sim_get_global_usb_vidpids(request: Request):
         """Admin-only: return the platform-wide certified USB device list."""
+        # Admin-only; return the stored list.
         _require_admin(request)
         return {"usb_vidpids": await store.get_global_usb_vidpids()}
 
@@ -335,19 +399,24 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def sim_put_global_usb_vidpids(request: Request):
         """Replace the platform-wide certified list, then push the effective
         (global+tenant) list to every tenant's spoke."""
+        # Admin-only.
         _require_admin(request)
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Normalise and save the new list.
         devices = _normalize_usb_vidpids((body or {}).get("usb_vidpids"))
         await store.set_global_usb_vidpids(devices)
+        # Push the merged lists to every tenant's spokes and report the result.
         pushed = await _push_usb_to_all_tenants()
         return {"status": "saved", "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.get("/sim/api/superadmin/global-usb-ignored-vidpids")
     async def sim_get_global_usb_ignored(request: Request):
         """Admin-only: return the platform-wide ignored USB VID:PID list."""
+        # Admin-only; return the stored list.
         _require_admin(request)
         return {"usb_vidpids": await store.get_global_usb_ignored_vidpids()}
 
@@ -355,19 +424,24 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def sim_put_global_usb_ignored(request: Request):
         """Replace the platform-wide ignored list, then push the effective
         (global+tenant) ignored list to every tenant's spoke."""
+        # Admin-only.
         _require_admin(request)
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Normalise and save the new list.
         vidpids = _normalize_usb_ignored((body or {}).get("usb_vidpids"))
         await store.set_global_usb_ignored_vidpids(vidpids)
+        # Push the merged lists to every tenant's spokes and report the result.
         pushed = await _push_usb_to_all_tenants()
         return {"status": "saved", "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.get("/sim/api/superadmin/global-t1-pci-vidpids")
     async def sim_get_global_t1_pci(request: Request):
         """Admin-only: platform-wide T1 PCI-passthrough VID:PID list."""
+        # Admin-only; return the stored list.
         _require_admin(request)
         return {"vidpids": await store.get_global_t1_pci_vidpids()}
 
@@ -375,19 +449,24 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def sim_put_global_t1_pci(request: Request):
         """Replace the platform-wide T1 PCI list, then push the effective
         (global+tenant) list to every tenant's spoke."""
+        # Admin-only.
         _require_admin(request)
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Normalise and save the new list.
         vidpids = _normalize_usb_ignored((body or {}).get("vidpids"))
         await store.set_global_t1_pci_vidpids(vidpids)
+        # Push to every tenant's spokes and report the count.
         pushed = await _push_usb_to_all_tenants()
         return {"status": "saved", "pushed_to_spokes": pushed}
 
     @app.get("/sim/api/superadmin/global-t3-pci-vidpids")
     async def sim_get_global_t3_pci(request: Request):
         """Admin-only: platform-wide T3 PCI-passthrough VID:PID list."""
+        # Admin-only; return the stored list.
         _require_admin(request)
         return {"vidpids": await store.get_global_t3_pci_vidpids()}
 
@@ -395,13 +474,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def sim_put_global_t3_pci(request: Request):
         """Replace the platform-wide T3 PCI list, then push the effective
         (global+tenant) list to every tenant's spoke."""
+        # Admin-only.
         _require_admin(request)
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Normalise and save the new list.
         vidpids = _normalize_usb_ignored((body or {}).get("vidpids"))
         await store.set_global_t3_pci_vidpids(vidpids)
+        # Push to every tenant's spokes and report the count.
         pushed = await _push_usb_to_all_tenants()
         return {"status": "saved", "pushed_to_spokes": pushed}
 
@@ -410,6 +493,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Approval queue: every unique VID:PID seen in spoke telemetry across
         all tenants, annotated with where it was seen and whether it is already
         globally certified. Superadmin certifies/ignores from here."""
+        # Admin-only; build the approval queue from telemetry.
         _require_admin(request)
         return {"devices": await _discovered_usb()}
 
@@ -421,7 +505,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         the existing /sim/api/superadmin/global-usb-* PUT routes; per-tenant
         certify/ignore acts via POST /sim/api/{tenant}/usb-vidpids?tenant_id=<id>.
         """
+        # Admin-only.
         _require_admin(request)
+        # Each tenant's own certified and ignored lists.
         tenants = (hub.state.tenant_state or {}).get("tenants", {}) or {}
         rows = []
         for tid in _all_tenant_ids():
@@ -434,6 +520,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 "certified": _normalize_usb_vidpids(cfg.get("usb_vidpids")),
                 "ignored": _normalize_usb_ignored(cfg.get("usb_ignored_vidpids")),
             })
+        # Return the global lists alongside the per-tenant rows.
         return {
             "global": {
                 "certified": await store.get_global_usb_vidpids(),
@@ -454,11 +541,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         Kea instance reports ``installed: false``; an offline cs spoke simply has
         no ``dhcp`` key → empty. Feeds the Setup → Simulations "DHCP Server" card.
         """
+        # Admin-only.
         _require_admin(request)
+        # Per tenant, list each cs spoke's cached DHCP block.
         rows = []
         for tid in _all_tenant_ids():
+            # Display name ("ADMIN" for the default tenant).
             tname = "ADMIN" if tid == "default" else (((hub.state.tenant_state or {}).get("tenants", {}) or {}) \
                 .get(tid, {}).get("name") or tid)
+            # Gather DHCP blocks from the cached telemetry.
             spokes = []
             for sid, data in _tenant_cache(tid).items():
                 spokes.append({
@@ -466,7 +557,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     "spoke_name": data.get("spoke_name") or sid,
                     "dhcp": data.get("dhcp") or {},
                 })
+            # Add the tenant row.
             rows.append({"tenant_id": tid, "tenant_name": tname, "spokes": spokes})
+        # Return all tenants.
         return {"tenants": rows}
 
     # --- API Routes ---
@@ -475,7 +568,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # param route can't shadow them. The {tenant} path segment is cosmetic —
     # every handler scopes to the session-resolved tenant_id.
 
+    # Builds UI views from hub state.
     service = SimulationsService(hub)
+    # Shared persisted config store.
     store = hub.simulations_store
 
     class _PushResult(int):
@@ -487,6 +582,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         need to opt in to reading ``.queued``/``.message`` where they want to
         tell the caller the change is delayed rather than already live."""
         def __new__(cls, count: int, queued: bool = False, message: str = ""):
+            """Create the count, recording whether it was queued and any user message."""
+            # Build the int, then attach the delivery metadata.
             obj = int.__new__(cls, count)
             obj.queued = queued
             obj.message = message
@@ -541,6 +638,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if isinstance(payload, dict) and any(
                 k in payload for k in ("usb_vidpids", "usb_ignored_vidpids",
                                        "t1_pci_vidpids", "t3_pci_vidpids")):
+            # Copy the payload, then swap each list for its merged global+tenant version.
             payload = dict(payload)
             if "usb_vidpids" in payload:
                 payload["usb_vidpids"] = json.dumps(await _effective_usb_vidpids(tenant_id))
@@ -553,12 +651,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Prefer the plural helper (reaches every bound cs spoke); fall back to
         # the singular one on an older hub build without it.
         spoke_ids: list = []
+        # Try the plural lookup first.
         get_spokes = getattr(hub, "get_client_sim_spokes", None)
         if callable(get_spokes):
             try:
                 spoke_ids = list(get_spokes(tenant_id) or [])
             except Exception:
                 spoke_ids = []
+        # Fall back to the singular lookup.
         if not spoke_ids:
             get_spoke = getattr(hub, "get_client_sim_spoke", None)
             if callable(get_spoke):
@@ -568,6 +668,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     sid = None
                 if sid:
                     spoke_ids = [sid]
+        # No spokes: nothing to push.
         if not spoke_ids:
             return {} if hash_only else _PushResult(0)
         # Always refresh the spoke's in-memory github_config (the Source-of-Truth
@@ -579,6 +680,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # GitHub version on sync" symptom. Don't override an explicit caller value
         # (the clear route sends github_config=None to wipe the spoke's copy).
         if "github_config" not in payload:
+            # Add the tenant's resolved GitHub config; failures are only logged.
             try:
                 payload = {**payload,
                            "github_config": await store.get_github_config(tenant_id, resolve=True)}
@@ -600,12 +702,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # reached here and self-manage via their own repo_sync + creds.
         if any(k in payload for k in
                ("sim_conf_override", "user_conf_override", "config_source")):
+            # Work out the spoke's config mode; default to hub.
             try:
                 _src = await _spoke_config_source(tenant_id)
             except Exception:  # noqa: BLE001 — never block the push on the mode calc
                 _src = "hub"
+            # Stamp the mode on a copy of the payload.
             payload = dict(payload)
             payload["config_source"] = _src
+            # In hub mode, remove the GitHub token from the payload.
             if _src == "hub":
                 _gc = payload.get("github_config")
                 if isinstance(_gc, dict) and _gc.get("github_token"):
@@ -625,6 +730,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # already use. Falls back to push_or_queue_to_spoke on an older hub
         # build without the drain-aware helper, then to a bare request_response.
         drain_aware = getattr(hub, "_drain_aware_config_push", None)
+        # Older push helper, used as a fallback.
         push = getattr(hub, "push_or_queue_to_spoke", None)
 
         # Tenant-wide split: when a tenant has SEVERAL cs spokes, a quota/placement
@@ -664,10 +770,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             wsite → central_site, transitively) so a "MIA" quota matches a
             spoke reporting "MIA-PSK" clients. None for an empty/global site →
             the quota is eligible on every spoke."""
+            # Normalise the site; an empty site means a global quota.
             site = str(site or "").strip()
             if not site:
                 return None
+            # Start with the site itself.
             aliases = {site.lower()}
+            # Keep merging alias groups that overlap until nothing changes.
             try:
                 changed = True
                 while changed:
@@ -678,22 +787,30 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             changed = True
             except Exception:  # noqa: BLE001
                 pass
+            # Return the alias set.
             return aliases
 
         def _spoke_pool_by_site(sid: str) -> dict:
+            """Return a spoke's cached client count per site from telemetry ({} if unknown)."""
+            # Read pool_by_site from the spoke's cached telemetry.
             try:
                 return (getattr(hub, "simulations_cache", {}).get(sid) or {}).get("pool_by_site") or {}
             except Exception:  # noqa: BLE001
                 return {}
 
+        # Spoke count, and each spoke's position in the list.
         _k = len(spoke_ids)
         _idx_of = {sid: i for i, sid in enumerate(spoke_ids)}
 
         def _spoke_weight(sid: str) -> int:
+            """Return a spoke's online pool size (its cached client count) for proportional splits.
+            """
+            # Count the cached clients; 0 if unknown.
             try:
                 return len((getattr(hub, "simulations_cache", {}).get(sid) or {}).get("clients") or [])
             except Exception:  # noqa: BLE001
                 return 0
+        # Per-spoke pool weights; split evenly when no telemetry exists.
         _weights = [_spoke_weight(s) for s in spoke_ids]
         if sum(_weights) <= 0:
             _weights = [1] * _k
@@ -702,17 +819,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             """Per-spoke weight for a site-scoped quota: the count of that
             spoke's pool clients whose physical site is in the alias set. None
             aliases (global quota) → the spoke's whole online pool (_weights)."""
+            # Global quota: use whole-pool weights.
             if aliases is None:
                 return list(_weights)
+            # Otherwise count each spoke's clients at the aliased sites.
             ws = []
             for sid in spoke_ids:
                 bs = _spoke_pool_by_site(sid)
                 n = sum(int(v) for s, v in bs.items()
                         if str(s).strip().lower() in aliases)
                 ws.append(n)
+            # Return the per-spoke weights.
             return ws
 
         def _apportion_w(total, idx: int, weights, rotate: int = 0) -> int:
+            """Return spoke idx's share of total, split by weights using largest remainder."""
+            # Floor the proportional shares and find what's left over.
             total = int(total or 0)
             tw = sum(weights) or 1
             raw = [total * w / tw for w in weights]
@@ -724,22 +846,31 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             order = sorted(range(_k),
                            key=lambda j: (raw[j] - shares[j], -((j - rotate) % _k)),
                            reverse=True)
+            # Give the leftover units out in that order.
             for i in order[:max(0, rem)]:
                 shares[i] += 1
+            # Return this spoke's share.
             return shares[idx]
 
         def _quota_rotate(q: dict) -> int:
+            """Return a stable per-quota offset that rotates which spoke gets the extra unit."""
+            # Byte checksum of the quota's identity, modulo the spoke count.
             key = f"{q.get('alert_type', 'alert')}:{q.get('alert_id', '')}:{q.get('site', '')}"
             return sum(key.encode()) % _k if _k else 0
 
         def _payload_for(sid: str) -> dict:
+            """Return this spoke's copy of the payload with quota/placement targets apportioned."""
+            # A single spoke gets the payload unchanged.
             if _k <= 1:
                 return payload
+            # This spoke's index, and a copy to modify.
             idx = _idx_of.get(sid, 0)
             p = dict(payload)
+            # Apportion each effective quota's count.
             if isinstance(payload.get("effective_sim_quotas"), list):
                 out = []
                 for q in payload["effective_sim_quotas"]:
+                    # Weights from the spokes that hold this quota's site.
                     site_w = _site_weights(_site_aliases(q.get("site")))
                     if q.get("alert_id"):
                         # Alert-tied: EVEN among site-eligible spokes (1 each),
@@ -754,32 +885,44 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         w = site_w
                         if sum(w) <= 0:
                             w = _weights
+                    # Replace the count with this spoke's share.
                     out.append({**q, "count": _apportion_w(q.get("count") or 0, idx,
                                                            w, _quota_rotate(q))})
+                # Store the apportioned quotas.
                 p["effective_sim_quotas"] = out
+            # Apportion SSID placement targets the same way.
             if isinstance(payload.get("ssid_placement"), dict):
                 out_place = {}
                 for site, pc in payload["ssid_placement"].items():
+                    # Pass through malformed entries unchanged.
                     if not isinstance(pc, dict):
                         out_place[site] = pc
                         continue
+                    # Per-site weights, or the total pool when the site is unplaced.
                     site_w = _site_weights(_site_aliases(site))
                     w = site_w if sum(site_w) > 0 else _weights
                     out_place[site] = {**pc, "targets": {
                         c: _apportion_w(n or 0, idx, w) for c, n in (pc.get("targets") or {}).items()}}
+                # Store the apportioned placement.
                 p["ssid_placement"] = out_place
+            # Return this spoke's payload.
             return p
 
         def _final_payload(sid: str) -> dict:
+            """Return the spoke's payload, stamped with full_config and its hash when full."""
+            # Apportion first.
             p = _payload_for(sid)
+            # Partial pushes are sent as they are.
             if not full:
                 return p
+            # Full pushes carry the hash the spoke echoes back.
             return {**p, "full_config": True, "config_hash": _cs_config_hash(p)}
 
         async def _one(sid: str):
             """Push to one spoke. Returns (1, queued, msg) on delivery (live OR
             queued — a queued push still counts, it WILL apply on reconnect),
             (0, False, '') on transport failure."""
+            # This spoke's apportioned (and possibly hashed) payload.
             payload = _final_payload(sid)
             # force_live (reconcile unsticking a queued-only spoke) bypasses the
             # drain-aware shortcut: skip is_draining → queue, and attempt a real
@@ -792,9 +935,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 _clear = getattr(hub, "clear_draining", None)
                 if callable(_clear):
                     _clear(sid)
+            # Preferred path: the drain-aware helper (queues while the spoke is draining).
             if callable(drain_aware) and not force_live:
                 try:
                     outcome = await drain_aware(sid, "CS_CONFIG_UPDATE", payload, timeout=30.0)
+                    # Note whether it was queued and why.
                     queued = bool(outcome.get("queued"))
                     msg = str(outcome.get("message", "") or "")
                     if queued:
@@ -802,8 +947,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                     "draining" if outcome.get("draining")
                                     else "spoke unreachable",
                                     outcome.get("message") or "")
+                    # Delivered or queued both count as reached.
                     return 1, queued, msg
                 except Exception as exc:
+                    # Transport failure: not reached.
                     logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", sid, exc)
                     return 0, False, ""
             if not callable(push):
@@ -814,38 +961,52 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 except Exception as exc:
                     logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", sid, exc)
                     return 0, False, ""
+            # Normal path: live push, queued if the spoke is unreachable.
             try:
                 outcome = await push(sid, "CS_CONFIG_UPDATE", payload, timeout=30.0)
+                # Note whether it was queued and why.
                 queued = bool(outcome.get("queued"))
                 msg = str(outcome.get("message", "") or "")
                 if queued:
                     logger.info("CS_CONFIG_UPDATE for %s queued (spoke unreachable): %s",
                                sid, outcome.get("message"))
+                # Delivered or queued both count as reached.
                 return 1, queued, msg
             except Exception as exc:
+                # Transport failure: not reached.
                 logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", sid, exc)
                 return 0, False, ""
 
+        # Push to every spoke unless a filter narrows the list.
         targets = spoke_ids
         if spoke_filter is not None:
+            # Optional helper that maps a spoke id to its primary key.
             _pk = getattr(hub, "_primary_key", None)
 
             def _key(s):
+                """Return the spoke's primary key, or the id itself if that can't be resolved."""
+                # Fall back to the raw id on any error.
                 try:
                     return _pk(s) if callable(_pk) else s
                 except Exception:  # noqa: BLE001
                     return s
+            # Match on either the raw id or the primary key.
             want = {_key(s) for s in spoke_filter} | set(spoke_filter)
             targets = [s for s in spoke_ids if s in want or _key(s) in want]
+        # hash_only: return the hashes without sending anything.
         if hash_only:
             return {sid: _cs_config_hash(_payload_for(sid)) for sid in targets}
+        # Nothing to deliver to.
         if not targets:
             return _PushResult(0)
+        # Push to all targets at the same time.
         results = await asyncio.gather(*[_one(sid) for sid in targets])
+        # Count deliveries, note any queueing, and collect the queue messages.
         pushed = sum(r[0] for r in results)
         any_queued = any(r[1] for r in results)
         queued_msgs = [f"{sid}: {r[2]}" for sid, r in zip(targets, results)
                        if r[1] and r[2]]
+        # Return the count along with its queued flag and message.
         return _PushResult(pushed, queued=any_queued,
                           message="; ".join(queued_msgs) if any_queued else "")
 
@@ -856,14 +1017,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         reply the way the command-queue routes do. Raises HTTPException on
         refusal (spoke returns status=ERROR) or transport failure. Returns the
         spoke's data dict on success."""
+        # Find the tenant's spoke; 503 if none.
         sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
         if not sid:
             raise HTTPException(status_code=503, detail="No spoke connected")
+        # Send the command; transport errors become 502.
         try:
             result = await hub.request_response(sid, cmd_type, payload, timeout=timeout)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"{cmd_type} failed: {exc}")
+        # Unwrap the reply's data.
         data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+        # The spoke refused or timed out.
         if isinstance(data, dict) and data.get("status") == "ERROR":
             msg = str(data.get("message") or "refused")
             # A request/agent TIMEOUT ("Timed out waiting for spoke response" /
@@ -871,9 +1036,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             # refusal — surface 504 so the UI reads "spoke busy/timeout" instead
             # of a misleading 403 "forbidden". Real refusals (protected vmid /
             # below the sim floor) stay 403.
+            # Timeouts give 504, refusals 403.
             ml = msg.lower()
             code = 504 if ("timed out" in ml or "timeout" in ml) else 403
             raise HTTPException(status_code=code, detail=msg)
+        # Return the data, wrapping non-dict results.
         return data if isinstance(data, dict) else {"status": "SUCCESS", "result": data}
 
     async def _cs_forward_all(tenant_id: str, cmd_type: str, payload: dict,
@@ -882,6 +1049,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         concurrently. Returns ``[(spoke_id, data|None)]`` — a failed/absent spoke
         yields None so callers merge what they got (tenant-wide aggregation for a
         multi-spoke tenant, e.g. cs-svr-02/03/04). Empty list = no spokes."""
+        # Prefer the plural spoke lookup.
         sids: list = []
         get_spokes = getattr(hub, "get_client_sim_spokes", None)
         if callable(get_spokes):
@@ -889,11 +1057,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 sids = list(get_spokes(tenant_id) or [])
             except Exception:  # noqa: BLE001
                 sids = []
+        # Fall back to the singular lookup.
         if not sids:
             sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
             sids = [sid] if sid else []
 
         async def _one(sid: str):
+            """Send the command to one spoke; return (sid, data) or (sid, None) on failure."""
+            # Send and unwrap; log and return None on failure.
             try:
                 result = await hub.request_response(sid, cmd_type, payload, timeout=timeout)
                 data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
@@ -901,25 +1072,31 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             except Exception as exc:  # noqa: BLE001
                 logger.info("_cs_forward_all(%s): %s failed on %s: %s", tenant_id, cmd_type, sid, exc)
                 return (sid, None)
+        # No spokes: empty result.
         if not sids:
             return []
+        # Send to every spoke at the same time.
         return list(await asyncio.gather(*[_one(s) for s in sids]))
 
     def _bridge_undeliverable(targets) -> str:
         """Read the CS bridge's per-agent decisions and delegate to
         ``bridge_undeliverable_message`` — see it for WHY this gate exists.
         A missing/unreadable bridge never blocks an action."""
+        # No bridge or no snapshot support: never block.
         bridge = getattr(hub, "cs_bridge", None)
         if bridge is None or not hasattr(bridge, "status_snapshot"):
             return ""
+        # Read the per-agent bridge rows; errors never block.
         try:
             rows = (bridge.status_snapshot() or {}).get("agents") or []
         except Exception:  # noqa: BLE001 — never block an action on a diag read
             return ""
+        # Let the shared helper decide the message.
         return bridge_undeliverable_message(rows, targets)
 
     def _tenant_cache(tenant_id: str) -> dict:
         """The merged CS_TELEMETRY cache for the tenant's spokes (read-only)."""
+        # Keep only the cache entries for spokes bound to this tenant.
         out = {}
         for sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
             try:
@@ -928,6 +1105,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             except Exception:
                 continue
             out[sid] = data or {}
+        # Return the filtered cache.
         return out
 
     def _patch_cached_client_overrides(tenant_id: str, hostname: str, overrides: dict) -> None:
@@ -938,14 +1116,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         making a removed override reappear when the user navigates back in. The
         spoke returns its POST-PRUNE overrides; we mirror them so the next read is
         correct. Best-effort; the authoritative telemetry frame overwrites it."""
+        # Normalise the inputs.
         hostname = str(hostname or "")
         ov = dict(overrides or {})
+        # Patch matching clients in this tenant's cached telemetry.
         for sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
             try:
                 if hub.state.get_spoke_tenant(sid) != tenant_id:
                     continue
             except Exception:
                 continue
+            # Match by hostname or client id.
             for c in (data.get("clients") or []):
                 if isinstance(c, dict) and (c.get("hostname") == hostname or c.get("id") == hostname):
                     c["overrides"] = dict(ov)
@@ -957,12 +1138,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # committed+pushed to GitHub when a token is configured, 403 in GitHub
     # read-only. Replaces the hidden per-client registry layer; the legacy
     # registry override is cleared on write so nothing double-applies.
+    # The sim flag keys a per-user override can set.
     _CS_SIM_FLAGS = {'assoc_fail', 'auth_fail', 'mac_auth_fail', 'dhcp_fail', 'dns_fail', 'download',
                      'iperf', 'kill_switch', 'ping_test', 'port_flap', 'ssidpw_fail',
                      'www_traffic'}
 
     def _username_for(hostname: str) -> str:
         """Mirror sim_config.username_for: hostname minus the trailing '-N'."""
+        # Strip the input; keep only the part before the first dash.
         h = str(hostname or "").strip()
         return h.split("-", 1)[0] if "-" in h else h
 
@@ -970,12 +1153,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Effective user-overrides.conf text (repo base + hub override), read
         live from the spoke; falls back to the hub-owned override content when
         the spoke is offline so an edit never starts from a blank file."""
+        # Prefer the live text from the spoke.
         try:
             data = await _cs_forward(tenant_id, "CS_GET_CONFIG", {}, timeout=6.0)
             if isinstance(data, dict) and data.get("user_overrides") is not None:
                 return data.get("user_overrides") or ""
         except HTTPException:
             pass
+        # Spoke offline: use the hub-owned override.
         try:
             return await store.get_user_overrides_content(tenant_id)
         except Exception:  # noqa: BLE001
@@ -986,30 +1171,40 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         flags updated. clear=True with empty flags removes ALL sim flags from the
         section; clear=True with flags removes just those; otherwise each flag is
         set on/off. Non-sim keys (wsite/ssid/sim_phy/…) are preserved."""
+        # Local import: only needed here.
         import io
+        # Case-preserving parser.
         p = configparser.ConfigParser()
         p.optionxform = str
+        # Parse the existing text; start clean if it is malformed.
         try:
             p.read_string(text or "")
         except Exception:  # noqa: BLE001 — start clean on a malformed file
             p = configparser.ConfigParser(); p.optionxform = str
+        # Clear all sim flags in the user's section.
         if clear and not flags:
             if p.has_section(username):
                 for k in list(p.options(username)):
                     if k in _CS_SIM_FLAGS:
                         p.remove_option(username, k)
+        # Otherwise set or clear the listed flags.
         else:
+            # Make sure the section exists.
             if not p.has_section(username):
                 p.add_section(username)
+            # Apply each flag.
             for k, v in (flags or {}).items():
                 if clear:
                     if p.has_option(username, k):
                         p.remove_option(username, k)
                 else:
+                    # Normalise truthy values to on/off.
                     on = str(v).strip().lower() in ("on", "true", "1", "yes")
                     p.set(username, k, "on" if on else "off")
+        # Remove a section that is now empty.
         if p.has_section(username) and not p.options(username):
             p.remove_section(username)
+        # Write the file back out to text.
         buf = io.StringIO()
         p.write(buf)
         return buf.getvalue()
@@ -1018,21 +1213,25 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Patch effective_config[flag] for every cached client of `username` so a
         just-set per-user override shows immediately (before the ~10s telemetry
         frame). Best-effort; the authoritative frame overwrites it."""
+        # Walk this tenant's cached spokes.
         for sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
             try:
                 if hub.state.get_spoke_tenant(sid) != tenant_id:
                     continue
             except Exception:  # noqa: BLE001
                 continue
+            # Update every cached client belonging to this user.
             for c in (data.get("clients") or []):
                 if not isinstance(c, dict):
                     continue
                 if _username_for(c.get("hostname") or c.get("id") or "") != username:
                     continue
+                # Make sure the client has a config dict.
                 cfg = c.get("config")
                 if not isinstance(cfg, dict):
                     cfg = {}
                     c["config"] = cfg
+                # Store each flag as on/off.
                 for k, v in (flags or {}).items():
                     cfg[k] = "on" if str(v).strip().lower() in ("on", "true", "1", "yes") else "off"
 
@@ -1041,8 +1240,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         the source-of-truth flow. Also clears the legacy per-client registry
         override so the old hidden layer never double-applies."""
         source = await _require_config_writable(tenant_id)   # 403 if github + no key
+        # Map the hostname to a username and keep only sim flags.
         username = _username_for(hostname)
         flags = {k: v for k, v in (flags or {}).items() if k in _CS_SIM_FLAGS}
+        # Edit the current text and save it as the hub-owned override.
         cur = await _current_user_overrides_text(tenant_id)
         new_text = _edit_user_override_flags(cur, username, flags, clear)
         await store.set_user_overrides_content(tenant_id, new_text)
@@ -1052,15 +1253,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             await _commit_config_to_github(
                 tenant_id, github_config_client.USER_OVERRIDES_PATH, new_text,
                 "Update user-overrides.conf (per-user override) via Lab Manager")
+        # Push the new text to the tenant's spokes.
         pushed = await _push_config(tenant_id,
                                     {"user_conf_override": new_text, "config_source": source})
+        # Update the cache so the UI reflects the change right away.
         if not clear and flags:
             _patch_cached_client_config(tenant_id, username, flags)   # instant feedback
+        # Clear the legacy per-client override (ignored if the spoke is offline).
         try:
             await _cs_forward(tenant_id, "CS_CLEAR_CLIENT_OVERRIDES", {"hostname": hostname})
         except HTTPException:
             pass
+        # Clear it from the cache too.
         _patch_cached_client_overrides(tenant_id, hostname, {})
+        # Report the result.
         return {"saved": True, "username": username, "source": source,
                 "pushed_to_spokes": pushed}
 
@@ -1069,12 +1275,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # merged with each tenant's lists into an "effective" set that is pushed to
     # spokes, so a globally-approved dongle type applies to every tenant.
     def _all_tenant_ids() -> list:
+        """Return every tenant id known to the hub."""
+        # Keys of the tenant map.
         tenants = (hub.state.tenant_state or {}).get("tenants", {}) or {}
         return list(tenants.keys())
 
     async def _effective_usb_vidpids(tenant_id: str) -> list:
         """Merged certified list = global + tenant (dedup by vidpid, global
         first). Returns {vidpid,type,label} dicts — the cs-spoke push shape."""
+        # Global entries first, de-duplicated by VID:PID.
         out: list = []
         seen: set = set()
         for d in await store.get_global_usb_vidpids():
@@ -1083,45 +1292,58 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 seen.add(vp)
                 out.append({"vidpid": vp, "type": str(d.get("type") or "wireless"),
                             "label": str(d.get("label") or vp)})
+        # Then the tenant's own entries that are not already listed.
         if tenant_id:
             hc = await store.get_hub_config(tenant_id)
             for d in _normalize_usb_vidpids((hc.get("hub_config") or {}).get("usb_vidpids")):
                 if d["vidpid"] not in seen:
                     seen.add(d["vidpid"])
                     out.append(d)
+        # Return the merged list.
         return out
 
     async def _effective_usb_ignored(tenant_id: str) -> list:
         """Merged ignored list = global + tenant (sorted bare vidpid strings)."""
+        # Global ignored list.
         s: set = set(await store.get_global_usb_ignored_vidpids())
+        # Add the tenant's own list.
         if tenant_id:
             hc = await store.get_hub_config(tenant_id)
             s.update(_normalize_usb_ignored((hc.get("hub_config") or {}).get("usb_ignored_vidpids")))
+        # Sorted union.
         return sorted(s)
 
     async def _effective_t1_pci(tenant_id: str) -> list:
         """Merged T1 PCI VID:PID list = global ∪ tenant (sorted bare strings)."""
+        # Global T1 list.
         s: set = set(await store.get_global_t1_pci_vidpids())
+        # Add the tenant's own list.
         if tenant_id:
             hc = await store.get_hub_config(tenant_id)
             s.update(_normalize_usb_ignored((hc.get("hub_config") or {}).get("t1_pci_vidpids")))
+        # Sorted union.
         return sorted(s)
 
     async def _effective_t3_pci(tenant_id: str) -> list:
         """Merged T3 PCI VID:PID list = global ∪ tenant (sorted bare strings)."""
+        # Global T3 list.
         s: set = set(await store.get_global_t3_pci_vidpids())
+        # Add the tenant's own list.
         if tenant_id:
             hc = await store.get_hub_config(tenant_id)
             s.update(_normalize_usb_ignored((hc.get("hub_config") or {}).get("t3_pci_vidpids")))
+        # Sorted union.
         return sorted(s)
 
     async def _push_usb_to_tenant(tenant_id: str) -> int:
         """Push the effective (global+tenant) USB certified/ignored + T1/T3 PCI
         tier lists to the tenant's cs speak. Returns spokes pushed (0 or 1)."""
+        # Build each merged list.
         cert = await _effective_usb_vidpids(tenant_id)
         ign = await _effective_usb_ignored(tenant_id)
         t1 = await _effective_t1_pci(tenant_id)
         t3 = await _effective_t3_pci(tenant_id)
+        # Push them all in one config update.
         return await _push_config(tenant_id, {
             "usb_vidpids": json.dumps(cert),
             "usb_ignored_vidpids": json.dumps(ign),
@@ -1136,37 +1358,48 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         seen_on:[{tenant_name,spoke_name}], is_global, is_global_ignored,
         locally_ignored}. Sorted by vidpid — feeds the superadmin approval
         queue (Setup → Simulations → Global USB Approvals)."""
+        # Globally certified VID:PIDs.
         g_cert: set = set()
         for d in await store.get_global_usb_vidpids():
             vp = str(d.get("vidpid", "")).strip().lower()
             if vp:
                 g_cert.add(vp)
+        # Globally ignored VID:PIDs, and the result map.
         g_ign: set = set(await store.get_global_usb_ignored_vidpids())
         discovered: dict = {}
 
         def _ensure(vp: str, name: str = "", locally_ignored: bool = False) -> None:
+            """Create or update the discovered entry for vp (fill a missing name, mark it ignored).
+            """
+            # Look up the existing entry.
             e = discovered.get(vp)
+            # New entry: record its global flags.
             if e is None:
                 discovered[vp] = {"vidpid": vp, "name": name or "",
                                   "seen_on": [], "is_global": vp in g_cert,
                                   "is_global_ignored": vp in g_ign,
                                   "locally_certified": [],
                                   "locally_ignored": locally_ignored}
+            # Existing entry: fill in a missing name and the ignored flag.
             else:
                 if not e["name"] and name:
                     e["name"] = name
                 if locally_ignored:
                     e["locally_ignored"] = True
 
+        # Add each tenant's own certified and ignored lists.
         for tid in _all_tenant_ids():
+            # Tenant name and its hub config.
             tname = _tenant_name(tid)
             hc = await store.get_hub_config(tid)
             cfg = hc.get("hub_config") or {}
+            # Tenant-certified devices that are not globally certified.
             for d in _normalize_usb_vidpids(cfg.get("usb_vidpids")):
                 vp = d["vidpid"]
                 if vp in g_cert:
                     continue
                 _ensure(vp, d.get("label") or "")
+                # Record where it was seen, once.
                 entry = {"tenant_name": tname, "spoke_name": "(tenant certified)"}
                 if entry not in discovered[vp]["seen_on"]:
                     discovered[vp]["seen_on"].append(entry)
@@ -1174,25 +1407,31 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 # the superadmin can un-approve it per-tenant from the discovered row.
                 if not any(c.get("tenant_id") == tid for c in discovered[vp]["locally_certified"]):
                     discovered[vp]["locally_certified"].append({"tenant_id": tid, "tenant_name": tname})
+            # Tenant-ignored devices that are not globally ignored.
             for vp in _normalize_usb_ignored(cfg.get("usb_ignored_vidpids")):
                 if vp in g_ign:
                     continue
                 _ensure(vp, "", locally_ignored=True)
+                # Record where it was seen, once.
                 entry = {"tenant_name": tname, "spoke_name": "(tenant ignored)"}
                 if entry not in discovered[vp]["seen_on"]:
                     discovered[vp]["seen_on"].append(entry)
 
+        # Add devices seen in each spoke's telemetry.
         cache = getattr(hub, "simulations_cache", {}) or {}
         for sid, data in cache.items():
+            # Skip spokes that are not bound to a tenant.
             try:
                 tid = hub.state.get_spoke_tenant(sid)
             except Exception:
                 tid = None
             if not tid:
                 continue
+            # Spoke and tenant display names.
             data = data or {}
             sname = data.get("spoke_name") or sid
             tname = _tenant_name(tid)
+            # Gather USB lists from the Proxmox block and the top level.
             px = data.get("proxmox") or {}
             raw: list = []
             for k in ("present_usb", "unknown_usb", "usb_state"):
@@ -1202,6 +1441,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             v = data.get("usb_devices")
             if isinstance(v, list):
                 raw.extend(v)
+            # Add each device that has a VID:PID.
             for dev in raw:
                 if not isinstance(dev, dict):
                     continue
@@ -1209,10 +1449,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 if not vp:
                     continue
                 _ensure(vp, dev.get("name") or dev.get("product") or "")
+                # Record where it was seen, once.
                 entry = {"tenant_name": tname, "spoke_name": sname}
                 if entry not in discovered[vp]["seen_on"]:
                     discovered[vp]["seen_on"].append(entry)
 
+        # Return the entries sorted by VID:PID.
         return sorted(discovered.values(), key=lambda d: d["vidpid"])
 
     async def _push_usb_to_all_tenants() -> int:
@@ -1221,9 +1463,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         Fanned out concurrently across tenants (the per-spoke push inside is
         already concurrent); returns the total pushed. Any error propagates as
         before (gather re-raises the first exception)."""
+        # Push to every tenant at the same time.
         counts = await asyncio.gather(
             *[_push_usb_to_tenant(tid) for tid in _all_tenant_ids()]
         )
+        # Total spokes pushed.
         return sum(counts)
 
     # ── Sim-Quota effective merge + push ─────────────────────────────────────
@@ -1242,15 +1486,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         keys (independent learning + separate clients), so the merge treats
         them as separate alerts. Global defaults are Central (bare ids) and
         never collide with ``Mist:``/``Central On-Prem:`` rows."""
+        # Local import: merge helpers and sim metadata.
         from .sim_quota import merge_effective_quotas, resolve_effective_quotas, SIM_META
+        # Tenant's Central site config (empty on error).
         try:
             t_csc = await store.get_central_sites_config(tenant_id) or {}
         except Exception:  # noqa: BLE001
             t_csc = {}
+        # Tenant's Mist site config (empty on error).
         try:
             t_msc = await store.get_mist_sites_config(tenant_id) or {}
         except Exception:  # noqa: BLE001
             t_msc = {}
+        # Tenant's Central On-Prem site config (empty on error).
         try:
             t_opc = await store.get_central_on_prem_sites_config(tenant_id) or {}
         except Exception:  # noqa: BLE001
@@ -1264,8 +1512,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # A tenant may opt OUT of the platform-wide quota defaults (Config → Sim
         # Quotas → "Ignore global quotas"): then only its own enabled rows apply.
         if t_csc.get("ignore_global_quotas"):
+            # Tenant rows only.
             base = resolve_effective_quotas(tenant_rows, list(SIM_META.keys()))
         else:
+            # Global defaults merged with the tenant's rows.
             try:
                 g_defaults = await store.get_sim_quota_defaults()
             except Exception:  # noqa: BLE001
@@ -1279,9 +1529,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return await _apply_adaptive_targets(tenant_id, base)
 
     def _adaptive_is_on(q: dict) -> bool:
+        """Return whether the quota is in adaptive mode (thin wrapper over sim_quota)."""
+        # Delegate to the pure helper.
         return sim_quota.adaptive_is_on(q)
 
     def _adaptive_key(q: dict) -> str:
+        """Return the quota's adaptive-state key (thin wrapper over sim_quota)."""
+        # Delegate to the pure helper.
         return sim_quota.adaptive_key(q)
 
     async def _apply_adaptive_targets(tenant_id: str, quotas: list) -> list:
@@ -1290,14 +1544,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         effective learned operating point for the alert (max of this tenant's
         learning-ON stable learned_op and the global published value). A quota
         with no controller state yet seeds from that op (or ``min``)."""
+        # Controller state for the tenant (empty on error).
         try:
             state = await store.get_adaptive_state(tenant_id)
         except Exception:  # noqa: BLE001
             state = {}
+        # Global learned values (empty on error).
         try:
             global_lv = await store.get_global_learned_values()
         except Exception:  # noqa: BLE001
             global_lv = {}
+        # Apply the targets with the pure helper.
         return sim_quota.apply_adaptive_targets(quotas, state, global_lv)
 
     async def _spoke_effective_counts(tenant_id: str) -> dict:
@@ -1309,11 +1566,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         spoke holds its APPORTIONED SHARE of the tenant-total target, so the
         sum, not one spoke's share, is what compares to the hub's applied
         count). Empty when no spokes reply (spoke down or no cs spoke bound)."""
+        # Ask every spoke for its quota state.
         try:
             results = await _cs_forward_all(tenant_id, "CS_GET_SIM_QUOTA_STATE",
                                             {}, timeout=10.0)
         except Exception:  # noqa: BLE001
             return {}
+        # Sum the counts across spokes.
         return _reduce_spoke_effective_counts(results)
 
     async def _spoke_producing_counts(tenant_id: str) -> dict:
@@ -1325,17 +1584,21 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         overstate what's actually needed. Empty when no spokes reply —
         adaptive_step then falls back to trusting the requested target,
         unchanged prior behavior."""
+        # Ask every spoke for its quota state.
         try:
             results = await _cs_forward_all(tenant_id, "CS_GET_SIM_QUOTA_STATE",
                                             {}, timeout=10.0)
         except Exception:  # noqa: BLE001
             return {}
+        # Sum the producing counts across spokes.
         return _reduce_spoke_producing_counts(results)
 
     def _adaptive_step(st: dict, q: dict, firing, now: float,
                        applied_op: Optional[int] = None,
                        applied_floor: Optional[int] = None,
                        producing: Optional[int] = None) -> dict:
+        """Advance one adaptive quota's controller state (thin wrapper over sim_quota)."""
+        # Delegate to the pure helper.
         return sim_quota.adaptive_step(st, q, firing, now, applied_op,
                                        applied_floor, producing)
 
@@ -1347,23 +1610,28 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         every _alert_firing call instead of re-reading csc + rebuilding per
         quota. The transitive fixpoint over these groups still runs per-quota in
         _alert_firing (it depends on the quota's own site)."""
+        # Site-like fields that can refer to the same place.
         _FIELDS = ("name", "cell", "site", "wsite", "central_site")
         groups: list = []
+        # One group per SSID-matrix cell.
         for cd in (csc.get("ssid_matrix") or []):
             g = {str(cd.get(f) or "").strip().lower() for f in _FIELDS}
             g.discard("")
             if g:
                 groups.append(g)
+        # One group per site link.
         for lk in (csc.get("site_links") or []):
             g = {str(lk.get(f) or "").strip().lower() for f in _FIELDS}
             g.discard("")
             if g:
                 groups.append(g)
+        # One group per site mapping.
         for wk, cv in (csc.get("site_mappings") or {}).items():
             g = {str(wk).strip().lower(), str(cv or "").strip().lower()}
             g.discard("")
             if g:
                 groups.append(g)
+        # Return all groups.
         return groups
 
     async def _alert_firing(tenant_id: str, q: dict, alias_groups: Optional[list] = None):
@@ -1402,6 +1670,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # firing", making the controller ramp to max on an already-green check.
         # Source-aware (Phase 4): capture the parsed ``source`` too — downstream
         # reads ONLY the row's own source's status block (central vs mist).
+        # Split the stored id into its source and bare id; no id means no signal.
         raw_aid = str(q.get("alert_id") or "").strip()
         source, bare_id = sim_quota.parse_alert_source(raw_aid)
         alert_id = bare_id.strip().lower()
@@ -1419,13 +1688,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # fire on cloud Central's status (and vice versa) — the engine-layer
         # "no stepping on each other" guarantee.
         spokes = list(service._spokes_for_tenant(tenant_id))        # distributed
+        # Collect (status, site_mappings) blocks for this source.
         blocks = []
         data_key = source
+        # Status from the hub's own poller, if present.
         hub_block = service._hub_block_for_source(source, tenant_id)
         hub_present = isinstance(hub_block, dict)
         if hub_present:
             blocks.append((hub_block.get("status") or {},
                            hub_block.get("site_mappings") or {}))
+        # Status relayed by each spoke for this source.
         for _sid, data in spokes:
             src = (data or {}).get(data_key) or {}
             blocks.append((src.get("status") or {},
@@ -1445,6 +1717,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # controller/learner loops (from the csc they already read) and passed in
         # to avoid re-reading csc + rebuilding groups per quota; when absent (any
         # other caller), read + build here so behavior is identical.
+        # Start the alias set from the quota's site.
         site = str(q.get("site") or "").strip()
         aliases = set()
         if site:
@@ -1457,17 +1730,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 # config (central/mist/central_on_prem), so a Central On-Prem
                 # quota's alias chain is built from the on-prem sites config —
                 # never cloud Central's — matching the per-source telemetry routing.
+                # Use the groups passed in, or build them from this source's site config.
                 groups = alias_groups
                 if groups is None:
                     if source == "mist":
+                        # Mist sites config.
                         msc = await store.get_mist_sites_config(tenant_id) or {}
                         groups = _alias_groups_from_csc(msc)
                     elif source == "central_on_prem":
+                        # Central On-Prem sites config.
                         opc = await store.get_central_on_prem_sites_config(tenant_id) or {}
                         groups = _alias_groups_from_csc(opc)
                     else:
+                        # Central sites config.
                         csc = await store.get_central_sites_config(tenant_id) or {}
                         groups = _alias_groups_from_csc(csc)
+                # Per-source dict: pick this source's groups.
                 elif isinstance(groups, dict):
                     groups = groups.get(source) or []
                 # Fixpoint: union any group that shares a member with the alias set,
@@ -1486,21 +1764,26 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         saw_fail = False
         matched_status = None
         seen_cids: set = set()   # every check id available at the matched site(s)
+        # Scan every status block for this alert at the matching sites.
         for status_map, site_mappings in blocks:
             for wsite, checks_map in (status_map or {}).items():
+                # Skip malformed per-site entries.
                 if not isinstance(checks_map, dict):
                     continue
+                # With a site filter, skip sites outside the alias set.
                 if aliases:
                     wkey = str(wsite).strip().lower()
                     csite = str(site_mappings.get(wsite) or "").strip().lower()
                     if wkey not in aliases and csite not in aliases:
                         continue
+                # Check each id at this site.
                 for cid, info in checks_map.items():
                     seen_cids.add(str(cid))
                     # Bare-compare both sides (check ids are already bare, but a
                     # prefixed one must never hide a match).
                     if parse_alert_source(cid)[1].strip().lower() != alert_id:
                         continue
+                    # Normalise the status string and remember it.
                     s = (info.get("status") if isinstance(info, dict) else info) or ""
                     sl = str(s).strip().lower()
                     matched_status = sl
@@ -1519,6 +1802,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         #    the site-link's Central Site).
         #  - alert_id NOT in cids_at_site → name/format mismatch with the check id.
         #  - present but firing False → the dashboard has it not-ok at that site.
+        # Every status site key with its Central site, for the diagnostic log.
         status_wsites = sorted({
             f"{w}→{(smap or {}).get(w)}"
             for stat, smap in blocks for w in (stat or {})
@@ -1530,6 +1814,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                      "aliases=%s matched_status=%r → firing=%s; status_wsites=%s cids_at_site=%s",
                      tenant_id, alert_id, site or "(global)", hub_present, len(spokes),
                      sorted(aliases), matched_status, firing, status_wsites, sorted(seen_cids))
+        # True, False, or None (hold).
         return firing
 
     # Per-tenant consecutive stalled re-push counter. Incremented each reconcile
@@ -1560,6 +1845,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         the Quota State view); this is the actuator that actually re-feeds the
         spoke. Called every 45s from the adaptive controller loop (A) AND every
         15m from a dedicated backstop loop (B)."""
+        # Hub's effective quotas; give up on read errors.
         try:
             eff = await _effective_sim_quotas(tenant_id)
         except Exception as exc:  # noqa: BLE001
@@ -1568,17 +1854,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             return False
         if not eff:
             return False  # tenant has no quotas — no forward, no push
+        # What the spokes are actually running; give up on read errors.
         try:
             spoke_counts = await _spoke_effective_counts(tenant_id)
         except Exception as exc:  # noqa: BLE001
             logger.debug("reconcile-push [%s] spoke counts read failed: %s",
                          tenant_id, exc)
             return False
+        # Compare the two.
         stale = _compute_stale_push(eff, spoke_counts)
         if not stale:
             # Spoke is current — clear any prior stall counter.
             _reconcile_stall.pop(tenant_id, None)
             return False
+        # Consecutive stalled ticks so far.
         prev_stall = _reconcile_stall.get(tenant_id, 0)
         # Log the stale set once when a stall starts; while it persists the
         # throttled STILL-stale warning below carries the signal.
@@ -1598,12 +1887,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # force-live blows past it. (A genuinely-restarting spoke just times out
         # and re-queues — no worse than today.)
         force_live = prev_stall >= 2
+        # Re-push the quotas.
         try:
             result = await _push_sim_quotas(tenant_id, force_live=force_live)
         except Exception as exc:  # noqa: BLE001
             logger.warning("reconcile-push [%s] re-push failed: %s",
                            tenant_id, exc)
             return False
+        # Count reached, and whether it was only queued.
         pushed = int(result or 0)
         queued = bool(getattr(result, "queued", False))
         if pushed and not queued:
@@ -1618,8 +1909,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Surface it: a perpetually-stale spoke used to be silent because the
         # re-push "succeeded" (queued counts as pushed). Count consecutive
         # stalled ticks and escalate so this can't hide "for a long time" again.
+        # Count this stalled tick.
         n = prev_stall + 1
         _reconcile_stall[tenant_id] = n
+        # Explain why it didn't land.
         if not pushed:
             reason = "no cs spoke connected/bound — push reached 0 spokes"
         else:
@@ -1651,15 +1944,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         full thermostat (the lab); learning-OFF rows are up-only consumers that
         seed/lift from ``applied_op``. Only learning-ON rows down-ratchet — a
         consumer never risks stopping its alert."""
+        # Local imports: only needed here.
         import time as _t
         from .sim_quota import normalize_quota, _alert_key
+        # Current time and global learned values (empty on error).
         now = _t.time()
         try:
             global_lv = await store.get_global_learned_values()
         except Exception:  # noqa: BLE001
             global_lv = {}
+        # Process each tenant; one tenant's failure doesn't stop the others.
         for tid in _all_tenant_ids():
             try:
+                # The tenant's three site configs.
                 csc = await store.get_central_sites_config(tid) or {}
                 msc = await store.get_mist_sites_config(tid) or {}
                 opc = await store.get_central_on_prem_sites_config(tid) or {}
@@ -1686,6 +1983,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 all_q = ([normalize_quota(r) for r in (csc.get("sim_quotas") or [])]
                          + [normalize_quota(r) for r in (msc.get("sim_quotas") or [])]
                          + [normalize_quota(r) for r in (opc.get("sim_quotas") or [])])
+                # Enabled quotas in adaptive mode.
                 adaptive = [q for q in all_q if q.get("enabled") and _adaptive_is_on(q)]
                 # DIAG: does the controller even reach _alert_firing for this tenant?
                 # total_quotas>0 but adaptive=0 = quotas aren't adaptive (min==max /
@@ -1695,6 +1993,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             tid, len(all_q), len(adaptive),
                             [f"{q.get('alert_id')}@{q.get('site')} min={q.get('min')} "
                              f"max={q.get('max')} learn={q.get('learning')}" for q in adaptive])
+                # Nothing adaptive for this tenant.
                 if not adaptive:
                     continue
                 # Only fetched when there's adaptive work this tenant this tick
@@ -1704,24 +2003,31 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 state = await store.get_adaptive_state(tid)
                 # applied_op / applied_floor per alert = max(own learning-ON
                 # stable value, global published value).
+                # Collect the best learned op and floor per alert from stable learning rows.
                 applied_op: dict = {}
                 applied_floor: dict = {}
                 for q in adaptive:
                     if not q.get("learning"):
                         continue
+                    # This quota's controller state.
                     st = state.get(_adaptive_key(q)) or {}
                     if st.get("phase") == "stable" and st.get("learned_op") is not None:
+                        # Keep the highest learned op per alert.
                         ak = _alert_key(q)
                         val = int(st["learned_op"])
                         if ak not in applied_op or val > applied_op[ak]:
                             applied_op[ak] = val
+                        # Keep the highest learned floor per alert.
                         if st.get("floor") is not None:
                             valf = int(st["floor"])
                             if ak not in applied_floor or valf > applied_floor[ak]:
                                 applied_floor[ak] = valf
+                # Raise each alert's op and floor to the global published values if those are
+                # higher.
                 for ak, gv in (global_lv or {}).items():
                     if not isinstance(gv, dict):
                         continue
+                    # Global op, if it parses as an int.
                     gop = gv.get("op")
                     if gop is not None:
                         try:
@@ -1730,6 +2036,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             gval = None
                         if gval is not None and (ak not in applied_op or gval > applied_op[ak]):
                             applied_op[ak] = gval
+                    # Global floor, if it parses as an int.
                     gfloor = gv.get("floor")
                     if gfloor is not None:
                         try:
@@ -1738,6 +2045,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             gfval = None
                         if gfval is not None and (ak not in applied_floor or gfval > applied_floor[ak]):
                             applied_floor[ak] = gfval
+                # Change flags and the set of keys still in use.
                 changed = False
                 live = set()
                 # Known-good capture: the learned simulation.conf knobs live in
@@ -1747,16 +2055,21 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 knob_state = await store.get_knob_learn_state(tid)
                 known_good = await store.get_known_good(tid)
                 pending = await store.get_global_learned_pending()
+                # Track whether the known-good snapshot or pending queue changed.
                 kg_changed = False
                 pending_changed = False
+                # Step each adaptive quota's controller.
                 for q in adaptive:
+                    # Mark the key live and read the alert's firing state.
                     k = _adaptive_key(q); live.add(k)
                     firing = await _alert_firing(tid, q, alias_groups)
+                    # Advance the state from a copy of the old state.
                     before = dict(state.get(k) or {})
                     after = _adaptive_step(before, q, firing, now,
                                             applied_op.get(_alert_key(q)),
                                             applied_floor.get(_alert_key(q)),
                                             producing_counts.get(sim_quota.quota_dedup_key(q)))
+                    # Record any change.
                     if after != before:
                         state[k] = after; changed = True
                     # Record the known-good when a learning-ON quota is stable —
@@ -1767,15 +2080,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     # (admin still has to approve before it seeds every tenant).
                     if (q.get("learning") and after.get("phase") == "stable"
                             and after.get("learned_op") is not None):
+                        # Knob values the learner found for this quota.
                         _knobs = (knob_state.get(k) or {}).get("values") or {}
                         kg = sim_quota.known_good_from_state(q, after, _knobs)
                         if kg:
+                            # Compare with the previous known-good for this alert.
                             ak = _alert_key(q)
                             prev = known_good.get(ak) or {}
                             if (int(kg["count"]) != int(prev.get("count", 0))
                                     or (kg.get("knobs") or {}) != (prev.get("knobs") or {})):
+                                # Save the new snapshot.
                                 known_good[ak] = kg
                                 kg_changed = True
+                                # Propose it for approval when it differs from the global value.
                                 _gap = (global_lv or {}).get(ak) or {}
                                 if int(_gap.get("op", -1)) != int(kg["count"]):
                                     pending[ak] = {
@@ -1794,6 +2111,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 # (matching the WebUI's honest at-max test, assigned >= max) when
                 # some quota is parked at max — the common case costs nothing.
                 try:
+                    # Keys parked at max, and the clients filled per quota.
                     _atmax = {kk for kk in live if (state.get(kk) or {}).get("phase") == "at_max"}
                     _filled: dict = {}
                     # Default so `_confirmable` below has something to read when
@@ -1807,9 +2125,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     _res = []
                     if _atmax:
                         try:
+                            # Fetch the spoke ledgers (only when something is at max).
                             _res = await _cs_forward_all(tid, "CS_GET_SIM_QUOTA_STATE", {}, timeout=10.0)
                         except Exception:  # noqa: BLE001
                             _res = []
+                        # Union each ledger key's clients across spokes.
                         for _sid, _d in (_res or []):
                             if not isinstance(_d, dict):
                                 continue
@@ -1819,28 +2139,37 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     # can't confirm "actually filled" — skip this sweep rather than
                     # emit a false recovery (the alert re-evaluates next tick).
                     _confirmable = bool(_res) or not _atmax
+                    # Evaluate the max-ceiling alert per quota (only when the result is
+                    # confirmable).
                     for q in (adaptive if _confirmable else []):
+                        # Phase, ceiling and filled count.
                         _ph = (state.get(_adaptive_key(q)) or {}).get("phase")
                         _mx = int(q.get("max") or 0)
                         _have = len(_filled.get(sim_quota.quota_dedup_key(q), ()))
                         _maxed = (_ph == "at_max" and _mx > 0 and _have >= _mx)
+                        # Alert item label and detail text.
                         _item = f"{q.get('alert_id') or q.get('sim_id') or 'quota'} @ {q.get('site') or 'all sites'}"
                         _detail = (f"Filled to max ({_mx}) clients but the monitored alert still "
                                    f"isn't firing — it should have fired below max. Check the "
                                    f"alert/threshold or investigate the underlying issue.") if _maxed else ""
+                        # Edge-triggered alert: fires on entry, recovers on exit.
                         await hub.alert_engine.evaluate(
                             tid, "adaptive_quota_maxed", _item, is_bad=_maxed,
                             detail=_detail, severity="error" if _maxed else "")
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("adaptive max-alert (%s): %s", tid, exc)
+                # Drop state for quotas that no longer exist.
                 for k in list(state.keys()):
                     if k not in live:
                         state.pop(k, None); changed = True
+                # Persist and re-push when the state moved.
                 if changed:
                     await store.set_adaptive_state(tid, state)
                     await _push_sim_quotas(tid)
+                # Persist the known-good snapshot if it changed.
                 if kg_changed:
                     await store.set_known_good(tid, known_good)
+                # Persist the pending queue if it changed.
                 if pending_changed:
                     await store.set_global_learned_values(published)
             except Exception as exc:  # noqa: BLE001
@@ -1848,6 +2177,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     async def _adaptive_controller_loop() -> None:
         """Periodic adaptive-quota controller sweep. Started from main.py."""
+        # Run a pass every 45s; a failure never kills the loop.
         while True:
             try:
                 await _run_adaptive_controller()
@@ -1872,6 +2202,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         tenant or the controller loop itself is stalled. 15-min cadence — the
         45s controller also runs a reconcile pass each tick (A); this is the
         safety net, not the primary path. Started from main.py."""
+        # Reconcile every tenant every 15 minutes; a failure never kills the loop.
         while True:
             try:
                 for tid in _all_tenant_ids():
@@ -1882,6 +2213,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 logger.warning("reconcile-push loop: %s", exc)
             await asyncio.sleep(900)
 
+    # Expose the backstop loop for startup scheduling.
     try:
         hub._reconcile_push_loop = _reconcile_push_loop
     except Exception:  # noqa: BLE001
@@ -1926,7 +2258,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         Empty when nothing applies. NOTE: the override is spoke-WIDE (one value
         per knob key), not per-site — the spoke overlays it onto every client's
         ``[simulation]`` section."""
+        # Local import: quota and knob helpers.
         from .sim_quota import normalize_quota, knobs_for_sim, adaptive_is_on, _alert_key, _learned_knob_floor
+        # Load the tenant's quotas and split them into lab and consumer rows.
         try:
             csc = await store.get_central_sites_config(tenant_id) or {}
             quotas = [normalize_quota(r) for r in (csc.get("sim_quotas") or [])]
@@ -1935,21 +2269,27 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             consumers = [q for q in quotas
                          if q.get("enabled") and not q.get("learning")
                          and adaptive_is_on(q) and knobs_for_sim(q.get("sim_id"))]
+            # Nothing to deliver.
             if not labs and not consumers:
                 return {}
+            # Knob learner state and global learned values.
             state = await store.get_knob_learn_state(tenant_id)
             global_lv = await store.get_global_learned_values()
         except Exception:  # noqa: BLE001
             return {}
+        # Knob key -> value to deliver.
         out: dict = {}
 
         def _ints(vals: dict) -> dict:
+            """Return only the entries whose values parse as ints, converted to int."""
+            # Keep the values that parse as ints.
             o = {}
             for kk, vv in vals.items():
                 try:
                     o[kk] = int(vv)
                 except (TypeError, ValueError):
                     continue
+            # Return the ints.
             return o
 
         # (1) CONSUMER rows: the approved lab's tuned knobs (production runs the
@@ -1964,10 +2304,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # declared knob for the sim still falls back to the computed floor —
         # turning inherit off is a per-knob opt-out, not an all-or-nothing one.
         for q in consumers:
+            # The approved learned knobs for this alert, and any operator overrides.
             gv = global_lv.get(_alert_key(q)) or {}
             learned_knobs = _ints(gv.get("knobs") or {})
             inherit = q.get("inherit_learned_knobs", True)
             overrides = _ints(q.get("knob_overrides") or {}) if not inherit else {}
+            # Overrides win; otherwise deliver the computed floor.
             for kk, vv in learned_knobs.items():
                 if kk in overrides:
                     out[kk] = overrides[kk]
@@ -1984,11 +2326,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # actively testing (more current than the approved snapshot), MIN across
         # this tenant's lab quotas for the same key. Approved knobs fill the rest
         # (keys no lab is currently tuning).
+        # Lab rows: take the minimum live tuned value per knob key.
         lab_vals: dict = {}
         for q in labs:
             vals = _ints((state.get(_adaptive_key(q)) or {}).get("values") or {})
             for kk, iv in vals.items():
                 lab_vals[kk] = iv if kk not in lab_vals else min(lab_vals[kk], iv)
+        # Lab values win over consumer values; return the merged map.
         out.update(lab_vals)
         return out
 
@@ -1997,11 +2341,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         declared knobs — advance the floor search and re-push the delivered knob
         values when they move. Learning folds knob-tuning: a lab tunes both client
         count (the adaptive controller) and the sim's [simulation] knobs (here)."""
+        # Local imports: only needed here.
         import time as _t
         from .sim_quota import normalize_quota, knobs_for_sim, knob_step
+        # Current time.
         now = _t.time()
+        # Process each tenant; one tenant's failure doesn't stop the others.
         for tid in _all_tenant_ids():
             try:
+                # The tenant's three site configs.
                 csc = await store.get_central_sites_config(tid) or {}
                 msc = await store.get_mist_sites_config(tid) or {}
                 opc = await store.get_central_on_prem_sites_config(tid) or {}
@@ -2014,25 +2362,33 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             if q.get("enabled") and q.get("learning") and knobs_for_sim(q.get("sim_id"))]
                          + [q for q in (normalize_quota(r) for r in (opc.get("sim_quotas") or []))
                             if q.get("enabled") and q.get("learning") and knobs_for_sim(q.get("sim_id"))])
+                # No lab rows to tune.
                 if not learn:
                     continue
                 # Site-alias groups resolved ONCE for the sweep, per source.
                 alias_groups = {"central": _alias_groups_from_csc(csc),
                                 "mist": _alias_groups_from_csc(msc),
                                 "central_on_prem": _alias_groups_from_csc(opc)}
+                # Learner state and change tracking.
                 state = await store.get_knob_learn_state(tid)
                 changed = False
                 live = set()
+                # Step each lab quota's knob search.
                 for q in learn:
+                    # Mark the key live and read the alert's firing state.
                     k = _adaptive_key(q); live.add(k)
                     firing = await _alert_firing(tid, q, alias_groups)
+                    # Advance the floor search.
                     before = dict(state.get(k) or {})
                     after = knob_step(before, knobs_for_sim(q.get("sim_id")), firing, now)
+                    # Record any change.
                     if after != before:
                         state[k] = after; changed = True
+                # Drop state for quotas that no longer exist.
                 for k in list(state.keys()):
                     if k not in live:
                         state.pop(k, None); changed = True
+                # Persist and re-push when values moved.
                 if changed:
                     await store.set_knob_learn_state(tid, state)
                     await _push_sim_quotas(tid)
@@ -2041,6 +2397,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     async def _knob_learner_loop() -> None:
         """Periodic knob-floor learner sweep. Started from main.py."""
+        # Run a pass every 45s; a failure never kills the loop.
         while True:
             try:
                 await _run_knob_learner()
@@ -2050,6 +2407,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 logger.warning("knob learner loop: %s", exc)
             await asyncio.sleep(45)
 
+    # Expose the loop for startup scheduling.
     try:
         hub._knob_learner_loop = _knob_learner_loop
         # Knob-push seam (Phase 2): the sim_knob_overrides a tenant's clients get —
@@ -2065,6 +2423,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         tenant's quota engine). Edited on Setup → Simulations → Sim Quotas and
         stored under the store's ``__global__`` key. The ``tenant_id`` arg is
         accepted (call sites pass it) but ignored — sharing is platform-wide."""
+        # Global map (empty on error).
         try:
             return await store.get_sim_shareable_global()
         except Exception:  # noqa: BLE001
@@ -2074,6 +2433,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """The GLOBAL sim-stacking knobs (sim_weights / stack_cap /
         stack_rotation_s) pushed to every spoke's SimQuotaEngine._reconcile_stacked.
         Platform-wide like ``_sim_shareable`` — ``tenant_id`` accepted but ignored."""
+        # Global stacking knobs (empty on error).
         try:
             return {
                 "sim_weights": await store.get_sim_weights_global(),
@@ -2092,10 +2452,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         unknown source falls back to ``central`` (legacy bare ids are Central).
         Best-effort: swallows everything so recording can never break a browse."""
         try:
+            # Ignore anything that is not a browse dict.
             if not isinstance(browse, dict):
                 return
+            # Unknown sources default to Central.
             if source not in sim_quota.SOURCE_PREFIXES:
                 source = "central"
+            # Build one history item per named alert.
             items: list = []
             for a in (browse.get("alerts") or []):
                 ident = str((a.get("name") or a.get("category") or "")).strip()
@@ -2107,6 +2470,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                   "category": a.get("category") or "",
                                   "severity": a.get("severity") or "",
                                   "device_type": a.get("device_type") or a.get("deviceType") or ""})
+            # And one per named insight.
             for i in (browse.get("insights") or []):
                 ident = str((i.get("name") or i.get("category") or "")).strip()
                 if ident:
@@ -2115,6 +2479,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                   "category": i.get("category") or "",
                                   "severity": i.get("severity") or "",
                                   "device_type": i.get("device_type") or i.get("deviceType") or ""})
+            # Save them all.
             if items:
                 await store.record_alert_insight_seen(items)
         except Exception:  # noqa: BLE001
@@ -2128,11 +2493,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         ``Mist:``) so a Central alert and a Mist alert with the same bare name
         are distinct picker options and the engine can route a row to its source;
         the stored id stays BARE (dashboard / reports / firing compare bare)."""
+        # Load the history (empty on error).
         try:
             hist = await store.get_alert_insight_history()
         except Exception:  # noqa: BLE001
             hist = []
         def _sort(rows):
+            """Return rows as sorted picker options with source-prefixed ids."""
+            # Prefixed id, display name, site and source; sorted by name.
             return sorted(
                 [{"id": prefixed_alert_id(h.get("source") or "central", h.get("id")),
                   "name": h.get("name") or h.get("id"),
@@ -2141,6 +2509,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                  for h in rows if h.get("id")],
                 key=lambda r: str(r.get("name") or r.get("id") or "").lower(),
             )
+        # Split into alerts and insights.
         alerts = _sort([h for h in hist if h.get("type") == "alert"])
         insights = _sort([h for h in hist if h.get("type") == "insight"])
         return alerts, insights
@@ -2149,6 +2518,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """The GLOBAL per-simulation N/A (does-not-apply) UI hide map — used only
         to hide sims from the Setup → Simulations Sharing tile. Stored under the
         store's ``__global__`` key. ``tenant_id`` accepted but ignored."""
+        # Global map (empty on error).
         try:
             return await store.get_sim_na_global()
         except Exception:  # noqa: BLE001
@@ -2159,10 +2529,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         flattened into the CS_CONFIG_UPDATE keys the spoke applies (see
         docs/simulation-pool-and-quota-design.md). Missing keys are omitted so a
         tenant that hasn't configured pools pushes nothing extra."""
+        # Tenant's Central site config (empty on error).
         try:
             csc = await store.get_central_sites_config(tenant_id) or {}
         except Exception:  # noqa: BLE001
             csc = {}
+        # Copy each pool/SSID key only if it has the expected type.
         out: dict = {}
         if isinstance(csc.get("site_source"), str):
             out["site_source"] = csc["site_source"]
@@ -2180,11 +2552,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # ambient-active); ambient_control=on adds relative per-sim weights
         # (ambient_weights) that split the active clients and per-site load weights
         # (ambient_site_weights) that scale a site's level.
+        # Clamp the ambient level to 0-100.
         if csc.get("ambient_pct") is not None:
             try:
                 out["ambient_pct"] = max(0, min(100, int(csc["ambient_pct"])))
             except (TypeError, ValueError):
                 pass
+        # Ambient on/off and per-sim weights.
         if csc.get("ambient_control") is not None:
             out["ambient_control"] = bool(csc.get("ambient_control"))
         if isinstance(csc.get("ambient_weights"), dict):
@@ -2210,6 +2584,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # the resolved set from its central_sites_config (the engine defaults to
         # the locked set when neither is set, so this is purely an admin override).
         try:
+            # Use the tenant's own list if it has one; otherwise the global default.
             t_qt = csc.get("qt_exclude_sims")
             if isinstance(t_qt, list):
                 out["qt_exclude_sims"] = [str(s) for s in t_qt if str(s).strip()]
@@ -2242,6 +2617,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         actuator after consecutive stalls. Default False preserves the existing
         drain-aware behavior for every other caller (Save buttons, adaptive
         state-change pushes, the hub seam)."""
+        # Push quotas, sharing, knobs, stacking and pool config together.
         return await _push_config(tenant_id, {
             "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
             "sim_shareable": await _sim_shareable(tenant_id),
@@ -2255,9 +2631,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         change (Setup → Simulations → Sim Quotas). Fanned out concurrently across
         tenants (per-spoke push inside is already concurrent); returns the total
         pushed. Any error propagates as before (gather re-raises)."""
+        # Push to every tenant at the same time.
         counts = await asyncio.gather(
             *[_push_sim_quotas(tid) for tid in _all_tenant_ids()]
         )
+        # Total spokes pushed.
         return sum(counts)
 
     # Expose the per-tenant push as a callable seam on the Hub (on-demand
@@ -2282,11 +2660,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Resolved per-feature polling owner for the tenant's cs spokes. The
         spoke idles its Central / Central On-Prem / Mist poller for every
         "centralized" feature, because the hub's own poller owns it then."""
+        # Stored modes, and the store class for its static predicates.
         modes = await store.get_processing_modes(tenant_id)
         S = SimulationsStore
 
         def _m(centralized: bool) -> str:
+            """Return the mode name for a centralized flag."""
+            # Map the flag to its name.
             return "centralized" if centralized else "distributed"
+        # One mode per API feature.
         return {
             "central_api": _m(S.central_api_is_centralized(modes)),
             "central_on_prem_api": _m(S.central_on_prem_api_is_centralized(modes)),
@@ -2299,6 +2681,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         quota apportionment are filled in there). Creds/sites/override text are
         included only when the hub actually holds them, so a hub with no data
         never wipes spoke-local state."""
+        # Hub-owned override texts; include only the non-empty ones.
         p: dict = {}
         sim_ov = await store.get_sim_conf_content(tenant_id) or ""
         user_ov = await store.get_user_overrides_content(tenant_id) or ""
@@ -2309,12 +2692,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if sim_ov or user_ov:
             p["config_source"] = "hub"   # recomputed by _push_config
         try:
+            # Relay timeouts from the global config.
             gc = hub.state.get_global_config() or {}
             for rk in ("agent_relay_timeout_long_s", "agent_relay_timeout_fast_s"):
                 if gc.get(rk) is not None:
                     p[rk] = gc.get(rk)
         except Exception:  # noqa: BLE001
             pass
+        # Hub-config keys, or just the non-empty USB/PCI lists when hub config is off.
         hc = await store.get_hub_config(tenant_id) or {}
         if hc.get("hub_config_enabled"):
             p.update(dict(hc.get("hub_config") or {}))
@@ -2330,6 +2715,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                           ("t3_pci_vidpids", _effective_t3_pci)):
                 if await fn(tenant_id):
                     p[k] = "[]"
+        # Credentials and site configs the hub holds (Central creds resolved).
         for key, getter in (("central_config", store.get_central_config),
                             ("central_sites_config", store.get_central_sites_config),
                             ("mist_config", store.get_mist_config),
@@ -2342,8 +2728,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     v = await central_secrets.resolve(hub, v)
             except Exception:  # noqa: BLE001
                 v = None
+            # Include only non-empty dicts.
             if isinstance(v, dict) and v:
                 p[key] = v
+        # Polling ownership per feature.
         p["processing_modes"] = await _cs_processing_modes(tenant_id)
         # Quota / stacking / pool bundle — the same set _push_sim_quotas sends.
         p["effective_sim_quotas"] = await _effective_sim_quotas(tenant_id)
@@ -2351,9 +2739,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         p["sim_knob_overrides"] = await _knob_overrides_for_tenant(tenant_id)
         p.update(await _sim_stacking(tenant_id))
         p.update(await _pool_config(tenant_id))
+        # Return the full payload.
         return p
 
     def _cs_tenant_of(spoke_id: str) -> Optional[str]:
+        """Return the tenant a spoke is bound to, or None."""
+        # None on lookup errors.
         try:
             return hub.state.get_spoke_tenant(spoke_id)
         except Exception:  # noqa: BLE001
@@ -2362,65 +2753,85 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def _cs_full_config_push(spoke_id: str, reason: str = "reconnect") -> int:
         """Full-config push to ONE spoke. Returns spokes reached (0 = the spoke
         isn't one of its tenant's connected cs spokes yet → caller falls back)."""
+        # The spoke's tenant; unbound spokes are skipped.
         tenant_id = _cs_tenant_of(spoke_id)
         if not tenant_id:
             return 0
+        # Pull GitHub config first if the hub has none yet.
         pull = getattr(hub, "_cs_github_pull_if_empty", None)
         if callable(pull):
             await pull(tenant_id)
+        # Push the full config to this spoke only.
         res = await _push_config(tenant_id, await _cs_full_config(tenant_id),
                                  spoke_filter={spoke_id}, full=True)
         logger.info("cs full config push (%s) to %s (tenant %s): %s%s", reason,
                     spoke_id, tenant_id, int(res),
                     " queued" if getattr(res, "queued", False) else "")
+        # Spokes reached.
         return int(res)
 
     async def _cs_expected_config_hash(spoke_id: str) -> str:
+        """Return the config hash this spoke should report after a full push ("" if unknown)."""
+        # The spoke's tenant; unbound means no hash.
         tenant_id = _cs_tenant_of(spoke_id)
         if not tenant_id:
             return ""
+        # Compute without sending.
         hashes = await _push_config(tenant_id, await _cs_full_config(tenant_id),
                                     spoke_filter={spoke_id}, hash_only=True)
+        # The single spoke's hash.
         return next(iter(hashes.values()), "") if hashes else ""
 
     async def _cs_config_sync_once(now: Optional[float] = None) -> int:
         """One drift/backstop pass. Only spokes whose telemetry carries
         ``cs_config_hash`` (they diff full pushes) are targeted; legacy spokes
         keep the reconnect push only. Returns spokes pushed."""
+        # Default to now, and set up the per-spoke last-push timestamps.
         now = time.time() if now is None else now
         ts = getattr(hub, "_cs_full_push_ts", None)
         if ts is None:
             ts = {}
             hub._cs_full_push_ts = ts
+        # Helpers: primary key, drain check, telemetry cache.
         pk = getattr(hub, "_primary_key", None) or (lambda s: s)
         is_draining = getattr(hub, "is_draining", None)
         cache = getattr(hub, "simulations_cache", {}) or {}
         pushed = 0
+        # Check each tenant; one failure doesn't block the others.
         for tid in _all_tenant_ids():
             try:
+                # Only spokes that report a config hash.
                 sids = [s for s in (hub.get_client_sim_spokes(tid) or [])
                         if _cs_tenant_of(s) == tid
                         and "cs_config_hash" in (cache.get(s) or {})]
                 if not sids:
                     continue
+                # Build the payload and the expected hashes.
                 payload = await _cs_full_config(tid)
                 expected = await _push_config(tid, payload, spoke_filter=set(sids),
                                               hash_only=True)
+                # Choose which spokes need a push.
                 due = []
                 for s in sids:
+                    # Skip draining spokes.
                     if callable(is_draining) and is_draining(s):
                         continue
+                    # Time since the last full push, and the reported hash.
                     since = now - ts.get(pk(s), 0.0)
                     reported = (cache.get(s) or {}).get("cs_config_hash") or ""
+                    # Backstop: push unconditionally after an hour.
                     if since >= _CS_SYNC_BACKSTOP_S:
                         due.append(s)
+                    # Drift: hash mismatch after the grace period.
                     elif since >= _CS_SYNC_DRIFT_GRACE_S and reported != expected.get(s):
                         logger.info("cs config drift on %s (tenant %s): spoke hash %s != hub %s",
                                     s, tid, reported[:12] or "<none>",
                                     str(expected.get(s) or "")[:12])
                         due.append(s)
+                # Nothing due.
                 if not due:
                     continue
+                # Stamp, push, and count.
                 for s in due:
                     ts[pk(s)] = now
                 res = await _push_config(tid, payload, spoke_filter=set(due), full=True)
@@ -2429,10 +2840,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 raise
             except Exception as exc:  # noqa: BLE001 — one tenant never blocks the rest
                 logger.warning("cs config sync for tenant %s failed: %s", tid, exc)
+        # Total spokes pushed.
         return pushed
 
     async def _cs_config_sync_loop() -> None:
+        """Background drift/backstop sync loop (5-minute cadence)."""
+        # Wait for telemetry to settle before the first pass.
         await asyncio.sleep(_CS_SYNC_DRIFT_GRACE_S)
+        # Run a pass every interval; a failure never kills the loop.
         while True:
             try:
                 await _cs_config_sync_once()
@@ -2442,6 +2857,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 logger.warning("cs config sync loop error: %s", exc)
             await asyncio.sleep(_CS_SYNC_INTERVAL_S)
 
+    # Expose the sync functions on the hub for startup and tests.
     try:
         hub._cs_full_config = _cs_full_config
         hub._cs_full_config_push = _cs_full_config_push
@@ -2454,30 +2870,40 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # ── aggregate reads (literal "aggregate" first segment) ────────────────
     @app.get("/sim/api/aggregate/dashboard")
     async def get_dashboard(tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's dashboard view."""
+        # Built by the service from cached telemetry.
         return await service.get_dashboard_data(tenant_id)
 
     @app.get("/sim/api/aggregate/clients")
     async def get_clients(tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's clients view."""
+        # Built by the service from cached telemetry.
         return await service.get_clients_data(tenant_id)
 
     @app.get("/sim/api/aggregate/simulations")
     async def get_simulations(tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's simulations view."""
+        # Built by the service from cached telemetry.
         return await service.get_simulations_data(tenant_id)
 
     @app.get("/sim/api/aggregate/proxmox")
     async def get_proxmox(request: Request, tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's Proxmox/VM-server view, with USB devices reclassified."""
+        # Base view from the service.
         data = await service.get_proxmox_data(tenant_id)
         # Apply the effective USB certified/ignored sets (global + this tenant)
         # server-side so the tenant UI reflects admin/tenant decisions even
         # before the spoke re-filters its own telemetry: ignored devices are
         # hidden, certified devices no longer show as "to be certified", and each
         # certified device is tagged with its approval scope (global/local).
+        # Merged ignored list, global certified types, and tenant certified types.
         ign = set(await _effective_usb_ignored(tenant_id))
         g_cert = {str(d.get("vidpid", "")).strip().lower(): str(d.get("type") or "wireless")
                   for d in await store.get_global_usb_vidpids() if d.get("vidpid")}
         hc = await store.get_hub_config(tenant_id)
         t_cert = {e["vidpid"]: str(e.get("type") or "wireless") for e in
                   _normalize_usb_vidpids((hc.get("hub_config") or {}).get("usb_vidpids"))}
+        # Reclassify each host's USB devices.
         if ign or g_cert or t_cert:
             data["hosts"] = [_reclassify_host_usb(h, ign, g_cert, t_cert)
                              for h in (data.get("hosts") or [])]
@@ -2494,6 +2920,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 ]
         except Exception:
             pass
+        # Return the view.
         return data
 
     @app.get("/sim/api/aggregate/proxmox-debug")
@@ -2502,7 +2929,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         the tenant's cs spokes, to localize a missing USB count in the VM Server
         Overview / USB tab. Returns keys + USB field locations/lengths only —
         NEVER values (a CS payload may carry Proxmox tokens in other frames)."""
+        # Admin-only.
         _require_admin(request)
+        # USB structure summary per spoke (keys and lengths only).
         return {
             "tenant_id": tenant_id,
             "spokes": [
@@ -2515,6 +2944,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.get("/sim/api/aggregate/central")
     async def get_central(tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's Central view."""
+        # Built by the service from cached telemetry.
         return await service.get_central_data(tenant_id)
 
     @app.get("/sim/api/aggregate/central-health")
@@ -2525,24 +2956,33 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         the on-hover breakdown. Merges the centralized hub-poller history with any
         DISTRIBUTED spoke's relayed daily summary (central_status.health); hourly for
         a distributed check is fetched on demand from the owning spoke (CS_GET_HEALTH)."""
+        # Hub poller's health history, if available.
         poller = getattr(hub, "central_hub_poller", None)
         health = getattr(poller, "_health", None)
+        # Optional site/check for the hourly breakdown.
         site = request.query_params.get("site")
         check = request.query_params.get("check")
+        # Hourly breakdown for one check.
         if site and check:
+            # Try the hub history first.
             hourly = health.hourly(tenant_id, site, check) if health else []
             if not hourly:  # distributed → ask the owning spoke
                 try:
+                    # Fall back to the owning spoke.
                     r = await _cs_forward(tenant_id, "CS_GET_HEALTH",
                                           {"site": site, "check": check}, timeout=10.0)
                     hourly = (r or {}).get("hourly") or []
                 except Exception:  # noqa: BLE001 — no spoke / offline → empty
                     pass
+            # Return the hourly buckets.
             return {"hourly": hourly}
+        # Local import: daily-to-success helper.
         from .central_hub_poller import success_from_daily
+        # Hub daily summaries and success stats.
         daily = dict(health.summary(tenant_id)) if health else {}
         success = dict(health.success_stats(tenant_id)) if health else {}
         # Merge relayed spoke health (distributed-mode tenants).
+        # Add each spoke's relayed daily summaries.
         for _sid, data in service._spokes_for_tenant(tenant_id):
             sp = ((data or {}).get("central") or {}).get("health") or {}
             for site_name, checks in sp.items():
@@ -2550,22 +2990,28 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Success-% per check (ok / graded over 24h·7d·4w). Hub-poller history is
         # hourly-accurate; distributed checks (only in `daily`) fall back to their
         # daily buckets so every rendered check gets a score.
+        # Fill any missing success stats from the daily buckets.
         for site_name, checks in daily.items():
             for cid, dlist in (checks or {}).items():
                 if success.get(site_name, {}).get(cid) is None:
                     success.setdefault(site_name, {})[cid] = success_from_daily(dlist)
+        # Return both.
         return {"daily": daily, "success": success}
 
     @app.get("/sim/api/aggregate/central-status")
     async def get_central_status(tenant_id: str = Depends(get_tenant_id)):
+        """Return the Central status view, merged with the hub-owned Central config."""
+        # Status from the service.
         data = await service.get_central_status_data(tenant_id)
         # Merge hub-owned central config (mode + cluster creds) from the store so
         # the Central tab's form populates.
+        # Add the stored config (without mode) and its mode.
         cc = await store.get_central_config(tenant_id)
         if isinstance(cc, dict):
             data["hub_central_config"] = {k: v for k, v in cc.items() if k != "mode"}
             if cc.get("mode"):
                 data["mode"] = cc["mode"]
+        # Return the merged view.
         return data
 
     @app.get("/sim/api/aggregate/central-browse")
@@ -2584,11 +3030,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         branch, a centralized tenant's creds validated (Test Central) but the
         Sites/Alerts/Clients tabs asked a credential-less spoke and got
         'Central not configured'."""
+        # Polling mode for Central.
         modes = await store.get_processing_modes(tenant_id)
         if store.central_api_is_centralized(modes):  # unset defaults to centralized
+            # Centralized: the hub browses with its own credentials.
             cc = await store.get_central_config(tenant_id)
             result = await browse_all_from_config(await central_secrets.resolve(hub, cc))
         else:
+            # Distributed: ask the spoke; return an empty result if it is unavailable.
             try:
                 result = await _cs_forward(tenant_id, "CS_CENTRAL_BROWSE", {}, timeout=30.0)
             except HTTPException as exc:
@@ -2600,30 +3049,39 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # system-defaults) history so the Sim-Quota ID picker can offer it later,
         # even after it clears. Best-effort — never let it break the browse.
         await _record_alert_insight_history(result)
+        # Return the browse result.
         return result
 
     @app.get("/sim/api/aggregate/api-server")
     async def get_api_server(tenant_id: str = Depends(get_tenant_id)):
+        """Return the API-server view, adding each spoke's live repo status."""
+        # Base view from the service.
         data = await service.get_api_server_data(tenant_id)
         # Enrich each spoke card with its LIVE repo/update status (branch +
         # served VERSION + key script versions) so Setup → Diagnostics shows,
         # from the UI, whether the spoke's checkout actually has the latest push
         # — the answer to "did my change reach the spoke?" without the CLI.
         try:
+            # Ask each spoke for its repo status.
             repos = await _cs_forward_all(tenant_id, "CS_GET_REPO_STATUS", {}, timeout=10.0)
+            # Map spoke id to repo status.
             by_sid = {sid: (r or {}).get("repo") for sid, r in (repos or [])
                       if isinstance(r, dict)}
+            # Attach it to each spoke card.
             for sp in data.get("spokes", []):
                 rp = by_sid.get(sp.get("spoke_id"))
                 if rp:
                     sp.setdefault("api_server", {}).setdefault("health", {})["repo"] = rp
         except Exception:  # noqa: BLE001 — diagnostics enrich must never break the card
             logger.debug("api-server repo enrich failed", exc_info=True)
+        # Return the view.
         return data
 
     # ── aggregate actions ──────────────────────────────────────────────────
     @app.post("/sim/api/aggregate/central")
     async def save_central(request: Request, tenant_id: str = Depends(get_tenant_id)):
+        """Save the tenant's Central API config (SSRF-checked) and push it to the spokes."""
+        # Parse the body and fold the mode into the config.
         body = await request.json()
         mode = body.get("mode")
         hub_cc = body.get("hub_central_config") or {}
@@ -2640,13 +3098,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # internal IP after the save. ``new_central`` mode uses a fixed HPE
         # token URL and ignores cluster_url, so only validate when present.
         cluster_url = (cfg.get("cluster_url") or "").strip()
+        # Validate the cluster URL when present.
         if cluster_url:
+            # Must be a public HTTPS URL.
             if not safe_external_url(cluster_url, require_https=True):
                 raise HTTPException(
                     status_code=400,
                     detail="cluster_url must be a public https:// URL "
                            "(internal hosts, IP literals, and plain http are blocked).",
                 )
+            # And must resolve to an external address.
             host = urlsplit(cluster_url).hostname
             if host and not await asyncio.to_thread(host_resolves_external, host):
                 raise HTTPException(
@@ -2657,6 +3118,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Central poll interval (seconds). Optional; coerce + floor at 60s here so
         # a bad value can't be stored (the poller also floors defensively).
         if "poll_interval_s" in cfg:
+            # Clamp to at least 60s; invalid values become 300.
             try:
                 cfg["poll_interval_s"] = max(60, int(cfg["poll_interval_s"] or 300))
             except (TypeError, ValueError):
@@ -2666,18 +3128,23 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # (_cc_thresholds) also clamp defensively on read. error can't sit below
         # warn (red before amber). die_off_pct=0 disables the sustained-die-off rule.
         if isinstance(cfg.get("cc_thresholds"), dict):
+            # Thresholds as provided.
             _t = cfg["cc_thresholds"]
 
             def _cnum(val, dflt, lo, hi):
+                """Return val as a float clamped to [lo, hi], or dflt if it doesn't parse."""
+                # Clamp; fall back to the default.
                 try:
                     return max(lo, min(hi, float(val)))
                 except (TypeError, ValueError):
                     return dflt
 
+            # Warn and error percentages; error is never below warn.
             _warn = _cnum(_t.get("warn_pct"), 20.0, 0.0, 100.0)
             _err = _cnum(_t.get("error_pct"), 50.0, 0.0, 100.0)
             if _err < _warn:
                 _err = _warn
+            # Store the clamped thresholds.
             cfg["cc_thresholds"] = {
                 "warn_pct": _warn,
                 "error_pct": _err,
@@ -2691,6 +3158,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502,
                                 detail=f"Could not store the Central secret in the vault: {exc}")
+        # Save the stored form; resolve real values for the push.
         await store.set_central_config(tenant_id, stored)
         cfg = await central_secrets.resolve(hub, stored)
         # Push ``cfg`` (NOT ``hub_cc``): cfg carries ``mode`` on top of the
@@ -2698,11 +3166,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # pick classic vs new_central. Pushing hub_cc dropped mode, so the spoke
         # defaulted to classic regardless of the operator's choice.
         pushed = await _push_config(tenant_id, {"central_config": cfg})
+        # Report the push result.
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     # ── Mist aggregate routes — mirror of Central (separate product) ──────────
     @app.get("/sim/api/aggregate/mist")
     async def get_mist(tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's Mist view."""
+        # Built by the service from cached telemetry.
         return await service.get_mist_data(tenant_id)
 
     @app.get("/sim/api/aggregate/mist-health")
@@ -2713,21 +3184,29 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         history (Phase 3) with any DISTRIBUTED spoke's relayed daily summary
         (mist_status.health); hourly for a distributed check is fetched on demand
         from the owning spoke (CS_GET_MIST_HEALTH)."""
+        # Mist hub poller's health history, if available.
         poller = getattr(hub, "mist_hub_poller", None)
         health = getattr(poller, "_health", None)
+        # Optional site/check for the hourly breakdown.
         site = request.query_params.get("site")
         check = request.query_params.get("check")
+        # Hourly breakdown for one check.
         if site and check:
+            # Try the hub history first.
             hourly = health.hourly(tenant_id, site, check) if health else []
             if not hourly:  # distributed → ask the owning spoke
                 try:
+                    # Fall back to the owning spoke.
                     r = await _cs_forward(tenant_id, "CS_GET_MIST_HEALTH",
                                           {"site": site, "check": check}, timeout=10.0)
                     hourly = (r or {}).get("hourly") or []
                 except Exception:  # noqa: BLE001 — no spoke / offline → empty
                     pass
+            # Return the hourly buckets.
             return {"hourly": hourly}
+        # Local import: daily-to-success helper.
         from .central_hub_poller import success_from_daily
+        # Hub daily summaries and success stats.
         daily = dict(health.summary(tenant_id)) if health else {}
         success = dict(health.success_stats(tenant_id)) if health else {}
         # Merge relayed spoke health (distributed-mode tenants).
@@ -2735,20 +3214,25 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             sp = ((data or {}).get("mist") or {}).get("health") or {}
             for site_name, checks in sp.items():
                 daily.setdefault(site_name, {}).update(checks)
+        # Fill any missing success stats from the daily buckets.
         for site_name, checks in daily.items():
             for cid, dlist in (checks or {}).items():
                 if success.get(site_name, {}).get(cid) is None:
                     success.setdefault(site_name, {})[cid] = success_from_daily(dlist)
+        # Return both.
         return {"daily": daily, "success": success}
 
     @app.get("/sim/api/aggregate/mist-status")
     async def get_mist_status(tenant_id: str = Depends(get_tenant_id)):
+        """Return the Mist status view, merged with the hub-owned Mist config."""
+        # Status from the service.
         data = await service.get_mist_status_data(tenant_id)
         # Merge hub-owned mist config (token + org + host) from the store so the
         # Mist tab's form populates.
         mc = await store.get_mist_config(tenant_id)
         if isinstance(mc, dict):
             data["hub_mist_config"] = mc
+        # Return the merged view.
         return data
 
     @app.get("/sim/api/aggregate/mist-browse")
@@ -2759,22 +3243,29 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         ``browse_mist_from_config`` itself; distributed → forwards CS_MIST_BROWSE
         to the spoke. Records every alert/insight seen into the SHARED history
         tagged ``source=mist`` so the Sim-Quota picker can offer ``Mist:`` ids."""
+        # Polling mode for Mist.
         modes = await store.get_processing_modes(tenant_id)
         if store.mist_api_is_centralized(modes):  # unset defaults to centralized
+            # Centralized: the hub browses with its own config.
             mc = await store.get_mist_config(tenant_id)
             result = await browse_mist_from_config(mc or {})
         else:
+            # Distributed: ask the spoke; return an empty result if it is unavailable.
             try:
                 result = await _cs_forward(tenant_id, "CS_MIST_BROWSE", {}, timeout=30.0)
             except HTTPException as exc:
                 return {"status": "SUCCESS", "sites": [], "alerts": [], "insights": [],
                         "clients": [], "devices_by_site": {}, "clients_by_site": {},
                         "warning": f"Mist browse unavailable: {exc.detail}"}
+        # Record alerts/insights as Mist entries.
         await _record_alert_insight_history(result, source="mist")
+        # Return the browse result.
         return result
 
     @app.post("/sim/api/aggregate/mist")
     async def save_mist(request: Request, tenant_id: str = Depends(get_tenant_id)):
+        """Save the tenant's Mist API config (host-validated) and push it to the spokes."""
+        # Parse the body.
         body = await request.json()
         hub_mc = body.get("hub_mist_config") or {}
         cfg = dict(hub_mc)
@@ -2792,8 +3283,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                        "(api.mist.com / api.eu.mist.com / api.gc1.mist.com / "
                        "api.ac2.mist.com / api.ac5.mist.com).",
             )
+        # Store the validated host.
         cfg["host"] = host
         # Poll interval (seconds). Optional; coerce + floor at 60s.
+        # Clamp to at least 60s; invalid values become 300.
         if "poll_interval_s" in cfg:
             try:
                 cfg["poll_interval_s"] = max(60, int(cfg["poll_interval_s"] or 300))
@@ -2802,24 +3295,30 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Client-count CHECK thresholds — same coerce+clamp as Central (Mist's
         # _mist_cc_thresholds reads the same cc_thresholds key from mist_config).
         if isinstance(cfg.get("cc_thresholds"), dict):
+            # Thresholds as provided.
             _t = cfg["cc_thresholds"]
 
             def _cnum(val, dflt, lo, hi):
+                """Return val as a float clamped to [lo, hi], or dflt if it doesn't parse."""
+                # Clamp; fall back to the default.
                 try:
                     return max(lo, min(hi, float(val)))
                 except (TypeError, ValueError):
                     return dflt
 
+            # Warn and error percentages; error is never below warn.
             _warn = _cnum(_t.get("warn_pct"), 20.0, 0.0, 100.0)
             _err = _cnum(_t.get("error_pct"), 50.0, 0.0, 100.0)
             if _err < _warn:
                 _err = _warn
+            # Store the clamped thresholds.
             cfg["cc_thresholds"] = {
                 "warn_pct": _warn,
                 "error_pct": _err,
                 "die_off_pct": _cnum(_t.get("die_off_pct"), 20.0, 0.0, 100.0),
                 "min_peak": int(_cnum(_t.get("min_peak"), 5, 1, 1_000_000)),
             }
+        # Save, push, and report.
         await store.set_mist_config(tenant_id, cfg)
         pushed = await _push_config(tenant_id, {"mist_config": cfg})
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
@@ -2832,6 +3331,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # it reads, the hub status slot it merges, and the source tag it records.
     @app.get("/sim/api/aggregate/central-on-prem")
     async def get_central_on_prem(tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's Central On-Prem view."""
+        # Built by the service from cached telemetry.
         return await service.get_central_on_prem_data(tenant_id)
 
     @app.get("/sim/api/aggregate/central-on-prem-health")
@@ -2844,21 +3345,29 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         with any DISTRIBUTED spoke's relayed daily summary
         (central_on_prem_status.health); hourly for a distributed check is
         fetched on demand from the owning spoke (CS_GET_CENTRAL_ON_PREM_HEALTH)."""
+        # On-prem hub poller's health history, if available.
         poller = getattr(hub, "central_on_prem_hub_poller", None)
         health = getattr(poller, "_health", None)
+        # Optional site/check for the hourly breakdown.
         site = request.query_params.get("site")
         check = request.query_params.get("check")
+        # Hourly breakdown for one check.
         if site and check:
+            # Try the hub history first.
             hourly = health.hourly(tenant_id, site, check) if health else []
             if not hourly:  # distributed → ask the owning spoke
                 try:
+                    # Fall back to the owning spoke.
                     r = await _cs_forward(tenant_id, "CS_GET_CENTRAL_ON_PREM_HEALTH",
                                           {"site": site, "check": check}, timeout=10.0)
                     hourly = (r or {}).get("hourly") or []
                 except Exception:  # noqa: BLE001 — no spoke / offline → empty
                     pass
+            # Return the hourly buckets.
             return {"hourly": hourly}
+        # Local import: daily-to-success helper.
         from .central_hub_poller import success_from_daily
+        # Hub daily summaries and success stats.
         daily = dict(health.summary(tenant_id)) if health else {}
         success = dict(health.success_stats(tenant_id)) if health else {}
         # Merge relayed spoke health (distributed-mode tenants). The on-prem
@@ -2867,14 +3376,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             sp = ((data or {}).get("central_on_prem") or {}).get("health") or {}
             for site_name, checks in sp.items():
                 daily.setdefault(site_name, {}).update(checks)
+        # Fill any missing success stats from the daily buckets.
         for site_name, checks in daily.items():
             for cid, dlist in (checks or {}).items():
                 if success.get(site_name, {}).get(cid) is None:
                     success.setdefault(site_name, {})[cid] = success_from_daily(dlist)
+        # Return both.
         return {"daily": daily, "success": success}
 
     @app.get("/sim/api/aggregate/central-on-prem-status")
     async def get_central_on_prem_status(tenant_id: str = Depends(get_tenant_id)):
+        """Return the Central On-Prem status view, merged with its hub-owned config."""
+        # Status from the service.
         data = await service.get_central_on_prem_status_data(tenant_id)
         # Merge hub-owned on-prem config (mode + cluster creds) from the store so
         # the Central On-Prem tab's form populates (mirror of central-status).
@@ -2883,6 +3396,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             data["hub_central_on_prem_config"] = {k: v for k, v in cc.items() if k != "mode"}
             if cc.get("mode"):
                 data["mode"] = cc["mode"]
+        # Return the merged view.
         return data
 
     @app.get("/sim/api/aggregate/central-on-prem-browse")
@@ -2895,11 +3409,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         forwards CS_CENTRAL_ON_PREM_BROWSE to the spoke. Records every alert/
         insight seen into the SHARED history tagged ``source=central_on_prem`` so
         the Sim-Quota picker can offer ``Central On-Prem:`` ids."""
+        # Polling mode for on-prem Central.
         modes = await store.get_processing_modes(tenant_id)
         if store.central_on_prem_api_is_centralized(modes):  # unset → centralized
+            # Centralized: the hub browses with its own credentials.
             cc = await store.get_central_on_prem_config(tenant_id)
             result = await browse_all_from_config(await central_secrets.resolve(hub, cc))
         else:
+            # Distributed: ask the spoke; return an empty result if it is unavailable.
             try:
                 result = await _cs_forward(tenant_id, "CS_CENTRAL_ON_PREM_BROWSE",
                                            {}, timeout=30.0)
@@ -2907,12 +3424,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 return {"status": "SUCCESS", "sites": [], "alerts": [], "insights": [],
                         "clients": [], "devices_by_site": {}, "clients_by_site": {},
                         "warning": f"Central On-Prem browse unavailable: {exc.detail}"}
+        # Record alerts/insights as on-prem entries.
         await _record_alert_insight_history(result, source="central_on_prem")
+        # Return the browse result.
         return result
 
     @app.post("/sim/api/aggregate/central-on-prem")
     async def save_central_on_prem(request: Request,
                                    tenant_id: str = Depends(get_tenant_id)):
+        """Save the tenant's Central On-Prem config (SSRF-checked) and push it to spokes."""
+        # Parse the body and fold the mode into the config.
         body = await request.json()
         mode = body.get("mode")
         hub_cc = body.get("hub_central_on_prem_config") or {}
@@ -2926,13 +3447,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # host and DNS-resolve it to block rebinding to an internal IP. Only
         # validate when present (new_central mode uses a fixed token URL).
         cluster_url = (cfg.get("cluster_url") or "").strip()
+        # Validate the cluster URL when present.
         if cluster_url:
+            # Must be a public HTTPS URL.
             if not safe_external_url(cluster_url, require_https=True):
                 raise HTTPException(
                     status_code=400,
                     detail="cluster_url must be a public https:// URL "
                            "(internal hosts, IP literals, and plain http are blocked).",
                 )
+            # And must resolve to an external address.
             host = urlsplit(cluster_url).hostname
             if host and not await asyncio.to_thread(host_resolves_external, host):
                 raise HTTPException(
@@ -2942,6 +3466,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 )
         # Poll interval (seconds). Optional; coerce + floor at 60s (mirror of Central).
         if "poll_interval_s" in cfg:
+            # Clamp to at least 60s; invalid values become 300.
             try:
                 cfg["poll_interval_s"] = max(60, int(cfg["poll_interval_s"] or 300))
             except (TypeError, ValueError):
@@ -2949,18 +3474,23 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Client-count CHECK thresholds — same coerce+clamp as cloud Central (the
         # on-prem poller's _cc_thresholds reads the same cc_thresholds key).
         if isinstance(cfg.get("cc_thresholds"), dict):
+            # Thresholds as provided.
             _t = cfg["cc_thresholds"]
 
             def _cnum(val, dflt, lo, hi):
+                """Return val as a float clamped to [lo, hi], or dflt if it doesn't parse."""
+                # Clamp; fall back to the default.
                 try:
                     return max(lo, min(hi, float(val)))
                 except (TypeError, ValueError):
                     return dflt
 
+            # Warn and error percentages; error is never below warn.
             _warn = _cnum(_t.get("warn_pct"), 20.0, 0.0, 100.0)
             _err = _cnum(_t.get("error_pct"), 50.0, 0.0, 100.0)
             if _err < _warn:
                 _err = _warn
+            # Store the clamped thresholds.
             cfg["cc_thresholds"] = {
                 "warn_pct": _warn,
                 "error_pct": _err,
@@ -2974,19 +3504,24 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502,
                                 detail=f"Could not store the Central secret in the vault: {exc}")
+        # Save the stored form; resolve real values for the push.
         await store.set_central_on_prem_config(tenant_id, stored)
         cfg = await central_secrets.resolve(hub, stored)
         # Push ``cfg`` (carries ``mode`` on top of the cluster creds) — mirror of
         # cloud Central's save; the spoke's on-prem poller needs ``mode`` to pick
         # classic vs new_central (Phase 5).
         pushed = await _push_config(tenant_id, {"central_on_prem_config": cfg})
+        # Report the push result.
         return {"saved": True, "pushed_to_spokes": pushed,
                 "queued": bool(getattr(pushed, "queued", False))}
 
     @app.post("/sim/api/aggregate/config-push")
     async def config_push(request: Request, tenant_id: str = Depends(get_tenant_id)):
+        """Push an arbitrary config blob to the tenant's spokes."""
+        # Accept either {"config": ...} or a bare config body.
         body = await request.json()
         cfg = body.get("config") if isinstance(body, dict) else body
+        # Push it and report the result.
         pushed = await _push_config(tenant_id, {"config": cfg or {}})
         return {"pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
@@ -2995,6 +3530,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def get_spokes_diag(tenant_id: str = Depends(get_tenant_id)):
         """Live, cache-derived diag per spoke for the tenant (replaces the former
         store.get_spokes_diag call that AttributeErrored)."""
+        # One entry per cached spoke bound to this tenant.
         out = []
         for sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
             try:
@@ -3009,10 +3545,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 "last_seen": (data or {}).get("timestamp"),
                 "telemetry_keys": sorted((data or {}).keys()),
             })
+        # Return the entries.
         return {"tenant_id": tenant_id, "spokes": out}
 
     # Spoke-id prefix → module-type fallback (mirrors api.py:509-513) so an
     # offline spoke with no persisted module_type still shows a readable type.
+    # Spoke-id prefix -> module type.
     _TYPE_PREFIX = {
         "pxmx": "hypervisor", "opn": "firewall", "cppm": "nac",
         "cs": "simulation", "netbox": "ipam", "ldap": "directory",
@@ -3020,12 +3558,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     }
 
     def _spoke_type(sid: str, live_types: dict, meta: dict) -> str:
+        """Return the spoke's module type: live, then persisted, then guessed from its id prefix."""
+        # Prefer the live or persisted type.
         t = live_types.get(sid) or (meta or {}).get("module_type")
         if t:
             return t
+        # Otherwise guess from the id prefix.
         for pfx, typ in _TYPE_PREFIX.items():
             if sid.startswith(pfx):
                 return typ
+        # Unknown.
         return ""
 
     # Module types that count as a "Simulation" spoke for this module's
@@ -3034,6 +3576,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     _SIM_TYPES = {"Client-Sim", "simulation", "cs"}
 
     def _is_sim_spoke(sid: str, live_types: dict, meta: dict) -> bool:
+        """Return whether the spoke counts as a Simulation spoke."""
+        # Resolve its type and check it against the sim types.
         t = _spoke_type(sid, live_types, meta)
         return bool(t) and t in _SIM_TYPES
 
@@ -3046,14 +3590,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         tenant's approved spokes; admins also see its pending spokes plus
         unbound (no tenant) ones so they can assign them. VM count is read from
         the simulations_cache (the cached CS_TELEMETRY relay payload)."""
+        # Caller's session, admin flag and tenants.
         sess = session_user_fn(request)
         admin = bool(sess and is_admin_fn(sess))
         user_tenants = _user_tenants(sess)
+        # Spoke metadata, approvals, live types, connections and telemetry.
         meta = hub.state.system_state.get("module_metadata", {}) or {}
         approved = hub.state.get_approved_modules()
         live_types = getattr(hub, "spoke_module_types", {}) or {}
         conns = getattr(hub, "active_connections", {}) or {}
         cache = getattr(hub, "simulations_cache", {}) or {}
+        # Build one row per visible Simulation spoke.
         out = []
         for sid, m in meta.items():
             m = m or {}
@@ -3062,19 +3609,24 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             # opn/…) are managed from their own modules' screens.
             if not _is_sim_spoke(sid, live_types, m):
                 continue
+            # The spoke's bound tenant.
             t_id = m.get("tenant_id")
+            # Admins see this tenant's spokes plus unbound ones.
             if admin:
                 if t_id and t_id != tenant_id:
                     continue
+            # Others see only this tenant's approved spokes.
             elif (not t_id or t_id != tenant_id or t_id not in user_tenants
                   or not approved.get(hub._primary_key(sid), False)):
                 continue
+            # VM count from the Proxmox host inventory, if present.
             vm_count = None
             cdata = cache.get(sid) or {}
             hosts = cdata.get("proxmox_hosts") or []
             if hosts:
                 vm_count = sum(int((h.get("proxmox") or {}).get("vm_count") or 0)
                                for h in hosts)
+            # Otherwise from a single Proxmox block.
             elif isinstance(cdata.get("proxmox"), dict) and \
                     cdata["proxmox"].get("vm_count") is not None:
                 vm_count = cdata["proxmox"].get("vm_count")
@@ -3086,6 +3638,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 clients = cdata.get("clients")
                 if isinstance(clients, list):
                     vm_count = len(clients)
+            # Add the row.
             out.append({
                 "spoke_id": sid,
                 # Prefer a friendly name — an explicit display_name, else the
@@ -3100,26 +3653,33 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 "tenant_id": t_id,
                 "vm_count": vm_count,
             })
+        # Sort by spoke id and return.
         out.sort(key=lambda s: s["spoke_id"])
         return {"tenant_id": tenant_id, "spokes": out}
 
     @app.get("/sim/api/checks")
     async def get_checks():
+        """Legacy checks endpoint; always returns an empty list."""
+        # Nothing to return.
         return []
 
     # ── tenant-scoped config (literal "tenant" first segment) ──────────────
     @app.get("/sim/api/tenant/{tenant}/hypervisors-config")
     async def get_hypervisors_config(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         """Setup → Hypervisors config (backup/snapshot/per-host/confirm)."""
+        # Return the stored config.
         return {"hypervisors_config": await store.get_hypervisors_config(tenant_id)}
 
     @app.put("/sim/api/tenant/{tenant}/hypervisors-config")
     async def set_hypervisors_config(request: Request, tenant: str,
                                      tenant_id: str = Depends(get_tenant_id)):
+        """Save the tenant's Setup → Hypervisors config."""
+        # Parse the body; the config must be a dict.
         body = await request.json()
         cfg = body.get("hypervisors_config") if isinstance(body, dict) else None
         if not isinstance(cfg, dict):
             raise HTTPException(status_code=400, detail="missing hypervisors_config")
+        # Save it.
         await store.set_hypervisors_config(tenant_id, cfg)
         return {"saved": True}
 
@@ -3129,16 +3689,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         hypervisor/simulation spoke so the Setup dropdown offers real Proxmox
         storages (content=backup). Best-effort — a spoke that errors/omits it
         just contributes nothing. Returns {hosts:[{hostname, storages:[...]}]}."""
+        # Collect storages from every hypervisor and simulation spoke.
         out: List[Dict[str, Any]] = []
         seen_hosts = set()
         for sid in (hub.get_all_spokes_by_type("hypervisor")
                     + hub.get_all_spokes_by_type("simulation")):
+            # Skip duplicates.
             if sid in seen_hosts:
                 continue
             seen_hosts.add(sid)
+            # Ask the spoke for its storages.
             try:
                 r = await hub.request_response(sid, "PXMX_LIST_STORAGE", {}, timeout=60.0)
                 data = r.get("payload", {}).get("data", {}) if isinstance(r, dict) else {}
+                # Keep every host entry that has a hostname.
                 for h in (data.get("hosts") or []):
                     if isinstance(h, dict) and h.get("hostname"):
                         # Forward storage_types (name→type, e.g. pbs/dir/nfs/zfs)
@@ -3149,20 +3713,27 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                     "storages": h.get("storages") or [],
                                     "storage_types": h.get("storage_types") or {}})
             except Exception as e:  # noqa: BLE001
+                # Ignore failing spokes.
                 logger.debug("PXMX_LIST_STORAGE %s failed: %s", sid, e)
+        # Return everything collected.
         return {"hosts": out}
 
     @app.get("/sim/api/tenant/{tenant}/hub-config")
     async def get_hub_config(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's hub-config (enable flag + knobs)."""
+        # Read from the store.
         return await store.get_hub_config(tenant_id)
 
     @app.put("/sim/api/tenant/{tenant}/hub-config")
     async def set_hub_config(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Save the tenant's hub-config, pushing it to the spokes when enabled."""
+        # Parse the body.
         body = await request.json()
         hc = body.get("hub_config") or {}
         # Fetch the stored snapshot up front — used to normalize list fields AND to
         # PRESERVE the enable state when a save OMITS the flag.
         try:
+            # The stored config (None on error).
             stored = await store.get_hub_config(tenant_id)
         except Exception:
             stored = None
@@ -3179,6 +3750,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # / ignored_hostnames; downstream expects lists. Preserve usb_vidpids
         # type/label from the currently-stored entry.
         hc = normalize_hub_config_lists(hc, stored_hc)
+        # Save, push when enabled, and report.
         await store.set_hub_config(tenant_id, enabled, hc)
         pushed = await _push_config(tenant_id, hc if enabled else {}) if enabled else 0
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
@@ -3193,35 +3765,49 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         settings clear to defaults too (the payload carries an explicit value
         for every owned knob so the spoke's set-present-only apply clears old
         user values)."""
+        # Reset in the store.
         result = await store.reset_hub_config(tenant_id)
+        # Push the reset config when enabled.
         pushed = await _push_config(tenant_id, result["hub_config"]) \
             if result["hub_config_enabled"] else 0
+        # Report the result and the new config.
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False)),
                 "hub_config_enabled": result["hub_config_enabled"],
                 "hub_config": result["hub_config"]}
 
     @app.get("/sim/api/tenant/{tenant}/onboarding-psk")
     async def get_psks(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's onboarding PSKs (admins only)."""
+        # Admin gate, then the stored PSKs.
         _require_tenant_admin_or_admin(request)
         return {"psks": await store.get_psks(tenant_id)}
 
     @app.post("/sim/api/tenant/{tenant}/onboarding-psk")
     async def gen_psk(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Generate a new onboarding PSK, store it, and push it to the spokes (admins only)."""
+        # Admin gate.
         _require_tenant_admin_or_admin(request)
+        # Random URL-safe PSK.
         import secrets as _secrets
         psk = _secrets.token_urlsafe(24)
+        # Store it, push it, and return it.
         await store.add_psk(tenant_id, psk)
         pushed = await _push_config(tenant_id, {"relay_onboarding_psk": psk})
         return {"psk": psk, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.delete("/sim/api/tenant/{tenant}/onboarding-psk")
     async def revoke_psk(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Revoke an onboarding PSK and rotate it off the spokes (admins only)."""
+        # Admin gate.
         _require_tenant_admin_or_admin(request)
+        # The PSK to revoke from the body.
         body = await request.json()
         psk = body.get("psk") if isinstance(body, dict) else None
+        # Remove it if present.
         removed = await store.remove_psk(tenant_id, psk) if psk else False
         # Rotate the spoke's PSK away from the revoked value.
         pushed = await _push_config(tenant_id, {"relay_onboarding_psk": ""}) if removed else 0
+        # Report the result.
         return {"removed": removed, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.post("/sim/api/tenant/{tenant}/spokes/{spoke_id}/claim")
@@ -3236,10 +3822,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         onboarding_psks store the /onboarding-psk routes manage, then the spoke
         is approved + tenant-bound and (if connected) pushed its session key +
         APPROVED + config so it begins operating immediately."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # PSK and spoke id are both required.
         psk = str((body or {}).get("onboarding_psk") or "").strip()
         if not psk:
             raise HTTPException(status_code=400, detail="onboarding_psk required")
@@ -3248,22 +3836,27 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Only a Simulation spoke may be claimed from this (Simulations) screen.
         # A non-sim spoke connecting with this tenant's PSK would otherwise get
         # bound as if it were a Client-Sim spoke.
+        # Look up the spoke's type info.
         live_types = getattr(hub, "spoke_module_types", {}) or {}
         spoke_meta = (hub.state.system_state.get("module_metadata", {}) or {}).get(spoke_id) or {}
         if not _is_sim_spoke(spoke_id, live_types, spoke_meta):
             raise HTTPException(status_code=409, detail="Only a Simulation spoke can be claimed here.")
+        # Load the tenant's PSKs; failures are a 500.
         try:
             psks = await store.get_psks(tenant_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("claim_spoke: PSK read failed for tenant %s: %s", tenant_id, exc)
             raise HTTPException(status_code=500, detail="PSK store unavailable")
+        # Constant-time comparison against each stored PSK.
         if not psks or not any(hmac.compare_digest(str(p), psk) for p in psks):
             raise HTTPException(status_code=403, detail="Invalid onboarding PSK")
+        # Approve and bind the spoke.
         try:
             await hub.approve_and_bind_spoke(spoke_id, tenant_id)
         except Exception as exc:  # noqa: BLE001
             logger.error("claim_spoke: approve_and_bind failed for %s: %s", spoke_id, exc)
             raise HTTPException(status_code=500, detail=str(exc))
+        # Log and report success.
         logger.info("Spoke %s claimed for tenant %s via PSK.", spoke_id, tenant_id)
         return {"status": "success", "spoke_id": spoke_id, "tenant_id": tenant_id}
 
@@ -3271,15 +3864,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """404 unless ``spoke_id`` is bound to ``tenant_id`` (or, when
         ``allow_unbound``, bound to no tenant) — so a spoke-management action
         in tenant A's context can never read or touch tenant B's spoke."""
+        # The spoke's bound tenant (None on error).
         try:
             bound = hub.state.get_spoke_tenant(spoke_id)
         except Exception:
             bound = None
+        # Same tenant: allowed.
         if bound:
             if bound == tenant_id:
                 return
+        # Unbound and unbound is allowed.
         elif allow_unbound:
             return
+        # Anything else looks like a missing spoke.
         raise HTTPException(status_code=404, detail="Spoke not found")
 
     # ── spoke management parity (Wave 6) — admin-only {tenant}-first routes ──
@@ -3287,32 +3884,45 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.patch("/sim/api/{tenant}/spokes/{spoke_id}/label")
     async def cs_spoke_set_label(request: Request, tenant: str, spoke_id: str,
                                   tenant_id: str = Depends(get_tenant_id)):
+        """Rename a spoke (admins only)."""
+        # Admin gate; the spoke must be this tenant's or unbound.
         _require_admin(request)
         _require_spoke_in_tenant(spoke_id, tenant_id, allow_unbound=True)
+        # The label is required.
         body = await request.json()
         label = (body or {}).get("label")
         if not label or not str(label).strip():
             raise HTTPException(status_code=400, detail="label required")
+        # Save the new name.
         hub.state.set_module_name(spoke_id, str(label).strip())
         hub.state._mark_dirty()
+        # Report the new label.
         return {"saved": True, "spoke_id": spoke_id, "label": str(label).strip()}
 
     @app.patch("/sim/api/{tenant}/spokes/{spoke_id}/assigned-site")
     async def cs_spoke_set_assigned_site(request: Request, tenant: str, spoke_id: str,
                                           tenant_id: str = Depends(get_tenant_id)):
+        """Set a spoke's assigned site (admins only)."""
+        # Admin gate; the spoke must be this tenant's or unbound.
         _require_admin(request)
         _require_spoke_in_tenant(spoke_id, tenant_id, allow_unbound=True)
+        # Read the site from the body.
         body = await request.json()
         site = (body or {}).get("site", "")
+        # Save it in the metadata.
         hub.state.update_module_metadata(spoke_id, {"assigned_site": site or ""})
         hub.state._mark_dirty()
+        # Report the new site.
         return {"saved": True, "spoke_id": spoke_id, "assigned_site": site or ""}
 
     @app.post("/sim/api/{tenant}/spokes/{spoke_id}/approve")
     async def cs_spoke_approve(request: Request, tenant: str, spoke_id: str,
                                 tenant_id: str = Depends(get_tenant_id)):
+        """Approve or unapprove a spoke, optionally binding a tenant (admins only)."""
+        # Admin gate; the spoke must be this tenant's or unbound.
         _require_admin(request)
         _require_spoke_in_tenant(spoke_id, tenant_id, allow_unbound=True)
+        # Parse an optional JSON body.
         raw = await request.body()
         body = {}
         if raw:
@@ -3321,29 +3931,39 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 body = _json.loads(raw)
             except Exception:
                 body = {}
+        # "unapprove" revokes; anything else approves.
         action = (body or {}).get("action", "approve")
         approved = action != "unapprove"
+        # Update the persisted and in-memory approval.
         hub.state.register_module(spoke_id, approved=approved)
         hub.approved_modules[hub._primary_key(spoke_id)] = approved
+        # Bind a tenant if one was given.
         if (body or {}).get("tenant_id"):
             hub.state.set_spoke_tenant(spoke_id, body["tenant_id"])
+        # Save now and report.
         await hub.state.save_state_now()
         return {"saved": True, "spoke_id": spoke_id, "approved": approved}
 
     @app.patch("/sim/api/{tenant}/spokes/{spoke_id}/config")
     async def cs_spoke_patch_config(request: Request, tenant: str, spoke_id: str,
                                      tenant_id: str = Depends(get_tenant_id)):
+        """Push an arbitrary config patch to the tenant's spokes (admins only)."""
+        # Admin gate.
         _require_admin(request)
+        # The config must be an object.
         body = await request.json()
         cfg = (body or {}).get("config") or {}
         if not isinstance(cfg, dict):
             raise HTTPException(status_code=400, detail="config must be an object")
+        # Push it and report.
         pushed = await _push_config(tenant_id, cfg)
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.delete("/sim/api/spokes/{spoke_id}")
     async def cs_spoke_delete(request: Request, spoke_id: str,
                               tenant_id: str = Depends(get_tenant_id)):
+        """Remove a spoke: close its socket and drop its registration and keys (admins only)."""
+        # Admin gate; the spoke must be this tenant's or unbound.
         _require_admin(request)
         _require_spoke_in_tenant(spoke_id, tenant_id, allow_unbound=True)
         # Close the live WS (if any) then drop registration + metadata + keys.
@@ -3353,34 +3973,43 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 await ws.close(code=1008, reason="Removed by admin")
             except Exception as exc:
                 logger.warning("cs_spoke_delete: close WS %s failed: %s", spoke_id, exc)
+        # Remove its registration and metadata.
         try:
             hub.state.remove_module(spoke_id)
         except Exception as exc:
             logger.warning("cs_spoke_delete: remove_module %s failed: %s", spoke_id, exc)
+        # Delete its session key.
         try:
             hub.key_manager.delete_spoke_key(hub._primary_key(spoke_id))
         except Exception as exc:
             logger.warning("cs_spoke_delete: delete_spoke_key %s failed: %s", spoke_id, exc)
+        # Report removal.
         return {"removed": True, "spoke_id": spoke_id}
 
     @app.get("/sim/api/{tenant}/spokes/{spoke_id}/config-diag")
     async def cs_spoke_config_diag(tenant: str, spoke_id: str,
                                    tenant_id: str = Depends(get_tenant_id)):
         # Desired (store-pushed) vs applied (last relayed telemetry) for a spoke.
+        """Return a spoke's applied config and cached telemetry info for diagnostics."""
         _require_spoke_in_tenant(spoke_id, tenant_id)
+        # Base diagnostic record.
         diag = {"spoke_id": spoke_id, "tenant_id": tenant_id}
+        # Applied config from the service; record any error.
         try:
             diag["applied_config"] = await service.get_spoke_config(tenant_id, spoke_id)
         except Exception as exc:
             diag["applied_config"] = None
             diag["applied_error"] = str(exc)
+        # Last seen time and telemetry keys from the cache.
         cache = getattr(hub, "simulations_cache", {}) or {}
         entry = cache.get(spoke_id) or {}
         diag["last_seen"] = entry.get("last_seen")
         diag["telemetry_keys"] = sorted(list(entry.keys())) if isinstance(entry, dict) else []
+        # Return the record.
         return diag
 
     # ── scheduled email health report (Setup → Notifications → Email Reports) ──
+    # Default settings for the single-report feature.
     _EMAIL_REPORT_DEFAULTS = {
         "enabled": False,
         "sections": {"checks": True, "clients": True},
@@ -3392,18 +4021,25 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # Global Admin sees/manages all; a non-admin (reports right) sees only reports
     # for their own tenant and can only create for it. Stored in global_config via
     # email_report.get_reports / save_reports.
+    # Report ids.
     import uuid as _uuid
 
     def _user_tenant(sess):
+        """Return the session user's primary tenant id."""
+        # Its tenant_id, or the first listed tenant.
         u = (sess or {}).get("user", {}) or {}
         return u.get("tenant_id") or ((u.get("tenants") or [None])[0])
 
     def _clean_report(body, sess, existing=None):
+        """Validate and normalise a report body into a stored report record."""
+        # Schedule fields and target tenant.
         sch = body.get("schedule") or {}
         freq = str(sch.get("freq", "weekly"))
         tenant = str(body.get("tenant") or "default")
+        # Non-admins can only target their own tenant.
         if not is_admin_fn(sess):
             tenant = _user_tenant(sess) or "default"  # non-admin can only target own
+        # Build the clean record with clamped schedule values.
         return {
             "id": (existing or {}).get("id") or _uuid.uuid4().hex[:12],
             "name": (str(body.get("name") or "Report").strip() or "Report")[:80],
@@ -3422,12 +4058,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         }
 
     def _may_touch(sess, rep):
+        """Return whether the session may modify this report."""
+        # Admins, or users of the report's tenant.
         return is_admin_fn(sess) or (rep.get("tenant") == _user_tenant(sess))
 
     @app.get("/api/reports/list")
     async def list_reports(request: Request, tenant: str = None):
+        """List reports visible to the caller, optionally scoped to one tenant."""
+        # Caller session and all reports.
         sess = session_user_fn(request)
         reports = email_report.get_reports(hub)
+        # Non-admins see only their tenant's reports.
         if not is_admin_fn(sess):
             tid = _user_tenant(sess)
             reports = [r for r in reports if r.get("tenant") == tid]
@@ -3439,85 +4080,117 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             # reports, never another tenant's. Only a call with no ?tenant= at
             # all (programmatic) keeps the full list.
             import access
+            # Expand the tenant into its scope ids and filter by them.
             scope = access.tenant_scope_ids(tenant)
             if scope is not None:
                 reports = [r for r in reports
                            if access.in_tenant_scope(r.get("tenant"), scope)]
+        # Return the visible reports.
         return {"reports": reports}
 
     @app.get("/api/reports/tenants")
     async def reports_tenants(request: Request):
         """Tenants selectable as a report's dashboard (admin: all; else own only)."""
+        # Caller session and the tenant map.
         sess = session_user_fn(request)
         tenants = hub.state.tenant_state.get("tenants", {}) or {}
+        # One option per tenant ("ADMIN" for default).
         out = [{"id": tid, "name": "ADMIN" if tid == "default" else ((cfg or {}).get("name") or tid)} for tid, cfg in tenants.items()]
+        # Make sure the ADMIN tenant is always listed.
         if "default" not in [t["id"] for t in out]:
             out.insert(0, {"id": "default", "name": "ADMIN"})
+        # Non-admins see only their own tenant.
         if not is_admin_fn(sess):
             mine = _user_tenant(sess)
             out = [t for t in out if t["id"] == mine]
+        # Return the options.
         return {"tenants": out}
 
     @app.post("/api/reports")
     async def create_report(request: Request):
+        """Create a new emailed report."""
+        # Caller session, body and current reports.
         sess = session_user_fn(request)
         body = await request.json()
         reports = email_report.get_reports(hub)
+        # Build the clean record, append it, and save.
         rep = _clean_report(body if isinstance(body, dict) else {}, sess)
         reports.append(rep)
         email_report.save_reports(hub, reports)
+        # Return the new report.
         return {"saved": True, "report": rep}
 
     @app.put("/api/reports/{rid}")
     async def update_report(rid: str, request: Request):
+        """Update an existing report, if the caller may touch it."""
+        # Caller session, body and current reports.
         sess = session_user_fn(request)
         body = await request.json()
         reports = email_report.get_reports(hub)
+        # Find the report by id.
         for i, r in enumerate(reports):
             if r.get("id") == rid:
+                # Forbid other tenants' reports.
                 if not _may_touch(sess, r):
                     raise HTTPException(status_code=403, detail="Not authorized for this report")
+                # Replace, save and return it.
                 reports[i] = _clean_report(body if isinstance(body, dict) else {}, sess, r)
                 email_report.save_reports(hub, reports)
                 return {"saved": True, "report": reports[i]}
+        # No such report.
         raise HTTPException(status_code=404, detail="Report not found")
 
     @app.delete("/api/reports/{rid}")
     async def delete_report(rid: str, request: Request):
+        """Delete a report, if the caller may touch it."""
+        # Caller session and current reports.
         sess = session_user_fn(request)
         reports = email_report.get_reports(hub)
+        # Keep every report except the target.
         keep, removed = [], False
         for r in reports:
             if r.get("id") == rid:
+                # Forbid other tenants' reports.
                 if not _may_touch(sess, r):
                     raise HTTPException(status_code=403, detail="Not authorized for this report")
                 removed = True
                 continue
             keep.append(r)
+        # Save only if something was removed.
         if removed:
             email_report.save_reports(hub, keep)
+        # Report the result.
         return {"removed": removed}
 
     @app.post("/api/reports/{rid}/test")
     async def test_report(rid: str, request: Request):
+        """Send a report immediately as a test."""
+        # Caller session and the report.
         sess = session_user_fn(request)
         rep = next((r for r in email_report.get_reports(hub) if r.get("id") == rid), None)
+        # Missing report or no permission.
         if not rep:
             raise HTTPException(status_code=404, detail="Report not found")
         if not _may_touch(sess, rep):
             raise HTTPException(status_code=403, detail="Not authorized for this report")
+        # Send now; failures are a 400.
         try:
             await email_report.send_now(hub, rep.get("tenant") or "default", rep)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"Send failed: {exc}")
+        # Report the recipients.
         return {"sent": True, "to": rep.get("recipients") or []}
 
     # ── realtime alert rules (per-tenant; the AlertEngine matches on these) ──
+    # Valid alert-rule sources.
     from alert_engine import SOURCES as _ALERT_SOURCES
 
     def _clean_rule(body, existing=None):
+        """Validate and normalise an alert-rule body into a stored rule record."""
+        # Unknown sources fall back to the first one.
         src = str(body.get("source") or "")
         src = src if src in _ALERT_SOURCES else _ALERT_SOURCES[0]
+        # Build the clean rule.
         return {
             "id": (existing or {}).get("id") or _uuid.uuid4().hex[:12],
             "name": (str(body.get("name") or "").strip() or src)[:80],
@@ -3530,64 +4203,89 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.get("/api/alerts/rules")
     async def list_alert_rules(tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's alert rules and the valid sources."""
+        # Read from the store.
         return {"rules": await store.get_alert_rules(tenant_id), "sources": list(_ALERT_SOURCES)}
 
     @app.post("/api/alerts/rules")
     async def create_alert_rule(request: Request, tenant_id: str = Depends(get_tenant_id)):
+        """Create a new alert rule for the tenant."""
+        # Body and current rules.
         body = await request.json()
         rules = await store.get_alert_rules(tenant_id)
+        # Build, append and save.
         rule = _clean_rule(body if isinstance(body, dict) else {})
         rules.append(rule)
         await store.set_alert_rules(tenant_id, rules)
+        # Return the new rule.
         return {"saved": True, "rule": rule}
 
     @app.put("/api/alerts/rules/{rid}")
     async def update_alert_rule(rid: str, request: Request, tenant_id: str = Depends(get_tenant_id)):
+        """Update an existing alert rule."""
+        # Body and current rules.
         body = await request.json()
         rules = await store.get_alert_rules(tenant_id)
+        # Find the rule by id, then replace, save and return it.
         for i, r in enumerate(rules):
             if r.get("id") == rid:
                 rules[i] = _clean_rule(body if isinstance(body, dict) else {}, r)
                 await store.set_alert_rules(tenant_id, rules)
                 return {"saved": True, "rule": rules[i]}
+        # No such rule.
         raise HTTPException(status_code=404, detail="Rule not found")
 
     @app.delete("/api/alerts/rules/{rid}")
     async def delete_alert_rule(rid: str, tenant_id: str = Depends(get_tenant_id)):
+        """Delete an alert rule."""
+        # Drop the rule by id.
         rules = await store.get_alert_rules(tenant_id)
         keep = [r for r in rules if r.get("id") != rid]
         removed = len(keep) != len(rules)
+        # Save only if something was removed.
         if removed:
             await store.set_alert_rules(tenant_id, keep)
+        # Report the result.
         return {"removed": removed}
 
     @app.post("/api/alerts/rules/{rid}/test")
     async def test_alert_rule(rid: str, tenant_id: str = Depends(get_tenant_id)):
+        """Send a test email for an alert rule."""
+        # Find the rule; 404 if missing.
         rule = next((r for r in await store.get_alert_rules(tenant_id) if r.get("id") == rid), None)
         if not rule:
             raise HTTPException(status_code=404, detail="Rule not found")
+        # It must have recipients.
         recips = rule.get("recipients") or []
         if not recips:
             raise HTTPException(status_code=400, detail="This rule has no recipients")
+        # Local import: email sender.
         import notifications as _n
+        # Strip angle brackets so the values are safe in HTML.
         _src = str(rule.get("source") or "").replace("<", "").replace(">", "")
         _tid = str(tenant_id).replace("<", "").replace(">", "")
+        # Send the test email.
         ok = await _n.send_email(
             hub, f"[LM TEST] alert rule '{rule.get('name')}'",
             f"Test alert for source '{_src}' (tenant {_tid}).",
             to_emails=recips,
             html=f"<p>Test alert for <b>{_src}</b> (tenant {_tid}).</p>")
+        # Report a failed send.
         if not ok:
             raise HTTPException(status_code=400, detail="Send failed — check Setup → Notifications")
+        # Report the recipients.
         return {"sent": True, "to": recips}
 
     # ── hub tenant processing-modes (literal "hub" first segment) ──────────
     @app.patch("/sim/api/hub/tenants/{tenant}/processing-modes")
     async def set_processing_mode(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Set one processing mode for the tenant and push the change to its spokes."""
+        # Take the single feature/value pair from the body.
         body = await request.json()
         feature, value = next(iter(body.items())) if body else (None, None)
         if not feature:
             raise HTTPException(status_code=400, detail="missing feature")
+        # Save it.
         await store.set_processing_mode(tenant_id, feature, value)
         # central_api maps to the legacy webui-spoke's central_api.mode; every
         # polling feature also pushes the resolved processing_modes so the live
@@ -3597,12 +4295,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             payload = {"central_api": {"mode": "central" if value == "centralized" else "classic"}}
         if feature in ("central_api", "central_on_prem_api", "mist_api"):
             payload["processing_modes"] = await _cs_processing_modes(tenant_id)
+        # Push only if there is something to send.
         pushed = await _push_config(tenant_id, payload) if payload else 0
+        # Report the result.
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     # ── {tenant}/... param routes (registered last) ────────────────────────
     @app.get("/sim/api/{tenant}/spokes/{spoke_id}/config")
     async def get_spoke_config(tenant: str, spoke_id: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return a spoke's applied config."""
+        # From the service.
         return await service.get_spoke_config(tenant_id, spoke_id)
 
     # ── Kill switch (global sim emergency stop) ───────────────────────────────
@@ -3613,13 +4315,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # circuits every sim iteration to KILLED).
     @app.get("/sim/api/{tenant}/kill-switch")
     async def cs_get_kill_switch(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's kill-switch state from its spoke."""
+        # Find the spoke; none means unknown.
         sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
         if not sid:
             return {"kill_switch": None, "spoke_connected": False}
+        # Ask the spoke; failures mean unknown.
         try:
             result = await hub.request_response(sid, "CS_GET_KILL_SWITCH", {}, timeout=4.0)
         except Exception:
             return {"kill_switch": None, "spoke_connected": False}
+        # Unwrap the reply and return the flag.
         data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
         ks = data.get("kill_switch") if isinstance(data, dict) else None
         return {"kill_switch": bool(ks), "spoke_connected": True}
@@ -3627,10 +4333,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.post("/sim/api/{tenant}/kill-switch")
     async def cs_set_kill_switch(request: Request, tenant: str,
                                  tenant_id: str = Depends(get_tenant_id)):
+        """Turn the tenant's kill switch on or off on its spoke."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Forward the on/off flag.
         on = bool(body.get("on")) if isinstance(body, dict) else False
         return await _cs_forward(tenant_id, "CS_KILL_SWITCH", {"on": on})
 
@@ -3643,13 +4352,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.post("/sim/api/{tenant}/demo/client/{hostname}/scenario")
     async def cs_demo_set_scenario(request: Request, tenant: str, hostname: str,
                                    tenant_id: str = Depends(get_tenant_id)):
+        """Trigger a named demo failure scenario on one client."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # The scenario name is required.
         scenario = str(body.get("scenario") or "").strip() if isinstance(body, dict) else ""
         if not scenario:
             raise HTTPException(status_code=400, detail="missing 'scenario'")
+        # Forward it to the spoke.
         return await _cs_forward(tenant_id, "CS_DEMO_SCENARIO",
                                  {"hostname": hostname, "scenario": scenario,
                                   "triggered_by": str(body.get("triggered_by") or "")})
@@ -3657,10 +4370,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.delete("/sim/api/{tenant}/demo/client/{hostname}/scenario")
     async def cs_demo_clear_scenario(tenant: str, hostname: str,
                                      tenant_id: str = Depends(get_tenant_id)):
+        """Clear a client's demo scenario."""
+        # Forward to the spoke.
         return await _cs_forward(tenant_id, "CS_DEMO_CLEAR", {"hostname": hostname})
 
     @app.get("/sim/api/{tenant}/demo/active")
     async def cs_demo_active(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return the active demo scenarios (empty if the spoke is offline)."""
+        # Ask the spoke; offline means empty.
         try:
             return await _cs_forward(tenant_id, "CS_GET_DEMO_ACTIVE", {})
         except HTTPException:
@@ -3671,11 +4388,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # The scenario catalog is static; fall back to the canon if the spoke is
         # offline so the UI's dropdown still populates. (Mirrors
         # cs/lm-spoke/src/demo_scenarios.build_scenarios — kept in sync.)
+        """Return the demo scenario catalog (built-in copy if the spoke is offline)."""
         _flags = ("dns_fail", "dhcp_fail", "assoc_fail", "auth_fail",
                   "ssidpw_fail", "mac_auth_fail", "port_flap")
+        # Built-in catalog: normal (all off) plus one per flag.
         _canon = {"normal": {f: "off" for f in _flags}}
         for f in _flags:
             _canon[f] = {x: ("on" if x == f else "off") for x in _flags}
+        # Prefer the spoke's catalog.
         try:
             return await _cs_forward(tenant_id, "CS_GET_DEMO_SCENARIOS", {})
         except HTTPException:
@@ -3690,14 +4410,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.post("/sim/api/{tenant}/clients/control-all")
     async def cs_control_all(request: Request, tenant: str,
                              tenant_id: str = Depends(get_tenant_id)):
+        """Apply the same overrides to every client on the tenant's spokes."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Accept {"overrides": {...}} or a bare flag dict.
         overrides = body.get("overrides") if isinstance(body, dict) else None
         if not isinstance(overrides, dict):
             overrides = {k: v for k, v in (body or {}).items()
                          if isinstance(body, dict)}
+        # Forward to the spoke.
         return await _cs_forward(tenant_id, "CS_SET_ALL_CLIENT_OVERRIDES",
                                  {"overrides": overrides})
 
@@ -3716,13 +4440,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # only the primary left the others' clients behind — "Purge Clients"
         # reported success while the untouched spokes' clients reappeared on
         # the next ~10s telemetry frame, looking like the purge never worked.
+        """Purge every registered client on all of the tenant's spokes and clear the cache."""
         results = await _cs_forward_all(tenant_id, "CS_PURGE_CLIENTS", {})
+        # Spokes that answered; 502 if none did.
         replied = [d for _sid, d in results if isinstance(d, dict)]
         if not replied:
             raise HTTPException(status_code=502,
                                 detail="no client-sim spoke responded to the purge request")
+        # Total purged across spokes.
         purged = sum(int(d.get("purged") or 0) for d in replied)
         try:
+            # Drop cached clients for this tenant's spokes.
             for _sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
                 try:
                     if hub.state.get_spoke_tenant(_sid) != tenant_id:
@@ -3733,6 +4461,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     data.pop("clients", None)
         except Exception:  # noqa: BLE001
             pass
+        # Report the total.
         return {"status": "SUCCESS", "purged": purged}
 
     @app.delete("/sim/api/proxmox/host/{hostname}")
@@ -3744,22 +4473,27 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         tenant's cs spokes (immediate UI removal) and best-effort tells the owning
         spoke to drop it from ``proxmox_states`` so it isn't re-relayed. Works even
         if the spoke is offline (cache clear still applies)."""
+        # Admin-only; the hostname is required.
         _require_admin(request)
         hn = (hostname or "").strip()
         if not hn:
             raise HTTPException(status_code=400, detail="hostname required")
+        # Remove the host from each of this tenant's cached spokes.
         removed = 0
         cleared_sids = []
         cache = getattr(hub, "simulations_cache", None)
         if isinstance(cache, dict):
             for sid, cdata in list(cache.items()):
+                # Skip malformed cache entries.
                 if not isinstance(cdata, dict):
                     continue
+                # Skip other tenants' spokes.
                 try:
                     if hub.state.get_spoke_tenant(sid) != tenant_id:
                         continue
                 except Exception:
                     pass
+                # Drop the host's row from proxmox_hosts.
                 touched = False
                 ph = cdata.get("proxmox_hosts")
                 if isinstance(ph, list):
@@ -3779,6 +4513,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         if len(pruned) != len(lst):
                             cdata[k] = pruned
                             touched = True
+                # Note which spokes were changed.
                 if touched:
                     cleared_sids.append(sid)
         # Best-effort: tell EVERY cs spoke of this tenant to drop it from
@@ -3787,12 +4522,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # tenant's spokes (e.g. after its pxmx server moved to another tenant), so
         # notifying only the primary spoke left the stale row behind.
         forwarded = False
+        # Ask every spoke to purge it; note whether any answered.
         try:
             results = await _cs_forward_all(tenant_id, "CS_PURGE_HOST", {"hostname": hn}, timeout=8.0)
             forwarded = any(isinstance(d, dict) for _sid, d in results)
         except Exception:
             pass
+        # Refresh the site-map cache.
         _invalidate_pxmx_site_map(tenant_id)
+        # Report the result.
         return {"status": "ok", "removed": removed, "spoke_notified": forwarded,
                 "message": (f"Removed host {hn}"
                             + ("" if forwarded else " (spoke offline — cache cleared; "
@@ -3813,10 +4551,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         registered client so the served ``simulation.conf`` drops the stale
         ``[username]`` sim flags on the next client fetch. Mirrors the per-host
         CS_CLEAR_CLIENT_OVERRIDES but fan-out to all clients in one shot."""
+        # Clear on the spoke.
         result = await _cs_forward(tenant_id, "CS_CLEAR_ALL_CLIENT_OVERRIDES", {})
         # Mirror the clear into the hub cache so the Clients tab sim bars drop
         # the flags before the next ~10s telemetry frame (otherwise a stale
         # override reappears until the frame lands).
+        # Drop cached overrides for this tenant's clients.
         try:
             for _sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
                 try:
@@ -3829,6 +4569,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         c.pop("overrides", None)
         except Exception:  # noqa: BLE001
             pass
+        # Return the spoke's reply.
         return result
 
     # Remove ONE client's registry record — the surgical counterpart to
@@ -3842,6 +4583,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.delete("/sim/api/{tenant}/clients/{hostname}")
     async def cs_delete_client(tenant: str, hostname: str,
                                tenant_id: str = Depends(get_tenant_id)):
+        """Remove one client's registry record from all of the tenant's spokes."""
+        # Delete everywhere and report.
         removed = await _delete_client_everywhere(tenant_id, hostname)
         return {"status": "SUCCESS", "hostname": hostname, "removed": removed}
 
@@ -3868,13 +4611,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # total forwarding failure silently masqueraded as "already gone" —
         # the same misleading-message failure mode this endpoint exists to
         # fix, just moved from the single-spoke path to the all-failed path.
+        # Spokes that answered; 502 if none did.
         replied = [d for _sid, d in results if isinstance(d, dict)]
         if not replied:
             raise HTTPException(status_code=502,
                                 detail="no client-sim spoke responded to the delete request")
+        # Removed if any spoke had it.
         removed = any(d.get("removed") for d in replied)
         # Mirror the removal into the hub cache so the row disappears before
         # the next ~10s telemetry frame (same pattern as Purge Clients).
+        # Drop the client from this tenant's cache.
         try:
             for _sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
                 try:
@@ -3888,6 +4634,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                        if not (isinstance(c, dict) and c.get("hostname") == hostname)]
         except Exception:  # noqa: BLE001
             pass
+        # Whether it was removed.
         return removed
 
     # Real batches finish fast; a freshly-provisioned VM's telemetry can lag
@@ -3921,8 +4668,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         inventory data at all — a telemetry outage that emptied proxmox_vms
         fleet-wide must never read as "every VM is gone", which would scrub
         the whole registry."""
+        # Collect every known VM name across the tenant's hosts.
         vm_names = set()
         saw_any_host = False
+        # Per-host VM inventories.
         for _sid, data in service._spokes_for_tenant(tenant_id):
             for h in (data.get("proxmox_hosts") or []):
                 saw_any_host = True
@@ -3930,29 +4679,37 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     n = str((v or {}).get("name") or "").strip()
                     if n:
                         vm_names.add(n)
+            # Legacy single-host VM list.
             if data.get("proxmox_vms"):  # legacy single-host shape
                 saw_any_host = True
                 for v in data["proxmox_vms"]:
                     n = str((v or {}).get("name") or "").strip()
                     if n:
                         vm_names.add(n)
+        # No inventory at all: skip, so nothing is wrongly scrubbed.
         if not saw_any_host:
             return []
+        # Find clients with no matching VM.
         now = time.time()
         stale = []
         for _sid, data in service._spokes_for_tenant(tenant_id):
+            # One check per unique hostname.
             for c in (data.get("clients") or []):
                 c = c or {}
                 h = str(c.get("hostname") or "").strip()
                 if not h or h in vm_names or h in stale:
                     continue
+                # Last-seen time (0 when unknown).
                 try:
                     ls = float(c.get("last_seen") or 0)
                 except (TypeError, ValueError):
                     ls = 0.0
+                # Skip clients seen within the grace period.
                 if ls and (now - ls) < _SCRUB_GRACE_S:
                     continue
+                # Stale.
                 stale.append(h)
+        # Return the stale hostnames.
         return stale
 
     async def _clients_scrub_loop() -> None:
@@ -3964,19 +4721,25 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         this on a useful timescale). Runs alongside the 15-min reconcile-push
         backstop; deliberately not gated on that loop's cadence or errors.
         Started from main.py."""
+        # Sweep every 15 minutes; a failure never kills the loop.
         while True:
             try:
+                # Check each tenant separately.
                 for tid in _all_tenant_ids():
+                    # Find stale clients; skip the tenant if the check fails.
                     try:
                         stale = _stale_clients_no_vm(tid)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(f"clients scrub: {tid} stale-check failed: {exc}")
                         continue
+                    # Nothing stale.
                     if not stale:
                         continue
+                    # Delete them all at the same time; exceptions are returned, not raised.
                     results = await asyncio.gather(
                         *[_delete_client_everywhere(tid, h) for h in stale],
                         return_exceptions=True)
+                    # Log those actually removed.
                     removed = [h for h, r in zip(stale, results) if r is True]
                     if removed:
                         logger.info("clients scrub (%s): removed %d client(s) with no matching VM: %s",
@@ -3987,6 +4750,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 logger.warning(f"clients scrub loop: {exc}")
             await asyncio.sleep(900)
 
+    # Expose the loop for startup scheduling.
     try:
         hub._clients_scrub_loop = _clients_scrub_loop
     except Exception:  # noqa: BLE001
@@ -3998,20 +4762,26 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Model A: per-client sim overrides live in user-overrides.conf
         # [username], so seed the control panel from there (the same place the
         # toggles write) rather than the legacy per-client registry.
+        """Return a client's per-user sim overrides from user-overrides.conf."""
+        # Map the hostname to its username.
         username = _username_for(hostname)
+        # Read the current overrides text (empty overrides on any error).
         try:
             text = await _current_user_overrides_text(tenant_id)
+            # Case-preserving parse; None if malformed.
             p = configparser.ConfigParser()
             p.optionxform = str
             try:
                 p.read_string(text or "")
             except Exception:  # noqa: BLE001
                 p = None
+            # Collect the sim flags in the user's section.
             ov = {}
             if p is not None and p.has_section(username):
                 for k in p.options(username):
                     if k in _CS_SIM_FLAGS:
                         ov[k] = p.get(username, k)
+            # Return them.
             return {"status": "SUCCESS", "hostname": hostname,
                     "username": username, "overrides": ov}
         except Exception:  # noqa: BLE001
@@ -4020,10 +4790,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.post("/sim/api/{tenant}/clients/{hostname}/control")
     async def cs_set_client_control(request: Request, tenant: str, hostname: str,
                                     tenant_id: str = Depends(get_tenant_id)):
+        """Set a client's per-user sim overrides in user-overrides.conf."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Accept {"overrides": {...}} or inline flags.
         overrides = body.get("overrides") if isinstance(body, dict) else None
         if not isinstance(overrides, dict):
             # Also accept the flags inline ({"dns_fail":"on",...}) for parity with
@@ -4037,6 +4810,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.delete("/sim/api/{tenant}/clients/{hostname}/control")
     async def cs_clear_client_control(tenant: str, hostname: str,
                                       tenant_id: str = Depends(get_tenant_id)):
+        """Clear a client's per-user sim overrides."""
+        # Clear all sim flags for the user.
         return await _write_user_override(tenant_id, hostname, {}, clear=True)
 
     # ── per-host USB VMID overrides ─────────────────────────────────────────
@@ -4049,40 +4824,55 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.get("/sim/api/{tenant}/cs/host-usb-override")
     async def cs_get_host_usb_overrides(tenant: str,
                                         tenant_id: str = Depends(get_tenant_id)):
+        """Return the per-host USB VMID overrides from the spoke."""
+        # Forward to the spoke.
         return await _cs_forward(tenant_id, "CS_GET_HOST_USB_OVERRIDES", {})
 
     @app.post("/sim/api/{tenant}/cs/host-usb-override/{hostname}")
     async def cs_set_host_usb_override(request: Request, tenant: str, hostname: str,
                                        tenant_id: str = Depends(get_tenant_id)):
+        """Set one host's USB VMID override on the spoke."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Accept {"knobs": {...}} or inline knobs.
         knobs = body.get("knobs") if isinstance(body, dict) else None
         if not isinstance(knobs, dict):
             # Accept the knobs inline ({"vmid_start":91000,"vmid_end":91999}).
             knobs = {k: v for k, v in (body or {}).items() if isinstance(body, dict)}
+        # Forward to the spoke.
         return await _cs_forward(tenant_id, "CS_SET_HOST_USB_OVERRIDE",
                                  {"hostname": hostname, "knobs": knobs})
 
     @app.delete("/sim/api/{tenant}/cs/host-usb-override/{hostname}")
     async def cs_clear_host_usb_override(tenant: str, hostname: str,
                                          tenant_id: str = Depends(get_tenant_id)):
+        """Clear one host's USB VMID override on the spoke."""
+        # Forward to the spoke.
         return await _cs_forward(tenant_id, "CS_CLEAR_HOST_USB_OVERRIDE",
                                  {"hostname": hostname})
 
     @app.get("/sim/api/{tenant}/config/simulation-conf")
     async def get_sim_conf(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         # The spoke's actual simulation.conf content, relayed in telemetry.
+        """Return the spoke's current simulation.conf text from telemetry."""
         sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
+        # Its cached telemetry, if any.
         data = (getattr(hub, "simulations_cache", {}) or {}).get(sid, {}) if sid else {}
+        # Return the content.
         return {"content": data.get("sim_conf_content") or "", "sha": ""}
 
     @app.put("/sim/api/{tenant}/config/simulation-conf")
     async def put_sim_conf(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Save simulation.conf (commit it to GitHub in GitHub mode) and push it to the spokes."""
+        # The new content from the body.
         body = await request.json()
         content = body.get("content", "") if isinstance(body, dict) else ""
+        # Fails with 403 if the tenant's config is read-only.
         source = await _require_config_writable(tenant_id)  # 403 if github + no key
+        # Save as the hub-owned override.
         await store.set_sim_conf_content(tenant_id, content)
         # Hub is the sole GitHub client: on a GitHub-managed tenant the HUB
         # commits+pushes this edit to the repo (the spoke is a follower and no
@@ -4091,21 +4881,27 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             await _commit_config_to_github(
                 tenant_id, github_config_client.SIM_CONF_PATH, content,
                 "Update simulation.conf via Lab Manager")
+        # Clear the quota catalog cache.
         _invalidate_sim_quota_catalog(tenant_id)  # sims/sites derive from this
+        # Push the new text.
         pushed = await _push_config(tenant_id, {"sim_conf_override": content})
         # Re-merge + re-push effective quotas so a config change that removes a
         # sim primitive re-validates the tenant's quotas against SIM_META (a
         # quota pointing at a now-unknown sim is dropped) and the spoke
         # reconciles against the refreshed list.
+        # Re-push quotas (0 on error).
         try:
             qpushed = await _push_sim_quotas(tenant_id)
         except Exception:  # noqa: BLE001
             qpushed = 0
+        # Report the result.
         return {"saved": True, "synced_spokes": pushed, "quota_spokes": qpushed,
                 "source": source}
 
     @app.get("/sim/api/{tenant}/clients/sim-overrides")
     async def get_client_overrides(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's stored per-user overrides."""
+        # Read from the store.
         return await store.get_user_overrides(tenant_id)
 
     # ── Simulations Config tab (legacy solutions-hpe/client-sim port) ──────────
@@ -4131,12 +4927,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         (the brief pre-first-pull bootstrap for a github tenant). ``source`` says
         which: ``hub`` (authoritative store) | ``spoke`` (bootstrap fallback).
         """
+        # Stored text; source defaults to hub.
         raw = (await store.get_sim_conf_content(tenant_id)) or ""
         source = "hub"
+        # Hub or GitHub mode (GitHub on error).
         try:
             mode = "hub" if (await store.get_source_of_truth(tenant_id)) == "hub" else "github"
         except Exception:  # noqa: BLE001
             mode = "github"
+        # Store empty: fall back to the spoke.
         if not raw.strip():
             # Hub store empty (github tenant not yet pulled) — ask the spoke for
             # its current effective config so the editor still renders.
@@ -4151,12 +4950,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Distinguish a truly-offline spoke from one that IS connected but whose
         # live CS_GET_CONFIG round-trip failed/timed out (e.g. its event loop was
         # momentarily busy) — the editor mislabeled the latter as "spoke offline".
+        # Whether the spoke is connected.
         spoke_connected = False
         try:
             _sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
             spoke_connected = bool(_sid and hub._primary_key(_sid) in getattr(hub, "active_connections", {}))
         except Exception:
             spoke_connected = False
+        # Return the parsed sections, raw text and metadata.
         return {"sections": _parse_ini_sections(raw), "raw": raw,
                 "mode": mode, "source": source,
                 "spoke_connected": spoke_connected,
@@ -4172,8 +4973,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         tenant hasn't been pulled yet (an empty store is otherwise the real value
         — user-overrides.conf is commonly empty). ``source``: ``hub`` | ``spoke``.
         """
+        # Stored text; source defaults to hub.
         content = (await store.get_user_overrides_content(tenant_id)) or ""
         source = "hub"
+        # Hub or GitHub mode (GitHub on error).
         try:
             mode = "hub" if (await store.get_source_of_truth(tenant_id)) == "hub" else "github"
         except Exception:  # noqa: BLE001
@@ -4188,6 +4991,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     source = "spoke"
             except HTTPException as exc:
                 logger.info("user-overrides-conf: hub store empty + CS_GET_CONFIG failed (%s)", exc.detail)
+        # Return the text and metadata.
         return {"content": content, "mode": mode, "source": source,
                 "fetched_at": _now_iso()}
 
@@ -4199,12 +5003,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         Validates the INI parses (422 on a malformed file) before persisting or
         pushing, mirroring the spoke-side ``sim_config.validate_ini_text`` gate.
         """
+        # The new content from the body.
         body = await request.json()
         content = (body.get("content", "") if isinstance(body, dict) else "") or ""
+        # Fails with 403 if the tenant's config is read-only.
         source = await _require_config_writable(tenant_id)  # 403 if github + no key
         # Validate parse before saving so a bad edit doesn't overwrite the canon.
         if content.strip() and not _parse_ini_sections(content):
             raise HTTPException(status_code=422, detail="Invalid INI: could not parse user-overrides.conf")
+        # Save as the hub-owned override.
         await store.set_user_overrides_content(tenant_id, content)
         # Hub is the sole GitHub client: commit the edit to the repo on a
         # GitHub-managed tenant (best-effort; the spoke no longer pushes).
@@ -4212,6 +5019,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             await _commit_config_to_github(
                 tenant_id, github_config_client.USER_OVERRIDES_PATH, content,
                 "Update user-overrides.conf via Lab Manager")
+        # Push the new text.
         pushed = await _push_config(tenant_id, {"user_conf_override": content})
         # Per-user wsite/sim-flag overrides shift a quota's site pool + sim
         # eligibility, so re-merge + re-push effective quotas (the spoke
@@ -4220,24 +5028,32 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             qpushed = await _push_sim_quotas(tenant_id)
         except Exception:  # noqa: BLE001
             qpushed = 0
+        # Report the result.
         return {"saved": True, "synced_spokes": pushed, "quota_spokes": qpushed,
                 "source": source}
 
     @app.get("/sim/api/{tenant}/settings")
     async def get_settings(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's settings, with the SMTP password hidden."""
+        # Load from the store.
         settings = await store.get_settings(tenant_id)
         # Never echo the password (legacy plaintext smtp_pass or the Fernet
         # ciphertext) to the UI — surface a has_password flag instead.
+        # Copy the notifications, note whether a password exists, then remove it.
         notif = dict(settings.get("notifications") or {})
         has_pw = bool(notif.get("smtp_password_enc") or notif.get("smtp_pass"))
         for _k in ("smtp_pass", "smtp_password", "smtp_password_enc"):
             notif.pop(_k, None)
+        # Expose only the flag.
         notif["has_password"] = has_pw
         settings["notifications"] = notif
+        # Return the sanitised settings.
         return settings
 
     @app.post("/sim/api/{tenant}/settings/notifications")
     async def set_notifications(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Save the tenant's notification recipients (sender settings are hub-global)."""
+        # Parse the body.
         body = await request.json()
         cfg = body if isinstance(body, dict) else {}
         # The hub sends this tenant's spoke out-of-contact alerts itself, using
@@ -4247,14 +5063,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # sender creds are stored here (the spoke-sent email path is retired).
         # Legacy sender-config fields already on disk are preserved untouched
         # (non-destructive) in case the spoke-sent path is ever revived.
+        # Update only the recipients, keeping any legacy fields.
         cur = await store.get_notifications(tenant_id) or {}
         stored = dict(cur)
         stored["to_emails"] = cfg.get("to_emails")
+        # Save.
         await store.set_notifications(tenant_id, stored)
         return {"saved": True}
 
     @app.get("/sim/api/{tenant}/spokes")
     async def list_spokes(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Legacy per-tenant spokes endpoint; always returns an empty list."""
+        # Nothing to return.
         return []
 
     # ── Client-Simulation command queue (D2) ───────────────────────────────
@@ -4271,12 +5091,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         pools are cluster-wide, yet a fleet of standalone nodes each has its own
         set, and picking one that only exists on some hosts would make clones
         fail on the rest. The UI flags a partial pool rather than hiding it."""
+        # Ask every spoke for its pools.
         results = await _cs_forward_all(tenant_id, "CS_GET_POOLS", {}, timeout=20.0)
+        # Accumulators for the union.
         by_pool: dict = {}
         hosts: set = set()
         errors: dict = {}
         selected = ""
+        # Merge each spoke's reply.
         for _sid, data in results:
+            # Skip spokes that failed.
             if not isinstance(data, dict):
                 continue
             for pid, hs in (data.get("by_pool") or {}).items():
@@ -4284,6 +5108,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             hosts.update(data.get("hosts") or [])
             errors.update(data.get("errors") or {})
             selected = selected or str(data.get("selected") or "")
+        # Return the sorted union.
         return {"pools": sorted(by_pool),
                 "by_pool": {k: sorted(v) for k, v in by_pool.items()},
                 "hosts": sorted(hosts), "errors": errors,
@@ -4298,33 +5123,42 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         New clones join via ``qm clone --pool``; this exists for VMs created
         before a pool was set. The agent guards to the sim VMID range, so it can
         never sweep a non-sim VM in."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
             body = {}
+        # Target pool, sent to every spoke.
         pool = str((body or {}).get("pool") or "").strip()
         results = await _cs_forward_all(tenant_id, "CS_POOL_ADD_EXISTING",
                                         {"pool": pool}, timeout=90.0)
+        # Total added and per-spoke errors.
         added, errors = 0, {}
         for _sid, data in results:
+            # Unreachable spokes count as errors.
             if not isinstance(data, dict):
                 errors[str(_sid)] = "spoke unreachable"
                 continue
             added += int(data.get("added") or 0)
             errors.update(data.get("errors") or {})
+        # No spokes at all.
         if not results:
             raise HTTPException(status_code=503, detail="No spoke connected")
+        # SUCCESS or PARTIAL.
         return {"status": "SUCCESS" if not errors else "PARTIAL",
                 "added": added, "errors": errors}
 
     @app.post("/sim/api/{tenant}/proxmx/command")
     async def cs_enqueue_command(request: Request, tenant: str,
                                  tenant_id: str = Depends(get_tenant_id)):
+        """Queue a Proxmox VM command on the tenant's spoke, or on every spoke for fleet actions."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
         body = body if isinstance(body, dict) else {}
+        # The action is required.
         action = str(body.get("action") or "").strip()
         if not action:
             raise HTTPException(status_code=400, detail="missing 'action'")
@@ -4335,6 +5169,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         else:
             args = {k: v for k, v in body.items()
                     if k not in ("action", "target", "type", "all_spokes")}
+        # Command envelope for the spoke.
         payload = {"target": body.get("target") or "proxmox",
                    "action": action, "args": args, "type": body.get("type")}
 
@@ -4347,6 +5182,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Everything else stays single-spoke: a start_vm/stop_vm targets one VM
         # on one host and must NOT be broadcast.
         if body.get("all_spokes"):
+            # Prefer the plural spoke lookup.
             spoke_ids: list = []
             get_spokes = getattr(hub, "get_client_sim_spokes", None)
             if callable(get_spokes):
@@ -4354,10 +5190,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     spoke_ids = list(get_spokes(tenant_id) or [])
                 except Exception:  # noqa: BLE001
                     spoke_ids = []
+            # Fall back to the singular lookup.
             if not spoke_ids:
                 get_spoke = getattr(hub, "get_client_sim_spoke", None)
                 sid = get_spoke(tenant_id) if callable(get_spoke) else None
                 spoke_ids = [sid] if sid else []
+            # No spokes: 503.
             if not spoke_ids:
                 raise HTTPException(status_code=503, detail="No spoke connected")
             # Clearing the quarantine / exclusion list is idempotent and
@@ -4368,6 +5206,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             queueable = action in _QUEUEABLE_FLEET_ACTIONS
 
             def _label(sid):
+                """Return a friendly label for a spoke (its id on error)."""
+                # Use the hub's label helper when present.
                 fn = getattr(hub, "_spoke_label", None)
                 try:
                     return str(fn(sid)) if callable(fn) else str(sid)
@@ -4375,7 +5215,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     return str(sid)
 
             async def _one(sid):
+                """Send the command to one spoke and return (outcome, label-or-message)."""
+                # Friendly name for messages.
                 label = _label(sid)
+                # Queue-able actions may be queued; others must be live.
                 try:
                     if queueable:
                         r = await hub.push_or_queue_to_spoke(
@@ -4387,14 +5230,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         r = await hub.request_response(sid, "CS_QUEUE_COMMAND", payload, timeout=5.0)
                 except Exception as exc:  # noqa: BLE001 — one spoke must not abort the fan-out
                     return "error", f"{label}: {exc}"
+                # Unwrap the reply; a spoke ERROR is a refusal.
                 d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else r
                 if isinstance(d, dict) and d.get("status") == "ERROR":
                     return "refusal", f"{label}: {d.get('message', 'refused')}"
+                # Delivered.
                 return "pushed", label
 
             # Concurrent: N unresponsive spokes cost one timeout, not N.
             outcomes = await asyncio.gather(*(_one(sid) for sid in spoke_ids),
                                             return_exceptions=False)
+            # Sort the outcomes into buckets.
             pushed = sum(1 for k, _ in outcomes if k == "pushed")
             queued = [t for k, t in outcomes if k == "queued"]
             errors = [t for k, t in outcomes if k == "error"]
@@ -4402,31 +5248,39 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             # Partial success is reported, not raised: clearing 3 of 4 spokes is
             # a materially different outcome from clearing none, and the operator
             # needs to know WHICH failed.
+            # Nothing accepted: 502 with the reasons.
             if not (pushed or queued):
                 raise HTTPException(
                     status_code=502,
                     detail="; ".join(errors + refusals) or "no spoke accepted the command")
+            # Report the per-spoke outcome.
             return {"status": "SUCCESS", "pushed_to_spokes": pushed,
                     "queued_to_spokes": len(queued),
                     "spokes_total": len(spoke_ids),
                     "errors": errors, "refusals": refusals, "queued": queued}
 
+        # Single-spoke path: find the spoke.
         sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
         if not sid:
             raise HTTPException(status_code=503, detail="No spoke connected")
+        # Send live; transport errors give 502.
         try:
             result = await hub.request_response(sid, "CS_QUEUE_COMMAND", payload, timeout=5.0)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"enqueue failed: {exc}")
+        # Unwrap the reply.
         data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
         if isinstance(data, dict) and data.get("status") == "ERROR":
             # Safeguard refusal (protected vmid / below sim floor) → 403.
             raise HTTPException(status_code=403, detail=data.get("message", "refused"))
+        # Return the spoke's data.
         return data
 
     @app.get("/sim/api/{tenant}/proxmx/commands")
     async def cs_list_commands(tenant: str, tenant_id: str = Depends(get_tenant_id),
                                live: bool = False):
+        """List the spoke's command queue (cached unless live=1)."""
+        # Find the spoke; none means an empty list.
         sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
         if not sid:
             return {"commands": [], "spoke_connected": False}
@@ -4441,10 +5295,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             cq = _cached_command_queue(hub, sid)
             if cq is not None:
                 return {"commands": cq, "spoke_connected": True}
+        # Live fetch; transport errors give 502.
         try:
             result = await hub.request_response(sid, "CS_GET_COMMANDS", {}, timeout=15.0)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"list failed: {exc}")
+        # Unwrap the reply and return it.
         data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
         return data if isinstance(data, dict) else {"commands": []}
 
@@ -4455,13 +5311,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         bridge reaching it? are commands re-queued or failing?) without SSH.
         Reads the CSBridgePoller instance stored on the hub by
         run_cs_bridge_loop. Returns {} if the bridge hasn't started yet."""
+        # No bridge yet: unavailable.
         bridge = getattr(hub, "cs_bridge", None)
         if bridge is None or not hasattr(bridge, "status_snapshot"):
             return {"agents": [], "available": False}
+        # Snapshot it; errors are reported, never raised.
         try:
             snap = bridge.status_snapshot()
         except Exception as exc:  # noqa: BLE001 — never 500 the panel
             return {"agents": [], "available": False, "error": str(exc)}
+        # Mark it available and return it.
         snap["available"] = True
         return snap
 
@@ -4476,6 +5335,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Per-spoke/per-VM action. Body: {action, args?, target?}. ``target``
         defaults to the spoke's primary proxmox hostname (resolved from the
         cached telemetry) so the UI can address a host by spoke_id alone."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
@@ -4483,6 +5343,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         body = body if isinstance(body, dict) else {}
         # Default host for items that don't specify their own target.
         def _default_target():
+            """Return the spoke's primary Proxmox hostname from cached telemetry ("proxmox" if
+            unknown).
+            """
+            # Read node.hostname from the cached Proxmox block.
             cache = _tenant_cache(tenant_id).get(spoke_id, {})
             px = cache.get("proxmox") or {}
             node = (px.get("node") or {}) if isinstance(px, dict) else {}
@@ -4493,10 +5357,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # VMs route to their own host.
         items = body.get("items")
         if isinstance(items, list) and items:
+            # Normalise each valid item.
             norm = []
             for it in items:
                 if not isinstance(it, dict):
                     continue
+                # Skip items without an action.
                 iact = str(it.get("action") or "").strip()
                 if not iact:
                     continue
@@ -4506,21 +5372,29 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     "args": it.get("args") if isinstance(it.get("args"), dict) else {},
                     "type": it.get("type"),
                 })
+            # Nothing valid: 400.
             if not norm:
                 raise HTTPException(status_code=400, detail="no valid items")
+            # Refuse when the bridge can't reach a target.
             blocked = _bridge_undeliverable({it["target"] for it in norm})
             if blocked:
                 raise HTTPException(status_code=409, detail=blocked)
+            # Forward all items in one call.
             return await _cs_forward(tenant_id, "CS_QUEUE_COMMAND", {"items": norm})
+        # Single-command path: the action is required.
         action = str(body.get("action") or "").strip()
         if not action:
             raise HTTPException(status_code=400, detail="missing 'action'")
+        # Explicit args, or the remaining inline fields.
         args = body.get("args") if isinstance(body.get("args"), dict) else \
             {k: v for k, v in body.items() if k not in ("action", "target", "type")}
+        # Target host (defaults to the spoke's primary host).
         target = body.get("target") or _default_target()
+        # Refuse when the bridge can't reach it.
         blocked = _bridge_undeliverable({target})
         if blocked:
             raise HTTPException(status_code=409, detail=blocked)
+        # Forward the command.
         payload = {"target": target, "action": action, "args": args, "type": body.get("type")}
         return await _cs_forward(tenant_id, "CS_QUEUE_COMMAND", payload)
 
@@ -4547,16 +5421,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         already session-authorized by ``get_tenant_id``; the spoke-binding check
         is the per-VM ownership gate (a cs spoke is single-tenant, so a VM on a
         spoke bound to the session's tenant is the session's VM)."""
+        # Local imports: ids and tokens.
         import uuid as _uuid
         import secrets as _secrets
+        # Login required.
         sess = session_user_fn(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
         body = body if isinstance(body, dict) else {}
+        # Spoke, VM id (must be an int), node, agent and VM type.
         spoke_id = str(body.get("spoke_id") or "").strip()
         try:
             vmid = int(body.get("vmid"))
@@ -4573,12 +5451,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # tenant's spokes or the request is foreign → 403 (not a silent fallback
         # to the primary, which would route to the wrong host and 502).
         tenant_spokes = []
+        # This tenant's cs spokes.
         get_spokes = getattr(hub, "get_client_sim_spokes", None)
         if callable(get_spokes):
             try:
                 tenant_spokes = list(get_spokes(tenant_id) or [])
             except Exception:  # noqa: BLE001
                 tenant_spokes = []
+        # Non-admins need edit access and a spoke that belongs to their tenant.
         if not is_admin_fn(sess):
             if not has_edit_access(sess):
                 raise HTTPException(status_code=403, detail="Edit access required for VM console")
@@ -4593,6 +5473,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             # Admin: prefer the body's spoke_id when it's a connected cs spoke
             # (any tenant); else fall back to the tenant's primary cs spoke.
             if spoke_id and spoke_id not in tenant_spokes:
+                # Accept a foreign spoke id only if it is a connected cs spoke.
                 all_cs = []
                 get_all = getattr(hub, "get_all_spokes_by_type", None)
                 if callable(get_all):
@@ -4603,13 +5484,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         all_cs = []
                 if spoke_id not in all_cs:
                     spoke_id = ""
+            # Otherwise use the tenant's primary spoke.
             if not spoke_id:
                 spoke_id = (hub.get_client_sim_spoke(tenant_id)
                             if hasattr(hub, "get_client_sim_spoke") else None) or ""
             if not spoke_id:
                 raise HTTPException(status_code=503, detail="No spoke connected")
+        # One-shot session id and websocket token.
         session_id = str(_uuid.uuid4())
         ws_token = _secrets.token_urlsafe(32)
+        # Register the session for the console relay.
         hub.register_vnc_session(session_id, {
             "spoke_id": spoke_id,
             "tenant_id": tenant_id,
@@ -4623,6 +5507,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # a cs VM (which may not carry a cluster) uses node as the cluster
         # fallback. node is the authoritative agent-resolver here.
         unique_id = f"{node or 'cs'}/{node or 'cs'}/{vmid}"
+        # Ask the spoke to start VNC; on failure remove the session and return 502.
         try:
             vnc_res = await hub.request_response(spoke_id, "VNC_START", {
                 "session_id": session_id,
@@ -4644,6 +5529,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 vnc_res = vnc_res.get("payload", {}).get("data", vnc_res)
             else:
                 break
+        # Extract the ticket, or fail with the agent's reason.
         ticket = ""
         if isinstance(vnc_res, dict):
             if vnc_res.get("status") not in ("SUCCESS", "OK"):
@@ -4656,6 +5542,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     detail = vnc_res.get("message") or vnc_res.get("error") or "agent refused VNC_START"
                 raise HTTPException(status_code=502, detail=f"failed to start console: {detail}")
             ticket = str(vnc_res.get("ticket") or "")
+        # Return what the browser needs to connect.
         return {"session_id": session_id, "ws_token": ws_token,
                 "ticket": ticket, "expires_in": 60}
 
@@ -4665,11 +5552,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Queue a `proxmox_reclone_all` command on the tenant's cs spoke
         (relayed to the pxmx agent by the CSBridgePoller). Body may carry
         `concurrency` (int) to cap parallel reclones; 0/omit = spoke default."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Requested concurrency (0 = default).
         concurrency = int((body or {}).get("concurrency", 0) or 0)
+        # Reclone-all command envelope.
         payload = {"target": "proxmox", "action": "proxmox_reclone_all",
                     "type": "proxmox_reclone_all", "args": {"concurrency": concurrency}}
         # Fan out to EVERY server concurrently (was _cs_forward → only the first
@@ -4677,6 +5567,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # agent then runs `concurrency` reclones in parallel internally, so the
         # fleet does concurrency×servers at once.
         results = await _cs_forward_all(tenant_id, "CS_QUEUE_COMMAND", payload, timeout=15.0)
+        # Report how many servers got it.
         return {"queued": True, "servers": len(results),
                 "dispatched": sum(1 for _s, d in results if d is not None)}
 
@@ -4686,8 +5577,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         is a FAST op on the agent (it only sets a flag), so it isn't blocked
         behind the batch that holds the agent's long-op semaphore; in-flight
         reclones finish, the rest are skipped."""
+        # Stop command envelope.
         payload = {"target": "proxmox", "action": "proxmox_reclone_stop",
                    "type": "proxmox_reclone_stop", "args": {}}
+        # Send to every server and count those that stopped.
         results = await _cs_forward_all(tenant_id, "CS_QUEUE_COMMAND", payload, timeout=10.0)
         return {"stopped": sum(1 for _s, d in results
                                if isinstance(d, dict) and d.get("stopped")),
@@ -4703,26 +5596,35 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         Reclone All, and a later clean run gets read against stale failures.
         Refused per-agent while a batch is RUNNING (stop it first), so this can
         never blank a progress view someone is watching."""
+        # Clear command envelope.
         payload = {"target": "proxmox", "action": "proxmox_reclone_clear",
                    "type": "proxmox_reclone_clear", "args": {}}
+        # Send to every server and count those that cleared.
         results = await _cs_forward_all(tenant_id, "CS_QUEUE_COMMAND", payload, timeout=10.0)
         cleared = sum(1 for _s, d in results if isinstance(d, dict) and d.get("cleared"))
+        # Report cleared versus refused.
         return {"cleared": cleared, "servers": len(results),
                 "refused": len(results) - cleared}
 
     @app.post("/sim/api/{tenant}/update-all")
     async def cs_update_all(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Queue a pxmx agent self-update on the tenant's spoke."""
+        # Update command envelope.
         payload = {"target": "proxmox", "action": "proxmox_agent_update",
                    "type": "proxmox_agent_update", "args": {}}
+        # Forward to the spoke.
         return await _cs_forward(tenant_id, "CS_QUEUE_COMMAND", payload, timeout=10.0)
 
     @app.get("/sim/api/{tenant}/fleet-reclone-status")
     async def cs_fleet_reclone_status(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return each spoke's cached fleet-reclone state."""
+        # One entry per tenant spoke.
         spokes = []
         for sid, data in _tenant_cache(tenant_id).items():
             rs = data.get("reclone_state") or {}
             spokes.append({"spoke_id": sid, "spoke_name": data.get("spoke_name") or sid,
                             "reclone_state": rs})
+        # Return them.
         return {"spokes": spokes}
 
     @app.post("/sim/api/{tenant}/toggle-auto-provision")
@@ -4732,14 +5634,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         persist it, and push it to ALL bound cs spokes via `_push_config`
         (fans out to every approved connected Client-Sim spoke for the tenant,
         not just one). Also enables `hub_config_enabled` when turned on."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Desired state, and the current hub config.
         enabled = bool(body.get("enabled")) if isinstance(body, dict) else False
         hc = await store.get_hub_config(tenant_id)
+        # Set the flag on a copy of the knobs.
         cfg = dict(hc.get("hub_config") or {})
         cfg["usb_auto_provision"] = "on" if enabled else "off"
+        # Save it (turning on also enables hub config) and push it.
         await store.set_hub_config(tenant_id, bool(hc.get("hub_config_enabled", False)) or enabled, cfg)
         pushed = await _push_config(tenant_id, {"usb_auto_provision": cfg["usb_auto_provision"]})
         # Nudge the cs_bridge to re-sync usb_config to this tenant's connected
@@ -4752,10 +5658,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 br.request_usb_resync(tenant_id)
         except Exception:  # noqa: BLE001 — best-effort; passive sweep still applies
             pass
+        # Report the result.
         return {"saved": True, "usb_auto_provision": cfg["usb_auto_provision"], "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.get("/sim/api/{tenant}/usb-provisioning-status")
     async def cs_usb_provisioning_status(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's USB auto-provisioning status for the UI."""
+        # Hub config, then build the status from config, cache and agent config.
         hc = await store.get_hub_config(tenant_id)
         return _usb_provisioning_status_payload(
             hc.get("hub_config") or {}, _tenant_cache(tenant_id),
@@ -4764,6 +5673,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.delete("/sim/api/{tenant}/proxmx/commands")
     async def cs_clear_commands(tenant: str, target: str = "",
                                 tenant_id: str = Depends(get_tenant_id)):
+        """Clear the spoke's command queue, optionally for one target only."""
+        # Forward to the spoke.
         return await _cs_forward(tenant_id, "CS_CLEAR_COMMANDS", {"target": target or ""})
 
     @app.delete("/sim/api/{tenant}/proxmx/commands/pending")
@@ -4772,14 +5683,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Expire in-flight commands for one target before VM destroy so they
         don't fire against a gone VM. Registered BEFORE the ``{cmd_id}`` route so
         the literal ``pending`` segment isn't captured as a command id."""
+        # The target is required.
         if not target:
             raise HTTPException(status_code=400, detail="missing 'target'")
+        # Forward to the spoke.
         return await _cs_forward(tenant_id, "CS_CLEAR_COMMANDS", {"target": target})
 
     @app.delete("/sim/api/{tenant}/proxmx/commands/{cmd_id}")
     async def cs_delete_command(tenant: str, cmd_id: str,
                                 tenant_id: str = Depends(get_tenant_id)):
         """Remove a single queued command (per-row delete)."""
+        # Forward to the spoke.
         return await _cs_forward(tenant_id, "CS_DELETE_COMMAND", {"id": cmd_id})
 
     @app.post("/sim/api/{tenant}/usb-vidpids")
@@ -4799,17 +5713,21 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         under hub_managed and parses with _parse_json_list, so the hub MUST
         send these exact shapes (a bare comma string would parse to an empty
         certified set and silently break certify/ignore)."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
         body = body if isinstance(body, dict) else {}
+        # vid, pid and a valid action are required.
         vid = str(body.get("vid") or "").strip()
         pid = str(body.get("pid") or "").strip()
         action = str(body.get("action") or "").strip().lower()
         if not vid or not pid or action not in ("certify", "ignore", "remove"):
             raise HTTPException(status_code=400, detail="required: {vid, pid, action: certify|ignore|remove}")
+        # Lowercased vid:pid.
         token = f"{vid.lower()}:{pid.lower()}"
+        # Current hub config.
         hc = await store.get_hub_config(tenant_id)
         cfg = dict(hc.get("hub_config") or {})
         # Normalize existing stored values: accept the current JSON-array shape
@@ -4817,8 +5735,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # values migrate cleanly on the first action).
         cert_list = _normalize_usb_vidpids(cfg.get("usb_vidpids"))
         ign_set = set(_normalize_usb_ignored(cfg.get("usb_ignored_vidpids")))
+        # Index the certified entries by VID:PID.
         cert_by_vid = {e["vidpid"]: e for e in cert_list}
+        # Certify: set or update the type; remove it from ignored.
         if action == "certify":
+            # Unknown types default to wireless.
             dtype = str(body.get("type") or "").strip().lower()
             if dtype not in _USB_TYPES:
                 dtype = "wireless"
@@ -4830,43 +5751,55 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             else:
                 cert_by_vid[token] = {"vidpid": token, "type": dtype, "label": token}
             ign_set.discard(token)
+        # Ignore: add to ignored and remove from certified.
         elif action == "ignore":
             ign_set.add(token)
             cert_by_vid.pop(token, None)
+        # Remove: drop it from both lists.
         else:  # remove
             cert_by_vid.pop(token, None)
             ign_set.discard(token)
+        # Serialise both lists in the shapes the spoke expects.
         cert_list = sorted(cert_by_vid.values(), key=lambda e: e["vidpid"])
         ign_list = sorted(ign_set)
         cfg["usb_vidpids"] = json.dumps(cert_list)
         cfg["usb_ignored_vidpids"] = json.dumps(ign_list)
+        # Save, enabling hub config.
         await store.set_hub_config(tenant_id, bool(hc.get("hub_config_enabled", False)) or True, cfg)
         # Push the EFFECTIVE list (global + tenant) so a per-tenant certify/ignore
         # still respects superadmin-global approvals, and vice versa.
         pushed = await _push_usb_to_tenant(tenant_id)
+        # Report the new lists.
         return {"saved": True, "usb_vidpids": cfg["usb_vidpids"],
                 "usb_ignored_vidpids": cfg["usb_ignored_vidpids"], "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     # ── Setup subtabs (Wave 2) ────────────────────────────────────────────────
     @app.get("/sim/api/{tenant}/settings/github")
     async def get_github(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's GitHub config with the token hidden."""
+        # Load from the store.
         cfg = await store.get_github_config(tenant_id)
         # Never echo the token back to the UI — return only whether one is set.
         safe = dict(cfg or {})
         safe["has_token"] = bool(safe.get("github_token"))
         safe.pop("github_token", None)
+        # Return the safe copy.
         return safe
 
     @app.post("/sim/api/{tenant}/settings/github")
     async def set_github(request: Request, tenant: str,
                          tenant_id: str = Depends(get_tenant_id)):
+        """Save the tenant's GitHub repo/branch/token and push them to the spokes."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
         body = body if isinstance(body, dict) else {}
+        # Start from the existing config.
         existing = await store.get_github_config(tenant_id)
         cfg = dict(existing) if isinstance(existing, dict) else {}
+        # Update the repo and branch when provided.
         for k in ("repo_url", "repo_branch"):
             if k in body:
                 cfg[k] = str(body.get(k) or "").strip()
@@ -4875,25 +5808,34 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # hub-side and pushed to the spoke via CS_CONFIG_UPDATE — intended flow.
         if body.get("github_token"):
             cfg["github_token"] = str(body.get("github_token"))
+        # Save, push, and report.
         await store.set_github_config(tenant_id, cfg)
         pushed = await _push_config(tenant_id, {"github_config": cfg})
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.delete("/sim/api/{tenant}/settings/github")
     async def clear_github(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Clear the tenant's GitHub config here and on the spokes."""
+        # Wipe locally, then push None to wipe the spoke's copy.
         await store.set_github_config(tenant_id, {})
         pushed = await _push_config(tenant_id, {"github_config": None})
+        # Report the result.
         return {"cleared": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     # ── Config Source of Truth (Config screen: Hub vs GitHub) ────────────────
     async def _config_gate(tenant_id: str):
         """(source, has_token) for the tenant's config ownership. Writes are only
         allowed when source='hub' OR source='github' with a token configured."""
+        # Source of truth and whether a token exists.
         source = await store.get_source_of_truth(tenant_id)
         gh = await store.get_github_config(tenant_id) or {}
         return source, bool(gh.get("github_token"))
 
     async def _require_config_writable(tenant_id: str) -> str:
+        """Raise 403 if the tenant's config is read-only (GitHub source with no token); else return
+        the source.
+        """
+        # Check the source and token.
         source, has_token = await _config_gate(tenant_id)
         if source == "github" and not has_token:
             raise HTTPException(
@@ -4901,6 +5843,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 detail=("GitHub is the source of truth but no API key is configured — "
                         "the config is read-only. Add a GitHub API key, or switch "
                         "Source of Truth to Hub."))
+        # Writable: return the source.
         return source
 
     # ── Hub-as-sole-GitHub-client helpers ────────────────────────────────────
@@ -4914,12 +5857,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         the hub's first pull has populated the store — so the spoke isn't handed
         an empty whole-config (it keeps self-pulling until the hub takes over).
         Hub-owned tenants are always ``'hub'``."""
+        # Stored source of truth (GitHub on error).
         try:
             sot = await store.get_source_of_truth(tenant_id)
         except Exception:  # noqa: BLE001
             sot = "github"
+        # Hub-owned tenants always use hub mode.
         if sot == "hub":
             return "hub"
+        # GitHub tenant: hub mode once config has been pulled.
         try:
             has_cfg = bool((await store.get_sim_conf_content(tenant_id) or "").strip())
         except Exception:  # noqa: BLE001
@@ -4932,6 +5878,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         the stored content CHANGED (caller then re-distributes to spokes). No-op
         (False) for a tenant not github-managed or without creds, and on any
         network/auth error (logged, retried next cycle)."""
+        # Only GitHub-managed tenants with credentials; any error skips this cycle.
         try:
             if await store.get_source_of_truth(tenant_id) != "github":
                 return False
@@ -4942,8 +5889,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception as exc:  # noqa: BLE001 — network/auth → skip this cycle
             logger.info("github pull for %s failed: %s", tenant_id, exc)
             return False
+        # Nothing pulled.
         if not pulled:
             return False
+        # Save each file whose content changed.
         changed = False
         sim_txt = pulled.get("sim_conf")
         if sim_txt is not None and sim_txt != (await store.get_sim_conf_content(tenant_id) or ""):
@@ -4953,6 +5902,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if user_txt is not None and user_txt != (await store.get_user_overrides_content(tenant_id) or ""):
             await store.set_user_overrides_content(tenant_id, user_txt)
             changed = True
+        # Whether anything changed.
         return changed
 
     async def _commit_config_to_github(tenant_id: str, path: str, content: str,
@@ -4961,6 +5911,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         GitHub client). Best-effort: a GitHub failure is logged, not raised — the
         edit is already saved hub-side and fanned out to spokes, so the repo just
         lags until the next successful commit / poll."""
+        # Commit if credentials exist; failures are only logged.
         try:
             gh = await store.get_github_config(tenant_id, resolve=True) or {}
             if not github_config_client.is_configured(gh):
@@ -4971,14 +5922,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             logger.warning("github commit of %s for %s failed: %s", path, tenant_id, exc)
 
     async def _github_config_sync_once() -> None:
+        """One GitHub pull pass over all tenants; redistribute any config that changed."""
+        # Check each tenant separately.
         for tid in list(store.tenant_ids()):
             try:
+                # Pull; if changed, push the new texts to the spokes.
                 if await _pull_github_into_store(tid):
                     logger.info("github config for tenant %s changed on repo — redistributing", tid)
                     await _push_config(tid, {
                         "sim_conf_override": await store.get_sim_conf_content(tid),
                         "user_conf_override": await store.get_user_overrides_content(tid),
                     })
+                    # Refresh quotas too (best-effort).
                     try:
                         await _push_sim_quotas(tid)
                     except Exception:  # noqa: BLE001 — best-effort quota refresh
@@ -4997,7 +5952,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         hourly — external repo edits are rare; human edits push immediately via
         the save routes, so the poll only catches out-of-band commits; floor
         30s). Started from main.py."""
+        # Local import: environment access.
         import os
+        # Interval from the environment (default 1 hour, at least 30s).
         try:
             interval = int(os.environ.get("LM_HUB_GITHUB_SYNC_INTERVAL", "3600"))
         except ValueError:
@@ -5007,6 +5964,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # is populated hub-side (and pushed to spokes as they connect) without
         # waiting a full interval — closes the cold-start blank-config window.
         await asyncio.sleep(5)
+        # Pull on each interval; a failure never kills the loop.
         while True:
             try:
                 await _github_config_sync_once()
@@ -5016,6 +5974,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 logger.warning("github config sync loop: %s", exc)
             await asyncio.sleep(interval)
 
+    # Expose the loop for startup scheduling.
     try:
         hub._github_config_sync_loop = _github_config_sync_loop
     except Exception:  # noqa: BLE001
@@ -5023,8 +5982,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.get("/sim/api/{tenant}/config/source")
     async def get_config_source(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's config source of truth, whether it is writable, and the repo."""
+        # Source, token presence, and the GitHub config.
         source, has_token = await _config_gate(tenant_id)
         gh = await store.get_github_config(tenant_id) or {}
+        # Return the summary.
         return {"source": source, "has_token": has_token,
                 "writable": (source == "hub") or has_token,
                 "repo_url": gh.get("repo_url", ""), "repo_branch": gh.get("repo_branch", "")}
@@ -5032,10 +5994,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.post("/sim/api/{tenant}/config/source")
     async def set_config_source(request: Request, tenant: str,
                                 tenant_id: str = Depends(get_tenant_id)):
+        """Switch the tenant between Hub and GitHub source of truth, seeding hub config if needed.
+        """
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Anything except "hub" means GitHub.
         source = "hub" if str((body or {}).get("source")) == "hub" else "github"
         # Seed the hub-owned config on the FIRST switch to Hub mode. In hub mode
         # the hub-owned override files ARE the whole config (repo base ignored);
@@ -5049,16 +6015,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # prior edit; an offline spoke skips seeding gracefully (the first save
         # still seeds later).
         seeded = {}
+        # Seed only when switching to Hub.
         if source == "hub":
+            # Which hub-owned files are still empty.
             need_sim = not (await store.get_sim_conf_content(tenant_id) or "").strip()
             need_user = not (await store.get_user_overrides_content(tenant_id) or "").strip()
             if need_sim or need_user:
+                # Read the effective config from the spoke (skip seeding if offline).
                 eff = None
                 try:
                     eff = await _cs_forward(tenant_id, "CS_GET_CONFIG", {}, timeout=6.0)
                 except HTTPException as exc:
                     logger.info("config/source→hub: skipping seed, spoke round-trip "
                                 "failed (%s); first save will seed instead", exc.detail)
+                # Seed each empty file from the spoke's effective text.
                 if isinstance(eff, dict):
                     if need_sim:
                         sim_txt = (eff.get("simulation_conf", "") or "")
@@ -5070,39 +6040,51 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         if user_txt.strip():
                             await store.set_user_overrides_content(tenant_id, user_txt)
                             seeded["user_conf_override"] = user_txt
+        # Save the new source of truth.
         await store.set_source_of_truth(tenant_id, source)
         # Tell the spoke which mode so load_configs resolves the effective conf
         # accordingly (hub = hub-owned full file, never git-reverted; github =
         # repo file is the base). Bundle any freshly-seeded hub-owned override
         # text in the same message so mode + files land together.
         pushed = await _push_config(tenant_id, {"config_source": source, **seeded})
+        # Report the result.
         return {"saved": True, "source": source, "pushed_to_spokes": pushed,
                 "seeded": sorted(seeded.keys())}
 
     @app.get("/sim/api/{tenant}/settings/security")
     async def get_security(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's security settings."""
+        # Read from the store.
         return await store.get_security_config(tenant_id)
 
     @app.post("/sim/api/{tenant}/settings/security")
     async def set_security(request: Request, tenant: str,
                            tenant_id: str = Depends(get_tenant_id)):
+        """Save the tenant's security settings and push them to the spokes."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
         body = body if isinstance(body, dict) else {}
+        # Keep only the known keys.
         cfg = {k: str(body.get(k) or "").strip() for k in ("session_timeout_minutes", "auth_provider") if k in body}
+        # Save, push, and report.
         await store.set_security_config(tenant_id, cfg)
         pushed = await _push_config(tenant_id, {"security_config": cfg})
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.get("/sim/api/{tenant}/central-sites-config")
     async def get_central_sites(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's Central sites config."""
+        # Read from the store.
         return await store.get_central_sites_config(tenant_id)
 
     @app.post("/sim/api/{tenant}/central-sites-config")
     async def set_central_sites(request: Request, tenant: str,
                                 tenant_id: str = Depends(get_tenant_id)):
+        """Merge a partial Central sites-config save, validate quotas, and push to the spokes."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
@@ -5115,14 +6097,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # it omits is preserved here. (Previously this replaced the whole config,
         # so saving quotas dropped the pool config, saving pool dropped the links,
         # etc.) Validate the sim_quotas field the same way.
+        # Existing config (empty on error).
         try:
             existing = await store.get_central_sites_config(tenant_id) or {}
         except Exception:  # noqa: BLE001
             existing = {}
+        # Merge the new keys over it.
         cfg = {**existing, **body}
         # Sanitize the per-site minimum client floor: coerce to a {site: int>0}
         # dict, dropping anything malformed. Sent whole by the WebUI toggle
         # (shallow top-level merge), like site_mappings.
+        # Keep only positive integer minimums per site.
         _smc = cfg.get("site_min_clients") or {}
         if isinstance(_smc, dict):
             clean_smc: dict = {}
@@ -5134,11 +6119,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 if n > 0:
                     clean_smc[str(k)] = n
             cfg["site_min_clients"] = clean_smc
+        # Remove a malformed value.
         else:
             cfg.pop("site_min_clients", None)
+        # Defaults in case validation fails.
         sim_quota_errors: list[str] = []
         clean: list = list(cfg.get("sim_quotas") or [])
         wipe_blocked = False
+        # Validate quotas against the sims in simulation.conf.
         try:
             sim_txt = await store.get_sim_conf_content(tenant_id) or ""
             sim_ids = [s["sim_id"] for s in available_sims_from_ini(sim_txt)] if sim_txt.strip() else None
@@ -5151,6 +6139,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             # validate_sim_quotas drop every row on ANY save that re-sends or
             # re-validates the merged config — wiping the whole table. Keep the
             # existing quotas and report the block instead.
+            # Keep existing quotas instead of letting a save wipe them all.
             existing_quotas = existing.get("sim_quotas") or []
             clean, wipe_blocked = guard_sim_quota_wipe(existing_quotas, clean, body)
             if wipe_blocked:
@@ -5158,17 +6147,21 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                              "would drop %d quota(s) to 0 (stale sim_ids or empty send) "
                              "without force_sim_quotas_clear; existing quotas preserved",
                              tenant_id, len(existing_quotas))
+            # Store the cleaned quotas.
             cfg = {**cfg, "sim_quotas": clean}
         except Exception as exc:  # noqa: BLE001 — never block the save
             logger.warning("set_central_sites(%s): sim_quotas validate failed: %s", tenant_id, exc)
+        # Save and clear the catalog cache.
         await store.set_central_sites_config(tenant_id, cfg)
         _invalidate_sim_quota_catalog(tenant_id)  # site_mappings feed the catalog
+        # Push the config, effective quotas, sharing and pool settings.
         pushed = await _push_config(tenant_id, {
             "central_sites_config": cfg,
             "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
             "sim_shareable": await _sim_shareable(tenant_id),
             **await _pool_config(tenant_id),
         })
+        # Report the result and any validation issues.
         return {"saved": True, "pushed_to_spokes": pushed,
                 "queued": bool(getattr(pushed, "queued", False)),
                 "sim_quotas": clean,
@@ -5177,6 +6170,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.get("/sim/api/{tenant}/mist-sites-config")
     async def get_mist_sites(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's Mist sites config."""
+        # Read from the store.
         return await store.get_mist_sites_config(tenant_id)
 
     @app.post("/sim/api/{tenant}/mist-sites-config")
@@ -5189,16 +6184,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         ``_effective_sim_quotas`` (Phase 4). Pool/SSID config stays with Central
         (central_sites_config) — Mist pushes only its sites config + the unioned
         effective quotas + shareable map."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
         body = body if isinstance(body, dict) else {}
+        # Existing config (empty on error).
         try:
             existing = await store.get_mist_sites_config(tenant_id) or {}
         except Exception:  # noqa: BLE001
             existing = {}
+        # Merge the new keys over it.
         cfg = {**existing, **body}
+        # Keep only positive integer minimums per site.
         _smc = cfg.get("site_min_clients") or {}
         if isinstance(_smc, dict):
             clean_smc: dict = {}
@@ -5210,17 +6209,21 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 if n > 0:
                     clean_smc[str(k)] = n
             cfg["site_min_clients"] = clean_smc
+        # Remove a malformed value.
         else:
             cfg.pop("site_min_clients", None)
+        # Defaults in case validation fails.
         sim_quota_errors: list[str] = []
         clean: list = list(cfg.get("sim_quotas") or [])
         wipe_blocked = False
+        # Validate quotas against the sims in simulation.conf.
         try:
             sim_txt = await store.get_sim_conf_content(tenant_id) or ""
             sim_ids = [s["sim_id"] for s in available_sims_from_ini(sim_txt)] if sim_txt.strip() else None
             clean, sim_quota_errors = validate_sim_quotas(cfg.get("sim_quotas"), sim_ids)
             if sim_quota_errors:
                 logger.warning("set_mist_sites(%s): sim_quotas errors: %s", tenant_id, sim_quota_errors)
+            # Keep existing quotas instead of letting a save wipe them all.
             existing_quotas = existing.get("sim_quotas") or []
             clean, wipe_blocked = guard_sim_quota_wipe(existing_quotas, clean, body)
             if wipe_blocked:
@@ -5228,16 +6231,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                              "would drop %d quota(s) to 0 (stale sim_ids or empty send) "
                              "without force_sim_quotas_clear; existing quotas preserved",
                              tenant_id, len(existing_quotas))
+            # Store the cleaned quotas.
             cfg = {**cfg, "sim_quotas": clean}
         except Exception as exc:  # noqa: BLE001 — never block the save
             logger.warning("set_mist_sites(%s): sim_quotas validate failed: %s", tenant_id, exc)
+        # Save and clear the catalog cache.
         await store.set_mist_sites_config(tenant_id, cfg)
         _invalidate_sim_quota_catalog(tenant_id)
+        # Push the config, effective quotas and sharing.
         pushed = await _push_config(tenant_id, {
             "mist_sites_config": cfg,
             "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
             "sim_shareable": await _sim_shareable(tenant_id),
         })
+        # Report the result and any validation issues.
         return {"saved": True, "pushed_to_spokes": pushed,
                 "queued": bool(getattr(pushed, "queued", False)),
                 "sim_quotas": clean,
@@ -5247,6 +6254,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.get("/sim/api/{tenant}/central-on-prem-sites-config")
     async def get_central_on_prem_sites(tenant: str,
                                         tenant_id: str = Depends(get_tenant_id)):
+        """Return the tenant's Central On-Prem sites config."""
+        # Read from the store.
         return await store.get_central_on_prem_sites_config(tenant_id)
 
     @app.post("/sim/api/{tenant}/central-on-prem-sites-config")
@@ -5260,16 +6269,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         ``_effective_sim_quotas`` (Phase 3). Pool/SSID config stays with cloud
         Central (central_sites_config) — on-prem pushes only its sites config +
         the unioned effective quotas + shareable map (same as Mist)."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
         body = body if isinstance(body, dict) else {}
+        # Existing config (empty on error).
         try:
             existing = await store.get_central_on_prem_sites_config(tenant_id) or {}
         except Exception:  # noqa: BLE001
             existing = {}
+        # Merge the new keys over it.
         cfg = {**existing, **body}
+        # Keep only positive integer minimums per site.
         _smc = cfg.get("site_min_clients") or {}
         if isinstance(_smc, dict):
             clean_smc: dict = {}
@@ -5281,11 +6294,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 if n > 0:
                     clean_smc[str(k)] = n
             cfg["site_min_clients"] = clean_smc
+        # Remove a malformed value.
         else:
             cfg.pop("site_min_clients", None)
+        # Defaults in case validation fails.
         sim_quota_errors: list[str] = []
         clean: list = list(cfg.get("sim_quotas") or [])
         wipe_blocked = False
+        # Validate quotas against the sims in simulation.conf.
         try:
             sim_txt = await store.get_sim_conf_content(tenant_id) or ""
             sim_ids = [s["sim_id"] for s in available_sims_from_ini(sim_txt)] if sim_txt.strip() else None
@@ -5293,6 +6309,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             if sim_quota_errors:
                 logger.warning("set_central_on_prem_sites(%s): sim_quotas errors: %s",
                                tenant_id, sim_quota_errors)
+            # Keep existing quotas instead of letting a save wipe them all.
             existing_quotas = existing.get("sim_quotas") or []
             clean, wipe_blocked = guard_sim_quota_wipe(existing_quotas, clean, body)
             if wipe_blocked:
@@ -5300,17 +6317,21 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                              "save would drop %d quota(s) to 0 (stale sim_ids or empty send) "
                              "without force_sim_quotas_clear; existing quotas preserved",
                              tenant_id, len(existing_quotas))
+            # Store the cleaned quotas.
             cfg = {**cfg, "sim_quotas": clean}
         except Exception as exc:  # noqa: BLE001 — never block the save
             logger.warning("set_central_on_prem_sites(%s): sim_quotas validate failed: %s",
                            tenant_id, exc)
+        # Save and clear the catalog cache.
         await store.set_central_on_prem_sites_config(tenant_id, cfg)
         _invalidate_sim_quota_catalog(tenant_id)
+        # Push the config, effective quotas and sharing.
         pushed = await _push_config(tenant_id, {
             "central_on_prem_sites_config": cfg,
             "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
             "sim_shareable": await _sim_shareable(tenant_id),
         })
+        # Report the result and any validation issues.
         return {"saved": True, "pushed_to_spokes": pushed,
                 "queued": bool(getattr(pushed, "queued", False)),
                 "sim_quotas": clean,
@@ -5329,11 +6350,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         Cached per tenant for ``_SIM_QUOTA_CATALOG_TTL_S`` (60s) — see the cache
         note above. A live spoke result is cached; the offline fallback (with a
         ``warning``) is NOT, so a reconnecting spoke refreshes immediately."""
+        # Return a fresh cached catalog if one exists.
         import time as _t
         now = _t.monotonic()
         hit = _sim_quota_catalog_cache.get(tenant_id)
         if hit and hit[0] > now:
             return hit[1]
+        # Ask the spoke; if unreachable, build from the cached simulation.conf (not cached).
         cached_ok = True
         try:
             cat = await _cs_forward(tenant_id, "CS_GET_SIM_QUOTA_CATALOG", {}, timeout=15.0)
@@ -5345,6 +6368,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             cached_ok = False  # don't cache a degraded/offline result
         # Attach the tenant's saved per-sim shareable overrides so the Sim Sharing
         # tile renders current state (authoritative; empty = use the SIM_META default).
+        # Add sharing, N/A flags and the alert/insight catalogs.
         if isinstance(cat, dict):
             cat["sim_shareable"] = await _sim_shareable(tenant_id)
             cat["sim_na"] = await _sim_na(tenant_id)
@@ -5356,6 +6380,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             # exactly the ``applied_op`` the engine seeds from. Best-effort: a
             # failure here must never blank the catalog.
             try:
+                # Collected learned values per alert key.
                 learned: dict = {}
 
                 def _put_learned(ak: str, entry: dict) -> None:
@@ -5364,15 +6389,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     Central:/Mist:/Central On-Prem: prefix or a bare id. Highest op
                     wins on collision; the exact (prefixed) key is what the editor
                     tries first."""
+                    # Store under the full key and the bare alias; highest op wins.
                     for key in {ak, f"{ak.partition(':')[0]}:{parse_alert_source(ak.partition(':')[2])[1]}"}:
+                        # Skip empty keys.
                         if not key:
                             continue
+                        # Keep the higher op.
                         cur = learned.get(key)
                         if cur is None or entry["op"] > cur.get("op", 0):
                             learned[key] = dict(entry)
 
+                # Tenant learned values: stable states only.
                 astate = await store.get_adaptive_state(tenant_id) or {}
                 for skey, stx in astate.items():
+                    # Skip malformed or not-yet-stable entries.
                     if not isinstance(stx, dict):
                         continue
                     if stx.get("phase") != "stable" or stx.get("learned_op") is None:
@@ -5383,6 +6413,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     # rpartition — the head IS the alert_key (== _alert_key). Mirrors
                     # the global roll-up's derivation.
                     ak = str(skey).rpartition(":")[0] or str(skey)
+                    # Learned op and floor as ints (skip bad values).
                     try:
                         op = int(stx["learned_op"])
                     except (TypeError, ValueError):
@@ -5391,11 +6422,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         fl = int(stx["floor"]) if stx.get("floor") is not None else None
                     except (TypeError, ValueError):
                         fl = None
+                    # Record it as a tenant value.
                     _put_learned(ak, {"op": op, "floor": fl, "source": "tenant"})
+                # Global published values.
                 glv = await store.get_global_learned_values() or {}
                 for ak, gv in glv.items():
+                    # Skip entries without an op.
                     if not isinstance(gv, dict) or gv.get("op") is None:
                         continue
+                    # Op and floor as ints (skip bad values).
                     try:
                         gval = int(gv["op"])
                     except (TypeError, ValueError):
@@ -5404,10 +6439,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         gfl = int(gv["floor"]) if gv.get("floor") is not None else None
                     except (TypeError, ValueError):
                         gfl = None
+                    # Record it as a global value.
                     _put_learned(str(ak), {"op": gval, "floor": gfl, "source": "global"})
+                # Attach the learned map.
                 cat["learned"] = learned
             except Exception:
                 logger.debug("sim-quota catalog: learned-value attach failed", exc_info=True)
+        # Cache only a full live result.
         if cached_ok and isinstance(cat, dict) and not cat.get("warning"):
             _sim_quota_catalog_cache[tenant_id] = (now + _SIM_QUOTA_CATALOG_TTL_S, cat)
         return cat
@@ -5429,13 +6467,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         frozen at an old assignment, tags stripped from a still-producing client)
         look identical in Proxmox and are only separable here.
         """
+        # The hub, for node-name lookups.
         hub = app.state.hub
 
         def _name(sid):
+            """Return the spoke's hostname, or "" when it has no name beyond its id."""
+            # Look up the name; blank if it's just the id.
             nm = node_name(hub.state.system_state, sid)
             return "" if nm == sid else nm
 
+        # Ask every cs spoke for its tag health.
         results = await _cs_forward_all(tenant_id, "CS_GET_SIM_TAG_HEALTH", {}, timeout=25.0)
+        # One row per spoke: data on success, otherwise marked unreachable.
         spokes = []
         for sid, data in results:
             if isinstance(data, dict) and data.get("status") == "SUCCESS":
@@ -5449,6 +6492,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                "message": (data or {}).get("message")
                                if isinstance(data, dict) else "spoke did not answer",
                                "hosts": []})
+        # Return the rows.
         return {"spokes": spokes}
 
     @app.get("/sim/api/{tenant}/dhcp-health")
@@ -5461,6 +6505,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         that cannot answer is reported as unreachable so the panel still renders
         the spokes that did.
         """
+        # The hub, for node-name lookups.
         hub = app.state.hub
 
         def _name(sid):
@@ -5468,10 +6513,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             operator thinks in hostnames — a wall of UUIDs is unreadable when
             the whole point of the panel is "which box is broken". Reuses the
             hub's own labeller so this matches the alert log wording."""
+            # Look up the name; blank if it's just the id.
             nm = node_name(hub.state.system_state, sid)
             return "" if nm == sid else nm
 
+        # Ask every cs spoke for its DHCP health.
         results = await _cs_forward_all(tenant_id, "CS_GET_DHCP_HEALTH", {}, timeout=25.0)
+        # One row per spoke: data on success, otherwise marked unreachable.
         spokes = []
         for sid, data in results:
             if isinstance(data, dict) and data.get("status") == "SUCCESS":
@@ -5484,6 +6532,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                "unreachable": True,
                                "error": (data if isinstance(data, str)
                                          else (data or {}).get("message", "no response"))})
+        # Return the rows, warning when there are no spokes.
         return {"status": "SUCCESS", "spokes": spokes,
                 "warning": "" if results else "No Client-Sim spoke connected."}
 
@@ -5491,24 +6540,33 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Lower-cased pxmx hostnames that a cs spoke bound to a DIFFERENT tenant
         is relaying live (last_seen within ``fresh_s``). An unbound/orphaned
         spoke's frozen copy is not ownership evidence."""
+        # Local import: the clock.
         import time as _t
+        # Now, and the hosts found.
         now = _t.time()
         owned: set = set()
+        # Check every cached spoke's data.
         for sid, data in list((getattr(hub, "simulations_cache", None) or {}).items()):
+            # Its tenant (skip on error).
             try:
                 other = hub.state.get_spoke_tenant(sid)
             except Exception:  # noqa: BLE001
                 continue
+            # Only other tenants' spokes count.
             if not other or other == tenant_id or not isinstance(data, dict):
                 continue
+            # Each host it reports.
             for h in (data.get("proxmox_hosts") or []):
+                # Hostname and last-seen time.
                 hn = str((h or {}).get("hostname") or "").strip().lower()
                 try:
                     seen = float(((h or {}).get("proxmox") or {}).get("last_seen") or 0)
                 except (TypeError, ValueError):
                     seen = 0.0
+                # Recent sightings count as owned.
                 if hn and now - seen <= fresh_s:
                     owned.add(hn)
+        # Return the owned hosts.
         return owned
 
     @app.get("/sim/api/{tenant}/pxmx-site-map")
@@ -5516,6 +6574,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Cached per tenant for _PXMX_SITE_MAP_TTL_S (60s), invalidated on save.
         # Only a real (spoke-connected) merge is cached; the "not connected"
         # fallback is not, so a reconnecting spoke refreshes immediately.
+        """Return the tenant's pxmx host-to-site map, merged with live hosts."""
+        # Return a fresh cached result if one exists.
         import time as _t
         now = _t.monotonic()
         hit = _pxmx_site_map_cache.get(tenant_id)
@@ -5524,20 +6584,26 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Tenant-wide: merge the pxmx agents + site maps from ALL of the tenant's
         # Client-Sim spokes (cs-svr-02/03/04) so every pxmx server shows and can
         # be assigned, not just bound[0]'s.
+        # Ask every cs spoke for its map and agents.
         results = await _cs_forward_all(tenant_id, "CS_GET_PXMX_SITE_MAP", {}, timeout=15.0)
+        # Merged map and deduplicated agents.
         merged_map: dict = {}
         agents: list = []
         seen_agents: set = set()
+        # Merge each spoke's reply.
         for _sid, data in results:
             if not isinstance(data, dict):
                 continue
+            # Map entries.
             for h, s in (data.get("pxmx_site_map") or {}).items():
                 merged_map[str(h)] = s
+            # Agents, first seen wins.
             for a in (data.get("agents") or []):
                 key = a.get("agent_id") or a.get("hostname")
                 if key and key not in seen_agents:
                     seen_agents.add(key)
                     agents.append(a)
+        # No spokes: return an empty result (not cached).
         if not results:
             return {"status": "SUCCESS", "pxmx_site_map": {}, "agents": [],
                     "warning": "Client-Sim spoke not connected."}
@@ -5545,6 +6611,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # map entry / offline row on this tenant's spokes. Hide any host whose
         # live telemetry is currently relayed by a spoke bound to a different
         # tenant — it is not this tenant's to assign.
+        # Hide hosts another tenant currently owns.
         foreign = _pxmx_hosts_owned_elsewhere(tenant_id)
         if foreign:
             merged_map = {h: s for h, s in merged_map.items()
@@ -5552,6 +6619,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             agents = [a for a in agents
                       if str(a.get("agent_id") or a.get("hostname") or "").strip().lower()
                       not in foreign]
+        # Cache and return.
         out = {"status": "SUCCESS", "pxmx_site_map": merged_map, "agents": agents}
         _pxmx_site_map_cache[tenant_id] = (now + _PXMX_SITE_MAP_TTL_S, out)
         return out
@@ -5559,17 +6627,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.post("/sim/api/{tenant}/pxmx-site-map")
     async def set_pxmx_site_map(tenant: str, request: Request,
                                 tenant_id: str = Depends(get_tenant_id)):
+        """Save the pxmx host-to-site map on every cs spoke and return the merged result."""
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Accept a wrapped body or a bare map.
         payload = body if isinstance(body, dict) else {}
         if "pxmx_site_map" not in payload and isinstance(body, dict):
             payload = {"pxmx_site_map": body}
         # Fan the FULL map out to every cs spoke — each keeps only its own agents'
         # entries but a shared map is harmless (a spoke ignores hosts it doesn't
         # host). Returns the merged saved map.
+        # Send to every cs spoke.
         results = await _cs_forward_all(tenant_id, "CS_SET_PXMX_SITE_MAP", payload, timeout=20.0)
+        # Merge the saved maps and errors from spokes that succeeded.
         merged: dict = {}
         errors: list = []
         saved_any = False
@@ -5578,12 +6651,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 saved_any = True
                 merged.update(data.get("pxmx_site_map") or {})
                 errors.extend(data.get("errors") or [])
+        # Clear the cache and report.
         _invalidate_pxmx_site_map(tenant_id)  # next GET re-fans-out the fresh map
         return {"saved": saved_any, "pxmx_site_map": merged, "errors": errors}
 
     @app.get("/sim/api/{tenant}/cs-agents")
     async def get_cs_agents(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         """Connected pxmx agents for the tenant's cs spoke (PXMX Sites dropdown)."""
+        # Ask the spoke; with no spoke, return an empty list.
         try:
             return await _cs_forward(tenant_id, "GET_AGENTS", {}, timeout=15.0)
         except HTTPException as he:
@@ -5601,7 +6676,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # spokes so the counts are tenant totals (cs-svr-02/03/04 together), not
         # bound[0]'s slice. The effective target comes from the hub (the tenant
         # config); each spoke fills its split share and we sum the assignments.
+        # Ask every cs spoke for its ledger.
         results = await _cs_forward_all(tenant_id, "CS_GET_SIM_QUOTA_STATE", {}, timeout=15.0)
+        # Merged ledger and monitored checks.
         merged_ledger: dict = {}
         monitored: list = []
         # Live per-check firing status merged across the tenant's cs spokes —
@@ -5628,16 +6705,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # hub), so an underfilled quota gave no reason. blocked-reason counts sum;
         # target/assigned/eligible_free/not_harvestable sum; labels take first.
         merged_diag: dict = {}
+        # Merge each spoke's reply.
         for _sid, data in results:
             if not isinstance(data, dict):
                 continue
+            # Ledger: append clients per key.
             for k, e in (data.get("ledger") or {}).items():
                 m = merged_ledger.setdefault(
                     k, {"sim_id": e.get("sim_id"), "site": e.get("site"), "clients": []})
                 m["clients"].extend(e.get("clients") or [])
+            # Diagnostics: sum the counters per key.
             for d in (data.get("diagnostics") or []):
                 if not isinstance(d, dict) or not d.get("key"):
                     continue
+                # Create the merged entry on first sight.
                 md = merged_diag.get(d["key"])
                 if md is None:
                     md = {"key": d["key"], "sim_id": d.get("sim_id"), "site": d.get("site"),
@@ -5645,21 +6726,26 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                           "target": 0, "producing": 0, "assigned": 0,
                           "eligible_free": 0, "not_harvestable": 0, "blocked": {}}
                     merged_diag[d["key"]] = md
+                # Add the numeric fields and blocked reasons.
                 for f in ("target", "producing", "assigned", "eligible_free", "not_harvestable"):
                     md[f] += int(d.get(f) or 0)
                 for r, n in (d.get("blocked") or {}).items():
                     md["blocked"][r] = md["blocked"].get(r, 0) + int(n or 0)
+            # Sum the effective counts.
             for q in (data.get("effective") or []):
                 if isinstance(q, dict):
                     k = sim_quota.quota_dedup_key(q)
                     spoke_counts[k] = spoke_counts.get(k, 0) + int(q.get("count") or 0)
+            # Sum the pool counts.
             p = data.get("pool") or {}
             pool["online"] += int(p.get("online") or 0)
             pool["tenant_pool"] += int(p.get("tenant_pool") or 0)
             for _s, _n in (p.get("by_site") or {}).items():
                 pool["by_site"][_s] = pool["by_site"].get(_s, 0) + int(_n or 0)
+            # Monitored checks: first spoke wins.
             if not monitored:
                 monitored = data.get("monitored_checks") or []
+            # Merge check status per site.
             for wsite, cmap in (data.get("check_status") or {}).items():
                 if not isinstance(cmap, dict):
                     continue
@@ -5670,6 +6756,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # SAME status the dashboard Checks table does — otherwise every check read
         # "unresolved" / "not firing" for a live, green check. (Distributed tenants
         # have no hub block; this is a no-op there.)
+        # Merge hub-polled Central status when present.
         _hubc = service._hub_central(tenant_id)
         if isinstance(_hubc, dict):
             for wsite, cmap in (_hubc.get("status") or {}).items():
@@ -5677,14 +6764,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     check_status.setdefault(wsite, {}).update(cmap)
             if not monitored:
                 monitored = _hubc.get("monitored_checks") or monitored
+        # Remove duplicate clients.
         for m in merged_ledger.values():  # dedupe (a hostname is unique per tenant)
             m["clients"] = list(dict.fromkeys(m["clients"]))
+        # No spokes: return an empty result.
         if not results:
             return {"status": "SUCCESS", "effective": [], "ledger": {},
                     "monitored_checks": [], "check_status": {},
                     "warning": "Client-Sim spoke not connected."}
         # Tenant-wide placement warnings: compare the merged fill to the tenant's
         # configured hold-N per cell (not each spoke's split share).
+        # Placement cells below their target.
         placement_warnings: list = []
         try:
             csc = await store.get_central_sites_config(tenant_id) or {}
@@ -5696,12 +6786,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             {"site": site, "cell": cell, "have": have, "want": int(want or 0)})
         except Exception:  # noqa: BLE001
             pass
+        # Hub's effective quotas.
         eff_quotas = await _effective_sim_quotas(tenant_id)
         # Flag quotas whose tenant-total spoke count (the SUM of the shares the
         # spokes adopted) lags the hub's applied count — a genuine push-propagation
         # gap (a spoke offline or missing its share), NOT the share-vs-total false
         # positive the old first-wins reduction produced in multi-spoke tenants.
         stale_push = _compute_stale_push(eff_quotas, spoke_counts)
+        # Build the result.
         result = {"status": "SUCCESS",
                   "effective": eff_quotas,
                   "spoke_counts": spoke_counts,
@@ -5710,10 +6802,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                   "placement_warnings": placement_warnings, "pool": pool,
                   "diagnostics": list(merged_diag.values()),
                   "check_status": check_status}
+        # Add adaptive state (best-effort).
         try:
             result["adaptive_state"] = await store.get_adaptive_state(tenant_id)
         except Exception:  # noqa: BLE001
             pass
+        # Return it.
         return result
 
     @app.post("/sim/api/{tenant}/sim-quota-reset")
@@ -5722,6 +6816,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         reconcile fresh — a clean re-shuffle. Use to flush stale assignments (a
         client stuck in two quotas, or an ignored host lingering) after config or
         engine-model changes."""
+        # Reset every spoke; count those that succeeded.
         results = await _cs_forward_all(tenant_id, "CS_RESET_SIM_QUOTA", {}, timeout=30.0)
         return {"reset_spokes": sum(1 for _s, d in results
                                     if isinstance(d, dict) and d.get("status") != "ERROR"),
@@ -5736,7 +6831,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # "all sites" at the global level).
     @app.get("/sim/api/superadmin/sim-quota-defaults")
     async def get_sim_quota_defaults(request: Request):
+        """Return the global Sim-Quota defaults catalog for the superadmin editor."""
+        # Superadmin only.
         _require_admin(request)
+        # Static catalog of every sim.
         from .sim_quota import sim_quota_catalog_from_ini
         catalog = sim_quota_catalog_from_ini("")
         # Platform-wide Site list for the Defaults editor dropdown: the union of
@@ -5764,6 +6862,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # these). A tenant csc ``qt_exclude_sims`` overrides per-tenant; this
         # is the global default the Sim-Quota Defaults editor curates.
         catalog["qt_exclude_sims"] = await store.get_qt_exclude_sims()
+        # Return the stored defaults and the catalog.
         return {"defaults": await store.get_sim_quota_defaults(),
                 "catalog": catalog}
 
@@ -5775,11 +6874,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.get("/sim/api/superadmin/observed-catalog")
     async def get_observed_catalog(request: Request):
         """Admin-only: the full hub-wide alert/insight catalog, most-recent first."""
+        # Superadmin only.
         _require_admin(request)
+        # Load the history (empty on error).
         try:
             catalog = await store.get_alert_insight_history()
         except Exception:  # noqa: BLE001
             catalog = []
+        # Newest first, with a count.
         catalog = sorted(catalog, key=lambda e: float(e.get("last_seen") or 0), reverse=True)
         return {"catalog": catalog, "count": len(catalog)}
 
@@ -5789,7 +6891,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         override) and ``central_sites_config.site_mappings`` — so the
         platform-wide Sim Quota Defaults editor can offer a Site dropdown
         sourced from the actual simulation.conf content."""
+        # Local import: the site parser.
         from .sim_quota import available_sites_from_ini
+        # Sites from every spoke's cached simulation.conf.
         sites: set = set()
         for data in (getattr(hub, "simulations_cache", {}) or {}).values():
             txt = (data or {}).get("sim_conf_content") or ""
@@ -5798,6 +6902,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     sites.update(available_sites_from_ini(txt))
                 except Exception:  # noqa: BLE001
                     pass
+        # Plus each tenant's stored conf and site mappings.
         for tid in _all_tenant_ids():
             try:
                 txt = await store.get_sim_conf_content(tid) or ""
@@ -5814,22 +6919,30 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         sites.add(str(v))
             except Exception:  # noqa: BLE001
                 pass
+        # Sorted, without blanks.
         return sorted(s for s in sites if s)
 
     @app.put("/sim/api/superadmin/sim-quota-defaults")
     async def put_sim_quota_defaults(request: Request):
+        """Save the global Sim-Quota defaults and global stacking knobs, then re-push all tenants.
+        """
+        # Superadmin only.
         _require_admin(request)
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Validate defaults against every known sim.
         from .sim_quota import SIM_META, validate_sim_quotas
         clean, errs = validate_sim_quotas(
             (body or {}).get("defaults"), list(SIM_META.keys()))
         if errs:
             logger.warning("set_sim_quota_defaults: errors: %s", errs)
+        # Save the defaults.
         await store.set_sim_quota_defaults(clean)
         # GLOBAL Simulation Sharing (stacking) + N/A hide maps, if present.
+        # Global sharing and N/A maps, when sent.
         if isinstance((body or {}).get("sim_shareable"), dict):
             await store.set_sim_shareable_global(
                 {str(k): bool(v) for k, v in body["sim_shareable"].items()})
@@ -5840,6 +6953,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # sim_weights = {sim_id: breadth weight} (coerce to float, drop bad/<0);
         # stack_cap / stack_rotation_s are ints (the store clamps). Each omitted →
         # leave the stored value as-is.
+        # Sim weights: keep non-negative floats.
         if isinstance((body or {}).get("sim_weights"), dict):
             _sw = {}
             for k, v in body["sim_weights"].items():
@@ -5850,6 +6964,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 if fv >= 0:
                     _sw[str(k)] = fv
             await store.set_sim_weights_global(_sw)
+        # Integer knobs, when sent.
         if (body or {}).get("stack_cap") is not None:
             await store.set_stack_cap_global(body.get("stack_cap"))
         if (body or {}).get("stack_rotation_s") is not None:
@@ -5860,6 +6975,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # known sim ids; unknown ids are dropped (an admin typo shouldn't widen
         # the exclusion set silently). Empty list = exclude nothing (every sim
         # that never connects is shed); omitted = leave the stored set as-is.
+        # Exclusion sims: keep only known sim ids.
         if isinstance((body or {}).get("qt_exclude_sims"), list):
             known = set(SIM_META.keys())
             cleaned_qt = [s for s in (body["qt_exclude_sims"] or [])
@@ -5870,6 +6986,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # A global-defaults / sharing change can shift every tenant's effective
         # quotas — re-push so each cs spoke's SimQuotaEngine reconciles (the push
         # carries the new global sim_shareable too).
+        # Re-push every tenant and report.
         pushed = await _push_sim_quotas_all_tenants()
         return {"status": "saved", "defaults": clean, "errors": errs,
                 "pushed_to_spokes": pushed}
@@ -5884,14 +7001,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Roll up every tenant's stable learning-ON ``learned_op`` per alert, so
         the Global Admin can pick one to Publish. Returns one row per
         (tenant, alert, site) that has reached ``stable`` with a recorded op."""
+        # Superadmin only.
         _require_admin(request)
+        # Local import: the alert-key helper.
         from .sim_quota import _alert_key
+        # Collect candidates from every tenant.
         out = []
         for tid in _all_tenant_ids():
+            # Adaptive state (skip on error).
             try:
                 state = await store.get_adaptive_state(tid)
             except Exception:  # noqa: BLE001
                 continue
+            # Only stable entries that have an op.
             for key, st in (state or {}).items():
                 if not isinstance(st, dict) or st.get("phase") != "stable":
                     continue
@@ -5899,20 +7021,26 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 if op is None:
                     continue
                 # key = "{alert_type}:{alert_id}:{site}" (adaptive_key)
+                # Split the key into type, id and site.
                 head, _, site = key.rpartition(":")
                 atype, _, aid = head.partition(":")
+                # Add the row.
                 out.append({"alert_key": _alert_key({"alert_type": atype, "alert_id": aid}),
                             "alert_type": atype or "alert", "alert_id": aid,
                             "site": site, "op": int(op),
                             "floor": st.get("floor"),
                             "source_tenant": tid})
         # Highest op per (tenant, alert_key) first for easy picking.
+        # Sort and return.
         out.sort(key=lambda r: (r["alert_key"], r["source_tenant"], -r["op"]))
         return {"candidates": out}
 
     @app.get("/sim/api/superadmin/global-learned-values")
     async def get_global_learned_values(request: Request):
+        """Return the published global learned values (superadmin only)."""
+        # Superadmin only.
         _require_admin(request)
+        # Return the registry.
         return {"published": await store.get_global_learned_values()}
 
     @app.put("/sim/api/superadmin/global-learned-values")
@@ -5923,14 +7051,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         entry's ``published_at`` is stamped server-side when omitted. Force-pushes
         every tenant so consumers lift to the new op without waiting for a
         controller tick."""
+        # Local import: the clock.
         import time as _t
+        # Superadmin only.
         _require_admin(request)
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Raw values, and the cleaned registry.
         raw = (body or {}).get("values") or {}
         clean: dict = {}
+        # Keep only entries with a valid op of at least 1.
         if isinstance(raw, dict):
             now = _t.time()
             for ak, v in raw.items():
@@ -5942,6 +7075,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     continue
                 if op < 1:
                     continue
+                # Store the normalised entry.
                 clean[str(ak)] = {
                     "op": op,
                     "floor": int(v["floor"]) if v.get("floor") is not None else None,
@@ -5953,6 +7087,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     "source_tenant": str(v.get("source_tenant") or ""),
                     "published_at": float(v.get("published_at") or now),
                 }
+        # Replace the registry and re-push all tenants.
         await store.set_global_learned_values(clean)
         pushed = await _push_sim_quotas_all_tenants()
         return {"status": "published", "values": clean, "pushed_to_spokes": pushed}
@@ -5963,6 +7098,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """The recorded known-good operating point per alert for this tenant —
         what the learner settled on ("exactly what it took"): count + the
         simulation.conf knobs + time-to-stable + when. Read-only; drives the UI."""
+        # Read from the store.
         return {"known_good": await store.get_known_good(tenant_id)}
 
     @app.post("/sim/api/{tenant}/sim-quota/reset-to-known-good")
@@ -5973,30 +7109,40 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         HOLDS at the known-good count for 1h (all clients spin up + every sim
         fires) then resumes learning from there; a learning-OFF alert jumps +
         holds. Body: optional ``{alert_key}`` to scope to one alert, else all."""
+        # Admin only.
         _require_admin(request)
+        # Local imports.
         import time as _t
         from .sim_quota import normalize_quota, _alert_key as _ak, seed_state_to_known_good
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Optional one-alert scope.
         only_ak = (body or {}).get("alert_key")
         now = _t.time()
+        # Nothing recorded: say so.
         kg_map = await store.get_known_good(tenant_id)
         if not kg_map:
             return {"status": "no_known_good",
                     "message": "No known-good recorded yet — let an alert reach 'stable' first."}
+        # Tenant quotas plus adaptive and knob state.
         csc = await store.get_central_sites_config(tenant_id) or {}
         quotas = [normalize_quota(r) for r in (csc.get("sim_quotas") or [])]
         state = await store.get_adaptive_state(tenant_id)
         knob_state = await store.get_knob_learn_state(tenant_id)
+        # Restore each matching enabled adaptive quota.
         restored = 0
         for q in quotas:
+            # Skip disabled or non-adaptive quotas.
             if not (q.get("enabled") and _adaptive_is_on(q)):
                 continue
+            # Apply the scope.
             ak = _ak(q)
             if only_ak and ak != only_ak:
                 continue
+            # This alert's known-good snapshot, if any.
             kg = kg_map.get(ak)
             if not kg:
                 continue
@@ -6007,16 +7153,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 ent = dict(knob_state.get(_adaptive_key(q)) or {})
                 ent["values"] = dict(kg["knobs"])
                 knob_state[_adaptive_key(q)] = ent
+            # Count it as restored.
             restored += 1
+        # Nothing matched: say so.
         if not restored:
             return {"status": "no_match",
                     "message": "No adaptive alert matched a recorded known-good."}
+        # Save both states.
         await store.set_adaptive_state(tenant_id, state)
         await store.set_knob_learn_state(tenant_id, knob_state)
         # Reshuffle the placement ledger so clients redistribute to the restored
         # count, and push the restored quotas/knobs down to the spokes.
         await _cs_forward_all(tenant_id, "CS_RESET_SIM_QUOTA", {}, timeout=30.0)
         pushed = await _push_sim_quotas(tenant_id)
+        # Report what was restored and the 1h hold.
         return {"status": "ok", "restored_alerts": restored,
                 "hold_seconds": 3600, "pushed_to_spokes": pushed}
 
@@ -6026,7 +7176,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Known-good operating points proposed by learning tenants, awaiting
         admin approval before they seed every tenant. Each: ``{count, floor,
         knobs, time_to_stable_s, source_tenant, proposed_at}`` keyed per alert."""
+        # Superadmin only.
         _require_admin(request)
+        # Pending proposals and current published values.
         return {"pending": await store.get_global_learned_pending(),
                 "published": await store.get_global_learned_values()}
 
@@ -6034,24 +7186,32 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def approve_global_learned_pending(request: Request):
         """Approve a proposed known-good → publish into global_learned_values
         (seeds every tenant). Body: ``{alert_key}`` or ``{alert_keys:[...]}``."""
+        # Local import: the clock.
         import time as _t
+        # Superadmin only.
         _require_admin(request)
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Gather the keys (list or single) and require at least one.
         keys = list(body.get("alert_keys") or [])
         if body.get("alert_key"):
             keys.append(body["alert_key"])
         keys = [str(k) for k in keys if k]
         if not keys:
             raise HTTPException(status_code=400, detail="alert_key(s) required")
+        # Pending and published registries.
         pending = await store.get_global_learned_pending()
         published = await store.get_global_learned_values()
+        # Timestamp and approved keys.
         now = _t.time()
         approved = []
+        # Promote each valid pending entry to published.
         for ak in keys:
             p = pending.get(ak)
+            # Skip missing or count-less entries.
             if not isinstance(p, dict) or p.get("count") is None:
                 continue
             published[ak] = {
@@ -6062,10 +7222,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 "source_tenant": str(p.get("source_tenant") or ""),
                 "published_at": now,
             }
+            # Remove it from pending.
             pending.pop(ak, None)
             approved.append(ak)
+        # None matched: 404.
         if not approved:
             raise HTTPException(status_code=404, detail="no matching pending entries")
+        # Save, re-push all tenants, and report.
         await store.set_global_learned_values(published)
         await store.set_global_learned_values(published)
         pushed = await _push_sim_quotas_all_tenants()
@@ -6074,18 +7237,24 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.post("/sim/api/superadmin/global-learned-pending/reject")
     async def reject_global_learned_pending(request: Request):
         """Discard a proposed known-good without publishing. Body: ``{alert_key}``."""
+        # Superadmin only.
         _require_admin(request)
+        # Parse the body; bad JSON is treated as empty.
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # The alert key is required.
         ak = str((body or {}).get("alert_key") or "")
         if not ak:
             raise HTTPException(status_code=400, detail="alert_key required")
+        # Remove it from pending.
         pending = await store.get_global_learned_pending()
         existed = pending.pop(ak, None) is not None
+        # Save when something was removed.
         if existed:
             await store.set_global_learned_values(published)
+        # Report the outcome.
         return {"status": "rejected" if existed else "not_found", "alert_key": ak}
 
     @app.get("/sim/api/{tenant}/central/available")
@@ -6102,10 +7271,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         - **distributed** (or unset) — forwards to the tenant's spoke via
           CS_GET_CENTRAL_AVAILABLE; degrades to an empty catalog when no spoke is
           connected (the editor still works with manual checks)."""
+        # Centralized mode: the hub builds the catalog from its own config.
         modes = await store.get_processing_modes(tenant_id)
         if store.central_api_is_centralized(modes):  # unset defaults to centralized
             cc = await store.get_central_config(tenant_id)
             return await get_central_available_from_config(await central_secrets.resolve(hub, cc))
+        # Distributed: ask the spoke; empty catalog when offline.
         try:
             return await _cs_forward(tenant_id, "CS_GET_CENTRAL_AVAILABLE", {}, timeout=15.0)
         except HTTPException:
@@ -6131,6 +7302,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         A distributed-mode row that still shows all-— after this change means
         the spoke didn't respond within the fan-out timeout — check the hub log
         for the warning below and the spoke log for the CentralPoller entry."""
+        # Rows and this tenant's telemetry cache.
         out = []
         cache = _tenant_cache(tenant_id)
         # Centralized processing mode → the HUB holds the Aruba Central creds
@@ -6139,6 +7311,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # hub directly (the hub historically had no Aruba client, so this button
         # could never validate the creds the operator typed into the hub form).
         # Distributed mode → fan CS_TEST_CENTRAL out to the tenant's cs spokes.
+        # Centralized mode: test from the hub with its own creds.
         modes = await store.get_processing_modes(tenant_id)
         if store.central_api_is_centralized(modes):  # unset defaults to centralized
             cc = await store.get_central_config(tenant_id)
@@ -6150,22 +7323,31 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # union the route returns an empty spokes list and the UI shows "No
         # spokes reporting central state" instead of a per-spoke "Spoke
         # unreachable" row that actually names the culprit spoke.
+        # Registered, approved cs spokes for this tenant (or unassigned).
         md = hub.state.system_state.get("module_metadata", {}) or {}
         cs_types = {"Client-Sim", "simulation"}
         reg_sids = []
+        # Keep cs spokes only.
         for sid, meta in md.items():
             if not isinstance(meta, dict) or meta.get("module_type") not in cs_types:
                 continue
+            # Must be approved.
             if not getattr(hub, "approved_modules", {}).get(hub._primary_key(sid), False):
                 continue
+            # Bound to this tenant, or unassigned.
             tid = meta.get("tenant_id")
             if tid == tenant_id or not tid:
                 reg_sids.append(sid)
+        # Cached and registered spokes, deduplicated.
         all_sids = list(dict.fromkeys(list(cache.keys()) + reg_sids))
+        # Probe each spoke.
         for sid in all_sids:
+            # Its cached telemetry.
             data = cache.get(sid, {})
             cached_central = data.get("central") or {}
+            # Live test result, if the spoke answers.
             live_entry: Optional[dict] = None
+            # Run the live test.
             try:
                 result = await hub.request_response(sid, "CS_TEST_CENTRAL", {}, timeout=8.0)
                 payload = (result.get("payload", {}) or {}).get("data", result) if isinstance(result, dict) else result
@@ -6175,6 +7357,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             except Exception as exc:
                 logger.warning("test_central: CS_TEST_CENTRAL fan-out to %s failed: %s",
                                sid, exc)
+            # Live result: use it.
             if live_entry:
                 out.append({"spoke_id": sid,
                             "spoke_name": live_entry.get("spoke_name") or data.get("spoke_name") or sid,
@@ -6191,6 +7374,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             "token_state": cached_central.get("token_state"),
                             "token_valid": cached_central.get("token_valid"),
                             "status": cached_central.get("status") or "Spoke unreachable — see hub log."})
+        # Return the rows.
         return {"spokes": out}
 
     @app.get("/sim/api/{tenant}/mist/available")
@@ -6200,10 +7384,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         centralized mode → hub fetches via ``get_mist_available_from_config``;
         distributed → forwards CS_GET_MIST_AVAILABLE (degrades to empty when no
         spoke is connected)."""
+        # Centralized mode: the hub builds the catalog from its own Mist config.
         modes = await store.get_processing_modes(tenant_id)
         if store.mist_api_is_centralized(modes):  # unset defaults to centralized
             mc = await store.get_mist_config(tenant_id)
             return await get_mist_available_from_config(mc or {})
+        # Distributed: ask the spoke; empty catalog when offline.
         try:
             return await _cs_forward(tenant_id, "CS_GET_MIST_AVAILABLE", {}, timeout=15.0)
         except HTTPException:
@@ -6217,28 +7403,39 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         each of the tenant's cs spokes, falling back to the spoke's last relayed
         ``mist`` telemetry when it is unreachable so the UI renders a row, not a
         502."""
+        # Centralized mode: test from the hub with its own token.
         modes = await store.get_processing_modes(tenant_id)
         if store.mist_api_is_centralized(modes):  # unset defaults to centralized
             mc = await store.get_mist_config(tenant_id)
             return {"spokes": [await test_mist_from_config(mc or {}, spoke_id="hub")]}
+        # Rows and this tenant's telemetry cache.
         out: list = []
         cache = _tenant_cache(tenant_id)
+        # Registered, approved cs spokes for this tenant (or unassigned).
         md = hub.state.system_state.get("module_metadata", {}) or {}
         cs_types = {"Client-Sim", "simulation"}
         reg_sids = []
+        # Keep cs spokes only.
         for sid, meta in md.items():
             if not isinstance(meta, dict) or meta.get("module_type") not in cs_types:
                 continue
+            # Must be approved.
             if not getattr(hub, "approved_modules", {}).get(hub._primary_key(sid), False):
                 continue
+            # Bound to this tenant, or unassigned.
             tid = meta.get("tenant_id")
             if tid == tenant_id or not tid:
                 reg_sids.append(sid)
+        # Cached and registered spokes, deduplicated.
         all_sids = list(dict.fromkeys(list(cache.keys()) + reg_sids))
+        # Probe each spoke.
         for sid in all_sids:
+            # Its cached telemetry.
             data = cache.get(sid, {})
             cached_mist = data.get("mist") or {}
+            # Live test result, if the spoke answers.
             live_entry: Optional[dict] = None
+            # Run the live test.
             try:
                 result = await hub.request_response(sid, "CS_TEST_MIST", {}, timeout=8.0)
                 payload = (result.get("payload", {}) or {}).get("data", result) if isinstance(result, dict) else result
@@ -6248,17 +7445,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             except Exception as exc:
                 logger.warning("test_mist: CS_TEST_MIST fan-out to %s failed: %s",
                                sid, exc)
+            # Live result: use it.
             if live_entry:
                 out.append({"spoke_id": sid,
                             "spoke_name": live_entry.get("spoke_name") or data.get("spoke_name") or sid,
                             "token_state": live_entry.get("token_state"),
                             "token_valid": live_entry.get("token_valid"),
                             "status": live_entry.get("status")})
+            # Unreachable: fall back to cached state.
             else:
                 out.append({"spoke_id": sid, "spoke_name": data.get("spoke_name") or sid,
                             "token_state": cached_mist.get("token_state"),
                             "token_valid": cached_mist.get("token_valid"),
                             "status": cached_mist.get("status") or "Spoke unreachable — see hub log."})
+        # Return the rows.
         return {"spokes": out}
 
     @app.get("/sim/api/{tenant}/central-on-prem/available")
@@ -6271,10 +7471,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         → hub fetches from the ON-PREM config; distributed → forwards
         CS_GET_CENTRAL_ON_PREM_AVAILABLE (degrades to empty when no spoke is
         connected)."""
+        # Centralized mode: the hub builds the catalog from its on-prem config.
         modes = await store.get_processing_modes(tenant_id)
         if store.central_on_prem_api_is_centralized(modes):  # unset → centralized
             cc = await store.get_central_on_prem_config(tenant_id)
             return await get_central_available_from_config(await central_secrets.resolve(hub, cc))
+        # Distributed: ask the spoke; empty catalog when offline.
         try:
             return await _cs_forward(tenant_id, "CS_GET_CENTRAL_ON_PREM_AVAILABLE",
                                      {}, timeout=15.0)
@@ -6294,28 +7496,39 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         out to each of the tenant's cs spokes, falling back to the spoke's last
         relayed ``central_on_prem`` telemetry when it is unreachable so the UI
         renders a row, not a 502."""
+        # Centralized mode: test from the hub with its on-prem creds.
         modes = await store.get_processing_modes(tenant_id)
         if store.central_on_prem_api_is_centralized(modes):  # unset → centralized
             cc = await store.get_central_on_prem_config(tenant_id)
             return {"spokes": [await test_central_from_config(await central_secrets.resolve(hub, cc), spoke_id="hub")]}
+        # Rows and this tenant's telemetry cache.
         out: list = []
         cache = _tenant_cache(tenant_id)
+        # Registered, approved cs spokes for this tenant (or unassigned).
         md = hub.state.system_state.get("module_metadata", {}) or {}
         cs_types = {"Client-Sim", "simulation"}
         reg_sids = []
+        # Keep cs spokes only.
         for sid, meta in md.items():
             if not isinstance(meta, dict) or meta.get("module_type") not in cs_types:
                 continue
+            # Must be approved.
             if not getattr(hub, "approved_modules", {}).get(hub._primary_key(sid), False):
                 continue
+            # Bound to this tenant, or unassigned.
             tid = meta.get("tenant_id")
             if tid == tenant_id or not tid:
                 reg_sids.append(sid)
+        # Cached and registered spokes, deduplicated.
         all_sids = list(dict.fromkeys(list(cache.keys()) + reg_sids))
+        # Probe each spoke.
         for sid in all_sids:
+            # Its cached telemetry.
             data = cache.get(sid, {})
             cached_on_prem = data.get("central_on_prem") or {}
+            # Live test result, if the spoke answers.
             live_entry: Optional[dict] = None
+            # Run the live test.
             try:
                 result = await hub.request_response(sid, "CS_TEST_CENTRAL_ON_PREM",
                                                      {}, timeout=8.0)
@@ -6326,28 +7539,35 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             except Exception as exc:
                 logger.warning("test_central_on_prem: CS_TEST_CENTRAL_ON_PREM fan-out to %s failed: %s",
                                sid, exc)
+            # Live result: use it.
             if live_entry:
                 out.append({"spoke_id": sid,
                             "spoke_name": live_entry.get("spoke_name") or data.get("spoke_name") or sid,
                             "token_state": live_entry.get("token_state"),
                             "token_valid": live_entry.get("token_valid"),
                             "status": live_entry.get("status")})
+            # Unreachable: fall back to cached state.
             else:
                 out.append({"spoke_id": sid, "spoke_name": data.get("spoke_name") or sid,
                             "token_state": cached_on_prem.get("token_state"),
                             "token_valid": cached_on_prem.get("token_valid"),
                             "status": cached_on_prem.get("status") or "Spoke unreachable — see hub log."})
+        # Return the rows.
         return {"spokes": out}
 
     @app.get("/sim/api/{tenant}/troubleshooting")
     async def get_troubleshooting(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Return each spoke's API health and reclone state for troubleshooting."""
+        # One row per spoke from the telemetry cache.
         spokes = []
+        # API-server health and reclone state.
         for sid, data in _tenant_cache(tenant_id).items():
             api = data.get("api_server") or {}
             health = api.get("health") or {} if isinstance(api, dict) else {}
             spokes.append({"spoke_id": sid, "spoke_name": data.get("spoke_name") or sid,
                            "api_health": health,
                            "reclone_state": data.get("reclone_state") or {}})
+        # Return the rows.
         return {"spokes": spokes}
 
     # --- WebSocket Route ---
@@ -6361,16 +7581,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # handshake cookie — Starlette WebSocket exposes ``.cookies`` like
         # Request (it has no ``.request`` attribute, so the old lookup always
         # yielded None and rejected even admins with a 1008 close).
+        """Simulations websocket: check access, then subscribe the socket to tenant telemetry."""
+        # Admins or users with the cs right only.
         sess = session_user_fn(websocket)
         cs_ok = bool(is_admin_fn(sess)) or bool(has_cs_access_fn and has_cs_access_fn(sess))
+        # Not allowed: accept, then close with 1008.
         if not cs_ok:
             await websocket.accept()
             await websocket.close(code=1008, reason="Simulations module access required")
             return
+        # Tenant and admin flag.
         tenant_id = resolve_tenant_fn(websocket)
         is_admin = bool(is_admin_fn(sess))
+        # Accept and subscribe.
         await websocket.accept()
         hub.simulations_broadcaster.subscribe(websocket, tenant_id, is_admin)
+        # Read until the socket closes, then unsubscribe.
         try:
             while True:
                 await websocket.receive_text() # Keep connection alive

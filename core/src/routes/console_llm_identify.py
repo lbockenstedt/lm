@@ -12,12 +12,18 @@ The whole feature is gated off by default: the hub endpoint checks
 ``LM_CONSOLE_LLM_IDENTIFY`` and the spoke checks its ``console_llm_identify``
 config, so nothing runs until an operator explicitly enables both sides.
 """
+# JSON parsing of the LLM replies.
 import json
+# Logging under the "Console" logger.
 import logging
+# Reads the LM_CONSOLE_LLM_IDENTIFY env default.
 import os
+# Regexes for scrubbing and for pulling JSON out of replies.
 import re
+# Type hints.
 from typing import Any, Dict, List, Optional, Tuple
 
+# Local fingerprint DB that remembers what worked for each prompt signature.
 from . import console_learn
 
 logger = logging.getLogger("Console")
@@ -31,11 +37,13 @@ logger = logging.getLogger("Console")
 _RE_HASH = re.compile(r"\$[0-9a-zA-Z]{1,3}\$[^\s'\"]{3,}")            # $1$/$5$/$6$/$2y$ …
 _RE_MAC = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b"
                      r"|\b(?:[0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4}\b")   # colon/dash or Cisco dotted
+# IPv4 addresses, with an optional /prefix length.
 _RE_IPV4 = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}"
                       r"(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:/\d{1,2})?\b")
 # IPv6: ≥4 hextets (≥3 colons) or a ``::`` compressed form — avoids eating hh:mm:ss.
 _RE_IPV6 = re.compile(r"\b(?:[0-9A-Fa-f]{1,4}:){3,}[0-9A-Fa-f]{1,4}\b"
                       r"|\b(?:[0-9A-Fa-f]{1,4})?::(?:[0-9A-Fa-f]{1,4}:?)+\b")
+# E-mail addresses.
 _RE_EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
 # key/value secrets: redact the value after a secret-ish keyword.
 _RE_SECRET = re.compile(
@@ -49,6 +57,7 @@ _RE_HOSTNAME = re.compile(r"(?i)\b(host-?name|sysname|switchname)\b(\s*[:=]?\s*)
 # → redact the hostname but keep the mode/terminator (the vendor cue).
 _RE_PROMPT_HOST = re.compile(r"(?m)^([A-Za-z0-9][\w.\-]{0,63})(\([^)]*\))?\s*([>#])\s*$")
 
+# Redaction markers; a field containing one of these is not a real value.
 _PLACEHOLDERS = ("[IP]", "[IPV6]", "[MAC]", "[HOST]", "[EMAIL]", "[REDACTED")
 
 # Terminal escape sequences (VT100/ANSI CSI cursor moves, OSC, scroll-region,
@@ -61,6 +70,7 @@ _RE_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _strip_ansi(text: str) -> str:
+    """Remove terminal escape/control codes and normalise line endings."""
     s = _RE_ANSI_OSC.sub("", text)
     s = _RE_ANSI_CSI.sub("", s)
     s = _RE_ANSI_MISC.sub("", s)
@@ -75,6 +85,7 @@ def scrub_for_llm(text: Optional[str]) -> str:
     IPv4/IPv6 passes so their colon groups aren't mistaken for addresses."""
     if not text:
         return ""
+    # Strip escapes, then replace each kind of sensitive data with a placeholder.
     s = _strip_ansi(str(text))
     s = _RE_HASH.sub("[REDACTED-HASH]", s)
     s = _RE_MAC.sub("[MAC]", s)
@@ -86,6 +97,7 @@ def scrub_for_llm(text: Optional[str]) -> str:
     s = _RE_PROMPT_HOST.sub(lambda m: f"[HOST]{m.group(2) or ''}{m.group(3)}", s)
     return s
 
+# System prompt: identify the device outright or ask for read-only commands.
 _SYS_IDENTIFY = (
     "You are a network-device identification assistant. You are given raw console "
     "output captured from an UNKNOWN device on a serial line (boot log, banner, "
@@ -102,6 +114,7 @@ _SYS_IDENTIFY = (
     "display/get/cat style — NEVER configuration or state-changing commands) that "
     "would reveal the device identity. Prefer a small, broadly-compatible set."
 )
+# System prompt: identify the device from the command outputs.
 _SYS_EXTRACT = (
     "You are a network-device identification assistant. Given the console output "
     "and the outputs of the read-only commands below, identify the device. Respond "
@@ -112,6 +125,7 @@ _SYS_EXTRACT = (
     "is the role: one of Switch, Router, Firewall, Access Point, Gateway, Server, "
     "Load Balancer, or Other. Use null for unknown fields."
 )
+# System prompt: suggest factory-default logins for a device stuck at login.
 _SYS_CREDS = (
     "You are a network-device credential assistant. You are given raw console "
     "output from a device sitting at a login/password prompt whose stored "
@@ -122,6 +136,7 @@ _SYS_CREDS = (
     "guesses, most likely first. Use an empty string for a blank password. Do not "
     "propose destructive actions or commentary."
 )
+# System prompt: pick the device's management IP from a candidate list.
 _SYS_PICK_IP = (
     "You are a network-device addressing assistant. A console fingerprint of ONE "
     "device found several candidate IPv4 addresses on it (e.g. one per addressed "
@@ -135,6 +150,7 @@ _SYS_PICK_IP = (
     "with an address that is not in the candidate list."
 )
 
+# Identity fields we accept from the LLM.
 _IDENTITY_FIELDS = ("model", "os", "type", "serial", "hostname", "ip", "confidence")
 
 
@@ -142,6 +158,7 @@ def hub_llm_identify_enabled(hub=None) -> bool:
     """Whether the hub side of LLM identify is switched on. A persisted hub
     setting (the admin UI toggle) is authoritative once set; otherwise fall back
     to the LM_CONSOLE_LLM_IDENTIFY env default (both default off)."""
+    # The saved hub setting wins when present.
     if hub is not None:
         try:
             v = hub.state.system_state.get("console_llm_identify_enabled")
@@ -149,6 +166,7 @@ def hub_llm_identify_enabled(hub=None) -> bool:
             v = None
         if v is not None:
             return bool(v)
+    # Otherwise use the env var (truthy spellings only).
     return str(os.getenv("LM_CONSOLE_LLM_IDENTIFY", "")).strip().lower() in (
         "1", "true", "yes", "on")
 
@@ -156,6 +174,7 @@ def hub_llm_identify_enabled(hub=None) -> bool:
 def find_ab(hub) -> Optional[str]:
     """The connected AppBuilder agent's spoke_id (the LLM relay), or None. ab
     registers as spoke_id 'ab'; else any connected id containing 'ab'."""
+    # Prefer the spoke registered as "ab"; else any connected id containing "ab".
     conns = getattr(hub, "active_connections", {}) or {}
     try:
         if hub._primary_key("ab") in conns:
@@ -178,6 +197,7 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
     m = re.search(r"```(?:json)?\s*(.+?)```", s, re.DOTALL | re.IGNORECASE)
     if m:
         s = m.group(1).strip()
+    # Try the whole text as JSON first.
     try:
         obj = json.loads(s)
         return obj if isinstance(obj, dict) else None
@@ -203,10 +223,12 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
 
 
 def _user_capture(capture: str) -> str:
+    """Build the LLM user message from the capture (last 6000 chars)."""
     return "=== CAPTURED CONSOLE OUTPUT ===\n" + (capture or "(no output captured)")[-6000:]
 
 
 def _user_outputs(capture: str, outputs: Dict[str, str]) -> str:
+    """Build the LLM user message from the capture plus each command's output (last 3000 chars)."""
     parts = [_user_capture(capture), "\n=== COMMAND OUTPUTS ==="]
     for cmd, out in (outputs or {}).items():
         parts.append(f"\n$ {cmd}\n{(out or '')[-3000:]}")
@@ -215,12 +237,15 @@ def _user_outputs(capture: str, outputs: Dict[str, str]) -> str:
 
 def _finalize(result: Dict[str, Any], js: Dict[str, Any]) -> Dict[str, Any]:
     """Fold a parsed LLM identity object into the running result."""
+    # Ignore anything that isn't a dict.
     if not isinstance(js, dict):
         return result
+    # Keep only real (non-empty, non-placeholder) identity values.
     vendor = js.get("vendor")
     identity = {k: js[k] for k in _IDENTITY_FIELDS
                 if js.get(k) not in (None, "")
                 and not any(ph in str(js[k]) for ph in _PLACEHOLDERS)}
+    # Copy what we got into the result.
     if vendor:
         result["vendor"] = vendor
     if identity:
@@ -231,6 +256,7 @@ def _finalize(result: Dict[str, Any], js: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _unwrap(res) -> Dict[str, Any]:
+    """Return the spoke's inner data dict from a request_response result ({} if not a dict)."""
     if isinstance(res, dict):
         return res.get("payload", {}).get("data", res)
     return {}
@@ -242,10 +268,12 @@ async def _ask_llm(hub, agent, system: str, user: str, timeout: float = 90.0,
     The user content is scrubbed of site-sensitive data before it leaves the hub.
     ``role="final"`` asks AppBuilder for its most capable model (older agents
     ignore it)."""
+    # Build the request with the scrubbed user text (and the model role, if asked).
     req = {"messages": [{"role": "user", "content": scrub_for_llm(user)}],
            "tools": None, "system": system}
     if role:
         req["role"] = role
+    # Send it; anything other than SUCCESS is an error. Return the reply text.
     res = await hub.request_response(agent, "HELP_ASK", req, timeout=timeout)
     data = _unwrap(res)
     if not isinstance(data, dict) or data.get("status") != "SUCCESS":
@@ -257,10 +285,12 @@ async def _ask_llm_credentials(hub, agent, capture: str) -> List[Dict[str, str]]
     """Ask the LLM for likely factory-default credentials for a device stuck at a
     login prompt. Returns an ordered list of ``{username, password}`` (best-effort;
     empty on any failure). These are tried once each — never re-hammered."""
+    # Ask for guesses (any failure means none).
     try:
         content = await _ask_llm(hub, agent, _SYS_CREDS, _user_capture(capture))
     except Exception:  # noqa: BLE001
         return []
+    # Keep up to 6 guesses that have a username.
     js = _extract_json(content) or {}
     out: List[Dict[str, str]] = []
     for c in (js.get("credentials") or [])[:6]:
@@ -280,6 +310,7 @@ async def resolve_ambiguous_ip(hub, agent: str, candidates: List[Any], context: 
     Returns ``{"ip": <a candidate, verbatim>, "confidence": float|None}``, or None
     when the LLM can't tell, answers with a non-candidate, or the relay fails
     (best-effort, like ``_ask_llm_credentials``)."""
+    # Normalise the candidates to unique (ip, source) pairs; we need at least 2.
     cands: List[Tuple[str, str]] = []
     for c in candidates or []:
         if isinstance(c, dict):
@@ -290,6 +321,7 @@ async def resolve_ambiguous_ip(hub, agent: str, candidates: List[Any], context: 
             cands.append((ip, src))
     if len(cands) < 2:
         return None
+    # Build the message: the device context, then each candidate and where it was seen.
     lines = ["=== DEVICE ===", scrub_for_llm(context) or "(unknown)",
              "", "=== CANDIDATE ADDRESSES ==="]
     for ip, src in cands:
@@ -304,6 +336,7 @@ async def resolve_ambiguous_ip(hub, agent: str, candidates: List[Any], context: 
     # lines) is still scrubbed above. This exemption is scoped to THIS function
     # only; never generalize it or reuse this raw-send pattern elsewhere — every
     # other LLM call in this module must keep going through _ask_llm.
+    # Send it directly to the LLM; a relay failure gives None.
     try:
         res = await hub.request_response(
             agent, "HELP_ASK",
@@ -313,6 +346,7 @@ async def resolve_ambiguous_ip(hub, agent: str, candidates: List[Any], context: 
     except Exception as e:  # noqa: BLE001
         logger.warning("console LLM identify: ambiguous-ip resolve failed: %s", e)
         return None
+    # Need a SUCCESS reply naming one of the candidates.
     data = _unwrap(res)
     if not isinstance(data, dict) or data.get("status") != "SUCCESS":
         return None
@@ -320,6 +354,7 @@ async def resolve_ambiguous_ip(hub, agent: str, candidates: List[Any], context: 
     ip = str(js.get("ip") or "").strip()
     if ip not in (x for x, _ in cands):
         return None  # "can't tell" (null) or an address we never offered
+    # Read the confidence (None if missing or not a number).
     try:
         conf: Optional[float] = float(js.get("confidence"))
     except (TypeError, ValueError):
@@ -337,6 +372,7 @@ async def orchestrate(hub, agent: str, sid: str, port_id: str,
     device with this prompt signature has been seen before we reuse its known
     read-only commands (and vendor), skipping the first LLM round entirely. Every
     successful round teaches the DB, so identification gets faster over time."""
+    # Start with an empty result.
     result: Dict[str, Any] = {"status": "OK", "identified": False, "vendor": None,
                               "identity": {}, "commands_run": [], "rejected": [],
                               "logged_in": False, "rounds": 0}
@@ -361,6 +397,7 @@ async def orchestrate(hub, agent: str, sid: str, port_id: str,
             result["identified"] = True
         cmds = [c for c in learned["commands"] if isinstance(c, str) and c.strip()][:cmd_cap]
     else:
+        # No learned entry: ask the LLM; if it identifies the device, learn, store and return.
         content = await _ask_llm(hub, agent, _SYS_IDENTIFY, _user_capture(capture))
         result["rounds"] = 1
         js = _extract_json(content) or {}
@@ -373,6 +410,7 @@ async def orchestrate(hub, agent: str, sid: str, port_id: str,
         cmds = [c.strip() for c in (js.get("commands") or [])
                 if isinstance(c, str) and c.strip()][:cmd_cap]
 
+    # No commands to run -> inconclusive.
     if not cmds:
         result["status"] = "INCONCLUSIVE"
         return result
@@ -402,6 +440,7 @@ async def orchestrate(hub, agent: str, sid: str, port_id: str,
             if retry.get("status") != "ERROR" and not retry.get("error"):
                 coll = retry
 
+    # Record what ran, what was rejected and whether we logged in.
     outputs = coll.get("outputs") or {}
     result["commands_run"] = list(outputs.keys())
     result["rejected"] = coll.get("rejected") or []
@@ -433,6 +472,7 @@ async def orchestrate(hub, agent: str, sid: str, port_id: str,
 
 async def _persist(hub, sid: str, port_id: str, banner: str, result: Dict[str, Any]) -> None:
     """Store the LLM-derived identity on the spoke (best-effort)."""
+    # Send the identity and the last 2000 chars of the banner to the spoke.
     try:
         await hub.request_response(sid, "CONSOLE_LLM_STORE", {
             "port_id": port_id, "vendor": result.get("vendor"),

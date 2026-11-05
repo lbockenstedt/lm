@@ -1,14 +1,20 @@
 """Setup admin: debug-mode, docs, appearance, logs, diagnostics, recovery, bug reports."""
+# asyncio provides the per-event-loop lock for the diagnostics cache.
 import asyncio
+# Hub-wide helpers: HTTP errors, logger, os/re/time and the log-level setter.
 from api import (
     HTTPException, Request, logger, os, re, set_log_level, time,
 )
+# Compares a spoke's version with the latest one for its repo.
 from update_pipeline import _version_behind
+# Ids of spokes that connect directly to the hub (not relayed through another spoke).
 from spoke_alert_sync import direct_module_ids as _direct_module_ids
+# GitHub helpers that turn recently merged PRs/commits into "What's New" items.
 from whats_new_prs import (
     _WHATS_NEW_REPOS, fetch_recent_merged_prs, merged_prs_to_items, recent_commit_items,
 )
 
+# Parses YAML front matter in docs.
 from . import frontmatter
 
 # Cap for the WebUI "What's New" popover (GET /api/whats-new).
@@ -29,22 +35,30 @@ def _committed_features(reports: list, *, now: float = None,
     Newest-first by ``fixed_at`` (falls back to ``ts``), capped at
     ``_WHATS_NEW_LIMIT``. Each item carries a ``type`` so the UI can badge
     "Bug fix" vs "Feature". Pure function (inject ``now`` in tests)."""
+    # Default to the current time; tests pass a fixed one.
     if now is None:
         now = time.time()
+    # Oldest fix time still shown.
     cutoff = now - within_days * 86400
+    # Collect qualifying items.
     items = []
     for r in reports or []:
+        # Only bug and feature reports (untyped counts as bug).
         rtype = str(r.get("type") or "bug").lower()
         if rtype not in ("bug", "feature"):
             continue
+        # Only reports marked fixed.
         if str(r.get("status") or "").lower() != "fixed":
             continue
+        # Skip reports without a summary.
         summary = str(r.get("summary") or "").strip()
         if not summary:
             continue
+        # Skip reports with no time or older than the cutoff.
         when = r.get("fixed_at") or r.get("ts") or 0
         if not when or when < cutoff:
             continue
+        # Keep just the fields the popover needs.
         items.append({
             "id": r.get("id"),
             "summary": summary,
@@ -52,6 +66,7 @@ def _committed_features(reports: list, *, now: float = None,
             "fixed_at": when,
             "issue_url": r.get("issue_url") or "",
         })
+    # Newest first, capped.
     items.sort(key=lambda x: x.get("fixed_at") or 0, reverse=True)
     return items[:_WHATS_NEW_LIMIT]
 
@@ -62,14 +77,18 @@ def _dedupe_and_cap(items: list, limit: int = _WHATS_NEW_LIMIT) -> list:
     callers pass the bug-store items first so a curated summary wins over a
     PR-derived one describing the same change - then sorts newest-first by
     ``fixed_at`` and caps at ``limit``. Pure; does not touch ``_committed_features``."""
+    # Track normalised summaries already seen.
     seen = set()
     deduped = []
+    # Keep only the first item for each summary.
     for it in items:
+        # Compare summaries ignoring case and extra whitespace.
         key = " ".join(str(it.get("summary") or "").lower().split())
         if key in seen:
             continue
         seen.add(key)
         deduped.append(it)
+    # Newest first, capped at the limit.
     deduped.sort(key=lambda x: x.get("fixed_at") or 0, reverse=True)
     return deduped[:limit]
 
@@ -89,6 +108,8 @@ _diag_locks: dict = {}
 
 
 def _diag_lock() -> "asyncio.Lock":
+    """Return the diagnostics lock for the current event loop, creating it on first use."""
+    # Key the lock by the running loop so each loop gets its own.
     loop = asyncio.get_running_loop()
     lk = _diag_locks.get(id(loop))
     if lk is None:
@@ -104,11 +125,14 @@ async def _maybe_refresh_diagnostics(hub, force=False):
     served payload (fresh, recomputed, or stale-on-failure). Mirrors
     pxmx._maybe_refresh_agents; ``force`` does not bypass a genuinely-fresh
     result (a concurrent refresh while this one waited is served as-is)."""
+    # Only one refresh runs at a time.
     async with _diag_lock():
+        # Serve the cache if it is fresh enough.
         cached = _DIAG_CACHE["data"]
         age = (time.time() - _DIAG_CACHE["ts"]) if cached is not None else None
         if cached is not None and age is not None and age < _DIAG_FRESH_S:
             return cached
+        # Recompute and store the new payload.
         _DIAG_CACHE["refreshing"] = True
         try:
             result = await _aggregate_diagnostics(hub)
@@ -118,6 +142,7 @@ async def _maybe_refresh_diagnostics(hub, force=False):
         except Exception:
             logger.exception("diagnostics cache refresh failed")
             return cached  # serve stale rather than blanking the card
+        # Always clear the refreshing flag.
         finally:
             _DIAG_CACHE["refreshing"] = False
 
@@ -131,8 +156,10 @@ def _bust_diag_cache():
     GET serves instantly and kicks a single background refresh, reflecting the
     mutation within the fresh-TTL window without thrash. A cold cache (data is
     None) still forced-refreshes on the next GET."""
+    # Keep data but mark it just past fresh, so the next GET refreshes in the background.
     if _DIAG_CACHE.get("data") is not None:
         _DIAG_CACHE["ts"] = min(_DIAG_CACHE["ts"], time.time() - _DIAG_FRESH_S)
+    # No cached data: force a refresh on the next GET.
     else:
         _DIAG_CACHE["ts"] = 0.0
 
@@ -155,6 +182,7 @@ async def _aggregate_diagnostics(hub):
     unit-testable with a stub hub. Includes the leaked relay-agent
     self-heal (run on every fresh recompute so stale serves inherit
     a cleaned state)."""
+    # Hub-wide system metrics, the result list and the known spokes.
     metrics = await hub.get_system_metrics()
     diagnostics = []
     known_spokes = hub.state.system_state.get("known_modules", [])
@@ -169,6 +197,7 @@ async def _aggregate_diagnostics(hub):
     # X.Y.Z / v-tag / pre-reset values.
     import re as _re
     def _is_nn(v) -> bool:
+        """Return True if ``v`` uses the ".NN" or "MAJOR.MINOR" version scheme."""
         # Accept BOTH the legacy ".NN" counter and the new "MAJOR.MINOR" scheme
         # (e.g. "1.02", "2.14"). SKEW flags only versions on NEITHER (stale
         # X.Y.Z / v-tag / pre-reset). Mirrors _isNN in WebUI/main.js.
@@ -188,6 +217,7 @@ async def _aggregate_diagnostics(hub):
     # them below, and self-heal the persisted registries so the watchdog
     # stops considering them. Mirrors the client-side filter in
     # loadDiagnostics (WebUI/main.js).
+    # Collect relayed agent ids from agent_config and "{spoke}:{agent}" heartbeat keys.
     agent_cfg_keys = set((hub.state.system_state.get("agent_config", {}) or {}).keys())
     relay_ids = {k.split(":", 1)[1] for k in hub.heartbeat.last_seen if ":" in k}
     relay_ids |= agent_cfg_keys
@@ -198,7 +228,9 @@ async def _aggregate_diagnostics(hub):
         _raw = (_info or {}).get("agent_id")
         if _raw:
             relay_ids.add(_raw)
+    # Spokes that connect directly are never treated as relayed agents.
     direct_module_ids = _direct_module_ids(hub.state.system_state)
+    # Remove relay agent ids that leaked into known_modules/approved_modules.
     if relay_ids:
         known = list(hub.state.system_state.get("known_modules", []))
         leaked = [
@@ -215,9 +247,12 @@ async def _aggregate_diagnostics(hub):
             logger.info("[diag] removed leaked relay-agent id(s) from "
                         "known_modules/approved_modules: %s", leaked)
 
+    # Build one diagnostics row per known spoke.
     for sid in known_spokes:
+        # Skip relayed node agents.
         if sid in relay_ids and sid not in direct_module_ids:
             continue  # relayed node agent — surfaced via /api/pxmx/agents, not here
+        # Live socket, telemetry and recent events for this spoke.
         ws = hub.active_connections.get(hub._primary_key(sid))
         telemetry = hub.spoke_telemetry.get(hub._primary_key(sid), {})
         events = hub.get_spoke_events(sid, limit=50)
@@ -240,6 +275,7 @@ async def _aggregate_diagnostics(hub):
                           # stuck in this loop reconnects/refuses on the same
                           # 5-300s backoff cadence.
                           "hub_identity_rejected"))
+        # Three or more drops in 5 minutes counts as flapping.
         flapping = flap_drops >= 3
 
         # Heartbeat age: seconds since the last inbound heartbeat frame, or
@@ -263,6 +299,7 @@ async def _aggregate_diagnostics(hub):
         # contact. Drives the diagnostics badge.
         alert = (getattr(hub, "_spoke_alerts", {}) or {}).get(sid, {}) or {}
 
+        # The version this spoke last reported.
         spoke_version = hub.spoke_versions.get(hub._primary_key(sid), "unknown")
         # version_skew: True when a connected spoke reports a version that
         # is NOT in the new per-repo ".NN" numbering (e.g. a stale X.Y.Z /
@@ -298,6 +335,7 @@ async def _aggregate_diagnostics(hub):
         parent_online = bool(
             parent_sid and hub._primary_key(parent_sid) in hub.active_connections)
 
+        # Add this spoke's diagnostics row.
         diagnostics.append({
             "spoke_id": sid,
             "display_name": hub.state.get_module_name(sid),
@@ -369,6 +407,7 @@ async def _aggregate_diagnostics(hub):
             "cs_telemetry_ts": (hub.simulations_cache.get(sid, {}) or {}).get("timestamp"),
         })
 
+    # Read the WebUI version file; stays "unknown" if it cannot be read.
     webui_version = "unknown"
     try:
         # The WebUI lives at lm/WebUI (not lm/ui). Resolve from core/src →
@@ -382,6 +421,7 @@ async def _aggregate_diagnostics(hub):
     except Exception:
         pass
 
+    # Return per-spoke rows plus hub-wide versions and metrics.
     return {
         "spokes": diagnostics,
         "hub_version": hub_version,
@@ -396,11 +436,13 @@ async def store_bug_report(hub, ctx, request, data: dict) -> str:
     Request Assistant submit route) and log the greppable ``[bug-report]``
     marker ab's scan_bugs keys on. Returns the report id; raises HTTPException.
     The tenant is resolved server-side and overrides whatever the browser sent."""
+    # Any unexpected failure becomes a 500.
     try:
         explanation = str(data.get("explanation") or "")
         # Capture-integrity receipt line (before store): shows whether the
         # WebUI actually captured console/html/screenshot, so a "no issue in
         # GitHub" trace can rule out a missing payload upstream of storage.
+        # Note the screenshot format (png/jpg) or "none" for the receipt log.
         shot = data.get("screenshot")
         if isinstance(shot, str) and shot.startswith("data:"):
             shot_kind = "png" if "image/png" in shot.split(",", 1)[0] else "jpg"
@@ -419,6 +461,7 @@ async def store_bug_report(hub, ctx, request, data: dict) -> str:
             _tid = ctx._resolve_tenant(request) or ""
         except Exception:  # noqa: BLE001
             _tid = ""
+        # No session tenant: use the tenant picked in the WebUI header.
         if not _tid:
             _c = data.get("context") or {}
             if isinstance(_c, dict):
@@ -427,11 +470,13 @@ async def store_bug_report(hub, ctx, request, data: dict) -> str:
         # store it as untagged (Global-Admin-only) rather than a bogus tenant.
         if _tid == "default":
             _tid = ""
+        # Save the report off the event loop; an empty id means it failed.
         data["tenant_id"] = _tid
         rid = await asyncio.to_thread(hub._store_bug_report, data)
         if not rid:
             logger.error("bug-report: _store_bug_report returned no id (data keys=%s)", list(data.keys()))
             raise HTTPException(status_code=500, detail="Failed to store bug report")
+        # Gather the fields for the marker log line.
         sev = str(data.get("severity") or "medium")
         rtype = str(data.get("type") or "bug").strip().lower() or "bug"
         bctx = data.get("context") or {}
@@ -444,6 +489,7 @@ async def store_bug_report(hub, ctx, request, data: dict) -> str:
             f"summary={summary[:80]!r}"
         )
         return rid
+    # Let HTTP errors through unchanged; wrap anything else as a 500.
     except HTTPException:
         raise
     except Exception as e:
@@ -456,17 +502,25 @@ def register(app, hub, ctx):
 
     @app.get("/setup/debug-mode")
     async def get_debug_mode():
+        """Return whether debug logging is enabled."""
+        # Read the debug flag from the global config.
         hub = app.state.hub
         enabled = hub.state.get_global_config().get("debug_mode", False)
         return {"enabled": enabled}
 
     @app.post("/setup/debug-mode")
     async def toggle_debug_mode(request: Request):
+        """Turn debug logging on or off for the hub and all spokes.
+
+        Expects JSON {"enabled": bool}.
+        """
         hub = app.state.hub
         try:
+            # Read the requested setting.
             data = await request.json()
             enabled = data.get("enabled", False)
 
+            # Store it in the global config and mark state for saving.
             global_config = hub.state.get_global_config()
             global_config["debug_mode"] = enabled
             hub.state.system_state["global_config"] = global_config
@@ -478,28 +532,35 @@ def register(app, hub, ctx):
             await hub.broadcast_log_level(enabled)
 
             return {"status": "ok", "enabled": enabled}
+        # Any failure is reported as a 500.
         except Exception as e:
             logger.exception("toggle_debug_mode failed")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/setup/docs/{section}")
     async def get_docs(section: str):
+        """Return one "Help:" section of README.md by its header name (404 if missing)."""
         try:
+            # Find README.md in either possible layout, falling back to the first path.
             readme_path = next(
                 (r for r in (
                     os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../README.md")),
                     os.path.abspath(os.path.join(os.path.dirname(__file__), "../../README.md")),
                 ) if os.path.exists(r)),
                 os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../README.md")))
+            # The README must exist.
             if not os.path.exists(readme_path):
                 raise HTTPException(status_code=404, detail="README.md documentation not found")
 
+            # Read the whole README.
             with open(readme_path, "r") as f:
                 content = f.read()
 
+            # Help sections start with this marker; split the README on it.
             marker = "### \U0001f4d6 Help:"
             sections = content.split(marker)
 
+            # Return the body of the section whose header matches.
             for s in sections[1:]:
                 lines = s.split('\n')
                 header = lines[0].strip()
@@ -508,6 +569,7 @@ def register(app, hub, ctx):
                     return {"content": body}
 
             raise HTTPException(status_code=404, detail=f"Help section '{section}' not found in documentation.")
+        # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -532,12 +594,14 @@ def register(app, hub, ctx):
 
     def _safe_doc_path(name: str) -> str:
         """Resolve ``name`` to a .md file strictly inside _DOCS_DIR (no traversal)."""
+        # Normalise the name and drop any .md extension.
         stem = (name or "").strip().lower()
         if stem.endswith(".md"):
             stem = stem[:-3]
         # Canonical doc names are kebab-case ascii; reject anything else outright.
         if not stem or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", stem):
             raise HTTPException(status_code=400, detail="Invalid document name.")
+        # Build the path and make sure it is a real file directly in the docs folder.
         path = os.path.abspath(os.path.join(_DOCS_DIR, f"{stem}.md"))
         if os.path.dirname(path) != _DOCS_DIR or not os.path.isfile(path):
             raise HTTPException(status_code=404, detail=f"Document '{stem}' not found.")
@@ -546,14 +610,18 @@ def register(app, hub, ctx):
     @app.get("/docs")
     async def list_docs():
         """List the canonical docs (name + first-heading title) for the Help index."""
+        # Collect one entry per doc.
         out = []
         try:
+            # Look at every .md file in the docs folder, in name order.
             for fn in sorted(os.listdir(_DOCS_DIR)):
                 if not fn.endswith(".md"):
                     continue
+                # Default the title to the file name.
                 name = fn[:-3]
                 title = name
                 summary = ""
+                # Read the start of the file for its front matter summary and first heading.
                 try:
                     with open(os.path.join(_DOCS_DIR, fn), "r", encoding="utf-8") as f:
                         head = f.read(2048)
@@ -563,9 +631,11 @@ def register(app, hub, ctx):
                         if line.startswith("# "):
                             title = line[2:].strip()
                             break
+                # An unreadable doc keeps its default title.
                 except Exception:  # noqa: BLE001
                     pass
                 out.append({"name": name, "title": title, "summary": summary})
+        # The docs folder itself is missing.
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Docs directory not found.")
         return {"docs": out}
@@ -573,10 +643,12 @@ def register(app, hub, ctx):
     @app.get("/docs/{name}")
     async def get_doc(name: str):
         """Return one canonical doc as raw markdown (rendered client-side)."""
+        # Validate the name and read the file.
         path = _safe_doc_path(name)
         try:
             with open(path, "r", encoding="utf-8") as f:
                 markdown = f.read()
+        # Read failures are logged and reported as a 500.
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error reading doc {name}: {e}")
             raise HTTPException(status_code=500, detail="Error reading document.")
@@ -584,11 +656,13 @@ def register(app, hub, ctx):
         # renderer turns '---' into <hr>, so an unstripped block renders as a
         # rule followed by raw YAML at the top of every document.
         meta, markdown = frontmatter.split(markdown)
+        # Default the title to the file name, then use the first "# " heading if any.
         title = os.path.basename(path)[:-3]
         for line in markdown.splitlines():
             if line.startswith("# "):
                 title = line[2:].strip()
                 break
+        # Return the doc with its title, summary and markdown body.
         return {"name": os.path.basename(path)[:-3], "title": title,
                 "summary": str(meta.get("summary") or ""), "markdown": markdown}
 
@@ -610,11 +684,18 @@ def register(app, hub, ctx):
 
     @app.post("/setup/mtls-enable")
     async def set_mtls_enable(request: Request):
+        """Turn mutual TLS on or off (Global Admin only).
+
+        Enabling is refused with 409 if the fleet is not ready, unless "force" is true.
+        """
+        # mtls holds the runtime mTLS switch.
         from security import mtls
         hub = app.state.hub
+        # Only Global Admins may change this.
         sess = ctx._session_user(request)
         if not sess or not ctx._is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Read the requested state.
         data = await request.json()
         enable = bool(data.get("enabled"))
         # Guard: refuse to enable if not ready (would orphan a spoke), unless
@@ -628,6 +709,7 @@ def register(app, hub, ctx):
                     detail="System not ready for mTLS — "
                            + "; ".join(rdy["blockers"])
                            + " (or pass force=true).")
+        # Save the flag in the global config and mark state for saving.
         gc = hub.state.system_state.get("global_config", {})
         gc["mtls_enabled"] = enable
         hub.state.system_state["global_config"] = gc
@@ -647,12 +729,15 @@ def register(app, hub, ctx):
         mTLS materials out to every primary spoke; when OFF, distribution and
         auto-enable are both inert (the manual Enable button + 409 guard still
         behave as before)."""
+        # Only Global Admins may change this.
         hub = app.state.hub
         sess = ctx._session_user(request)
         if not sess or not ctx._is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Read the requested state.
         data = await request.json()
         enabled = bool(data.get("enabled"))
+        # Save it under global_config["mtls"] and mark state for saving.
         gc = hub.state.system_state.get("global_config", {})
         mtls_cfg = gc.get("mtls", {}) or {}
         mtls_cfg["auto_provision"] = enabled
@@ -672,8 +757,10 @@ def register(app, hub, ctx):
     async def get_session_timeout():
         """Idle session timeout (minutes) — a user with no requests for this long
         is logged out. 0 = disabled. Default 60 minutes."""
+        # access holds the live idle-timeout setting.
         import access
         hub = app.state.hub
+        # Use the stored value, or the current live default.
         gc = hub.state.system_state.get("global_config", {}) or {}
         mins = gc.get("session_idle_timeout_minutes")
         if mins is None:
@@ -682,11 +769,15 @@ def register(app, hub, ctx):
 
     @app.post("/setup/session-timeout")
     async def set_session_timeout(request: Request):
+        """Set the idle session timeout in minutes (Global Admin only, 0 disables, max 30 days)."""
+        # access holds the live idle-timeout setting.
         import access
         hub = app.state.hub
+        # Only Global Admins may change this.
         sess = ctx._session_user(request)
         if not sess or not ctx._is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Read and validate the number of minutes.
         data = await request.json()
         try:
             mins = int(data.get("minutes"))
@@ -694,6 +785,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail="minutes must be an integer")
         if mins < 0 or mins > 43200:  # cap at 30 days
             raise HTTPException(status_code=400, detail="minutes out of range (0–43200)")
+        # Save it in the global config and mark state for saving.
         gc = hub.state.system_state.get("global_config", {})
         gc["session_idle_timeout_minutes"] = mins
         hub.state.system_state["global_config"] = gc
@@ -705,6 +797,8 @@ def register(app, hub, ctx):
 
     @app.get("/setup/appearance")
     async def get_appearance():
+        """Return the WebUI colour/logo settings, or the HPE defaults when unset."""
+        # Read the stored appearance, with HPE defaults.
         hub = app.state.hub
         config = hub.state.system_state.get("global_config", {}).get("appearance", {
             "primary_color": "#01A982",
@@ -718,29 +812,40 @@ def register(app, hub, ctx):
 
     @app.post("/setup/appearance")
     async def update_appearance(request: Request):
+        """Save the WebUI colour/logo settings.
+
+        Expects JSON {"config": {...}}.
+        """
+        # Read the new settings.
         hub = app.state.hub
         try:
             data = await request.json()
             config = data.get("config", {})
 
+            # Store them in the global config and mark state for saving.
             global_config = hub.state.system_state.get("global_config", {})
             global_config["appearance"] = config
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
 
             return {"status": "ok", "message": "Appearance settings updated."}
+        # Any failure is reported as a 500.
         except Exception as e:
             logger.exception("update_appearance failed")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/setup/toast-config")
     async def get_toast_config():
+        """Return how long WebUI toast messages stay on screen (seconds, default 10)."""
+        # Read the stored duration.
         hub = app.state.hub
         seconds = hub.state.system_state.get("toast_duration_s", 10)
         return {"toast_duration_s": seconds}
 
     @app.post("/setup/toast-config")
     async def update_toast_config(request: Request):
+        """Set how long WebUI toast messages stay on screen (1-300 seconds)."""
+        # Read the requested duration.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -748,9 +853,11 @@ def register(app, hub, ctx):
             # instantly (effectively hiding errors) and there is no reason to
             # keep one on screen for more than 5 minutes.
             seconds = max(1, min(300, int(data.get("toast_duration_s", 10))))
+            # Store it and mark state for saving.
             hub.state.system_state["toast_duration_s"] = seconds
             hub.state._mark_dirty()
             return {"status": "ok", "toast_duration_s": seconds}
+        # A non-number value is a bad request.
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="toast_duration_s must be a number")
         except Exception as e:
@@ -759,6 +866,7 @@ def register(app, hub, ctx):
 
     @app.get("/setup/logs/all")
     async def get_all_logs():
+        """Return logs from every source (hub, spokes, agents) in one payload."""
         hub = app.state.hub
         # collect_all_logs does os.listdir + per-file open + deque over
         # /var/log/lm then an inline json.dumps binary search to fit the
@@ -769,12 +877,16 @@ def register(app, hub, ctx):
 
     @app.get("/setup/logs")
     async def get_hub_logs():
+        """Return the last 500 lines of the hub log (file, or in-memory buffer as fallback)."""
+        # Any read error falls back to the in-memory buffer below.
         hub = app.state.hub
         try:
+            # Prefer the hub log file when it exists.
             log_path = "/var/log/lm/hub.log"
             if os.path.exists(log_path):
                 # deque(f, maxlen=500) caps memory: readlines() loads the WHOLE
                 # file (hub.log can be many MB) before slicing the last 500.
+                # deque keeps only the last N lines in memory.
                 from collections import deque
                 with open(log_path, "r") as f:
                     tail = deque(f, maxlen=500)
@@ -782,6 +894,7 @@ def register(app, hub, ctx):
             # No file — fall back to in-memory deque (deques don't support slicing)
             mem_logs = list(hub.logs)[-500:] if hasattr(hub, "logs") else []
             return {"logs": [str(l) for l in mem_logs]}
+        # On error, log it and try the in-memory buffer; return no lines if that fails too.
         except Exception as e:
             logger.error(f"Error reading hub logs: {e}")
             try:
@@ -792,6 +905,11 @@ def register(app, hub, ctx):
 
     @app.get("/setup/logs/{module}")
     async def get_module_logs(module: str):
+        """Return the logs for one module, the error log, console logs or agent logs.
+
+        ``module`` is a short module name (e.g. "dns") or one of "errors", "console", "agents".
+        """
+        # Any failure is handled at the end of this function.
         hub = app.state.hub
         try:
             if module == "errors":
@@ -806,7 +924,9 @@ def register(app, hub, ctx):
                 # feeds hub.console_logs directly (see main.py ConsoleLogHandler).
                 return {"logs": list(hub.console_logs)[-500:]}
 
+            # Agent logs: every agent's lines, labelled with a readable name.
             if module == "agents":
+                # Flatten all agents' lines into one list.
                 flat = []
                 for agent_id, logs in hub.agent_logs.items():
                     # B2: agent_logs is guid-keyed for relayed agents; label with
@@ -817,6 +937,7 @@ def register(app, hub, ctx):
                     label = hub._agent_relay_name(agent_id)
                     if label == agent_id:
                         label = hub._log_source_label(agent_id)
+                    # Prefix each line with its source.
                     for line in logs:
                         flat.append(f"[{label}] {line}")
                 return {"logs": flat[-500:]}
@@ -831,11 +952,13 @@ def register(app, hub, ctx):
             # them in hub.agent_logs[spoke_id], same buffer the "agents"
             # branch above already reads). Prefer that live relay, scoped to
             # this module's spoke(s), before ever touching the local file.
+            # Map short module names to the spoke module types.
             module_type_map = {
                 "opn": "firewall", "pxmx": "hypervisor", "cppm": "nac",
                 "cs": "simulation", "ldap": "directory", "netbox": "ipam",
                 "dns": "dns", "dhcp": "dhcp", "henet": "henet", "nw": "nw", "le": "certificates",
             }
+            # Collect spoke ids of this module's type.
             mtype = module_type_map.get(module)
             matching_sids = set()
             if mtype:
@@ -847,6 +970,7 @@ def register(app, hub, ctx):
             matching_sids.update(
                 sid for sid in hub.agent_logs if sid == module or sid.startswith(module + "-"))
 
+            # When spokes relayed lines, return those, labelled by source.
             if matching_sids:
                 flat = []
                 for sid in matching_sids:
@@ -868,6 +992,7 @@ def register(app, hub, ctx):
                 # per-agent decisions in one place (mirrors le/cert above).
                 if module == "cs":
                     flat.extend(hub.cs_bridge_logs)
+                # Return the newest 500 lines if anything was found.
                 if flat:
                     return {"logs": flat[-500:]}
 
@@ -895,18 +1020,22 @@ def register(app, hub, ctx):
                 "henet":  "lm-henet",
                 "dhcp":   "lm-dhcp",
             }
+            # Unknown modules use the "lm-<module>" naming convention.
             filename = log_name_map.get(module, f"lm-{module}")
 
+            # The log file must exist on the hub.
             log_path = f"/var/log/lm/{filename}.log"
             if not os.path.exists(log_path):
                 raise HTTPException(status_code=404, detail=f"Log file for {module} not found at {log_path}.")
 
+            # Read the last 500 lines of the file.
             with open(log_path, "r") as f:
                 # deque caps memory — readlines() loads the whole file first.
                 from collections import deque
                 logs = deque(f, maxlen=500)
 
             return {"logs": [log.strip() for log in logs]}
+        # Let HTTP errors through unchanged; report anything else as a 500.
         except HTTPException:
             raise
         except Exception as e:
@@ -919,13 +1048,16 @@ def register(app, hub, ctx):
         and delegate to the ab spoke's LLM. The hub has no LLM of its own.
         Blocks until the analysis returns (long — the LLM can be slow); admin-gated
         by the /setup/* middleware."""
+        # A missing or invalid JSON body is treated as empty.
         hub = app.state.hub
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Which module to analyse; hub, recovery and all mean the hub log.
         module = (body or {}).get("module") or "hub"
         is_hub = module in ("hub", "recovery", "all", "")
+        # Reuse the log routes above; any failure means no lines.
         try:
             resp = await (get_hub_logs() if is_hub else get_module_logs(module))
         except HTTPException:
@@ -936,26 +1068,32 @@ def register(app, hub, ctx):
         # expects. Send the LLM only the recent window (configured interval, default 15 min)
         # — not the whole tail. Quiet module (nothing in-window) → "no recent activity".
         lines = [str(l) for l in ((resp or {}).get("logs", []) if isinstance(resp, dict) else [])]
+        # Window length in minutes from settings (default 30).
         win = int(hub.state.get_global_config().get("log_analysis_interval_min", 30) or 30)
         windowed = hub._window_log_lines(lines, win)
+        # Send at most the last 400 lines.
         log_text = "\n".join(windowed[-400:])
+        # Label the logs for the LLM prompt.
         label = f"Lab Manager (hub) logs (last {win} min)" if is_hub else f"{module} logs (last {win} min)"
         return await hub.analyze_logs_via_ab(module, log_text, label)
 
     @app.get("/setup/log-analysis")
     async def get_log_analysis(module: str = "hub"):
         """Return the cached (pre-computed or last-run) Log Analysis for a module."""
+        # Look up the cached result for this module.
         hub = app.state.hub
         cache = getattr(hub, "_log_analysis_cache", {}) or {}
         cached = cache.get(module or "hub")
         if cached:
             return cached
+        # Nothing cached yet: return an empty placeholder.
         return {"ok": None, "running": False, "module": module or "hub",
                 "analysis": "", "verdict": None, "error": None, "at": None}
 
     @app.get("/setup/log-analysis/config")
     async def get_log_analysis_config():
         """Log-sentinel settings + last-sweep generation-time metric for the UI."""
+        # Read the settings from the global config.
         hub = app.state.hub
         gc = hub.state.get_global_config()
         return {
@@ -969,11 +1107,13 @@ def register(app, hub, ctx):
     async def set_log_analysis_config(request: Request):
         """Enable/disable the unattended sentinel + set its target interval (minutes).
         The loop self-throttles so the effective gap is never shorter than a sweep takes."""
+        # A missing or invalid JSON body is treated as empty.
         hub = app.state.hub
         try:
             data = await request.json()
         except Exception:
             data = {}
+        # Update only the fields that were sent; a bad interval is ignored.
         gc = hub.state.get_global_config()
         if "auto" in data:
             gc["log_analysis_auto"] = bool(data.get("auto"))
@@ -982,6 +1122,7 @@ def register(app, hub, ctx):
                 gc["log_analysis_interval_min"] = max(1, int(data.get("interval_min")))
             except (TypeError, ValueError):
                 pass
+        # Store the config and mark state for saving.
         hub.state.system_state["global_config"] = gc
         hub.state._mark_dirty()
         return {"ok": True, "auto": gc.get("log_analysis_auto", True),
@@ -997,10 +1138,12 @@ def register(app, hub, ctx):
         ``/setup/*`` middleware already gates admin, this is belt-and-suspenders
         (mirrors ``reset_rate_limit_drops``). The clear is destructive and
         fleet-wide, hence the explicit re-check + a [diag] audit line."""
+        # Re-check Global Admin, since the action is destructive and fleet-wide.
         hub = app.state.hub
         sess = ctx._session_user(request)
         if not sess or not ctx._is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
+        # Clear every log source, then write an audit line.
         result = await hub.clear_all_logs()
         logger.warning("[diag] Clear Logs by %s: hub %d + agent/spoke %d lines, "
                        "%d on-disk file(s), broadcast to %d spoke(s)",
@@ -1012,10 +1155,15 @@ def register(app, hub, ctx):
 
     @app.get("/setup/api-probe")
     async def probe_spoke_api(spoke_id: str, path: str):
+        """Ask a connected spoke to call one of its own API paths and return the raw result (debug
+           tool).
+        """
+        # The spoke must be connected.
         hub = app.state.hub
         if hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"Spoke {spoke_id} not connected")
 
+        # Relay the probe; any failure is a 500.
         try:
             result = await hub.request_response(spoke_id, "PROBE_API", {"path": path})
             return result
@@ -1034,6 +1182,7 @@ def register(app, hub, ctx):
         and a forced refresh only when there is no servable cache. The
         compute (``_aggregate_diagnostics``) runs the leaked relay-agent
         self-heal on every fresh recompute."""
+        # Read the cached payload and its age.
         hub = app.state.hub
 
         cached = _DIAG_CACHE["data"]
@@ -1060,6 +1209,7 @@ def register(app, hub, ctx):
         ``event_count`` badge) so the polled list stays light — these arrays are
         only needed for the one spoke the operator actually expanded. Cheap
         hub-local reads (in-memory deques), admin-gated by the /setup/ prefix."""
+        # Read the in-memory event and log buffers for this spoke.
         hub = app.state.hub
         return {
             "spoke_id": spoke_id,
@@ -1077,6 +1227,7 @@ def register(app, hub, ctx):
         flag" surfaced as a per-row Pause/Resume button in the Diagnostics view.
         Admin-gated automatically by the /setup/ prefix in access_control_middleware.
         """
+        # A missing or invalid JSON body is treated as empty.
         hub = app.state.hub
         try:
             data = await request.json()
@@ -1084,13 +1235,16 @@ def register(app, hub, ctx):
             data = {}
         pause = bool(data.get("pause", False))
 
+        # Get (or create) this spoke's recovery state.
         st = hub.spoke_recovery.setdefault(hub._primary_key(spoke_id), {"attempts": 0})
+        # Pause: stop restart attempts and record the event.
         if pause:
             st["manual_pause"] = True
             st["in_progress"] = False
             action, event = "paused", "recovery_paused"
             hub.record_spoke_event(spoke_id, "recovery_paused", "manual pause set via WebUI")
             logger.info(f"[recovery] spoke_id={spoke_id} action=paused reason=manual_override")
+        # Resume: clear the pause.
         else:
             st["manual_pause"] = False
             # Resume: reset attempts/backoff so recovery fires on the next tick
@@ -1101,6 +1255,7 @@ def register(app, hub, ctx):
             action, event = "resumed", "recovery_resumed"
             hub.record_spoke_event(spoke_id, "recovery_resumed", "manual pause cleared via WebUI")
             logger.info(f"[recovery] spoke_id={spoke_id} action=resumed reason=manual_override")
+        # Make the Diagnostics view refresh soon to show the change.
         _bust_diag_cache()
         return {"status": "ok", "spoke_id": spoke_id, "paused": pause}
 
@@ -1118,6 +1273,7 @@ def register(app, hub, ctx):
         issue and pulls these artifacts from the hub for fix context.
         """
         hub = app.state.hub
+        # The body must be valid JSON with a non-empty explanation.
         try:
             data = await request.json()
         except Exception:
@@ -1125,6 +1281,7 @@ def register(app, hub, ctx):
         if not isinstance(data, dict) or not str(data.get("explanation") or "").strip():
             raise HTTPException(status_code=400, detail="Missing explanation")
 
+        # Store the report and return its id.
         return {"status": "ok", "id": await store_bug_report(hub, ctx, request, data)}
 
     @app.get("/api/whats-new")
@@ -1158,13 +1315,17 @@ def register(app, hub, ctx):
         falls back to the bug-store-only result.
         """
         hub = app.state.hub
+        # Source 1: fixed reports from the bug store.
         bug_items = _committed_features(hub._list_bug_reports())
+        # Source 2: merged PRs; any failure leaves this list empty.
         pr_items = []
         try:
+            # Repos to read from settings (default list), as (owner, name) pairs.
             gc = hub.state.system_state.get("global_config", {}) or {}
             repos = gc.get("whats_new_repos") or list(_WHATS_NEW_REPOS)
             slugs = [(o, n) for o, _, n in (str(r or "").partition("/") for r in repos) if o and n]
             if slugs:
+                # Fetch all repos in parallel; a failing repo is logged and skipped.
                 fetched = await asyncio.gather(
                     *(fetch_recent_merged_prs(o, n, within_days=_WHATS_NEW_DAYS) for o, n in slugs),
                     return_exceptions=True,
@@ -1175,10 +1336,12 @@ def register(app, hub, ctx):
                         logger.warning("whats-new: PR fetch failed: %s", result)
                         continue
                     prs.extend(result)
+                # Turn PRs into popover items.
                 pr_items = merged_prs_to_items(prs, within_days=_WHATS_NEW_DAYS)
         except Exception as e:  # noqa: BLE001 — PR source must never break the popover
             logger.warning("whats-new: PR source failed: %s", e)
             pr_items = []
+        # Source 3: recent commits on this hub's checkout, read off the event loop.
         commit_items = []
         try:
             commit_items = await asyncio.to_thread(
@@ -1186,6 +1349,7 @@ def register(app, hub, ctx):
                 repo_url=f"https://github.com/{_WHATS_NEW_REPOS[0]}")
         except Exception as e:  # noqa: BLE001 — never break the popover
             logger.warning("whats-new: commit source failed: %s", e)
+        # Merge, dedupe and cap the three sources.
         return {"features": _dedupe_and_cap(bug_items + pr_items + commit_items)}
 
     # Bug Reports log view (admin-only, like the rest of /setup/): lists filed
@@ -1194,6 +1358,8 @@ def register(app, hub, ctx):
     # _get_bug_report helpers so the UI and ab see the same data.
     @app.get("/setup/bug-reports")
     async def list_bug_reports():
+        """List all filed bug reports and feature requests, newest first."""
+        # Read the stored reports and sort newest first.
         hub = app.state.hub
         reports = hub._list_bug_reports()
         reports.sort(key=lambda r: r.get("ts", 0), reverse=True)
@@ -1201,6 +1367,8 @@ def register(app, hub, ctx):
 
     @app.get("/setup/bug-reports/{rid}")
     async def get_bug_report(rid: str):
+        """Return one bug report with its artifacts, or 404."""
+        # Read the report off the event loop.
         hub = app.state.hub
         rep = await asyncio.to_thread(hub._get_bug_report, rid)
         if not rep:
@@ -1214,6 +1382,7 @@ def register(app, hub, ctx):
         (console/HTML/screenshot) under data_dir/bugs/<id>/. The public GitHub
         issue ab may already have filed is NOT touched — only the hub's
         local copy of the captured artifacts."""
+        # Delete off the event loop; False means it did not exist.
         hub = app.state.hub
         ok = await asyncio.to_thread(hub._delete_bug_report, rid)
         if not ok:
@@ -1225,6 +1394,7 @@ def register(app, hub, ctx):
         """Admin approves a feature request (admin-only, like the rest of /setup/).
         Marks it 'approved' so GET_BUG_REPORTS exposes it to ab, which then
         files the GitHub issue and works the feature. Bugs never need this gate."""
+        # Mark it approved off the event loop; False means it did not exist.
         hub = app.state.hub
         ok = await asyncio.to_thread(hub._approve_bug_report, rid)
         if not ok:
@@ -1238,6 +1408,7 @@ def register(app, hub, ctx):
     # is gated to tenant-admins + Global Admins by the access-control middleware;
     # per-report ownership is enforced here (anti cross-tenant IDOR).
     def _bug_acting_tenants(sess):
+        """Return the tenant ids assigned to the session's user."""
         return (sess or {}).get("user", {}).get("tenants") or []
 
     def _bug_report_tenant(r):
@@ -1246,10 +1417,12 @@ def register(app, hub, ctx):
         spoof it); fall back to the tenant captured in the report's
         ``context.currentTenant`` so LEGACY reports — filed before tenant_id was
         recorded — still scope by the tenant that's already in the bug."""
+        # Use the stored tenant_id when set.
         r = r or {}
         tid = str(r.get("tenant_id") or "").strip()
         if tid:
             return tid
+        # Otherwise fall back to the tenant recorded in the report's context.
         cmeta = r.get("context") or {}
         if isinstance(cmeta, dict):
             ctid = str(cmeta.get("currentTenant") or "").strip()
@@ -1263,8 +1436,10 @@ def register(app, hub, ctx):
         report's context). Untagged reports stay Global-Admin-only, so a tenant
         admin never sees a report not attributed to their tenant (mirrors
         tenant_devices._owns)."""
+        # Global Admins see everything.
         if ctx._is_admin(sess):
             return True
+        # Others see only reports tagged with one of their tenants.
         tid = _bug_report_tenant(r)
         return bool(tid) and tid in _bug_acting_tenants(sess)
 
@@ -1272,6 +1447,7 @@ def register(app, hub, ctx):
     async def tenant_list_bug_reports(request: Request):
         """Tenant-scoped, read-only mirror of /setup/bug-reports. Returns only
         reports filed under one of the caller's tenants (Global Admin sees all)."""
+        # Keep only reports this caller may see, newest first.
         hub = app.state.hub
         sess = ctx._session_user(request)
         reports = [r for r in hub._list_bug_reports() if _bug_report_visible(sess, r)]
@@ -1282,6 +1458,7 @@ def register(app, hub, ctx):
     async def tenant_get_bug_report(request: Request, rid: str):
         """Tenant-scoped detail. A report the caller's tenant doesn't own is
         reported as 404 (never 403) so existence never leaks across tenants."""
+        # Read the report and hide it unless the caller may see it.
         hub = app.state.hub
         sess = ctx._session_user(request)
         rep = await asyncio.to_thread(hub._get_bug_report, rid)

@@ -6,7 +6,9 @@ Every view degrades to an empty list when the tenant has no cached spokes, so
 the UI never white-screens. ``spoke_online`` is the live websocket connection
 state from ``hub.active_connections``.
 """
+# Wall-clock time for cache-age and host-staleness checks.
 import time
+# Type hints only.
 from typing import Any, Dict, List, Optional, Tuple
 
 # Check statuses that count as pass / fail / warning for summaries.
@@ -41,16 +43,21 @@ def _agent_cs_enabled(hub, hostname: str) -> bool:
     hostname — tolerant, mirroring ``gateway/cs_bridge._agent_config_entry``).
     Unknown hosts default to True so a freshly-connected agent still shows
     while its config row is created (don't black-hole a brand-new agent)."""
+    # No hostname to look up: show the host.
     if not hostname:
         return True
+    # Read the hub's per-agent config; any error means show the host.
     try:
         store = hub.state.system_state.get("agent_config", {}) or {}
     except Exception:
         return True
+    # Try a direct lookup by hostname (entries may be keyed by hostname).
     entry = store.get(hostname)
+    # Otherwise search entries for a matching hostname or display name.
     if not isinstance(entry, dict):
         hn = str(hostname).strip().lower()
         for v in store.values():
+            # Skip malformed entries.
             if not isinstance(v, dict):
                 continue
             alt = str(v.get("hostname") or v.get("display_name") or "").strip().lower()
@@ -59,6 +66,7 @@ def _agent_cs_enabled(hub, hostname: str) -> bool:
                 break
     if not isinstance(entry, dict):
         return True  # unknown → show
+    # The agent's client-simulation settings block.
     cs = entry.get("client_simulation") or {}
     # enabled absent → treat as off ONLY when the entry exists with an explicit
     # client_simulation block; an entry with no client_simulation at all is an
@@ -80,24 +88,32 @@ class SimulationsService:
     """
 
     def __init__(self, hub):
+        """Keep a reference to the hub for reading caches, connections and state."""
         self.hub = hub
 
     # ── cache access helpers ───────────────────────────────────────────────
     def _cache(self) -> Dict[str, dict]:
+        """Return the hub's per-spoke telemetry cache (empty if the hub has none)."""
         return getattr(self.hub, "simulations_cache", {}) or {}
 
     def _is_online(self, spoke_id: str) -> bool:
+        """Return True when the spoke currently has a live websocket connection."""
+        # Connections are keyed by the spoke's primary key, so normalise the id first.
         return self.hub._primary_key(spoke_id) in getattr(self.hub, "active_connections", {})
 
     def _spokes_for_tenant(self, tenant_id: str) -> List[Tuple[str, dict]]:
         """Cached Client-Sim spokes bound to this tenant (by module_metadata
         tenant_id). Admins viewing a specific tenant get that tenant's spokes."""
+        # Collected (spoke_id, telemetry) pairs.
         out: List[Tuple[str, dict]] = []
+        # Hub helper mapping spoke -> tenant (absent on test doubles).
         get_tenant = getattr(self.hub.state, "get_spoke_tenant", None)
+        # Keep cached spokes that belong to this tenant (or all, if no tenant lookup exists).
         for sid, data in self._cache().items():
             try:
                 if get_tenant is None or get_tenant(sid) == tenant_id:
                     out.append((sid, data or {}))
+            # A lookup failure for one spoke just skips it.
             except Exception:
                 continue
         return out
@@ -110,14 +126,18 @@ class SimulationsService:
         cache (< _CACHE_FRESH_S — serve as current, no notice) from a stale one
         (show the 'cached — check Spoke and Agent' notice). Missing timestamp
         (older frame) => treated as stale."""
+        # Timestamp when this telemetry was received.
         ts = float((data or {}).get("fetched_at") or 0)
+        # No timestamp: age unknown, so neither fresh nor flagged stale.
         if not ts:
             return {"cache_age_s": None, "cache_fresh": False, "cache_stale": False}
+        # Age in seconds, classified against the freshness window.
         age = time.time() - ts
         return {"cache_age_s": int(age), "cache_fresh": age < _CACHE_FRESH_S,
                 "cache_stale": age >= _CACHE_FRESH_S}
 
     def _meta(self, sid: str, data: dict) -> Dict[str, Any]:
+        """Return the common per-spoke fields (id, name, hostname, online, cache age) for a row."""
         return {
             "spoke_id": sid,
             "spoke_name": data.get("spoke_name") or sid,
@@ -128,6 +148,8 @@ class SimulationsService:
 
     @staticmethod
     def _check_status(info: Any) -> str:
+        """Return a check's status as a lowercase string, accepting a dict or a bare value."""
+        # Pull "status" out of a dict entry, or use the value itself.
         s = (info.get("status") if isinstance(info, dict) else info) or ""
         return str(s).lower()
 
@@ -137,12 +159,14 @@ class SimulationsService:
         when the tenant isn't centralized / hasn't been polled yet. Produced by
         CentralHubPoller (see simulations/central_hub_poller.py); presence
         implies centralized central_api mode."""
+        # The hub poller stores one status block per centralized tenant.
         return (getattr(self.hub, "central_hub_status", {}) or {}).get(tenant_id)
 
     @staticmethod
     def _hub_meta() -> Dict[str, Any]:
         """Synthetic spoke meta for the hub's own Central status so the per-spoke
         views render a 'Hub (centralized)' row identical to a real spoke."""
+        # A fixed meta row that looks like a real, always-online spoke.
         return {"spoke_id": "hub", "spoke_name": "Hub (centralized)",
                 "spoke_hostname": "", "spoke_online": True}
 
@@ -150,10 +174,13 @@ class SimulationsService:
         """Per-wsite ok/fail/unknown check tally + wireless client count from a
         ``central_status`` block. Shared by the real-spoke and hub-centralized
         paths in get_central_status_data."""
+        # Per-site check statuses, client counts and site-name mappings.
         status_map = central.get("status") or {}
         clients_by_site = central.get("central_clients_by_site") or {}
         site_mappings = central.get("site_mappings") or {}
+        # One summary row per site.
         sites: List[dict] = []
+        # Tally each check's status into ok / fail / unknown.
         for wsite, checks_map in status_map.items():
             ok = fail = unk = 0
             for _chk, info in (checks_map or {}).items():
@@ -164,6 +191,7 @@ class SimulationsService:
                     fail += 1
                 else:
                     unk += 1
+            # Summary row with the mapped Central site name and client count.
             sites.append({"wsite": wsite,
                           "central_site": site_mappings.get(wsite) or wsite,
                           "check_ok": ok, "check_fail": fail, "check_unknown": unk,
@@ -173,15 +201,19 @@ class SimulationsService:
     # ── aggregate reads ────────────────────────────────────────────────────
     async def get_dashboard_data(self, tenant_id: str) -> Dict[str, Any]:
         """Roll up client count, hardware breakdown, and central-check summary for the tenant's cached spokes."""
+        # Cached spokes for this tenant and running totals.
         spokes = self._spokes_for_tenant(tenant_id)
         client_count = 0
         hw: Dict[str, int] = {}
         checks = {"pass": 0, "fail": 0, "warning": 0}
+        # Walk each spoke's cached clients and checks.
         for sid, data in spokes:
+            # Count clients and group them by hardware type.
             for c in (data.get("clients") or []):
                 client_count += 1
                 k = (c or {}).get("hw_type") or (c or {}).get("platform") or "Unknown"
                 hw[k] = hw.get(k, 0) + 1
+            # Tally each Central check status into pass / fail / warning.
             for _site, checks_map in ((data.get("central") or {}).get("status") or {}).items():
                 for _chk, info in (checks_map or {}).items():
                     s = self._check_status(info)
@@ -192,6 +224,7 @@ class SimulationsService:
                     elif s in _WARN:
                         checks["warning"] += 1
         # Centralized-mode Central checks come from the hub poller, not a spoke.
+        # Add the hub-side Central status for centralized tenants.
         hub_central = self._hub_central(tenant_id)
         if hub_central is not None:
             for _site, checks_map in (hub_central.get("status") or {}).items():
@@ -203,7 +236,9 @@ class SimulationsService:
                         checks["fail"] += 1
                     elif s in _WARN:
                         checks["warning"] += 1
+        # Count spokes with a live connection.
         online = sum(1 for sid, _ in spokes if self._is_online(sid))
+        # Return the dashboard summary.
         return {"tenant_id": tenant_id, "client_count": client_count,
                 "hardware_breakdown": hw, "checks_summary": checks,
                 "spokes_online": online, "spokes_total": len(spokes)}
@@ -223,11 +258,17 @@ class SimulationsService:
         return self._build_clients_data(tenant_id)
 
     def _build_clients_data(self, tenant_id: str) -> Dict[str, Any]:
+        """Build the Clients view rows for a tenant, merging duplicate hostnames across spokes."""
+        # One row per cached client across this tenant's spokes.
         rows: List[dict] = []
         for sid, data in self._spokes_for_tenant(tenant_id):
+            # Common spoke fields copied onto every row.
             meta = self._meta(sid, data)
+            # Each client reported by this spoke.
             for c in (data.get("clients") or []):
+                # Treat a None entry as an empty dict.
                 c = c or {}
+                # Flatten the client into a Clients-view row.
                 rows.append({
                     **meta,
                     "hostname": c.get("hostname") or c.get("id") or "",
@@ -295,28 +336,37 @@ class SimulationsService:
         # whichever spoke holds it). Mirrors the get_proxmox_data cross-spoke
         # dedup; rows with no hostname are kept as-is (unique).
         def _ckey(c: dict) -> str:
+            """Return the dedup key for a row: lowercased hostname (or id)."""
             return str(c.get("hostname") or c.get("id") or "").strip().lower()
 
         def _ls(c: dict) -> float:
+            """Return a row's last_seen as a number for comparison (0 if missing/unparseable)."""
+            # last_seen may be a number, numeric string, placeholder or missing.
             ls = c.get("last_seen")
             try:
                 return float(ls)
+            # Non-numeric values sort as oldest.
             except (TypeError, ValueError):
                 return 0.0
 
         def _crank(c: dict):
             # online first, then most active sims, then most recent last_seen.
+            """Return a sort key ranking which duplicate row is the better base."""
             return (1 if c.get("online") else 0,
                     len(c.get("active_simulations") or []), _ls(c))
 
+        # Best row per hostname, first-seen order, and rows that have no hostname.
         best: Dict[str, dict] = {}
         order: List[str] = []
         extras: List[dict] = []
+        # Fold every row into the per-hostname best map.
         for c in rows:
             k = _ckey(c)
+            # Rows without a hostname cannot be deduplicated; keep them all.
             if not k:
                 extras.append(c)
                 continue
+            # First row for this hostname becomes the base.
             if k not in best:
                 best[k] = c
                 order.append(k)
@@ -325,6 +375,7 @@ class SimulationsService:
             # an override-only phantom) so its bucket sim / tier / config /
             # simulation_id survive; fold the other row's overrides +
             # active_simulations + last_seen in.
+            # a = base, b = row being folded in; swap when b ranks higher.
             a, b = best[k], c
             if _crank(b) > _crank(a):
                 a, b = b, a
@@ -341,6 +392,7 @@ class SimulationsService:
             # already has set; the folded row fills any key the base lacks (this
             # is how the phantom's freshly-set override lands on the real
             # client's row).
+            # Fill in override keys the base has not set.
             ov = dict(a.get("overrides") or {})
             for ok, ov_b in (b.get("overrides") or {}).items():
                 if ov.get(ok) in (None, "", [], {}):
@@ -348,16 +400,20 @@ class SimulationsService:
             a["overrides"] = ov
             # online is OR; last_seen is the most recent; error_count the max so
             # a real error isn't masked by the phantom's 0.
+            # Online if either row is online; keep the latest last_seen.
             if b.get("online"):
                 a["online"] = True
             if _ls(b) > _ls(a):
                 a["last_seen"] = b.get("last_seen")
+            # Keep the larger error count; ignore unparseable values.
             try:
                 a["error_count"] = max(int(a.get("error_count") or 0),
                                         int(b.get("error_count") or 0))
             except (TypeError, ValueError):
                 pass
+        # Rebuild rows in first-seen order, followed by rows without hostnames.
         rows = [best[k] for k in order] + extras
+        # Return rows plus fleet health computed against the running sim VMs.
         return {"tenant_id": tenant_id, "clients": rows,
                 "fleet_health": self._fleet_health(
                     rows, self._running_sim_vms(tenant_id))}
@@ -372,12 +428,17 @@ class SimulationsService:
         only counts when its host is currently in telemetry AND it is running, so
         a host that drops out removes its VMs from both this set and the VM Server
         view in lockstep. Templates, LXC and sub-floor infra VMs are excluded."""
+        # name -> vmid of running sim VMs.
         out: Dict[str, int] = {}
+        # Walk every cached spoke of the tenant.
         for _sid, data in self._spokes_for_tenant(tenant_id):
+            # Multi-host payloads list hosts with their own VM lists.
             host_list = data.get("proxmox_hosts")
             vm_lists: List[list] = []
             if isinstance(host_list, list) and host_list:
+                # Collect each enabled host's VM list.
                 for h in host_list:
+                    # Treat a None host as empty.
                     h = h or {}
                     # Match the VM Server view, which HIDES CS-disabled hosts —
                     # their VMs have no reporting client by design, so counting
@@ -386,22 +447,30 @@ class SimulationsService:
                     if hn and not _agent_cs_enabled(self.hub, hn):
                         continue
                     vm_lists.append((h.get("proxmox_vms")) or [])
+            # Legacy single-host payload: one top-level VM list.
             else:
                 vm_lists.append(data.get("proxmox_vms") or [])
+            # Keep only running sim VMs above the vmid floor.
             for vms in vm_lists:
                 for vm in (vms or []):
+                    # Skip malformed entries.
                     if not isinstance(vm, dict):
                         continue
+                    # Templates and containers are never sim clients.
                     if vm.get("is_template") or vm.get("type") == "lxc":
                         continue
+                    # Parse the vmid; skip entries without a numeric id.
                     try:
                         vid = int(vm.get("vmid") or 0)
                     except (TypeError, ValueError):
                         continue
+                    # Infrastructure VMs below the floor are not sim clients.
                     if vid <= _SIM_VMID_FLOOR:
                         continue
+                    # Only running VMs are expected to check in.
                     if str(vm.get("status") or "").lower() != "running":
                         continue
+                    # Record the VM under its lowercased name.
                     name = str(vm.get("name") or "").strip().lower()
                     if name:
                         out[name] = vid
@@ -432,6 +501,7 @@ class SimulationsService:
         Fallbacks: with no VM telemetry, or when VM names don't correlate to any
         online client (a name↔hostname mismatch that would otherwise show a false
         0%), fall back to the registry metric (online clients ÷ registered)."""
+        # Lowercased hostnames of clients that are currently online.
         online_names = set()
         for c in clients:
             if c.get("online"):
@@ -439,7 +509,9 @@ class SimulationsService:
                 if h:
                     online_names.add(h)
 
+        # Prefer the VM-based measurement when VM telemetry exists.
         use_vms = bool(sim_vms)
+        # Count VMs with a matching online client.
         if use_vms:
             reporting = sum(1 for name in sim_vms if name in online_names)
             # Name↔hostname correlation failed (VMs exist, clients ARE checking
@@ -454,6 +526,7 @@ class SimulationsService:
         # so the UI can synthesize a verifiable "never checked in" row for each.
         not_reporting_names: List[dict] = []
 
+        # VM basis: working = running VMs with an online client.
         if use_vms:
             total = len(sim_vms)
             reporting = sum(1 for name in sim_vms if name in online_names)
@@ -461,12 +534,14 @@ class SimulationsService:
             eligible = total
             provisioned = total
             not_reporting = max(0, total - reporting)
+            # Names and vmids of running VMs without a live client.
             not_reporting_names = [
                 {"hostname": name, "vmid": sim_vms[name]}
                 for name in sorted(sim_vms)
                 if name not in online_names
             ]
             basis = "vm_checkin"
+        # Registry basis: working = online clients out of all registered clients.
         else:
             registered = len(clients)
             working = len(online_names)
@@ -475,7 +550,9 @@ class SimulationsService:
             not_reporting = max(0, registered - working)
             basis = "client_checkin"
 
+        # Percent working, or None when nothing is eligible.
         pct = round(100.0 * working / eligible, 1) if eligible > 0 else None
+        # Map the percentage to a badge status: >=90 ok, >=75 warning, else critical.
         if pct is None:
             status = "no_data"
         elif pct >= 90:
@@ -484,6 +561,7 @@ class SimulationsService:
             status = "warning"
         else:
             status = "critical"
+        # Return the badge data, including the basis used.
         return {"provisioned": provisioned, "exclusive": 0, "eligible": eligible,
                 "working": working, "not_reporting": not_reporting,
                 "not_reporting_names": not_reporting_names,
@@ -491,23 +569,31 @@ class SimulationsService:
 
     async def get_simulations_data(self, tenant_id: str) -> Dict[str, Any]:
         """One row per active simulation across the tenant's cached clients (the Simulations view shape)."""
+        # One row per (client, simulation) across this tenant's spokes.
         rows: List[dict] = []
         for sid, data in self._spokes_for_tenant(tenant_id):
+            # Spoke fields used on every row.
             meta = self._meta(sid, data)
             spoke_rows: List[dict] = []
+            # Each client reported by this spoke.
             for c in (data.get("clients") or []):
+                # Treat a None entry as an empty dict.
                 c = c or {}
+                # Use the active simulations list, or the single pinned simulation id.
                 sims = c.get("active_simulations") or (
                     [c.get("simulation_id")] if c.get("simulation_id") else [])
+                # One row per simulation the client is running.
                 for sn in sims:
                     spoke_rows.append({"tenant_id": tenant_id, "spoke_id": sid,
                                        "spoke_name": meta["spoke_name"],
                                        "hostname": c.get("hostname") or "",
                                        "simulation_name": sn})
+            # A spoke with no running simulations still gets a placeholder row.
             if not spoke_rows:
                 spoke_rows.append({"tenant_id": tenant_id, "spoke_id": sid,
                                    "spoke_name": meta["spoke_name"],
                                    "simulation_name": "—"})
+            # Add this spoke's rows to the result.
             rows.extend(spoke_rows)
         return {"tenant_id": tenant_id, "simulations": rows}
 
@@ -518,6 +604,7 @@ class SimulationsService:
         (the 'clear the cache to make it refresh' bug that cost us a whole day).
         Cheap at this fleet size. The route caller mutates the result, so the
         per-request build + shallow host-dict copies below are what it gets."""
+        # Build the host rows from the current telemetry cache.
         result = self._build_proxmox_data(tenant_id)
         # Recompute per-hop AGES + online/stale HERE, per request — NOT in the
         # memoized build. The memo only rebuilds when a new telemetry frame bumps
@@ -526,10 +613,13 @@ class SimulationsService:
         # memoized raw timestamps on every request is what lets a dead host age
         # out and a genuinely-stale cache read "cached". Also powers the detail
         # page's telemetry-freshness panel (agent → spoke → hub → now chain).
+        # One clock reading for all age calculations in this request.
         now = time.time()
         out_hosts = []
+        # Work on a shallow copy of each host so the build output is not mutated.
         for h in (result.get("hosts") or []):
             h = dict(h)
+            # When the agent last reported this host (epoch seconds).
             hls = h.get("host_last_seen")
             if isinstance(hls, (int, float)) and hls:
                 h["host_age_s"] = max(0, int(now - hls))
@@ -549,6 +639,7 @@ class SimulationsService:
                 h["host_online"] = bool(h.get("spoke_online"))
             # Recompute the cache freshness label from the hub receipt time each
             # request (was frozen at build time → misleading "cached"/"fresh").
+            # When the hub received this spoke's telemetry.
             hf = h.get("hub_fetched_at")
             if isinstance(hf, (int, float)) and hf:
                 cage = max(0, int(now - hf))
@@ -556,6 +647,7 @@ class SimulationsService:
                 h["cache_fresh"] = cage < _CACHE_FRESH_S
                 h["cache_stale"] = cage >= _CACHE_FRESH_S
             # Per-hop lag chain for the detail page (seconds, one-decimal).
+            # Agent-side telemetry details and when the agent generated the frame.
             at = h.get("agent_telemetry") or {}
             gen = at.get("gen_ts")
             # Frame is flowing (host in-contact) but the agent reused a snapshot
@@ -565,6 +657,7 @@ class SimulationsService:
             # and NOT "offline" (the frame keeps last_seen advancing, which is what
             # stops the "offline while connected" symptom).
             h["telemetry_stale"] = bool(at.get("stale_collect"))
+            # Per-hop ages and agent stats for the detail page's freshness panel.
             h["freshness"] = {
                 "agent_gen_age_s":  round(now - gen, 1) if isinstance(gen, (int, float)) else None,
                 "stale_collect":    bool(at.get("stale_collect")),
@@ -592,20 +685,28 @@ class SimulationsService:
                 "last_disconnect_reason": at.get("last_disconnect_reason"),
                 "last_disconnect_age_s":  at.get("last_disconnect_age_s"),
             }
+            # Add the enriched host row.
             out_hosts.append(h)
+        # Return the tenant id and the per-request host rows.
         return {"tenant_id": result.get("tenant_id", tenant_id), "hosts": out_hosts}
 
     def _build_proxmox_data(self, tenant_id: str) -> Dict[str, Any]:
+        """Build one VM Server row per Proxmox host for a tenant, deduplicated and filtered."""
+        # One row per Proxmox host across this tenant's spokes.
         hosts: List[dict] = []
         for sid, data in self._spokes_for_tenant(tenant_id):
             # New multi-host shape (cs spoke aggregating several pxmx agents):
             # ``proxmox_hosts`` is one entry per known Proxmox host. Expand it
             # into one VM Server row per host so each pxmx host is visible.
+            # Hosts reported by a multi-host spoke.
             host_list = data.get("proxmox_hosts")
             if isinstance(host_list, list) and host_list:
+                # One row per host, with spoke-level fields as fallbacks.
                 for h in host_list:
+                    # Treat a None host as empty and read its proxmox block.
                     h = h or {}
                     hpx = h.get("proxmox") or {}
+                    # Build the VM Server row for this host.
                     hosts.append({
                         "spoke_id": sid,
                         "spoke_name": h.get("hostname") or (data.get("spoke_name") or sid),
@@ -639,8 +740,10 @@ class SimulationsService:
                         "relay_age_s":     h.get("relay_age_s"),
                         "hub_fetched_at":  data.get("fetched_at"),
                     })
+                # Done with this spoke; the legacy branch below does not apply.
                 continue
             # Legacy single-host shape (one Proxmox host per cs spoke).
+            # Single-host spoke: its proxmox block is at the top level.
             px = data.get("proxmox") or {}
             # Skip a pure RELAY spoke: a cs spoke that only relays pxmx agents is
             # not itself a Proxmox host, so it has no proxmox block / VMs of its
@@ -654,6 +757,7 @@ class SimulationsService:
             # the rows.
             if not px and not data.get("proxmox_vms"):
                 continue
+            # Build the VM Server row for the legacy single-host spoke.
             hosts.append({
                 **self._meta(sid, data),
                 "vm_count": px.get("vm_count") or len(data.get("proxmox_vms") or []),
@@ -684,10 +788,14 @@ class SimulationsService:
         # (online first, then most VMs, then most USB) so the fleet count is
         # accurate. Rows with no resolvable hostname are kept as-is (unique).
         def _host_key(h: dict) -> str:
+            """Return the dedup key for a host row: its lowercased hostname (or fallback id)."""
             return str(h.get("hostname") or h.get("spoke_hostname")
                        or h.get("spoke_name") or h.get("spoke_id") or "").strip().lower()
 
         def _host_rank(h: dict):
+            """Return a sort key ranking duplicate host rows by data freshness, then spoke online
+            state.
+            """
             # FRESHNESS decides, not size. Two cs spokes can both report the same
             # Proxmox host — an agent that moved from one spoke to another leaves
             # its old spoke re-publishing a frozen copy forever (relay_payload
@@ -704,25 +812,32 @@ class SimulationsService:
             # host_last_seen is agent→spoke→hub, so it tracks the ACTUAL data
             # age. spoke_online stays as a tiebreaker (a live spoke beats a dead
             # one at equal freshness); counts are data, never a recency signal.
+            # Parse the last-seen timestamp; unparseable values rank as oldest.
             try:
                 seen = float(h.get("host_last_seen") or 0)
             except (TypeError, ValueError):
                 seen = 0.0
             return (seen, 1 if h.get("spoke_online") else 0)
 
+        # Best row per host, first-seen order, and rows with no hostname.
         best: Dict[str, dict] = {}
         order: List[str] = []
         extras: List[dict] = []
+        # Keep the freshest row per host.
         for h in hosts:
             k = _host_key(h)
+            # Rows without a hostname cannot be deduplicated; keep them all.
             if not k:
                 extras.append(h)
                 continue
+            # First row for this host.
             if k not in best:
                 best[k] = h
                 order.append(k)
+            # A fresher duplicate replaces the current best.
             elif _host_rank(h) > _host_rank(best[k]):
                 best[k] = h
+        # Rebuild in first-seen order, followed by rows without hostnames.
         hosts = [best[k] for k in order] + extras
         # Hide hosts whose backing agent has client_simulation.enabled = false.
         # An agent attached to a cs spoke but with CS disabled must not show its
@@ -746,78 +861,103 @@ class SimulationsService:
         # frame captured AFTER its delete was stamped is a reused/re-cloned vmid,
         # so clear its stale "deleted" overlay — otherwise a legitimately
         # re-created vmid stays hidden for the rest of _VM_DELETED_TTL (180s).
+        # Latest telemetry receipt time at which each vmid was seen.
         present_ts: Dict[str, float] = {}
+        # Walk every VM in every host's list.
         for h in hosts:
+            # Skip hosts with no receipt timestamp.
             fa = h.get("hub_fetched_at")
             if not fa:
                 continue
             for vm in (h.get("proxmox_vms") or []):
+                # Skip malformed VM entries.
                 if not isinstance(vm, dict):
                     continue
+                # Record the latest receipt time for this vmid; skip unparseable timestamps.
                 vid = str(vm.get("vmid"))
                 try:
                     present_ts[vid] = max(present_ts.get(vid, 0.0), float(fa))
                 except (TypeError, ValueError):
                     continue
+        # Clear "deleted" overlays for vmids that reappeared after the delete; best-effort.
         try:
             self.hub.vm_live_drop_reappeared(tenant_id, present_ts)
         except Exception:  # noqa: BLE001
             pass
+        # Fetch transient per-vmid states; failures mean no overlay.
         try:
             overlay = self.hub.vm_live_states(tenant_id)
         except Exception:  # noqa: BLE001
             overlay = {}
+        # Apply the overlay to each host's VM list.
         if overlay:
             for h in hosts:
+                # Original list, rebuilt list and count of removed VMs.
                 vms = h.get("proxmox_vms") or []
                 kept = []
                 pruned = 0
+                # Check each VM against the overlay.
                 for vm in vms:
+                    # Keep malformed entries untouched.
                     if not isinstance(vm, dict):
                         kept.append(vm)
                         continue
+                    # Transient state for this VM, if any.
                     state = overlay.get(str(vm.get("vmid")))
+                    # VM just deleted: drop it from the list.
                     if state == "deleted":
                         pruned += 1
                         continue
+                    # Other transient state: copy the VM with the state stamped on.
                     if state:
                         vm = {**vm, "prov_status": state}
                     kept.append(vm)
+                # Store the rebuilt list.
                 h["proxmox_vms"] = kept
+                # Lower the VM count by the number pruned; fall back to the list length.
                 if pruned:
                     try:
                         h["vm_count"] = max(0, int(h.get("vm_count") or len(vms)) - pruned)
                     except (TypeError, ValueError):
                         h["vm_count"] = len(kept)
+        # Return the tenant id and processed host rows.
         return {"tenant_id": tenant_id, "hosts": hosts}
 
     async def get_central_data(self, tenant_id: str) -> Dict[str, Any]:
         """Simulations tab: per-spoke central checks / hardware alerts / client counts."""
+        # One entry per cached spoke with its Central status block.
         spokes: List[dict] = []
         for sid, data in self._spokes_for_tenant(tenant_id):
             central = data.get("central") or {}
             spokes.append({**self._meta(sid, data), "central_status": central})
+        # Add the synthetic hub row for centralized tenants.
         hub_central = self._hub_central(tenant_id)
         if hub_central is not None:
             spokes.append({**self._hub_meta(), "central_status": hub_central})
+        # Return the per-spoke Central blocks.
         return {"tenant_id": tenant_id, "mode": "—", "spokes": spokes}
 
     async def get_central_status_data(self, tenant_id: str) -> Dict[str, Any]:
         """Central tab: per-spoke site breakdown (ok/fail/unknown + wireless clients)."""
+        # Per-spoke rows and the most recent known token validity.
         spokes: List[dict] = []
         token_valid: Any = None
+        # One entry per cached spoke with its site breakdown.
         for sid, data in self._spokes_for_tenant(tenant_id):
             central = data.get("central") or {}
+            # Remember the token state when this spoke reports one.
             tv = central.get("token_valid")
             token_valid = tv if tv is not None else token_valid
             spokes.append({**self._meta(sid, data),
                            "sites": self._central_site_rows(central)})
+        # Add the synthetic hub row for centralized tenants.
         hub_central = self._hub_central(tenant_id)
         if hub_central is not None:
             tv = hub_central.get("token_valid")
             token_valid = tv if tv is not None else token_valid
             spokes.append({**self._hub_meta(),
                            "sites": self._central_site_rows(hub_central)})
+        # Return the site breakdown per spoke.
         return {"tenant_id": tenant_id, "mode": "—", "token_valid": token_valid,
                 "hub_central_config": {}, "spokes": spokes}
 
@@ -827,6 +967,7 @@ class SimulationsService:
         the tenant isn't centralized / hasn't been polled yet. Produced by
         MistHubPoller (simulations/mist_hub_poller.py); presence implies
         centralized mist_api mode. Mirror of _hub_central."""
+        # The hub Mist poller stores one status block per centralized tenant.
         return (getattr(self.hub, "mist_hub_status", {}) or {}).get(tenant_id)
 
     # ── Central On-Prem — a SECOND, independent Aruba Central instance (same
@@ -837,6 +978,7 @@ class SimulationsService:
     def _hub_central_on_prem(self, tenant_id: str) -> Any:
         """Hub-side ``central_on_prem_status`` for a centralized-mode tenant, or
         None when not centralized / not yet polled. Mirror of _hub_central."""
+        # The on-prem hub poller stores one status block per centralized tenant.
         return (getattr(self.hub, "central_on_prem_hub_status", {}) or {}).get(tenant_id)
 
     def _hub_block_for_source(self, source: str, tenant_id: str) -> Any:
@@ -846,7 +988,9 @@ class SimulationsService:
         Used by the SimQuotaEngine firing-eval so each source's quota reads ONLY
         its own source's telemetry — a Central On-Prem quota never fires on
         cloud Central's status (and vice versa)."""
+        # Normalise the source name; empty means cloud Central.
         src = str(source or "central").strip().lower()
+        # Pick the hub status block for that source.
         if src == "mist":
             return self._hub_mist(tenant_id)
         if src == "central_on_prem":
@@ -860,10 +1004,13 @@ class SimulationsService:
         / client_count_status / health). ``mist_clients_by_site`` is populated by
         the centralized MistHubPoller; a distributed spoke's relayed status lacks
         it (wireless_clients=0), identical to Central's distributed path."""
+        # Per-site check statuses, client counts and site-name mappings.
         status_map = mist.get("status") or {}
         clients_by_site = mist.get("mist_clients_by_site") or {}
         site_mappings = mist.get("site_mappings") or {}
+        # One summary row per site.
         sites: List[dict] = []
+        # Tally each check's status into ok / fail / unknown.
         for wsite, checks_map in status_map.items():
             ok = fail = unk = 0
             for _chk, info in (checks_map or {}).items():
@@ -874,6 +1021,7 @@ class SimulationsService:
                     fail += 1
                 else:
                     unk += 1
+            # Summary row with the mapped Mist site name and client count.
             sites.append({"wsite": wsite,
                           "mist_site": site_mappings.get(wsite) or wsite,
                           "check_ok": ok, "check_fail": fail, "check_unknown": unk,
@@ -884,32 +1032,40 @@ class SimulationsService:
         """Simulations tab: per-spoke Mist checks / hardware alerts / client
         counts. Mirror of get_central_data (reads the relayed ``data["mist"]``
         block + the centralized hub poller's synthetic spoke)."""
+        # One entry per cached spoke with its Mist status block.
         spokes: List[dict] = []
         for sid, data in self._spokes_for_tenant(tenant_id):
             mist = data.get("mist") or {}
             spokes.append({**self._meta(sid, data), "mist_status": mist})
+        # Add the synthetic hub row for centralized tenants.
         hub_mist = self._hub_mist(tenant_id)
         if hub_mist is not None:
             spokes.append({**self._hub_meta(), "mist_status": hub_mist})
+        # Return the per-spoke Mist blocks.
         return {"tenant_id": tenant_id, "mode": "—", "spokes": spokes}
 
     async def get_mist_status_data(self, tenant_id: str) -> Dict[str, Any]:
         """Mist tab: per-spoke site breakdown (ok/fail/unknown + wireless
         clients). Mirror of get_central_status_data."""
+        # Per-spoke rows and the most recent known token validity.
         spokes: List[dict] = []
         token_valid: Any = None
+        # One entry per cached spoke with its site breakdown.
         for sid, data in self._spokes_for_tenant(tenant_id):
             mist = data.get("mist") or {}
+            # Remember the token state when this spoke reports one.
             tv = mist.get("token_valid")
             token_valid = tv if tv is not None else token_valid
             spokes.append({**self._meta(sid, data),
                            "sites": self._mist_site_rows(mist)})
+        # Add the synthetic hub row for centralized tenants.
         hub_mist = self._hub_mist(tenant_id)
         if hub_mist is not None:
             tv = hub_mist.get("token_valid")
             token_valid = tv if tv is not None else token_valid
             spokes.append({**self._hub_meta(),
                            "sites": self._mist_site_rows(hub_mist)})
+        # Return the site breakdown per spoke.
         return {"tenant_id": tenant_id, "mode": "—", "token_valid": token_valid,
                 "hub_mist_config": {}, "spokes": spokes}
 
@@ -924,38 +1080,47 @@ class SimulationsService:
         client counts. Mirror of get_central_data (reads the relayed
         ``data["central_on_prem"]`` block + the centralized on-prem hub poller's
         synthetic spoke)."""
+        # One entry per cached spoke with its on-prem Central status block.
         spokes: List[dict] = []
         for sid, data in self._spokes_for_tenant(tenant_id):
             on_prem = data.get("central_on_prem") or {}
             spokes.append({**self._meta(sid, data), "central_status": on_prem})
+        # Add the synthetic hub row for centralized tenants.
         hub_on_prem = self._hub_central_on_prem(tenant_id)
         if hub_on_prem is not None:
             spokes.append({**self._hub_meta(), "central_status": hub_on_prem})
+        # Return the per-spoke on-prem blocks.
         return {"tenant_id": tenant_id, "mode": "—", "spokes": spokes}
 
     async def get_central_on_prem_status_data(self, tenant_id: str) -> Dict[str, Any]:
         """Central On-Prem tab: per-spoke site breakdown (ok/fail/unknown +
         wireless clients). Mirror of get_central_status_data — same status-block
         shape, so the shared _central_site_rows renderer is reused unchanged."""
+        # Per-spoke rows and the most recent known token validity.
         spokes: List[dict] = []
         token_valid: Any = None
+        # One entry per cached spoke with its site breakdown.
         for sid, data in self._spokes_for_tenant(tenant_id):
             on_prem = data.get("central_on_prem") or {}
+            # Remember the token state when this spoke reports one.
             tv = on_prem.get("token_valid")
             token_valid = tv if tv is not None else token_valid
             spokes.append({**self._meta(sid, data),
                            "sites": self._central_site_rows(on_prem)})
+        # Add the synthetic hub row for centralized tenants.
         hub_on_prem = self._hub_central_on_prem(tenant_id)
         if hub_on_prem is not None:
             tv = hub_on_prem.get("token_valid")
             token_valid = tv if tv is not None else token_valid
             spokes.append({**self._hub_meta(),
                            "sites": self._central_site_rows(hub_on_prem)})
+        # Return the site breakdown per spoke.
         return {"tenant_id": tenant_id, "mode": "—", "token_valid": token_valid,
                 "hub_central_on_prem_config": {}, "spokes": spokes}
 
     async def get_api_server_data(self, tenant_id: str) -> Dict[str, Any]:
         """Per-spoke API-server status block (the API Server view shape)."""
+        # One entry per cached spoke with its API-server status block.
         spokes: List[dict] = []
         for sid, data in self._spokes_for_tenant(tenant_id):
             spokes.append({**self._meta(sid, data),
@@ -964,5 +1129,6 @@ class SimulationsService:
 
     async def get_spoke_config(self, tenant_id: str, spoke_id: str) -> Dict[str, Any]:
         """Return a single spoke's cached config + raw telemetry (for the spoke detail view)."""
+        # The spoke's cached telemetry (empty if none).
         data = self._cache().get(spoke_id, {})
         return {"config": data.get("config") or {}, "telemetry": data}

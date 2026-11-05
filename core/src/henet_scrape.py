@@ -1,4 +1,4 @@
-"""Read-only scraper for the Hurricane Electric (dns.he.net) web control panel.
+"""Scraper for the Hurricane Electric (dns.he.net) web control panel.
 
 HE's dyndns update API (``dyn.dns.he.net/nic/update``) is push-only — it cannot
 *list* the records in a zone, so the HE.NET module only ever knew about records
@@ -6,8 +6,9 @@ it created itself. To bring records that already exist in a zone (added directly
 in the dns.he.net UI, or by another tool) under management, we log into the
 **web panel** with the HE account credentials and read the zone's record table —
 exactly the same account login the certificate module already uses for HE
-DNS-01. Nothing here writes to HE; it only enumerates existing records so the
-hub can hand them to the henet spoke to merge into its managed set.
+DNS-01. The import path only enumerates existing records so the hub can hand
+them to the henet spoke to merge into its managed set; ``set_records`` (used by
+"Sync all" and the scheduled re-sync) also creates/updates A/AAAA records.
 
 Runs on the HUB (the henet spoke may have no outbound path to dns.he.net, while
 the hub — which resolves the vault credential — does). ``fetch`` is injectable
@@ -24,18 +25,28 @@ The panel's HTML contract (stable for years; see the dns-lexicon henet provider)
               carrying ``data="A"``), ttl, priority, value (``data="1.2.3.4"``),
               is-dynamic (``0``/``1``).
 """
+# Postpone evaluation of type hints so annotations are never evaluated at runtime.
 from __future__ import annotations
 
+# html.unescape turns entities like &amp; in scraped cells back into plain text.
 import html
+# CookieJar keeps the login session cookie between requests.
 import http.cookiejar
+# Standard-library logging for network/parse failures.
 import logging
+# urllib.parse encodes form data and URL parameters.
 import urllib.parse
+# urllib.request performs the HTTP requests (no third-party client needed).
 import urllib.request
+# HTMLParser is the stdlib streaming HTML parser the page parsers below subclass.
 from html.parser import HTMLParser
+# Type hints only.
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+# One named logger so HE.NET scraper messages can be filtered together.
 logger = logging.getLogger("HENetScrape")
 
+# Root URL of the HE DNS web control panel (login, zone list and record pages).
 BASE_URL = "https://dns.he.net/"
 # Writes (create/update/delete) POST to the CGI endpoint; reads GET the root.
 EDIT_URL = "https://dns.he.net/index.cgi"
@@ -46,6 +57,7 @@ MANAGEABLE_TYPES = ("A", "AAAA")
 
 # A fetcher takes (method, url, data|None) and returns (status, body_text),
 # transparently carrying cookies across calls.
+# Type alias for the injectable fetch function described above.
 Fetch = Callable[[str, str, Optional[Dict[str, str]]], Tuple[int, str]]
 
 
@@ -54,15 +66,22 @@ def _find_zone_for(name: str, zones: List[Dict[str, str]]) -> Optional[Dict[str,
     record name or is a dot-suffix of it (so ``a.b.example.com`` matches
     ``example.com``, and ``sub.example.com`` prefers ``sub.example.com`` over
     ``example.com`` when both are hosted). ``None`` when no zone matches."""
+    # Normalise the record name: trimmed, no trailing dot, lower-case.
     n = (name or "").strip().rstrip(".").lower()
+    # Best (longest) matching zone found so far.
     best = None
+    # Compare against every hosted zone.
     for z in zones:
+        # Normalise the zone name the same way; skip blanks.
         zn = (z.get("name") or "").strip().rstrip(".").lower()
         if not zn:
             continue
+        # The zone matches if it equals the name or is a parent domain of it.
         if n == zn or n.endswith("." + zn):
+            # Prefer the longest (most specific) matching zone.
             if best is None or len(zn) > len(best.get("name", "")):
                 best = z
+    # Return the best match, or None.
     return best
 
 
@@ -71,17 +90,26 @@ class _ZoneListParser(HTMLParser):
     hosted zone on the account home page."""
 
     def __init__(self) -> None:
+        """Initialise the parser with an empty zone list."""
+        # convert_charrefs=True makes the parser decode HTML entities in text for us.
         super().__init__(convert_charrefs=True)
+        # Zones found so far: {name, zone_id}.
         self.zones: List[Dict[str, str]] = []
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        """Record a zone for each ``<img alt="delete" ...>`` tag on the page."""
+        # Only <img> tags are of interest.
         if tag != "img":
             return
+        # Turn the attribute list into a dict (None values become "").
         a = {k: (v or "") for k, v in attrs}
+        # Only the per-zone "delete" icons carry zone name/id.
         if a.get("alt", "").lower() != "delete":
             return
+        # Zone name (no trailing dot) and numeric zone id.
         name = a.get("name", "").strip().rstrip(".")
         value = a.get("value", "").strip()
+        # Keep it only if both are present.
         if name and value:
             self.zones.append({"name": name, "zone_id": value})
 
@@ -91,17 +119,28 @@ class _RecordTableParser(HTMLParser):
     record dict per row: ``{name, type, value, ttl, is_dynamic}``."""
 
     def __init__(self) -> None:
+        """Initialise the parser state used while walking the record table."""
+        # convert_charrefs=True makes the parser decode HTML entities in text for us.
         super().__init__(convert_charrefs=True)
+        # Completed records.
         self.records: List[Dict[str, Any]] = []
+        # Are we inside a record row / table cell right now?
         self._in_row = False
         self._in_td = False
+        # Cells collected for the current row, each {data, text}.
         self._cells: List[Dict[str, Any]] = []
+        # The current cell's "data" attribute (full value), if any.
         self._cur_data: Optional[str] = None
+        # Text fragments collected for the current cell.
         self._text: List[str] = []
+        # Record type found in the row's rrlabel span.
         self._rtype: Optional[str] = None
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        """Track entry into record rows, cells and the record-type label span."""
+        # Turn the attribute list into a dict (None values become "").
         a = {k: (v or "") for k, v in attrs}
+        # A <tr> with class dns_tr starts a new record row: reset per-row state.
         if tag == "tr":
             cls = a.get("class", "")
             if "dns_tr" in cls:
@@ -109,53 +148,68 @@ class _RecordTableParser(HTMLParser):
                 self._cells = []
                 self._rtype = None
             return
+        # Ignore everything outside record rows.
         if not self._in_row:
             return
+        # Start of a cell: remember its data attribute and reset its text.
         if tag == "td":
             self._in_td = True
             self._cur_data = a.get("data")
             self._text = []
+        # The record type label span.
         elif tag == "span" and "rrlabel" in a.get("class", ""):
             # The type lives in the rrlabel span's ``data`` attr (e.g. data="A").
             self._rtype = (a.get("data") or a.get("alt") or "").strip() or self._rtype
 
     def handle_data(self, data: str) -> None:
+        """Collect text that appears inside the current table cell."""
+        # Only text inside a cell matters.
         if self._in_td:
             self._text.append(data)
 
     def handle_endtag(self, tag: str) -> None:
+        """Close cells and rows, finishing the record when its row ends."""
+        # End of a cell: save its data attribute and joined text, then reset.
         if tag == "td" and self._in_row:
             self._cells.append({"data": self._cur_data,
                                 "text": "".join(self._text).strip()})
             self._in_td = False
             self._cur_data = None
             self._text = []
+        # End of a record row: turn the collected cells into a record.
         elif tag == "tr" and self._in_row:
             self._finish_row()
             self._in_row = False
 
     def _finish_row(self) -> None:
+        """Convert the collected cells of one row into a record dict and append it."""
         cells = self._cells
         # Columns: 0 zone-id, 1 rec-id, 2 name, 3 type, 4 ttl, 5 priority,
         # 6 value, 7 is-dynamic. A malformed/short row is skipped rather than
         # raising — this is best-effort enumeration of a live third-party page.
         if len(cells) < 7:
             return
+        # Record id, name (no trailing dot) and type (from the label span, else the cell text).
         rec_id = html.unescape(cells[1]["text"]).strip()
         name = html.unescape(cells[2]["text"]).strip().rstrip(".")
         rtype = (self._rtype or html.unescape(cells[3]["text"])).strip().upper()
         # The value's full form is in the cell's ``data`` attr (text may be
         # truncated for long records); fall back to the visible text.
+        # Value column.
         vcell = cells[6]
         value = html.unescape((vcell.get("data") or vcell.get("text") or "")).strip()
+        # TTL text, and whether the record is a dynamic-DNS record ("1" in column 7).
         ttl = cells[4]["text"].strip()
         is_dynamic = len(cells) > 7 and cells[7]["text"].strip() == "1"
+        # TTL as an integer, defaulting to 300 s if unparsable.
         try:
             ttl_i = int(ttl)
         except (TypeError, ValueError):
             ttl_i = 300
+        # Skip rows missing name, type or value.
         if not name or not rtype or not value:
             return
+        # Store the parsed record.
         self.records.append({"id": rec_id, "name": name, "type": rtype,
                              "value": value, "ttl": ttl_i, "is_dynamic": is_dynamic})
 
@@ -164,9 +218,15 @@ class HENetScraper:
     """Log into dns.he.net and enumerate a zone's existing records (read-only)."""
 
     def __init__(self, fetch: Optional[Fetch] = None, timeout: float = 20.0):
+        """Set up the scraper with an injected fetch function, or a real cookie-keeping HTTP
+        opener.
+        """
+        # Per-request timeout in seconds.
         self.timeout = timeout
+        # Tests inject a fake fetch so no network is used.
         if fetch is not None:
             self._fetch = fetch
+        # Real use: an opener that keeps cookies so the login session persists across requests.
         else:
             cj = http.cookiejar.CookieJar()
             self._opener = urllib.request.build_opener(
@@ -175,9 +235,15 @@ class HENetScraper:
 
     def _default_fetch(self, method: str, url: str,
                        data: Optional[Dict[str, str]] = None) -> Tuple[int, str]:
+        """Perform one real HTTP request (form-encoded POST if ``data`` given); returns (status,
+        body).
+        """
+        # Encode form fields as application/x-www-form-urlencoded bytes, if any.
         body = urllib.parse.urlencode(data).encode("utf-8") if data else None
+        # Build the request with a recognisable User-Agent.
         req = urllib.request.Request(url, data=body, method=method,
                                      headers={"User-Agent": "lm-henet/1.0"})
+        # Send it through the cookie-keeping opener and decode the body (bad bytes replaced).
         with self._opener.open(req, timeout=self.timeout) as resp:  # noqa: S310 — fixed HE endpoint
             status = getattr(resp, "status", 200) or 200
             return status, resp.read().decode("utf-8", "replace")
@@ -189,23 +255,32 @@ class HENetScraper:
         re-renders the login form, so the presence of ``name="email"`` in the
         POST response is treated as failure (also covers 2FA-blocked accounts,
         which never reach the record table)."""
+        # Visit the home page first so HE sets its session cookie.
         self._fetch("GET", BASE_URL, None)  # seed the session cookie
+        # Submit the login form.
         _status, body = self._fetch("POST", BASE_URL,
                                     {"email": username or "", "pass": password or ""})
+        # A failed login (or 2FA) shows the login form again.
         low = body.lower()
         if 'name="email"' in low and 'name="pass"' in low:
             return False
+        # Otherwise the session is logged in.
         return True
 
     def list_zones(self) -> List[Dict[str, str]]:
+        """Return every hosted zone on the logged-in account as {name, zone_id}."""
+        # Fetch the account home page and parse the zone icons.
         _status, body = self._fetch("GET", BASE_URL, None)
         p = _ZoneListParser()
         p.feed(body)
         return p.zones
 
     def list_zone_records(self, zone_id: str) -> List[Dict[str, Any]]:
+        """Return the records listed on one zone's edit page."""
+        # Build the edit-zone URL for this zone id (quoted for URL safety).
         url = (f"{BASE_URL}?hosted_dns_zoneid={urllib.parse.quote(str(zone_id))}"
                "&menu=edit_zone&hosted_dns_editzone")
+        # Fetch and parse the record table.
         _status, body = self._fetch("GET", url, None)
         p = _RecordTableParser()
         p.feed(body)
@@ -220,6 +295,8 @@ class HENetScraper:
 
     def _post_record(self, zone_id: str, name: str, rtype: str, value: str,
                      ttl: int, record_id: str = "") -> Tuple[int, str]:
+        """Submit the panel's edit-record form to create (no id) or update (with id) one record."""
+        # Fields exactly as the panel's own edit-zone form sends them.
         form = {
             "account": "",
             "menu": "edit_zone",
@@ -235,6 +312,7 @@ class HENetScraper:
             # 'Submit' creates a new one (empty record id).
             "hosted_dns_editrecord": "Update" if record_id else "Submit",
         }
+        # Post the form and return (status, body).
         return self._fetch("POST", EDIT_URL, form)
 
     def set_records(self, username: str, password: str,
@@ -249,19 +327,25 @@ class HENetScraper:
         ``{status, results:[{name,type,ok,detail}]}`` — ``status`` is SUCCESS
         when every record applied, PARTIAL when some failed, ERROR when login/
         zone resolution failed before any record could be attempted."""
+        # Both email and password are required.
         if not username or not password:
             return {"status": "ERROR",
                     "message": "HE.NET account login (email + password) is required"}
+        # Log in and list zones; network errors are reported, not raised.
         try:
+            # Wrong credentials (or 2FA enabled).
             if not self.login(username, password):
                 return {"status": "ERROR",
                         "message": "HE.NET login failed — check the account email/"
                                    "password in the Credential Vault (2-factor auth "
                                    "must be disabled for the web panel)"}
+            # Get the account's zones so each record can be matched to its zone.
             zones = self.list_zones()
+        # Could not reach HE at all.
         except Exception as exc:  # noqa: BLE001 — network/transport
             logger.warning("henet scrape: write login/zone list failed: %s", exc)
             return {"status": "ERROR", "message": f"could not reach dns.he.net: {exc}"}
+        # No zones: nothing could be written.
         if not zones:
             return {"status": "ERROR",
                     "message": "no HE.NET zones found on the account (is 2-factor "
@@ -270,43 +354,56 @@ class HENetScraper:
         # Cache each zone's current records so a batch (Sync all) reads a zone
         # once, and so we can find an existing record's id (update-in-place) and
         # verify the write afterward without re-fetching per record.
+        # zone id -> its current records.
         cache: Dict[str, List[Dict[str, Any]]] = {}
 
         def _zone_rows(zid: str) -> List[Dict[str, Any]]:
+            """Return a zone's records, fetching and caching them on first use (empty on error)."""
+            # Fetch only if not cached yet; a failure caches an empty list.
             if zid not in cache:
                 try:
                     cache[zid] = self.list_zone_records(zid)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("henet scrape: records for zone %s failed: %s", zid, exc)
                     cache[zid] = []
+            # Return the cached rows.
             return cache[zid]
 
+        # Per-record outcomes.
         results: List[Dict[str, Any]] = []
+        # Process each requested record.
         for r in records:
+            # Normalise name, type and value.
             name = str(r.get("name", "")).strip().rstrip(".")
             rtype = str(r.get("type", "A")).strip().upper()
             value = str(r.get("value", "")).strip()
+            # TTL as an integer, defaulting to 300 s.
             try:
                 ttl = int(r.get("ttl", 300))
             except (TypeError, ValueError):
                 ttl = 300
+            # Name and value are required.
             if not name or not value:
                 results.append({"name": name, "type": rtype, "ok": False,
                                 "detail": "name and value are required"})
                 continue
+            # Only A/AAAA records can be managed.
             if rtype not in MANAGEABLE_TYPES:
                 results.append({"name": name, "type": rtype, "ok": False,
                                 "detail": f"HE.NET web update manages A/AAAA only, not {rtype}"})
                 continue
+            # Find the hosted zone that owns this name.
             zone = _find_zone_for(name, zones)
             if not zone:
                 results.append({"name": name, "type": rtype, "ok": False,
                                 "detail": "no hosted HE.NET zone matches this name"})
                 continue
+            # Look for an existing record with the same name and type, to update it in place.
             zid = zone["zone_id"]
             existing = next((x for x in _zone_rows(zid)
                              if x.get("name", "").lower() == name.lower()
                              and str(x.get("type", "")).upper() == rtype), None)
+            # Create or update it; a request failure is recorded and we move on.
             try:
                 self._post_record(zid, name, rtype, value, ttl,
                                    record_id=(existing or {}).get("id", ""))
@@ -317,11 +414,13 @@ class HENetScraper:
             # Verify against a fresh read of the zone (the panel gives no clean
             # machine-readable status; the authoritative check is that the row
             # now carries the value we set).
+            # Drop the cached zone rows and re-read them to confirm the new value is there.
             cache.pop(zid, None)
             applied = next((x for x in _zone_rows(zid)
                             if x.get("name", "").lower() == name.lower()
                             and str(x.get("type", "")).upper() == rtype
                             and x.get("value", "") == value), None)
+            # Report whether the write was confirmed.
             if applied:
                 results.append({"name": name, "type": rtype, "ok": True,
                                 "detail": "updated via HE.NET web panel"})
@@ -330,9 +429,11 @@ class HENetScraper:
                                 "detail": "HE.NET did not accept the update (check the "
                                           "account login / that the zone is on this account)"})
 
+        # Overall status: all ok -> SUCCESS, some ok -> PARTIAL, none -> ERROR.
         ok_n = sum(1 for x in results if x["ok"])
         status = "SUCCESS" if ok_n == len(results) and results else (
             "PARTIAL" if ok_n else "ERROR")
+        # Return the overall status plus per-record details.
         return {"status": status, "results": results, "applied": ok_n,
                 "total": len(results)}
 
@@ -347,29 +448,36 @@ class HENetScraper:
         on success, or ``{status:"ERROR", message}``. ``records`` are the
         manageable (A/AAAA) records only; ``skipped_types`` tallies the
         non-A/AAAA records that HE's dyndns API cannot manage."""
+        # Both email and password are required.
         if not username or not password:
             return {"status": "ERROR",
                     "message": "HE.NET account login (email + password) is required "
                                "to read existing zone records"}
+        # Log in; network errors are reported, not raised.
         try:
+            # Wrong credentials (or 2FA enabled).
             if not self.login(username, password):
                 return {"status": "ERROR",
                         "message": "HE.NET login failed — check the account email/"
                                    "password in the Credential Vault (2-factor auth "
                                    "must be disabled for the web panel)"}
+        # Could not reach HE at all.
         except Exception as exc:  # noqa: BLE001 — network/transport
             logger.warning("henet scrape: login request failed: %s", exc)
             return {"status": "ERROR", "message": f"could not reach dns.he.net: {exc}"}
 
+        # List the account's zones.
         try:
             zones = self.list_zones()
         except Exception as exc:  # noqa: BLE001
             logger.warning("henet scrape: zone list failed: %s", exc)
             return {"status": "ERROR", "message": f"could not list HE.NET zones: {exc}"}
 
+        # Optional zone filter, normalised; keep only the matching zone.
         want = (zone_filter or "").strip().rstrip(".").lower() or None
         if want:
             zones = [z for z in zones if z["name"].lower() == want]
+        # No zones to read.
         if not zones:
             return {"status": "ERROR",
                     "message": ("no matching HE.NET zone found on the account"
@@ -377,18 +485,23 @@ class HENetScraper:
                                 "no HE.NET zones found on the account (is 2-factor "
                                 "auth enabled, or the account empty?)")}
 
+        # Manageable records collected, and a tally of other record types skipped.
         records: List[Dict[str, Any]] = []
         skipped: Dict[str, int] = {}
+        # Read each zone's record table.
         for z in zones:
             try:
                 rows = self.list_zone_records(z["zone_id"])
+            # One failing zone is logged and skipped; the others are still read.
             except Exception as exc:  # noqa: BLE001 — per-zone, keep going
                 logger.warning("henet scrape: records for %s failed: %s", z["name"], exc)
                 continue
+            # Keep A/AAAA records (tagged with their zone) and count every other type.
             for r in rows:
                 if r["type"] in MANAGEABLE_TYPES:
                     records.append({**r, "zone": z["name"]})
                 else:
                     skipped[r["type"]] = skipped.get(r["type"], 0) + 1
+        # Return the records plus zone list and skipped-type counts.
         return {"status": "SUCCESS", "records": records, "zones": zones,
                 "skipped_types": skipped}

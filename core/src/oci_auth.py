@@ -12,22 +12,31 @@ See https://docs.oracle.com/en-us/iaas/Content/API/Concepts/signingrequests.htm
 """
 from __future__ import annotations
 
+# base64/hashlib build signature and body digests; json serializes request bodies.
 import base64
 import hashlib
 import json
+# logging for diagnostics; os writes uploaded keys; re validates OCIDs and regions.
 import logging
 import os
 import re
+# formatdate makes the RFC1123 Date header that OCI signs.
 from email.utils import formatdate
+# Type hints only; they document the shapes of values passed around.
 from typing import Any, Dict, Optional
+# urlsplit pulls host and path out of a URL for the signing string.
 from urllib.parse import urlsplit
 
+# httpx performs the HTTPS calls to OCI.
 import httpx
+# cryptography loads the RSA private key and does RSA-SHA256 (PKCS#1 v1.5) signing.
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
+# Resolves key_path (Key Vault name, file path, or secret name) to PEM bytes.
 from security.credential_store import resolve_private_key_material
 
+# One named logger so OCI auth messages can be filtered together.
 logger = logging.getLogger("OciAuth")
 
 # Generous cap for an uploaded OCI API signing key PEM (~1.7 KB typical).
@@ -56,6 +65,8 @@ class OciAuthConfig:
     of them so the admin UI stays consistent)."""
 
     def __init__(self, stored: Optional[dict] = None):
+        """Build the auth config from a stored global_config block (missing keys become "")."""
+        # Treat a missing block as empty.
         stored = stored or {}
         # Strip ALL internal whitespace, not just the ends: OCIDs and
         # fingerprints are routinely copy-pasted out of the OCI console, which
@@ -67,14 +78,17 @@ class OciAuthConfig:
         # Resolved via credential_store: kv:<name> / filesystem path / bare
         # secret name — same shape as the Entra OIDC client-key path.
         self.key_path = str(stored.get("key_path") or "").strip()
+        # Region id, e.g. "us-ashburn-1" (validated when a request is built).
         self.region = str(stored.get("region") or "").strip()
 
     @property
     def key_id(self) -> str:
+        """The OCI keyId string: "<tenancy>/<user>/<fingerprint>"."""
         return f"{self.tenancy_ocid}/{self.user_ocid}/{self.fingerprint}"
 
     @property
     def ready(self) -> bool:
+        """True when every field needed to sign a request is filled in."""
         return bool(self.tenancy_ocid and self.user_ocid and self.fingerprint
                     and self.key_path and self.region)
 
@@ -90,6 +104,7 @@ class OciAuthConfig:
 # regions are out of scope. Shared by ``routes/oci_nsg.py`` and
 # ``routes/oci_vault.py`` (one dropdown source for both integrations).
 # Source: https://docs.oracle.com/en-us/iaas/Content/General/Concepts/regions.htm
+# (region id, display label) pairs.
 OCI_REGIONS = [
     ("us-ashburn-1", "US East (Ashburn)"),
     ("us-phoenix-1", "US West (Phoenix)"),
@@ -138,6 +153,7 @@ OCI_REGIONS = [
 def list_regions() -> list:
     """The curated OCI region catalog as ``[{id, label}, ...]`` for the WebUI
     dropdown, sorted by label for a stable, readable picker."""
+    # Build {id, label} entries and sort by label.
     return sorted(
         ({"id": rid, "label": f"{label} ({rid})"} for rid, label in OCI_REGIONS),
         key=lambda r: r["label"],
@@ -165,11 +181,13 @@ def validate_region(region: str) -> str:
     regions regularly and :data:`OCI_REGIONS` is a hand-maintained snapshot, so
     refusing anything not in the list would break new regions.
     """
+    # Normalize to lowercase; an empty region gets its own clear message.
     r = (region or "").strip().lower()
     if not r:
         raise OciAuthError(
             "no OCI region configured — set the region (e.g. 'us-ashburn-1') "
             "in the OCI integration settings.")
+    # Reject anything not shaped like <area>-<city>-<n>.
     if not _REGION_RE.match(r):
         raise OciAuthError(
             f"{region!r} is not a valid OCI region identifier. Expected a form "
@@ -185,18 +203,23 @@ def _transport_error_detail(url: str, exc: Exception) -> str:
     ``[Errno -2] Name or service not known`` — no hostname, no URL. Surfaced
     through a route's generic ``except Exception`` that leaves an operator with
     no way to tell a mistyped region from a genuine egress/DNS problem."""
+    # Pull the hostname out of the URL; fall back to the raw URL if it will not parse.
     try:
         host = httpx.URL(url).host
     except Exception:  # noqa: BLE001
         host = url
+    # Base message naming the host and the original error.
     base = f"could not reach OCI endpoint {host}: {exc}"
+    # Detect DNS lookup failures from the various OS-specific error texts.
     name_err = ("name or service not known" in str(exc).lower()
                 or "nodename nor servname" in str(exc).lower()
                 or "temporary failure in name resolution" in str(exc).lower())
+    # DNS failure: point at the region spelling and DNS reachability.
     if name_err:
         return (f"{base}. DNS could not resolve that host — check the OCI region "
                 f"is spelled correctly, and that this hub can resolve and reach "
                 f"*.oraclecloud.com.")
+    # Anything else: point at network egress.
     return f"{base}. Check network egress from the hub to *.oraclecloud.com."
 
 
@@ -204,20 +227,29 @@ def _transport_error_detail(url: str, exc: Exception) -> str:
 # Only the subset needed here: plain GET / POST with a JSON body, no
 # query-string params, no on-behalf-of token.
 
+# Parsed private keys cached by key_path so each request does not re-read/parse PEM.
 _key_cache: Dict[str, Any] = {}  # key_path -> loaded RSAPrivateKey
 
 
 def _load_private_key(key_path: str):
+    """Return the parsed RSA private key for key_path, loading and caching it on first use.
+
+    Raises OciAuthError if the key cannot be resolved or parsed.
+    """
+    # Return the cached key when already loaded.
     key = _key_cache.get(key_path)
     if key is not None:
         return key
+    # Resolve the configured reference to PEM bytes.
     pem = resolve_private_key_material(key_path)
     if not pem:
         raise OciAuthError(f"could not resolve OCI API private key {key_path!r}")
+    # Parse the PEM (unencrypted); parsing errors become a clear OciAuthError.
     try:
         key = serialization.load_pem_private_key(pem, password=None)
     except Exception as e:  # noqa: BLE001
         raise OciAuthError(f"could not parse OCI API private key {key_path!r}: {e}")
+    # Cache and return the parsed key.
     _key_cache[key_path] = key
     return key
 
@@ -237,15 +269,19 @@ def write_uploaded_private_key(hub, subdir: str, filename: str, data: bytes) -> 
 
     Raises :class:`OciAuthError` on validation or write failure; never
     partially writes (validated fully before anything touches disk)."""
+    # Reject empty or oversized uploads.
     if not data:
         raise OciAuthError("empty upload")
     if len(data) > MAX_KEY_UPLOAD_BYTES:
         raise OciAuthError("key upload exceeds 64 KB limit")
+    # Make sure it really is an unencrypted PEM private key before writing anything.
     try:
         serialization.load_pem_private_key(data, password=None)
     except Exception as e:  # noqa: BLE001
         raise OciAuthError(f"not a valid, unencrypted PEM private key: {e}")
+    # Target path under the hub data directory.
     path = os.path.join(hub.state.data_dir, subdir, filename)
+    # Write to a temp file, lock it to owner-only (0600), then atomically rename it.
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
@@ -253,6 +289,7 @@ def write_uploaded_private_key(hub, subdir: str, filename: str, data: bytes) -> 
             f.write(data)
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
+    # Disk/permission errors become a clear OciAuthError.
     except OSError as e:
         raise OciAuthError(f"could not write key file: {e}")
     return path
@@ -267,13 +304,16 @@ def public_key_fingerprint(key_path: str) -> str:
     lets us tell an operator definitively whether the key they uploaded is the
     one the pasted fingerprint refers to, which is the single most common cause
     of a 401 NotAuthenticated that "looks right"."""
+    # Load the key and DER-encode its public half.
     key = _load_private_key(key_path)
     der = key.public_key().public_bytes(
         serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    # MD5 of the DER bytes, formatted as colon-separated hex pairs.
     digest = hashlib.md5(der).hexdigest()  # noqa: S324 — OCI defines MD5 here
     return ":".join(digest[i:i + 2] for i in range(0, len(digest), 2))
 
 
+# Shape checks for OCIDs, 16-byte colon-hex fingerprints, and the OCID resource type.
 _OCID_RE = re.compile(r"^ocid1\.[a-z0-9]+\.[a-z0-9-]*\.[a-z0-9-]*\.?[a-zA-Z0-9._-]*$")
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){15}$")
 _OCID_TYPE_RE = re.compile(r"^ocid1\.([a-z0-9]+)\.")
@@ -319,6 +359,7 @@ _OCID_REGION_KEYS = {
     "ap-sydney-1": "syd", "ap-melbourne-1": "mel", "ap-singapore-1": "sin",
     "ap-singapore-2": "xsp", "ap-batam-1": "btm",
 }
+# Reverse map: region key ("iad") -> region name ("us-ashburn-1").
 _REGION_KEY_TO_NAME = {v: k for k, v in _OCID_REGION_KEYS.items()}
 
 # Where to get the four signing fields, consistently, in one place.
@@ -331,9 +372,11 @@ _CONFIG_PREVIEW_HINT = (
 
 def _describe_ocid(value: str) -> str:
     """Name the resource type an OCID actually refers to, for error messages."""
+    # Pull the type segment; anything not starting "ocid1.<type>." is not an OCID.
     m = _OCID_TYPE_RE.match(value)
     if not m:
         return "not an OCID"
+    # Use the friendly name when known, otherwise quote the raw type.
     return _OCID_TYPE_NAMES.get(m.group(1), f"an OCID of type '{m.group(1)}'")
 
 
@@ -344,23 +387,28 @@ def diagnose_auth(cfg: OciAuthConfig) -> list:
     which part was wrong. Everything checkable locally is checked here so the
     operator gets a specific pointer instead of "the required information ...
     was not provided or was incorrect"."""
+    # Collected problem messages, most likely cause first.
     problems = []
 
+    # The tenancy field must hold a tenancy OCID (not a domain/compartment OCID).
     if cfg.tenancy_ocid and not cfg.tenancy_ocid.startswith("ocid1.tenancy."):
         problems.append(
             f"The Tenancy OCID is wrong: you pasted "
             f"{_describe_ocid(cfg.tenancy_ocid)}, but this field needs the "
             f"tenancy OCID (it starts with 'ocid1.tenancy.'). Got "
             f"'{cfg.tenancy_ocid[:40]}…'. {_CONFIG_PREVIEW_HINT}")
+    # The user field must hold a user OCID.
     if cfg.user_ocid and not cfg.user_ocid.startswith("ocid1.user."):
         problems.append(
             f"The User OCID is wrong: you pasted "
             f"{_describe_ocid(cfg.user_ocid)}, but this field needs the OCID of "
             f"the USER the API key belongs to (it starts with 'ocid1.user.'). "
             f"Got '{cfg.user_ocid[:40]}…'. {_CONFIG_PREVIEW_HINT}")
+    # Pasting the same value into both fields is a common mistake.
     if cfg.tenancy_ocid and cfg.tenancy_ocid == cfg.user_ocid:
         problems.append("Tenancy OCID and User OCID are identical — they must "
                         "be two different values.")
+    # Fingerprint must be 16 colon-separated lowercase hex pairs.
     if cfg.fingerprint and not _FINGERPRINT_RE.match(cfg.fingerprint):
         problems.append(
             f"Fingerprint '{cfg.fingerprint}' isn't in OCI's expected form "
@@ -401,12 +449,15 @@ def region_of_ocid(value: str) -> str:
     region segment — which is normal and not an error: tenancy, user, group and
     compartment OCIDs are global and carry an empty region field
     (``ocid1.tenancy.oc1..aaaa…``)."""
+    # Split into ocid1/type/realm/region/unique; short OCIDs carry no region.
     parts = (value or "").split(".")
     if len(parts) < 5:
         return ""
+    # Empty region segment means a global OCID.
     key = parts[3].strip().lower()
     if not key:
         return ""
+    # Map short region keys to names; full names pass through unchanged.
     return _REGION_KEY_TO_NAME.get(key, key)
 
 
@@ -420,16 +471,19 @@ def diagnose_resource_ocid(value: str, expected_type: str, label: str,
     refuses to distinguish those so it can't be used to probe for resources.
     That makes the error useless on its own, so anything provable from the
     OCID's own structure is reported here."""
+    # Collected problem messages; an empty OCID has nothing to check.
     problems = []
     value = (value or "").strip()
     if not value:
         return problems
 
+    # Must look like an OCID at all.
     m = _OCID_TYPE_RE.match(value)
     if not m:
         problems.append(f"The {label} doesn't look like an OCID at all (an "
                         f"OCID starts with 'ocid1.'). Got '{value[:40]}…'.")
         return problems
+    # The type must match what the field expects (or an accepted alias).
     if m.group(1) != expected_type and \
             m.group(1) not in _OCID_TYPE_ALIASES.get(expected_type, frozenset()):
         problems.append(
@@ -440,6 +494,7 @@ def diagnose_resource_ocid(value: str, expected_type: str, label: str,
 
     # A resource in region A is invisible to region B's endpoint, and OCI
     # reports that as a plain 404 rather than a redirect.
+    # Compare the OCID's region with the configured region.
     ocid_region = region_of_ocid(value)
     want = (region or "").strip().lower()
     if ocid_region and want and ocid_region != want:
@@ -456,6 +511,7 @@ def _clock_skew_hint() -> str:
     """OCI rejects a request whose Date header is more than ~5 minutes off as
     NotAuthenticated — indistinguishable from a bad credential. Surfaced as a
     hint because the hub can't measure OCI's clock without a successful call."""
+    # Include the hub's current UTC time so the operator can compare.
     return (f"If the credentials are definitely correct, check this hub's "
             f"clock: OCI rejects requests skewed more than ~5 minutes and the "
             f"error looks identical. Hub UTC is now "
@@ -467,6 +523,7 @@ def auth_failure_help(cfg: OciAuthConfig) -> str:
 
     Returns the specific local problems when there are any, otherwise the
     checklist of causes that can only be confirmed against OCI itself."""
+    # Specific local problems win; otherwise list the causes only OCI can confirm.
     problems = diagnose_auth(cfg)
     if problems:
         return " Detected: " + " ".join(problems)
@@ -483,30 +540,39 @@ def signed_headers(cfg: OciAuthConfig, method: str, url: str,
                    body: Optional[bytes]) -> Dict[str, str]:
     """Build the ``Authorization`` header (+ every header it covers) for one
     signed OCI API request."""
+    # All five auth fields are required to sign.
     if not cfg.ready:
         raise OciAuthError("OCI auth incomplete: tenancy_ocid/user_ocid/"
                            "fingerprint/key_path/region are all required")
+    # Split the URL into host and path(+query) for the signing string.
     parsed = urlsplit(url)
     method_lc = method.lower()
     request_target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+    # Headers always signed: request target, date, host.
     headers: Dict[str, str] = {
         "date": formatdate(usegmt=True),
         "host": parsed.netloc,
         "(request-target)": f"{method_lc} {request_target}",
     }
+    # Order of headers in the signing string.
     signed = ["(request-target)", "date", "host"]
+    # Requests with a body also sign its length, type and SHA-256 digest.
     if body is not None:
         digest = base64.b64encode(hashlib.sha256(body).digest()).decode("ascii")
         headers["content-length"] = str(len(body))
         headers["content-type"] = "application/json"
         headers["x-content-sha256"] = digest
         signed += ["content-length", "content-type", "x-content-sha256"]
+    # Signing string is "name: value" lines joined by newlines.
     signing_string = "\n".join(f"{h}: {headers[h]}" for h in signed)
+    # Sign with RSA-SHA256 (PKCS#1 v1.5) and base64-encode the signature.
     key = _load_private_key(cfg.key_path)
     signature = key.sign(signing_string.encode("ascii"), padding.PKCS1v15(), hashes.SHA256())
     sig_b64 = base64.b64encode(signature).decode("ascii")
+    # Assemble the Signature Version 1 Authorization header.
     auth = (f'Signature version="1",headers="{" ".join(signed)}",'
            f'keyId="{cfg.key_id}",algorithm="rsa-sha256",signature="{sig_b64}"')
+    # Return the real headers (the pseudo-header is not sent) plus Authorization.
     out = {k: v for k, v in headers.items() if k != "(request-target)"}
     out["Authorization"] = auth
     return out
@@ -524,8 +590,10 @@ _BODY_METHODS = {"POST", "PUT", "PATCH"}
 def _body_bytes(method: str, json_body: Optional[dict]) -> Optional[bytes]:
     """Request body to send AND sign: encoded JSON, b"" for a bodyless
     POST/PUT/PATCH, or None for methods that take no body at all."""
+    # Compact JSON for a provided body.
     if json_body is not None:
         return json.dumps(json_body, separators=(",", ":")).encode("utf-8")
+    # Empty body for POST/PUT/PATCH, none for other methods.
     return b"" if (method or "").upper() in _BODY_METHODS else None
 
 
@@ -539,8 +607,10 @@ async def oci_request(cfg: OciAuthConfig, client: httpx.AsyncClient, method: str
     Transport failures are re-raised as :class:`OciAuthError` naming the host,
     so a DNS miss reads as "could not reach OCI endpoint <host>" instead of a
     context-free ``[Errno -2] Name or service not known``."""
+    # Build the body and its signed headers.
     body = _body_bytes(method, json_body)
     headers = signed_headers(cfg, method, url, body)
+    # Send; HTTP status errors pass through, transport errors become OciAuthError.
     try:
         return await client.request(method, url, headers=headers, content=body)
     except httpx.HTTPStatusError:

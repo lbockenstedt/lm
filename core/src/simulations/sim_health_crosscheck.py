@@ -22,8 +22,10 @@ client only counts as not-working after a FULL trend window with no confirming
 observation. This module just produces the per-cycle observation; the trend does
 the smoothing.
 """
+# Allow modern type-hint syntax (e.g. list[str]) on older Python versions.
 from __future__ import annotations
 
+# Type hints only; they document the shapes of the inputs.
 from typing import Iterable, Mapping, Optional, Sequence
 
 # Canonical failure-sim ids (mirror routes.py demo-scenario failure preset,
@@ -43,7 +45,9 @@ def norm_mac(mac: object) -> str:
     (``AA:BB:..`` vs ``aa-bb-..`` vs ``aabb..``); compare on the bare hex.
     Returns "" for anything without hex digits (placeholders like "—").
     """
+    # Keep only hex digits so all MAC formats compare equal.
     s = "".join(ch for ch in str(mac or "").lower() if ch in "0123456789abcdef")
+    # A real MAC has 12 hex digits; anything shorter is a placeholder, so return "".
     return s if len(s) >= 12 else ""
 
 
@@ -51,11 +55,14 @@ def _client_macs(client: Mapping) -> list[str]:
     """All normalized MACs a client presents (its adapter inventory + any top
     level ``mac``). Central may see any of the client's radios, so we match on
     the union."""
+    # Collect MACs in order, top-level MAC first so it becomes the client's stable key.
     macs = []
     top = norm_mac(client.get("mac"))
     if top:
         macs.append(top)
+    # Add the MAC of every network adapter the client reports.
     for ad in (client.get("adapters") or []):
+        # Ignore malformed adapter entries that are not dict-like.
         if isinstance(ad, Mapping):
             m = norm_mac(ad.get("mac"))
             if m:
@@ -66,9 +73,11 @@ def _client_macs(client: Mapping) -> list[str]:
 def _active_sims(client: Mapping) -> set[str]:
     """The sim ids currently expected on this client (active_simulations, else
     the single pinned simulation_id)."""
+    # Prefer the list of currently active simulations when it is a non-empty collection.
     act = client.get("active_simulations")
     if isinstance(act, (list, tuple, set)) and act:
         return {str(s) for s in act}
+    # Otherwise fall back to the single pinned simulation id (or nothing).
     sid = client.get("simulation_id")
     return {str(sid)} if sid else set()
 
@@ -76,6 +85,7 @@ def _active_sims(client: Mapping) -> set[str]:
 def expects_failing(client: Mapping, failure_sims: Iterable[str] = FAILURE_SIMS) -> bool:
     """True when the client runs at least one failure sim (so it should appear in
     Central's FAILED-client list, not its connected-client list)."""
+    # Intersect the client's sims with the failure-sim set; any overlap means "expected to fail".
     fs = set(failure_sims)
     return bool(_active_sims(client) & fs)
 
@@ -105,25 +115,35 @@ def observe_clients(
     scored; everything else (no sims, placeholder MACs) drops out of both
     numerator and denominator. Returns ``trend.rollup(...)``.
     """
+    # Normalise both MAC sets and drop "" placeholders so they never match anything.
     present = {norm_mac(m) for m in present_macs}
     present.discard("")
     failing = {norm_mac(m) for m in failing_macs}
     failing.discard("")
 
+    # Keys of the clients scored this cycle, passed to the rollup.
     active_keys: list[str] = []
+    # Score each sim client against Central's view.
     for c in clients:
+        # Clients not running any sim are out of scope.
         if not _active_sims(c):
             continue
+        # Clients with no usable MAC cannot be matched against Central.
         macs = _client_macs(c)
         if not macs:
             continue
+        # The first MAC is the stable trend key for this client.
         key = macs[0]
+        # Failure-sim clients are working when Central lists them as failing...
         want_fail = expects_failing(c, failure_sims)
         if want_fail:
             working = any(m in failing for m in macs)
+        # ...everything else is working when Central lists it as connected.
         else:
             working = any(m in present for m in macs)
+        # Record this cycle's observation; the trend smooths it over time.
         trend.observe(tenant_id, key, working, now=now)
         active_keys.append(key)
 
+    # Summarise the tenant's working/not-working counts over the active clients.
     return trend.rollup(tenant_id, active_keys, now=now)

@@ -8,10 +8,14 @@ module_metadata, agent_info, netbox_server_agents, ...) plus the
 change — ``LabManagerHub`` inherits these exactly as before.
 """
 
+# logging reports lookup problems.
 import logging
+# time compares last-seen timestamps against the grace window.
 import time
+# Optional marks lookups that may find nothing.
 from typing import Optional
 
+# Module-level logger named after this module.
 logger = logging.getLogger(__name__)
 
 # module_type → spoke_id prefix substring, for legacy spoke resolution.
@@ -37,6 +41,7 @@ _MODULE_TYPE_PREFIX = {
 class SpokeRegistryMixin:
     """Read-only spoke/agent registry lookups mixed into ``LabManagerHub``."""
 
+    # Ask global config for the display grace window; any config problem means default.
     def _online_grace_s(self) -> float:
         """Grace window (s) for the DISPLAY online/offline status. A module reads
         offline only after being out of contact THIS long — so a transient loop
@@ -46,6 +51,7 @@ class SpokeRegistryMixin:
             return float((self.state.get_global_config() or {}).get(
                 "display", {}).get("online_grace_s", 180))
         except Exception:
+            # Malformed or missing config falls back to the 180-second default.
             return 180.0
 
     def is_spoke_in_contact(self, spoke_id: str, grace_s: Optional[float] = None) -> bool:
@@ -53,23 +59,31 @@ class SpokeRegistryMixin:
         This is the DISPLAY notion of 'online' — decoupled from instantaneous WS
         membership so a few-second stall doesn't drop the tile. Command routing
         still uses ``active_connections`` directly (must be live-accurate)."""
+        # A live WebSocket connection always counts as in contact.
         if self._primary_key(spoke_id) in self.active_connections:
             return True
+        # Otherwise look up when the spoke was last heard from; never seen means offline.
         ts = self.heartbeat.last_seen.get(self._primary_key(spoke_id))
         if not ts:
             return False
+        # Use the caller's grace window if given, else the configured one.
         g = self._online_grace_s() if grace_s is None else grace_s
+        # In contact if the last contact is within the grace window.
         return (time.time() - ts) <= g
 
     def spokes_in_contact(self, grace_s: Optional[float] = None) -> list:
         """Ids considered 'in contact' for display: connected now OR seen within
         the grace window. The WebUI colours online/offline tiles from this."""
+        # Resolve the grace window and the current time once for the whole scan.
         g = self._online_grace_s() if grace_s is None else grace_s
         now = time.time()
+        # Start with every live connection.
         ids = set(self.active_connections.keys())
+        # Add every id whose last heartbeat falls inside the grace window.
         for sid, ts in list(self.heartbeat.last_seen.items()):
             if ts and (now - ts) <= g:
                 ids.add(sid)
+        # Return a stable, sorted list for the UI.
         return sorted(ids)
 
     def _evict_spoke(self, spoke_id: str) -> None:
@@ -84,6 +98,7 @@ class SpokeRegistryMixin:
         needed by the watchdog if the spoke is flapping. Reconnect re-creates
         rate_limiters / re-pushes simulations_cache, so eviction on delete is safe.
         """
+        # Normalise the id to its primary key, then drop every per-spoke cache entry.
         pk = self._primary_key(spoke_id)
         self.simulations_cache.pop(pk, None)
         self.spoke_telemetry.pop(pk, None)
@@ -105,9 +120,11 @@ class SpokeRegistryMixin:
         # so "Delete" never sticks for a cloned fleet (all clones keep collapsing
         # into one guid no matter how many times it's deleted). Drop every alias/
         # index entry that resolves to pk, plus pk's own guid-keyed entries.
+        # Remove connect-name aliases that point at (or are) the deleted spoke.
         for _name, _guid in list(getattr(self, "spoke_id_alias", {}).items()):
             if _guid == pk or _name == pk:
                 self.spoke_id_alias.pop(_name, None)
+        # Remove install-uuid index entries that point at (or are) the deleted spoke.
         for _iu, _guid in list(getattr(self, "install_uuid_index", {}).items()):
             if _guid == pk or _iu == pk:
                 self.install_uuid_index.pop(_iu, None)
@@ -120,10 +137,12 @@ class SpokeRegistryMixin:
         # page — which only walks known_modules — shows nothing out of contact. The
         # decommission route already does this (setup.py); delete must match.
         try:
+            # Clear any active alert and its tier/absence bookkeeping for this spoke.
             self._spoke_alert_clear(pk)
             self._spoke_alert_tier.pop(pk, None)
             self._spoke_absent_since.pop(pk, None)
         except Exception:  # noqa: BLE001 — alert state is best-effort
+            # Missing alert state is fine; there is nothing to clear.
             pass
 
     def _mark_spoke_disconnected(self, spoke_id: str) -> None:
@@ -136,18 +155,22 @@ class SpokeRegistryMixin:
         than ``KeyError`` on the index. A transient disconnect (entry still
         present) just updates the status in place.
         """
+        # Look up the telemetry entry under the spoke's primary key.
         pk = self._primary_key(spoke_id)
         tel = self.spoke_telemetry.get(pk)
+        # Entry already evicted (spoke deleted): create a minimal DISCONNECTED stub.
         if tel is None:
             self.spoke_telemetry[pk] = {
                 "last_attempt": time.time(),
                 "status": "DISCONNECTED",
             }
         else:
+            # Entry still present (transient drop): just flip its status.
             tel["status"] = "DISCONNECTED"
 
     def get_spoke_by_type(self, module_type: str) -> Optional[str]:
         """Return the first connected, approved spoke that advertised the given module_type."""
+        # Prefer a connected spoke that explicitly declared this module_type.
         for sid, mtype in self.spoke_module_types.items():
             if mtype == module_type and sid in self.active_connections:
                 return sid
@@ -156,6 +179,7 @@ class SpokeRegistryMixin:
         prefix = _MODULE_TYPE_PREFIX.get(module_type)
         if prefix:
             return next((sid for sid in self.active_connections if prefix in sid), None)
+        # No match at all.
         return None
 
     def get_spoke_for_agent(self, agent_id: str, fallback_hypervisor: bool = True) -> Optional[str]:
@@ -188,19 +212,25 @@ class SpokeRegistryMixin:
         cs-dialed agent (e.g. the CS bridge relaying commands) pass
         ``fallback_hypervisor=False`` and skip when None is returned.
         """
+        # Normalise the agent id and check the in-memory relay index first.
         agent_pk = self._agent_primary_key(agent_id)
         info = self.agent_info.get(agent_pk)
         if info:
+            # Use the indexed spoke only if it is still connected.
             sid = info.get("spoke_id")
             if sid and self._primary_key(sid) in self.active_connections:
                 return sid
+        # Fall back to the durable "spoke:agent" heartbeat keys to find the owning spoke.
         hb_last = getattr(getattr(self, "heartbeat", None), "last_seen", None) or {}
         for key in hb_last:
+            # Only composite keys carry a spoke/agent pair; split them apart.
             if isinstance(key, str) and ":" in key:
                 spoke_pk, apk = key.split(":", 1)
                 spoke_pk = self._primary_key(spoke_pk)
+                # Match this agent on a spoke that is connected right now.
                 if apk == agent_pk and spoke_pk in self.active_connections:
                     return spoke_pk
+        # Still unknown: optionally assume the hypervisor (pxmx) spoke owns it.
         if fallback_hypervisor:
             return self.get_hypervisor_spoke()
         return None
@@ -238,49 +268,65 @@ class SpokeRegistryMixin:
         such concept) or a stale/disconnected identifier falls back to
         ``get_spoke_by_type`` unchanged — the pre-fix behavior, for
         backward compat."""
+        # Agent-hosting types route by which spoke owns the agent.
         if module_type in ("hypervisor", "simulation"):
+            # A specific agent id: find the spoke that owns that agent (no pxmx guess).
             if identifier:
                 sid = self.get_spoke_for_agent(identifier, fallback_hypervisor=False)
                 if sid:
                     return sid
+            # No specific agent: pick any connected agent-hosting spoke that has an indexed agent.
             for info in (self.agent_info or {}).values():
                 sid = (info or {}).get("spoke_id")
                 pk = self._primary_key(sid)
                 if (sid and pk in self.active_connections
                         and self.spoke_module_types.get(pk) in ("hypervisor", "simulation")):
                     return sid
+            # Indexes not populated yet: prefer the simulation spoke, then any pxmx spoke.
             return (self.get_spoke_by_type("simulation")
                     or self.get_spoke_by_type("hypervisor"))
+        # netbox-server targets are generic agents that deployed NetBox locally.
         if module_type == "netbox-server":
             # The cert target is a generic agent that ran the netbox-server
             # deploy (has the local nginx cert helper + root). A specific
             # identifier picks that agent; empty picks any connected one.
+            # Use the named agent if it is a known NetBox host and currently connected.
             if identifier and self._primary_key(identifier) in self.netbox_server_agents \
                     and self._primary_key(identifier) in self.active_connections:
                 return identifier
+            # Otherwise pick any connected NetBox-hosting agent (or None).
             return next((sid for sid in self.netbox_server_agents
                          if sid in self.active_connections), None)
+        # ldap-server targets are generic agents that deployed the LDAP server locally.
         if module_type == "ldap-server":
             # The cert target is a generic agent that ran the ldap-server deploy
             # (has the local lm-ldap-install-cert helper + root). Mirrors the
             # netbox-server branch.
+            # Use the named agent if it is a known LDAP host and currently connected.
             if identifier and self._primary_key(identifier) in self.ldap_server_agents \
                     and self._primary_key(identifier) in self.active_connections:
                 return identifier
+            # Otherwise pick any connected LDAP-hosting agent (or None).
             return next((sid for sid in self.ldap_server_agents
                          if sid in self.active_connections), None)
+        # zabbix-server targets are generic agents hosting the Zabbix web frontend.
         if module_type == "zabbix-server":
             # Generic agent hosting the Zabbix web frontend (nginx); mirrors
             # the ldap-server branch.
+            # Set of agents known to host Zabbix (attribute may not exist on older hubs).
             agents = getattr(self, "zabbix_server_agents", set())
+            # Use the named agent if it is a known Zabbix host and currently connected.
             if identifier and self._primary_key(identifier) in agents \
                     and self._primary_key(identifier) in self.active_connections:
                 return identifier
+            # Otherwise pick any connected Zabbix-hosting agent (or None).
             return next((sid for sid in agents
                          if sid in self.active_connections), None)
+        # Other types: honour a specific identifier if it is a connected spoke of that type.
         if (identifier and self._primary_key(identifier) in self.active_connections
                 and self.spoke_module_types.get(self._primary_key(identifier)) == module_type):
             return identifier
+        # Fall back to the first connected spoke of the type (legacy behaviour).
         return self.get_spoke_by_type(module_type)
 
     def get_hypervisor_spoke(self) -> Optional[str]:
@@ -301,6 +347,7 @@ class SpokeRegistryMixin:
         get_spoke_for_agent, which is still the right choice wherever a
         specific agent_id is already in scope — this is for the handful of
         callers that only ever assumed a single global hypervisor spoke."""
+        # Prefer a real pxmx spoke, else a cs spoke that hosts agents itself.
         return self.get_spoke_by_type("hypervisor") or self.get_spoke_by_type("simulation")
 
     def get_hypervisor_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
@@ -322,14 +369,18 @@ class SpokeRegistryMixin:
         fall back to ``get_hypervisor_spoke`` so the admin's default dashboard
         still shows a global count (unchanged legacy behavior).
         """
+        # Admin/global view: any hypervisor-capable spoke will do.
         if not tenant_id or tenant_id == "default":
             return self.get_hypervisor_spoke()
+        # Collect every hypervisor and simulation spoke as candidates.
         cands = (list(self.get_all_spokes_by_type("hypervisor") or [])
                  + list(self.get_all_spokes_by_type("simulation") or []))
+        # Keep only connected, approved candidates.
         cands = [sid for sid in cands if sid in self.active_connections
                  and self.approved_modules.get(sid, False)]
         if not cands:
             return None
+        # Return the first candidate bound to this tenant, else None (no cross-tenant fallback).
         md = self.state.system_state.get("module_metadata", {})
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         return bound[0] if bound else None
@@ -350,10 +401,12 @@ class SpokeRegistryMixin:
         mirrors ``_inherit_agent_tenant``). A spoke with no indexed agents yet
         (``agent_info`` lags connect ~30s) falls back to its own binding so a
         freshly-bound spoke still resolves. Empty set = no scope (unbound)."""
+        # Read the module metadata and the spoke's own tenant binding.
         md = self.state.system_state.get("module_metadata", {}) or {}
         spoke_pk = self._primary_key(spoke_id)
         spoke_tid = str((md.get(spoke_id, {}) or md.get(spoke_pk, {}) or {})
                         .get("tenant_id") or "").strip()
+        # Per-agent config holds any per-agent tenant pin.
         agent_cfg = self.state.system_state.get("agent_config", {}) or {}
         # Agents on this spoke, from BOTH the live index (agent_info, wiped on hub
         # restart / evicted on spoke disconnect) AND the DURABLE composite
@@ -362,19 +415,23 @@ class SpokeRegistryMixin:
         # durable source a hub restart would blank agent_info for ~30s and the
         # pinned-host scope would fall back to the spoke's (shared) binding,
         # re-leaking the host onto every tenant's Overview until agents relay.
+        # Collect agents indexed live to this spoke.
         agents = set()
         for apk, info in (getattr(self, "agent_info", {}) or {}).items():
             if info and info.get("spoke_id") \
                     and self._primary_key(info.get("spoke_id")) == spoke_pk:
                 agents.add(apk)
+        # Add agents seen on this spoke via the durable composite heartbeat keys.
         hb_last = getattr(getattr(self, "heartbeat", None), "last_seen", None) or {}
         for key in hb_last:
             if isinstance(key, str) and ":" in key:
                 s_pk, a_pk = key.split(":", 1)
                 if self._primary_key(s_pk) == spoke_pk:
                     agents.add(a_pk)
+        # No agents known yet: use the spoke's own binding (or no scope).
         if not agents:
             return {spoke_tid} if spoke_tid else set()
+        # Each agent contributes its pinned tenant, else inherits the spoke's tenant.
         effs = set()
         for apk in agents:
             pin = str(((agent_cfg.get(apk, {}) or {}).get("client_simulation") or {})
@@ -382,6 +439,7 @@ class SpokeRegistryMixin:
             eff = pin or spoke_tid
             if eff:
                 effs.add(eff)
+        # Union of effective tenants across the spoke's agents.
         return effs
 
     def get_hypervisor_spokes_for_tenant(self, tenant_id: str = None) -> list:
@@ -421,28 +479,37 @@ class SpokeRegistryMixin:
         this, a Proxmox host the admin deliberately assigned to the ADMIN
         tenant would never appear on its own Overview — the reported "servers
         I just added don't show up" bug."""
+        # No tenant given means nothing is visible.
         if not tenant_id:
             return []
+        # Candidates are all pxmx and cs spokes.
         cands = (list(self.get_all_spokes_by_type("hypervisor") or [])
                  + list(self.get_all_spokes_by_type("simulation") or []))
+        # Find the tenant flagged as "shared" (visible to everyone), if any.
         try:
             _tenants = (getattr(self.state, "tenant_state", {}) or {}).get("tenants", {}) or {}
             shared = next((tid for tid, cfg in _tenants.items()
                            if isinstance(cfg, dict) and cfg.get("shared")), None)
         except Exception:
+            # Tenant state unreadable: behave as if there is no shared tenant.
             shared = None
+        # Build the set of tenant ids whose spokes this tenant may see.
         want = {tenant_id}
         if tenant_id == "default":
             want.add("")  # UNASSIGNED resources are visible to the ADMIN scope
         if shared:
             want.add(shared)
+        # Helpers that work out a spoke's module type and whether a tenant owns its own spoke.
         from access import spoke_module_type, tenant_has_own_spoke
+        # Walk the candidates and keep those visible to the tenant.
         out = []
         for sid in cands:
+            # Skip disconnected and unapproved spokes.
             if sid not in self.active_connections:
                 continue
             if not self.approved_modules.get(sid, False):
                 continue
+            # Skip spokes whose effective scope does not overlap the visible set.
             effs = self._spoke_effective_tenants(sid) or {""}
             if not effs & want:
                 continue
@@ -451,6 +518,7 @@ class SpokeRegistryMixin:
             if tenant_id not in effs and tenant_has_own_spoke(
                     self, tenant_id, spoke_module_type(self, sid)):
                 continue
+            # Visible: include it.
             out.append(sid)
         return out
 
@@ -471,13 +539,17 @@ class SpokeRegistryMixin:
         fall back to ``get_spoke_by_type("nw")`` so the admin's Network
         Devices page still shows the global fleet (unchanged legacy behavior).
         """
+        # Admin/global view: return any nw spoke.
         if not tenant_id or tenant_id == "default":
             return self.get_spoke_by_type("nw")
+        # Candidates are connected, approved nw spokes.
         cands = [sid for sid in (self.get_all_spokes_by_type("nw") or [])
                  if sid in self.active_connections
                  and self.approved_modules.get(sid, False)]
+        # None connected means no live devices.
         if not cands:
             return None
+        # Return the nw spoke bound to this tenant, or None (never another tenant's).
         md = self.state.system_state.get("module_metadata", {})
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         return bound[0] if bound else None
@@ -504,13 +576,17 @@ class SpokeRegistryMixin:
         fall back to ``get_spoke_by_type("directory")`` so a Global Admin still
         sees / manages every tenant's OU (unchanged legacy behavior).
         """
+        # Admin/global view: return any directory spoke.
         if not tenant_id or tenant_id == "default":
             return self.get_spoke_by_type("directory")
+        # Candidates are connected, approved directory spokes.
         cands = [sid for sid in (self.get_all_spokes_by_type("directory") or [])
                  if sid in self.active_connections
                  and self.approved_modules.get(sid, False)]
+        # None connected means nothing to route to.
         if not cands:
             return None
+        # Look for a directory spoke bound to this tenant; use it if found.
         md = self.state.system_state.get("module_metadata", {})
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         if bound:
@@ -520,9 +596,12 @@ class SpokeRegistryMixin:
         # This fallback is intentional and DIFFERENT from nw/hypervisor (which
         # return None here) — do not "fix" it to match them.
         # A spoke bound to the SHARED tenant is the same shared server.
+        # Helpers that detect the shared tenant and tenants owning their own spoke.
         from access import tenant_is_shared, tenant_has_own_spoke
+        # A tenant with its own directory spoke must never fall through to the shared server.
         if tenant_has_own_spoke(self, tenant_id, "directory"):
             return None  # own (offline) spoke → never the shared one
+        # Otherwise use an unassigned or shared-tenant directory spoke (the shared OU server).
         shared = [sid for sid in cands
                   if not (md.get(sid, {}).get("tenant_id") or "")
                   or tenant_is_shared(md.get(sid, {}).get("tenant_id"))]
@@ -537,8 +616,10 @@ class SpokeRegistryMixin:
         imports the registry, so it's cycle-safe) then defers to
         ``get_nw_spoke_for_tenant``. With no shared tenant configured, falls
         back to the global nw spoke (admin path)."""
+        # Look up the shared tenant id lazily (avoids an import cycle).
         from access import shared_tenant_id
         sid = shared_tenant_id()
+        # Resolve that tenant's nw spoke, or any nw spoke if no shared tenant exists.
         return self.get_nw_spoke_for_tenant(sid) if sid else self.get_spoke_by_type("nw")
 
     def get_truenas_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
@@ -550,13 +631,17 @@ class SpokeRegistryMixin:
         unassigned fallback. With ``tenant_id`` None / ``"default"`` (admin
         unscoped), fall back to ``get_spoke_by_type("storage")`` so the admin's
         Storage page still shows the global fleet."""
+        # Admin/global view: return any storage spoke.
         if not tenant_id or tenant_id == "default":
             return self.get_spoke_by_type("storage")
+        # Candidates are connected, approved storage spokes.
         cands = [sid for sid in (self.get_all_spokes_by_type("storage") or [])
                  if sid in self.active_connections
                  and self.approved_modules.get(sid, False)]
+        # None connected means nothing to route to.
         if not cands:
             return None
+        # Return the storage spoke bound to this tenant, or None (never another tenant's).
         md = self.state.system_state.get("module_metadata", {})
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         return bound[0] if bound else None
@@ -564,8 +649,10 @@ class SpokeRegistryMixin:
     def get_truenas_spoke_for_shared(self) -> Optional[str]:
         """The storage spoke that owns the SHARED-tenant TrueNAS appliances.
         Mirrors ``get_nw_spoke_for_shared``."""
+        # Look up the shared tenant id lazily (avoids an import cycle).
         from access import shared_tenant_id
         sid = shared_tenant_id()
+        # Resolve that tenant's storage spoke, or any storage spoke if no shared tenant exists.
         return (self.get_truenas_spoke_for_tenant(sid)
                 if sid else self.get_spoke_by_type("storage"))
 
@@ -601,20 +688,27 @@ class SpokeRegistryMixin:
         (``main.py``'s ``push_config_to_spoke``) already does. Only fall back
         to the connection-order pool pick for a spoke that self-registered
         this tenant_id without a formal instance record."""
+        # Admin/global view: return any nac spoke.
         if not tenant_id or tenant_id == "default":
             return self.get_spoke_by_type("nac")
+        # Walk configured NAC instances in config order for a stable choice.
         instances = (self.state.get_global_config().get("nac_instances", []) or [])
         for inst in instances:
+            # Skip malformed entries and instances for other tenants.
             if not isinstance(inst, dict) or inst.get("tenant_id") != tenant_id:
                 continue
+            # Use this instance's spoke if it is connected and approved.
             sid = inst.get("spoke_id") or ""
             if sid and sid in self.active_connections and self.approved_modules.get(sid, False):
                 return sid
+        # No instance record matched: fall back to connected, approved nac spokes.
         cands = [sid for sid in (self.get_all_spokes_by_type("nac") or [])
                  if sid in self.active_connections
                  and self.approved_modules.get(sid, False)]
+        # None connected means nothing to route to.
         if not cands:
             return None
+        # Return the nac spoke bound to this tenant, or None (never another tenant's).
         md = self.state.system_state.get("module_metadata", {})
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         return bound[0] if bound else None
@@ -632,13 +726,17 @@ class SpokeRegistryMixin:
         connected. With ``tenant_id`` None / ``"default"`` (admin unscoped /
         global view), fall back to ``get_spoke_by_type("dhcp")`` so the admin's
         DHCP page still shows a spoke (unchanged legacy behavior)."""
+        # Admin/global view: return any dhcp spoke.
         if not tenant_id or tenant_id == "default":
             return self.get_spoke_by_type("dhcp")
+        # Candidates are connected, approved dhcp spokes.
         cands = [sid for sid in (self.get_all_spokes_by_type("dhcp") or [])
                  if sid in self.active_connections
                  and self.approved_modules.get(sid, False)]
+        # None connected means nothing to route to.
         if not cands:
             return None
+        # Return the dhcp spoke bound to this tenant, or None (never another tenant's).
         md = self.state.system_state.get("module_metadata", {})
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         return bound[0] if bound else None
@@ -657,13 +755,17 @@ class SpokeRegistryMixin:
         (admin unscoped / global view), fall back to
         ``get_spoke_by_type("dns")`` so the admin's DNS page still shows a
         spoke (unchanged legacy behavior)."""
+        # Admin/global view: return any dns spoke.
         if not tenant_id or tenant_id == "default":
             return self.get_spoke_by_type("dns")
+        # Candidates are connected, approved dns spokes.
         cands = [sid for sid in (self.get_all_spokes_by_type("dns") or [])
                  if sid in self.active_connections
                  and self.approved_modules.get(sid, False)]
+        # None connected means nothing to route to.
         if not cands:
             return None
+        # Return the dns spoke bound to this tenant, or None (never another tenant's).
         md = self.state.system_state.get("module_metadata", {})
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         return bound[0] if bound else None
@@ -672,8 +774,10 @@ class SpokeRegistryMixin:
         """The NAC spoke that owns the SHARED-tenant ClearPass appliance — the
         fallback a tenant with no dedicated NAC spoke of its own resolves to.
         Mirrors ``get_nw_spoke_for_shared``."""
+        # Look up the shared tenant id lazily (avoids an import cycle).
         from access import shared_tenant_id
         sid = shared_tenant_id()
+        # Resolve that tenant's nac spoke, or any nac spoke if no shared tenant exists.
         return (self.get_cppm_spoke_for_tenant(sid)
                 if sid else self.get_spoke_by_type("nac"))
 
@@ -698,23 +802,30 @@ class SpokeRegistryMixin:
         different path (``routes/cppm.py``'s ``_nac_merge_fanout``), which
         also tags each record by its owning tenant, a distinct need this list
         isn't for."""
+        # The admin view uses a separate fan-out path, so return nothing here.
         if not tenant_id or tenant_id == "default":
             return []
+        # Find the tenant's own dedicated NAC spoke.
         own = self.get_cppm_spoke_for_tenant(tenant_id)
+        # Helpers for the shared tenant id and own-spoke detection.
         from access import shared_tenant_id as _shared_tenant_id, tenant_has_own_spoke
         if own or tenant_has_own_spoke(self, tenant_id, "nac"):
             # A tenant with its own ClearPass is out of the shared NAC environment.
             return [own] if own else []
+        # Otherwise add the shared tenant's NAC spoke, but only if a shared tenant exists.
         shared_tid = _shared_tenant_id()
         shared = self.get_cppm_spoke_for_tenant(shared_tid) if shared_tid else None
+        # De-duplicate while keeping order and dropping empty entries.
         return list(dict.fromkeys(sid for sid in (own, shared) if sid))
 
     def get_dhcp_spoke_for_shared(self) -> Optional[str]:
         """The DHCP spoke that owns the SHARED-tenant Kea server — the
         fallback a tenant with no dedicated DHCP spoke of its own resolves to.
         Mirrors ``get_nw_spoke_for_shared``."""
+        # Look up the shared tenant id lazily (avoids an import cycle).
         from access import shared_tenant_id
         sid = shared_tenant_id()
+        # Resolve that tenant's dhcp spoke, or any dhcp spoke if no shared tenant exists.
         return (self.get_dhcp_spoke_for_tenant(sid)
                 if sid else self.get_spoke_by_type("dhcp"))
 
@@ -722,8 +833,10 @@ class SpokeRegistryMixin:
         """The DNS spoke that owns the SHARED-tenant Unbound server — the
         fallback a tenant with no dedicated DNS spoke of its own resolves to.
         Mirrors ``get_nw_spoke_for_shared``."""
+        # Look up the shared tenant id lazily (avoids an import cycle).
         from access import shared_tenant_id
         sid = shared_tenant_id()
+        # Resolve that tenant's dns spoke, or any dns spoke if no shared tenant exists.
         return (self.get_dns_spoke_for_tenant(sid)
                 if sid else self.get_spoke_by_type("dns"))
 
@@ -732,6 +845,7 @@ class SpokeRegistryMixin:
         # netbox-server is a capability (advertised in the auth frame), not a
         # module_type any spoke registers under — so the wildcard fan-out + cert
         # targeting resolve it from the netbox_server_agents set.
+        # Capability-based server types resolve from their agent sets (connected only).
         if module_type == "netbox-server":
             return [sid for sid in getattr(self, "netbox_server_agents", set())
                     if sid in self.active_connections]
@@ -743,13 +857,17 @@ class SpokeRegistryMixin:
                     if sid in self.active_connections]
         # Legacy fallback: same prefix map as get_spoke_by_type. See
         # _MODULE_TYPE_PREFIX.
+        # Spokes that registered this module_type and are connected.
         by_registry = [sid for sid, mt in self.spoke_module_types.items()
                        if mt == module_type and sid in self.active_connections]
+        # Registry matches win; otherwise use the legacy id-prefix fallback.
         if by_registry:
             return by_registry
+        # Legacy fallback: any connected spoke whose id contains the type's prefix.
         prefix = _MODULE_TYPE_PREFIX.get(module_type)
         if prefix:
             return [sid for sid in self.active_connections if prefix in sid]
+        # Unknown type with no prefix: nothing matches.
         return []
 
     def _is_client_sim_spoke(self, spoke_id: str) -> bool:
@@ -759,16 +877,21 @@ class SpokeRegistryMixin:
         dials rather than the tenant's first cs spoke. Accepts the legacy
         "simulation" module type for older combined-spoke builds, matching
         get_client_sim_spoke."""
+        # An empty id can never be a Client-Sim spoke.
         if not spoke_id:
             return False
+        # Normalise to the primary key; if that fails, use the id as given.
         try:
             pk = self._primary_key(spoke_id)
         except Exception:  # noqa: BLE001
             pk = spoke_id
+        # All connected Client-Sim spokes, including the legacy "simulation" type.
         cands = set(self.get_all_spokes_by_type("Client-Sim") or []) | \
             set(self.get_all_spokes_by_type("simulation") or [])
+        # Not a Client-Sim spoke at all.
         if not (spoke_id in cands or pk in cands):
             return False
+        # It must also be approved (under either id form).
         return bool(self.approved_modules.get(spoke_id)
                     or self.approved_modules.get(pk))
 
@@ -795,8 +918,10 @@ class SpokeRegistryMixin:
         cands = [sid for sid in cands if self.approved_modules.get(sid, False)]
         if not cands:
             return None
+        # Tenant-scoped request: look for spokes bound to that tenant.
         if tenant_id:
             md = self.state.system_state.get("module_metadata", {})
+            # Sorted so the choice is deterministic.
             bound = sorted(sid for sid in cands
                            if md.get(sid, {}).get("tenant_id") == tenant_id)
             if bound:
@@ -833,19 +958,23 @@ class SpokeRegistryMixin:
         two log lines. Falls back to a SORTED pick so a cold hub (or a broker
         that really did go away) is at least deterministic across calls.
         """
+        # Lazily create the per-tenant sticky broker map on first use.
         store = getattr(self, "_cs_broker_sticky", None)
         if store is None:
             store = {}
             self._cs_broker_sticky = store
+        # Keep the previous broker while it is still eligible.
         prev = store.get(tenant_id)
         if prev and prev in candidates:
             return prev
+        # Otherwise elect the first candidate, logging the change if one was replaced.
         chosen = candidates[0]                      # candidates arrive sorted
         if prev:
             logger.info(
                 "[cs-broker] tenant %s: broker %s -> %s (previous no longer "
                 "connected/approved/bound; %d candidate(s))",
                 tenant_id, prev, chosen, len(candidates))
+        # Remember the choice for subsequent calls.
         store[tenant_id] = chosen
         return chosen
 
@@ -871,8 +1000,10 @@ class SpokeRegistryMixin:
         cands = self.get_all_spokes_by_type("Client-Sim") or self.get_all_spokes_by_type("simulation")
         # Only approved spokes carry cached telemetry (unapproved frames are dropped).
         cands = [sid for sid in cands if self.approved_modules.get(sid, False)]
+        # None connected and approved: nothing to push to.
         if not cands:
             return []
+        # Tenant-scoped request: return every spoke bound to the tenant.
         if tenant_id:
             md = self.state.system_state.get("module_metadata", {})
             bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
@@ -889,6 +1020,7 @@ class SpokeRegistryMixin:
 
     def get_spoke_for_firewall(self, firewall_id: str) -> Optional[str]:
         """Finds the spoke associated with a given firewall ID."""
+        # Look up the firewall record in global config and return its spoke binding.
         firewalls = self.state.get_global_config().get("firewalls", [])
         fw = next((f for f in firewalls if f["id"] == firewall_id), None)
         return fw.get("spoke_id") if fw else None
@@ -912,10 +1044,12 @@ class SpokeRegistryMixin:
     # ------------------------------------------------------------------
     def _agent_roles_store(self) -> dict:
         """The persisted ``{agent_pk: [role, ...]}`` map (created on first use)."""
+        # setdefault creates the empty map the first time and returns the stored one afterwards.
         return self.state.system_state.setdefault("agent_roles", {})
 
     def agent_assigned_roles(self, agent_id: str) -> list:
         """Sorted role names the hub has on record for ``agent_id``."""
+        # Normalise to the primary key and return a copy of the recorded roles.
         pk = self._primary_key(agent_id)
         return list(self._agent_roles_store().get(pk, []) or [])
 
@@ -923,19 +1057,25 @@ class SpokeRegistryMixin:
         """Durably remember ``role`` is assigned to ``agent_id`` so the hub
         re-pushes it on the agent's next reconnect. Idempotent + no-op when the
         role is already on record (so a reconnect storm doesn't churn state)."""
+        # Ignore blank role names.
         role = (role or "").strip()
         if not role:
             return
+        # Load the agent's current roles from the persisted store.
         pk = self._primary_key(agent_id)
         store = self._agent_roles_store()
         roles = set(store.get(pk, []) or [])
+        # Already recorded: nothing to change (avoids churn on reconnect storms).
         if role in roles:
             return
+        # Add the role and store a sorted list for stable output.
         roles.add(role)
         store[pk] = sorted(roles)
+        # Mark state dirty so it is persisted on the next flush.
         try:
             self.state._mark_dirty()
         except Exception:  # noqa: BLE001 — never let bookkeeping crash a connect
+            # A persistence hiccup must not break the connect path.
             pass
         logger.info("agent_roles: recorded role %r for agent %s", role, agent_id)
 
@@ -943,22 +1083,28 @@ class SpokeRegistryMixin:
         """Drop ``role`` from an agent's assigned set (explicit ``UNLOAD_ROLE``
         or ``UNINSTALL_ROLE``).
         The role is then no longer re-pushed on reconnect."""
+        # Ignore blank role names.
         role = (role or "").strip()
         if not role:
             return
+        # Load the agent's current roles from the persisted store.
         pk = self._primary_key(agent_id)
         store = self._agent_roles_store()
         roles = set(store.get(pk, []) or [])
+        # Role not on record: nothing to forget.
         if role not in roles:
             return
+        # Remove it; drop the agent's entry entirely when no roles remain.
         roles.discard(role)
         if roles:
             store[pk] = sorted(roles)
         else:
             store.pop(pk, None)
+        # Mark state dirty so the change is persisted.
         try:
             self.state._mark_dirty()
         except Exception:  # noqa: BLE001
+            # A persistence hiccup is not worth failing the caller over.
             pass
         logger.info("agent_roles: forgot role %r for agent %s", role, agent_id)
 
@@ -972,18 +1118,23 @@ class SpokeRegistryMixin:
         UNINSTALL that didn't hard-ERROR forgets it. Fully fail-open — role
         bookkeeping must never disturb the command's own result."""
         try:
+            # Only role load/unload/uninstall commands affect the registry.
             if command_type not in ("LOAD_ROLE", "UNLOAD_ROLE", "UNINSTALL_ROLE"):
                 return
+            # Without a role name there is nothing to track.
             role = (data or {}).get("role")
             if not role:
                 return
+            # Unwrap the response envelope down to the handler's result dict.
             pl = result.get("payload", {}).get("data", result) \
                 if isinstance(result, dict) else result
             # LOAD_ROLE payload.data may itself nest the handler dict under
             # ``data`` (COMMAND_RESULT envelope); unwrap one more level.
             if isinstance(pl, dict) and "status" not in pl and isinstance(pl.get("data"), dict):
                 pl = pl["data"]
+            # Read the handler's status (None if the result is not a dict).
             status = pl.get("status") if isinstance(pl, dict) else None
+            # A successful LOAD records the role.
             if command_type == "LOAD_ROLE":
                 if status == "SUCCESS":
                     self._record_agent_role(spoke_id, role)
@@ -991,4 +1142,5 @@ class SpokeRegistryMixin:
                 if status != "ERROR":
                     self._forget_agent_role(spoke_id, role)
         except Exception:  # noqa: BLE001
+            # Bookkeeping failure is only logged; it never affects the command result.
             logger.debug("_track_role_rpc bookkeeping failed", exc_info=True)

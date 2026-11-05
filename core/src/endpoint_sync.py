@@ -19,17 +19,25 @@ this module to pull in the mixin). Dependency direction is
 Audience: Hub developers.
 """
 
+# Postpone evaluation of type hints so annotations are never evaluated at runtime.
 from __future__ import annotations
 
+# asyncio runs tenant syncs concurrently and spawns fire-and-forget sync tasks.
 import asyncio
+# datetime builds the UTC "last synced" timestamp.
 import datetime as _dt
+# Standard-library logging for per-tenant sync results.
 import logging
+# Type hints only.
 from typing import Any, Dict, List, Optional
 
+# Shared scheduling helpers: compute the next delay and run the periodic loop.
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
+# Unwraps a spoke's reply envelope into its payload.
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
 
+# Use the hub's main logger so sync lines (incl. [sync-error]) land in the hub log.
 logger = logging.getLogger("Hub")
 
 
@@ -66,6 +74,7 @@ class EndpointSyncMixin:
     # scoping all key off this registry, so no other change is needed.
     """
 
+    # Registry of supported IPAM products (see the class docstring for each field's meaning).
     IPAM_SOURCES: Dict[str, Dict[str, str]] = {
         "netbox": {
             "module_type": "ipam",
@@ -80,11 +89,13 @@ class EndpointSyncMixin:
 
     def _endpoint_sync_cfg(self) -> Dict[str, Any]:
         """Read the sync config fresh (enabled/source/mode/interval/daily_time)."""
+        # global_config[netbox_cppm_sync]; "or {}" guards against a stored None.
         return (self.state.system_state.get("global_config", {})
                 .get(self._ENDPOINT_SYNC_CFG_KEY, {})) or {}
 
     def _endpoint_sync_source(self) -> Dict[str, str]:
         """Resolve the configured IPAM source registry entry (falls back to NetBox)."""
+        # Configured source name, normalised; unknown names fall back to NetBox.
         name = str(self._endpoint_sync_cfg().get("source", "netbox")).strip().lower()
         return self.IPAM_SOURCES.get(name) or self.IPAM_SOURCES["netbox"]
 
@@ -96,15 +107,20 @@ class EndpointSyncMixin:
         driven by the source entry's ``tenant_scope_field`` so the hub stays
         source-agnostic and a future IPAM product only needs its own scope field.
         """
+        # Tenant's settings, then read the source-specific scope field (e.g. netbox_tenant_slug).
         cfg = self.state.get_tenant(tenant_id) or {}
         return str(cfg.get(source_entry.get("tenant_scope_field", "")) or "").strip()
 
     def _endpoint_sync_tenants(self) -> List[str]:
         """Tenant ids bound to the configured IPAM source (have its scope field set)."""
+        # Matching tenant ids.
         out: List[str] = []
+        # Which tenant-config field marks a tenant as bound to this source.
         se = self._endpoint_sync_source()
         field = se.get("tenant_scope_field", "")
+        # All tenants' settings.
         tenants = (self.state.tenant_state or {}).get("tenants", {}) or {}
+        # Keep tenants whose scope field is non-empty.
         for tid, cfg in tenants.items():
             if str((cfg or {}).get(field) or "").strip():
                 out.append(str(tid))
@@ -116,25 +132,31 @@ class EndpointSyncMixin:
         Used by the IPAM edit-trigger to find which tenant a mutated IPAM object
         belongs to when the request body carries the per-tenant scope value.
         """
+        # Which tenant-config field holds the scope value.
         se = self._endpoint_sync_source()
         field = se.get("tenant_scope_field", "")
+        # Normalise the value; nothing to match without a value and field.
         val = str(scope_value or "").strip()
         if not val or not field:
             return None
+        # Find the tenant whose scope field equals the value.
         tenants = (self.state.tenant_state or {}).get("tenants", {}) or {}
         for tid, cfg in tenants.items():
             if str((cfg or {}).get(field) or "").strip() == val:
                 return str(tid)
+        # No tenant uses that scope.
         return None
 
     def _endpoint_sync_concurrency(self) -> int:
         """Max tenants synced in parallel per cycle. Bounded so hundreds of
         tenants don't stampede the IPAM/CPPM spoke, but enough that a full cycle
         finishes well within the schedule. Clamp 1..16; default 8."""
+        # Configured concurrency; fall back to 8 if not a number.
         try:
             n = int(self._endpoint_sync_cfg().get("concurrency", 8))
         except (TypeError, ValueError):
             n = 8
+        # Clamp to 1..16.
         return max(1, min(16, n))
 
     async def sync_tenant_endpoints(self, tenant_id: str,
@@ -150,8 +172,11 @@ class EndpointSyncMixin:
         outage or a missing scoping yields a per-tenant error/skipped status,
         never an unhandled exception (the background loop depends on this).
         """
+        # UTC timestamp for this sync's status record.
         now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Friendly tenant name for logs (fallback to id).
         tenant_name = (self.state.get_tenant(tenant_id) or {}).get("name") or tenant_id
+        # Active IPAM source and its connected spoke.
         se = self._endpoint_sync_source()
         ipam = self.get_spoke_by_type(se.get("module_type", "ipam"))
         # Tenant-aware: with more than one nac spoke connected (each tenant's
@@ -159,6 +184,8 @@ class EndpointSyncMixin:
         # whichever nac spoke happened to connect first — see
         # get_cppm_spoke_for_tenant's docstring.
         nac = self.get_cppm_spoke_for_tenant(tenant_id) or self.get_cppm_spoke_for_shared()
+        # Need both spokes connected and the CPPM spoke configured; otherwise record an error
+        # status.
         if not ipam or not nac or nac in self._nac_unconfigured_spokes:
             logger.info("endpoint sync tenant=%s(%s) SKIP tenant: %s or CPPM spoke not connected "
                         "(ipam=%r nac=%r)", tenant_id, tenant_name, se.get('label', 'IPAM'),
@@ -169,6 +196,7 @@ class EndpointSyncMixin:
                       "last_sync_ts": now, "endpoints_total": 0}
             await self.simulations_store.set_endpoint_sync_status(tenant_id, status)
             return status
+        # The tenant's scope in the IPAM product; unbound tenants are skipped.
         scope = self._ipam_scope_for_tenant(se, tenant_id)
         if not scope:
             logger.info("endpoint sync tenant=%s(%s) SKIP tenant: not bound to %s "
@@ -179,10 +207,13 @@ class EndpointSyncMixin:
                       "last_sync_ts": now, "endpoints_total": 0}
             await self.simulations_store.set_endpoint_sync_status(tenant_id, status)
             return status
+        # Any failure below becomes a per-tenant error status rather than an exception.
         try:
+            # Ask the IPAM spoke for this tenant's IP records.
             r = await self.request_response(ipam, se.get("get_ips_command", "NETBOX_GET_IPS"),
                                              {"tenant": scope}, timeout=30.0)
             data = unwrap_spoke(r) if isinstance(r, dict) else {}
+            # The IPAM spoke reported an error: record it and stop.
             if isinstance(data, dict) and data.get("status") == "ERROR":
                 logger.info("endpoint sync tenant=%s(%s) SKIP tenant: %s returned ERROR: %s",
                             tenant_id, tenant_name, se.get('label', 'IPAM'),
@@ -193,21 +224,29 @@ class EndpointSyncMixin:
                           "last_sync_ts": now, "endpoints_total": 0}
                 await self.simulations_store.set_endpoint_sync_status(tenant_id, status)
                 return status
+            # Where the IP list lives in the reply.
             resp_key = se.get("response_key", "ip_addresses")
+            # Endpoints to send to ClearPass.
             endpoints: List[Dict[str, Any]] = []
             hub_skipped = 0  # records dropped hub-side before reaching CPPM
+            # Convert each IPAM record into {ip, mac, hostname}.
             for ip in (data.get(resp_key, []) if isinstance(data, dict) else []):
+                # Strip the prefix length ("10.0.0.5/24" -> "10.0.0.5").
                 address = str((ip or {}).get("address") or "").split("/")[0].strip()
+                # MAC address from the custom field, and DNS name as hostname.
                 mac = str(((ip or {}).get("custom_fields") or {}).get("mac_address") or "").strip()
                 hostname = str((ip or {}).get("dns_name") or "").strip()
+                # A record with neither IP nor MAC cannot be matched in ClearPass.
                 if not address and not mac:
                     hub_skipped += 1
                     logger.info("endpoint sync tenant=%s(%s) SKIP record: no address and no mac; "
                                 "hostname=%s (record has neither an IP nor a mac_address custom field)",
                                 tenant_id, tenant_name, hostname or "<empty>")
                     continue  # nothing to sync
+                # Keep the endpoint.
                 ep = {"ip": address, "mac": mac, "hostname": hostname}
                 endpoints.append(ep)
+            # No endpoints at all for this tenant.
             if not endpoints:
                 # Nothing in IPAM for this tenant. A replace with an empty batch
                 # is always refused by the CPPM spoke's mass-delete guard
@@ -224,16 +263,20 @@ class EndpointSyncMixin:
                           "last_sync_ts": now, "endpoints_total": 0}
                 await self.simulations_store.set_endpoint_sync_status(tenant_id, status)
                 return status
+            # Build the authoritative (replace=True) batch for the CPPM spoke.
             payload = {"tenant_id": tenant_id, "tenant_slug": scope,
                        "tenant_name": tenant_name, "source": se.get("label", "IPAM"),
                        "replace": True, "endpoints": endpoints}
+            # Only the operator one-off may allow removing more than half the tenant's endpoints.
             if allow_mass_remove:
                 payload["allow_mass_remove"] = True
             # 185+ sequential endpoint PUTs to ClearPass can exceed the old 60s
             # ceiling → "Timed out waiting for spoke response" (the sync had
             # sent=185 pushed=185 but reported status=error). 180s matches the
             # vm-sync push budget (vm_sync.py) so a full tenant batch completes.
+            # Send the batch to ClearPass.
             rr = await self.request_response(nac, "CPPM_SYNC_ENDPOINTS", payload, timeout=180.0)
+            # Unwrap the reply and read its counters (pushed/errors/skipped) and message.
             rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
             pushed = int((rd or {}).get("pushed", len(endpoints)) or 0)
@@ -241,6 +284,7 @@ class EndpointSyncMixin:
             skipped = int((rd or {}).get("skipped", 0) or 0)
             skipped_details = (rd or {}).get("skipped_details") or []
             message = (rd or {}).get("message", "")
+            # Log which endpoints the CPPM spoke skipped and why.
             if skipped_details:
                 logger.info(
                     "endpoint sync tenant=%s(%s) skipped %d: %s",
@@ -248,6 +292,7 @@ class EndpointSyncMixin:
                     "; ".join(f"ip={s.get('ip') or '<empty>'} mac={s.get('mac') or '<empty>'} "
                               f"hostname={s.get('hostname') or '<empty>'} ({s.get('reason')})"
                               for s in skipped_details))
+            # Overall result for this tenant.
             rstate = "success" if rstatus != "ERROR" else "error"
             # Hub-authoritative sync log: clean → INFO; errors/failure →
             # [sync-error] WARNING carrying the sink's message (first-error text)
@@ -263,6 +308,7 @@ class EndpointSyncMixin:
                             "skipped=%d hub_skipped=%d errors=%d",
                             tenant_id, tenant_name, rstate,
                             len(endpoints), pushed, skipped, hub_skipped, errors)
+            # Build the status record shown in the WebUI.
             status = {"tenant_id": tenant_id, "tenant_name": tenant_name,
                       "status": "success" if rstatus != "ERROR" else "error",
                       "pushed": pushed, "errors": errors, "skipped": skipped,
@@ -270,6 +316,7 @@ class EndpointSyncMixin:
                       "last_sync_ts": now, "endpoints_total": len(endpoints),
                       "hub_skipped": hub_skipped,
                       "skipped_details": skipped_details}
+        # Network/timeout/unexpected errors become an error status.
         except Exception as e:
             logger.warning("[sync-error] endpoint-sync tenant=%s failed: %s",
                            tenant_id, e)
@@ -277,6 +324,7 @@ class EndpointSyncMixin:
                       "status": "error", "pushed": 0, "errors": 0,
                       "message": str(e),
                       "last_sync_ts": now, "endpoints_total": 0}
+        # Save the status and return it.
         await self.simulations_store.set_endpoint_sync_status(tenant_id, status)
         return status
 
@@ -291,11 +339,14 @@ class EndpointSyncMixin:
         from an async route (spawns a task on the running loop); silently does
         nothing if there is no running loop.
         """
+        # Automatic sync is off: do nothing.
         if not self._endpoint_sync_cfg().get("enabled", False):
             return
+        # No usable CPPM spoke: do nothing.
         nac = self.get_spoke_by_type("nac")
         if not nac or nac in self._nac_unconfigured_spokes:
             return
+        # Start the sync in the background; with no running loop, silently skip.
         try:
             asyncio.create_task(self.sync_tenant_endpoints(tenant_id))
         except RuntimeError:
@@ -307,38 +358,53 @@ class EndpointSyncMixin:
         vault secret. Subnets are the tenant's NetBox prefixes, collapsed to
         the outermost ones. Skipped (not an error) when the tenant has no
         secret or no prefixes. Best-effort; never raises."""
+        # Imported lazily: IP maths, the credential vault, and the tenant-prefix fetcher.
         import ipaddress
         import cred_vault
         from access import fetch_tenant_prefixes
+        # Friendly tenant name for logs.
         tenant_name = (self.state.get_tenant(tenant_id) or {}).get("name") or tenant_id
+        # Vault buckets to search: the tenant's own (plus the admin bucket for "default").
         buckets = [tenant_id] + ([cred_vault.ADMIN_BUCKET] if tenant_id == "default" else [])
+        # Any failure below becomes an ERROR result rather than an exception.
         try:
+            # Find RADIUS secrets, preferring the tenant's own bucket.
             found = await cred_vault.automation_list_by_type(self, "radius", buckets)
             found.sort(key=lambda s: s["bucket"] != tenant_id)
             secret = found[0]["value"] if found else {}
+            # Shared secrets for RADIUS and TACACS+.
             radius = str(secret.get("radius_secret") or "")
             tacacs = str(secret.get("tacacs_secret") or "")
+            # No secret: nothing to register.
             if not (radius or tacacs):
                 return {"status": "skipped", "message": "no RADIUS/TACACS secret in the tenant's vault bucket"}
+            # The ClearPass spoke for this tenant (or the shared one).
             nac = self.get_cppm_spoke_for_tenant(tenant_id) or self.get_cppm_spoke_for_shared()
             if not nac or nac in self._nac_unconfigured_spokes:
                 return {"status": "skipped", "message": "CPPM spoke not connected"}
+            # The tenant's NetBox prefixes as network objects (invalid ones ignored).
             nets = []
             for p in await fetch_tenant_prefixes(self, tenant_id):
                 try:
                     nets.append(ipaddress.ip_network(str(p), strict=False))
                 except ValueError:
                     pass
+            # Collapse to the outermost subnets, separately for IPv4 and IPv6.
             subnets = [str(n) for v in (4, 6)
                        for n in ipaddress.collapse_addresses(x for x in nets if x.version == v)]
+            # No prefixes: nothing to register.
             if not subnets:
                 return {"status": "skipped", "message": "tenant has no prefixes"}
+            # Ask the CPPM spoke to create/update the Network Devices.
             rr = await self.request_response(nac, "CPPM_SYNC_NADS", {
                 "tenant_id": tenant_id, "tenant_name": tenant_name, "subnets": subnets,
                 "radius_secret": radius, "tacacs_secret": tacacs}, timeout=180.0)
+            # Unwrap the reply.
             rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
+        # Record the failure as an ERROR result.
         except Exception as e:  # noqa: BLE001
             rd = {"status": "ERROR", "message": str(e)}
+        # Log the outcome (success counts or a [sync-error] warning).
         if str(rd.get("status") or "").upper() == "SUCCESS":
             logger.info("nad sync tenant=%s(%s): created=%s updated=%s removed=%s",
                         tenant_id, tenant_name, rd.get("created"), rd.get("updated"), rd.get("removed"))
@@ -346,6 +412,7 @@ class EndpointSyncMixin:
             logger.warning("[sync-error] nad sync tenant=%s(%s) status=%s: %s %s", tenant_id,
                            tenant_name, rd.get("status"), rd.get("message") or "",
                            "; ".join(rd.get("error_details") or [])[:500])
+        # Return the spoke's result.
         return rd
 
     async def run_endpoint_sync_loop(self):
@@ -358,9 +425,14 @@ class EndpointSyncMixin:
         status for it).
         """
         def _guard() -> bool:
+            """Return True when this cycle should run: enabled, and both IPAM and CPPM spokes
+            usable.
+            """
+            # Read config and the active source fresh.
             cfg = self._endpoint_sync_cfg()
             se = self._endpoint_sync_source()
             nac = self.get_spoke_by_type("nac")
+            # Enabled, IPAM spoke connected, CPPM spoke connected and configured.
             return bool(cfg.get("enabled", False)
                         and self.get_spoke_by_type(se.get("module_type", "ipam"))
                         and nac and nac not in self._nac_unconfigured_spokes)
@@ -372,10 +444,14 @@ class EndpointSyncMixin:
             # schedule, so late tenants were perpetually stale. Bounded
             # (not unbounded gather) so we don't stampede the IPAM/CPPM
             # spokes with hundreds of simultaneous requests.
+            """One loop cycle: sync every bound tenant's endpoints and NADs, then refresh caches."""
             tenants = self._endpoint_sync_tenants()
+            # Limit how many tenants sync at once.
             sem = asyncio.Semaphore(self._endpoint_sync_concurrency())
 
             async def _one(tid: str):
+                """Sync one tenant's endpoints and NADs while holding a concurrency slot."""
+                # Wait for a free slot.
                 async with sem:
                     try:
                         await self.sync_tenant_endpoints(tid)
@@ -383,6 +459,7 @@ class EndpointSyncMixin:
                     except Exception as e:  # defense in depth — sync_tenant_endpoints already swallows, but never let one task kill the gather
                         logger.debug("endpoint sync gather tenant=%s: %s", tid, e)
 
+            # Run all tenants (bounded by the semaphore) and wait for them all.
             await asyncio.gather(*(_one(tid) for tid in tenants))
             # The cycle just pushed endpoint tags into CPPM — drop + re-fetch
             # the cppm_devices / cppm_sessions tenant caches so a non-admin
@@ -393,9 +470,15 @@ class EndpointSyncMixin:
             self.refresh_module_cache("cppm_sessions")
 
         def _delay() -> float:
+            """Return seconds until the next cycle (60 s while disabled so enabling applies
+            quickly).
+            """
+            # Read the schedule fresh.
             cfg = self._endpoint_sync_cfg()
+            # Disabled: re-check in a minute.
             if not cfg.get("enabled", False):
                 return 60
+            # Compute the delay for interval or daily-at-HH:MM mode.
             return next_schedule_delay(cfg, default_daily_time="02:00",
                                        log_name="endpoint sync")
 

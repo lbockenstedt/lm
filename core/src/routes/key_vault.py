@@ -10,17 +10,23 @@ Under ``/setup/`` so the access-control middleware gates them to admins.
 """
 from __future__ import annotations
 
+# json for restored bundles; os/re/tempfile for the safe .env rewrite.
 import json
 import os
 import re
 import tempfile
 
+# Fernet checks a fetched key is valid; Response serves the backup download.
 from cryptography.fernet import Fernet
 from fastapi import Response
 
+# Shared Hub helpers: HTTP error type, request and logger.
 from api import HTTPException, Request, logger
+# SSO app config (its cert is used to reach the vault).
 from security.oidc import get_oidc_config
+# Where the hub's .env file may live.
 from self_backup import _env_candidates
+# The Key Vault operations themselves.
 import key_vault as _kv
 
 # Defense-in-depth against .env injection: an env VALUE (secret name, vault
@@ -42,8 +48,10 @@ def _upsert_env_vars(path: str, updates: dict) -> None:
     corrupted/partial ``.env`` — this file carries every hub secret,
     including ``LM_FERNET_KEY`` itself, which this function never touches
     unless it's literally one of the keys in ``updates``."""
+    # Read the current lines.
     with open(path, "r", encoding="utf-8") as f:
         lines = f.read().splitlines()
+    # Replace matching KEY= lines in place.
     remaining = dict(updates)
     out = []
     for line in lines:
@@ -54,9 +62,11 @@ def _upsert_env_vars(path: str, updates: dict) -> None:
             if key in remaining:
                 matched_key = key
         out.append(f"{matched_key}={remaining.pop(matched_key)}" if matched_key else line)
+    # Append any keys that weren't there.
     for k, v in remaining.items():
         out.append(f"{k}={v}")
     content = "\n".join(out) + "\n"
+    # Write to a private temp file beside it, then swap it in (cleaning up on failure).
     directory = os.path.dirname(path) or "."
     fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".env.tmp-")
     try:
@@ -73,10 +83,14 @@ def _upsert_env_vars(path: str, updates: dict) -> None:
 
 
 def register(app, hub, ctx):
+    """Register the Key Vault routes on ``app``."""
+    # Read the Key Vault settings.
     @app.get("/setup/key-vault")
     async def get_key_vault():
+        """Return the settings, the backups in the vault, and the break-glass admin user."""
         cfg = _kv.get_config(hub)
         status = {"backups": [], "warning": ""}
+        # List the backups if a vault is set (an error becomes a warning).
         if cfg.get("vault_url"):
             try:
                 names = await _kv.list_secret_names(get_oidc_config(hub), cfg["vault_url"],
@@ -86,38 +100,49 @@ def register(app, hub, ctx):
                 status["warning"] = str(e)
         return {"config": cfg, "status": status, "admin_user": _kv.admin_uid(hub)}
 
+    # Change the Key Vault settings.
     @app.post("/setup/key-vault")
     async def set_key_vault(request: Request):
+        """Save the Key Vault settings."""
+        # Read the JSON body (defaulting to {}); settings may be under "config".
         try:
             body = await request.json()
         except Exception:
             body = {}
         incoming = (body or {}).get("config", body) or {}
+        # Apply the known fields to the current settings.
         cur = _kv.get_config(hub)
         for k in _kv.CFG_FIELDS:
             if k in incoming:
                 cur[k] = incoming[k]
         cur["enabled"] = bool(cur.get("enabled", False))
+        # Only one cloud vault may be on at a time.
         if cur["enabled"]:
             import cloud_vault
             if cloud_vault.other_provider_enabled(hub, "azure"):
                 raise HTTPException(status_code=400,
                                     detail="OCI Vault is currently enabled — disable it before enabling Azure Key Vault")
+        # Counts must be whole numbers of at least 1 (else the default).
         for k in ("retain", "rotate_days"):
             try:
                 cur[k] = max(1, int(cur[k]))
             except (TypeError, ValueError):
                 cur[k] = _kv.DEFAULTS[k]
+        # Tidy the URL and save.
         cur["vault_url"] = str(cur.get("vault_url") or "").strip()
         _kv.save_config(hub, {k: cur[k] for k in _kv.CFG_FIELDS})
         return {"status": "ok", "config": cur}
 
+    # Test the connection to the vault.
     @app.post("/setup/key-vault/test")
     async def test_key_vault(request: Request):
+        """Try reaching the vault with the given (or saved) settings."""
+        # Read the JSON body (defaulting to {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Use the sent settings, else the saved ones; report any error.
         cfg = ((body or {}).get("config") or _kv.get_config(hub))
         try:
             res = await _kv.test_connection(get_oidc_config(hub), cfg["vault_url"])
@@ -125,6 +150,7 @@ def register(app, hub, ctx):
         except Exception as e:  # noqa: BLE001
             return {"status": "error", "message": str(e)}
 
+    # Test the Fernet-key-from-vault boot path.
     @app.post("/setup/key-vault/test-fernet-tier1")
     async def test_fernet_tier1(request: Request):
         """Diagnostic for the Tier-1 Fernet-key-from-Key-Vault boot path
@@ -142,8 +168,10 @@ def register(app, hub, ctx):
         Never returns the secret's VALUE — only whether it was found and
         whether it parses as a valid Fernet key — so this diagnostic can't
         become a way to exfiltrate the master encryption key over the API."""
+        # Builds the boot-time vault credential.
         from security.credential_store import get_credential_provider
 
+        # Read the boot env vars; nothing to test without the secret name.
         secret_name = (os.getenv("LM_FERNET_KEY_KV_SECRET") or "").strip()
         vault_url = (os.getenv("LM_KEYVAULT_URL") or "").strip()
         diag = {"kv_secret_env_set": bool(secret_name), "vault_url_env_set": bool(vault_url)}
@@ -152,6 +180,7 @@ def register(app, hub, ctx):
                     "message": "LM_FERNET_KEY_KV_SECRET is not set on this hub process — "
                               "nothing to test yet. Set it in .env and restart before testing.",
                     **diag}
+        # Build the credential provider; it must be a ready Key Vault provider.
         try:
             provider = get_credential_provider()
         except Exception as e:  # noqa: BLE001
@@ -167,6 +196,7 @@ def register(app, hub, ctx):
             return {"status": "error",
                     "message": "Key Vault provider is not ready (missing SDK or invalid vault URL).",
                     **diag}
+        # Fetch the secret; it must exist.
         try:
             value = provider.get_secret(secret_name)
         except Exception as e:  # noqa: BLE001
@@ -177,6 +207,7 @@ def register(app, hub, ctx):
                     "message": f"Secret '{secret_name}' was not found in the vault (or the fetch "
                               f"failed — check the hub log for a 'Key Vault fetch' warning).",
                     **diag}
+        # It must be a valid Fernet key.
         try:
             Fernet(value.encode())
             diag["valid_fernet_key"] = True
@@ -191,6 +222,7 @@ def register(app, hub, ctx):
                           f"key — a restart with only LM_FERNET_KEY_KV_SECRET set would boot on it.",
                 **diag}
 
+    # Set up the Fernet-key-from-vault boot path.
     @app.post("/setup/key-vault/configure-tier1")
     async def configure_fernet_tier1(request: Request):
         """Write LM_FERNET_KEY_KV_SECRET / LM_KEYVAULT_URL into this hub's own
@@ -201,10 +233,12 @@ def register(app, hub, ctx):
         service" button) rather than a new restart mechanism. Never reads
         back or returns any OTHER line from .env — this route only ever
         writes the two values it was given."""
+        # Read the JSON body (defaulting to {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Both values are required and must be safe for a .env line.
         secret_name = str((body or {}).get("secret_name") or "").strip()
         vault_url = str((body or {}).get("vault_url") or "").strip()
         if not secret_name or not vault_url:
@@ -212,9 +246,11 @@ def register(app, hub, ctx):
         if not _ENV_VALUE_RE.match(secret_name) or not _ENV_VALUE_RE.match(vault_url):
             raise HTTPException(status_code=400,
                                 detail="secret_name/vault_url contain characters not allowed in an env value")
+        # Find the .env file.
         env_path = next((c for c in _env_candidates() if os.path.isfile(c)), None)
         if not env_path:
             raise HTTPException(status_code=503, detail="could not locate this hub's .env file")
+        # Write the two values.
         try:
             _upsert_env_vars(env_path, {
                 "LM_FERNET_KEY_KV_SECRET": secret_name,
@@ -225,6 +261,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=f"could not write .env: {e}")
         logger.warning("[diag] Tier-1 Key Vault boot vars written to .env (secret=%s) — restarting hub",
                        secret_name)
+        # Restart the hub if we can; otherwise ask for a manual restart.
         restart = getattr(hub, "_hub_self_restart", None)
         if restart is None:
             return {"status": "ok", "message": "Saved to .env — restart the hub manually to apply it."}
@@ -236,28 +273,35 @@ def register(app, hub, ctx):
                               f"({e}) — restart the hub manually to apply it."}
         return {"status": "ok", "message": msg or "Saved — lm.service restarting to apply it."}
 
+    # Rotate the break-glass admin password.
     @app.post("/setup/key-vault/rotate-admin")
     async def rotate_admin(request: Request):
         """Rotate the local admin password, push it to the vault, and invalidate
         that admin's sessions. BREAK-GLASS: afterwards it lives ONLY in the vault."""
+        # Rotate it; a vault error is a 502.
         try:
             res = await _kv.do_rotate_admin(hub)
         except _kv.KeyVaultError as e:
             raise HTTPException(status_code=502, detail=str(e))
         return {"status": "ok", **res}
 
+    # Push the Fernet key to the vault.
     @app.post("/setup/key-vault/push-fernet")
     async def push_fernet(request: Request):
+        """Push the hub's Fernet key to the vault."""
+        # Push it; a vault error is a 502.
         try:
             res = await _kv.do_push_fernet(hub)
         except _kv.KeyVaultError as e:
             raise HTTPException(status_code=502, detail=str(e))
         return {"status": "ok", **res}
 
+    # Push a min backup to the vault.
     @app.post("/setup/key-vault/backup")
     async def backup_min(request: Request):
         """Push a min (bootstrap) backup as ``<prefix><YYYYMMDD>`` and prune to the
         newest ``retain`` daily copies."""
+        # Push it; a size-limit error is a 413, others a 502.
         try:
             res = await _kv.do_backup_min(hub)
         except _kv.KeyVaultError as e:
@@ -265,25 +309,30 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=code, detail=str(e))
         return {"status": "ok", **res}
 
+    # Download the min backup.
     @app.get("/setup/key-vault/download-min")
     async def download_min():
         """Download the current min bootstrap bundle as a JSON file — the offline
         DR seed (keep it somewhere safe / off this hub). Upload it back via
         /restore on a fresh hub to bring logins + Azure + the backup source up."""
+        # Build it and return it as a file download.
         raw = _kv.build_min_backup(hub)
         return Response(content=raw, media_type="application/json", headers={
             "Content-Disposition": 'attachment; filename="lm-min-backup.json"'})
 
+    # Restore from a min backup.
     @app.post("/setup/key-vault/restore")
     async def restore_min(request: Request):
         """Restore a min bootstrap bundle. Body is either an uploaded bundle
         ({"bundle": {...}}) or {"from_vault": "<secret-name>"} to pull it from
         the vault. Applies users/logins + Azure config + OIDC cert/key, and
         returns the Fernet key + backup-source pointer for the full restore."""
+        # Read the JSON body (defaulting to {}).
         try:
             body = await request.json()
         except Exception:
             body = {}
+        # Use the uploaded bundle, or fetch and decode the named one from the vault.
         bundle = (body or {}).get("bundle")
         secret = (body or {}).get("from_vault")
         if not bundle and secret:
@@ -300,8 +349,10 @@ def register(app, hub, ctx):
                 bundle = json.loads(_kv.decode_config_secret(blob).decode())
             except Exception as e:  # noqa: BLE001
                 raise HTTPException(status_code=422, detail=f"could not decode backup: {e}")
+        # A bundle is required.
         if not isinstance(bundle, dict):
             raise HTTPException(status_code=400, detail="no bundle provided (upload a file or set from_vault)")
+        # Apply it and log it.
         try:
             res = _kv.apply_min_backup(hub, bundle)
         except _kv.KeyVaultError as e:

@@ -39,14 +39,19 @@ Audience: Hub developers.
 
 from __future__ import annotations
 
+# asyncio for the loop; logging for alert lines; time for durations.
 import asyncio
 import logging
 import time
 
+# Friendly node names for alert text.
 from display_names import node_name  # sibling leaf
+# Shared periodic-loop runner.
 from sync_loop import run_sync_loop  # sibling leaf
+# Type hints only.
 from typing import Any, Dict, List, Optional, Tuple
 
+# Log to the hub's logger.
 logger = logging.getLogger("Hub")
 
 # Tier names used in the store + API + WebUI.
@@ -72,7 +77,9 @@ def direct_module_ids(system_state: dict) -> set:
     cannot drift from the self-heal, which is exactly how
     ``/setup/alert-diagnostics`` came to report healthy device-mode agents as a
     permanent "self-heal should have popped it" failure."""
+    # Per-spoke metadata from system state.
     metadata = (system_state or {}).get("module_metadata", {}) or {}
+    # Spokes with their own install_uuid and no parent hypervisor.
     return {
         sid for sid, meta in metadata.items()
         if isinstance(meta, dict)
@@ -100,6 +107,7 @@ class SpokeAlertMixin:
         5/30 min (per user) instead of silently never clocking.
     """
 
+    # Config key, default thresholds, minimum warn threshold, and loop cadence.
     _SPOKE_ALERT_CFG_KEY = "spoke_alert"
     _SPOKE_ALERT_DEFAULT_WARN_S = 300
     _SPOKE_ALERT_DEFAULT_ERROR_S = 1800
@@ -110,6 +118,7 @@ class SpokeAlertMixin:
 
     def _spoke_alert_cfg(self) -> Dict[str, Any]:
         """Read the alert config fresh (enabled/warn_s/error_s)."""
+        # The config block from global_config, or {}.
         return (self.state.system_state.get("global_config", {})
                 .get(self._SPOKE_ALERT_CFG_KEY, {})) or {}
 
@@ -121,15 +130,19 @@ class SpokeAlertMixin:
         if a bad config flips that, error_s is bumped to warn_s + 60. Defaults
         300 / 1800.
         """
+        # Read config once for both thresholds.
         cfg = self._spoke_alert_cfg()
 
         def _pos(key: str, default: int) -> int:
+            """Return config value key as a positive int, using default when missing or invalid."""
+            # Bad values fall back to the default.
             try:
                 v = int(cfg.get(key, default))
             except (TypeError, ValueError):
                 v = default
             return max(1, v)
 
+        # Warn at least the minimum; error must be later than warn.
         warn_s = max(self._SPOKE_ALERT_MIN_WARN_S, _pos("warn_s", self._SPOKE_ALERT_DEFAULT_WARN_S))
         error_s = _pos("error_s", self._SPOKE_ALERT_DEFAULT_ERROR_S)
         if error_s <= warn_s:
@@ -139,6 +152,7 @@ class SpokeAlertMixin:
     @staticmethod
     def _spoke_alert_tier_for(duration: float, warn_s: int, error_s: int) -> str:
         """Map a continuous out-of-contact duration to a tier."""
+        # Error first, then warning, else none.
         if duration >= error_s:
             return _TIER_ERROR
         if duration >= warn_s:
@@ -159,6 +173,7 @@ class SpokeAlertMixin:
         heartbeat key, plus the keys of ``agent_config`` (persisted) and
         ``agent_info`` (in-memory). A bare agent id that appears in
         ``approved_modules`` AND here is a leak to self-heal out."""
+        # Agent ids from composite heartbeat keys, agent_config, and agent_info.
         relay_ids = {k.split(":", 1)[1] for k in self.heartbeat.last_seen
                      if ":" in k}
         relay_ids |= set((self.state.system_state.get("agent_config", {})
@@ -169,6 +184,7 @@ class SpokeAlertMixin:
     def _direct_module_ids(self) -> set:
         """Ids that are genuine directly-installed module spokes. Thin wrapper
         over :func:`direct_module_ids` — see it for why this set matters."""
+        # Delegate to the module-level function.
         return direct_module_ids(self.state.system_state)
 
     def _selfheal_leaked_agents(self, relay_ids: Optional[set] = None) -> set:
@@ -179,15 +195,18 @@ class SpokeAlertMixin:
         Returns the set of leaked ids that were removed. Best-effort: never raises
         (the persist is wrapped). Caller is responsible for subtracting the
         returned set from any LOCAL approved snapshot it already built."""
+        # Default to the current relayed ids; none means nothing to do.
         if relay_ids is None:
             relay_ids = self._relayed_agent_ids()
         if not relay_ids:
             return set()
+        # Approved ids that are relayed agents but not direct module spokes.
         direct_module_ids = self._direct_module_ids()
         leaked = {s for s, ap in self.approved_modules.items()
                   if ap and s in relay_ids and s not in direct_module_ids}
         if not leaked:
             return set()
+        # Remove each from approvals and clear its alert state.
         for sid in leaked:
             self.approved_modules.pop(sid, None)
             self._spoke_alert_clear(sid)
@@ -213,6 +232,7 @@ class SpokeAlertMixin:
                 pass
         # Persisted self-heal: drop from known_modules too so a hub restart
         # doesn't re-leak them. Change-gated → no per-cycle write once clean.
+        # Also drop them from known_modules, saving only when something changed.
         known = list(self.state.system_state.get("known_modules", []) or [])
         cleaned = [m for m in known if m not in relay_ids]
         if cleaned != known:
@@ -222,6 +242,7 @@ class SpokeAlertMixin:
                 self.state._mark_dirty()
             except Exception as e:
                 logger.debug("[spoke-alert] self-heal save failed: %s", e)
+        # Log which ids were removed.
         logger.info("[spoke-alert] skipped relayed agent id(s) "
                     "leaked into approved_modules: %s", sorted(leaked))
         return leaked
@@ -246,11 +267,13 @@ class SpokeAlertMixin:
         spoke_last_seen, so it SURVIVES a hub restart — which is what makes a
         dead agent still detectable after the hub bounces).
         """
+        # Freshest last_seen per agent from agent_info.
         out: Dict[str, float] = {}
         for pk, info in (getattr(self, "agent_info", {}) or {}).items():
             ls = (info or {}).get("last_seen")
             if isinstance(ls, (int, float)):
                 out[pk] = max(out.get(pk, 0.0), float(ls))
+        # Merge composite heartbeat keys, keeping the newer timestamp.
         hb = getattr(self, "heartbeat", None)
         for key, ts in (getattr(hb, "last_seen", {}) or {}).items():
             k = str(key)
@@ -271,28 +294,34 @@ class SpokeAlertMixin:
         contact FROM), on a decommissioned one, or on a record older than
         ``_AGENT_ALERT_MAX_AGE_S`` — a long-gone agent is retired, not down.
         """
+        # Thresholds, falling back to the defaults on any error.
         try:
             warn_s, error_s = self._spoke_alert_thresholds()
         except Exception:  # noqa: BLE001
             warn_s, error_s = 300, 1800
+        # Current time and the alert list.
         now = time.time()
         out: List[Dict[str, Any]] = []
+        # Last-seen per agent; a scan failure returns no alerts.
         try:
             seen = self._relayed_agent_last_seen()
         except Exception as e:  # noqa: BLE001 — must never break /status
             logger.debug("[agent-alert] last-seen scan failed: %s", e)
             return out
+        # Alert on agents silent past warn but not yet retired.
         for apk, last in sorted(seen.items()):
             if not isinstance(last, (int, float)) or last <= 0:
                 continue
             age = now - float(last)
             if age < warn_s or age > self._AGENT_ALERT_MAX_AGE_S:
                 continue
+            # Skip decommissioned agents.
             try:
                 if self.state.is_agent_decommissioned(apk):
                     continue
             except Exception:  # noqa: BLE001
                 pass
+            # Alert entry for this agent.
             out.append({
                 "spoke_id": f"agent:{apk}",
                 "name": self._alert_display_name(apk),
@@ -303,12 +332,14 @@ class SpokeAlertMixin:
                            f"error {error_s}s) — its parent spoke may still be "
                            f"healthy, so nothing else reports this"),
             })
+        # Errors first, then oldest first.
         order = {_TIER_ERROR: 0, _TIER_WARN: 1}
         out.sort(key=lambda e: (order.get(e["tier"], 9), e.get("since_ts") or 0))
         return out
 
     def _alert_display_name(self, sid: str) -> str:
         """Friendly name for a spoke or relayed-agent id (see display_names)."""
+        # Look up the name from system state and agent info.
         return node_name(self.state.system_state, sid, getattr(self, "agent_info", None))
 
     # ── active-alert store (surfaced via the API) ───────────────────────────
@@ -317,8 +348,10 @@ class SpokeAlertMixin:
         """Active alerts (tier != none) as a list, most-severe first (error before
         warning), then by ``since_ts`` ascending. Each entry is
         ``{spoke_id, tier, since_ts, duration_s, detail}``."""
+        # Severity order and output list.
         order = {_TIER_ERROR: 0, _TIER_WARN: 1}
         out: List[Dict[str, Any]] = []
+        # Collect warning and error alerts.
         for sid, a in (getattr(self, "_spoke_alerts", {}) or {}).items():
             if a.get("tier") in (_TIER_WARN, _TIER_ERROR):
                 out.append({
@@ -329,6 +362,7 @@ class SpokeAlertMixin:
                     "duration_s": int(a.get("duration_s", 0) or 0),
                     "detail": a.get("detail", ""),
                 })
+        # Errors first, then oldest first.
         out.sort(key=lambda e: (order.get(e["tier"], 9), e.get("since_ts") or 0))
         return out
 
@@ -349,11 +383,14 @@ class SpokeAlertMixin:
           hub restart) → the ``_spoke_absent_since`` clock, seeded on first
           observation so a never-seen spoke still accrues toward the thresholds.
         """
+        # Heartbeat seen: time since the last one.
         last = self.heartbeat.last_seen.get(sid)
         if last is not None:
             return max(0.0, now - last), last
+        # No heartbeat but connected: in contact.
         if sid in getattr(self, "active_connections", {}):
             return 0.0, None
+        # Never seen and not connected: start or continue the absence clock.
         absent_since = self._spoke_absent_since.get(sid)
         if absent_since is None:
             absent_since = now
@@ -362,6 +399,8 @@ class SpokeAlertMixin:
 
     def _spoke_alert_set(self, sid: str, tier: str, since_ts: Optional[float],
                          duration: float, detail: str) -> None:
+        """Store or replace the active alert for sid."""
+        # Alert record surfaced via the API.
         self._spoke_alerts[sid] = {
             "tier": tier,
             "since_ts": since_ts,
@@ -370,6 +409,8 @@ class SpokeAlertMixin:
         }
 
     def _spoke_alert_clear(self, sid: str) -> None:
+        """Remove any active alert for sid."""
+        # Drop it if present.
         self._spoke_alerts.pop(sid, None)
 
     def _spoke_label(self, sid: str) -> str:
@@ -377,6 +418,7 @@ class SpokeAlertMixin:
         display name (or name/hostname) with a short id hint for correlation, so
         the alert reads ``cs-svr-05 (a25e89a6)`` instead of the bare UUID. Falls
         back to the raw id when no name is registered."""
+        # Name plus short id, or just the id when no name is known.
         name = self._alert_display_name(sid)
         return f"{name} ({str(sid)[:8]})" if name != str(sid) else str(sid)
 
@@ -390,6 +432,7 @@ class SpokeAlertMixin:
         not the operator wanted it). The tier is still recorded by the caller, so
         the dashboard Infrastructure-Status tile + the alert-rule engine keep
         working; only the automatic send is gone."""
+        # Intentionally does nothing.
         return
 
     # ── loop ────────────────────────────────────────────────────────────────
@@ -403,6 +446,8 @@ class SpokeAlertMixin:
         startup so a hub restart doesn't fire a burst before spokes reconnect.
         """
         def _guard() -> bool:
+            """Return True when alerting is enabled; when disabled, also clear any active alerts."""
+            # Disabled: skip this cycle.
             if not self._spoke_alert_cfg().get("enabled", False):
                 # Still clear any stale active alerts so the UI doesn't show
                 # alerts while the feature is off.
@@ -410,9 +455,12 @@ class SpokeAlertMixin:
                     self._spoke_alerts.clear()
                     self._spoke_alert_tier.clear()
                 return False
+            # Enabled: run the body.
             return True
 
         async def _body():
+            """Evaluate every approved spoke once and record or log tier changes."""
+            # Thresholds, time, and the approved spokes.
             warn_s, error_s = self._spoke_alert_thresholds()
             now = time.time()
             approved = {s for s, a in self.approved_modules.items() if a}
@@ -433,6 +481,7 @@ class SpokeAlertMixin:
             # (mirrors setup_admin.py:349-367 so the cleanup does not depend
             # on the Diagnostics page being open). Shared with the repo-sync
             # update fan-out via _selfheal_leaked_agents().
+            # Remove relayed agents that leaked into approvals.
             leaked = self._selfheal_leaked_agents()
             if leaked:
                 approved -= leaked
@@ -444,6 +493,7 @@ class SpokeAlertMixin:
                 # this skip was written to prevent, so the skip alone made it
                 # PERMANENT instead of transient. Mirrors the decommissioned
                 # branch below, which already clears for the same reason.
+                # Clear any alert state they already had.
                 for sid in leaked:
                     if sid in getattr(self, "_spoke_alerts", {}):
                         logger.info("[spoke-alert] clearing stale out-of-contact "
@@ -460,6 +510,7 @@ class SpokeAlertMixin:
             # immediately (the loop is the only writer here besides the
             # decommission endpoint, which also clears). is_module_decommissioned
             # is keyed by primary key, matching approved_modules' keys.
+            # Drop decommissioned spokes and clear their alert state.
             decomm = {s for s in approved
                       if self.state.is_module_decommissioned(s)}
             if decomm:
@@ -469,11 +520,14 @@ class SpokeAlertMixin:
                     self._spoke_alert_tier.pop(sid, None)
                     self._spoke_absent_since.pop(sid, None)
 
+            # Evaluate each remaining spoke.
             for sid in sorted(approved):
+                # Duration out of contact, its tier, and the tier last emitted.
                 duration, since_ts = self._spoke_alert_duration(sid, now)
                 tier = self._spoke_alert_tier_for(duration, warn_s, error_s)
                 current = self._spoke_alert_tier.get(sid, _TIER_NONE)
 
+                # Same tier as last time: refresh the duration and move on.
                 if tier == current:
                     # No transition — just keep the live duration fresh for the
                     # UI ("out of contact 642 s") without re-logging.
@@ -483,6 +537,7 @@ class SpokeAlertMixin:
                     continue
 
                 # --- transition ---
+                # Back in contact: clear the alert and record the recovery.
                 if tier == _TIER_NONE:
                     # Back in contact (from warning or error).
                     prev = self._spoke_alerts.get(sid, {})
@@ -493,6 +548,7 @@ class SpokeAlertMixin:
                                             f"reconnected after {prev_dur}s")
                     logger.info("[spoke-alert] %s back in contact (was out %ds)",
                                 self._spoke_label(sid), prev_dur)
+                # Newly out of contact: raise a warning.
                 elif tier == _TIER_WARN:
                     # none → warning (first alert).
                     detail = f"out of contact {int(duration)}s (warn {warn_s}s)"
@@ -505,6 +561,7 @@ class SpokeAlertMixin:
                                    self._spoke_label(sid), int(duration), warn_s)
                     self._schedule_alert_email(sid, "warning", detail,
                                                since_ts, duration)
+                # Escalated to error, keeping the original start time.
                 else:  # tier == _TIER_ERROR (escalation from warning)
                     # Preserve the original onset since_ts (the out-of-contact
                     # start), don't reset it at escalation.
@@ -521,9 +578,12 @@ class SpokeAlertMixin:
                     self._schedule_alert_email(sid, "error", detail,
                                                prev_since, duration)
 
+                # Remember the tier just emitted.
                 self._spoke_alert_tier[sid] = tier
 
         def _delay() -> float:
+            """Return seconds until the next cycle: the loop cadence, or 60 while disabled."""
+            # Use the fast cadence only while enabled.
             enabled = self._spoke_alert_cfg().get("enabled", False)
             return self._SPOKE_ALERT_LOOP_S if enabled else 60
 

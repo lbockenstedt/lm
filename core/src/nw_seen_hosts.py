@@ -16,16 +16,23 @@ drives three things:
 
 Pure functions over plain dicts (``{ip: entry}`` per tenant).
 """
+# ipaddress validates host addresses; typing hints document the dict shapes.
 import ipaddress
 from typing import Any, Dict, Iterable, List, Set
 
+# Keep entries 37 days: NetBox tombstones after 7 days unseen and deletes 30 days later,
+# so the registry must outlive that. Hosts seen in the last 24 hours are monitored.
 KEEP_SECONDS = 37 * 86400       # NetBox deletes after 7d + 30d unseen
 MONITOR_WINDOW = 24 * 3600      # in Zabbix while seen within a day
+# Identity fields copied from a scan result into the registry entry.
 _FIELDS = ("hostname", "object_type", "snmp_credential_id")
 
 
 def _clean_ip(value: Any) -> str:
+    """Return the IPv4 address part of value (any /prefix removed), or "" if not IPv4."""
+    # Drop any /prefix length and whitespace.
     ip = str(value or "").split("/")[0].strip()
+    # Only IPv4 addresses are tracked; anything else (or garbage) yields "".
     try:
         return ip if isinstance(ipaddress.ip_address(ip), ipaddress.IPv4Address) else ""
     except ValueError:
@@ -37,23 +44,30 @@ def record(registry: Dict[str, Dict[str, Any]], hosts: Iterable[Dict[str, Any]],
     """Merge scan results (``{address, hostname, open_ports, snmp_ok, profile, …}``,
     or a bare ``{address}`` for a ping-only answer) into ``registry``. A newer
     empty value never erases an older one. Returns the IPs recorded."""
+    # IPs recorded in this call.
     seen = []
+    # Merge each scan result into the registry.
     for h in hosts or []:
+        # Skip malformed rows and rows without a valid IPv4 address.
         if not isinstance(h, dict):
             continue
         ip = _clean_ip(h.get("address"))
         if not ip:
             continue
+        # Create the entry on first sight, then stamp last_seen.
         e = registry.setdefault(ip, {"address": ip, "first_seen": now})
         e["last_seen"] = now
+        # Copy identity fields only when non-empty and not just the IP repeated.
         for k in _FIELDS:
             v = h.get(k)
             if v and str(v).strip() != ip:
                 e[k] = v
+        # Ports and SNMP success are only ever added, never cleared by an empty result.
         if h.get("open_ports"):
             e["open_ports"] = list(h["open_ports"])
         if h.get("snmp_ok"):
             e["snmp_ok"] = True
+        # Merge the probe profile over what was known before.
         if isinstance(h.get("profile"), dict) and h["profile"]:
             e["profile"] = {**(e.get("profile") or {}), **h["profile"]}
         seen.append(ip)
@@ -63,6 +77,7 @@ def record(registry: Dict[str, Dict[str, Any]], hosts: Iterable[Dict[str, Any]],
 def prune(registry: Dict[str, Dict[str, Any]], now: float,
           keep: float = KEEP_SECONDS) -> int:
     """Drop entries unseen for ``keep`` seconds. Returns how many."""
+    # Find entries whose last_seen is older than keep seconds, then remove them.
     old = [ip for ip, e in registry.items() if now - float(e.get("last_seen") or 0) > keep]
     for ip in old:
         registry.pop(ip, None)
@@ -71,10 +86,12 @@ def prune(registry: Dict[str, Dict[str, Any]], now: float,
 
 def netbox_records(entries: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """NETBOX_SYNC_DEVICES rows: IP-keyed sightings with hostname + profile."""
+    # Build one sighting row per entry, with no MAC (the sweep only knows IPs).
     out = []
     for e in entries:
         row: Dict[str, Any] = {"ip": e["address"], "mac": "",
                                "hostname": str(e.get("hostname") or "")}
+        # Attach the probe profile when there is one.
         if e.get("profile"):
             row["profile"] = e["profile"]
         out.append(row)
@@ -85,8 +102,10 @@ def unidentified(registry: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Hosts nothing has named or classified yet, newest first, with whatever
     evidence the probes gathered (ports, SNMP, ``profile``) for a human or AB
     to work out what they are."""
+    # Entries with neither hostname nor object type.
     rows = [e for e in (registry or {}).values()
             if not e.get("hostname") and not e.get("object_type")]
+    # Newest sighting first.
     return sorted(rows, key=lambda e: -float(e.get("last_seen") or 0))
 
 
@@ -96,14 +115,18 @@ def monitor_rows(by_tenant: Dict[str, Dict[str, Dict[str, Any]]], now: float,
     """Monitoring inventory rows (``nw_monitor_neighbors`` shape) for hosts
     seen within ``window`` that aren't already monitored (by address or name).
     Hosts without a working SNMP community get the ping template."""
+    # One row per recently seen, not yet monitored host across all tenants.
     out = []
     for tid, reg in (by_tenant or {}).items():
         for ip, e in (reg or {}).items():
+            # Skip hosts outside the window or already monitored by address.
             if now - float(e.get("last_seen") or 0) > window or ip in skip_addresses:
                 continue
+            # Use the hostname as name unless it clashes with a monitored name; then use the IP.
             name = str(e.get("hostname") or ip)
             if name.casefold() in skip_names:
                 name = ip
+            # SNMP template only when SNMP worked and a credential is known; else ping.
             out.append({"tenant_id": tid, "name": name, "address": ip,
                         "type": str(e.get("object_type") or "host"),
                         "snmp_ok": bool(e.get("snmp_ok") and e.get("snmp_credential_id")),

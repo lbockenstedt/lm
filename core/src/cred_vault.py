@@ -43,51 +43,76 @@ under an opaque ``cred-<uuid>`` name; the hub keeps only non-secret
 **metadata** (names, mode, type, description, timestamps, per-secret salt,
 PSK verifier) in the Fernet-encrypted hub state — never a plaintext value.
 """
+# Postpone evaluation of type hints so annotations are never evaluated at runtime.
 from __future__ import annotations
 
+# base64 encodes salts, hashes and derived Fernet keys as text.
 import base64
+# copy.deepcopy hands out independent copies of cached secrets.
 import copy
+# hmac.compare_digest compares PSK hashes in constant time.
 import hmac
+# json serialises secret values before encryption.
 import json
+# Standard-library logging.
 import logging
+# secrets generates random salts.
 import secrets
+# time stamps records and ages cache entries.
 import time
+# uuid generates opaque cloud-vault secret names.
 import uuid
+# Type hints only.
 from typing import Any, Dict, List, Optional, Tuple
 
+# Fernet encrypts secret payloads; scrypt derives keys from pass-phrases.
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
+# httpx: a shared HTTP client for parallel cloud-vault reads.
 import httpx
+# asyncio.gather fetches several secrets concurrently.
 import asyncio
 
+# Generic Azure/OCI vault dispatcher used as the ciphertext store.
 import cloud_vault as _cv
+# The hub's at-rest Fernet key, used for automation-readable ("hub" mode) secrets.
 from security.encryption import hub_encryption
+# Security sentinel: records/flags sensitive reads and canary hits.
 from security import sentinel
 
+# Dedicated logger for vault activity.
 logger = logging.getLogger("CredVault")
 
+# Short-lived cache of decrypted automation secrets, keyed by (bucket, name, updated_at),
+# so repeated scans do not hit the cloud vault every time.
 _AUTOMATION_CACHE: Dict[Tuple[str, str, str], Tuple[float, Any]] = {}
 _AUTOMATION_CACHE_TTL: float = 60.0  # seconds
 
 def _cache_key(bucket: str, name: str, updated_at: str) -> Tuple[str, str, str]:
+    """Return the automation-cache key; including updated_at makes edits miss the old entry."""
     return (bucket, name, str(updated_at or ""))
 
 def _cache_get(key: Tuple[str, str, str]) -> Optional[Any]:
     """Return a copy of the cached value, never the stored object itself —
     callers may freely mutate what they get back without poisoning the shared
     60s-TTL cache entry for every other reader in that window."""
+    # Use the entry only while it is younger than the TTL.
     entry = _AUTOMATION_CACHE.get(key)
     if entry is not None and (time.time() - entry[0]) < _AUTOMATION_CACHE_TTL:
         return copy.deepcopy(entry[1])
+    # Expired: remove it.
     if entry is not None:
         _AUTOMATION_CACHE.pop(key, None)
     return None
 
 def _cache_set(key: Tuple[str, str, str], value: Any) -> None:
+    """Store ``value`` in the automation cache with the current time."""
     _AUTOMATION_CACHE[key] = (time.time(), value)
 
 def _cache_invalidate(bucket: str, name: Optional[str] = None) -> None:
+    """Drop cached values for one secret, or for every secret in ``bucket`` if ``name`` is None."""
+    # Collect matching keys first, then delete (cannot change a dict while iterating it).
     to_del = [k for k in _AUTOMATION_CACHE if k[0] == bucket and (name is None or k[1] == name)]
     for k in to_del:
         _AUTOMATION_CACHE.pop(k, None)
@@ -98,10 +123,13 @@ _KV_PREFIX = "cred-"                # opaque cloud-vault secret-name prefix
 # name is NEVER read by any legitimate code path, so ANY read of it — via any
 # vault entry point — is malicious by definition and trips the sentinel canary.
 CANARY_SECRET = "__canary__"
+# Register the canary so the sentinel recognises it when tripped.
 sentinel.register_canary("vault.canary")
+# Secret modes: PSK-derived key (human only) or hub key (automation-readable).
 _MODE_PSK = "psk"
 _MODE_HUB = "hub"
 _MODES = (_MODE_PSK, _MODE_HUB)
+# Where the ciphertext is stored.
 _STORE_KV = "kv"                    # ciphertext lives in the active cloud vault
 _STORE_LOCAL = "local"             # ciphertext lives in hub state (no-KV deploy)
 
@@ -128,23 +156,29 @@ class CredVaultEngineError(CredVaultError):
 
 # ── low-level crypto helpers ────────────────────────────────────────────────
 def _scrypt(password: str, salt: bytes) -> bytes:
+    """Derive a 32-byte key from ``password`` and ``salt`` with scrypt."""
     return Scrypt(salt=salt, length=32, n=_SCRYPT_N, r=_SCRYPT_R,
                   p=_SCRYPT_P).derive(password.encode("utf-8"))
 
 
 def _psk_fernet(psk: str, salt: bytes) -> Fernet:
+    """Return a Fernet cipher keyed from the PSK and salt."""
+    # Fernet needs a url-safe base64 key.
     return Fernet(base64.urlsafe_b64encode(_scrypt(psk, salt)))
 
 
 def _b64(raw: bytes) -> str:
+    """Base64-encode bytes to an ASCII string."""
     return base64.b64encode(raw).decode("ascii")
 
 
 def _unb64(txt: str) -> bytes:
+    """Decode an ASCII base64 string to bytes."""
     return base64.b64decode(txt.encode("ascii"))
 
 
 def _now() -> int:
+    """Current time as whole Unix seconds."""
     return int(time.time())
 
 
@@ -159,6 +193,7 @@ def _meta(hub) -> Dict[str, Any]:
     there; on a vault-less deployment it falls back to the encrypted ``blobs``
     map (the ciphertext is already Fernet-encrypted, exactly like the other
     at-rest encrypted blobs in hub state)."""
+    # Create the nested structure on first use.
     gc = hub.state.system_state.setdefault("global_config", {})
     cv = gc.setdefault("cred_vault", {})
     cv.setdefault("buckets", {})
@@ -168,6 +203,7 @@ def _meta(hub) -> Dict[str, Any]:
 
 
 def _save(hub) -> None:
+    """Mark hub state dirty so the change is persisted."""
     hub.state._mark_dirty()
 
 
@@ -176,6 +212,7 @@ def _vault_available(hub) -> bool:
     Standalone hubs deployed as a plain VM without a vault — or with neither
     provider enabled — return False and transparently use the local
     encrypted-blob store instead."""
+    # Ask the dispatcher which provider is active; any error counts as unavailable.
     try:
         return _cv.active_provider(hub) is not None
     except Exception:  # noqa: BLE001
@@ -186,10 +223,13 @@ def _vault_available(hub) -> bool:
 def _secret_store(sm: Dict[str, Any]) -> str:
     """Which backend a stored secret lives in (``kv`` for pre-existing records
     without an explicit marker — they were vault-only before this fallback)."""
+    # Records without a "store" marker predate the local fallback, so they are in the vault.
     return sm.get("store") or _STORE_KV
 
 
 async def _store_put(hub, kv_name: str, token: str, store: str) -> None:
+    """Store ciphertext ``token`` under ``kv_name`` in the local map or the cloud vault."""
+    # Local store: keep it in hub state; otherwise write it to the cloud vault.
     if store == _STORE_LOCAL:
         _meta(hub)["blobs"][kv_name] = token
     else:
@@ -197,12 +237,16 @@ async def _store_put(hub, kv_name: str, token: str, store: str) -> None:
 
 
 async def _store_get(hub, kv_name: str, store: str, http: Optional[httpx.AsyncClient] = None) -> Optional[str]:
+    """Fetch ciphertext ``kv_name`` from the local map or the cloud vault (None if missing)."""
+    # Local store: read from hub state; otherwise read from the cloud vault.
     if store == _STORE_LOCAL:
         return _meta(hub)["blobs"].get(kv_name)
     return await _cv.get_secret(hub, kv_name, http=http)
 
 
 async def _store_del(hub, kv_name: str, store: str) -> None:
+    """Delete ciphertext ``kv_name`` from the local map or the cloud vault."""
+    # Local store: just remove the entry.
     if store == _STORE_LOCAL:
         _meta(hub)["blobs"].pop(kv_name, None)
         return
@@ -214,13 +258,17 @@ async def _store_del(hub, kv_name: str, store: str) -> None:
 
 # ── bucket / PSK management ─────────────────────────────────────────────────
 def bucket_has_psk(hub, bucket: str) -> bool:
+    """Return True if ``bucket`` has a pass-phrase set."""
     return bool(_meta(hub)["buckets"].get(bucket, {}).get("psk"))
 
 
 def verify_psk(hub, bucket: str, psk: str) -> bool:
+    """Return True if ``psk`` matches the bucket's stored pass-phrase verifier."""
+    # Stored verifier; nothing to check against means "no".
     rec = _meta(hub)["buckets"].get(bucket, {}).get("psk")
     if not rec or not psk:
         return False
+    # Recompute the hash from the supplied PSK and the stored salt.
     try:
         expect = _unb64(rec["hash"])
         got = _scrypt(psk, _unb64(rec["salt"]))
@@ -238,12 +286,16 @@ def verify_psk(hub, bucket: str, psk: str) -> bool:
         raise CredVaultEngineError(
             "pass-phrase check failed due to a server crypto error (not a wrong "
             "pass-phrase) — check the hub logs and retry") from exc
+    # Constant-time comparison so timing does not leak how much matched.
     return hmac.compare_digest(expect, got)
 
 
 def _require_psk(hub, bucket: str, psk: str) -> None:
+    """Raise CredVaultError unless the bucket has a PSK and ``psk`` matches it."""
+    # A bucket without a PSK cannot hold secrets yet.
     if not bucket_has_psk(hub, bucket):
         raise CredVaultError("this bucket has no pass-phrase set yet — set one before storing secrets")
+    # Wrong pass-phrase.
     if not verify_psk(hub, bucket, psk):
         raise CredVaultError("incorrect pass-phrase")
 
@@ -252,34 +304,44 @@ async def set_bucket_psk(hub, bucket: str, new_psk: str, old_psk: Optional[str] 
     """Set or rotate a bucket's PSK. Rotating re-encrypts every ``psk``-mode
     secret in the bucket under the new key (``hub``-mode secrets are unaffected —
     they're keyed on the hub Fernet key, not the PSK)."""
+    # Enforce a minimum length.
     new_psk = (new_psk or "").strip()
     if len(new_psk) < 8:
         raise CredVaultError("pass-phrase must be at least 8 characters")
+    # Existing verifier, if any.
     cv = _meta(hub)
     existing = cv["buckets"].get(bucket, {}).get("psk")
+    # Rotation: verify the old PSK, then re-encrypt PSK-mode secrets under the new one.
     if existing:
         if not verify_psk(hub, bucket, old_psk or ""):
             raise CredVaultError("incorrect current pass-phrase")
         await _rekey_bucket(hub, bucket, old_psk or "", new_psk)
+    # Store a fresh verifier (new salt + scrypt hash) and timestamps.
     salt = secrets.token_bytes(16)
     cv["buckets"].setdefault(bucket, {})
     cv["buckets"][bucket]["psk"] = {"salt": _b64(salt), "hash": _b64(_scrypt(new_psk, salt))}
     cv["buckets"][bucket].setdefault("created_at", _now())
     cv["buckets"][bucket]["updated_at"] = _now()
+    # Persist.
     _save(hub)
 
 
 async def _rekey_bucket(hub, bucket: str, old_psk: str, new_psk: str) -> None:
+    """Re-encrypt every PSK-mode secret in ``bucket`` from ``old_psk`` to ``new_psk``."""
     cv = _meta(hub)
+    # Walk the bucket's secrets; only PSK-mode ones depend on the pass-phrase.
     for name, sm in list(cv["secrets"].get(bucket, {}).items()):
         if sm.get("mode") != _MODE_PSK:
             continue
+        # Decrypt with the old PSK and re-encrypt with a new salt and the new PSK.
         value = await _fetch_and_decrypt(hub, bucket, name, psk=old_psk)
         salt = secrets.token_bytes(16)
         token = _psk_fernet(new_psk, salt).encrypt(json.dumps(value).encode("utf-8")).decode("ascii")
+        # Store the new ciphertext under the same name and record the new salt.
         await _store_put(hub, sm["kv_name"], token, _secret_store(sm))
         sm["salt"] = _b64(salt)
         sm["updated_at"] = _now()
+    # Persist.
     _save(hub)
 
 
@@ -288,6 +350,7 @@ def count_psk_secrets(hub, bucket: str) -> int:
     are therefore unrecoverable if the pass-phrase is lost. ``hub``-mode secrets
     are keyed on the hub Fernet key instead, so they survive a lost pass-phrase
     (and keep working for automation) — they are not counted here."""
+    # Count secrets whose mode is PSK (the default when unset).
     return sum(1 for sm in (_meta(hub)["secrets"].get(bucket, {}) or {}).values()
                if sm.get("mode", _MODE_PSK) == _MODE_PSK)
 
@@ -315,18 +378,22 @@ async def reset_bucket_psk(hub, bucket: str, new_psk: str, *,
 
     Returns a summary of what happened for the audit log / UI.
     """
+    # Enforce a minimum length.
     new_psk = (new_psk or "").strip()
     if len(new_psk) < 8:
         raise CredVaultError("pass-phrase must be at least 8 characters")
+    # PSK-mode secrets, which cannot survive a lost pass-phrase.
     cv = _meta(hub)
     doomed = [n for n, sm in (cv["secrets"].get(bucket, {}) or {}).items()
               if sm.get("mode", _MODE_PSK) == _MODE_PSK]
+    # Refuse to destroy them without explicit confirmation.
     if doomed and not destroy_psk_secrets:
         raise CredVaultError(
             f"{len(doomed)} secret(s) in this bucket are encrypted with the lost "
             f"pass-phrase and CANNOT be recovered: {', '.join(sorted(doomed))}. "
             "Re-run the reset with confirmation to discard them and set a new "
             "pass-phrase.")
+    # Delete each doomed secret's ciphertext and metadata.
     for name in doomed:
         sm = cv["secrets"][bucket][name]
         try:
@@ -336,16 +403,19 @@ async def reset_bucket_psk(hub, bucket: str, new_psk: str, *,
                            bucket, name, exc)
         del cv["secrets"][bucket][name]
         _cache_invalidate(bucket, name)
+    # Store a fresh verifier (new salt + scrypt hash) and timestamps.
     salt = secrets.token_bytes(16)
     cv["buckets"].setdefault(bucket, {})
     cv["buckets"][bucket]["psk"] = {"salt": _b64(salt), "hash": _b64(_scrypt(new_psk, salt))}
     cv["buckets"][bucket].setdefault("created_at", _now())
     cv["buckets"][bucket]["updated_at"] = _now()
+    # Persist and log the reset loudly (it is security-relevant).
     _save(hub)
     kept = len(cv["secrets"].get(bucket, {}) or {})
     logger.warning("cred-vault: pass-phrase RESET (no old pass-phrase) for bucket "
                    "%s by %s — %d psk-mode secret(s) discarded, %d hub-mode "
                    "secret(s) kept", bucket, actor or "?", len(doomed), kept)
+    # Summary for the audit log/UI.
     return {"bucket": bucket, "destroyed": sorted(doomed), "kept": kept}
 
 
@@ -368,11 +438,13 @@ async def move_secret(hub, bucket: str, name: str, to_bucket: str, *,
     move it somewhere tenant-scoped code can actually reference, then delete the
     orphan.
     """
+    # Validate the destination.
     to_bucket = (to_bucket or "").strip()
     if not to_bucket:
         raise CredVaultError("destination bucket is required")
     if to_bucket == bucket:
         raise CredVaultError("source and destination buckets are the same")
+    # The secret must exist, and the destination must not already have one with that name.
     cv = _meta(hub)
     sm = cv["secrets"].get(bucket, {}).get(name)
     if not sm:
@@ -381,16 +453,20 @@ async def move_secret(hub, bucket: str, name: str, to_bucket: str, *,
         raise CredVaultError(
             f"'{to_bucket}' already has a secret named '{name}' — rename or "
             "remove it first (a move must never silently overwrite a credential)")
+    # The destination must have a PSK so its secrets can be written.
     if not bucket_has_psk(hub, to_bucket):
         raise CredVaultError("the destination bucket has no pass-phrase set yet")
 
+    # Re-encrypt the payload for the destination, depending on mode.
     mode = sm.get("mode", _MODE_PSK)
     if mode == _MODE_HUB:
+        # Hub mode: decrypt with the hub key, update the bucket marker, re-encrypt with the hub key.
         value = await _fetch_and_decrypt(hub, bucket, name, psk=None)
         payload = dict(value)
         payload["_bucket"], payload["_name"] = to_bucket, name
         token = hub_encryption.encrypt(json.dumps(payload)).decode("ascii")
         salt = ""
+    # PSK mode: both pass-phrases are required; re-encrypt under the destination's key.
     else:
         _require_psk(hub, bucket, psk)
         _require_psk(hub, to_bucket, to_psk)
@@ -402,18 +478,22 @@ async def move_secret(hub, bucket: str, name: str, to_bucket: str, *,
             json.dumps(payload).encode("utf-8")).decode("ascii")
         salt = _b64(salt_bytes)
 
+    # Overwrite the same at-rest blob with the new ciphertext.
     await _store_put(hub, sm["kv_name"], token, _secret_store(sm))
+    # Move the metadata to the destination with the new salt and who/when.
     moved = dict(sm)
     moved["salt"] = salt
     moved["updated_at"] = _now()
     moved["updated_by"] = actor
     cv["secrets"].setdefault(to_bucket, {})[name] = moved
     del cv["secrets"][bucket][name]
+    # Persist, invalidate cached copies in both buckets, and log.
     _save(hub)
     _cache_invalidate(bucket, name)
     _cache_invalidate(to_bucket, name)
     logger.info("cred-vault: moved secret %s from bucket %s to %s by %s",
                 name, bucket, to_bucket, actor or "?")
+    # Summary for the caller.
     return {"name": name, "from": bucket, "to": to_bucket, "mode": mode}
 
 
@@ -434,18 +514,23 @@ async def delete_bucket(hub, bucket: str, *, confirm_destroy: bool = False,
     ``confirm_destroy`` is passed. Move anything worth keeping out first with
     :func:`move_secret`.
     """
+    # The admin slot can never be deleted.
     if bucket == ADMIN_BUCKET:
         raise CredVaultError(
             "the Global Admin slot is infrastructure and cannot be deleted")
+    # Secrets still in the bucket.
     cv = _meta(hub)
     names = sorted((cv["secrets"].get(bucket) or {}).keys())
+    # Refuse to destroy secrets without explicit confirmation.
     if names and not confirm_destroy:
         raise CredVaultError(
             f"this bucket still holds {len(names)} secret(s): {', '.join(names)}. "
             "Move them to another bucket first, or confirm the deletion to "
             "destroy them.")
+    # Nothing to delete at all: unknown bucket.
     if not names and not cv["buckets"].get(bucket):
         raise CredVaultError(f"bucket '{bucket}' not found")
+    # Delete each secret's ciphertext; failures are logged so metadata is still removed.
     for name in names:
         sm = cv["secrets"][bucket][name]
         try:
@@ -454,6 +539,7 @@ async def delete_bucket(hub, bucket: str, *, confirm_destroy: bool = False,
             logger.warning("cred-vault: delete-bucket could not remove blob for "
                            "%s/%s: %s", bucket, name, exc)
         _cache_invalidate(bucket, name)
+    # Remove the bucket's metadata, persist and log loudly.
     cv["secrets"].pop(bucket, None)
     cv["buckets"].pop(bucket, None)
     _save(hub)
@@ -464,9 +550,12 @@ async def delete_bucket(hub, bucket: str, *, confirm_destroy: bool = False,
 
 # ── secret storage ──────────────────────────────────────────────────────────
 def list_buckets(hub) -> List[Dict[str, Any]]:
+    """Return every bucket with whether it has a PSK and how many secrets it holds."""
+    # Buckets are known from PSK records and/or secret records.
     cv = _meta(hub)
     out = []
     names = set(cv["buckets"]) | set(cv["secrets"])
+    # One summary row per bucket.
     for b in sorted(names):
         out.append({"bucket": b, "has_psk": bucket_has_psk(hub, b),
                     "secret_count": len(cv["secrets"].get(b, {}))})
@@ -475,6 +564,7 @@ def list_buckets(hub) -> List[Dict[str, Any]]:
 
 def list_secrets(hub, bucket: str) -> List[Dict[str, Any]]:
     """Names + non-secret metadata for a bucket — NEVER the values."""
+    # One metadata row per secret, sorted by name.
     cv = _meta(hub)
     out = []
     for name, sm in sorted(cv["secrets"].get(bucket, {}).items()):
@@ -495,6 +585,7 @@ async def put_secret(hub, bucket: str, name: str, value: Dict[str, Any], *,
     holder of the pass-phrase can add or change secrets); ``mode`` then selects
     the at-rest key: ``psk`` (PSK-derived, human-only) or ``hub`` (hub Fernet key,
     automation-readable)."""
+    # Validate name, mode and value; writing always needs the bucket PSK.
     name = (name or "").strip()
     if not name:
         raise CredVaultError("secret name is required")
@@ -504,17 +595,20 @@ async def put_secret(hub, bucket: str, name: str, value: Dict[str, Any], *,
         raise CredVaultError("secret value must be a non-empty object")
     _require_psk(hub, bucket, psk)
 
+    # Existing record (if replacing) and its at-rest name, or a new opaque name.
     cv = _meta(hub)
     existing = cv["secrets"].setdefault(bucket, {}).get(name)
     kv_name = existing["kv_name"] if existing else _KV_PREFIX + uuid.uuid4().hex
     # Keep a replaced secret in its original backend; otherwise pick Key Vault
     # when configured, else the local encrypted-blob store (vault-less deploy).
     store = _secret_store(existing) if existing else (_STORE_KV if _vault_available(hub) else _STORE_LOCAL)
+    # Embed bucket and name in the payload so it is bound to this slot.
     payload = dict(value)
     payload["_bucket"] = bucket
     payload["_name"] = name
     plain = json.dumps(payload).encode("utf-8")
 
+    # Encrypt with the hub key (automation-readable) or a PSK-derived key with a fresh salt.
     if mode == _MODE_HUB:
         token = hub_encryption.encrypt(json.dumps(payload)).decode("ascii")
         salt = ""
@@ -523,6 +617,7 @@ async def put_secret(hub, bucket: str, name: str, value: Dict[str, Any], *,
         token = _psk_fernet(psk, salt_bytes).encrypt(plain).decode("ascii")
         salt = _b64(salt_bytes)
 
+    # Store the ciphertext, then record its non-secret metadata (keeping creation info).
     await _store_put(hub, kv_name, token, store)
     now = _now()
     cv["secrets"][bucket][name] = {
@@ -534,27 +629,35 @@ async def put_secret(hub, bucket: str, name: str, value: Dict[str, Any], *,
         "updated_at": now, "updated_by": actor,
         "last_accessed_at": existing.get("last_accessed_at") if existing else None,
     }
+    # Persist and drop any cached copy.
     _save(hub)
     _cache_invalidate(bucket, name)
     return {"bucket": bucket, "name": name, "mode": mode, "store": store}
 
 
 async def _fetch_and_decrypt(hub, bucket: str, name: str, *, psk: Optional[str], http: Optional[httpx.AsyncClient] = None) -> Dict[str, Any]:
+    """Load and decrypt one secret (PSK needed for PSK mode); returns the value without markers."""
+    # Reading the canary means an attacker is probing; trip the sentinel.
     if name == CANARY_SECRET:
         sentinel.guard("vault.canary", detail=f"{bucket}/{name} (honeytoken read)")
+    # Find the secret's metadata.
     sm = _meta(hub)["secrets"].get(bucket, {}).get(name)
     if not sm:
         raise CredVaultError(f"secret '{name}' not found")
+    # Fetch the ciphertext from its store.
     token = await _store_get(hub, sm["kv_name"], _secret_store(sm), http=http)
     if token is None:
         raise CredVaultError(f"secret '{name}' is missing from the vault")
+    # Decrypt with the hub key or the PSK-derived key.
     try:
         if sm.get("mode") == _MODE_HUB:
             raw = hub_encryption.decrypt(token.encode("ascii"))
         else:
             raw = _psk_fernet(psk or "", _unb64(sm["salt"])).decrypt(token.encode("ascii")).decode("utf-8")
+    # Wrong PSK or tampered data.
     except InvalidToken:
         raise CredVaultError("could not decrypt secret (wrong pass-phrase or corrupted data)")
+    # Parse and strip the internal bucket/name markers.
     data = json.loads(raw)
     data.pop("_bucket", None)
     data.pop("_name", None)
@@ -563,9 +666,12 @@ async def _fetch_and_decrypt(hub, bucket: str, name: str, *, psk: Optional[str],
 
 async def reveal_secret(hub, bucket: str, name: str, *, psk: str, actor: str = "") -> Dict[str, Any]:
     """Interactive reveal — ALWAYS requires the bucket PSK, regardless of mode."""
+    # Record the sensitive access with the sentinel.
     sentinel.guard("vault.reveal_secret", detail=f"{bucket}/{name} actor={actor}")
+    # Check the PSK, then decrypt.
     _require_psk(hub, bucket, psk)
     value = await _fetch_and_decrypt(hub, bucket, name, psk=psk)
+    # Record who accessed it and when.
     sm = _meta(hub)["secrets"][bucket][name]
     sm["last_accessed_at"] = _now()
     sm["last_accessed_by"] = actor
@@ -576,13 +682,17 @@ async def reveal_secret(hub, bucket: str, name: str, *, psk: str, actor: str = "
 async def automation_get(hub, bucket: str, name: str) -> Dict[str, Any]:
     """Unattended retrieval for tooling — NO pass-phrase. Only works for
     ``hub``-mode (automation-readable) secrets; ``psk``-mode secrets raise."""
+    # Record the sensitive access with the sentinel.
     sentinel.guard("vault.automation_get", detail=f"{bucket}/{name}")
+    # Find the secret; only hub-mode secrets may be read without a PSK.
     sm = _meta(hub)["secrets"].get(bucket, {}).get(name)
     if not sm:
         raise CredVaultError(f"secret '{name}' not found")
     if sm.get("mode") != _MODE_HUB:
         raise CredVaultError(f"secret '{name}' is pass-phrase-only and cannot be read unattended")
+    # Decrypt with the hub key.
     value = await _fetch_and_decrypt(hub, bucket, name, psk=None)
+    # Record the automated access.
     sm["last_accessed_at"] = _now()
     sm["last_accessed_by"] = "automation"
     _save(hub)
@@ -607,32 +717,41 @@ async def automation_list_by_type(hub, sec_type,
 
     Unlike :func:`automation_get` it does NOT stamp ``last_accessed_*`` (a seed
     can run on every spoke connect, so we avoid churning hub state on each scan)."""
+    # Accept a single type or several.
     want_types = ({sec_type} if isinstance(sec_type, str) else set(sec_type))
+    # Record the scan with the sentinel.
     sentinel.guard("vault.automation_list_by_type",
                    detail=f"type={','.join(sorted(want_types))}")
+    # Optional bucket filter.
     want = set(buckets) if buckets is not None else None
+    # Results, plus secrets that are not in the cache and must be fetched.
     out: List[Dict[str, Any]] = []
     to_fetch = []
+    # Find matching hub-mode secrets.
     for bucket, secrets in (_meta(hub)["secrets"] or {}).items():
         if want is not None and bucket not in want:
             continue
         for name, sm in (secrets or {}).items():
             if sm.get("type") not in want_types or sm.get("mode") != _MODE_HUB:
                 continue
+            # Use a cached value when fresh (the canary is always fetched so it trips the sentinel).
             val = _cache_get(_cache_key(bucket, name, sm.get("updated_at", "")))
             if val is not None and name != CANARY_SECRET:
                 out.append({"bucket": bucket, "name": name, "value": val})
             else:
                 to_fetch.append((bucket, name, sm))
     
+    # Fetch the rest in parallel over one shared HTTP client.
     if to_fetch:
         async with httpx.AsyncClient(timeout=20.0) as shared_http:
             tasks = [
                 _fetch_and_decrypt(hub, b, n, psk=None, http=shared_http)
                 for b, n, sm in to_fetch
             ]
+            # Errors are returned instead of raised so one bad record does not stop the others.
             results = await asyncio.gather(*tasks, return_exceptions=True)
             failed = 0
+            # Collect results; failures are counted and logged.
             for (b, n, sm), res in zip(to_fetch, results):
                 if isinstance(res, Exception):
                     # Per-record failures are non-fatal (this is a best-effort
@@ -643,8 +762,10 @@ async def automation_list_by_type(hub, sec_type,
                     logger.warning("vault: could not read %s/%s for automation: "
                                    "%s: %s", b, n, type(res).__name__, res)
                     continue
+                # Cache and return successful reads.
                 _cache_set(_cache_key(b, n, sm.get("updated_at", "")), res)
                 out.append({"bucket": b, "name": n, "value": res})
+            # Every read failed: log an error so it is not mistaken for an empty vault.
             if failed and not out:
                 logger.error(
                     "vault: ALL %d automation-readable secret(s) of type %s failed "
@@ -656,12 +777,16 @@ async def automation_list_by_type(hub, sec_type,
 
 
 async def delete_secret(hub, bucket: str, name: str, *, psk: str, actor: str = "") -> None:
+    """Delete a secret (requires the bucket PSK): its ciphertext and its metadata."""
+    # Check the PSK, then find the secret.
     _require_psk(hub, bucket, psk)
     cv = _meta(hub)
     sm = cv["secrets"].get(bucket, {}).get(name)
     if not sm:
         raise CredVaultError(f"secret '{name}' not found")
+    # Delete the ciphertext, then the metadata.
     await _store_del(hub, sm["kv_name"], _secret_store(sm))
     del cv["secrets"][bucket][name]
+    # Persist and drop any cached copy.
     _save(hub)
     _cache_invalidate(bucket, name)

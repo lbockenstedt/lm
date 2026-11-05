@@ -34,11 +34,16 @@ supplied per call by the hub (:mod:`security.key_manager`) or the spoke
 (``self.secret``).
 """
 
+# os: reading the LM_APP_ENCRYPTION env var and drawing random nonces.
 import os
+# base64 keeps the encrypted bytes JSON-safe as a plain string.
 import base64
+# Standard-library logging for the "crypto unavailable" warning.
 import logging
+# Type hints only; describe payload dicts and the frame-type set.
 from typing import Any, Dict, FrozenSet, Optional
 
+# One named logger so frame-encryption messages can be filtered together.
 logger = logging.getLogger("FrameCrypto")
 
 # cryptography is a core dep, but a spoke venv that hasn't installed it yet
@@ -46,18 +51,23 @@ logger = logging.getLogger("FrameCrypto")
 # is fail-safe by design (every version combo degrades to plaintext). When the
 # lib is absent we disable app-layer encryption: the spoke doesn't advertise
 # the capability, so the hub degrades to plaintext for it (mixed → plaintext).
+# Import the AEAD cipher, key-derivation function, hash and tag-failure exception.
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     from cryptography.hazmat.primitives import hashes
     from cryptography.exceptions import InvalidTag
+    # Reaching here means every primitive imported, so encryption can be used.
     _CRYPTO_AVAILABLE = True
+# The library is missing: record that and keep the module importable.
 except ImportError:  # pragma: no cover - exercised only on a dep-short venv
     _CRYPTO_AVAILABLE = False
 
     class InvalidTag(Exception):  # fallback so callers can still `except InvalidTag`
+        """Stand-in for cryptography's InvalidTag when the library is not installed."""
         pass
 
+    # Warn once at import time so operators know frames are going out unencrypted.
     logger.warning(
         "cryptography not installed — app-layer frame encryption DISABLED "
         "(plaintext, HMAC-signed as before). Install 'cryptography>=42' to enable."
@@ -72,6 +82,7 @@ _ENV_VAR = "LM_APP_ENCRYPTION"
 #: same signing secret (the HMAC key is the *raw* secret; the AEAD key is the
 #: HKDF-derived one, so a compromise of one primitive's output doesn't bleed
 #: into the other's key).
+# Fixed key-derivation label, length of the derived AES key, and GCM nonce size.
 _INFO = b"lm-app-layer-enc-v1"
 _KEY_LEN = 32  # AES-256
 _NONCE_LEN = 12  # AES-GCM standard
@@ -80,6 +91,7 @@ _NONCE_LEN = 12  # AES-GCM standard
 #: gate is ``type in ENCRYPTED_TYPES and peer-capable and key-available and
 #: enabled`` — non-secret frames (heartbeats, telemetry, commands, replies)
 #: hit only a cheap type-check and stay unchanged on the wire.
+# Built as a frozenset so membership checks are fast and the set cannot be modified.
 ENCRYPTED_TYPES: FrozenSet[str] = frozenset({
     "SPOKE_UPDATE_SESSION_KEY",
     "INSTALL_CERT",
@@ -112,8 +124,10 @@ def encryption_enabled() -> bool:
     """Whether app-layer frame encryption is active. Default ON (``"1"``);
     ``0``/``false``/``no`` (case-insensitive, whitespace-trimmed) → off. Always
     off when the ``cryptography`` lib is unavailable (fail-safe → plaintext)."""
+    # Without the crypto library encryption is impossible, whatever the env var says.
     if not _CRYPTO_AVAILABLE:
         return False
+    # Default "1" (on); only explicit off-values disable it.
     return os.environ.get(_ENV_VAR, "1").strip().lower() not in ("0", "false", "no")
 
 
@@ -127,12 +141,14 @@ def derive_aead_key(secret: str) -> bytes:
     (``secrets.token_urlsafe(32)``) so a salt is unnecessary; the ``info``
     label alone domain-separates this key from the raw HMAC key.
     """
+    # HKDF with SHA-256, no salt, and our label produces a 32-byte key.
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
         length=_KEY_LEN,
         salt=None,
         info=_INFO,
     )
+    # Derive the key from the UTF-8 bytes of the shared signing secret.
     return hkdf.derive(secret.encode())
 
 
@@ -146,30 +162,40 @@ def encrypt_payload_data(secret: str, data: Any) -> str:
     ``data`` stays JSON-encodable in the wire payload (``json.dumps`` of the
     outer body handles it like any other string field).
     """
+    # Derive the AES key and create the cipher for this call.
     import json  # local: keeps the module importable without json at top cost
     key = derive_aead_key(secret)
     aesgcm = AESGCM(key)
+    # A brand-new random nonce for every frame; reusing one would break GCM security.
     nonce = os.urandom(_NONCE_LEN)
+    # Serialise the data compactly; that JSON text is what gets encrypted.
     plaintext = json.dumps(data, separators=(',', ':')).encode()
+    # Encrypt + authenticate (no associated data); output is ciphertext followed by the tag.
     ct = aesgcm.encrypt(nonce, plaintext, None)  # ct || tag
+    # Prefix the nonce so the receiver can find it, then base64 it into a string.
     return base64.b64encode(nonce + ct).decode()
 
 
 def decrypt_payload_data(secret: str, b64: str) -> Any:
     """Inverse of :func:`encrypt_payload_data`. Raises :class:`InvalidTag` on
     tamper or wrong key (caller logs + drops the frame)."""
+    # Derive the same AES key from the shared secret.
     import json
     key = derive_aead_key(secret)
     aesgcm = AESGCM(key)
+    # Decode the base64 text back to bytes and split off the leading nonce.
     raw = base64.b64decode(b64)
     nonce, ct = raw[:_NONCE_LEN], raw[_NONCE_LEN:]
+    # Decrypt and check the tag; raises InvalidTag if tampered with or the key is wrong.
     plaintext = aesgcm.decrypt(nonce, ct, None)
+    # Turn the decrypted JSON back into the original data structure.
     return json.loads(plaintext)
 
 
 def is_encrypted(payload: Dict[str, Any]) -> bool:
     """Whether ``payload``'s ``data`` is an encrypted b64 blob (marker
     present). The single receive-side gate — no per-type branching."""
+    # Encrypted only when it is a dict carrying our exact marker value.
     return isinstance(payload, dict) and payload.get("enc") == ENC_MARKER
 
 
@@ -180,14 +206,17 @@ def wrap(secret: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     (defends against a double-encrypt if a caller re-enters the outbound path,
     e.g. a redelivery). Non-``data`` keys (e.g. ``correlation_id`` on reply
     frames, ``type``) are preserved. Returns ``payload`` for chaining."""
+    # Non-dict payloads cannot hold a data field; pass them through untouched.
     if not isinstance(payload, dict):
         return payload
+    # Skip encryption when the library is missing, already encrypted, or there is no data.
     if not _CRYPTO_AVAILABLE:
         return payload  # no crypto lib → never encrypt (fail-safe plaintext)
     if payload.get("enc") == ENC_MARKER:
         return payload  # already wrapped — idempotent
     if "data" not in payload:
         return payload  # nothing to encrypt (defensive)
+    # Replace the data with its encrypted form and mark the payload as encrypted.
     payload["data"] = encrypt_payload_data(secret, payload["data"])
     payload["enc"] = ENC_MARKER
     return payload
@@ -201,14 +230,17 @@ def unwrap(secret: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     HMAC-verified it is a corrupted or hostile frame; never dispatch it).
     Does nothing (and never raises) on an unmarked payload — symmetric with
     :func:`wrap`'s idempotence and the legacy/plaintext path."""
+    # Non-dict payloads cannot be encrypted; pass them through untouched.
     if not isinstance(payload, dict):
         return payload
+    # Unmarked payloads are plaintext and need no decryption.
     if payload.get("enc") != ENC_MARKER:
         return payload  # plaintext — pass through (legacy / non-secret path)
     if not _CRYPTO_AVAILABLE:
         # An encrypted frame arrived but we can't decrypt (shouldn't happen — we
         # don't advertise the capability without crypto). Drop it, don't dispatch.
         raise InvalidTag("cryptography unavailable — cannot decrypt frame")
+    # Restore the plaintext data and remove the marker so handlers see a normal payload.
     payload["data"] = decrypt_payload_data(secret, payload["data"])
     del payload["enc"]
     return payload

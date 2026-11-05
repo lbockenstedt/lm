@@ -22,13 +22,20 @@ A real HA pair, not two independent servers pointed at the same subnets:
   applied is reported as ``PARTIAL`` (with a rollback attempt), never SUCCESS.
 """
 
+# Deep copies keep caller configs from being changed.
 import copy
+# JSON for the persisted cluster/desired-state files.
 import json
+# Logging for warnings and diagnostics.
 import logging
+# Filesystem paths and atomic file replacement.
 import os
+# Timestamps for journal entries.
 import time
+# Type hints.
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+# Module logger.
 logger = logging.getLogger("KeaHA")
 
 #: Worker operations the DHCP coordinator may ever issue. Fixed at import.
@@ -64,6 +71,7 @@ DHCP_WORKER_OPS = (
     "KEAW_PACKET_TRACE",   # per-client DHCPv4 request/error trace
 )
 
+# Kea's two HA mode names, and the set of all known modes.
 HOT_STANDBY = "hot-standby"
 LOAD_BALANCING = "load-balancing"
 HA_MODES = (HOT_STANDBY, LOAD_BALANCING)
@@ -86,6 +94,7 @@ DEFAULT_HOOK_DIR = "/usr/lib/x86_64-linux-gnu/kea/hooks"
 HOOK_DIR_GLOBS = ("/usr/lib/*/kea/hooks", "/usr/lib/kea/hooks",
                   "/usr/local/lib/kea/hooks")
 
+# Default locations of the persisted cluster config and the DHCPv4 desired-state journal.
 DEFAULT_CLUSTER_CONFIG = "/etc/lm-dhcp/cluster.json"
 DEFAULT_DESIRED_STATE = "/var/lib/lm-dhcp/desired.json"
 #: DHCPv6's own journal — kept in a SEPARATE file from the v4 one because the
@@ -143,12 +152,15 @@ def normalize_mode(mode: Any) -> str:
     hot-standby — guessing a different allocation model from a misspelling is
     not acceptable either.
     """
+    # Normalize case and underscores so "Hot_Standby" etc. are recognized.
     value = str(mode or "").strip().lower().replace("_", "-")
+    # Load-balancing is refused outright.
     if value == LOAD_BALANCING:
         raise UnsupportedHAMode(
             "load-balancing is not supported: it requires each subnet's pool to "
             "be split between the two servers by client class, which this "
             "module does not yet generate. Use hot-standby.")
+    # Unknown values fall back to hot-standby with a warning.
     if value and value != HOT_STANDBY:
         logger.warning("Unknown Kea HA mode %r — defaulting to %s", mode, HOT_STANDBY)
     return HOT_STANDBY
@@ -161,8 +173,10 @@ def coerce_mode(mode: Any) -> str:
     spoke on startup — it is coerced to hot-standby with a loud warning, and the
     operator sees the unsupported mode called out in the HA report.
     """
+    # Normal path: the mode is valid.
     try:
         return normalize_mode(mode)
+    # Unsupported persisted mode: log loudly and keep running as hot-standby.
     except UnsupportedHAMode:
         logger.error("Persisted Kea HA mode %r is no longer supported — running "
                      "as %s. Re-apply the HA configuration to clear this.",
@@ -176,6 +190,7 @@ def peer_roles(mode: str) -> Tuple[str, str]:
     Kea names the second server ``standby`` in hot-standby and ``secondary`` in
     load-balancing; using the wrong one makes the hook refuse the config.
     """
+    # Second server is "standby" in hot-standby and "secondary" otherwise.
     return ("primary", "standby") if normalize_mode(mode) == HOT_STANDBY \
         else ("primary", "secondary")
 
@@ -189,6 +204,7 @@ def _member_url(member: Dict[str, Any]) -> str:
     dedicated, basic-auth-protected HA agent on ``ha_port`` (8002 by default),
     which the installer firewalls to the partner address.
     """
+    # An explicit URL wins, but it must not be plaintext HTTP.
     url = str(member.get("url") or member.get("ha_url") or "").strip()
     if url:
         if url.lower().startswith("http://"):
@@ -196,17 +212,22 @@ def _member_url(member: Dict[str, Any]) -> str:
                 f"member '{member.get('id')}' HA url {url} is plaintext http:// "
                 f"— HA peer traffic carries the control credentials and must be "
                 f"https://")
+        # Kea expects a trailing slash on peer URLs.
         return url if url.endswith("/") else url + "/"
+    # Otherwise build the URL from host, HA port and scheme.
     host = str(member.get("host") or "").strip()
     port = int(member.get("ha_port") or DEFAULT_HA_PORT)
     scheme = str(member.get("ha_scheme") or DEFAULT_HA_SCHEME).strip().lower()
+    # Only HTTPS is allowed for peer traffic.
     if scheme != "https":
         raise KeaHAConfigError(
             f"member '{member.get('id')}' requested HA scheme {scheme!r}; only "
             f"https is allowed for peer traffic")
+    # A host is required to build the URL.
     if not host:
         raise KeaHAConfigError(
             f"member '{member.get('id')}' needs a host or an explicit HA url")
+    # Return the built HTTPS URL.
     return f"https://{host}:{port}/"
 
 
@@ -227,17 +248,20 @@ def _member_auth(member: Dict[str, Any]) -> Dict[str, str]:
     trust = str(member.get("ha_trust_anchor", DEFAULT_HA_CA) or "").strip()
     cert = str(member.get("ha_cert", DEFAULT_HA_CERT) or "").strip()
     key = str(member.get("ha_key", DEFAULT_HA_KEY) or "").strip()
+    # Add each TLS file that is set.
     if trust:
         out["trust-anchor"] = trust
     if cert:
         out["cert-file"] = cert
     if key:
         out["key-file"] = key
+    # Add basic auth only when both user and password are given.
     user = str(member.get("ha_user") or "").strip()
     password = str(member.get("ha_password") or "")
     if user and password:
         out["basic-auth-user"] = user
         out["basic-auth-password"] = password
+    # Return the peer's auth settings.
     return out
 
 
@@ -248,10 +272,12 @@ def build_peers(members: Iterable[Dict[str, Any]], mode: str) -> List[Dict[str, 
     distinctly-identified, distinctly-addressed servers — the states that
     produce a split brain instead of an HA pair.
     """
+    # Keep only dict entries; a pair must be exactly two of them.
     members = [m for m in (members or []) if isinstance(m, dict)]
     if len(members) != 2:
         raise KeaHAConfigError(
             f"Kea HA requires exactly 2 members, got {len(members)}")
+    # Each member needs a non-empty id, distinct from the other.
     ids = [str(m.get("id") or "").strip() for m in members]
     if not all(ids):
         raise KeaHAConfigError("every Kea HA member needs a non-empty id")
@@ -259,20 +285,27 @@ def build_peers(members: Iterable[Dict[str, Any]], mode: str) -> List[Dict[str, 
         raise KeaHAConfigError(
             f"both Kea HA members are named '{ids[0]}' — peers must be distinct")
 
+    # Role names for this mode.
     primary_role, partner_role = peer_roles(mode)
+    # Read explicit roles to decide which member is primary.
     explicit = [str(m.get("role") or "").strip().lower() for m in members]
+    # First member is marked primary (or second is marked partner): keep order.
     if explicit[0] in ("primary",) or explicit[1] in ("standby", "secondary"):
         ordered = members
+    # Second member is marked primary (or first is marked partner): swap.
     elif explicit[1] in ("primary",) or explicit[0] in ("standby", "secondary"):
         ordered = [members[1], members[0]]
+    # No roles given: keep the declared order.
     else:
         ordered = members  # no explicit roles → declaration order decides
 
+    # Each peer needs its own control-agent URL.
     urls = [_member_url(m) for m in ordered]
     if urls[0] == urls[1]:
         raise KeaHAConfigError(
             f"both Kea HA members resolve to the same control-agent URL "
             f"{urls[0]} — each node needs its own address")
+    # Build Kea's peer entries: primary first, both with auto-failover and their auth.
     peers = [
         {"name": str(ordered[0]["id"]).strip(), "url": urls[0],
          "role": primary_role, "auto-failover": True,
@@ -281,6 +314,7 @@ def build_peers(members: Iterable[Dict[str, Any]], mode: str) -> List[Dict[str, 
          "role": partner_role, "auto-failover": True,
          **_member_auth(ordered[1])},
     ]
+    # Every peer must have a TLS trust anchor; refuse to build an unverified pair.
     missing_tls = [p["name"] for p in peers if not p.get("trust-anchor")]
     if missing_tls:
         raise KeaHAConfigError(
@@ -288,6 +322,7 @@ def build_peers(members: Iterable[Dict[str, Any]], mode: str) -> List[Dict[str, 
             "for: " + ", ".join(missing_tls) + ". Re-run install_dhcp.sh with "
             "--ha-ca/--ha-cert/--ha-key on each node and supply ha_trust_anchor "
             "in the member configuration.")
+    # Return the validated peer list.
     return peers
 
 
@@ -298,6 +333,7 @@ def apply_order(peers: List[Dict[str, Any]]) -> List[str]:
     last one disturbed, and a config the standby already rejected never reaches
     it.
     """
+    # Non-primary peers first, then the primary.
     partner = [p["name"] for p in peers if p["role"] != "primary"]
     primary = [p["name"] for p in peers if p["role"] == "primary"]
     return partner + primary
@@ -313,10 +349,13 @@ def resolve_hook_dir(explicit: str = "") -> str:
     :data:`DEFAULT_HOOK_DIR` so the caller still produces a usable (if wrong)
     path to report as missing.
     """
+    # An explicit operator path wins.
     explicit = (explicit or "").strip()
     if explicit:
         return explicit.rstrip("/")
+    # glob is only needed here.
     import glob as _glob
+    # Look for a hook directory that actually contains the HA library.
     for pattern in HOOK_DIR_GLOBS:
         for candidate in sorted(_glob.glob(pattern)):
             if os.path.isfile(os.path.join(candidate, "libdhcp_ha.so")):
@@ -327,10 +366,20 @@ def resolve_hook_dir(explicit: str = "") -> str:
         for candidate in sorted(_glob.glob(pattern)):
             if os.path.isdir(candidate):
                 return candidate.rstrip("/")
+    # Nothing found: use the compiled-in default.
     return DEFAULT_HOOK_DIR
 
 
 def hook_paths(hook_dir: str = "") -> Dict[str, str]:
+    """Paths of the HA and lease_cmds hook libraries in this node's hook directory.
+
+    Args:
+        hook_dir: Optional explicit hook directory.
+
+    Returns:
+        Dict with "ha" and "lease_cmds" library paths.
+    """
+    # Resolve the directory, then build both library paths.
     base = resolve_hook_dir(hook_dir)
     return {"ha": f"{base}/libdhcp_ha.so",
             "lease_cmds": f"{base}/libdhcp_lease_cmds.so"}
@@ -344,10 +393,12 @@ def build_ha_hooks(this_name: str, peers: List[Dict[str, Any]], mode: str,
     partner during synchronisation, and without it a failover node serves an
     empty lease database.
     """
+    # This node must be one of the peers.
     names = [p["name"] for p in peers]
     if this_name not in names:
         raise KeaHAConfigError(
             f"'{this_name}' is not one of the HA peers ({', '.join(names)})")
+    # lease_cmds first, then the HA hook with this node's name, mode, timers and peers.
     paths = hook_paths(hook_dir)
     return [
         {"library": paths["lease_cmds"]},
@@ -389,14 +440,18 @@ def build_node_config(node_dhcp4: Dict[str, Any], this_name: str,
     lease-commands entries are replaced wholesale so a stale peer list from an
     earlier topology cannot survive a reconfiguration.
     """
+    # Start from a copy of the node's own config.
     cfg = copy.deepcopy(node_dhcp4 or {})
+    # Replace only the coordinator-owned keys that were supplied.
     for key in COORDINATOR_OWNED_KEYS:
         if owned is not None and key in owned:
             cfg[key] = copy.deepcopy(owned[key])
+    # Keep the node's other hooks but drop any old HA/lease_cmds entries.
     keep = [h for h in (cfg.get("hooks-libraries") or [])
             if isinstance(h, dict)
             and not str(h.get("library", "")).endswith(
                 ("libdhcp_ha.so", "libdhcp_lease_cmds.so"))]
+    # Add fresh HA hooks for the current peers.
     cfg["hooks-libraries"] = keep + build_ha_hooks(this_name, peers, mode, hook_dir)
     return cfg
 
@@ -423,7 +478,9 @@ def build_node_config6(node_dhcp6: Dict[str, Any], this_name: str,
     ``subnet4``) and the config tree it is applied to differ, so ``peers`` and
     :func:`build_ha_hooks` are reused verbatim from the v4 path.
     """
+    # Start from a copy of the node's own Dhcp6 config.
     cfg = copy.deepcopy(node_dhcp6 or {})
+    # Replace only the coordinator-owned keys that were supplied.
     for key in COORDINATOR_OWNED_KEYS6:
         if owned is not None and key in owned:
             cfg[key] = copy.deepcopy(owned[key])
@@ -433,16 +490,20 @@ def build_node_config6(node_dhcp6: Dict[str, Any], this_name: str,
     # so without this the pair would accept the config, report SUCCESS and
     # then silently never match a client. Mirrors ``KeaManager.sync6``.
     identifiers = cfg.get("host-reservation-identifiers") or []
+    # Ignore a malformed identifiers value.
     if not isinstance(identifiers, list):
         identifiers = []
+    # Add hw-address if missing; always store a fresh list copy.
     if "hw-address" not in identifiers:
         cfg["host-reservation-identifiers"] = list(identifiers) + ["hw-address"]
     else:
         cfg["host-reservation-identifiers"] = list(identifiers)
+    # Keep the node's other hooks but drop any old HA/lease_cmds entries.
     keep = [h for h in (cfg.get("hooks-libraries") or [])
             if isinstance(h, dict)
             and not str(h.get("library", "")).endswith(
                 ("libdhcp_ha.so", "libdhcp_lease_cmds.so"))]
+    # Add fresh HA hooks for the current peers.
     cfg["hooks-libraries"] = keep + build_ha_hooks(this_name, peers, mode, hook_dir)
     return cfg
 
@@ -454,8 +515,10 @@ def config_fingerprint(dhcp4: Dict[str, Any]) -> str:
     ``this-server-name``. Comparing the rest is how drift in scopes,
     reservations or options is detected.
     """
+    # hashlib is only needed here.
     import hashlib
 
+    # Drop the hooks (they contain this node's name) and hash the rest in canonical JSON.
     shared = copy.deepcopy(dhcp4 or {})
     shared.pop("hooks-libraries", None)
     blob = json.dumps(shared, sort_keys=True, separators=(",", ":"))
@@ -494,11 +557,14 @@ def parse_ha_status(status_get: Dict[str, Any]) -> Dict[str, Any]:
     ``high-availability`` block — that means the HA hook is not loaded, which is
     a very different (and much worse) condition than "state unknown".
     """
+    # Kea's HA section from status-get.
     ha_list = (status_get or {}).get("high-availability") or []
+    # No HA section means the hook is not loaded.
     if not ha_list:
         return {"ha_enabled": False, "local": {}, "remote": {},
                 "state": "not-configured", "scopes": [], "in_sync": False,
                 "transitional": False, "serving": False}
+    # Local and partner server entries and their states.
     servers = (ha_list[0] or {}).get("ha-servers") or {}
     local = servers.get("local") or {}
     remote = servers.get("remote") or {}
@@ -508,6 +574,7 @@ def parse_ha_status(status_get: Dict[str, Any]) -> Dict[str, Any]:
     # that has never exchanged one is NOT synchronised no matter what state the
     # local server claims for itself.
     in_touch = bool(remote.get("in-touch"))
+    # Return the normalized local/partner HA view.
     return {
         "ha_enabled": True,
         "state": state,
@@ -539,6 +606,7 @@ def public_peers(peers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     The password is needed to RENDER Kea's config and nowhere else; a status or
     diagnostics reply that carried it would leak the HA credential to every
     caller of ``/api/dhcp/ha``."""
+    # Copy each peer without the password, flagging that basic auth is set.
     out = []
     for peer in peers or []:
         clean = {k: v for k, v in (peer or {}).items()
@@ -546,6 +614,7 @@ def public_peers(peers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if peer.get("basic-auth-password"):
             clean["basic-auth"] = True
         out.append(clean)
+    # Return the cleaned list.
     return out
 
 
@@ -561,24 +630,31 @@ def summarize_ha(mode: str, peers: List[Dict[str, Any]],
     directly testable. ``now`` is injectable purely so the "is this pair
     mid-apply?" window is testable without sleeping.
     """
+    # Default the digests and the current time.
     config_digests = config_digests or {}
     now = time.time() if now is None else now
     # An apply that landed within APPLY_SETTLE_S explains a node still walking
     # WAITING -> SYNCING -> READY. Outside that window a transitional node is
     # STUCK, not updating, and must not be excused.
     applied_at = (last_apply or {}).get("at")
+    # A missing or malformed timestamp means "no recent apply".
     try:
         recent_apply = applied_at is not None and 0 <= (now - float(applied_at)) <= APPLY_SETTLE_S
     except (TypeError, ValueError):
         recent_apply = False
+    # HA role for each peer name.
     roles = {p["name"]: p["role"] for p in peers}
+    # Per-member rows and id lists by health.
     members: List[Dict[str, Any]] = []
     healthy_ids, degraded_ids, unreachable_ids = [], [], []
     updating_ids, serving_ids = [], []
+    # Classify each member from its connection link and status reply.
     for link in links:
+        # This member's status reply and its parsed HA section.
         member_id = link["id"]
         status = per_member.get(member_id) or {}
         ha = status.get("ha") if isinstance(status.get("ha"), dict) else {}
+        # Start from the link info and add role, digest and HA fields.
         member = dict(link)
         member["ha_role"] = roles.get(member_id, link.get("role") or "")
         member["config_digest"] = config_digests.get(member_id)
@@ -593,12 +669,15 @@ def summarize_ha(mode: str, peers: List[Dict[str, Any]],
             "subnet_count": status.get("subnet_count"),
             "error": status.get("message") or status.get("error") or "",
         })
+        # Record whether this node is answering clients.
         member["serving"] = bool(ha.get("serving"))
         if member["serving"]:
             serving_ids.append(member_id)
+        # Not connected or status failed: unreachable.
         if not link["connected"] or status.get("status") != "SUCCESS":
             member["health"] = "unreachable"
             unreachable_ids.append(member_id)
+        # HA on and in sync: healthy.
         elif ha.get("ha_enabled") and ha.get("in_sync"):
             member["health"] = "healthy"
             healthy_ids.append(member_id)
@@ -608,6 +687,7 @@ def summarize_ha(mode: str, peers: List[Dict[str, Any]],
             # every routine NetBox sync look like an outage.
             member["health"] = "updating"
             updating_ids.append(member_id)
+        # Anything else: degraded.
         else:
             member["health"] = "degraded"
             degraded_ids.append(member_id)
@@ -622,12 +702,14 @@ def summarize_ha(mode: str, peers: List[Dict[str, Any]],
     have_all = bool(member_ids) and all(bool(reported[mid]) for mid in member_ids)
     config_converged = have_all and len(set(reported.values())) == 1
     missing_digests = [mid for mid in member_ids if not reported.get(mid)]
+    # Number of members.
     total = len(members)
     # "updating" outranks "degraded" but never outranks a REAL fault: it is
     # claimed only when every member is either already healthy or mid-apply,
     # and at least one is mid-apply. One unreachable/degraded node and the
     # pair is degraded again, exactly as before.
     updating = bool(updating_ids) and not unreachable_ids and not degraded_ids
+    # Pair state: healthy only if every member is healthy and configs match.
     if total and len(healthy_ids) == total and config_converged:
         state = "healthy"
     elif updating:
@@ -637,14 +719,18 @@ def summarize_ha(mode: str, peers: List[Dict[str, Any]],
     else:
         state = "down"
 
+    # Build operator-facing recommendations.
     recommendations: List[str] = []
+    # Pair size is wrong.
     if total != 2:
         recommendations.append(
             f"Kea HA needs exactly two members; {total} configured.")
+    # One per unreachable node.
     for member_id in unreachable_ids:
         recommendations.append(
             f"Kea node '{member_id}' is not reachable through the DHCP module; "
             f"check lm-dhcp-worker and kea-ctrl-agent on that host.")
+    # Explain each updating or degraded node.
     for member in members:
         if member["health"] == "updating":
             recommendations.append(
@@ -654,8 +740,10 @@ def summarize_ha(mode: str, peers: List[Dict[str, Any]],
                 f"leases; it returns automatically, typically within 30 "
                 f"seconds. No action needed.")
             continue
+        # Healthy and unreachable nodes need no more advice here.
         if member["health"] != "degraded":
             continue
+        # Degraded: explain the most likely cause.
         if not member["ha_enabled"]:
             recommendations.append(
                 f"Kea node '{member['id']}' has no HA hook loaded — it is "
@@ -678,6 +766,7 @@ def summarize_ha(mode: str, peers: List[Dict[str, Any]],
                 f"Kea node '{member['id']}' is in HA state "
                 f"'{member['ha_state']}' and has not synchronised leases with "
                 f"its partner.")
+    # Config state: unknown, still rolling out, or genuinely different.
     if missing_digests:
         recommendations.append(
             "Configuration state is unknown for: " + ", ".join(missing_digests)
@@ -695,12 +784,14 @@ def summarize_ha(mode: str, peers: List[Dict[str, Any]],
         recommendations.append(
             "The two Kea nodes are running DIFFERENT subnet/reservation "
             "configurations; re-apply the DHCP configuration to converge them.")
+    # The last apply only partly completed.
     if last_apply and last_apply.get("status") == "PARTIAL":
         recommendations.append(
             f"The last HA configuration apply only completed on "
             f"{', '.join(last_apply.get('applied') or []) or 'no node'}; the "
             f"pair is running mismatched configuration until it is re-applied.")
 
+    # Return the full summary for the Diagnostics page.
     return {
         "enabled": True,
         "mode": coerce_mode(mode),
@@ -732,7 +823,9 @@ def summarize_ha(mode: str, peers: List[Dict[str, Any]],
 
 def load_cluster_config(path: str) -> Dict[str, Any]:
     """Read the persisted HA topology. Missing/garbage → HA off."""
+    # Value returned when there is no usable config: HA off.
     empty = {"members": [], "mode": HOT_STANDBY, "hook_dir": ""}
+    # Read the JSON file; a missing file is normal, anything else is logged.
     try:
         with open(path) as fh:
             data = json.load(fh)
@@ -741,8 +834,10 @@ def load_cluster_config(path: str) -> Dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         logger.warning("Could not read DHCP cluster config %s: %s", path, e)
         return empty
+    # Top level must be an object.
     if not isinstance(data, dict):
         return empty
+    # Return members, mode (coerced to a supported one) and hook directory.
     members = data.get("members")
     return {
         "members": members if isinstance(members, list) else [],
@@ -753,13 +848,24 @@ def load_cluster_config(path: str) -> Dict[str, Any]:
 
 def save_cluster_config(path: str, members: List[Dict[str, Any]], mode: str,
                         hook_dir: str = "") -> None:
+    """Atomically write the HA topology to disk with owner-only permissions.
+
+    Args:
+        path: Destination file.
+        members: HA member dicts (may include credentials).
+        mode: HA mode; coerced to a supported mode.
+        hook_dir: Optional explicit Kea hook directory.
+    """
+    # Create the parent directory if needed.
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
+    # Write to a temp file first so readers never see a half-written file.
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
         json.dump({"members": members, "mode": coerce_mode(mode),
                    "hook_dir": hook_dir}, fh, indent=2)
     # Members may carry the HA basic-auth password, so this file is a secret.
     os.chmod(tmp, 0o600)
+    # Atomically replace the real file.
     os.replace(tmp, path)

@@ -36,6 +36,7 @@ check. This module is **vendored verbatim** into the standalone pxmx agent
 (``pxmx/agent/src/update_recovery.py``) which has no lm-core dependency — keep
 the two copies in sync.
 """
+# Stdlib only: CLI parsing, timestamps, JSON state, files, subprocess, logging.
 import argparse
 import datetime
 import json
@@ -46,6 +47,7 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Set
 
+# Module logger.
 logger = logging.getLogger("UpdateRecovery")
 
 # Canonical LM log format (matches logging_setup.DEFAULT_FORMAT). This module
@@ -68,17 +70,20 @@ _RECOVERY_LOG_FILE = '/var/log/lm/recovery.log'
 
 def _configure_cli_logging() -> None:
     """Configure the ``UpdateRecovery`` logger for a CLI run (stdlib-only)."""
+    # Default INFO; a valid LOG_LEVEL env value overrides it.
     level = logging.INFO
     _raw = (os.environ.get("LOG_LEVEL") or "").strip().upper()
     _resolved = getattr(logging, _raw, None) if _raw else None
     if isinstance(_resolved, int):
         level = _resolved
+    # Always log to stderr; add the recovery log file when it can be created.
     handlers: list = [logging.StreamHandler()]
     try:
         os.makedirs(os.path.dirname(_RECOVERY_LOG_FILE) or ".", exist_ok=True)
         handlers.append(logging.FileHandler(_RECOVERY_LOG_FILE))
     except Exception:  # noqa: BLE001 — non-root / missing dir → stderr only
         pass
+    # Replace any existing root handlers.
     logging.basicConfig(level=level, format=_LOG_FMT, datefmt=_LOG_DATEFMT,
                         handlers=handlers, force=True)
 
@@ -87,6 +92,7 @@ def _configure_cli_logging() -> None:
 # Default to the hub prod state dir; spokes/agents pass state_dir= explicitly
 # (and the CLI passes --state-dir). Allow an override for tests / non-standard
 # installs via LM_STATE_DIR.
+# State dir: env override, else the hub default.
 STATE_DIR = os.environ.get("LM_STATE_DIR", "/var/lib/lm/state")
 
 # Default trees a HUB code update swaps and the only ones that can break its
@@ -94,45 +100,60 @@ STATE_DIR = os.environ.get("LM_STATE_DIR", "/var/lib/lm/state")
 # entry is a path relative to the component root; the backup preserves it under
 # its basename (core/src→src, WebUI→WebUI, dns→dns) so the bash helpers that
 # check ``$bdir/src`` keep working.
+# Trees a hub update snapshots.
 DEFAULT_TREE_LIST: List[str] = ["core/src", "WebUI"]
 
 # How long the root helper waits for the new version to reach /status 200 (hub)
 # or the healthy marker to appear (spoke/agent), and how long it then waits for
 # the rolled-back version to come back. Mirrors the 60s readiness poll
 # install_all.sh already uses.
+# Health and rollback timeouts in seconds.
 HEALTH_TIMEOUT = 60
 ROLLBACK_TIMEOUT = 30
 # Pre-swap snapshots retained on disk (newer ones win; oldest pruned).
+# Number of snapshots kept.
 KEEP_BACKUPS = 3
 
 
 def _state_dir(state_dir: Optional[str]) -> str:
     """Resolve the state dir, falling back to the module default."""
+    # Explicit dir, else the module default.
     return state_dir if state_dir is not None else STATE_DIR
 
 
 def _backup_root(state_dir: Optional[str] = None) -> str:
+    """Return the snapshot root directory under the state dir."""
+    # <state>/update-backup.
     return os.path.join(_state_dir(state_dir), "update-backup")
 
 
 def _pending_path(state_dir: Optional[str] = None) -> str:
+    """Return the pending-update manifest path under the state dir."""
+    # <state>/pending_update.json.
     return os.path.join(_state_dir(state_dir), "pending_update.json")
 
 
 def _bad_versions_path(state_dir: Optional[str] = None) -> str:
+    """Return the bad-versions registry path under the state dir."""
+    # <state>/bad_versions.json.
     return os.path.join(_state_dir(state_dir), "bad_versions.json")
 
 
 def _bad_commits_path(state_dir: Optional[str] = None) -> str:
+    """Return the bad-commits registry path under the state dir."""
+    # <state>/bad_commits.json.
     return os.path.join(_state_dir(state_dir), "bad_commits.json")
 
 
 def _failed_path(state_dir: Optional[str] = None) -> str:
+    """Return the update-failed marker path under the state dir."""
+    # <state>/update_failed.json.
     return os.path.join(_state_dir(state_dir), "update_failed.json")
 
 
 # Module-level path constants for the default (hub) state dir — kept for
 # backward compat with any external importer and for the CLI's default chown.
+# Default hub paths.
 BACKUP_ROOT = _backup_root()
 PENDING_PATH = _pending_path()
 BAD_VERSIONS_PATH = _bad_versions_path()
@@ -142,6 +163,7 @@ FAILED_PATH = _failed_path()
 
 def _tree_basename(tree: str) -> str:
     """Backup subdir name for a tree path = its final segment (core/src→src)."""
+    # Last path segment, with slashes normalised.
     return os.path.basename(tree.rstrip("/").replace("\\", "/"))
 
 
@@ -152,6 +174,7 @@ def _ver_tuple(v: str):
     Matches perform_update's own ``_ver`` helper. Non-numeric versions fall
     back to (0, 0, 0) so a malformed VERSION file never crashes the registry.
     """
+    # Ints split on dots; anything unparseable is (0, 0, 0).
     try:
         return tuple(int(x) for x in (v or "").strip().split("."))
     except Exception:
@@ -165,12 +188,14 @@ def _ignore_special(directory: str, names) -> list:
     raise. Broken symlinks are preserved (``symlinks=True`` copies the link,
     it does not follow it, so a dead target is not a failure).
     """
+    # Skip anything that is not a link, directory, or regular file.
     skip: list = []
     for n in names:
         p = os.path.join(directory, n)
         if os.path.islink(p) or os.path.isdir(p) or os.path.isfile(p):
             continue
         skip.append(n)
+    # Names to skip.
     return skip
 
 
@@ -194,12 +219,15 @@ def snapshot_code(hub_root: str, ts: str,
     rollback path whatever it could capture, and the install/update continues
     instead of aborting.
     """
+    # Trees to copy, and the backup root.
     trees = tree_list if tree_list is not None else DEFAULT_TREE_LIST
     broot = _backup_root(state_dir)
     os.makedirs(broot, exist_ok=True)
+    # Backup dir for this timestamp.
     backup_dir = os.path.join(broot, str(ts))
     # If a same-timestamp dir already exists (fast double-update), reuse it.
     os.makedirs(backup_dir, exist_ok=True)
+    # Copy each existing tree under its basename.
     for tree in trees:
         src = os.path.join(hub_root, tree)
         if not os.path.isdir(src):
@@ -208,12 +236,14 @@ def snapshot_code(hub_root: str, ts: str,
         # symlinks=True preserves links as-is (no follow → a broken link in the
         # existing tree is not a fatal FileNotFoundError); _ignore_special
         # drops special files copytree can't copy.
+        # Copy it; a failure is logged and the next tree is tried.
         try:
             shutil.copytree(src, os.path.join(backup_dir, name),
                             dirs_exist_ok=True, symlinks=True,
                             ignore=_ignore_special)
         except Exception as e:  # pragma: no cover - disk/fs errors only
             logger.warning("snapshot: copytree %s failed: %s", tree, e)
+    # Log and return the backup dir.
     logger.info("update snapshot saved to %s", backup_dir)
     return backup_dir
 
@@ -222,21 +252,26 @@ def prune_backups(keep: int = KEEP_BACKUPS,
                   state_dir: Optional[str] = None) -> int:
     """Delete oldest backups beyond ``keep`` (by directory mtime). Returns the
     number removed. Best-effort: never raises."""
+    # Best-effort: failures log and return 0.
     try:
+        # No backup root: nothing to prune.
         broot = _backup_root(state_dir)
         if not os.path.isdir(broot):
             return 0
+        # Backup dirs, newest first.
         entries = [
             os.path.join(broot, d)
             for d in os.listdir(broot)
             if os.path.isdir(os.path.join(broot, d))
         ]
         entries.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        # Remove everything past the newest keep.
         removed = 0
         for stale in entries[keep:]:
             shutil.rmtree(stale, ignore_errors=True)
             removed += 1
         return removed
+    # Log the failure.
     except Exception as e:  # pragma: no cover - disk/fs errors only
         logger.warning("prune_backups failed: %s", e)
         return 0
@@ -253,8 +288,10 @@ def write_pending(backup_dir: str, from_version: str, to_version: str, ts: str,
     ``extra`` carries spoke/agent-specific fields (``from_commit``,
     ``to_commit``, ``service_unit``, ``deadline``) alongside the common ones.
     """
+    # Make sure the state dir exists.
     sd = _state_dir(state_dir)
     os.makedirs(sd, exist_ok=True)
+    # Common fields plus any extras.
     payload: Dict[str, Any] = {
         "backup_dir": backup_dir,
         "from_version": from_version,
@@ -263,6 +300,7 @@ def write_pending(backup_dir: str, from_version: str, to_version: str, ts: str,
     }
     if extra:
         payload.update(extra)
+    # Write the manifest and log it.
     with open(_pending_path(state_dir), "w") as f:
         json.dump(payload, f)
     logger.info("pending update manifest written: %s -> %s", from_version, to_version)
@@ -270,6 +308,7 @@ def write_pending(backup_dir: str, from_version: str, to_version: str, ts: str,
 
 def read_pending(state_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Return the pending-update manifest, or None if none/invalid."""
+    # Read and parse; missing is None, other errors log and give None.
     try:
         with open(_pending_path(state_dir)) as f:
             return json.load(f)
@@ -282,6 +321,7 @@ def read_pending(state_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
 
 def clear_pending(state_dir: Optional[str] = None) -> None:
     """Remove the pending manifest (success or rollback complete). Best-effort."""
+    # Remove the file if present; errors only log.
     try:
         p = _pending_path(state_dir)
         if os.path.exists(p):
@@ -294,6 +334,7 @@ def clear_pending(state_dir: Optional[str] = None) -> None:
 def read_bad_versions(state_dir: Optional[str] = None) -> Set[str]:
     """Versions that failed to boot and were rolled back. The auto loop skips
     re-pulling any version in this set (until a newer remote version clears it)."""
+    # Read the versions list; failures give an empty set.
     try:
         with open(_bad_versions_path(state_dir)) as f:
             data = json.load(f)
@@ -307,6 +348,8 @@ def read_bad_versions(state_dir: Optional[str] = None) -> Set[str]:
 
 def _write_bad_versions(versions: Set[str],
                         state_dir: Optional[str] = None) -> None:
+    """Write the bad-versions set to its JSON registry (sorted)."""
+    # Make sure the state dir exists, then write the sorted list.
     os.makedirs(_state_dir(state_dir), exist_ok=True)
     with open(_bad_versions_path(state_dir), "w") as f:
         json.dump({"versions": sorted(versions)}, f, indent=2)
@@ -314,6 +357,7 @@ def _write_bad_versions(versions: Set[str],
 
 def add_bad_version(version: str, state_dir: Optional[str] = None) -> None:
     """Mark a version bad (it was rolled back after failing to boot)."""
+    # Add a new non-empty version, save, and warn.
     versions = read_bad_versions(state_dir)
     if version and version not in versions:
         versions.add(version)
@@ -322,6 +366,8 @@ def add_bad_version(version: str, state_dir: Optional[str] = None) -> None:
 
 
 def is_version_bad(version: str, state_dir: Optional[str] = None) -> bool:
+    """Return True if version is in the bad-versions registry."""
+    # Membership in the registry.
     return version in read_bad_versions(state_dir)
 
 
@@ -330,9 +376,11 @@ def clear_bad_versions_older_than(threshold: str,
     """Drop bad-version entries older than ``threshold`` — called when a newer
     remote version appears, so stale "don't pull 1.0.9" entries clear once the
     hub is moving forward to 1.0.10. Returns the number removed."""
+    # Keep only entries at or above the threshold.
     thresh = _ver_tuple(threshold)
     versions = read_bad_versions(state_dir)
     keep = {v for v in versions if _ver_tuple(v) >= thresh}
+    # Save and log if anything was removed.
     removed = len(versions) - len(keep)
     if removed:
         _write_bad_versions(keep, state_dir)
@@ -344,6 +392,7 @@ def clear_bad_versions_older_than(threshold: str,
 def read_bad_commits(state_dir: Optional[str] = None) -> Set[str]:
     """Commit SHAs that failed to boot and were rolled back. A spoke/agent
     update path skips re-pulling any commit in this set."""
+    # Read the commits list; failures give an empty set.
     try:
         with open(_bad_commits_path(state_dir)) as f:
             data = json.load(f)
@@ -357,6 +406,8 @@ def read_bad_commits(state_dir: Optional[str] = None) -> Set[str]:
 
 def _write_bad_commits(commits: Set[str],
                        state_dir: Optional[str] = None) -> None:
+    """Write the bad-commits set to its JSON registry (sorted)."""
+    # Make sure the state dir exists, then write the sorted list.
     os.makedirs(_state_dir(state_dir), exist_ok=True)
     with open(_bad_commits_path(state_dir), "w") as f:
         json.dump({"commits": sorted(commits)}, f, indent=2)
@@ -364,6 +415,7 @@ def _write_bad_commits(commits: Set[str],
 
 def add_bad_commit(commit: str, state_dir: Optional[str] = None) -> None:
     """Mark a commit SHA bad (it was rolled back after failing to boot)."""
+    # Add a new non-empty commit, save, and warn.
     commits = read_bad_commits(state_dir)
     if commit and commit not in commits:
         commits.add(commit)
@@ -372,6 +424,8 @@ def add_bad_commit(commit: str, state_dir: Optional[str] = None) -> None:
 
 
 def is_bad_commit(commit: str, state_dir: Optional[str] = None) -> bool:
+    """Return True if commit is in the bad-commits registry."""
+    # Membership in the registry.
     return commit in read_bad_commits(state_dir)
 
 
@@ -381,6 +435,7 @@ def write_update_failed(to_version: str, backup_dir: str, reason: str,
     """Last-resort marker: the new version failed AND the rollback also failed
     to boot. Carries the bad version + backup location so an operator can
     recover manually (the backup is preserved on disk)."""
+    # Make sure the state dir exists, then write the marker.
     os.makedirs(_state_dir(state_dir), exist_ok=True)
     with open(_failed_path(state_dir), "w") as f:
         json.dump(
@@ -388,6 +443,7 @@ def write_update_failed(to_version: str, backup_dir: str, reason: str,
             f,
             indent=2,
         )
+    # Log at error level.
     logger.error("update FAILED and rollback also failed: %s (backup at %s)", to_version, backup_dir)
 
 
@@ -400,6 +456,7 @@ def read_update_failed(state_dir: Optional[str] = None) -> Optional[Dict[str, An
     reads a stuck hub as merely "update available", indistinguishable from a
     routine pending update.
     """
+    # Read a non-empty marker; read errors are logged at debug.
     try:
         p = _failed_path(state_dir)
         if os.path.exists(p) and os.path.getsize(p) > 0:
@@ -408,6 +465,7 @@ def read_update_failed(state_dir: Optional[str] = None) -> Optional[Dict[str, An
             return d if isinstance(d, dict) else None
     except (OSError, json.JSONDecodeError) as e:
         logger.debug("read_update_failed: %s", e)
+    # No marker.
     return None
 
 
@@ -421,8 +479,10 @@ def update_health_summary(state_dir: Optional[str] = None) -> Dict[str, Any]:
     ``pending``  — an update is mid-flight (snapshot taken, not yet confirmed).
                    Present for a long time = the restart never completed.
     """
+    # Defaults.
     out: Dict[str, Any] = {"failed": False, "failed_detail": None,
                            "bad_versions": [], "pending": None}
+    # Each part is read independently; a failure leaves its default.
     try:
         f = read_update_failed(state_dir)
         if f:
@@ -455,28 +515,36 @@ def restore_snapshot(backup_dir: str, hub_root: str,
     (a partial restore of an optional tree is logged, not fatal). Returns True
     if the required tree restored. ``chown_user`` recursively re-owns the
     restored trees to ``user:user`` (None = skip)."""
+    # Trees to restore; no backup dir means nothing to do.
     trees = tree_list if tree_list is not None else DEFAULT_TREE_LIST
     if not backup_dir:
         return False
+    # Backup subdir names.
     names = [_tree_basename(t) for t in trees]
     # The first tree is the required one (hub: src; spoke: src; agent: code dir).
     if not os.path.isdir(os.path.join(backup_dir, names[0])):
         return False
+    # Whether any tree was restored.
     ok = False
+    # Restore each tree present in the backup.
     for tree, name in zip(trees, names):
         src_backup = os.path.join(backup_dir, name)
         if not os.path.isdir(src_backup):
             continue
+        # Destination in the component root.
         dst = os.path.join(hub_root, tree)
         # Wipe the failed-code tree before restoring (matches ``rm -rf`` in bash).
         shutil.rmtree(dst, ignore_errors=True)
+        # Copy back; a failure is logged.
         try:
             shutil.copytree(src_backup, dst, dirs_exist_ok=True)
             ok = True
         except Exception as e:  # best-effort per tree
             logger.warning("restore %s failed: %s", tree, e)
+        # Optionally fix ownership.
         if chown_user:
             _chown_tree(dst, chown_user)
+    # Log and return.
     logger.info("snapshot restored from %s", backup_dir)
     return ok
 
@@ -484,6 +552,7 @@ def restore_snapshot(backup_dir: str, hub_root: str,
 def _chown_tree(path: str, user: str) -> None:
     """Recursively ``chown -R user:user`` (best-effort, mirrors the bash
     ``2>/dev/null || true`` semantics)."""
+    # Run chown -R; failures only log.
     try:
         subprocess.run(
             ["chown", "-R", "{0}:{0}".format(user), path],
@@ -514,7 +583,10 @@ def _chown_tree(path: str, user: str) -> None:
 #   python3 update_recovery.py writefailed --to-version V --backup-dir D --reason R [--state-dir D] [--chown-user U]
 #   python3 update_recovery.py prune      [--keep N] [--state-dir D]
 def _cli_snapshot(args) -> int:
+    """CLI snapshot: copy the trees, write the pending manifest, and print the backup dir."""
+    # Timestamp from the args, else now.
     ts = args.ts or datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    # Snapshot; failure prints nothing and returns 1.
     try:
         bdir = snapshot_code(args.hub_root, ts,
                              tree_list=args.tree or None,
@@ -523,10 +595,13 @@ def _cli_snapshot(args) -> int:
         logger.warning("snapshot_code failed: %s", e)
         print("", end="")
         return 1
+    # Write the pending manifest.
     write_pending(bdir, args.from_version, args.to_version, ts,
                   state_dir=args.state_dir)
+    # Optionally fix ownership of the state dir.
     if args.chown_user:
         _chown_tree(_state_dir(args.state_dir), args.chown_user)
+    # Print the backup dir for the caller.
     print(bdir)
     return 0
 
@@ -536,10 +611,13 @@ def _cli_rollback(args) -> int:
     # original log ordering (the "Rolling back..." line is printed BEFORE the
     # restore). This subcommand does ONLY the restore cp given an explicit
     # backup_dir, so bash keeps its exact flow and the cp is delegated here.
+    """CLI rollback: restore the given backup and print a JSON result; always returns 0."""
     bdir = args.backup_dir or ""
+    # Restore the trees.
     ok = restore_snapshot(bdir, args.hub_root,
                           tree_list=args.tree or None,
                           chown_user=args.chown_user)
+    # JSON result on stdout.
     payload = {"ok": ok, "backup_dir": bdir,
                "reason": "" if ok else "no snapshot; new version failed to boot"}
     json.dump(payload, sys.stdout)
@@ -548,7 +626,10 @@ def _cli_rollback(args) -> int:
 
 
 def _cli_markbad(args) -> int:
+    """CLI markbad: add a version to the bad-versions registry, optionally fixing file ownership."""
+    # Add it.
     add_bad_version(args.version, state_dir=args.state_dir)
+    # Optionally chown the registry file; errors are ignored.
     if args.chown_user:
         try:
             subprocess.run(
@@ -561,7 +642,10 @@ def _cli_markbad(args) -> int:
 
 
 def _cli_markbadcommit(args) -> int:
+    """CLI markbadcommit: add a commit to the bad-commits registry, optionally fixing file ownership."""
+    # Add it.
     add_bad_commit(args.commit, state_dir=args.state_dir)
+    # Optionally chown the registry file; errors are ignored.
     if args.chown_user:
         try:
             subprocess.run(
@@ -573,6 +657,7 @@ def _cli_markbadcommit(args) -> int:
     return 0
 
 
+# Hub systemd unit file.
 _LM_UNIT_PATH = "/etc/systemd/system/lm.service"
 
 
@@ -580,6 +665,7 @@ def _dedupe_unit_std_lines(unit_path: str, unit: str) -> bool:
     """Collapse repeated ``StandardOutput=`` / ``StandardError=`` directives
     (left by the old substring-matching heal) to the first of each. Returns
     True only if it rewrote the file. Best-effort; never raises."""
+    # Keep only the first StandardOutput and StandardError lines.
     seen = set()
     out = []
     for line in unit.splitlines(keepends=True):
@@ -589,9 +675,11 @@ def _dedupe_unit_std_lines(unit_path: str, unit: str) -> bool:
                 continue
             seen.add(key)
         out.append(line)
+    # Unchanged: nothing to write.
     s = "".join(out)
     if s == unit:
         return False
+    # Write atomically; failure (e.g. not root) returns False.
     try:
         tmp = unit_path + ".heal.tmp"
         with open(tmp, "w") as f:
@@ -599,11 +687,13 @@ def _dedupe_unit_std_lines(unit_path: str, unit: str) -> bool:
         os.replace(tmp, unit_path)
     except Exception:  # noqa: BLE001 — not root / read-only: leave it
         return False
+    # Reload systemd; errors are ignored.
     try:
         subprocess.run(["systemctl", "daemon-reload"], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:  # noqa: BLE001
         pass
+    # Log and report the rewrite.
     logger.info("Healed lm.service: collapsed duplicate StandardOutput/"
                 "StandardError lines.")
     return True
@@ -621,6 +711,7 @@ def heal_hub_service_unit(unit_path: str = _LM_UNIT_PATH) -> bool:
     install-time helper. No-op when the unit is missing, already migrated, or we
     lack permission (invoked as svc_lm, not root — only the root call heals).
     The rewrite takes effect on the NEXT restart. Returns True if it rewrote."""
+    # Read the unit; unreadable means nothing to heal.
     try:
         with open(unit_path) as f:
             unit = f.read()
@@ -636,21 +727,27 @@ def heal_hub_service_unit(unit_path: str = _LM_UNIT_PATH) -> bool:
     legacy = re.search(r"(?m)^Type=oneshot\s*$", unit) is not None
     if not legacy:
         return _dedupe_unit_std_lines(unit_path, unit)
+    # Rewrite to Type=exec running main.py directly; permission and other errors return False.
     try:
+        # Install base from WorkingDirectory, default /opt/lm.
         base = "/opt/lm"
         m = re.search(r"(?m)^WorkingDirectory=(.+)$", unit)
         if m and m.group(1).strip():
             base = m.group(1).strip()
+        # Python and main.py paths.
         py = f"{base}/core/venv/bin/python3"
         main = f"{base}/core/src/main.py"
+        # Switch the type and drop oneshot-only directives.
         s = re.sub(r"(?m)^Type=oneshot\s*$", "Type=exec", unit)
         s = re.sub(r"(?m)^RemainAfterExit=.*\n", "", s)
         s = re.sub(r"(?m)^Standard(Output|Error)=.*\n", "", s)
+        # New ExecStart plus log redirection, and drop ExecStop.
         s = re.sub(r"(?m)^ExecStart=.*$",
                    f"ExecStart={py} {main}\n"
                    f"StandardOutput=append:/var/log/lm/hub.log\n"
                    f"StandardError=append:/var/log/lm/hub.log", s, count=1)
         s = re.sub(r"(?m)^ExecStop=.*\n", "", s)
+        # Write atomically.
         tmp = unit_path + ".heal.tmp"
         with open(tmp, "w") as f:
             f.write(s)
@@ -667,12 +764,15 @@ def heal_hub_service_unit(unit_path: str = _LM_UNIT_PATH) -> bool:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:  # noqa: BLE001
         pass
+    # Log and report success.
     logger.info("Healed lm.service: Type=oneshot → Type=exec (systemd now tracks "
                 "the hub as MainPID; effective on the next restart).")
     return True
 
 
 def _cli_clearpending(args) -> int:
+    """CLI clearpending: remove the pending manifest and try to heal lm.service."""
+    # Remove the manifest.
     clear_pending(state_dir=args.state_dir)
     # Piggyback the one-time lm.service migration here: clearpending is the
     # root-executed step lm-update-restart runs after a successful update, so
@@ -686,8 +786,11 @@ def _cli_clearpending(args) -> int:
 
 
 def _cli_writefailed(args) -> int:
+    """CLI writefailed: write the double-failure marker, optionally fixing file ownership."""
+    # Write the marker.
     write_update_failed(args.to_version, args.backup_dir, args.reason,
                         state_dir=args.state_dir)
+    # Optionally chown it; errors are ignored.
     if args.chown_user:
         try:
             subprocess.run(
@@ -700,20 +803,27 @@ def _cli_writefailed(args) -> int:
 
 
 def _cli_prune(args) -> int:
+    """CLI prune: delete old snapshots and print how many were removed."""
+    # Prune and print the count.
     removed = prune_backups(args.keep, state_dir=args.state_dir)
     print(removed)
     return 0
 
 
 def main(argv=None) -> int:
+    """Parse argv, run the chosen subcommand, and return its exit code."""
+    # Set up logging, then the parser with one subcommand per operation.
     _configure_cli_logging()
     parser = argparse.ArgumentParser(prog="update_recovery", description="Update-recovery state machine CLI")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     def _add_state_dir(p):
+        """Add the shared --state-dir option to parser p."""
+        # Optional; defaults to the hub state dir.
         p.add_argument("--state-dir", default=None,
                        help="component state dir (default: hub /var/lib/lm/state)")
 
+    # snapshot subcommand.
     p = sub.add_parser("snapshot", help="snapshot code trees and write pending manifest")
     p.add_argument("--hub-root", required=True)
     p.add_argument("--from-version", required=True)
@@ -725,6 +835,7 @@ def main(argv=None) -> int:
     p.add_argument("--chown-user", default=None)
     p.set_defaults(func=_cli_snapshot)
 
+    # rollback subcommand.
     p = sub.add_parser("rollback", help="restore a snapshot back into hub-root")
     p.add_argument("--hub-root", required=True)
     p.add_argument("--backup-dir", required=True)
@@ -734,22 +845,26 @@ def main(argv=None) -> int:
     p.add_argument("--chown-user", default=None)
     p.set_defaults(func=_cli_rollback)
 
+    # markbad subcommand.
     p = sub.add_parser("markbad", help="mark a version bad (skip re-pull)")
     p.add_argument("version")
     _add_state_dir(p)
     p.add_argument("--chown-user", default=None)
     p.set_defaults(func=_cli_markbad)
 
+    # markbadcommit subcommand.
     p = sub.add_parser("markbadcommit", help="mark a commit SHA bad (skip re-pull)")
     p.add_argument("commit")
     _add_state_dir(p)
     p.add_argument("--chown-user", default=None)
     p.set_defaults(func=_cli_markbadcommit)
 
+    # clearpending subcommand.
     p = sub.add_parser("clearpending", help="clear the pending-update manifest")
     _add_state_dir(p)
     p.set_defaults(func=_cli_clearpending)
 
+    # writefailed subcommand.
     p = sub.add_parser("writefailed", help="write the double-failure marker")
     p.add_argument("--to-version", required=True)
     p.add_argument("--backup-dir", required=True)
@@ -758,14 +873,17 @@ def main(argv=None) -> int:
     p.add_argument("--chown-user", default=None)
     p.set_defaults(func=_cli_writefailed)
 
+    # prune subcommand.
     p = sub.add_parser("prune", help="prune old snapshots (keep newest N)")
     p.add_argument("--keep", type=int, default=KEEP_BACKUPS)
     _add_state_dir(p)
     p.set_defaults(func=_cli_prune)
 
+    # Parse and dispatch.
     args = parser.parse_args(argv)
     return args.func(args)
 
 
+# Run as a script.
 if __name__ == "__main__":
     sys.exit(main())

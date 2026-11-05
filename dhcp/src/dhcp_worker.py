@@ -11,23 +11,35 @@ The apply op snapshots the running config before writing so the coordinator can
 roll a node back when its partner fails mid-transaction.
 """
 
+# argparse reads worker settings from the command line.
 import argparse
+# asyncio runs the WebSocket client loop.
 import asyncio
+# copy.deepcopy keeps config snapshots independent of later edits.
 import copy
+# Standard-library logging (logger defined below).
 import logging
+# os checks hook-library files and reads environment settings.
 import os
+# shutil.which detects whether apt-get exists on this host.
 import shutil
+# subprocess runs the fixed apt-get/dpkg/systemctl commands.
 import subprocess
+# Type hints only; they document payload shapes.
 from typing import Any, Dict, Optional
 
+# KeaManager talks to the local Kea daemons; kea_ha supplies HA helper functions.
+# The import path differs when run as a script vs loaded as a package.
 try:
     from kea_manager import KeaManager, worker_code_version
     from kea_ha import config_fingerprint, hook_paths, parse_ha_status, resolve_hook_dir
+# Package layout: import through src.
 except ImportError:  # loaded as a package (src.X)
     from src.kea_manager import KeaManager, worker_code_version  # type: ignore
     from src.kea_ha import (  # type: ignore
         config_fingerprint, hook_paths, parse_ha_status, resolve_hook_dir)
 
+# One named logger so all worker messages can be filtered together.
 logger = logging.getLogger("DHCPWorker")
 
 #: The ONLY package install this worker can perform. Fixed argv — no shell, no
@@ -36,6 +48,7 @@ logger = logging.getLogger("DHCPWorker")
 #: ever fail and leave the node reporting its HA libraries missing.
 _HOOK_PACKAGES = ("kea-common",)
 
+# Coordinator agent port reserved for the DHCP role.
 DEFAULT_COORDINATOR_PORT = 8770
 
 
@@ -43,6 +56,12 @@ class DhcpWorkerOps:
     """The fixed operation table exposed to the coordinator."""
 
     def __init__(self, mgr: KeaManager):
+        """Bind the ops to a Kea manager and start with no rollback snapshots.
+
+        Args:
+            mgr: Manager for the local Kea daemons.
+        """
+        # Keep the manager; the DHCPv4 rollback snapshot is empty until the first apply.
         self.mgr = mgr
         self._snapshot: Optional[Dict[str, Any]] = None
         # Separate DHCPv6 rollback slot: a v6 apply/rollback must never
@@ -63,31 +82,39 @@ class DhcpWorkerOps:
         # architecture, so a coordinator's x86_64 default made every arm64
         # worker report its HA libraries missing.
         hook_dir = resolve_hook_dir(str(data.get("hook_dir") or ""))
+        # Full paths of each required hook library, and which of them are missing.
         paths = hook_paths(hook_dir)
         missing = [name for name, path in paths.items() if not os.path.exists(path)]
+        # Everything is already present: nothing to install.
         if not missing:
             return {"status": "SUCCESS", "libraries": paths, "installed": False,
                     "hook_dir": hook_dir}
+        # Without apt-get there is no way to install them here.
         if not shutil.which("apt-get"):
             return {"status": "ERROR", "libraries": paths,
                     "message": f"missing Kea hook libraries: {', '.join(missing)} "
                                f"(no apt-get on this host to install them)"}
+        # Run the one fixed install command; a timeout or launch failure is an error.
         try:
             proc = subprocess.run(
                 ["apt-get", "install", "-y", "-qq", *_HOOK_PACKAGES],
                 capture_output=True, text=True, timeout=300)
+        # apt-get could not run or timed out.
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "libraries": paths, "message": str(e)}
         # apt may have created the arch-specific dir only now, so re-resolve.
         hook_dir = resolve_hook_dir(str(data.get("hook_dir") or ""))
         paths = hook_paths(hook_dir)
+        # Check again after the install.
         still_missing = [name for name, path in paths.items()
                          if not os.path.exists(path)]
+        # Still missing: report the failure with the tail of apt's output.
         if still_missing:
             detail = (proc.stderr or proc.stdout or "").strip()[-500:]
             return {"status": "ERROR", "libraries": paths, "hook_dir": hook_dir,
                     "message": f"Kea hook libraries still missing after install: "
                                f"{', '.join(still_missing)}. {detail}"}
+        # Installed successfully.
         return {"status": "SUCCESS", "libraries": paths, "installed": True,
                 "hook_dir": hook_dir}
 
@@ -95,6 +122,8 @@ class DhcpWorkerOps:
 
     @staticmethod
     def _config_of(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Return the Dhcp4 body of data["config"] (wrapped or bare), or None if absent."""
+        # Accept either {"Dhcp4": {...}} or the bare Dhcp4 dict.
         cfg = data.get("config")
         if isinstance(cfg, dict) and "Dhcp4" in cfg:
             cfg = cfg["Dhcp4"]
@@ -106,13 +135,17 @@ class DhcpWorkerOps:
         Uses the running daemon's parser rather than a local heuristic: only Kea
         can say whether Kea will accept a config.
         """
+        # Pull out the candidate config; it is required.
         cfg = self._config_of(data)
         if cfg is None:
             return {"status": "ERROR", "message": "config (Dhcp4) is required"}
+        # Ask Kea to test the config without applying it.
         try:
             self.mgr._rpc("dhcp4", "config-test", {"Dhcp4": cfg})
+        # Kea rejected the config: its error message is the answer.
         except Exception as e:  # noqa: BLE001 — a rejected config is the answer
             return {"status": "ERROR", "message": str(e)}
+        # Kea accepted it: return its fingerprint.
         return {"status": "SUCCESS", "digest": config_fingerprint(cfg)}
 
     def get_config(self, _data: Dict[str, Any]) -> Dict[str, Any]:
@@ -122,26 +155,35 @@ class DhcpWorkerOps:
         interfaces, lease database, loggers and every other node-local setting
         survive a cluster apply instead of being replaced by a generated stub.
         """
+        # Fetch the running config; certain failures trigger a one-time self-heal attempt.
         try:
             cfg = self.mgr.get_config()
+        # Fetch failed; look at why.
         except Exception as e:  # noqa: BLE001
             err_msg = str(e)
+            # Errors that mean the daemon is down or unreachable can often be fixed by a restart.
             if any(term in err_msg.lower() for term in ("likely to be offline", "permission denied", "connection refused", "unable to forward")):
                 logger.warning("Kea DHCP4 appears offline or inaccessible (%s); attempting service restart & permission repair", err_msg)
+                # Restart (and repair permissions); if that worked, wait a moment and retry once.
                 if self._restart_kea_dhcp4_service():
                     import time
                     time.sleep(1.0)
                     try:
                         cfg = self.mgr.get_config()
+                    # Still failing after the restart: report both errors.
                     except Exception as retry_e:  # noqa: BLE001
                         return {"status": "ERROR", "message": f"{err_msg} (restart retry failed: {retry_e})"}
+                # Restart failed: report the original error.
                 else:
                     return {"status": "ERROR", "message": err_msg}
+            # Some other error: report it as-is.
             else:
                 return {"status": "ERROR", "message": err_msg}
+        # Anything other than a dict is not a usable config.
         if not isinstance(cfg, dict):
             return {"status": "ERROR",
                     "message": f"Kea returned {type(cfg).__name__}, not a config"}
+        # Return the config and its fingerprint.
         return {"status": "SUCCESS", "config": cfg,
                 "digest": config_fingerprint(cfg)}
 
@@ -158,6 +200,8 @@ class DhcpWorkerOps:
 
     @staticmethod
     def _config6_of(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Return the Dhcp6 body of data["config"] (wrapped or bare), or None if absent."""
+        # Accept either {"Dhcp6": {...}} or the bare Dhcp6 dict.
         cfg = data.get("config")
         if isinstance(cfg, dict) and "Dhcp6" in cfg:
             cfg = cfg["Dhcp6"]
@@ -165,24 +209,32 @@ class DhcpWorkerOps:
 
     def validate6(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_VALIDATE6`` — Kea's own ``config-test`` against dhcp6."""
+        # Pull out the candidate config; it is required.
         cfg = self._config6_of(data)
         if cfg is None:
             return {"status": "ERROR", "message": "config (Dhcp6) is required"}
+        # Ask Kea's dhcp6 daemon to test the config without applying it.
         try:
             self.mgr._rpc("dhcp6", "config-test", {"Dhcp6": cfg})
+        # Kea rejected the config: its error message is the answer.
         except Exception as e:  # noqa: BLE001 — a rejected config is the answer
             return {"status": "ERROR", "message": str(e)}
+        # Kea accepted it: return its fingerprint.
         return {"status": "SUCCESS", "digest": config_fingerprint(cfg)}
 
     def get_config6(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_GET_CONFIG6`` — this node's FULL running ``Dhcp6`` config."""
+        # Fetch the running dhcp6 config.
         try:
             cfg = self.mgr.get_config6()
+        # Daemon unreachable or command failed.
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "message": str(e)}
+        # Anything other than a dict is not a usable config.
         if not isinstance(cfg, dict):
             return {"status": "ERROR",
                     "message": f"Kea returned {type(cfg).__name__}, not a config"}
+        # Return the config and its fingerprint.
         return {"status": "SUCCESS", "config": cfg,
                 "digest": config_fingerprint(cfg)}
 
@@ -191,36 +243,46 @@ class DhcpWorkerOps:
 
         Same mutated/restored reporting contract as :meth:`apply` — see there
         for why the two Kea calls are distinguished."""
+        # Pull out the candidate config; it is required.
         cfg = self._config6_of(data)
         if cfg is None:
             return {"status": "ERROR", "message": "config (Dhcp6) is required",
                     "mutated": False}
+        # Snapshot the running config first so a failed transaction can be rolled back.
         try:
             self._snapshot6 = copy.deepcopy(self.mgr.get_config6())
+        # Without a snapshot we refuse to change anything.
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "mutated": False,
                     "message": f"cannot snapshot current DHCPv6 config for rollback: {e}"}
+        # Apply the new config (config-set, then config-write to disk).
         outcome = self.mgr.apply_config6(copy.deepcopy(cfg))
+        # Both steps landed: success.
         if outcome.get("set") and outcome.get("written"):
             return {"status": "SUCCESS", "version": data.get("version"),
                     "mutated": True, "digest": config_fingerprint(cfg)}
+        # config-set failed: nothing changed on this node.
         if not outcome.get("set"):
             return {"status": "ERROR", "mutated": False,
                     "message": outcome.get("error") or "config-set (Dhcp6) failed"}
         # config-set landed, config-write did not: restore locally right now —
         # see apply()'s identical restore-on-write-failure rationale.
+        # Restore the snapshot so the node is not left on an unpersisted config.
         restore = self.mgr.apply_config6(copy.deepcopy(self._snapshot6))
+        # Restore fully landed: report the original failure, node unchanged.
         if restore.get("set") and restore.get("written"):
             return {"status": "ERROR", "mutated": False, "restored": True,
                     "message": (f"config-write failed ({outcome.get('error')}); "
                                 f"the previous DHCPv6 configuration was restored "
                                 f"and persisted on this node")}
+        # Restore is running but not saved to disk: partial.
         if restore.get("set"):
             return {"status": "PARTIAL", "mutated": True, "restored": False,
                     "message": (f"config-write failed ({outcome.get('error')}); "
                                 f"the previous DHCPv6 configuration is running "
                                 f"again but could NOT be persisted "
                                 f"({restore.get('error')})")}
+        # Even the restore failed: the node is running the new, unsaved config.
         return {"status": "PARTIAL", "mutated": True, "restored": False,
                 "message": (f"config-write failed ({outcome.get('error')}) AND "
                             f"the local restore failed ({restore.get('error')}) "
@@ -229,56 +291,72 @@ class DhcpWorkerOps:
 
     def rollback6(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_ROLLBACK6`` — restore the dhcp6 config from the last apply6."""
+        # Nothing to roll back to unless apply6 ran first.
         if self._snapshot6 is None:
             return {"status": "ERROR", "message": "no DHCPv6 snapshot to roll back to"}
+        # Re-apply the snapshot.
         outcome = self.mgr.apply_config6(copy.deepcopy(self._snapshot6))
+        # config-set failed: rollback did not happen.
         if not outcome.get("set"):
             return {"status": "ERROR",
                     "message": outcome.get("error") or "rollback config-set (Dhcp6) failed"}
+        # Running again but not saved to disk: partial.
         if not outcome.get("written"):
             return {"status": "PARTIAL",
                     "digest": config_fingerprint(self._snapshot6),
                     "message": (f"previous DHCPv6 configuration restored but not "
                                 f"persisted ({outcome.get('error')})")}
+        # Rolled back and persisted.
         return {"status": "SUCCESS",
                 "digest": config_fingerprint(self._snapshot6)}
 
     def standdown6(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_STANDDOWN6`` — leave the DHCPv6 HA pair cleanly (see
         :meth:`standdown` for the v4 rationale, identical here)."""
+        # Copy the running dhcp6 config so it can be edited safely.
         try:
             cfg = copy.deepcopy(self.mgr.get_config6())
+        # Cannot read the config: report it.
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "message": str(e)}
+        # Remove the HA and lease_cmds hook entries, counting how many were dropped.
         before = len(cfg.get("hooks-libraries") or [])
         cfg["hooks-libraries"] = [
             h for h in (cfg.get("hooks-libraries") or [])
             if isinstance(h, dict) and not str(h.get("library", "")).endswith(
                 ("libdhcp_ha.so", "libdhcp_lease_cmds.so"))]
         removed = before - len(cfg["hooks-libraries"])
+        # No HA hooks were loaded: nothing to do.
         if not removed:
             return {"status": "SUCCESS", "changed": False,
                     "message": "no HA hooks were loaded"}
+        # Apply and persist the trimmed config; anything short of both is an error.
         outcome = self.mgr.apply_config6(cfg)
         if not (outcome.get("set") and outcome.get("written")):
             return {"status": "ERROR", "changed": bool(outcome.get("set")),
                     "message": outcome.get("error") or "could not remove the DHCPv6 HA hooks"}
+        # HA hooks removed and saved.
         return {"status": "SUCCESS", "changed": True, "hooks_removed": removed}
 
     def ha_status6(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_HA_STATUS6`` — ``status-get`` (dhcp6) plus config digest."""
+        # Ask the dhcp6 daemon for its HA status.
         try:
             raw = self.mgr._rpc("dhcp6", "status-get", {})
+        # Daemon unreachable: report it as not running.
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "message": str(e), "running": False}
+        # Also report the config fingerprint and subnet count, best effort.
         digest = ""
         subnet_count = None
         try:
             cfg = self.mgr.get_config6()
             digest = config_fingerprint(cfg)
             subnet_count = len(cfg.get("subnet6") or [])
+        # Config unreadable: still return the HA status without the digest.
         except Exception as e:  # noqa: BLE001 — HA state is still worth reporting
             logger.debug("could not read DHCPv6 config for digest: %s", e)
+        # Return raw and parsed HA status with the digest and subnet count.
         return {"status": "SUCCESS", "running": True, "status_get": raw,
                 "ha": parse_ha_status(raw), "digest": digest,
                 "subnet_count": subnet_count}
@@ -301,33 +379,43 @@ class DhcpWorkerOps:
         distinct from a missing/corrupt file), plus the last few HOOKS_*
         log lines.
         """
+        # Only enrich hook-load errors; return anything else unchanged.
         if "hook librar" not in (error or "").lower():
             return error
+        # Start with Kea's error, then append each diagnostic found.
         detail = [error]
+        # Add which worker code commit is running, if known.
         code_ver = worker_code_version()
         if code_ver.get("commit"):
             detail.append(
                 f"worker code: {code_ver['commit']}"
                 + (f" ({code_ver['commit_time']})" if code_ver.get("commit_time") else "")
                 + (" [locally modified]" if code_ver.get("dirty") else ""))
+        # List the resolved hook directory (shows a wrong arch path or missing files).
         try:
             hook_dir = resolve_hook_dir(hook_dir)
             entries = sorted(os.listdir(hook_dir)) if os.path.isdir(hook_dir) else []
             detail.append(f"hook dir {hook_dir}: "
                           f"{', '.join(entries) if entries else '(missing or empty)'}")
+        # Directory listing failed: say so.
         except Exception as e:  # noqa: BLE001
             detail.append(f"could not list hook dir: {e}")
+        # Add installed Kea package versions so ABI drift is visible.
         pkg_versions = DhcpWorkerOps._installed_package_versions()
         if pkg_versions:
             detail.append("package versions: " + ", ".join(
                 f"{name}={ver}" for name, ver in pkg_versions.items()))
+        # Add any unresolved shared-library dependencies of the HA hook.
         ldd_issue = DhcpWorkerOps._ldd_missing_deps(
             os.path.join(hook_dir, "libdhcp_ha.so"))
         if ldd_issue:
             detail.append(f"libdhcp_ha.so dependency check: {ldd_issue}")
+        # Add any HA-TLS permission problem.
         ha_tls_issue = DhcpWorkerOps._ha_tls_permission_issue()
         if ha_tls_issue:
             detail.append(f"HA-TLS material check: {ha_tls_issue}")
+        # Add the most relevant recent hook-related log line from Kea's journal.
+        # Best effort: failures here are ignored.
         try:
             proc = subprocess.run(
                 ["journalctl", "-u", "kea-dhcp4-server", "-n", "30", "--no-pager"],
@@ -345,8 +433,10 @@ class DhcpWorkerOps:
             chosen = (error_lines or hook_lines)
             if chosen:
                 detail.append("recent log: " + chosen[-1][:300])
+        # journalctl unavailable: skip the log line.
         except Exception:  # noqa: BLE001 — best-effort only
             pass
+        # Join everything into one message.
         return " | ".join(detail)
 
     @staticmethod
@@ -357,25 +447,35 @@ class DhcpWorkerOps:
         failed to load" when the files themselves are present and intact
         (see ``_repair_ha_tls_permissions``). Returns "" when fine or when the
         directory/user don't apply (HA not configured on this node)."""
+        # HA-TLS directory; if it does not exist, HA TLS is not in use here.
         d = DhcpWorkerOps._HA_TLS_DIR
         if not os.path.isdir(d):
             return ""
+        # Best effort: any error means "no detected problem".
         try:
+            # Read the directory's owner/mode and look up the _kea group.
             st = os.stat(d)
+            # grp is Unix-only, so import it just here.
             import grp
             try:
                 kea_gid = grp.getgrnam("_kea").gr_gid
+            # No _kea group: Kea is not installed the usual way, so the check does not apply.
             except KeyError:
                 return ""
+            # _kea can enter the directory if group-execute is set and it owns the group, or if
+            # world-execute is set.
             mode = st.st_mode
             group_can_enter = bool(mode & 0o010) and st.st_gid == kea_gid
             world_can_enter = bool(mode & 0o001)
+            # Neither applies: describe the problem.
             if not (group_can_enter or world_can_enter):
                 return (f"{d} is not readable by the _kea user (owner gid="
                         f"{st.st_gid}, mode={oct(mode & 0o777)}) — the daemon "
                         f"cannot traverse into it to read its HA trust anchor")
+        # Stat or lookup failure: report nothing.
         except Exception:  # noqa: BLE001 — best-effort only
             pass
+        # No problem found.
         return ""
 
     #: Packages whose version alignment matters for hook-library ABI
@@ -391,18 +491,24 @@ class DhcpWorkerOps:
         detail above — lets an operator (or this code, see
         ``_repair_hook_libraries``) see at a glance whether kea-common and
         kea-dhcp4-server drifted apart, which a plain existence check can't."""
+        # Without dpkg-query (not Debian/Ubuntu) there is nothing to report.
         if not shutil.which("dpkg-query"):
             return {}
+        # Ask dpkg for each package's installed version.
         versions: Dict[str, str] = {}
         for pkg in DhcpWorkerOps._VERSION_CHECK_PACKAGES:
+            # Query one package; skip it if the query fails.
             try:
                 proc = subprocess.run(
                     ["dpkg-query", "-W", "-f=${Version}", pkg],
                     capture_output=True, text=True, timeout=10)
+                # Record the version only if the package is installed.
                 if proc.returncode == 0 and proc.stdout.strip():
                     versions[pkg] = proc.stdout.strip()
+            # dpkg-query error or timeout: skip this package.
             except Exception:  # noqa: BLE001 — best-effort only
                 continue
+        # Return the versions found.
         return versions
 
     @staticmethod
@@ -414,13 +520,17 @@ class DhcpWorkerOps:
         Returns "" when the file is missing, ldd isn't available, or every
         dependency resolves.
         """
+        # Skip when the file or ldd is missing.
         if not os.path.isfile(so_path) or not shutil.which("ldd"):
             return ""
+        # Run ldd on the library.
         try:
             proc = subprocess.run(
                 ["ldd", so_path], capture_output=True, text=True, timeout=10)
+        # ldd failed to run: report that.
         except Exception as e:  # noqa: BLE001
             return f"ldd failed: {e}"
+        # Collect lines reporting unresolved dependencies.
         missing = [ln.strip() for ln in (proc.stdout or "").splitlines()
                    if "not found" in ln]
         return "; ".join(missing) if missing else ""
@@ -440,10 +550,12 @@ class DhcpWorkerOps:
           ``restored: False``) and the verdict is ``PARTIAL``, never ERROR — the
           distinction the coordinator needs to decide what to roll back.
         """
+        # Pull out the candidate config; it is required.
         cfg = self._config_of(data)
         if cfg is None:
             return {"status": "ERROR", "message": "config (Dhcp4) is required",
                     "mutated": False}
+        # Snapshot the running config first so a failed transaction can be rolled back.
         try:
             self._snapshot = copy.deepcopy(self.mgr.get_config())
         except Exception as e:  # noqa: BLE001
@@ -451,11 +563,15 @@ class DhcpWorkerOps:
             # the coordinator believes it can undo.
             return {"status": "ERROR", "mutated": False,
                     "message": f"cannot snapshot current config for rollback: {e}"}
+        # Apply the new config (config-set, then config-write to disk).
         outcome = self.mgr.apply_config(copy.deepcopy(cfg))
+        # Both steps landed: success.
         if outcome.get("set") and outcome.get("written"):
             return {"status": "SUCCESS", "version": data.get("version"),
                     "mutated": True, "digest": config_fingerprint(cfg)}
+        # Running but not saved: try to self-heal a permission problem before giving up.
         if outcome.get("set") and not outcome.get("written"):
+            # Kea's write error text.
             write_err = str(outcome.get("error") or "")
             # config-set landed (running config is already the new one) but
             # config-write couldn't persist it — if that's the master conf
@@ -463,20 +579,27 @@ class DhcpWorkerOps:
             # _kea, the same class of bug as the HA-TLS directory), fix it
             # and retry the SAME config-write once before falling through to
             # the restore-and-report path below.
+            # Kea could not open its conf file for writing: fix file permissions and AppArmor.
             if "unable to open file" in write_err.lower() and "for writing" in write_err.lower():
+                # Record each repair that actually changed something.
                 healed = []
                 if self._repair_kea_conf_permissions():
                     healed.append("fixed /etc/kea/kea-dhcp4.conf permissions")
                 if self._repair_kea_apparmor_write_access():
                     healed.append("granted AppArmor write access to /etc/kea/kea-dhcp4.conf")
+                # If anything was repaired, retry just the write once.
                 if healed:
                     retry_write = self.mgr.write_config()
+                    # Retry worked: success, noting what was healed.
                     if retry_write.get("written"):
                         return {"status": "SUCCESS", "version": data.get("version"),
                                 "mutated": True, "digest": config_fingerprint(cfg),
                                 "self_healed": healed}
+                    # Retry failed: keep its error for the restore path below.
                     outcome = {**outcome, "error": retry_write.get("error") or write_err}
+        # config-set itself failed: the node is unchanged.
         if not outcome.get("set"):
+            # Hook directory hint and Kea's error.
             hook_dir = str(data.get("hook_dir") or "")
             error = outcome.get("error") or "config-set failed"
             # A hook-load rejection can mean the .so EXISTS (install_hooks()
@@ -487,22 +610,29 @@ class DhcpWorkerOps:
             # (HA-TLS permission fix, then reinstall the package that owns
             # the libraries) and retry the SAME config-set once before
             # giving up.
+            # Hook-load failure: try the safe repairs, then retry the whole apply once.
             if "hook librar" in error.lower():
+                # Record each repair that actually changed something.
                 healed = []
                 if self._repair_ha_tls_permissions():
                     healed.append("fixed /etc/kea/ha-tls permissions")
                 if self._repair_hook_libraries(hook_dir):
                     healed.append("reinstalled Kea hook libraries")
+                # If anything was repaired, retry the apply.
                 if healed:
                     retry = self.mgr.apply_config(copy.deepcopy(cfg))
+                    # Retry fully landed: success, noting what was healed.
                     if retry.get("set") and retry.get("written"):
                         return {"status": "SUCCESS", "version": data.get("version"),
                                 "mutated": True, "digest": config_fingerprint(cfg),
                                 "self_healed": healed}
+                    # Retry's config-set failed: report its error; otherwise continue to the
+                    # write-failed handling with the retry's outcome.
                     if not retry.get("set"):
                         error = retry.get("error") or error
                     else:
                         outcome = retry  # fall through to the write-failed path below
+            # config-set failed (even after any repair): return the enriched diagnostic.
             return {"status": "ERROR", "mutated": False,
                     "message": self._hook_load_failure_detail(error, hook_dir)}
         # config-set landed, config-write did not: restore locally right now.
@@ -512,11 +642,13 @@ class DhcpWorkerOps:
         # boots the configuration we just decided to abandon — that is a mutated
         # node, not a clean one.
         restore = self.mgr.apply_config(copy.deepcopy(self._snapshot))
+        # Restore fully landed: report the original failure, node unchanged.
         if restore.get("set") and restore.get("written"):
             return {"status": "ERROR", "mutated": False, "restored": True,
                     "message": (f"config-write failed ({outcome.get('error')}); "
                                 f"the previous configuration was restored and "
                                 f"persisted on this node")}
+        # Restore is running but not saved to disk: partial.
         if restore.get("set"):
             return {"status": "PARTIAL", "mutated": True, "restored": False,
                     "message": (f"config-write failed ({outcome.get('error')}); "
@@ -524,6 +656,7 @@ class DhcpWorkerOps:
                                 f"but could NOT be persisted "
                                 f"({restore.get('error')}) — a Kea restart would "
                                 f"boot the abandoned configuration")}
+        # Even the restore failed: the node is running the new, unsaved config.
         return {"status": "PARTIAL", "mutated": True, "restored": False,
                 "message": (f"config-write failed ({outcome.get('error')}) AND "
                             f"the local restore failed "
@@ -546,9 +679,11 @@ class DhcpWorkerOps:
         daemon can read its HA trust anchor / cert / key. Fixed, argument-free
         ``chgrp``/``chmod`` calls only — no caller-supplied path. Returns
         ``True`` iff the directory exists and every fix-up call succeeded."""
+        # Nothing to fix if the directory does not exist.
         d = DhcpWorkerOps._HA_TLS_DIR
         if not os.path.isdir(d):
             return False
+        # Give the _kea group ownership and directory traversal/read access; any failure aborts.
         try:
             subprocess.run(["chgrp", "-R", "_kea", d],
                             capture_output=True, text=True, timeout=10, check=True)
@@ -556,9 +691,11 @@ class DhcpWorkerOps:
                             capture_output=True, text=True, timeout=10, check=True)
             subprocess.run(["chmod", "-R", "g+rX", d],
                             capture_output=True, text=True, timeout=10, check=True)
+        # A command failed: log it and report the repair as unsuccessful.
         except Exception as e:  # noqa: BLE001
             logger.warning("could not repair %s permissions: %s", d, e)
             return False
+        # Every fix-up succeeded.
         return True
 
     #: The Debian package ships this root:root 0644 (world-readable, no
@@ -575,9 +712,11 @@ class DhcpWorkerOps:
         group-write so the daemon's own ``config-write`` RPC can persist it.
         Fixed, argument-free ``chgrp``/``chmod`` calls only. Returns ``True``
         iff the file exists and every fix-up call succeeded."""
+        # Nothing to fix if the file does not exist.
         f = DhcpWorkerOps._KEA_DHCP4_CONF
         if not os.path.isfile(f):
             return False
+        # Make _kea the file's group; any failure aborts.
         try:
             subprocess.run(["chgrp", "_kea", f],
                             capture_output=True, text=True, timeout=10, check=True)
@@ -588,9 +727,11 @@ class DhcpWorkerOps:
             # process, never written) and silently never actually fixed the bug.
             subprocess.run(["chmod", "0660", f],
                             capture_output=True, text=True, timeout=10, check=True)
+        # A command failed: log it and report the repair as unsuccessful.
         except Exception as e:  # noqa: BLE001
             logger.warning("could not repair %s permissions: %s", f, e)
             return False
+        # Every fix-up succeeded.
         return True
 
     #: Ubuntu's shipped AppArmor profiles for kea-dhcp4 and kea-ctrl-agent
@@ -605,6 +746,8 @@ class DhcpWorkerOps:
     #: ``#include <local/usr.sbin.kea-...>`` hook exists for exactly this)
     #: granting write on the conf file, then reload the profile so it takes
     #: effect without restarting kea.
+    # Local-override and system profile folders, the rule line to add, and the profiles it
+    # goes into.
     _AA_LOCAL_DIR = "/etc/apparmor.d/local"
     _AA_SYSTEM_DIR = "/etc/apparmor.d"
     _AA_OVERRIDE_LINE = "  /etc/kea/kea-dhcp4.conf rw,\n"
@@ -618,28 +761,39 @@ class DhcpWorkerOps:
         ``apparmor_parser -r`` so it takes effect immediately. No-ops (and
         returns ``False``) if AppArmor isn't in use on this host. Returns
         ``True`` iff every profile needing the override got it applied."""
+        # No local override folder means AppArmor is not in use here.
         if not os.path.isdir(cls._AA_LOCAL_DIR):
             return False
+        # Becomes False if any profile could not be fixed.
         ok = True
+        # Fix each Kea profile in turn.
         for profile in cls._AA_PROFILES:
+            # Where the override goes and the system profile it belongs to.
             override_path = os.path.join(cls._AA_LOCAL_DIR, profile)
             system_path = os.path.join(cls._AA_SYSTEM_DIR, profile)
+            # Profile not installed: nothing to fix for it.
             if not os.path.isfile(system_path):
                 continue
+            # Each profile's failure is logged and recorded without stopping the others.
             try:
+                # Read any existing override so the rule is not added twice.
                 existing = ""
                 if os.path.isfile(override_path):
                     with open(override_path, "r") as fh:
                         existing = fh.read()
+                # Append the rule only when missing.
                 if cls._AA_OVERRIDE_LINE.strip() not in existing:
                     with open(override_path, "a") as fh:
                         fh.write(cls._AA_OVERRIDE_LINE)
+                # Reload the profile so the change takes effect now.
                 subprocess.run(["apparmor_parser", "-r", system_path],
                                 capture_output=True, text=True, timeout=15, check=True)
+            # Write or reload failed for this profile.
             except Exception as e:  # noqa: BLE001
                 logger.warning("could not repair AppArmor write access for %s: %s",
                                profile, e)
                 ok = False
+        # True only if every profile was fixed.
         return ok
 
 
@@ -664,18 +818,23 @@ class DhcpWorkerOps:
         versions already match (a corrupt/truncated file is the more likely
         cause there) or when dpkg-query isn't available to tell.
         """
+        # Without apt-get nothing can be reinstalled.
         if not shutil.which("apt-get"):
             return False
+        # Compare the hook package's version with the daemon's version.
         versions = DhcpWorkerOps._installed_package_versions()
         common_ver = versions.get("kea-common")
         daemon_ver = versions.get("kea-dhcp4-server")
         mismatched = bool(common_ver and daemon_ver and common_ver != daemon_ver)
+        # Log that we are realigning versions rather than reinstalling.
         if mismatched:
             logger.warning(
                 "kea-common (%s) and kea-dhcp4-server (%s) versions differ — "
                 "repairing by realigning both packages instead of a same-"
                 "version reinstall", common_ver, daemon_ver)
+        # Run the appropriate fixed apt commands; any failure aborts.
         try:
+            # Versions differ: refresh package lists and upgrade both together.
             if mismatched:
                 subprocess.run(["apt-get", "update", "-y", "-qq"],
                                 capture_output=True, text=True, timeout=300)
@@ -683,16 +842,20 @@ class DhcpWorkerOps:
                     ["apt-get", "install", "-y", "-qq",
                      "kea-common", "kea-dhcp4-server"],
                     capture_output=True, text=True, timeout=300)
+            # Versions match: reinstall the hook package at its current version.
             else:
                 subprocess.run(
                     ["apt-get", "install", "--reinstall", "-y", "-qq", *_HOOK_PACKAGES],
                     capture_output=True, text=True, timeout=300)
+        # apt failed or timed out.
         except Exception as e:  # noqa: BLE001
             logger.warning("hook library reinstall failed: %s", e)
             return False
+        # Confirm every hook library file exists now.
         resolved = resolve_hook_dir(hook_dir)
         paths = hook_paths(resolved)
         still_missing = [name for name, path in paths.items() if not os.path.exists(path)]
+        # Some still missing: the repair failed.
         if still_missing:
             logger.warning("hook libraries still missing after reinstall: %s",
                             ", ".join(still_missing))
@@ -702,11 +865,13 @@ class DhcpWorkerOps:
         # this method exists to address). Cross-check with ldd so a repair
         # that changed nothing meaningful doesn't get reported as a success
         # right before the retried config-set fails again anyway.
+        # Check the HA hook's shared-library dependencies with ldd.
         ldd_issue = DhcpWorkerOps._ldd_missing_deps(paths.get("ha", ""))
         if ldd_issue:
             logger.warning("hook libraries present but still have unresolved "
                             "dependencies after reinstall: %s", ldd_issue)
             return False
+        # Log the new package versions and report success.
         after = DhcpWorkerOps._installed_package_versions()
         logger.info("self-heal: reinstalled Kea hook libraries (%s); "
                     "package versions now: %s", resolved,
@@ -716,19 +881,24 @@ class DhcpWorkerOps:
     @classmethod
     def _restart_kea_dhcp4_service(cls) -> bool:
         """Attempt to repair permissions and start/restart kea-dhcp4-server if offline."""
+        # Fix every known permission problem first, ignoring individual results.
         cls._repair_ha_tls_permissions()
         cls._repair_kea_conf_permissions()
         cls._repair_kea_apparmor_write_access()
+        # Restart with systemctl, falling back to the older service command.
         try:
             if shutil.which("systemctl"):
+                # Restart via systemd and report success if it worked.
                 proc = subprocess.run(
                     ["systemctl", "restart", "kea-dhcp4-server"],
                     capture_output=True, text=True, timeout=15)
                 if proc.returncode == 0:
                     logger.info("Successfully restarted kea-dhcp4-server service")
                     return True
+                # systemctl failed: log why.
                 logger.warning("systemctl restart kea-dhcp4-server returned %d: %s",
                                proc.returncode, (proc.stderr or proc.stdout).strip())
+            # No systemd: try the SysV service wrapper.
             elif shutil.which("service"):
                 proc = subprocess.run(
                     ["service", "kea-dhcp4-server", "restart"],
@@ -736,15 +906,20 @@ class DhcpWorkerOps:
                 if proc.returncode == 0:
                     logger.info("Successfully restarted kea-dhcp4-server service")
                     return True
+        # Restart could not run.
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to restart kea-dhcp4-server service: %s", e)
+        # Neither restart method worked.
         return False
 
     def rollback(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_ROLLBACK`` — restore the config captured by the last apply."""
+        # Nothing to roll back to unless apply ran first.
         if self._snapshot is None:
             return {"status": "ERROR", "message": "no snapshot to roll back to"}
+        # Re-apply the snapshot.
         outcome = self.mgr.apply_config(copy.deepcopy(self._snapshot))
+        # config-set failed: rollback did not happen.
         if not outcome.get("set"):
             return {"status": "ERROR",
                     "message": outcome.get("error") or "rollback config-set failed"}
@@ -755,6 +930,7 @@ class DhcpWorkerOps:
                     "digest": config_fingerprint(self._snapshot),
                     "message": (f"previous configuration restored but not "
                                 f"persisted ({outcome.get('error')})")}
+        # Rolled back and persisted.
         return {"status": "SUCCESS",
                 "digest": config_fingerprint(self._snapshot)}
 
@@ -766,72 +942,103 @@ class DhcpWorkerOps:
         heartbeating at a partner it is no longer paired with (it keeps serving
         its own scopes — silently blackholing DHCP would be worse). Everything
         else in the node's configuration is preserved."""
+        # Copy the running config so it can be edited safely.
         try:
             cfg = copy.deepcopy(self.mgr.get_config())
+        # Cannot read the config: report it.
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "message": str(e)}
+        # Remove the HA and lease_cmds hook entries, counting how many were dropped.
         before = len(cfg.get("hooks-libraries") or [])
         cfg["hooks-libraries"] = [
             h for h in (cfg.get("hooks-libraries") or [])
             if isinstance(h, dict) and not str(h.get("library", "")).endswith(
                 ("libdhcp_ha.so", "libdhcp_lease_cmds.so"))]
         removed = before - len(cfg["hooks-libraries"])
+        # No HA hooks were loaded: nothing to do.
         if not removed:
             return {"status": "SUCCESS", "changed": False,
                     "message": "no HA hooks were loaded"}
+        # Apply and persist the trimmed config; anything short of both is an error.
         outcome = self.mgr.apply_config(cfg)
         if not (outcome.get("set") and outcome.get("written")):
             return {"status": "ERROR", "changed": bool(outcome.get("set")),
                     "message": outcome.get("error") or "could not remove the HA hooks"}
+        # HA hooks removed and saved.
         return {"status": "SUCCESS", "changed": True, "hooks_removed": removed}
 
     # ── Status ──────────────────────────────────────────────────────────────
 
     def ha_status(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_HA_STATUS`` — ``status-get`` plus the running config digest."""
+        # Ask the dhcp4 daemon for its HA status.
         try:
             raw = self.mgr._rpc("dhcp4", "status-get", {})
+        # Daemon unreachable: report it as not running.
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "message": str(e), "running": False}
+        # Also report the config fingerprint and subnet count, best effort.
         digest = ""
         subnet_count = None
         try:
             cfg = self.mgr.get_config()
             digest = config_fingerprint(cfg)
             subnet_count = len(cfg.get("subnet4") or [])
+        # Config unreadable: still return the HA status without the digest.
         except Exception as e:  # noqa: BLE001 — HA state is still worth reporting
             logger.debug("could not read config for digest: %s", e)
+        # Return raw and parsed HA status with the digest and subnet count.
         return {"status": "SUCCESS", "running": True, "status_get": raw,
                 "ha": parse_ha_status(raw), "digest": digest,
                 "subnet_count": subnet_count}
 
     def status(self, _data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_STATUS`` — return the local Kea status."""
         return {"status": "SUCCESS", **self.mgr.status()}
 
     def list_subnets(self, _data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_LIST_SUBNETS`` — return the DHCPv4 subnets configured on this node."""
         return {"status": "SUCCESS", "subnets": self.mgr.list_subnets()}
 
     def list_leases(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_LIST_LEASES`` — return DHCPv4 leases, optionally for one subnet."""
         return {"status": "SUCCESS",
                 "leases": self.mgr.list_leases(data.get("subnet") or None)}
 
     def list_reservations(self, _data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_LIST_RES`` — return the DHCPv4 host reservations on this node."""
         return {"status": "SUCCESS", "reservations": self.mgr.list_reservations()}
 
     def delete_lease(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_DEL_LEASE`` — delete DHCPv4 lease(s) by current IP, old IP and/or MAC.
+
+        Args:
+            data: ip (or ip-address), old_ip, and/or mac (or hw-address).
+
+        Returns:
+            SUCCESS with the list of purged addresses.
+        """
+        # Accept both LM-style and Kea-style field names.
         ip = data.get("ip") or data.get("ip-address")
         old_ip = data.get("old_ip")
         mac = data.get("mac") or data.get("hw-address")
+        # At least one identifier is required.
         if not ip and not mac and not old_ip:
             return {"status": "ERROR", "message": "ip, old_ip, or mac is required"}
+        # Addresses actually removed.
         purged = set()
+        # Prefer the manager's purge helper, which also catches leases matching the MAC.
         if hasattr(self.mgr, "purge_leases_for_mac_or_ip"):
+            # Purge by the current IP.
             if ip:
                 purged.update(self.mgr.purge_leases_for_mac_or_ip(mac=mac, ip=ip))
+            # Also purge the previous IP if it differs.
             if old_ip and old_ip != ip:
                 purged.update(self.mgr.purge_leases_for_mac_or_ip(mac=mac, ip=old_ip))
+            # MAC only: purge every lease for that MAC.
             if mac and not ip and not old_ip:
                 purged.update(self.mgr.purge_leases_for_mac_or_ip(mac=mac))
+        # Older manager without the purge helper: delete by IP only.
         else:
             if ip:
                 self.mgr.delete_lease(ip)
@@ -839,18 +1046,22 @@ class DhcpWorkerOps:
             if old_ip and old_ip != ip:
                 self.mgr.delete_lease(old_ip)
                 purged.add(old_ip)
+        # Report what was purged.
         return {"status": "SUCCESS", "purged": list(purged)}
 
     # ── DHCPv6 read-only / lease ops (HA fanout targets) ────────────────────
 
     def list_subnets6(self, _data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_LIST_SUBNETS6`` — return the DHCPv6 subnets configured on this node."""
         return {"status": "SUCCESS", "subnets": self.mgr.list_subnets6()}
 
     def list_leases6(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_LIST_LEASES6`` — return DHCPv6 leases, optionally for one subnet."""
         return {"status": "SUCCESS",
                 "leases": self.mgr.list_leases6(data.get("subnet") or None)}
 
     def list_reservations6(self, _data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_LIST_RES6`` — return the DHCPv6 host reservations on this node."""
         return {"status": "SUCCESS", "reservations": self.mgr.list_reservations6()}
 
     def delete_lease6(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -861,12 +1072,16 @@ class DhcpWorkerOps:
         collapsing an unreachable Kea into SUCCESS reports a clean apply while
         the client keeps its stale address.
         """
+        # Accept both LM-style and Kea-style field names.
         ip = data.get("ip") or data.get("ip-address")
         old_ip = data.get("old_ip")
         mac = data.get("mac") or data.get("hw-address")
+        # At least one identifier is required.
         if not ip and not mac and not old_ip:
             return {"status": "ERROR", "message": "ip, old_ip, or mac is required"}
+        # Addresses actually removed so far.
         purged = set()
+        # Purge by current IP, previous IP, or MAC only; any RPC failure is reported.
         try:
             if ip:
                 purged.update(self.mgr.purge_leases6_for_mac_or_ip(mac=mac, ip=ip))
@@ -874,23 +1089,30 @@ class DhcpWorkerOps:
                 purged.update(self.mgr.purge_leases6_for_mac_or_ip(mac=mac, ip=old_ip))
             if mac and not ip and not old_ip:
                 purged.update(self.mgr.purge_leases6_for_mac_or_ip(mac=mac))
+        # Purge failed: return an error with whatever was purged before the failure.
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "purged": sorted(purged),
                     "message": f"DHCPv6 lease purge failed: {e}"}
+        # Report what was purged.
         return {"status": "SUCCESS", "purged": list(purged)}
 
     def diagnostics(self, _data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_DIAGNOSTICS`` — return the local Kea diagnostics report."""
         return self.mgr.diagnostics()
 
     def packet_trace(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_PACKET_TRACE`` — this node's DHCPv4 request/error trace."""
+        # Trace the given MAC (or all clients) over the last N minutes, with an optional capture.
         return self.mgr.packet_trace(data.get("mac") or "", data.get("minutes", 30),
                                      data.get("capture_seconds", 0))
 
     def stats(self, _data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_STATS`` — return local Kea statistics."""
         return self.mgr.get_stats()
 
     def op_table(self) -> Dict[str, Any]:
+        """Return the complete map of command names this worker accepts to handler methods."""
+        # Anything not in this table is rejected by the transport.
         return {
             "KEAW_INSTALL_HOOKS": self.install_hooks,
             "KEAW_GET_CONFIG": self.get_config,
@@ -923,10 +1145,13 @@ class DhcpWorkerOps:
 def build_worker(member_id: str, coordinator_url: str, secret: str,
                  ca_url: str = "http://localhost:8001"):
     """Wire the op table into the shared cluster worker transport."""
+    # Import the shared worker transport; its path differs between layouts.
     try:
         from core.src.messaging.service_cluster import ServiceWorkerClient
+    # Flat layout: core/src is on sys.path directly.
     except ImportError:
         from messaging.service_cluster import ServiceWorkerClient  # type: ignore
+    # Build the operation table on a Kea manager pointed at the Control Agent URL.
     ops = DhcpWorkerOps(KeaManager(ca_url=ca_url))
     # default_port drives the URL normalization, which REJECTS a plaintext
     # ws:// to a remote coordinator (the PSK rides in the handshake).
@@ -936,6 +1161,8 @@ def build_worker(member_id: str, coordinator_url: str, secret: str,
 
 
 def main() -> None:
+    """Parse settings from command line/environment and run the worker until stopped."""
+    # Each option falls back to an environment variable so systemd can configure it.
     parser = argparse.ArgumentParser(description="Lab Manager Kea HA worker")
     parser.add_argument("--id", default=os.getenv("LM_DHCP_MEMBER_ID", ""),
                         help="HA member id (must match the module's member list "
@@ -946,18 +1173,23 @@ def main() -> None:
                         help="shared worker secret (matches the module's agent_secret)")
     parser.add_argument("--ca-url", default=os.getenv("KEA_CA_URL",
                                                       "http://localhost:8001"))
+    # Parse the command line into args.
     args = parser.parse_args()
+    # Member id, coordinator URL and secret are all required.
     if not args.id:
         parser.error("--id is required (or LM_DHCP_MEMBER_ID in the environment)")
     if not args.coordinator or not args.secret:
         parser.error("--coordinator and --secret are required "
                      "(or LM_DHCP_COORDINATOR / LM_DHCP_WORKER_SECRET)")
+    # Log to stderr with timestamps; force replaces any handlers installed earlier.
     logging.basicConfig(
         level=logging.INFO, force=True,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    # Build the worker and run its connection loop until the process is stopped.
     worker = build_worker(args.id, args.coordinator, args.secret, ca_url=args.ca_url)
     asyncio.run(worker.run())
 
 
+# Run main() when executed as a script.
 if __name__ == "__main__":
     main()

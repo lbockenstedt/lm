@@ -40,19 +40,26 @@ the OCI response body so the route/UI can show the real reason.
 """
 from __future__ import annotations
 
+# asyncio for the wait between status polls; base64 encodes/decodes secret content.
 import asyncio
 import base64
+# logging for diagnostics; type hints only.
 import logging
 from typing import Any, Dict, Optional
+# quote URL-encodes secret names and OCIDs in query strings.
 from urllib.parse import quote
 
+# httpx is the HTTP client type used for OCI calls.
 import httpx
 
+# Shared pooled async client used across the hub.
 from http_client import shared_client
 
+# Shared OCI request-signing helpers; OciConfig is re-exported under the old name.
 import oci_auth as _oci_auth
 from oci_auth import OciAuthConfig as OciConfig  # re-exported: same fields/shape
 
+# Named logger for Vault messages.
 logger = logging.getLogger("OciVault")
 
 # "OCI Vault" is three separate services on three hostnames with two different
@@ -81,25 +88,30 @@ def _not_found_help(cfg: OciConfig, vcfg: Optional[Dict[str, Any]]) -> str:
     doesn't let you see it" — collapsed into one response so the API can't be
     used to probe for resources you lack access to. Nothing in the response
     body narrows it down, so we narrow it locally."""
+    # Configured region (may be unset) and collected problem messages.
     region = getattr(cfg, "region", "") or ""
     problems = []
+    # Check the shape and region of each configured resource OCID.
     if vcfg:
         problems += _oci_auth.diagnose_resource_ocid(
             str(vcfg.get("vault_id") or ""), "vault", "Vault OCID", region)
         problems += _oci_auth.diagnose_resource_ocid(
             str(vcfg.get("compartment_id") or ""), "compartment",
             "Compartment OCID", region)
+        # The KMS key OCID is optional (only needed to create secrets).
         key_id = str(vcfg.get("key_id") or "")
         if key_id:
             problems += _oci_auth.diagnose_resource_ocid(
                 key_id, "key", "Encryption key OCID", region)
 
+    # Specific problems found: list them and stop.
     out = ""
     if problems:
         out += "\n\nDetected:\n" + "\n".join(f"  • {p}" for p in problems)
         return out
 
     # Nothing provably wrong in the OCIDs — point at the two remaining causes.
+    # Nothing provably wrong: list the causes only OCI can confirm.
     out += ("\n\nOCI returns this same 404 for three different situations and "
             "will not say which:\n"
             "  • The resource is in a different region than "
@@ -127,7 +139,9 @@ def _http_error(cfg: OciConfig, what: str, resp: httpx.Response,
     names no field, so the locally-verifiable diagnosis (OCID shapes, and
     whether the private key actually matches the configured fingerprint) is
     appended on 401/403. A 404 is equally vague and gets its own diagnosis."""
+    # Base message with the status and a trimmed response body.
     msg = f"{what} failed: HTTP {resp.status_code} — {resp.text[:300]}"
+    # Append the auth or not-found diagnosis; diagnosis errors are swallowed.
     try:
         if resp.status_code in (401, 403):
             msg += _oci_auth.auth_failure_help(cfg)
@@ -141,17 +155,22 @@ def _http_error(cfg: OciConfig, what: str, resp: httpx.Response,
 def get_oci_config(hub) -> OciConfig:
     """Read the stored OCI Vault auth config from ``global_config`` (admin-set
     via ``/setup/oci-vault``) and build an :class:`OciConfig`."""
+    # Read the oci_vault block from global_config; a hub with no state gives an empty config.
     stored = {}
     try:
         stored = hub.state.system_state.get("global_config", {}).get("oci_vault", {}) or {}
     except Exception:  # noqa: BLE001 — hub without state (tests)
         stored = {}
+    # Wrap it in the shared auth config.
     return OciConfig(stored)
 
 
 def _require(vcfg: Dict[str, Any]) -> None:
+    """Raise OciVaultError unless the Vault config has both vault_id and compartment_id."""
+    # vault_id is required for every operation.
     if not str(vcfg.get("vault_id") or "").strip():
         raise OciVaultError("OCI Vault config incomplete: 'vault_id' is required")
+    # compartment_id is required for the management (list/create) calls.
     if not str(vcfg.get("compartment_id") or "").strip():
         raise OciVaultError("OCI Vault config incomplete: 'compartment_id' is required")
 
@@ -159,8 +178,10 @@ def _require(vcfg: Dict[str, Any]) -> None:
 def _vault_region(cfg: OciConfig) -> str:
     """Validated region id shared by both Vault endpoint builders. Catches a
     typo'd region here rather than letting it become a bare DNS failure."""
+    # A region is required to build any hostname.
     if not cfg.region:
         raise OciVaultError("OCI Vault config incomplete: 'region' is required")
+    # Validate the region and convert the error type.
     try:
         return _oci_auth.validate_region(cfg.region)
     except _oci_auth.OciAuthError as e:
@@ -200,6 +221,8 @@ def _secrets_base(cfg: OciConfig) -> str:
 
 async def _request(cfg: OciConfig, client: httpx.AsyncClient, method: str, url: str, *,
                    json_body: Optional[dict] = None) -> httpx.Response:
+    """Send one signed request on an open client, converting OciAuthError to OciVaultError."""
+    # Delegate to the shared signer and convert its error type.
     try:
         return await _oci_auth.oci_request(cfg, client, method, url, json_body=json_body)
     except _oci_auth.OciAuthError as e:
@@ -212,23 +235,29 @@ async def _request(cfg: OciConfig, client: httpx.AsyncClient, method: str, url: 
 async def get_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
                      http: Optional[httpx.AsyncClient] = None) -> Optional[str]:
     """Fetch a secret's current value by name. ``None`` if it doesn't exist."""
+    # No name means nothing to look up.
     if not name:
         return None
+    # The vault the secret is looked up in.
     vault_id = str(vcfg.get("vault_id") or "").strip()
     # GetSecretBundleByName is a POST whose arguments are QUERY parameters and
     # whose body is empty — a GET on this path 404s.
     url = (f"{_secrets_base(cfg)}/secretbundles/actions/getByName"
            f"?secretName={quote(name, safe='')}&vaultId={quote(vault_id, safe='')}")
+    # Send the lookup on a shared client.
     async with shared_client(http, 20.0) as client:
         resp = await _request(cfg, client, "POST", url)
+    # 404 means no such secret; other non-200 codes are errors.
     if resp.status_code == 404:
         return None
     if resp.status_code != 200:
         raise _http_error(cfg, "OCI GetSecretBundleByName", resp, vcfg)
+    # The value is base64 inside secretBundleContent.content; empty means no value.
     body = resp.json()
     content = ((body.get("secretBundleContent") or {}).get("content") or "")
     if not content:
         return None
+    # Decode to text; a bad payload is an error.
     try:
         return base64.b64decode(content).decode("utf-8")
     except Exception as e:  # noqa: BLE001
@@ -240,11 +269,18 @@ async def get_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
 
 async def _find_secret_id(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
                           client: httpx.AsyncClient) -> Optional[str]:
+    """Return the OCID of the live (not deleted) secret named name in the vault, or None.
+
+    Raises OciVaultError when the ListSecrets call fails.
+    """
+    # List secrets in the vault filtered by name.
     url = (f"{_vaults_base(cfg)}/secrets?compartmentId={vcfg['compartment_id']}"
           f"&vaultId={vcfg['vault_id']}&name={name}")
     resp = await _request(cfg, client, "GET", url)
+    # Any non-200 is an error.
     if resp.status_code != 200:
         raise _http_error(cfg, "OCI ListSecrets", resp, vcfg)
+    # Return the first exact-name match that is not deleted or pending deletion.
     for item in (resp.json() or []):
         if item.get("secretName") == name and item.get("lifecycleState") not in ("DELETED", "SCHEDULING_DELETION"):
             return item.get("id")
@@ -265,12 +301,16 @@ async def _wait_secret_active(cfg: OciConfig, vcfg: Dict[str, Any], secret_id: s
     Best-effort: returns False on timeout rather than raising, so a slow vault
     degrades to the caller's existing error path instead of losing the write
     (the secret IS created either way)."""
+    # Poll the secret's lifecycle state up to attempts times.
     for i in range(attempts):
         resp = await _request(cfg, client, "GET", f"{_vaults_base(cfg)}/secrets/{secret_id}")
+        # Done as soon as the secret reports ACTIVE.
         if resp.status_code == 200 and (resp.json() or {}).get("lifecycleState") == "ACTIVE":
             return True
+        # Sleep between polls (not after the last one).
         if i < attempts - 1:
             await asyncio.sleep(delay)
+    # Timed out: warn and report failure without raising.
     logger.warning("OCI vault: secret %s not ACTIVE after %.0fs — reads may 404 briefly",
                    secret_id, attempts * delay)
     return False
@@ -280,12 +320,17 @@ async def set_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str, value: str
                      http: Optional[httpx.AsyncClient] = None) -> str:
     """Create the secret if it doesn't exist yet, else push a new version.
     Returns the secret's OCID."""
+    # Config and name are required.
     _require(vcfg)
     if not name:
         raise OciVaultError("secret name is required")
+    # OCI takes the secret value base64-encoded.
     content_b64 = base64.b64encode((value or "").encode("utf-8")).decode("ascii")
+    # One client for find -> update or create.
     async with shared_client(http, 20.0) as client:
+        # Look for an existing secret with this name.
         secret_id = await _find_secret_id(cfg, vcfg, name, client)
+        # Existing secret: push the value as a new current version.
         if secret_id:
             resp = await _request(
                 cfg, client, "PUT", f"{_vaults_base(cfg)}/secrets/{secret_id}",
@@ -293,10 +338,12 @@ async def set_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str, value: str
             if resp.status_code not in (200, 202):
                 raise _http_error(cfg, "OCI UpdateSecret", resp, vcfg)
             return secret_id
+        # New secret: a KMS key OCID is required to encrypt it.
         key_id = str(vcfg.get("key_id") or "").strip()
         if not key_id:
             raise OciVaultError("OCI Vault config incomplete: 'key_id' (KMS master key OCID) "
                                "is required to create a NEW secret")
+        # Create the secret in the configured compartment and vault.
         resp = await _request(
             cfg, client, "POST", f"{_vaults_base(cfg)}/secrets",
             json_body={
@@ -304,8 +351,10 @@ async def set_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str, value: str
                 "secretName": name,
                 "secretContent": {"contentType": "BASE64", "content": content_b64, "stage": "CURRENT"},
             })
+        # Any status other than 200/201 is an error.
         if resp.status_code not in (200, 201):
             raise _http_error(cfg, "OCI CreateSecret", resp, vcfg)
+        # OCID of the new secret.
         new_id = resp.json().get("id", "")
         # A freshly created secret is CREATING; its value can't be read back
         # until ACTIVE. Wait here so the caller's next read doesn't 404.
@@ -329,13 +378,16 @@ async def delete_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
     well before that window elapses (OCI's ``GetSecretBundle`` already
     refuses ``PENDING_DELETION`` secrets), so callers see the same "gone"
     behavior as an instant delete."""
+    # Config is required; an empty name is a no-op.
     _require(vcfg)
     if not name:
         return True
+    # Look up the secret id on a shared client.
     async with shared_client(http, 20.0) as client:
         secret_id = await _find_secret_id(cfg, vcfg, name, client)
         if not secret_id:
             return True  # already absent/deleted — nothing to schedule
+        # Schedule deletion; 404 (already gone) also counts as success.
         resp = await _request(
             cfg, client, "POST", f"{_vaults_base(cfg)}/secrets/{secret_id}/actions/scheduleDeletion",
             json_body={})
@@ -349,12 +401,16 @@ async def delete_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
 async def test_connection(cfg: OciConfig, vcfg: Dict[str, Any],
                           http: Optional[httpx.AsyncClient] = None) -> Dict[str, Any]:
     """GET the vault to confirm the signing key + IAM policy + OCID resolve."""
+    # Config is required; GetVault lives on the KMS host.
     _require(vcfg)
     url = f"{_kms_base(cfg)}/vaults/{vcfg['vault_id']}"
+    # One GET on a shared client.
     async with shared_client(http, 20.0) as client:
         resp = await _request(cfg, client, "GET", url)
+    # Anything but 200 is an error.
     if resp.status_code != 200:
         raise _http_error(cfg, "OCI GET vault", resp, vcfg)
+    # Return the key vault fields.
     body = resp.json()
     return {"lifecycle_state": body.get("lifecycleState"), "vault_id": body.get("id"),
             "management_endpoint": body.get("managementEndpoint")}
@@ -370,14 +426,17 @@ async def resolve_ref(hub, ref: Optional[str],
     vault (returns ``None`` when not configured/enabled or the secret is
     absent). Any other non-empty string is treated as an inline literal and
     returned unchanged. Never raises."""
+    # Empty refs resolve to None; non-kv: strings are returned as literals.
     if not ref:
         return None
     ref = str(ref)
     if not ref.startswith("kv:"):
         return ref
+    # Secret name after "kv:"; blank means nothing to resolve.
     name = ref[len("kv:"):].strip()
     if not name:
         return None
+    # Fetch only when the OCI Vault integration is enabled and configured; never raise.
     try:
         vcfg = (hub.state.system_state.get("global_config", {}) or {}).get("oci_vault", {}) or {}
         if not vcfg.get("enabled") or not vcfg.get("vault_id"):

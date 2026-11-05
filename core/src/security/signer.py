@@ -16,12 +16,18 @@ session keys. The envelope that carries these signatures on the wire is
 defined in ``messaging/protocol.py``.
 """
 
+# hmac computes and constant-time-compares message authentication codes.
 import hmac
+# hashlib supplies SHA-256, the hash used inside the HMAC.
 import hashlib
+# json serialises message dicts into the exact bytes that get signed.
 import json
+# Standard-library logging for signature-mismatch warnings.
 import logging
+# Type hints only; describe message dicts.
 from typing import Dict, Any
 
+# One named logger so signing problems can be filtered together.
 logger = logging.getLogger("Signer")
 
 def encode_frame(signer, msg: Dict[str, Any]) -> str:
@@ -31,15 +37,20 @@ def encode_frame(signer, msg: Dict[str, Any]) -> str:
     (no re-serialization, no sort_keys) — the per-frame json.dumps that dominated
     hub ingest CPU disappears. This raw-bytes frame is the deployed default across
     the hub, cs, pxmx, and ab (see docs/backpressure-throttling.md §7)."""
+    # Serialise once with no spaces; these exact bytes are what gets signed and sent.
     body = json.dumps(msg, separators=(',', ':'))
+    # Sign the body bytes, or leave the signature empty when no key exists yet.
     sig = signer.sign_bytes(body.encode()) if signer is not None else ""
+    # Join as "<sig>.<body>"; the hex signature never contains a dot, so it splits cleanly.
     return sig + "." + body
 
 
 def split_frame(wire: str):
     """Split ``<sig>.<body>`` → (sig, body). sig may be '' (unsigned). A frame
     with no separator is treated as an unsigned raw body (defensive)."""
+    # Split at the first dot only; JSON bodies can contain dots themselves.
     sig, sep, body = wire.partition(".")
+    # No dot at all: treat the whole string as an unsigned body.
     if not sep:
         return "", wire
     return sig, body
@@ -51,22 +62,29 @@ class MessageSigner:
     """
 
     def __init__(self, secret: str):
+        """Remember the shared secret used as the HMAC key."""
         self.secret = secret
 
     def _canonicalize(self, obj: Any) -> Any:
         """Recursively sorts dictionary keys to ensure deterministic serialization."""
+        # Dicts: rebuild with keys in sorted order, canonicalising each value too.
         if isinstance(obj, dict):
             return {k: self._canonicalize(obj[k]) for k in sorted(obj.keys())}
+        # Lists keep their order, but their elements are canonicalised.
         elif isinstance(obj, list):
             return [self._canonicalize(i) for i in obj]
+        # Scalars (str, int, ...) are already deterministic.
         return obj
 
     def sign(self, msg: Dict[str, Any]) -> str:
         """Signs a message by creating an HMAC-SHA256 hash of its canonical JSON representation."""
         # Exclude signature from the data being signed
         data = {k: v for k, v in msg.items() if k != "signature"}
+        # Sort keys recursively so sender and receiver produce identical JSON.
         canonical_data = self._canonicalize(data)
+        # Compact separators so whitespace never changes the signed bytes.
         message_bytes = json.dumps(canonical_data, separators=(',', ':')).encode()
+        # HMAC those bytes.
         sig = self.sign_bytes(message_bytes)
         # logger.debug(f"Signing with secret {self.secret[:4]}...{self.secret[-4:]} -> {sig[:8]}")
         return sig
@@ -78,16 +96,21 @@ class MessageSigner:
         serialized ONCE. Signing raw bytes is what lets the receiver verify the
         received body directly (verify_bytes) without re-serialising — the win
         that removed the per-frame json.dumps from hub ingest."""
+        # Use the shared secret as the HMAC key and return the hex digest.
         return hmac.new(self.secret.encode(), message_bytes, hashlib.sha256).hexdigest()
 
     def verify(self, msg: Dict[str, Any]) -> bool:
         """Verifies the signature of a message."""
+        # A message without a signature can never verify.
         sig = msg.get("signature")
         if not sig:
             return False
 
+        # Recompute what the signature should be and compare in constant time (avoids timing
+        # attacks that guess the signature byte by byte).
         expected = self.sign(msg)
         result = hmac.compare_digest(expected, sig)
+        # On mismatch, rebuild the signed bytes only to log their size and a short prefix.
         if not result:
             data = {k: v for k, v in msg.items() if k != "signature"}
             canonical_data = self._canonicalize(data)
@@ -110,6 +133,7 @@ class MessageSigner:
         eliminating the per-frame json.dumps that dominated hub ingest CPU. No
         sort_keys is needed — the receiver verifies the exact bytes, not a
         canonical re-serialization, so signing order is irrelevant."""
+        # Delegate to the module-level helper, passing this signer.
         return encode_frame(self, msg)
 
     def verify_bytes(self, message_bytes: bytes, signature: str) -> bool:
@@ -120,6 +144,7 @@ class MessageSigner:
         ingest CPU is gone. Constant-time compare (compare_digest); a mismatch
         logs length + hex prefix only, never the raw (possibly token-bearing)
         bytes. See docs/backpressure-throttling.md §7."""
+        # Recompute the HMAC over the received bytes and compare in constant time.
         expected = self.sign_bytes(message_bytes)
         result = hmac.compare_digest(expected, signature)
         if not result:

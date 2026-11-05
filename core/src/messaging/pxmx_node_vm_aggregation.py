@@ -19,6 +19,7 @@ and its agent was live.
 (dict), ``send_to_agent()`` (coroutine), and optionally ``disk_cache`` (pxmx-only
 last-known-data fallback; degrades to empty when absent, e.g. on a cs spoke).
 """
+# Standard-library imports plus the PVE command builder (with a fallback import path).
 import asyncio
 import logging
 import time
@@ -49,6 +50,7 @@ def _freshest_by_key(rows: Iterable[Tuple[Any, float, Dict[str, Any]]]) -> List[
     by each agent's own telemetry timestamp instead means a lagging/stale
     cluster-mate can no longer silently win over a fresher one.
     """
+    # Keep the freshest entry for each key.
     best: Dict[Any, Tuple[float, Dict[str, Any]]] = {}
     for key, ts, entry in rows:
         cur = best.get(key)
@@ -71,10 +73,12 @@ async def _node_stats_from_agent(cp, agent_id: str) -> Dict[str, Any]:
     ``{nodes:[], error}`` (the Agent's outer-try shape); a pvesh error alone
     yields empty nodes (read-only, non-fatal), matching the Agent.
     """
+    # Cluster name for this agent (defaults to the agent id).
     info = (cp.connected_agents or {}).get(agent_id, {}) if cp else {}
     cluster = info.get("cluster_name", agent_id)
 
     async def _send(cmd: str, timeout: float = 12.0):
+        """Run one shell command on this agent via RUN_COMMAND."""
         return await cp.send_to_agent(
             "RUN_COMMAND",
             {"command": cmd, "allow_shell": True, "timeout": timeout},
@@ -114,6 +118,8 @@ async def _node_stats_from_agent(cp, agent_id: str) -> Dict[str, Any]:
 
 
 async def get_node_stats(cp, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Answer GET_NODE_STATS: one agent's nodes, or all agents' nodes from telemetry, live query or disk cache.
+    """
     if not cp:
         return {"status": "ERROR", "error": "Control plane not initialised"}
 
@@ -137,6 +143,7 @@ async def get_node_stats(cp, data: Dict[str, Any]) -> Dict[str, Any]:
     # which otherwise has no idea which of several spokes' identical node
     # reports is newest.
     def _node_rows():
+        """Yield (hostname, telemetry time, node entry) for every node in the telemetry cache."""
         for aid, info in cp.connected_agents.items():
             cluster = info.get("cluster_name", aid)
             ts = info.get("telemetry_ts", 0) or 0
@@ -157,6 +164,7 @@ async def get_node_stats(cp, data: Dict[str, Any]) -> Dict[str, Any]:
         results = await asyncio.gather(
             *[_node_stats_from_agent(cp, a) for a in aids],
             return_exceptions=True)
+        # Merge results, skipping failed agents and duplicate nodes.
         seen_nodes = set()
         for aid, res in zip(aids, results):
             if isinstance(res, Exception) or not isinstance(res, dict):
@@ -174,6 +182,7 @@ async def get_node_stats(cp, data: Dict[str, Any]) -> Dict[str, Any]:
         disk_cache = getattr(cp, "disk_cache", {})
 
         def _disk_node_rows():
+            """Yield (hostname, telemetry time, node entry) for every node in the disk cache."""
             for aid, info in disk_cache.items():
                 cluster = info.get("cluster_name", aid)
                 ts = info.get("telemetry_ts", 0) or 0
@@ -194,6 +203,7 @@ async def _pool_map_from_agent(cp, agent_id: str, _send, probe) -> Dict[Any, str
     """Best-effort ``{vmid: poolid}`` from ``/pools`` (+ per-pool detail).
     ``probe`` is the already-fetched ``/pools`` response (the reachability
     check round-trip is reused rather than re-sent). ``{}`` on any failure."""
+    # Find pools, fetch detail for pools whose members weren't listed, and build the map.
     try:
         listing = pve_cmd_builder.parse_pools_listing_for_members(probe)
         details: Dict[str, List[Dict[str, Any]]] = {}
@@ -211,10 +221,12 @@ async def _vm_interfaces(_send, v: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Best-effort ``[{name, mac, ips}]`` for one VM/CT. Running → guest
     interfaces (QGA / lxc netns); stopped or empty → ``qm/pct config`` netN
     MACs. Mirrors the Agent's ``_vm_interfaces`` (4s per-call timeout)."""
+    # Pick the VM's node, id, kind and status.
     node, vmid = v.get("node", ""), v.get("vmid")
     kind = "qemu" if v.get("type") == "qemu" else "lxc"
     status = v.get("status")
     ifaces: List[Dict[str, Any]] = []
+    # Running: ask the guest for its live interfaces.
     if status == "running":
         try:
             r = await _send(pve_cmd_builder.vm_guest_ifaces_cmd(node, vmid, kind),
@@ -238,13 +250,16 @@ async def _annotate_vm_interfaces(vms: List[Dict[str, Any]], _send) -> None:
     Mirrors the Agent's ``_annotate_vm_interfaces`` (which the telemetry loop
     still uses internally). Best-effort: VMs not annotated before the deadline
     keep ``interfaces=[]``/``ips=[]`` (filled next telemetry tick)."""
+    # Only VMs with a node and an id can be annotated.
     targets = [v for v in vms if v.get("node") and v.get("vmid") not in (None, "")]
     if not targets:
         return
     sem = asyncio.Semaphore(16)
 
     async def _one(v):
+        """Annotate one VM with its interfaces and IPs, within the semaphore."""
         async with sem:
+            # Run all annotations, giving up at the deadline.
             try:
                 ifaces = await _vm_interfaces(_send, v)
             except Exception:  # one VM's annotation failure is non-fatal
@@ -275,10 +290,12 @@ async def _vms_from_agent(cp, agent_id: str) -> Dict[str, Any]:
     unreachable agent returns ``{status:ERROR, message}`` (so the pinned path
     surfaces it honestly, not as "0 VMs synced, success"); on a reachable-but-
     failed query returns the Agent's ``{vms:[], cluster, error}`` shape."""
+    # Cluster name for this agent (defaults to the agent id).
     info = (cp.connected_agents or {}).get(agent_id, {}) if cp else {}
     cluster = info.get("cluster_name", agent_id)
 
     async def _send(cmd: str, timeout: float = 12.0):
+        """Run one shell command on this agent via RUN_COMMAND."""
         return await cp.send_to_agent(
             "RUN_COMMAND",
             {"command": cmd, "allow_shell": True, "timeout": timeout},
@@ -307,6 +324,7 @@ async def _vms_from_agent(cp, agent_id: str) -> Dict[str, Any]:
                 rl = await _send(pve_cmd_builder.node_lxc_cmd(node))
                 vms += pve_cmd_builder.parse_node_vm_list(rl, node, "lxc", cluster, pool_map)
 
+        # Add interface details, then return the list.
         await _annotate_vm_interfaces(vms, _send)
         return {"vms": vms, "cluster": cluster}
     except Exception as e:
@@ -340,12 +358,14 @@ def _cached_agent_vms(cp, agent_id: str) -> Optional[Dict[str, Any]]:
     that need live truth (delete verification, VM sync, VMID allocation)
     never send ``prefer_cache`` and keep the live path. A fresh snapshot
     with an EMPTY vms list is a real "0 VMs" and is returned as such."""
+    # Need a known agent with recent telemetry.
     info = (getattr(cp, "connected_agents", None) or {}).get(agent_id)
     if not isinstance(info, dict):
         return None
     ts = info.get("telemetry_ts") or 0
     if not ts or (time.time() - ts) > PREFER_CACHE_MAX_AGE_S:
         return None
+    # Return a copy of its cached VMs.
     return {"vms": list(info.get("vms") or []),
             "cluster": info.get("cluster_name", agent_id)}
 
@@ -366,6 +386,7 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
     if not cp:
         return {"status": "ERROR", "error": "Control plane not initialised"}
 
+    # Read the target agent and lower-cased tag filter.
     agent_id = data.get("agent_id")
     tag_filter = data.get("tag_filter", "").lower() or None
 
@@ -376,15 +397,18 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
     # surface it honestly so the hub records an 'error' sync status instead
     # of silently reading an empty vms list as "0 records synced, success".
     if agent_id:
+        # Use fresh telemetry if asked and available, otherwise query the agent live.
         result = _cached_agent_vms(cp, agent_id) if data.get("prefer_cache") else None
         source = "telemetry_cache" if result is not None else "pinned_agent"
         if result is None:
             result = await _vms_from_agent(cp, agent_id)
+        # Pass errors straight back.
         if not isinstance(result, dict) or result.get("status") == "ERROR":
             logger.warning("PXMX_LIST_VMS pinned agent %r unreachable: %s",
                            agent_id, result if isinstance(result, dict) else "non-dict")
             return result if isinstance(result, dict) else {"status": "ERROR",
                                                             "message": "agent returned no data"}
+        # Tag each VM with its agent, cluster and unique id.
         cluster = result.get("cluster", agent_id)
         vms = []
         for vm in result.get("vms", []):
@@ -393,11 +417,13 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
             vm.setdefault("cluster", cluster)
             vm.setdefault("unique_id", f"{cluster}/{vm.get('node','?')}/{vm.get('vmid','?')}")
             vms.append(vm)
+        # Keep only VMs carrying the tag.
         if tag_filter:
             vms = [v for v in vms
                    if tag_filter in [t.lower() for t in (v.get("tags") or [])]]
         logger.info("PXMX_LIST_VMS pinned agent=%s tag_filter=%r -> %d VMs (%s)",
                     agent_id, tag_filter, len(vms), source)
+        # Return the pinned agent's list.
         return {"status": "SUCCESS", "vms": vms, "source": source,
                 "agent_count": 1}
 
@@ -407,6 +433,7 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
     # within any one real cluster and node names differ across separate
     # clusters — keeping whichever cluster-mate's telemetry is freshest.
     def _vm_rows():
+        """Yield ((node, vmid), telemetry time, VM entry) for every VM in the telemetry cache."""
         for aid, info in cp.connected_agents.items():
             cluster = info.get("cluster_name", aid)
             ts = info.get("telemetry_ts", 0) or 0
@@ -421,12 +448,15 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
                     "telemetry_ts": ts,
                 }
 
+    # Keep the freshest copy of each VM.
     cached_vms: List[Dict] = _freshest_by_key(_vm_rows())
 
+    # Keep only VMs carrying the tag.
     if tag_filter:
         cached_vms = [v for v in cached_vms
                       if tag_filter in [t.lower() for t in (v.get("tags") or [])]]
 
+    # Return the cached list if it has anything.
     if cached_vms:
         logger.info("PXMX_LIST_VMS aggregate tag_filter=%r -> %d VMs (telemetry_cache, %d agents)",
                     tag_filter, len(cached_vms), len(cp.connected_agents))
@@ -441,6 +471,7 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
     aids = list(cp.connected_agents or {})
     results = await asyncio.gather(
         *[_vms_from_agent(cp, a) for a in aids], return_exceptions=True)
+    # Merge results, skipping failed agents and duplicate VMs.
     all_vms: List[Dict] = []
     seen_vms = set()
     for aid, res in zip(aids, results):
@@ -463,10 +494,12 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
                 "unique_id": vm.get("unique_id", f"{cluster}/{node}/{vmid}"),
             })
 
+    # Keep only VMs carrying the tag.
     if tag_filter:
         all_vms = [v for v in all_vms
                    if tag_filter in [t.lower() for t in (v.get("tags") or [])]]
 
+    # Return the live list if it has anything.
     if all_vms:
         logger.info("PXMX_LIST_VMS aggregate tag_filter=%r -> %d VMs (live_query, %d agents)",
                     tag_filter, len(all_vms), len(cp.connected_agents))
@@ -478,6 +511,7 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
     disk_cache = getattr(cp, "disk_cache", {})
     if disk_cache:
         def _disk_vm_rows():
+            """Yield ((node, vmid), telemetry time, VM entry) for every VM in the disk cache."""
             for aid, info in disk_cache.items():
                 cluster = info.get("cluster_name", aid)
                 ts = info.get("telemetry_ts", 0) or 0
@@ -492,6 +526,7 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
                         "telemetry_ts": ts,
                     }
 
+        # Dedup, filter by tag and return the stale list if non-empty.
         stale_vms: List[Dict] = _freshest_by_key(_disk_vm_rows())
         if tag_filter:
             stale_vms = [v for v in stale_vms
@@ -500,5 +535,6 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
             return {"status": "SUCCESS", "vms": stale_vms, "source": "disk_cache",
                     "stale": True, "agent_count": 0}
 
+    # Nothing anywhere: return the empty list.
     return {"status": "SUCCESS", "vms": all_vms, "source": "live_query",
             "agent_count": len(cp.connected_agents)}

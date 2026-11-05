@@ -12,9 +12,12 @@ Security posture (matches how the feature was requested):
 Commands reach a spoke as a HMAC-signed RUN_COMMAND (control_plane), so a spoke
 trusts them exactly like SPOKE_UPDATE; the hub runs "hub" targets locally.
 """
+# Runs hub-local commands in a worker thread.
 import asyncio
+# Shared Hub helpers: HTTP error type, request and logger.
 from api import HTTPException, Request, logger
 
+# The shared command runner (allowlist / shell), imported either way it's packaged.
 try:
     from command_runner import run_local_command
 except ImportError:  # test/bare-package path
@@ -22,31 +25,43 @@ except ImportError:  # test/bare-package path
 
 
 def register(app, hub, ctx):
+    """Register the Remote Console routes on ``app``."""
+    # Session and admin helpers from the shared route context.
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
 
     def _cfg():
+        """Return the ``remote_exec`` settings ({} if unset)."""
         return (hub.state.get_global_config() or {}).get("remote_exec", {}) or {}
 
     def _who(sess):
+        """Return the caller's name for the audit log ("?" if unknown)."""
         return (sess or {}).get("user_id") or (sess or {}).get("username") or (sess or {}).get("user") or "?"
 
     def _require_admin(request):
+        """Return the session, or raise 403 unless it is a Global Admin."""
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="Global Admin required")
         return sess
 
+    # Read the Remote Console settings.
     @app.get("/api/exec/config")
     async def get_exec_config(request: Request):
+        """Return whether Remote Console and shell mode are on (Global Admins only)."""
+        # Global Admins only.
         _require_admin(request)
         c = _cfg()
         return {"enabled": bool(c.get("enabled", False)),
                 "allow_shell": bool(c.get("allow_shell", False))}
 
+    # Change the Remote Console settings.
     @app.post("/api/exec/config")
     async def set_exec_config(request: Request):
+        """Turn Remote Console and shell mode on or off (Global Admins only)."""
+        # Global Admins only.
         sess = _require_admin(request)
+        # Apply whichever flags were sent to the current settings.
         data = await request.json()
         gc = hub.state.get_global_config()
         cur = dict(gc.get("remote_exec", {}) or {})
@@ -58,6 +73,7 @@ def register(app, hub, ctx):
         # never silently comes back with arbitrary-shell already unlocked.
         if not cur.get("enabled"):
             cur["allow_shell"] = False
+        # Save, audit-log and return the new settings.
         gc["remote_exec"] = cur
         hub.state.system_state["global_config"] = gc
         hub.state._mark_dirty()
@@ -66,8 +82,11 @@ def register(app, hub, ctx):
         return {"status": "ok", "enabled": bool(cur.get("enabled")),
                 "allow_shell": bool(cur.get("allow_shell"))}
 
+    # List where a command can be run.
     @app.get("/api/exec/targets")
     async def get_exec_targets(request: Request):
+        """Return the hub, each connected spoke and each reachable relayed agent."""
+        # Global Admins only.
         _require_admin(request)
         # hub + every connected spoke (generic agents + role sub-spokes connect
         # as spokes, so this list covers them by spoke_id).
@@ -92,13 +111,17 @@ def register(app, hub, ctx):
             targets.append({"id": f"agent:{sid}:{raw_aid}", "label": f"{host} · agent", "kind": "agent"})
         return {"targets": targets}
 
+    # Run a command on a target.
     @app.post("/api/exec")
     async def run_exec(request: Request):
+        """Run a command on the hub, a spoke or an agent and return its output."""
+        # Global Admins only, and Remote Console must be on.
         sess = _require_admin(request)
         c = _cfg()
         if not c.get("enabled"):
             raise HTTPException(status_code=403,
                                 detail="Remote Console is disabled — enable it in Setup → Remote Console")
+        # Read the target and command; a command is required.
         data = await request.json()
         target = (data.get("target") or "hub").strip()
         command = (data.get("command") or "").strip()
@@ -110,6 +133,7 @@ def register(app, hub, ctx):
         logger.warning("[remote-exec] RUN user=%s target=%s shell=%s cmd=%r",
                        who, target, allow_shell, command[:500])
         def _unwrap(resp):
+            """Pull the runner's result out of a spoke reply (an error result if missing)."""
             # {"payload":{"data":{"status","result"}}} → the runner dict.
             payload = (resp or {}).get("payload", {}) or {}
             inner = payload.get("data", resp) or {}
@@ -119,6 +143,7 @@ def register(app, hub, ctx):
                         "truncated": False, "error": "no result (offline / timed out?)"}
             return r
 
+        # Run it on the hub, through a spoke to an agent, or on a spoke.
         conns = getattr(hub, "active_connections", {}) or {}
         try:
             if target == "hub":
@@ -146,11 +171,13 @@ def register(app, hub, ctx):
                     {"command": command, "allow_shell": allow_shell, "timeout": 30.0},
                     timeout=40.0)
                 res = _unwrap(resp)
+        # Our HTTP errors pass through; anything else is logged and a 500.
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
             logger.error("[remote-exec] user=%s target=%s FAILED: %s", who, target, e)
             raise HTTPException(status_code=500, detail=str(e))
+        # Audit-log the result and return it.
         logger.warning("[remote-exec] DONE user=%s target=%s rc=%s error=%s",
                        who, target, res.get("rc"), res.get("error") or "")
         return res
