@@ -45,7 +45,7 @@ Retiring the dns/dhcp siblings removes the largest remaining block, about 5k lin
 
 ### Still open from Tier 1
 
-- **Archive the GitHub repos** `lbockenstedt/dns` and `lbockenstedt/dhcp`. This needs an owner decision.
+- **Archived the GitHub repos** `lbockenstedt/dns` and `lbockenstedt/dhcp` (done 2026-11-04, owner approved; un-archive to roll back).
 - **Kea→Unbound real-time DNS hook:** decide whether to port it. It lives in the sibling dhcp repo, commits d844d7e, 58ead78, 4fb3c03 and b0be963. It was not ported because lm uses the lease→DNS sync in core `dns_dhcp_sync.py`.
 
 ## Deliberately vendored: these need packaging, not deletion
@@ -55,7 +55,7 @@ Each copy below lives in a separately deployed tree that has no shared import pa
 | File | Copies | Guard |
 | :-- | :-- | :-- |
 | `check_eval.py` | cs `lm-spoke/src` (canonical), `webui-local/app`, `webui-spoke`, `lm/core/src/simulations` | SHA-pin test in each tree |
-| `hub_discovery.py` | `lm/core/src/messaging` (canonical), `pxmx/agent/src/discovery.py` | manual. **Drifted:** the pxmx copy has the extra `resolve_agent_url` / `_AGENT_LISTENER_CANDIDATES` code. Back-port it to the canonical copy, then add a SHA-pin test. |
+| `hub_discovery.py` | `lm/core/src/messaging` and `pxmx/agent/src/discovery.py` (canonical) | SHA-pin test in each repo (`test_hub_discovery_sync.py`, `test_discovery_sync.py`). The drift is back-ported. |
 | `collab_pcap.py` | `cs/clients/linux`, `lm/collab_sink` | header note only |
 | `resource_pressure.py` | `cs/lm-spoke/src`, `pxmx/agent/src` | header note only |
 | `probe_signatures.py` | `lm/core/src/security`, `ab` | header note only |
@@ -106,3 +106,15 @@ The cs spoke and the hub each run a copy of the Central/Mist telemetry logic. In
 - `cs/lm-spoke/src/sim_primitives.py` ↔ `simulation_engine.py`.
 - `ab/main.py` ↔ `ab/watchdog.py`.
 - `cs/webui-local/frontend/shared/shared_utils.py` ↔ `cs/webui-local/shared/shared_utils.py`.
+
+## Cleanup status (2026-11-04)
+
+- **`bump_version.py`:** no change needed. All 18 copies have the same hash and are synced from `nw/.pipeline-templates`. Each repo's promote workflow needs its own copy, so it stays.
+- **`hub_discovery.py`:** drift back-ported and SHA-pinned (see the Tier 1 table).
+- **JWT:** `cs/webui-local` moved from `python-jose` to `PyJWT`, which the rest of the fleet already uses.
+- **Still open, each a separate multi-repo change:**
+  - `requests` → `httpx` (about 12 repos; each has its own venv).
+  - `aiohttp` in `lm/proxy` (websocket proxy).
+  - `python-ldap` (`ldap` spoke) → `ldap3` (already used by lm and cs).
+- **Giant units:** most of the 15 largest are class bodies or `register()` closures. Split them route group by route group, with tests, not in one pass.
+- **Comments:** `kvm/src/kvm_engine.py` is done and its duplicated lookup is now one helper. Next worst: `cs/webui-spoke/routers/logs.py`, `cs/webui-local/app/routers/console.py`, `backups.py`, `settings.py`.
