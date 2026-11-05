@@ -291,7 +291,9 @@ def resolve_nw_scan_spoke(hub, tenant_id, requested_spoke_id, shared_tenant_id):
 
 # Absolute ceiling on one scan's total target list, and how many batches run
 # at once. Anything over the per-request batch size (``max_targets``) is split.
-_NW_SCAN_MAX_TOTAL = 32768
+# Leaf-prefix hosts dropped at the ceiling are not swept either (the sweep skips
+# leaves), so it must cover a large tenant's leaves: dxp has ~33k.
+_NW_SCAN_MAX_TOTAL = 65536
 _NW_SCAN_PARALLEL_BATCHES = 3
 # Recurring-scan cadence a tenant gets automatically once it has its own nw spoke.
 _NW_SCAN_DEFAULT_INTERVAL = 21600
