@@ -227,6 +227,12 @@ def register(app, hub, ctx):
         out = [r for r in rows
                if r.get("approved")
                and access.spoke_visible_to_session(sess, r.get("tenant_id") or "")]
+        # Shared spokes of a module the tenant has its own of are hidden.
+        if not access.is_admin(sess):
+            tid = access.request_effective_tenant(sess, request)
+            out = [r for r in out
+                   if access.spoke_owner_tenant(hub, r.get("spoke_id"))
+                   or not access.tenant_left_shared(hub, tid, r.get("module_type") or "")]
         return {"spokes": out}
 
     def _register_product(route, prod):

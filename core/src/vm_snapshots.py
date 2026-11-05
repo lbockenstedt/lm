@@ -69,7 +69,8 @@ async def tenant_vms(hub, tenant: str) -> List[Dict[str, Any]]:
             if aid and hasattr(hub, "get_spoke_for_agent") else None
         owner = access.spoke_owner_tenant(hub, sid)
         if not owner:
-            rest.append(vm)
+            if not access._shared_spoke_masked(hub, sid, tenant):
+                rest.append(vm)
         elif access.tenant_in(owner, tenant):
             owned.append(vm)
     if access.filter_enabled(hub, "hypervisor"):

@@ -206,7 +206,8 @@ def test_for_shared_shared_tenant_unbound_returns_none(monkeypatch):
 
 # ── get_cppm_spokes_for_tenant (combined own + shared view) ─────────────────
 
-def test_spokes_for_tenant_includes_own_and_shared(monkeypatch):
+def test_spokes_for_tenant_own_only_shared_hidden(monkeypatch):
+    """A tenant with its own ClearPass is out of the shared NAC environment."""
     import access
     monkeypatch.setattr(access, "shared_tenant_id", lambda: "shared-tenant")
     hub = _CppmHub(
@@ -217,7 +218,18 @@ def test_spokes_for_tenant_includes_own_and_shared(monkeypatch):
             {"tenant_id": "shared-tenant", "spoke_id": "cppm-shared"},
         ],
     )
-    assert LabManagerHub.get_cppm_spokes_for_tenant(hub, "tenantA") == ["cppm-a", "cppm-shared"]
+    assert LabManagerHub.get_cppm_spokes_for_tenant(hub, "tenantA") == ["cppm-a"]
+
+
+def test_spokes_for_tenant_own_offline_never_falls_back_to_shared(monkeypatch):
+    import access
+    monkeypatch.setattr(access, "shared_tenant_id", lambda: "shared-tenant")
+    md = {"cppm-a": {"tenant_id": "tenantA", "module_type": "cppm"},
+          "cppm-shared": {"tenant_id": "shared-tenant", "module_type": "nac"}}
+    hub = _CppmHub(["cppm-shared"], md,
+                   nac_instances=[{"tenant_id": "shared-tenant", "spoke_id": "cppm-shared"}])
+    assert LabManagerHub.get_cppm_spokes_for_tenant(hub, "tenantA") == []
+    assert LabManagerHub.get_cppm_spokes_for_tenant(hub, "tenantB") == ["cppm-shared"]
 
 
 def test_spokes_for_tenant_own_only_when_no_shared_tenant_configured(monkeypatch):
