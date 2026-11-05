@@ -2549,7 +2549,14 @@ def register(app, hub, ctx):
             return gw  # one batch per tick: finish the gateway pass first
         st = _sweep_state(hub, tid)
         leaves, supers = await _nw_netbox_prefix_split(hub, tid)
-        ranges = sweep_ranges(supers, leaves)
+        # The directed (6h) scan already covers its leaf prefixes and the
+        # tenant's saved scan subnets: never sweep those again.
+        for sub in saved.get("subnets") or []:
+            try:
+                leaves.append(ipaddress.ip_network(str(sub).strip(), strict=False))
+            except ValueError:
+                pass
+        ranges = sweep_ranges(supers, [n for n in leaves if n.version == 4])
         if not ranges:
             st.update(total=0, cursor=0, last_status="no-supernets", last_run_at=time.time())
             hub.state._mark_dirty()
@@ -2557,8 +2564,9 @@ def register(app, hub, ctx):
         covered, _ps = await _aggregate_scan_targets(
             hub, tid, ["dns", "dhcp", "nac"], saved.get("subnets") or [], [], _NW_SCAN_MAX_TOTAL)
         gc = hub.state.system_state.get("global_config", {}) or {}
-        covered = set(covered) | {str((d or {}).get("address", "")).strip()
-                                  for d in (gc.get("nw_devices") or []) if isinstance(d, dict)}
+        covered = set(covered) | set(_seen_registry(tid)) | {
+            str((d or {}).get("address", "")).strip()
+            for d in (gc.get("nw_devices") or []) if isinstance(d, dict)}
         batch, cursor, total = sweep_take(ranges, st.get("cursor") or 0,
                                           _NW_SWEEP_BATCH, skip=frozenset(covered))
         options = {"tcp_ports": list(_NW_SWEEP_PORTS), "try_snmp": True, "use_nmap": False,
@@ -2786,8 +2794,10 @@ def register(app, hub, ctx):
         known = {str((d or {}).get("address", "")).strip()
                  for d in ((hub.state.system_state.get("global_config", {}) or {}).get("nw_devices") or [])
                  if isinstance(d, dict)}
-        st["discovered"] = [d for d in st.get("discovered", []) if d.get("address") not in known]
+        st["found"] = sum(1 for d in st.pop("discovered", None) or [] if d.get("address") not in known)
         st["enabled"] = _sweep_enabled(hub, tid)
+        # The loop ticks every ~3 min; a batch can take up to ~10.
+        st["running"] = st["enabled"] and time.time() - float(st.get("last_run_at") or 0) < 900
         st["tenant"] = tid
         st["gateway"] = dict(_gw_state(hub, tid))
         st["unidentified"] = nw_seen_hosts.unidentified(

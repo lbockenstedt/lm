@@ -1324,15 +1324,15 @@ async function _nwtLoadSweep() {
         const r = await setupFetch('/api/nw/sweep' + (currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : ''));
         const d = await r.json();
         const pct = d.total ? Math.min(100, Math.round(100 * (d.cursor || 0) / d.total)) : 0;
-        const rows = (d.discovered || []).slice(0, 200).map(x => `<tr><td class="py-1 pr-3 font-mono">${escapeHtml(x.address)}</td><td class="pr-3">${escapeHtml((x.open_ports || []).join(', ') || '—')}</td><td>${x.last_seen ? new Date(x.last_seen * 1000).toLocaleString() : ''}</td></tr>`).join('');
+        const state = d.running ? '<span class="font-bold text-emerald-700">Running</span>'
+            : `<span class="font-bold text-slate-500">${d.enabled ? 'Waiting' : 'Stopped'}</span>`;
         box.className = 'text-xs text-slate-600';
         box.innerHTML = `<div class="flex flex-wrap items-center gap-3 mb-2">
             <label class="flex items-center gap-2"><input type="checkbox" ${d.enabled ? 'checked' : ''} onchange="nwtSweepAction({enabled: this.checked})"> Enable sweep</label>
             <button onclick="nwtSweepAction({run: true})" class="px-3 py-1 rounded bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Probe next batch now</button>
             <button onclick="nwtSweepAction({reset: true})" class="px-3 py-1 rounded bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Restart cycle</button>
-            <span>${d.total ? `Progress ${pct}% of ${d.total} addresses · cycles ${d.cycles || 0}` : 'No supernet space to sweep yet'}${d.last_status ? ` · last: ${escapeHtml(d.last_status)}` : ''}${d.last_error ? ` (${escapeHtml(d.last_error)})` : ''}</span></div>
-            <div id="nwt-gw" class="mb-3 p-2 rounded bg-slate-50"></div>
-            ${rows ? `<table class="w-full text-left"><thead><tr class="text-slate-400"><th>Unknown host</th><th>Open ports</th><th>Last seen</th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="italic text-slate-400">No unknown hosts found yet.</p>'}`;
+            <span>${state} · ${Number(d.found || 0)} host(s) found · ${d.total ? `Progress ${pct}% of ${d.total} addresses · cycles ${d.cycles || 0}` : 'No supernet space to sweep yet'}${d.last_status ? ` · last: ${escapeHtml(d.last_status)}` : ''}${d.last_error ? ` (${escapeHtml(d.last_error)})` : ''}</span></div>
+            <div id="nwt-gw" class="mb-3 p-2 rounded bg-slate-50"></div>`;
         _nwtRenderGateway(document.getElementById('nwt-gw'), d.gateway || {});
     } catch (e) {
         box.textContent = 'Sweep status unavailable: ' + e.message;

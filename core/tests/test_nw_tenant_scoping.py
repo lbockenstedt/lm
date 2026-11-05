@@ -23,6 +23,7 @@ cannot run under the local 3.9 interpreter). Locks in:
   * POST /api/nw/{id}/config — admin-only; relays to the record's spoke.
 """
 import asyncio
+import time
 
 import pytest
 from fastapi import FastAPI
@@ -911,3 +912,41 @@ def test_sweep_on_shared_agent_never_records_another_tenants_hosts(monkeypatch, 
     asyncio.run(run())
     seen = hub.state.system_state["global_config"]["nw_seen_hosts"]["acme"]
     assert "10.9.3.7" in seen and "10.9.3.8" not in seen
+
+
+def test_sweep_skips_space_the_directed_scan_covers(monkeypatch, tmp_path):
+    _client, hub = _build(monkeypatch, tmp_path)
+
+    async def prefixes(_hub, _tid):
+        return ["10.9.0.0/22", "10.9.0.0/24", "10.9.1.0/24"]  # leaves: .0 and .1
+    monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", prefixes)
+    gc = hub.state.system_state["global_config"]
+    gc["nw_scan"] = {"subnets": ["10.9.2.0/24"]}                 # saved scan subnet
+    gc["nw_seen_hosts"] = {"acme": {"10.9.3.9": {"address": "10.9.3.9", "last_seen": time.time()}}}
+
+    async def rr(spoke_id, cmd, data, timeout=30.0):
+        hub.calls.append((spoke_id, cmd, data))
+        if cmd == "NW_PING_SWEEP":
+            return {"payload": {"data": {"status": "SUCCESS", "alive": [
+                t for t in data["targets"] if t == "10.9.3.7"]}}}
+        return {"payload": {"data": {"status": "SUCCESS", "reachable": [
+            {"address": t, "reachable": True} for t in data.get("targets") or []]}}}
+    hub.request_response = rr
+    for name in ("get_dns_spoke_for_tenant", "get_dhcp_spoke_for_tenant",
+                 "get_cppm_spoke_for_tenant"):
+        setattr(hub, name, lambda *_a, **_k: None)
+
+    async def run():
+        await hub.run_nw_sweep_step("acme", force=True)  # gateway pass
+        hub.calls.clear()
+        await hub.run_nw_sweep_step("acme", force=True)  # host sweep
+    asyncio.run(run())
+    pinged = next(d for _s, c, d in hub.calls if c == "NW_PING_SWEEP")["targets"]
+    assert pinged and all(t.startswith("10.9.3.") for t in pinged)
+    assert "10.9.3.9" not in pinged
+
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = _client.get("/api/nw/sweep?tenant=acme", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["found"] == 1 and body["running"] is False and "discovered" not in body
