@@ -3335,6 +3335,41 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Built by the service from cached telemetry.
         return await service.get_central_on_prem_data(tenant_id)
 
+    @app.get("/sim/api/aggregate/compliance")
+    async def get_compliance(tenant_id: str = Depends(get_tenant_id)):
+        """Check compliance for leadership: % of graded polls that were OK, per
+        check (all sites combined) and overall, for the rolling week / month /
+        quarter / year, the last 12 calendar months and 4 quarters (UTC), plus a
+        24-hour hourly bar and flap count. Combines Central, Central On-Prem and
+        Mist; distributed spokes contribute their relayed daily history."""
+        from .central_hub_poller import build_compliance
+        sources = (("Central", "central_hub_poller", "central"),
+                   ("Central On-Prem", "central_on_prem_hub_poller", "central_on_prem"),
+                   ("Mist", "mist_hub_poller", "mist"))
+        relayed = list(service._spokes_for_tenant(tenant_id))
+        raw: Dict[str, Dict[str, Any]] = {}
+        for product, poller_attr, relay_key in sources:
+            health = getattr(getattr(hub, poller_attr, None), "_health", None)
+            hub_rows = health.compliance_raw(tenant_id) if health else {}
+            for check, row in hub_rows.items():
+                raw[f"{product}\x1f{check}"] = {**row, "check": check, "product": product}
+            # Distributed spokes relay daily buckets only (no hourly bar / flaps).
+            for _sid, data in relayed:
+                sp = ((data or {}).get(relay_key) or {}).get("health") or {}
+                for site, checks in sp.items():
+                    for check, dlist in (checks or {}).items():
+                        if check in hub_rows:
+                            continue
+                        row = raw.setdefault(f"{product}\x1f{check}", {
+                            "check": check, "product": product, "sites": set(),
+                            "hours": {}, "days": {}, "flaps": None})
+                        row["sites"].add(site)
+                        for d in dlist or []:
+                            cell = row["days"].setdefault(int(d.get("d", 0)), [0, 0, 0, 0])
+                            for i, k in enumerate("owen"):
+                                cell[i] += int(d.get(k, 0) or 0)
+        return build_compliance(raw)
+
     @app.get("/sim/api/aggregate/central-on-prem-health")
     async def get_central_on_prem_health(request: Request,
                                           tenant_id: str = Depends(get_tenant_id)):
