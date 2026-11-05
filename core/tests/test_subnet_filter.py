@@ -609,3 +609,82 @@ def test_owned_record_attributed_to_owner_not_prefix(monkeypatch):
     plain = {"ip": "10.5.0.2"}
     buckets, dropped = asyncio.run(_access.attribute_by_prefix(None, [owned, plain]))
     assert buckets == {"central": [owned], "dxp": [plain]} and dropped == 0
+
+
+# ── Own spoke of a module type → out of the shared environment ──────────────
+# Once a tenant owns a spoke of a type, the shared spokes of that type are
+# hidden from it entirely (never IP-routed). Others keep IP routing.
+
+def _left_shared_hub(**tenants):
+    hub = _owned_hub()
+    hub.state._spoke_tenants.update(tenants)
+    hub.spoke_module_types = {"cen-spoke": "nac", "shr-spoke": "cppm",
+                              **{sid: "nac" for sid in tenants}}
+    return hub
+
+
+def test_own_spoke_hides_shared_spoke_of_same_type_even_when_ip_matches():
+    out = _filter_as(_left_shared_hub(), "central", "shr-spoke")
+    assert out["sessions"] == []
+
+
+def _filter_rows(hub, tenant, spoke):
+    data = {"sessions": [{"ip": "10.5.0.1"}, {"ip": "192.0.2.1"}]}
+    return asyncio.run(filter_tenant(hub, {"a": _admin_session()}, _QSRequest("a"),
+                                     data, "nac", ["ip"],
+                                     explicit_tenant=tenant, spoke_id=spoke))["sessions"]
+
+
+def test_tenant_without_own_spoke_still_sees_ip_routed_shared_data():
+    assert _filter_rows(_left_shared_hub(), "dxp", "shr-spoke") == [{"ip": "10.5.0.1"}]
+
+
+def test_shared_spoke_of_other_type_still_ip_filtered_for_owner():
+    hub = _left_shared_hub()
+    hub.spoke_module_types["shr-spoke"] = "nw"
+    assert _filter_as(hub, "central", "shr-spoke")["sessions"] == [{"ip": "10.21.16.9"}]
+
+
+def test_offline_own_spoke_counts_via_module_metadata():
+    hub = _owned_hub()
+    hub.spoke_module_types = {"shr-spoke": "nac"}
+    hub.state.system_state["module_metadata"] = {
+        "cen-spoke": {"tenant_id": "central", "module_type": "cppm"}}
+    assert _filter_as(hub, "central", "shr-spoke")["sessions"] == []
+
+
+def test_admin_without_selection_sees_shared_spoke_data():
+    assert _filter_as(_left_shared_hub(), None, "shr-spoke") == _owned_data()
+
+
+def test_group_member_owning_type_does_not_cut_group_or_other_members(monkeypatch):
+    monkeypatch.setitem(_access._GROUP_MEMBERS, "group:g1", {"central", "dxp"})
+    hub = _left_shared_hub()
+    assert _access.tenant_has_own_spoke(hub, "central", "nac")
+    assert not _access.tenant_has_own_spoke(hub, "group:g1", "nac")
+    assert not _access.tenant_has_own_spoke(hub, "dxp", "nac")
+    assert _filter_rows(hub, "dxp", "shr-spoke") == [{"ip": "10.5.0.1"}]
+    assert _access.tenant_has_own_spoke(_left_shared_hub(**{"g-spoke": "group:g1"}),
+                                        "group:g1", "nac")
+
+
+def test_own_firewall_hides_shared_firewalls():
+    hub = _left_shared_hub()
+    hub.state.system_state["global_config"] = {"firewalls": [
+        {"id": "fw-c", "tenant_id": "central", "spoke_id": "shr-spoke"},
+        {"id": "fw-s", "tenant_id": "shared", "spoke_id": "shr-spoke"}]}
+    assert _access.tenant_has_own_firewall(hub, "central")
+    assert not _access.tenant_has_own_firewall(hub, "dxp")
+    assert _access._shared_spoke_masked(hub, "shr-spoke", "central", firewall_id="fw-s")
+    assert not _access._shared_spoke_masked(hub, "shr-spoke", "dxp", firewall_id="fw-s")
+
+
+def test_scoped_spoke_of_type_never_falls_back_to_shared():
+    hub = _left_shared_hub()
+    hub.active_connections = {"shr-spoke"}
+    hub.approved_modules = {"shr-spoke": True, "cen-spoke": True}
+    hub.get_spoke_by_type = lambda t: "shr-spoke"
+    assert _access.scoped_spoke_of_type(hub, "central", "nac") is None
+    assert _access.scoped_spoke_of_type(hub, "dxp", "nac") == "shr-spoke"
+    hub.active_connections.add("cen-spoke")
+    assert _access.scoped_spoke_of_type(hub, "central", "nac") == "cen-spoke"

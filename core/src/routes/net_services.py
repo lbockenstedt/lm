@@ -295,7 +295,7 @@ def register(app, hub, ctx):
         if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
             return spoke_id
         resolved = hub.get_dns_spoke_for_tenant(tid)
-        if not resolved:
+        if not resolved and not access.tenant_has_own_spoke(hub, tid, "dns"):
             resolved = hub.get_dns_spoke_for_shared()
         return spoke_or_503(resolved, "DNS")
 
@@ -1202,7 +1202,8 @@ def register(app, hub, ctx):
             return None
         insts = (hub.state.system_state.get("global_config", {}) or {}).get("dns_instances", []) or []
         inst = next((i for i in insts if isinstance(i, dict) and i.get("tenant_id") == tid), None)
-        if (inst or {}).get("spoke_id") or hub.get_dns_spoke_for_tenant(tid):
+        if ((inst or {}).get("spoke_id") or hub.get_dns_spoke_for_tenant(tid)
+                or access.tenant_has_own_spoke(hub, tid, "dns")):
             return "dedicated"
         return None
 
@@ -2691,6 +2692,13 @@ def register(app, hub, ctx):
             prefixes = await access.resolve_prefixes(hub, sess)
             if not prefixes:
                 prefixes = []
+        # A tenant with its own LE spoke no longer sees the shared LE spoke's
+        # certs: only certs explicitly owned by it remain.
+        _vt = access._norm_tenant_id(tid if explicit_scope else _effective_tenant(request, None))
+        _le_sid = hub.get_spoke_by_type("certificates")
+        shared_hidden = (access.tenant_left_shared(hub, _vt, "certificates")
+                         and access._norm_tenant_id(access.spoke_owner_tenant(hub, _le_sid)) != _vt)
+
         import ipaddress
         nets = []
         for p in prefixes:
@@ -2699,10 +2707,13 @@ def register(app, hub, ctx):
             except ValueError:
                 continue
         tenant_hosts, any_source = await _dns_hosts(nets) if nets else (set(), True)
-        if nets and not any_source:
+        if nets and not any_source and not shared_hidden:
             return data  # both DNS sources unreachable → fail open
 
         def _match(cert):
+            if shared_hidden:
+                return _vt in {access._norm_tenant_id(t)
+                               for t in _lca.get_tenants(hub, cert.get("domain"))}
             # Explicit per-cert tenant ownership takes precedence: an owned or
             # shared cert is always visible; a cert owned by OTHER tenants only
             # is hidden — regardless of DNS. Certs with no explicit owners fall
@@ -3717,7 +3728,7 @@ def register(app, hub, ctx):
         if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
             return spoke_id
         resolved = hub.get_dhcp_spoke_for_tenant(tid)
-        if not resolved:
+        if not resolved and not access.tenant_has_own_spoke(hub, tid, "dhcp"):
             resolved = hub.get_dhcp_spoke_for_shared()
         return spoke_or_503(resolved, "DHCP")
 
@@ -3734,7 +3745,8 @@ def register(app, hub, ctx):
         instances = (hub.state.system_state.get("global_config", {}) or {}).get("dhcp_instances", []) or []
         if any(isinstance(i, dict) and i.get("tenant_id") == tid for i in instances):
             return False
-        return not hub.get_dhcp_spoke_for_tenant(tid)
+        return not (hub.get_dhcp_spoke_for_tenant(tid)
+                    or access.tenant_has_own_spoke(hub, tid, "dhcp"))
 
     # Hub-side routing keys the merge fanout adds to each row. They must never
     # be relayed on to a spoke, which knows nothing about them.
@@ -3858,6 +3870,11 @@ def register(app, hub, ctx):
                 raise HTTPException(
                     status_code=403,
                     detail="that DHCP spoke belongs to another tenant")
+            if not access.spoke_owner_tenant(hub, requested) \
+                    and access.tenant_has_own_spoke(hub, tid, "dhcp"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="this tenant uses its own DHCP spoke, not the shared one")
         return requested
 
     async def _discover_dhcp_workers_for_spoke(dhcp_spoke: str):

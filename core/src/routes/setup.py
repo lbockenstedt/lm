@@ -2521,4 +2521,10 @@ def register(app, hub, ctx):
         if not _is_admin(sess):
             firewalls = [f for f in firewalls
                          if _spoke_visible(sess, (f or {}).get("tenant_id", ""))]
+            # A tenant with its own firewall no longer sees the shared ones.
+            import access
+            tid = access.request_effective_tenant(sess, request)
+            if access.tenant_has_own_firewall(hub, tid):
+                firewalls = [f for f in firewalls
+                             if access.firewall_owner_tenant(hub, (f or {}).get("id"))]
         return {"firewalls": firewalls}

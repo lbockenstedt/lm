@@ -214,6 +214,7 @@ def _build(monkeypatch, tmp_path, shared=False, gc_extra=None):
     tenant_state = {"tenants": {
         "acme": {"netbox_tenant_slug": "acme"},
         "othercorp": {"netbox_tenant_slug": "othercorp"},
+        "beta": {"netbox_tenant_slug": "beta"},   # no nw spoke of its own
     }}
     if shared:
         monkeypatch.setattr(access_mod, "_SHARED_TENANT_ID", "shared")
@@ -287,14 +288,17 @@ def test_list_admin_sees_all_devices(monkeypatch, tmp_path):
 
 def test_list_admin_acting_as_tenant_scopes_to_that_tenant(monkeypatch, tmp_path):
     """Tenant selector: a Global Admin with an explicit ``?tenant=acme`` sees
-    ONLY acme + shared devices — NOT othercorp's (the cross-tenant leak the
-    selector is supposed to close). Mirrors the Simulations behavior."""
+    ONLY acme's devices — NOT othercorp's, and not the shared ones either
+    (acme has its own nw spoke). A tenant without its own nw spoke (beta)
+    still sees the shared devices."""
     c, hub = _build(monkeypatch, tmp_path, shared=True)
     tok = _mint(hub, "admin", tenants=[], admin=True)
     r = c.get("/api/nw/devices?tenant=acme", cookies={"lm_session": tok})
     assert r.status_code == 200, r.text
     ids = {d["id"] for d in r.json()["data"]}
-    assert ids == {"acme-sw", "shared-sw"}   # NOT other-sw
+    assert ids == {"acme-sw"}   # NOT other-sw, NOT shared-sw
+    r = c.get("/api/nw/devices?tenant=beta", cookies={"lm_session": tok})
+    assert {d["id"] for d in r.json()["data"]} == {"shared-sw"}
 
 
 def test_list_admin_default_tenant_is_scoped_not_global(monkeypatch, tmp_path):
@@ -326,7 +330,8 @@ def test_list_admin_acting_as_empty_tenant_is_empty_not_fleet(monkeypatch, tmp_p
 
 def test_list_offline_cache_admin_acting_as_tenant_scoped(monkeypatch, tmp_path):
     """Offline cache path also honors the selector: an admin acting-as acme is
-    served the whole-fleet cache TENANT-FILTERED to acme + shared."""
+    served the whole-fleet cache TENANT-FILTERED to acme only (acme has its
+    own nw spoke, so the shared devices are hidden)."""
     c, hub = _build(monkeypatch, tmp_path, shared=True)
     asyncio.get_event_loop().run_until_complete(
         hub.nw_cache_set_fleet({"status": "SUCCESS",
@@ -336,17 +341,22 @@ def test_list_offline_cache_admin_acting_as_tenant_scoped(monkeypatch, tmp_path)
     r = c.get("/api/nw/devices?tenant=acme", cookies={"lm_session": tok})
     assert r.status_code == 200, r.text
     ids = {d["id"] for d in r.json()["data"]}
-    assert ids == {"acme-sw", "shared-sw"}   # NOT other-sw
+    assert ids == {"acme-sw"}   # NOT other-sw, NOT shared-sw
 
 
 def test_list_non_admin_sees_own_plus_shared_only(monkeypatch, tmp_path):
-    """An acme user sees acme + shared; othercorp's device never surfaces."""
+    """An acme user (own nw spoke) sees acme only; a beta user (no own nw
+    spoke) sees the shared devices; othercorp's device never surfaces."""
     c, hub = _build(monkeypatch, tmp_path, shared=True)
     tok = _mint(hub, "acme-user", tenants=["acme"], rights=("nw",))
     r = c.get("/api/nw/devices", cookies={"lm_session": tok})
     assert r.status_code == 200, r.text
     ids = {d["id"] for d in r.json()["data"]}
-    assert ids == {"acme-sw", "shared-sw"}     # NOT other-sw
+    assert ids == {"acme-sw"}     # NOT other-sw, NOT shared-sw
+    tok = _mint(hub, "beta-user", tenants=["beta"], rights=("nw",))
+    r = c.get("/api/nw/devices", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    assert {d["id"] for d in r.json()["data"]} == {"shared-sw"}
 
 
 def test_list_non_admin_no_shared_tenant_excludes_shared(monkeypatch, tmp_path):
@@ -395,7 +405,7 @@ def test_list_offline_cache_filtered_for_non_admin_no_leak(monkeypatch, tmp_path
     body = r.json()
     assert body.get("stale") is True
     ids = {d["id"] for d in body["data"]}
-    assert ids == {"acme-sw", "shared-sw"}   # NOT other-sw (no leak)
+    assert ids == {"acme-sw"}   # NOT other-sw (no leak), NOT shared-sw (own spoke)
 
 
 def test_list_offline_cache_admin_sees_all(monkeypatch, tmp_path):
@@ -469,7 +479,7 @@ def test_get_device_shared_relays_to_shared_spoke(monkeypatch, tmp_path):
     """A shared device resolves to the shared-tenant spoke and is visible to a
     non-admin (shared-tenant-flag invariant)."""
     c, hub = _build(monkeypatch, tmp_path, shared=True)
-    tok = _mint(hub, "acme-user", tenants=["acme"], rights=("nw",))
+    tok = _mint(hub, "beta-user", tenants=["beta"], rights=("nw",))
     r = c.get("/api/nw/shared-sw/arp", cookies={"lm_session": tok})
     assert r.status_code == 200, r.text
     relay_calls = [cl for cl in hub.calls if cl[1] == "NW_GET_ARP"]
@@ -481,11 +491,19 @@ def test_get_device_shared_scope_applies_subnet_filter(monkeypatch, tmp_path):
     table to the viewer's in-prefix rows (10.0.0.0/24); the out-of-prefix
     192.168.1.x row (another tenant's subnet on shared infra) is dropped."""
     c, hub = _build(monkeypatch, tmp_path, shared=True)
-    tok = _mint(hub, "acme-user", tenants=["acme"], rights=("nw",))
+    tok = _mint(hub, "beta-user", tenants=["beta"], rights=("nw",))
     r = c.get("/api/nw/shared-sw/arp", cookies={"lm_session": tok})
     assert r.status_code == 200, r.text
     ips = {row["ip"] for row in r.json()["data"]}
     assert ips == {"10.0.0.5"}   # filtered to acme's prefixes; 192.168.1.5 dropped
+
+
+def test_get_device_shared_is_403_for_tenant_with_own_nw_spoke(monkeypatch, tmp_path):
+    c, hub = _build(monkeypatch, tmp_path, shared=True)
+    tok = _mint(hub, "acme-user", tenants=["acme"], rights=("nw",))
+    r = c.get("/api/nw/shared-sw/arp", cookies={"lm_session": tok})
+    assert r.status_code == 403
+    assert not [cl for cl in hub.calls if cl[1] == "NW_GET_ARP"]
 
 
 def test_get_device_offline_serves_filtered_cache(monkeypatch, tmp_path):
@@ -497,7 +515,7 @@ def test_get_device_offline_serves_filtered_cache(monkeypatch, tmp_path):
         hub.nw_cache_set_device("shared-sw", "arp",
                                 {"status": "SUCCESS", "data": _ARP_ACME}))
     hub.active_connections = {"ipam-spoke"}   # nw spokes offline
-    tok = _mint(hub, "acme-user", tenants=["acme"], rights=("nw",))
+    tok = _mint(hub, "beta-user", tenants=["beta"], rights=("nw",))
     r = c.get("/api/nw/shared-sw/arp", cookies={"lm_session": tok})
     assert r.status_code == 200, r.text
     body = r.json()
