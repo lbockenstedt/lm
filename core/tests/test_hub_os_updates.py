@@ -1008,6 +1008,22 @@ async def test_a_failed_snapshot_means_the_node_is_not_patched():
     assert not [s for s in hub.sent if s[1] == "OS_UPDATE_APPLY"]
     item = hub._osu_state()["run"]["items"][0]
     assert item["status"] == "failed" and "storage full" in item["message"]
+    assert item["cause"] == "pre-patch VM snapshot failed: storage full"
+
+
+@pytest.mark.asyncio
+async def test_a_node_whose_spoke_went_offline_names_the_spoke_as_the_cause():
+    hub = _checked_hub()
+    await hub.osu_check_fleet(refresh=False)
+
+    async def _offline(target, cmd, data, timeout=None):
+        raise ConnectionError("spoke not connected")
+    hub.request_response = _offline
+    hub.active_connections.clear()
+    await hub.osu_apply_fleet(node_keys=["agent:guid-123"])
+    await _drain()
+    item = hub._osu_state()["run"]["items"][0]
+    assert item["status"] == "failed" and item["cause"] == "spoke Spoke One is offline"
 
 
 @pytest.mark.asyncio
