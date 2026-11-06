@@ -184,9 +184,11 @@ That is why the sim↔site linkage is **PXMX-server-based, not bucket-based**: l
 
 Three candidate Dashboard tabs for leadership reporting. All three read one endpoint, `GET /sim/api/aggregate/compliance`, so any of them can be kept or dropped. **Compliance** means the share of graded polls where a check was OK. Polls with no data are left out. Checks are combined across sites, and Central, Central On-Prem and Mist are shown together.
 
-- **Compliance:** a scorecard. It shows the rolling week, month (30d), quarter (90d) and year (365d), each compared with the previous period of the same length. Below that are a 12-month bar chart, the last 4 quarters, and the checks under 99% this month.
+- **Compliance:** a scorecard. It shows the rolling week, month (30d), quarter (90d) and year (365d), each compared with the previous period of the same length. Below that are a 12-month bar chart, the last 4 quarters, and a table of every check with its week / month / quarter / year %, worst month first.
 - **Compliance by Check:** one row per check. It has a 24-hour bar with one cell per hour (green = all OK, amber = mixed or flapping, red = mostly failing, grey = no data), a **Flaps** count (status changes between consecutive polls in the last 24h), and 24h / 7d / 30d / 90d / 1y scores.
 - **Compliance Heatmap:** checks against the last 12 calendar months, plus a year column.
+
+**Email.** Setup → Notifications → Reports sends the **Compliance** view by email (`build_report` in `core/src/simulations/email_report.py`). It uses the same data (`gather_compliance` in `central_hub_poller.py`) and shows the period cards, 12-month bars, quarters and the all-checks table as inline-styled tables. The subject line carries the month's %. Client Count is an optional second section.
 
 **Storage.** Each check-health history (`CheckHealthHistory` in `core/src/simulations/central_hub_poller.py`) now also keeps a daily store, `<name>_daily.json`, for 400 days. The store also holds the last 24h of status flips. The first time a check is loaded, its daily store is back-filled from the 30-day hourly history, so a year of history builds up from that point. Months and quarters are UTC calendar periods. Distributed spokes relay only daily buckets, so their checks have scores but no hourly bar or flap count.
 

@@ -1,8 +1,8 @@
-"""Scheduled email health report.
+"""Scheduled email compliance report.
 
-Renders the SAME data the WebUI shows on Dashboard → Checks and Client Count as
-email-safe, inline-styled HTML (flexbox / <style> are stripped by many mail
-clients, so everything is inline + table-based) and sends it via the tenant's own
+Renders the SAME data the WebUI shows on Dashboard → Compliance (and optionally
+Client Count) as email-safe, inline-styled HTML (flexbox / <style> are stripped
+by many mail clients, so everything is inline + table-based) and sends it via the tenant's own
 SMTP settings (the notifications config). Per-tenant enable/disable + section
 toggles + schedule live in ``store.get_email_report``. A background loop
 (``run_loop``, started from main.py) fires each due report once per period.
@@ -38,10 +38,6 @@ _PILL = {
     "error": ("Failing", "#fdeaea", "#c0322a"),
     "no_data": ("No data", "#eef2f1", "#5c6b65"),
 }
-# Strip cell colors indexed 0..3 by _strip below.
-_HCOLOR = ("#10b981", "#f59e0b", "#ef4444", "#e2e8f0")  # ok / warn / err / none
-# Sort order so failing checks are listed first.
-_RANK = {"error": 0, "warning": 1, "ok": 2}  # worst-first ordering
 
 
 def _esc(s: Any) -> str:
@@ -56,23 +52,6 @@ def _pill(status: str) -> str:
     return (f'<span style="display:inline-block;font-family:Arial,sans-serif;font-size:11px;'
             f'font-weight:bold;text-transform:uppercase;color:{fg};background:{bg};'
             f'padding:2px 9px;border-radius:10px;white-space:nowrap">{label}</span>')
-
-
-def _strip(daily: List[Dict[str, Any]]) -> str:
-    """30-day green/yellow/red strip as a fixed cell table (email-safe)."""
-    # Pad the left with empty grey cells when fewer than 30 days of history exist.
-    cells = ['<td style="background:#eef2f6;width:5px;height:14px;font-size:0;line-height:0">&nbsp;</td>'
-             for _ in range(max(0, 30 - len(daily)))]
-    # Add one colored cell per day for the most recent 30 days.
-    for d in (daily or [])[-30:]:
-        # Day counts of error / warning / ok samples.
-        e, w, o = int(d.get("e", 0)), int(d.get("w", 0)), int(d.get("o", 0))
-        # Pick the worst state seen that day: error > warning > ok > no data.
-        idx = 2 if e else (1 if w else (0 if o else 3))
-        cells.append(f'<td style="background:{_HCOLOR[idx]};width:5px;height:14px;font-size:0;line-height:0">&nbsp;</td>')
-    # Wrap the cells in a single-row table, which every mail client renders.
-    return ('<table role="presentation" cellpadding="0" cellspacing="1" border="0" '
-            f'style="border-collapse:separate"><tr>{"".join(cells)}</tr></table>')
 
 
 def _num(v: Any) -> str:
@@ -107,10 +86,9 @@ def _html_to_text(html: str) -> str:
 
 async def build_report(hub, service: SimulationsService, tenant_id: str,
                        cfg: Dict[str, Any]) -> Tuple[str, str]:
-    """Return (subject, html) for the tenant's report per ``cfg['sections']``."""
-    # Default to including both sections when the config does not say.
+    """Return (subject, html) for the tenant's report per ``cfg['sections']``.
+    ``checks`` = the Dashboard → Compliance view; ``clients`` = Client Count."""
     sections = cfg.get("sections") or {"checks": True, "clients": True}
-    # Prefer the tenant's display name in the report; fall back to the id.
     tenant_name = tenant_id
     try:
         t = (hub.state.tenant_state or {}).get("tenants", {}).get(tenant_id) or {}
@@ -119,149 +97,38 @@ async def build_report(hub, service: SimulationsService, tenant_id: str,
     except Exception:  # noqa: BLE001
         pass
 
-    # Latest Central data for every spoke of this tenant.
-    data = await service.get_central_data(tenant_id)
-    # Flatten per-spoke check statuses and client-count rows into simple lists.
-    checks: List[Dict[str, Any]] = []
-    ccrows: List[Dict[str, Any]] = []
-    for s in (data.get("spokes") or []):
-        # Each spoke reports a status map: site -> check id -> info.
-        cst = s.get("central_status") or {}
-        # One row per site/check, with status normalised to lowercase.
-        for site, cmap in (cst.get("status") or {}).items():
-            for cid, info in (cmap or {}).items():
-                if isinstance(info, dict):
-                    checks.append({"site": site, "check": cid,
-                                   "status": str(info.get("status") or "no_data").lower()})
-        # One client-count row per site.
-        for site, entry in (cst.get("client_count_status") or {}).items():
-            if isinstance(entry, dict):
-                ccrows.append({"site": site, **entry})
-
-    # 30-day health (centralized hub poller + relayed distributed spokes)
-    # Per-site/check daily history and success percentages for the report.
-    health: Dict[str, Dict[str, Any]] = {}
-    success: Dict[str, Dict[str, Any]] = {}
-    # The hub's central poller (if running) keeps the 30-day health history.
-    hh = getattr(getattr(hub, "central_hub_poller", None), "_health", None)
-    if hh is not None:
-        # Read centrally-polled history; failures leave it empty instead of breaking the report.
-        try:
-            health = dict(hh.summary(tenant_id) or {})
-        except Exception:  # noqa: BLE001
-            health = {}
-        # Read centrally-polled success percentages, also failure-tolerant.
-        try:
-            success = dict(hh.success_stats(tenant_id) or {})
-        except Exception:  # noqa: BLE001
-            success = {}
-    # Merge history relayed by distributed spokes on top of the centralized history.
-    for _sid, sd in service._spokes_for_tenant(tenant_id):
-        sp = ((sd or {}).get("central") or {}).get("health") or {}
-        for site, cm in sp.items():
-            health.setdefault(site, {}).update(cm)
-    # Success-% per check over 24h·7d·4w. Centralized = hourly-accurate; distributed
-    # checks (daily-only) fall back to their daily buckets so every row gets a score.
-    # Imported here to avoid a circular import at module load.
-    from .central_hub_poller import success_from_daily
-    # Fill in a success score from daily buckets for any check that has none yet.
-    for site, cm in health.items():
-        for cid, dlist in (cm or {}).items():
-            if success.get(site, {}).get(cid) is None:
-                success.setdefault(site, {})[cid] = success_from_daily(dlist)
-
-    # Sort worst status first, then by site and check name.
-    checks.sort(key=lambda r: (_RANK.get(r["status"], 3), r["site"], r["check"]))
-    # Headline totals for the summary chips and subject line.
-    n_fail = sum(1 for c in checks if c["status"] == "error")
-    n_warn = sum(1 for c in checks if c["status"] == "warning")
-    n_ok = sum(1 for c in checks if c["status"] == "ok")
-    n_clients = sum(int(r.get("current") or 0) for r in ccrows)
-    # Human-readable date for the header.
+    from .central_hub_poller import gather_compliance
+    comp = gather_compliance(hub, service, tenant_id)
+    month = (comp["overall"].get("d30") or {}).get("pct")
     today = datetime.datetime.now().strftime("%a, %b %d, %Y")
 
-    # ── HTML (inline styles only) ──────────────────────────────────────────
-    # Shared inline CSS snippets for headers and cells (mail clients ignore <style>).
+    # ── HTML (inline styles only; mail clients ignore <style>) ─────────────
     P = 'font-family:Arial,Helvetica,sans-serif'
     th = f'style="{P};font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;font-weight:bold;text-align:left;padding:6px 8px;border-bottom:1px solid #e8ecea"'
+    thr = th.replace("text-align:left", "text-align:right")
     td = f'style="{P};font-size:12px;color:#1f2937;padding:8px;border-bottom:1px solid #f0f2f1"'
     tdn = f'style="{P};font-size:12px;color:#1f2937;padding:8px;border-bottom:1px solid #f0f2f1;text-align:right"'
+    h2 = f'style="{P};font-size:13px;font-weight:bold;color:#1f2937;margin-bottom:8px"'
 
-    # The HTML body is assembled as a list of fragments and joined at the end.
     parts: List[str] = []
-    # Header block: title, date, tenant and the summary stat chips.
     parts.append(f'''
 <div style="background:#f5f7f6;padding:20px 0;{P}">
- <div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #e8ecea;border-radius:10px;overflow:hidden">
+ <div style="max-width:680px;margin:0 auto;background:#ffffff;border:1px solid #e8ecea;border-radius:10px;overflow:hidden">
   <div style="padding:20px 22px 16px;border-bottom:3px solid #01A982">
    <table role="presentation" width="100%"><tr>
-     <td style="{P};font-size:15px;font-weight:bold;color:#1f2937">◈ LM Health Report</td>
-     <td style="{P};font-size:11px;color:#6b7280;text-align:right">30 days ending<br><b>{today}</b></td>
+     <td style="{P};font-size:15px;font-weight:bold;color:#1f2937">◈ LM Compliance Report</td>
+     <td style="{P};font-size:11px;color:#6b7280;text-align:right">As of<br><b>{today}</b></td>
    </tr></table>
-   <div style="{P};font-size:19px;font-weight:bold;color:#1f2937;margin-top:12px">Simulation health — {_esc(tenant_name)}</div>
-   <div style="{P};font-size:12px;color:#6b7280;margin-top:2px">{len(ccrows)} site(s) monitored</div>
-  </div>
-  <table role="presentation" width="100%" style="background:#f5f7f6;border-bottom:1px solid #e8ecea"><tr>
-    <td style="padding:14px 22px">
-      {_stat(n_fail, "Failing", "#ef4444")}{_stat(n_warn, "Warning", "#b8860b")}{_stat(n_ok, "OK", "#10b981")}{_stat(n_clients, "Clients", "#1f2937")}
-    </td>
-  </tr></table>''')
+   <div style="{P};font-size:19px;font-weight:bold;color:#1f2937;margin-top:12px">Simulation compliance — {_esc(tenant_name)}</div>
+   <div style="{P};font-size:12px;color:#6b7280;margin-top:2px">Share of check polls that were OK · week, month, quarter and year</div>
+  </div>''')
 
-    # Dashboard Checks section, when enabled.
     if sections.get("checks", True):
-        # One table row per check with status pill, success percentages and 30-day strip.
-        rows = []
-        for c in checks:
-            # This check's daily history and success stats (empty when unknown).
-            daily = ((health.get(c["site"]) or {}).get(c["check"])) or []
-            sx = ((success.get(c["site"]) or {}).get(c["check"])) or {}
-            rows.append(f'<tr><td {td}><span style="font-family:monospace;font-size:11px;color:#374151">{_esc(c["site"])}</span></td>'
-                        f'<td {td}>{_esc(c["check"])}</td><td {td}>{_pill(c["status"])}</td>'
-                        f'<td {tdn}>{_pct(sx.get("h24"))}</td><td {tdn}>{_pct(sx.get("d7"))}</td><td {tdn}>{_pct(sx.get("w4"))}</td>'
-                        f'<td {td}>{_strip(daily)}</td></tr>')
-        # Section heading, table, rows (or a "no checks" row) and a color legend.
-        parts.append(f'''
-  <div style="padding:18px 22px 8px">
-   <div style="{P};font-size:13px;font-weight:bold;color:#1f2937;margin-bottom:8px">Dashboard Checks
-     <span style="font-weight:normal;color:#6b7280;font-size:11px">· {len(checks)} monitored · worst first · % = polls OK</span></div>
-   <table role="presentation" width="100%" style="border-collapse:collapse">
-     <tr><th {th}>Site</th><th {th}>Check</th><th {th}>Status</th><th {th} style="text-align:right">24h</th><th {th} style="text-align:right">7d</th><th {th} style="text-align:right">4w</th><th {th}>30-day trend</th></tr>
-     {"".join(rows) or f'<tr><td {td} colspan="7">No checks reported.</td></tr>'}
-   </table>
-   <div style="{P};font-size:10px;color:#6b7280;padding:8px 0 4px">
-     <span style="color:#10b981">■</span> firing (healthy) &nbsp; <span style="color:#f59e0b">■</span> degraded &nbsp;
-     <span style="color:#ef4444">■</span> not detected &nbsp; <span style="color:#cbd5e1">■</span> no data</div>
-  </div>''')
+        parts.append(_compliance_html(comp, P, th, thr, td, tdn, h2))
 
-    # Client Count section, when enabled.
     if sections.get("clients", True):
-        # One table row per site, sorted by name.
-        rows = []
-        for r in sorted(ccrows, key=lambda x: x.get("site_name") or x.get("site") or ""):
-            # Highlight a client-count drop in amber; otherwise grey.
-            drop = r.get("drop_pct")
-            dcol = "#b8860b" if (drop or 0) > 0 else "#6b7280"
-            rows.append(
-                f'<tr><td {td}><span style="font-family:monospace;font-size:11px;color:#374151">{_esc(r.get("site_name") or r.get("site"))}</span></td>'
-                f'<td {td}>{_pill(r.get("status") or "no_data")}</td>'
-                f'<td {tdn}><b>{_num(r.get("current"))}</b></td><td {tdn}>{_num(r.get("wired"))}</td>'
-                f'<td {tdn}>{_num(r.get("wireless"))}</td><td {tdn}>{_num(r.get("hourly_avg"))}</td>'
-                f'<td style="{P};font-size:12px;color:{dcol};padding:8px;border-bottom:1px solid #f0f2f1;text-align:right">{_num(drop)}{"%" if drop is not None else ""}</td>'
-                f'<td {tdn}>{_num(r.get("max_7day"))}</td><td {tdn}>{_num(r.get("max_30day"))}</td></tr>')
-        # Section heading, table header and rows (or a "no data" row).
-        parts.append(f'''
-  <div style="padding:8px 22px 8px">
-   <div style="{P};font-size:13px;font-weight:bold;color:#1f2937;margin-bottom:8px">Client Count
-     <span style="font-weight:normal;color:#6b7280;font-size:11px">· per site · last poll</span></div>
-   <table role="presentation" width="100%" style="border-collapse:collapse">
-     <tr><th {th}>Site</th><th {th}>Status</th><th {th} style="text-align:right">Current</th><th {th} style="text-align:right">Wired</th>
-       <th {th} style="text-align:right">Wireless</th><th {th} style="text-align:right">Hourly avg</th>
-       <th {th} style="text-align:right">Drop</th><th {th} style="text-align:right">7d peak</th><th {th} style="text-align:right">30d peak</th></tr>
-     {"".join(rows) or f'<tr><td {td} colspan="9">No client-count data.</td></tr>'}
-   </table>
-  </div>''')
+        parts.append(await _clients_html(service, tenant_id, P, th, td, tdn, h2))
 
-    # Footer explaining why the email was sent.
     parts.append(f'''
   <div style="padding:14px 22px 20px;border-top:1px solid #f0f2f1;background:#f5f7f6;{P};font-size:11px;color:#6b7280">
     Sent by <b>LM</b> because Email Reports is on for your tenant · manage in Setup → Notifications.
@@ -269,18 +136,151 @@ async def build_report(hub, service: SimulationsService, tenant_id: str,
  </div>
 </div>''')
 
-    # Subject line summarises failing/warning counts so it is useful in an inbox list.
-    subject = f"LM Health Report — {tenant_name} — {n_fail} failing, {n_warn} warning"
+    month_txt = f"{_fmt(month)}% this month" if month is not None else "no data yet"
+    subject = f"LM Compliance Report — {tenant_name} — {month_txt}"
     return subject, "".join(parts)
 
 
-def _stat(n: Any, label: str, color: str) -> str:
-    """Render one summary stat chip (big number with a small label)."""
-    return (f'<span style="display:inline-block;background:#ffffff;border:1px solid #e8ecea;border-radius:8px;'
-            f'padding:8px 12px;margin-right:8px;font-family:Arial,sans-serif">'
-            f'<span style="font-size:18px;font-weight:bold;color:{color}">{_esc(n)}</span>'
-            f'<span style="font-size:10px;text-transform:uppercase;color:#6b7280;display:block;margin-top:2px">{label}</span></span>')
+# (key, label, span) for the period cards and table columns.
+_WINDOWS = (("d7", "Week", "7 days"), ("d30", "Month", "30 days"),
+            ("d90", "Quarter", "90 days"), ("y1", "Year", "365 days"))
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
+
+def _fmt(v: Any) -> str:
+    """99.0 -> "99", 98.5 -> "98.5"."""
+    return str(int(v)) if float(v).is_integer() else str(v)
+
+
+def _color(v: Any) -> str:
+    """Green at >=99%, amber at >=95%, red below, grey when unknown."""
+    if v is None:
+        return "#cbd5e1"
+    return "#10b981" if v >= 99 else ("#f59e0b" if v >= 95 else "#ef4444")
+
+
+def _delta(cur: Any, prev: Any) -> str:
+    """"▲ 0.4 pts vs previous" line under a period card."""
+    if cur is None or prev is None:
+        return '<span style="color:#9ca3af">no previous period yet</span>'
+    d = round(cur - prev, 1)
+    if d == 0:
+        return '<span style="color:#6b7280">no change vs previous</span>'
+    col, arrow = ("#10b981", "▲") if d > 0 else ("#ef4444", "▼")
+    return f'<span style="color:{col}">{arrow} {_fmt(abs(d))} pts vs previous</span>'
+
+
+def _compliance_html(comp: Dict[str, Any], P: str, th: str, thr: str,
+                     td: str, tdn: str, h2: str) -> str:
+    """The Dashboard → Compliance view as email-safe HTML: period cards,
+    12-month bars, quarters and every check's % per period."""
+    o = comp["overall"]
+    cards = ""
+    for k, label, span in _WINDOWS:
+        w = o.get(k) or {}
+        pct = w.get("pct")
+        days = w.get("days") or 0
+        cover = f"based on {days} day{'' if days == 1 else 's'} of data" if days else "no data"
+        cards += (f'<td width="25%" valign="top" style="padding:4px"><div style="border:1px solid #e8ecea;border-radius:8px;padding:10px">'
+                  f'<div style="{P};font-size:10px;text-transform:uppercase;color:#6b7280;font-weight:bold">{label}'
+                  f' <span style="font-weight:normal;text-transform:none">· last {span}</span></div>'
+                  f'<div style="{P};font-size:24px;font-weight:bold;color:{_color(pct)};margin-top:4px">{_fmt(pct) + "%" if pct is not None else "—"}</div>'
+                  f'<div style="{P};font-size:10px;margin-top:2px">{_delta(pct, w.get("prev"))}</div>'
+                  f'<div style="{P};font-size:10px;color:#9ca3af;margin-top:2px">{cover}</div></div></td>')
+
+    # 12 vertical bars; bar height is the month's % of a 100px column.
+    bars, labels = "", ""
+    for m in comp["months"]:
+        pct = m.get("pct")
+        h = 0 if pct is None else max(2, int(round(pct)))
+        y, mo = m["m"].split("-")
+        bars += (f'<td valign="bottom" align="center" style="padding:0 2px;height:118px">'
+                 f'<div style="{P};font-size:9px;font-weight:bold;color:{_color(pct)}">{_fmt(pct) + "%" if pct is not None else ""}</div>'
+                 f'<div style="background:{_color(pct)};height:{h}px;line-height:{h}px;font-size:0;border-radius:3px 3px 0 0">&nbsp;</div></td>')
+        labels += f'<td align="center" style="{P};font-size:9px;color:#6b7280;padding-top:3px">{_MONTHS[int(mo) - 1]} {y[2:]}</td>'
+
+    quarters = "".join(
+        f'<td width="25%" align="center" style="padding:4px"><div style="border:1px solid #e8ecea;border-radius:8px;padding:8px">'
+        f'<div style="{P};font-size:11px;color:#6b7280;font-weight:bold">{_esc(q["q"])}</div>'
+        f'<div style="{P};font-size:16px;font-weight:bold;color:{_color(q.get("pct"))}">{_fmt(q["pct"]) + "%" if q.get("pct") is not None else "—"}</div></div></td>'
+        for q in comp["quarters"])
+
+    def row(name: str, sites: str, vals: List[Any], bold: bool = False) -> str:
+        bg = "background:#f5f7f6;font-weight:bold;" if bold else ""
+        return (f'<tr style="{bg}"><td {td}>{name}</td><td {tdn}>{sites}</td>'
+                + "".join(f"<td {tdn}>{_pct(v)}</td>" for v in vals) + "</tr>")
+
+    keys = [k for k, _, _ in _WINDOWS]
+    rows = row("Overall", "", [(o.get(k) or {}).get("pct") for k in keys], bold=True)
+    for c in comp["checks"]:
+        tag = (f'<span style="font-size:9px;text-transform:uppercase;color:#9ca3af">{_esc(c["product"])}</span> '
+               if c.get("product") else "")
+        rows += row(f'{tag}<span style="font-family:monospace;font-size:11px">{_esc(c["check"])}</span>',
+                    str(c.get("sites") or ""), [c.get(k) for k in keys])
+    heads = "".join(f"<th {thr}>{label}</th>" for _, label, _ in _WINDOWS)
+
+    since = ""
+    if comp.get("since"):
+        since = datetime.datetime.utcfromtimestamp(comp["since"]).strftime("%Y-%m-%d")
+        since = f"History starts {since}; longer periods fill in as data accumulates. "
+
+    return f'''
+  <div style="padding:16px 18px 4px">
+   <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>{cards}</tr></table>
+  </div>
+  <div style="padding:12px 22px 4px">
+   <div {h2}>Last 12 months</div>
+   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="table-layout:fixed"><tr>{bars}</tr><tr>{labels}</tr></table>
+  </div>
+  <div style="padding:12px 18px 4px">
+   <div {h2} style="padding-left:4px">Quarters</div>
+   <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>{quarters}</tr></table>
+  </div>
+  <div style="padding:12px 22px 8px">
+   <div {h2}>All checks <span style="font-weight:normal;color:#6b7280;font-size:11px">· worst month first</span></div>
+   <table role="presentation" width="100%" style="border-collapse:collapse">
+     <tr><th {th}>Check</th><th {thr}>Sites</th>{heads}</tr>
+     {rows}
+   </table>
+   <div style="{P};font-size:10px;color:#6b7280;padding:8px 0 4px">
+     <span style="color:#10b981">■</span> ≥ 99% &nbsp; <span style="color:#f59e0b">■</span> 95–99% &nbsp;
+     <span style="color:#ef4444">■</span> &lt; 95% &nbsp;·&nbsp; {since}Compliance = share of polls where the check was OK
+     (polls with no data are left out). Months and quarters are UTC calendar periods.</div>
+  </div>'''
+
+
+async def _clients_html(service: SimulationsService, tenant_id: str, P: str,
+                        th: str, td: str, tdn: str, h2: str) -> str:
+    """Client Count section: one row per site from the latest poll."""
+    data = await service.get_central_data(tenant_id)
+    ccrows: List[Dict[str, Any]] = []
+    for s in (data.get("spokes") or []):
+        for site, entry in ((s.get("central_status") or {}).get("client_count_status") or {}).items():
+            if isinstance(entry, dict):
+                ccrows.append({"site": site, **entry})
+    rows = []
+    for r in sorted(ccrows, key=lambda x: x.get("site_name") or x.get("site") or ""):
+        # Highlight a client-count drop in amber; otherwise grey.
+        drop = r.get("drop_pct")
+        dcol = "#b8860b" if (drop or 0) > 0 else "#6b7280"
+        rows.append(
+            f'<tr><td {td}><span style="font-family:monospace;font-size:11px;color:#374151">{_esc(r.get("site_name") or r.get("site"))}</span></td>'
+            f'<td {td}>{_pill(r.get("status") or "no_data")}</td>'
+            f'<td {tdn}><b>{_num(r.get("current"))}</b></td><td {tdn}>{_num(r.get("wired"))}</td>'
+            f'<td {tdn}>{_num(r.get("wireless"))}</td><td {tdn}>{_num(r.get("hourly_avg"))}</td>'
+            f'<td style="{P};font-size:12px;color:{dcol};padding:8px;border-bottom:1px solid #f0f2f1;text-align:right">{_num(drop)}{"%" if drop is not None else ""}</td>'
+            f'<td {tdn}>{_num(r.get("max_7day"))}</td><td {tdn}>{_num(r.get("max_30day"))}</td></tr>')
+    return f'''
+  <div style="padding:8px 22px 8px">
+   <div {h2}>Client Count
+     <span style="font-weight:normal;color:#6b7280;font-size:11px">· per site · last poll</span></div>
+   <table role="presentation" width="100%" style="border-collapse:collapse">
+     <tr><th {th}>Site</th><th {th}>Status</th><th {th} style="text-align:right">Current</th><th {th} style="text-align:right">Wired</th>
+       <th {th} style="text-align:right">Wireless</th><th {th} style="text-align:right">Hourly avg</th>
+       <th {th} style="text-align:right">Drop</th><th {th} style="text-align:right">7d peak</th><th {th} style="text-align:right">30d peak</th></tr>
+     {"".join(rows) or f'<tr><td {td} colspan="9">No client-count data.</td></tr>'}
+   </table>
+  </div>'''
 
 
 def _period_key(now: datetime.datetime, freq: str) -> str:
