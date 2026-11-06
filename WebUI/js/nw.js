@@ -28,7 +28,7 @@ function _nwSubViewTableHtml(subMenu, items, hideDevice) {
             const val = item[k] !== undefined && item[k] !== null && item[k] !== '' ? String(item[k]) : '-';
             if (k === 'device') return `<td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(val)}</td>`;
             if (k === 'status') {
-                const color = val === 'up' ? 'text-green-600' : 'text-slate-400';
+                const color = val === 'up' ? 'text-green-600' : 'text-slate-500';
                 return `<td class="px-4 py-3 font-mono text-xs ${color}">${escapeHtml(val)}</td>`;
             }
             return `<td class="px-4 py-3 text-slate-600 font-mono text-xs max-w-[200px] truncate" title="${escapeHtml(val)}">${escapeHtml(val)}</td>`;
@@ -37,7 +37,7 @@ function _nwSubViewTableHtml(subMenu, items, hideDevice) {
     }).join('');
     return `<div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
         <table class="w-full text-left text-sm">
-            <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}</tr></thead>
+            <thead class="bg-slate-100 text-slate-600 text-xs"><tr>${headers}</tr></thead>
             <tbody class="divide-y divide-slate-200">${rows}</tbody>
         </table>
     </div>`;
@@ -116,13 +116,13 @@ function _nwDetailHtml() {
     const transport = _NW_TRANSPORTS[dev.transport] || dev.transport || 'auto';
     const reachable = dev.reachable;
     const rcell = reachable === true || reachable === 'up'
-        ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">up</span>'
+        ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">up</span>'
         : reachable === false || reachable === 'down'
-            ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
-            : '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-amber-100 text-amber-700" title="Reachability unknown — the Network Devices spoke is offline, so up/down can\'t be probed">unknown</span>';
+            ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">down</span>'
+            : '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700" title="Reachability unknown — the Network Devices spoke is offline, so up/down can\'t be probed">unknown</span>';
     const cat = (window._nwView && window._nwView.category) || 'Devices';
     const tabs = _NW_DETAIL_TABS.map(t =>
-        `<button onclick="nwSelectDetailTab('${escJsAttr(t)}')" class="px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${t === st.activeTab ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}">${escapeHtml(t)}</button>`
+        `<button onclick="nwSelectDetailTab('${escJsAttr(t)}')" class="px-3 py-1.5 rounded-full text-xs font-bold transition-colors ${t === st.activeTab ? 'bg-brand/10 text-primary-text border border-brand' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}">${escapeHtml(t)}</button>`
     ).join('');
 
     let body;
@@ -133,7 +133,7 @@ function _nwDetailHtml() {
                  <button onclick="showNwConfigModal('${escJsAttr(dev.id)}','${escJsAttr(dev.name || dev.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>
                </div>`
             : '';
-        const metaRow = (k, v) => `<div class="flex justify-between py-1.5 border-b border-slate-100 last:border-0"><span class="text-xs text-slate-400 uppercase tracking-wider">${k}</span><span class="text-xs text-slate-700 font-mono">${v}</span></div>`;
+        const metaRow = (k, v) => `<div class="flex justify-between py-1.5 border-b border-slate-100 last:border-0"><span class="text-xs text-slate-500">${k}</span><span class="text-xs text-slate-700 font-mono">${v}</span></div>`;
         // Identity datums captured on poll (surfaced by the list route from the
         // warm per-device cache) — help positively ID the physical box.
         const idRow = (k, val) => val ? metaRow(k, escapeHtml(String(val))) : '';
@@ -154,7 +154,7 @@ function _nwDetailHtml() {
     } else {
         body = st.cache[st.activeTab] !== undefined
             ? st.cache[st.activeTab]
-            : `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${escapeHtml(st.activeTab)}…</div>`;
+            : `<div class="py-12 text-center text-slate-500 animate-pulse">Fetching ${escapeHtml(st.activeTab)}…</div>`;
     }
 
     return `<div class="space-y-3">
@@ -188,7 +188,7 @@ async function _nwLoadDetailTab(tab) {
             : (Array.isArray(data?.data) ? data.data : (Array.isArray(data?.payload?.data) ? data.payload.data : []));
         html = items.length
             ? _nwSubViewTableHtml(tab, items, true)
-            : `<div class="py-12 text-center text-slate-400 italic">No ${escapeHtml(tab)} on this device.</div>`;
+            : `<div class="py-12 text-center text-slate-500 italic">No ${escapeHtml(tab)} on this device.</div>`;
     } catch (err) {
         html = `<div class="py-12 text-center text-amber-600 italic">Could not load ${escapeHtml(tab)}: ${escapeHtml(err.message)}</div>`;
     }
@@ -263,12 +263,12 @@ function _nwAddressCell(it) {
     if (addrs.length <= 1) return escapeHtml(addrs[0] || '—');
     const others = addrs.filter(a => a !== it.address);
     return `${escapeHtml(it.address || addrs[0])}<details class="mt-0.5" onclick="event.stopPropagation()">
-        <summary class="cursor-pointer text-[10px] text-[#01A982] font-sans font-semibold select-none" title="This device was discovered at ${addrs.length} addresses — shown once">+${others.length} more</summary>
-        <div class="text-[10px] text-slate-500 leading-4">${others.map(a => escapeHtml(a)).join('<br>')}</div></details>`;
+        <summary class="cursor-pointer text-xs text-primary-text font-sans font-semibold select-none" title="This device was discovered at ${addrs.length} addresses — shown once">+${others.length} more</summary>
+        <div class="text-xs text-slate-500 leading-4">${others.map(a => escapeHtml(a)).join('<br>')}</div></details>`;
 }
 
 function _nwSerialCell(it) {
-    return it.serial ? `<span class="font-mono">${escapeHtml(String(it.serial))}</span>` : '<span class="text-slate-300">—</span>';
+    return it.serial ? `<span class="font-mono">${escapeHtml(String(it.serial))}</span>` : '<span class="text-slate-500">—</span>';
 }
 
 async function loadNwData(category) {
@@ -297,7 +297,7 @@ async function loadNwData(category) {
     }
     if (category !== 'Overview' && !CATEGORIES.includes(category)) category = 'Overview';
     window._nwDetail = null;
-    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Loading ${escapeHtml(category)}…</div>`;
+    container.innerHTML = `<div class="py-12 text-center text-slate-500 animate-pulse">Loading ${escapeHtml(category)}…</div>`;
 
     // Suppress the per-view "+ Add" action strip for nw (no add-from-view flow;
     // devices are managed on Setup → Network Devices).
@@ -323,9 +323,9 @@ async function loadNwData(category) {
             // ADMIN (default) tenant: the hub no longer accumulates every
             // tenant's devices — pick a specific tenant to see its fleet.
             container.innerHTML = `<div class="py-12 text-center space-y-3">
-                <svg class="w-10 h-10 mx-auto text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-3-4h.01M16 16h.01"/></svg>
+                <svg class="w-10 h-10 mx-auto text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-3-4h.01M16 16h.01"/></svg>
                 <p class="text-slate-600 text-sm font-semibold">Select a tenant to view its network devices</p>
-                <p class="text-slate-400 text-xs max-w-md mx-auto">The ADMIN (default) view no longer aggregates every tenant's devices. Choose a specific tenant from the tenant picker to see that tenant's fleet.</p>
+                <p class="text-slate-500 text-xs max-w-md mx-auto">The ADMIN (default) view no longer aggregates every tenant's devices. Choose a specific tenant from the tenant picker to see that tenant's fleet.</p>
             </div>`;
             return;
         }
@@ -370,15 +370,15 @@ function _renderNwOverview(devices, counts) {
     const unknown = total - up - down;
 
     if (!total) {
-        container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No network devices configured for this tenant. Add one in Setup → Network Devices.</div>`;
+        container.innerHTML = `<div class="py-12 text-center text-slate-500 italic">No network devices configured for this tenant. Add one in Setup → Network Devices.</div>`;
         return;
     }
 
     // Reachability stat cards (non-clickable summary).
     const stat = (label, n, valueCls) => `
         <div class="bg-white rounded-xl border border-slate-200 p-5">
-            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">${label}</p>
-            <p class="text-3xl font-bold ${valueCls || 'text-[#263040]'}">${n}</p>
+            <p class="text-xs font-bold text-slate-500 mb-2">${label}</p>
+            <p class="text-3xl font-bold ${valueCls || 'text-navy'}">${n}</p>
         </div>`;
     const statCards = `<div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
         ${stat('Total Devices', total)}
@@ -390,9 +390,9 @@ function _renderNwOverview(devices, counts) {
     // Per-category cards → click navigates to that category tab.
     const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'Other'];
     const catCard = c => `
-        <div onclick="setSubView('${c}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-[#01A982] hover:shadow-md transition-all" title="Filter network devices by ${c}">
-            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">${c}</p>
-            <p class="text-3xl font-bold text-[#263040]">${counts[c] || 0}</p>
+        <div onclick="setSubView('${c}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-brand hover:shadow-md transition-all" title="Filter network devices by ${c}">
+            <p class="text-xs font-bold text-slate-500 mb-2">${c}</p>
+            <p class="text-3xl font-bold text-navy">${counts[c] || 0}</p>
         </div>`;
     const catCards = `<div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
         ${CATEGORIES.map(catCard).join('')}
@@ -403,19 +403,19 @@ function _renderNwOverview(devices, counts) {
         const typeLabel = _NW_OBJECT_TYPES[it.object_type] || it.object_type || '—';
         const category  = _nwCategoryOf(it.object_type);
         const rcell = isUp(it)
-            ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">up</span>'
+            ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">up</span>'
             : isDown(it)
-                ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
-                : '<span class="text-slate-400 text-xs">—</span>';
+                ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">down</span>'
+                : '<span class="text-slate-500 text-xs">—</span>';
         return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer" title="View device details">
-            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${it.mac ? `<div class="text-[10px] font-mono font-normal text-slate-400 mt-0.5">${escapeHtml(String(it.mac))}</div>` : ''}</td>
+            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${it.mac ? `<div class="text-xs font-mono font-normal text-slate-500 mt-0.5">${escapeHtml(String(it.mac))}</div>` : ''}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(category)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${_nwSerialCell(it)}</td>
             <td class="px-4 py-3 text-slate-600 font-mono text-xs">${_nwAddressCell(it)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs" title="NetBox site of the prefix holding this address">${escapeHtml(it.site?.name || it.site?.slug || '—')}</td>
             <td class="px-4 py-3">${rcell}</td>
-            <td class="px-4 py-3 text-right"><span class="text-slate-300">›</span></td>
+            <td class="px-4 py-3 text-right"><span class="text-slate-500">›</span></td>
         </tr>`;
     }).join('');
     const headers = ['device', 'type', 'category', 'serial', 'address', 'site', 'reachable']
@@ -423,13 +423,13 @@ function _renderNwOverview(devices, counts) {
 
     container.innerHTML = `
         <div class="space-y-4">
-            <h3 class="text-base font-semibold text-[#263040] px-1">Fleet Overview
-                <span class="text-xs text-slate-400 font-normal">(${total} device${total === 1 ? '' : 's'} in this tenant)</span></h3>
+            <h3 class="text-base font-semibold text-navy px-1">Fleet Overview
+                <span class="text-xs text-slate-500 font-normal">(${total} device${total === 1 ? '' : 's'} in this tenant)</span></h3>
             ${statCards}
             ${catCards}
             <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
                 <table class="w-full text-left text-sm">
-                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}<th class="px-4 py-3"></th></tr></thead>
+                    <thead class="bg-slate-100 text-slate-600 text-xs"><tr>${headers}<th class="px-4 py-3"></th></tr></thead>
                     <tbody class="divide-y divide-slate-200">${rows}</tbody>
                 </table>
             </div>
@@ -645,10 +645,10 @@ function _nwTopoSvg(graph, view) {
         ({ nodes, edges } = _nwTopoGroupEndpoints(nodes, edges, view.epOpen));
     }
     if (!allNodes.length) {
-        return `<div class="py-12 text-center text-slate-400 italic">No devices in this tenant's topology yet.</div>`;
+        return `<div class="py-12 text-center text-slate-500 italic">No devices in this tenant's topology yet.</div>`;
     }
     if (!nodes.length) {
-        return `<div class="py-12 text-center text-slate-400 italic">No infrastructure devices found. Tick “Show endpoints” to see everything.</div>`;
+        return `<div class="py-12 text-center text-slate-500 italic">No infrastructure devices found. Tick “Show endpoints” to see everything.</div>`;
     }
     const colW = 240, rowH = 64, W0 = 900;
     const lay = _nwTopoLayout(nodes, edges, colW, rowH, collapsed);
@@ -829,7 +829,7 @@ async function _renderNwTopologyTab(opts) {
     if (!c) return;
     opts = opts || {};
     const infer = window._nwTopoInfer !== false;
-    c.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">${
+    c.innerHTML = `<div class="py-12 text-center text-slate-500 animate-pulse">${
         opts.refresh ? 'Gathering LLDP and MAC tables from every device…' : 'Building topology…'}</div>`;
 
     const qs = new URLSearchParams();
@@ -848,7 +848,7 @@ async function _renderNwTopologyTab(opts) {
     if (graph.select_tenant) {
         c.innerHTML = `<div class="py-12 text-center space-y-3">
             <p class="text-slate-600 text-sm font-semibold">Select a tenant to view its network topology</p>
-            <p class="text-slate-400 text-xs max-w-md mx-auto">A map is only coherent within one tenant's slice, so the ADMIN (default) view does not aggregate every tenant's devices. Choose a specific tenant from the tenant picker.</p>
+            <p class="text-slate-500 text-xs max-w-md mx-auto">A map is only coherent within one tenant's slice, so the ADMIN (default) view does not aggregate every tenant's devices. Choose a specific tenant from the tenant picker.</p>
         </div>`;
         return;
     }
@@ -879,9 +879,9 @@ async function _renderNwTopologyTab(opts) {
       <label class="flex items-center gap-1.5 text-xs text-slate-500" title="Include devices known only by a MAC address (hosts, VMs, phones). Off by default: the map shows infrastructure only.">
         <input type="checkbox" id="nw-topo-endpoints"> Show endpoints
       </label>
-      <button id="nw-topo-expand" class="px-2 py-1.5 text-xs font-semibold rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Expand all</button>
-      <button id="nw-topo-collapse" class="px-2 py-1.5 text-xs font-semibold rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Collapse all</button>
-      <button id="nw-topo-refresh" class="px-3 py-1.5 text-xs font-semibold rounded bg-[#01A982] text-white hover:bg-[#018f6f]">Refresh from devices</button>
+      <button id="nw-topo-expand" class="px-2 py-1.5 text-xs font-semibold rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50">Expand all</button>
+      <button id="nw-topo-collapse" class="px-2 py-1.5 text-xs font-semibold rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50">Collapse all</button>
+      <button id="nw-topo-refresh" class="px-3 py-1.5 text-xs font-semibold rounded-full bg-primary text-white hover:bg-[#018f6f]">Refresh from devices</button>
     </div>
   </div>
   <div class="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
@@ -893,12 +893,12 @@ async function _renderNwTopologyTab(opts) {
   </div>
   <div id="nw-topo-svg" class="border border-slate-200 rounded bg-white overflow-hidden">${_nwTopoSvg(graph, _nwTopoView())}</div>
   ${trunks ? `<div>
-    <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Trunk / uplink ports</h4>
-    <p class="text-xs text-slate-400 mb-2">These ports carry a whole downstream segment, so what is <em>directly</em> attached can't be inferred. Declare the link below if you know it.</p>
+    <h4 class="text-xs font-bold text-slate-500 mb-1">Trunk / uplink ports</h4>
+    <p class="text-xs text-slate-500 mb-2">These ports carry a whole downstream segment, so what is <em>directly</em> attached can't be inferred. Declare the link below if you know it.</p>
     <table class="w-full text-left"><tbody>${trunks}</tbody></table></div>` : ''}
   ${canEditTopo ? `<div class="border-t border-slate-200 pt-4 space-y-3">
-    <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider">Devices that don't speak LLDP</h4>
-    <p class="text-xs text-slate-400">Declare gear the fleet can't discover (unmanaged switches, media converters, PDUs, cameras). Give a MAC and it will be matched against switch MAC tables automatically — that is what puts it on the map.</p>
+    <h4 class="text-xs font-bold text-slate-500">Devices that don't speak LLDP</h4>
+    <p class="text-xs text-slate-500">Declare gear the fleet can't discover (unmanaged switches, media converters, PDUs, cameras). Give a MAC and it will be matched against switch MAC tables automatically — that is what puts it on the map.</p>
     <div id="nw-topo-manual"></div>
   </div>` : ''}
 </div>`;
@@ -938,8 +938,8 @@ async function _renderNwTopologyManual() {
         <td class="py-1 text-right"><button data-del-dev="${escapeHtml(d.id)}" class="text-xs text-red-500 hover:underline">Remove</button></td>
       </tr>`).join('');
     const linkRows = (cfg.links || []).map(l => `<tr class="border-t border-slate-100">
-        <td class="py-1 pr-3 text-xs">${escapeHtml(l.a)}${l.a_port ? ` <span class="text-slate-400 font-mono">${escapeHtml(l.a_port)}</span>` : ''}</td>
-        <td class="py-1 pr-3 text-xs">${escapeHtml(l.b)}${l.b_port ? ` <span class="text-slate-400 font-mono">${escapeHtml(l.b_port)}</span>` : ''}</td>
+        <td class="py-1 pr-3 text-xs">${escapeHtml(l.a)}${l.a_port ? ` <span class="text-slate-500 font-mono">${escapeHtml(l.a_port)}</span>` : ''}</td>
+        <td class="py-1 pr-3 text-xs">${escapeHtml(l.b)}${l.b_port ? ` <span class="text-slate-500 font-mono">${escapeHtml(l.b_port)}</span>` : ''}</td>
         <td class="py-1 pr-3 text-xs text-slate-500">${escapeHtml(l.note || '')}</td>
         <td class="py-1 text-right"><button data-del-link="${escapeHtml(l.id)}" class="text-xs text-red-500 hover:underline">Remove</button></td>
       </tr>`).join('');
@@ -947,18 +947,18 @@ async function _renderNwTopologyManual() {
     const inp = 'px-2 py-1 text-xs border border-slate-300 rounded';
     host.innerHTML = `<div class="grid md:grid-cols-2 gap-6">
   <div>
-    <table class="w-full text-left"><tbody>${devRows || `<tr><td class="py-1 text-xs text-slate-400 italic">None declared</td></tr>`}</tbody></table>
+    <table class="w-full text-left"><tbody>${devRows || `<tr><td class="py-1 text-xs text-slate-500 italic">None declared</td></tr>`}</tbody></table>
     <div class="flex flex-wrap gap-2 mt-2">
       <input id="nw-topo-dev-name" class="${inp}" placeholder="Name">
       <input id="nw-topo-dev-mac" class="${inp}" placeholder="MAC (optional)">
       <input id="nw-topo-dev-ip" class="${inp}" placeholder="IP (optional)">
       <input id="nw-topo-dev-note" class="${inp}" placeholder="Note">
-      <button id="nw-topo-dev-add" class="px-3 py-1 text-xs font-semibold rounded bg-slate-700 text-white">Add device</button>
+      <button id="nw-topo-dev-add" class="px-3 py-1 text-xs font-semibold rounded-full bg-slate-700 text-white">Add device</button>
     </div>
   </div>
   <div>
-    <h5 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Declared links</h5>
-    <table class="w-full text-left"><tbody>${linkRows || `<tr><td class="py-1 text-xs text-slate-400 italic">None declared</td></tr>`}</tbody></table>
+    <h5 class="text-xs font-bold text-slate-500 mb-1">Declared links</h5>
+    <table class="w-full text-left"><tbody>${linkRows || `<tr><td class="py-1 text-xs text-slate-500 italic">None declared</td></tr>`}</tbody></table>
     <datalist id="nw-topo-names">${options}</datalist>
     <div class="flex flex-wrap gap-2 mt-2">
       <input id="nw-topo-link-a" list="nw-topo-names" class="${inp}" placeholder="Device A">
@@ -966,7 +966,7 @@ async function _renderNwTopologyManual() {
       <input id="nw-topo-link-b" list="nw-topo-names" class="${inp}" placeholder="Device B">
       <input id="nw-topo-link-bp" class="${inp} w-20" placeholder="Port">
       <input id="nw-topo-link-note" class="${inp}" placeholder="Note">
-      <button id="nw-topo-link-add" class="px-3 py-1 text-xs font-semibold rounded bg-slate-700 text-white">Add link</button>
+      <button id="nw-topo-link-add" class="px-3 py-1 text-xs font-semibold rounded-full bg-slate-700 text-white">Add link</button>
     </div>
   </div>
 </div>`;
@@ -1021,11 +1021,11 @@ async function _renderNwScanTab() {
     if (isAdmin() && !currentTenant) {
         c.innerHTML = `<div class="py-12 text-center space-y-3">
             <p class="text-slate-600 text-sm font-semibold">Select a tenant to configure network scans</p>
-            <p class="text-slate-400 text-xs max-w-md mx-auto">Scan settings, schedules and credential sets all belong to a specific tenant. Choose a tenant from the tenant picker to view and edit its scan configuration.</p>
+            <p class="text-slate-500 text-xs max-w-md mx-auto">Scan settings, schedules and credential sets all belong to a specific tenant. Choose a tenant from the tenant picker to view and edit its scan configuration.</p>
         </div>`;
         return;
     }
-    c.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Loading scan settings…</div>`;
+    c.innerHTML = `<div class="py-12 text-center text-slate-500 animate-pulse">Loading scan settings…</div>`;
 
     // Pull the tenant's effective config + its visible scan-credential sets in
     // parallel. Both are tenant-scoped server-side (tenant-admins see only their
@@ -1056,10 +1056,10 @@ async function _renderNwScanTab() {
 
     const credRows = creds.length
         ? creds.map(cr => `<label class="flex items-center gap-2 text-sm text-slate-600">
-            <input type="checkbox" class="nwt-cred rounded border-slate-300 text-[#01A982] focus:ring-green-500" value="${escapeHtml(String(cr.id))}" ${selectedCreds.has(String(cr.id)) ? 'checked' : ''}>
-            <span class="font-mono">${escapeHtml(cr.name || cr.id)}</span>${cr.username ? `<span class="text-slate-400">· ${escapeHtml(cr.username)}</span>` : ''}
+            <input type="checkbox" class="nwt-cred rounded border-slate-300 text-primary-text focus:ring-green-500" value="${escapeHtml(String(cr.id))}" ${selectedCreds.has(String(cr.id)) ? 'checked' : ''}>
+            <span class="font-mono">${escapeHtml(cr.name || cr.id)}</span>${cr.username ? `<span class="text-slate-500">· ${escapeHtml(cr.username)}</span>` : ''}
           </label>`).join('')
-        : `<p class="text-xs text-slate-400 italic">No scan credential sets belong to this tenant (or the shared tenant). Scans run <b>discovery-only</b> until one exists — it reports which hosts are reachable and what management ports they expose, but cannot identify or add devices. To identify devices, add a set in Setup → Network Devices → Scan Credentials, bind it to <b>this</b> tenant (or the shared tenant so every tenant can use it), and point it at a Credential Vault entry. Note a vault credential on its own is not enough — the scan uses the credential <em>set</em> that references it.</p>`;
+        : `<p class="text-xs text-slate-500 italic">No scan credential sets belong to this tenant (or the shared tenant). Scans run <b>discovery-only</b> until one exists — it reports which hosts are reachable and what management ports they expose, but cannot identify or add devices. To identify devices, add a set in Setup → Network Devices → Scan Credentials, bind it to <b>this</b> tenant (or the shared tenant so every tenant can use it), and point it at a Credential Vault entry. Note a vault credential on its own is not enough — the scan uses the credential <em>set</em> that references it.</p>`;
 
     const opt = (opts, cur) => opts.map(([v, l]) =>
         `<option value="${escapeHtml(v)}" ${String(cur) === v ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('');
@@ -1077,14 +1077,14 @@ async function _renderNwScanTab() {
         : `<p class="text-xs text-amber-600 italic">No Network Devices agent is deployed in this tenant, and no shared agent is available. Deploy the nw module to scan.</p>`;
 
     const card = 'bg-white rounded-xl border border-slate-200 p-5';
-    const lblCls = 'block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1';
+    const lblCls = 'block text-xs font-bold text-slate-500 mb-1';
     const inCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const selCls = inCls;
 
     c.innerHTML = `<div class="space-y-5 max-w-4xl">
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-700 mb-1">Network Discovery Scan</h3>
-        <p class="text-xs text-slate-400 mb-4">Discover manageable devices on your network and add them to your fleet automatically. Scans run on your tenant's Network Devices spoke; with no credential set ticked, every set your tenant owns is tried.</p>
+        <p class="text-xs text-slate-500 mb-4">Discover manageable devices on your network and add them to your fleet automatically. Scans run on your tenant's Network Devices spoke; with no credential set ticked, every set your tenant owns is tried.</p>
         <div class="mb-4">
           <p class="${lblCls}">Scan Agent</p>
           ${spokeRows}
@@ -1094,17 +1094,17 @@ async function _renderNwScanTab() {
           <div id="nwt-creds" class="space-y-1.5">${credRows}</div>
         </div>
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-crawl" class="rounded border-slate-300 text-[#01A982]" ${chk(scan.crawl)}> Crawl LLDP neighbors</label>
-          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-snmp" class="rounded border-slate-300 text-[#01A982]" ${chk(scan.try_snmp !== false)}> Try SNMP</label>
-          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-autoadd" class="rounded border-slate-300 text-[#01A982]" ${chk(scan.auto_add)}> Auto-add discovered</label>
+          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-crawl" class="rounded border-slate-300 text-primary-text" ${chk(scan.crawl)}> Crawl LLDP neighbors</label>
+          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-snmp" class="rounded border-slate-300 text-primary-text" ${chk(scan.try_snmp !== false)}> Try SNMP</label>
+          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-autoadd" class="rounded border-slate-300 text-primary-text" ${chk(scan.auto_add)}> Auto-add discovered</label>
         </div>
         <div class="mb-4">
           <p class="${lblCls}">IP Sources</p>
           <div class="flex flex-wrap gap-4">
-            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-src-netbox" class="rounded border-slate-300 text-[#01A982]" ${chk(srcs.has('netbox'))}> NetBox prefixes</label>
-            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-src-nac" class="rounded border-slate-300 text-[#01A982]" ${chk(srcs.has('nac'))}> NAC endpoints</label>
-            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-src-dhcp" class="rounded border-slate-300 text-[#01A982]" ${chk(srcs.has('dhcp'))}> DHCP leases</label>
-            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-src-dns" class="rounded border-slate-300 text-[#01A982]" ${chk(srcs.has('dns'))}> DNS records</label>
+            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-src-netbox" class="rounded border-slate-300 text-primary-text" ${chk(srcs.has('netbox'))}> NetBox prefixes</label>
+            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-src-nac" class="rounded border-slate-300 text-primary-text" ${chk(srcs.has('nac'))}> NAC endpoints</label>
+            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-src-dhcp" class="rounded border-slate-300 text-primary-text" ${chk(srcs.has('dhcp'))}> DHCP leases</label>
+            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-src-dns" class="rounded border-slate-300 text-primary-text" ${chk(srcs.has('dns'))}> DNS records</label>
           </div>
         </div>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
@@ -1117,33 +1117,33 @@ async function _renderNwScanTab() {
           <div><label class="${lblCls}">Concurrency</label><input type="number" id="nwt-concurrency" min="1" max="128" value="${escapeHtml(String(scan.concurrency || 32))}" class="${inCls}"></div>
         </div>
         <div class="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
-          <button onclick="saveNwTenantScanConfig(this)" class="px-4 py-2 rounded-md bg-[#01A982] text-white text-sm font-bold hover:bg-[#018f6f]" title="Save tenant network scan configuration">Save config</button>
-          <button onclick="runNwTenantScan(this, true)" class="px-4 py-2 rounded-md bg-slate-100 text-slate-700 text-sm font-bold hover:bg-slate-200" title="Run discovery scan in preview mode without adding devices to inventory">Preview scan</button>
-          <button onclick="runNwTenantScan(this, false)" class="px-4 py-2 rounded-md bg-blue-600 text-white text-sm font-bold hover:bg-blue-700" title="Execute discovery scan and automatically enroll discovered devices">Scan &amp; add</button>
+          <button onclick="saveNwTenantScanConfig(this)" class="px-4 py-2 rounded-full bg-primary text-white text-sm font-bold hover:bg-[#018f6f]" title="Save tenant network scan configuration">Save config</button>
+          <button onclick="runNwTenantScan(this, true)" class="px-4 py-2 rounded-full bg-slate-100 text-slate-700 text-sm font-bold hover:bg-slate-200" title="Run discovery scan in preview mode without adding devices to inventory">Preview scan</button>
+          <button onclick="runNwTenantScan(this, false)" class="px-4 py-2 rounded-full bg-blue-600 text-white text-sm font-bold hover:bg-blue-700" title="Execute discovery scan and automatically enroll discovered devices">Scan &amp; add</button>
         </div>
         <div id="nwt-results" class="text-xs mt-3"></div>
       </div>
 
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-700 mb-1">Background Supernet Sweep</h3>
-        <p class="text-xs text-slate-400 mb-3">First pings the gateway (.1 and .254) of every /24 in your NetBox supernets that isn't a NetBox prefix yet, and adds each /24 that answers to NetBox so scheduled scans cover it. Then it slowly pings the rest of the supernet space and probes hosts that answer (SSH, Telnet, HTTP/HTTPS, NETCONF, SNMP). Hosts it finds are only reported, never added as devices.</p>
-        <div id="nwt-sweep" class="text-xs text-slate-400 italic">Loading…</div>
+        <p class="text-xs text-slate-500 mb-3">First pings the gateway (.1 and .254) of every /24 in your NetBox supernets that isn't a NetBox prefix yet, and adds each /24 that answers to NetBox so scheduled scans cover it. Then it slowly pings the rest of the supernet space and probes hosts that answer (SSH, Telnet, HTTP/HTTPS, NETCONF, SNMP). Hosts it finds are only reported, never added as devices.</p>
+        <div id="nwt-sweep" class="text-xs text-slate-500 italic">Loading…</div>
       </div>
       ${(setTimeout(() => _nwtLoadSweep(), 0), '')}
 
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-700 mb-1">Recurring Scan Schedule</h3>
-        <p class="text-xs text-slate-400 mb-4">On by default (every 6 hours) once your tenant has a Network Devices spoke; discovered devices are added automatically. Tick Preview only to report discoveries without adding them.</p>
+        <p class="text-xs text-slate-500 mb-4">On by default (every 6 hours) once your tenant has a Network Devices spoke; discovered devices are added automatically. Tick Preview only to report discoveries without adding them.</p>
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
-          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-sched-enabled" class="rounded border-slate-300 text-[#01A982]" ${chk(sched.enabled)}> Enable schedule</label>
+          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-sched-enabled" class="rounded border-slate-300 text-primary-text" ${chk(sched.enabled)}> Enable schedule</label>
           <div><label class="${lblCls}">Interval</label><select id="nwt-sched-interval" class="${selCls}">${opt(_NW_SCHED_INTERVALS, sched.interval_seconds || 0)}</select></div>
-          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-sched-dryrun" class="rounded border-slate-300 text-[#01A982]" ${chk(sched.dry_run !== false)}> Preview only (don't add)</label>
+          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-sched-dryrun" class="rounded border-slate-300 text-primary-text" ${chk(sched.dry_run !== false)}> Preview only (don't add)</label>
         </div>
       </div>
 
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-700 mb-1">Poll Cadence &amp; Anti-Stampede</h3>
-        <p class="text-xs text-slate-400 mb-4">Tune how your NW spoke polls your devices. Leave a control on "Inherit global" to use the platform default.</p>
+        <p class="text-xs text-slate-500 mb-4">Tune how your NW spoke polls your devices. Leave a control on "Inherit global" to use the platform default.</p>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div><label class="${lblCls}">Default Poll Interval</label><select id="nwt-poll-default" class="${selCls}">${opt([['', 'Inherit global'], ['900', '15 minutes'], ['3600', '1 hour'], ['21600', '6 hours'], ['43200', '12 hours'], ['86400', 'Daily']], pollVal('default_interval'))}</select></div>
           <div><label class="${lblCls}">Poll Jitter</label><select id="nwt-poll-jitter" class="${selCls}">${opt(_NW_JITTER_OPTS, pollVal('jitter_frac'))}</select></div>
@@ -1151,14 +1151,14 @@ async function _renderNwScanTab() {
           <div><label class="${lblCls}">Max Concurrent Polls</label><select id="nwt-poll-maxconc" class="${selCls}">${opt([['', 'Inherit global'], ['2', '2'], ['5', '5'], ['10', '10'], ['20', '20'], ['50', '50']], pollVal('max_concurrency'))}</select></div>
         </div>
         <div class="pt-3 mt-3 border-t border-slate-100">
-          <button onclick="saveNwTenantPollSchedule(this)" class="px-4 py-2 rounded-md bg-[#01A982] text-white text-sm font-bold hover:bg-[#018f6f]" title="Save recurring scan schedule and polling cadence">Save schedule &amp; cadence</button>
+          <button onclick="saveNwTenantPollSchedule(this)" class="px-4 py-2 rounded-full bg-primary text-white text-sm font-bold hover:bg-[#018f6f]" title="Save recurring scan schedule and polling cadence">Save schedule &amp; cadence</button>
         </div>
       </div>
 
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-700 mb-1">Scheduled Scans Already Set Up</h3>
-        <p class="text-xs text-slate-400 mb-4">Every recurring scan configured for the selected tenant — or, with no tenant selected, across the tenants you can see.</p>
-        <div id="nwt-sched-list"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+        <p class="text-xs text-slate-500 mb-4">Every recurring scan configured for the selected tenant — or, with no tenant selected, across the tenants you can see.</p>
+        <div id="nwt-sched-list"><p class="text-xs text-slate-500 italic">Loading…</p></div>
       </div>
     </div>`;
     _loadNwScanSchedules();
@@ -1202,31 +1202,31 @@ function _nwSchedWhen(ts, { future } = {}) {
 function _nwScanSchedulesHtml(d) {
     const rows = (d.schedules || []).filter(s => s.enabled);
     if (!rows.length) {
-        return `<p class="text-xs text-slate-400 italic">No recurring scans are enabled${(d.schedules || []).length ? ' on any tenant you can see' : ''}. Enable one on the card above.</p>`;
+        return `<p class="text-xs text-slate-500 italic">No recurring scans are enabled${(d.schedules || []).length ? ' on any tenant you can see' : ''}. Enable one on the card above.</p>`;
     }
     // The scheduler's last/next-run state lives in hub memory, so a restart
     // clears it and every schedule re-defers a full interval. Say so rather
     // than letting a blank "last run" read as "it never ran".
     const note = d.runtime_since_restart
         ? ''
-        : `<p class="text-[11px] text-slate-400 italic mb-2">The hub has not completed a scheduled run since it last restarted — last/next run are tracked in memory and each schedule re-defers one full interval after a restart.</p>`;
-    let html = note + '<table class="w-full text-left"><thead><tr class="text-slate-400 uppercase text-[10px]"><th class="py-1">Tenant</th><th>Cadence</th><th>Mode</th><th>Credentials</th><th>Agent</th><th>Last run</th><th>Next due</th></tr></thead><tbody>';
+        : `<p class="text-xs text-slate-500 italic mb-2">The hub has not completed a scheduled run since it last restarted — last/next run are tracked in memory and each schedule re-defers one full interval after a restart.</p>`;
+    let html = note + '<table class="w-full text-left"><thead><tr class="text-slate-500 text-xs"><th class="py-1">Tenant</th><th>Cadence</th><th>Mode</th><th>Credentials</th><th>Agent</th><th>Last run</th><th>Next due</th></tr></thead><tbody>';
     for (const s of rows) {
         const mode = s.dry_run
-            ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-100 text-slate-600" title="Reports discoveries without adding them">preview</span>'
-            : '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-100 text-amber-700" title="Adds identified devices to the fleet automatically">auto-add</span>';
+            ? '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-600" title="Reports discoveries without adding them">preview</span>'
+            : '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700" title="Adds identified devices to the fleet automatically">auto-add</span>';
         const creds = s.discovery_only
             ? '<span class="text-amber-600" title="No credential sets selected — this run probes reachability and open ports only, and can never add a device">discovery only</span>'
             : escapeHtml(s.credential_names.join(', '));
         const agent = s.spoke_id
             ? (s.spoke_connected ? '<span class="text-emerald-600">connected</span>' : '<span class="text-red-500" title="This schedule will be skipped while its agent is offline">offline</span>')
-            : '<span class="text-slate-400" title="No agent pinned — the hub picks a connected agent for this tenant">auto</span>';
+            : '<span class="text-slate-500" title="No agent pinned — the hub picks a connected agent for this tenant">auto</span>';
         const last = s.last_status
             ? `${escapeHtml(_nwSchedWhen(s.last_run_at))} · ${escapeHtml(s.last_status)}${s.last_added ? ` (+${s.last_added})` : ''}`
             : _nwSchedWhen(s.last_run_at);
         html += `<tr class="border-t border-slate-100 text-slate-600"><td class="py-1 font-semibold">${escapeHtml(s.tenant_name)}</td><td>${escapeHtml(_nwSchedEvery(s.interval_seconds))}</td><td>${mode}</td><td class="text-xs">${creds}</td><td class="text-xs">${agent}</td><td class="text-xs">${last}</td><td class="text-xs">${escapeHtml(_nwSchedWhen(s.next_due_at, { future: true }))}</td></tr>`;
         if (s.last_error) {
-            html += `<tr class="text-[11px] text-red-500"><td colspan="7" class="pb-1 pl-2">last error: ${escapeHtml(s.last_error)}</td></tr>`;
+            html += `<tr class="text-xs text-red-500"><td colspan="7" class="pb-1 pl-2">last error: ${escapeHtml(s.last_error)}</td></tr>`;
         }
     }
     return html + '</tbody></table>';
@@ -1329,8 +1329,8 @@ async function _nwtLoadSweep() {
         box.className = 'text-xs text-slate-600';
         box.innerHTML = `<div class="flex flex-wrap items-center gap-3 mb-2">
             <label class="flex items-center gap-2"><input type="checkbox" ${d.enabled ? 'checked' : ''} onchange="nwtSweepAction({enabled: this.checked})"> Enable sweep</label>
-            <button onclick="nwtSweepAction({run: true})" class="px-3 py-1 rounded bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Probe next batch now</button>
-            <button onclick="nwtSweepAction({reset: true})" class="px-3 py-1 rounded bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Restart cycle</button>
+            <button onclick="nwtSweepAction({run: true})" class="px-3 py-1 rounded-full bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Probe next batch now</button>
+            <button onclick="nwtSweepAction({reset: true})" class="px-3 py-1 rounded-full bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Restart cycle</button>
             <span>${state} · ${Number(d.found || 0)} host(s) found · ${d.total ? `Progress ${pct}% of ${d.total} addresses · cycles ${d.cycles || 0}` : 'No supernet space to sweep yet'}${d.last_status ? ` · last: ${escapeHtml(d.last_status)}` : ''}${d.last_error ? ` (${escapeHtml(d.last_error)})` : ''}</span></div>
             <div id="nwt-gw" class="mb-3 p-2 rounded bg-slate-50"></div>`;
         _nwtRenderGateway(document.getElementById('nwt-gw'), d.gateway || {});
@@ -1363,7 +1363,7 @@ function _nwtRenderGateway(box, g) {
     box.replaceChildren(head);
     if (!found.length) return;
     const table = el('table', null, 'w-full text-left mt-1');
-    const hr = el('tr', null, 'text-slate-400');
+    const hr = el('tr', null, 'text-slate-500');
     ['Subnet', 'Gateway', 'Found', 'NetBox'].forEach(h => hr.append(el('th', h)));
     table.append(el('thead'), el('tbody'));
     table.tHead.append(hr);
@@ -1396,7 +1396,7 @@ async function runNwTenantScan(btn, dryRun) {
     const out = document.getElementById('nwt-results');
     const label = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = dryRun ? 'Scanning…' : 'Scanning & adding…'; }
-    if (out) out.innerHTML = '<p class="text-slate-400 italic animate-pulse">Scanning — this can take a while for large subnets…</p>';
+    if (out) out.innerHTML = '<p class="text-slate-500 italic animate-pulse">Scanning — this can take a while for large subnets…</p>';
     const body = {
         dry_run: !!dryRun,
         auto_add: !dryRun,
@@ -1450,10 +1450,10 @@ function _renderNwDeviceList(category, devices, counts) {
         // Point the user at where devices actually are instead of a dead end.
         const elsewhere = CATEGORIES.filter(c => c !== category && counts[c]);
         const hint = elsewhere.length
-            ? `No ${escapeHtml(category.toLowerCase())} configured — devices are under ${elsewhere.map(c => `<button onclick="setSubView('${c}')" class="text-[#01A982] hover:underline font-semibold">${escapeHtml(c)} (${counts[c]})</button>`).join(', ')}.`
+            ? `No ${escapeHtml(category.toLowerCase())} configured — devices are under ${elsewhere.map(c => `<button onclick="setSubView('${c}')" class="text-primary-text hover:underline font-semibold">${escapeHtml(c)} (${counts[c]})</button>`).join(', ')}.`
             : `No ${escapeHtml(category.toLowerCase())} configured. Add one in Setup → Network Devices.`;
         container.innerHTML = addServerRow +
-            `<div class="py-12 text-center text-slate-400 italic">${hint}</div>`;
+            `<div class="py-12 text-center text-slate-500 italic">${hint}</div>`;
         return;
     }
     const keys = ['device', 'object_type', 'transport', 'serial', 'address', 'reachable'];
@@ -1463,10 +1463,10 @@ function _renderNwDeviceList(category, devices, counts) {
         const transport = _NW_TRANSPORTS[it.transport] || it.transport || 'auto';
         const reachable = it.reachable;
         const rcell = reachable === true || reachable === 'up'
-            ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">up</span>'
+            ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">up</span>'
             : reachable === false || reachable === 'down'
-                ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
-                : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-amber-100 text-amber-700" title="Reachability unknown — the Network Devices spoke is offline, so up/down can't be probed">unknown</span>`;
+                ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">down</span>'
+                : `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700" title="Reachability unknown — the Network Devices spoke is offline, so up/down can't be probed">unknown</span>`;
         // event.stopPropagation() keeps the Poll/Configure buttons from also
         // triggering the row's drill-into-detail click.
         const cfg = (isAdmin() || isTenantAdmin())
@@ -1474,20 +1474,20 @@ function _renderNwDeviceList(category, devices, counts) {
               `<button onclick="event.stopPropagation();showNwConfigModal('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium" title="Configure device connection parameters">Configure</button>`
             : '';
         return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer" title="View device details">
-            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${it.mac ? `<div class="text-[10px] font-mono font-normal text-slate-400 mt-0.5">${escapeHtml(String(it.mac))}</div>` : ''}</td>
+            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${it.mac ? `<div class="text-xs font-mono font-normal text-slate-500 mt-0.5">${escapeHtml(String(it.mac))}</div>` : ''}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(transport)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${_nwSerialCell(it)}</td>
             <td class="px-4 py-3 text-slate-600 font-mono text-xs">${_nwAddressCell(it)}</td>
             <td class="px-4 py-3">${rcell}</td>
-            <td class="px-4 py-3 text-right whitespace-nowrap">${cfg}<span class="text-slate-300 ml-2">›</span></td>
+            <td class="px-4 py-3 text-right whitespace-nowrap">${cfg}<span class="text-slate-500 ml-2">›</span></td>
         </tr>`;
     }).join('');
     container.innerHTML = addServerRow + `
         <div class="space-y-4">
             <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
                 <table class="w-full text-left text-sm">
-                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}<th class="px-4 py-3"></th></tr></thead>
+                    <thead class="bg-slate-100 text-slate-600 text-xs"><tr>${headers}<th class="px-4 py-3"></th></tr></thead>
                     <tbody class="divide-y divide-slate-200">${rows}</tbody>
                 </table>
             </div>
@@ -1505,7 +1505,7 @@ async function loadTruenasData(subMenu) {
     const container = document.getElementById('truenas-table-container');
     if (!container) return;
     subMenu = subMenu || currentSubView;
-    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${subMenu} data…</div>`;
+    container.innerHTML = `<div class="py-12 text-center text-slate-500 animate-pulse">Fetching ${subMenu} data…</div>`;
 
     // Suppress the per-view "+ Add" action strip; appliances are managed on
     // Setup → TrueNAS Appliances.
@@ -1561,7 +1561,7 @@ async function loadTruenasData(subMenu) {
             const data = await r.json();
             const items = _fleetRows(data);
             if (!items.length) {
-                container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No TrueNAS appliances configured. Add one in Setup → TrueNAS Appliances.</div>`;
+                container.innerHTML = `<div class="py-12 text-center text-slate-500 italic">No TrueNAS appliances configured. Add one in Setup → TrueNAS Appliances.</div>`;
                 return;
             }
             const headers = ['NAME', 'HOST', 'TYPE', 'VERSION', 'STATUS', ''].map(h => `<th class="px-4 py-3">${h}</th>`).join('');
@@ -1569,10 +1569,10 @@ async function loadTruenasData(subMenu) {
                 const info = (it.info && typeof it.info === 'object') ? it.info : {};
                 const reachable = it.reachable;
                 const rcell = reachable === true || reachable === 'up'
-                    ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">online</span>'
+                    ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">online</span>'
                     : reachable === false || reachable === 'down'
-                        ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">offline</span>'
-                        : `<span class="text-slate-400 text-xs">—</span>`;
+                        ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">offline</span>'
+                        : `<span class="text-slate-500 text-xs">—</span>`;
                 const poll = isAdmin()
                     ? `<button onclick="pollTruenasAppliance('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3" title="Trigger immediate polling of pools, datasets, and disks">Poll Now</button>`
                     : '';
@@ -1589,7 +1589,7 @@ async function loadTruenasData(subMenu) {
                 <div class="space-y-4">
                     <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
                         <table class="w-full text-left text-sm">
-                            <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}</tr></thead>
+                            <thead class="bg-slate-100 text-slate-600 text-xs"><tr>${headers}</tr></thead>
                             <tbody class="divide-y divide-slate-200">${rows}</tbody>
                         </table>
                     </div>
@@ -1640,7 +1640,7 @@ async function loadTruenasData(subMenu) {
 
         if (!items.length) {
             const errNote = errors.length ? `<div class="text-xs text-amber-600 mt-2">${errors.length} appliance(s) unreachable.</div>` : '';
-            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No ${subMenu} found.${errNote}</div>`;
+            container.innerHTML = `<div class="py-12 text-center text-slate-500 italic">No ${subMenu} found.${errNote}</div>`;
             return;
         }
 
@@ -1681,7 +1681,7 @@ async function loadTruenasData(subMenu) {
                 ${errBanner}
                 <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
                     <table class="w-full text-left text-sm">
-                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}</tr></thead>
+                        <thead class="bg-slate-100 text-slate-600 text-xs"><tr>${headers}</tr></thead>
                         <tbody class="divide-y divide-slate-200">${rows}</tbody>
                     </table>
                 </div>
@@ -1712,17 +1712,17 @@ function showNwConfigModal(deviceId, deviceName) {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">Configure ${escapeHtml(deviceName)}</h3>
-                <button onclick="closeNwConfigModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <h3 class="text-lg font-bold text-navy">Configure ${escapeHtml(deviceName)}</h3>
+                <button onclick="closeNwConfigModal()" class="text-slate-500 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-3">
-                <p class="text-xs text-slate-400">One command per line. Applied via the device's transport (SSH/CLI or REST) by the nw spoke.</p>
+                <p class="text-xs text-slate-500">One command per line. Applied via the device's transport (SSH/CLI or REST) by the nw spoke.</p>
                 <textarea id="nw-config-commands" rows="8" placeholder="show version\nshow running-config" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500"></textarea>
                 <div id="nw-config-result" class="text-xs text-slate-500"></div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeNwConfigModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="submitNwConfig('${escapeHtml(deviceId)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Apply</button>
+                <button onclick="submitNwConfig('${escapeHtml(deviceId)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Apply</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -1815,19 +1815,19 @@ async function _renderMonitoring(container) {
     const up = shown.filter(h => h.availability === 'available').length;
     const down = shown.filter(h => h.availability === 'unavailable').length;
     const probs = shown.reduce((n, h) => n + (h.problem_count || (h.problems || []).length), 0);
-    const tile = (label, val, cls) => `<div class="rounded border border-slate-200 px-4 py-3"><div class="text-[10px] uppercase tracking-wider text-slate-400">${label}</div><div class="text-2xl font-semibold ${cls || 'text-slate-700'}">${val}</div></div>`;
+    const tile = (label, val, cls) => `<div class="rounded border border-slate-200 px-4 py-3"><div class="text-xs text-slate-500">${label}</div><div class="text-2xl font-semibold ${cls || 'text-slate-700'}">${val}</div></div>`;
     const hostRows = shown.map(h => `<tr class="border-t border-slate-100">
         <td class="px-3 py-2 text-xs font-medium text-slate-700">${escapeHtml(h.name)}</td>
         <td class="px-3 py-2 text-xs text-slate-500">${escapeHtml(h.tenant)}</td>
         <td class="px-3 py-2 text-xs font-mono text-slate-500">${escapeHtml(h.ip)}</td>
         <td class="px-3 py-2 text-xs text-slate-500">${h.method}</td>
         <td class="px-3 py-2 text-xs"><span class="px-2 py-0.5 rounded ${availCls[h.availability] || availCls.unknown}" title="${escapeHtml(h.error || '')}">${h.availability}${h.enabled ? '' : ' (disabled)'}</span></td>
-        <td class="px-3 py-2 text-xs text-slate-600">${(h.problems || []).map(p => `<div>${escapeHtml(sevName[p.severity] || '')}: ${escapeHtml(p.name)}</div>`).join('') || '<span class="text-slate-300">none</span>'}</td>
+        <td class="px-3 py-2 text-xs text-slate-600">${(h.problems || []).map(p => `<div>${escapeHtml(sevName[p.severity] || '')}: ${escapeHtml(p.name)}</div>`).join('') || '<span class="text-slate-500">none</span>'}</td>
     </tr>`).join('');
     const table = shown.length
-        ? `<table class="w-full text-left mt-4"><thead><tr class="text-[10px] uppercase tracking-wider text-slate-400"><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Address</th><th class="px-3 py-2">Method</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Problems</th></tr></thead><tbody>${hostRows}</tbody></table>`
-        : `<div class="py-8 text-center text-slate-400 italic">No monitored devices${tenant ? ` for tenant "${escapeHtml(tenant)}"` : ''}.</div>`;
-    const info = admin ? `<div class="mt-4 text-[11px] text-slate-400">Zabbix ${escapeHtml(String(res.version || '?'))} · ${escapeHtml(String(res.managed_hosts ?? '?'))} managed hosts</div>` : '';
+        ? `<table class="w-full text-left mt-4"><thead><tr class="text-xs text-slate-500"><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Address</th><th class="px-3 py-2">Method</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Problems</th></tr></thead><tbody>${hostRows}</tbody></table>`
+        : `<div class="py-8 text-center text-slate-500 italic">No monitored devices${tenant ? ` for tenant "${escapeHtml(tenant)}"` : ''}.</div>`;
+    const info = admin ? `<div class="mt-4 text-xs text-slate-500">Zabbix ${escapeHtml(String(res.version || '?'))} · ${escapeHtml(String(res.managed_hosts ?? '?'))} managed hosts</div>` : '';
     const sevCls = ['bg-slate-100 text-slate-600', 'bg-sky-100 text-sky-700', 'bg-yellow-100 text-yellow-800', 'bg-amber-100 text-amber-800', 'bg-orange-100 text-orange-800', 'bg-red-100 text-red-700'];
     const allProbs = shown.flatMap(h => (h.problems || []).map(p => ({...p, host: h.name, tenant: h.tenant})))
         .sort((a, b) => (b.severity - a.severity) || (b.clock - a.clock));
@@ -1836,12 +1836,12 @@ async function _renderMonitoring(container) {
         <td class="px-3 py-2 text-xs font-medium text-slate-700">${escapeHtml(p.host)}</td>
         <td class="px-3 py-2 text-xs text-slate-500">${escapeHtml(p.tenant)}</td>
         <td class="px-3 py-2 text-xs text-slate-600">${escapeHtml(p.name)}</td>
-        <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">${p.clock ? new Date(p.clock * 1000).toLocaleString() : ''}</td>
+        <td class="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">${p.clock ? new Date(p.clock * 1000).toLocaleString() : ''}</td>
     </tr>`).join('');
     const problemsTable = `<h3 class="mt-6 text-sm font-semibold text-slate-700">Open problems (${allProbs.length})</h3>` + (allProbs.length
-        ? `<div class="max-h-96 overflow-y-auto"><table class="w-full text-left mt-2"><thead class="sticky top-0 bg-white"><tr class="text-[10px] uppercase tracking-wider text-slate-400"><th class="px-3 py-2">Severity</th><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Problem</th><th class="px-3 py-2">Since</th></tr></thead><tbody>${probRows}</tbody></table></div>`
-        : `<div class="py-4 text-slate-400 italic text-sm">No open problems.</div>`);
-    const buttons = admin ? `<p class="text-xs text-slate-400 mt-4">Monitoring syncs with the inventory automatically (schedule and Sync now: System → Sync).</p>` : '';
+        ? `<div class="max-h-96 overflow-y-auto"><table class="w-full text-left mt-2"><thead class="sticky top-0 bg-white"><tr class="text-xs text-slate-500"><th class="px-3 py-2">Severity</th><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Problem</th><th class="px-3 py-2">Since</th></tr></thead><tbody>${probRows}</tbody></table></div>`
+        : `<div class="py-4 text-slate-500 italic text-sm">No open problems.</div>`);
+    const buttons = admin ? `<p class="text-xs text-slate-500 mt-4">Monitoring syncs with the inventory automatically (schedule and Sync now: System → Sync).</p>` : '';
     container.innerHTML = `<div class="grid grid-cols-4 gap-3">${tile('Devices', shown.length)}${tile('Available', up, 'text-emerald-600')}${tile('Unavailable', down, down ? 'text-red-600' : '')}${tile('Open problems', probs, probs ? 'text-amber-600' : '')}</div>${table}${problemsTable}${info}${buttons}`;
 }
 

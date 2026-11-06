@@ -88,7 +88,7 @@ async def test_sync_extracts_and_pushes_replace_true():
     assert cppm_call[1] == "CPPM_SYNC_ENDPOINTS"
     assert cppm_call[2]["replace"] is True
     assert cppm_call[2]["tenant_id"] == "acme"
-    assert cppm_call[2]["tenant_slug"] == "acme"
+    assert "tenant_slug" not in cppm_call[2]
     eps = cppm_call[2]["endpoints"]
     assert {"ip": "10.20.0.5", "mac": "aa:bb:cc:dd:ee:01", "hostname": "host1",
             "nac_role": "SSPLM-DMZ"} in eps

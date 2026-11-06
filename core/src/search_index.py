@@ -354,6 +354,7 @@ class SearchIndexMixin:
         return {
             "q": "",
             "tenant": nb_slug,
+            "tenant_id": (scope.get("resolved") or "") if nb_slug else "",
             "proxmox_tag": scope.get("proxmox_tag") or "",
             "prefixes": prefixes,
             "is_admin": bool(scope.get("is_admin")),

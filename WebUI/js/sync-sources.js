@@ -55,7 +55,7 @@ function renderGlvPending() {
     if (!el) return;
     const keys = Object.keys(_glvPending || {}).sort();
     if (!keys.length) {
-        el.innerHTML = '<p class="text-xs text-slate-400 italic">No pending known-good proposals.</p>';
+        el.innerHTML = '<p class="text-xs text-slate-500 italic">No pending known-good proposals.</p>';
         return;
     }
     el.innerHTML = keys.map(k => {
@@ -67,14 +67,14 @@ function renderGlvPending() {
         const when = v.proposed_at ? new Date(Number(v.proposed_at) * 1000).toLocaleString() : '';
         return `<div class="flex flex-wrap items-center gap-3 text-xs py-1.5 border-b border-slate-100 last:border-0"${when ? ` title="proposed ${escapeHtml(when)}"` : ''}>
             <span class="font-mono text-slate-700 font-semibold min-w-[12rem]">${escapeHtml(k)}</span>
-            ${v.source_tenant ? `<span class="text-slate-400">from ${escapeHtml(v.source_tenant)}</span>` : ''}
+            ${v.source_tenant ? `<span class="text-slate-500">from ${escapeHtml(v.source_tenant)}</span>` : ''}
             <span class="text-slate-600">${escapeHtml(String(v.count ?? '—'))} clients</span>
-            <span class="text-slate-400">stable in ${escapeHtml(_glvDurHuman(v.time_to_stable_s))}</span>
-            ${v.floor != null ? `<span class="text-slate-400">floor ${escapeHtml(String(v.floor))}</span>` : ''}
-            <span class="text-slate-400">knobs: ${knobStr}</span>
+            <span class="text-slate-500">stable in ${escapeHtml(_glvDurHuman(v.time_to_stable_s))}</span>
+            ${v.floor != null ? `<span class="text-slate-500">floor ${escapeHtml(String(v.floor))}</span>` : ''}
+            <span class="text-slate-500">knobs: ${knobStr}</span>
             <div class="ml-auto flex gap-2">
-              <button onclick="approveGlvPending('${escJsAttr(k)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold">Approve</button>
-              <button onclick="rejectGlvPending('${escJsAttr(k)}')" class="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1 rounded-md text-xs font-bold">Reject</button>
+              <button onclick="approveGlvPending('${escJsAttr(k)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold">Approve</button>
+              <button onclick="rejectGlvPending('${escJsAttr(k)}')" class="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1 rounded-full text-xs font-bold">Reject</button>
             </div>
         </div>`;
     }).join('');
@@ -112,7 +112,7 @@ function renderGlvPublished() {
     if (!el) return;
     const keys = Object.keys(_glvPublished).sort();
     if (!keys.length) {
-        el.innerHTML = '<p class="text-xs text-slate-400 italic">Nothing published yet. Publish a candidate below.</p>';
+        el.innerHTML = '<p class="text-xs text-slate-500 italic">Nothing published yet. Publish a candidate below.</p>';
         return;
     }
     el.innerHTML = keys.map(k => {
@@ -121,9 +121,9 @@ function renderGlvPublished() {
         return `<div class="flex flex-wrap items-center gap-3 text-xs py-1 border-b border-slate-100 last:border-0">
             <span class="font-mono text-slate-700 flex-1 min-w-[12rem]">${escapeHtml(k)}</span>
             <span class="font-semibold text-emerald-700">op ${escapeHtml(String(v.op))}</span>
-            ${v.floor != null ? `<span class="text-slate-400">floor ${escapeHtml(String(v.floor))}</span>` : ''}
-            ${v.source_tenant ? `<span class="text-slate-400">from ${escapeHtml(v.source_tenant)}</span>` : ''}
-            ${when ? `<span class="text-slate-400">${escapeHtml(when)}</span>` : ''}
+            ${v.floor != null ? `<span class="text-slate-500">floor ${escapeHtml(String(v.floor))}</span>` : ''}
+            ${v.source_tenant ? `<span class="text-slate-500">from ${escapeHtml(v.source_tenant)}</span>` : ''}
+            ${when ? `<span class="text-slate-500">${escapeHtml(when)}</span>` : ''}
             <button onclick="unpublishGlv('${escJsAttr(k)}')" class="text-xs text-red-600 hover:text-red-800 font-bold">Unpublish</button>
         </div>`;
     }).join('');
@@ -133,7 +133,7 @@ function renderGlvCandidates() {
     const el = document.getElementById('glv-candidates');
     if (!el) return;
     if (!_glvCandidates.length) {
-        el.innerHTML = '<p class="text-xs text-slate-400 italic">No stable learned values yet. Mark a quota row as a Learning lab (Config → Engine) and let it settle (phase = stable).</p>';
+        el.innerHTML = '<p class="text-xs text-slate-500 italic">No stable learned values yet. Mark a quota row as a Learning lab (Config → Engine) and let it settle (phase = stable).</p>';
         return;
     }
     // Group by alert_key; within a group, highest op first.
@@ -149,14 +149,14 @@ function renderGlvCandidates() {
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center gap-2 mb-2">
                 <span class="font-mono text-xs text-slate-700 font-semibold">${escapeHtml(ak)}</span>
-                ${pub ? `<span class="text-[10px] uppercase tracking-wider text-emerald-700">published op ${escapeHtml(String(pub.op))}</span>` : ''}
+                ${pub ? `<span class="text-xs text-emerald-700">published op ${escapeHtml(String(pub.op))}</span>` : ''}
             </div>
             <div class="space-y-1">
                 ${rows.map(r => `<div class="flex flex-wrap items-center gap-3 text-xs py-0.5">
                     <span class="text-slate-600">op <b>${escapeHtml(String(r.op))}</b></span>
-                    ${r.floor != null ? `<span class="text-slate-400">floor ${escapeHtml(String(r.floor))}</span>` : ''}
-                    <span class="text-slate-400">${escapeHtml(r.source_tenant)} · ${escapeHtml(r.site || 'all sites')}</span>
-                    <button onclick="publishGlv('${escJsAttr(ak)}', ${Number(r.op)||0}, ${r.floor!=null?Number(r.floor):'null'}, '${escJsAttr(r.source_tenant)}')" class="ml-auto ${isPublished && r === rows[0] ? 'bg-emerald-100 text-emerald-700 border border-emerald-300' : 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982]'} px-3 py-1 rounded-md text-xs font-bold">${isPublished && r === rows[0] ? 'Published' : 'Publish'}</button>
+                    ${r.floor != null ? `<span class="text-slate-500">floor ${escapeHtml(String(r.floor))}</span>` : ''}
+                    <span class="text-slate-500">${escapeHtml(r.source_tenant)} · ${escapeHtml(r.site || 'all sites')}</span>
+                    <button onclick="publishGlv('${escJsAttr(ak)}', ${Number(r.op)||0}, ${r.floor!=null?Number(r.floor):'null'}, '${escJsAttr(r.source_tenant)}')" class="ml-auto ${isPublished && r === rows[0] ? 'bg-emerald-100 text-emerald-700 border border-emerald-300' : 'bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand'} px-3 py-1 rounded-full text-xs font-bold">${isPublished && r === rows[0] ? 'Published' : 'Publish'}</button>
                 </div>`).join('')}
             </div>
         </div>`;
@@ -254,25 +254,25 @@ async function loadDhcpServerStatus() {
         }
     }
     if (!rows.length) {
-        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No cs spokes reporting.</p>';
+        wrap.innerHTML = '<p class="text-xs text-slate-500 italic">No cs spokes reporting.</p>';
         return;
     }
     wrap.innerHTML = rows.map(({ tenant, spoke }) => {
         const d = spoke.dhcp || {};
-        const head = `<span class="text-sm font-bold text-slate-700">${esc(tenant)} <span class="text-xs text-slate-400" title="${esc(spoke.spoke_id)}">${esc(spoke.spoke_name && spoke.spoke_name !== spoke.spoke_id ? spoke.spoke_name : _spokeLabelFor(spoke.spoke_id))}</span></span>`;
+        const head = `<span class="text-sm font-bold text-slate-700">${esc(tenant)} <span class="text-xs text-slate-500" title="${esc(spoke.spoke_id)}">${esc(spoke.spoke_name && spoke.spoke_name !== spoke.spoke_id ? spoke.spoke_name : _spokeLabelFor(spoke.spoke_id))}</span></span>`;
         // Kea not installed → "Not configured" (ignore, per requirement).
         if (d.installed === false) {
             return `<div class="border border-slate-200 rounded-md p-3">
                 <div class="flex items-center justify-between mb-1">${head}
                     <span class="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">Not configured</span>
-                </div><p class="text-xs text-slate-400">Kea (kea-dhcp4-sim) not installed on this spoke.</p></div>`;
+                </div><p class="text-xs text-slate-500">Kea (kea-dhcp4-sim) not installed on this spoke.</p></div>`;
         }
         // No dhcp block → spoke offline / hasn't reported.
         if (d.installed !== true) {
             return `<div class="border border-slate-200 rounded-md p-3">
                 <div class="flex items-center justify-between mb-1">${head}
-                    <span class="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-400">No data</span>
-                </div><p class="text-xs text-slate-400">No DHCP telemetry from this spoke (offline or not reporting).</p></div>`;
+                    <span class="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">No data</span>
+                </div><p class="text-xs text-slate-500">No DHCP telemetry from this spoke (offline or not reporting).</p></div>`;
         }
         // installed === true → running pill + utilization bar.
         const running = !!d.running;
@@ -289,11 +289,11 @@ async function loadDhcpServerStatus() {
         const leaseText = unknown
             ? `<span title="The spoke could not read the Kea lease file">leases unknown / ${size}</span>`
             : `leases ${used} / ${size} (${pct.toFixed(1)}%)`;
-        const iface = d.iface ? `iface <span class="font-mono">${esc(d.iface)}</span>` : 'iface <span class="text-slate-400">—</span>';
+        const iface = d.iface ? `iface <span class="font-mono">${esc(d.iface)}</span>` : 'iface <span class="text-slate-500">—</span>';
         const subnet = d.subnet ? ` · <span class="font-mono">${esc(d.subnet)}</span>` : '';
         const pool = (d.pool_start && d.pool_end)
             ? `pool <span class="font-mono">${esc(d.pool_start)}–${esc(d.pool_end)}</span> (${size})`
-            : (size ? `pool size ${size}` : 'pool <span class="text-slate-400">—</span>');
+            : (size ? `pool size ${size}` : 'pool <span class="text-slate-500">—</span>');
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-2">${head}${pill}</div>
             <p class="text-xs text-slate-500 mb-2">${iface}${subnet} · ${pool}</p>
@@ -362,14 +362,14 @@ async function loadEndpointSyncStatus() {
     const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const rows = data.tenants || [];
     if (!rows.length) {
-        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
+        wrap.innerHTML = '<p class="text-xs text-slate-500 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
         return;
     }
     wrap.innerHTML = rows.map(t => {
         const st = String(t.status || '');
         const pill = st === 'success' ? 'bg-green-100 text-green-700'
             : st === 'error' ? 'bg-red-100 text-red-700'
-            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-400';
+            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-500';
         const pushed = Number(t.pushed) || 0;
         const errors = Number(t.errors) || 0;
         const total = Number(t.endpoints_total) || 0;
@@ -390,11 +390,11 @@ async function loadEndpointSyncStatus() {
             : '';
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-1">
-                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-400">${esc(t.tenant_id)}</span></span>
+                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-500">${esc(t.tenant_id)}</span></span>
                 <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
             </div>
-            <p class="text-xs text-slate-500">pushed ${pushed} · errors ${errors} · endpoints ${total}${skipLine} <span class="text-slate-400">· last ${fmtDate(t.last_sync_ts)}</span></p>
-            ${t.message ? `<p class="text-xs text-slate-400 mt-1">${esc(t.message)}</p>` : ''}
+            <p class="text-xs text-slate-500">pushed ${pushed} · errors ${errors} · endpoints ${total}${skipLine} <span class="text-slate-500">· last ${fmtDate(t.last_sync_ts)}</span></p>
+            ${t.message ? `<p class="text-xs text-slate-500 mt-1">${esc(t.message)}</p>` : ''}
             ${skipReasonHtml}
         </div>`;
     }).join('');
@@ -469,14 +469,14 @@ async function loadRealtimeNacSyncStatus() {
     const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const rows = data.tenants || [];
     if (!rows.length) {
-        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
+        wrap.innerHTML = '<p class="text-xs text-slate-500 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
         return;
     }
     wrap.innerHTML = rows.map(t => {
         const st = String(t.status || '');
         const pill = st === 'success' ? 'bg-green-100 text-green-700'
             : st === 'error' ? 'bg-red-100 text-red-700'
-            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-400';
+            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-500';
         const pushed = Number(t.pushed) || 0;
         const errors = Number(t.errors) || 0;
         const skipped = Number(t.skipped) || 0;
@@ -484,11 +484,11 @@ async function loadRealtimeNacSyncStatus() {
         const skipLine = skipped > 0 ? ` · <span class="text-amber-600">skipped ${skipped}</span>` : '';
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-1">
-                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-400">${esc(t.tenant_id)}</span></span>
+                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-500">${esc(t.tenant_id)}</span></span>
                 <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
             </div>
-            <p class="text-xs text-slate-500">added ${pushed} · already-present ${skipped} · errors ${errors} · sessions ${total}${skipLine} <span class="text-slate-400">· last ${fmtDate(t.last_sync_ts)}</span></p>
-            ${t.message ? `<p class="text-xs text-slate-400 mt-1">${esc(t.message)}</p>` : ''}
+            <p class="text-xs text-slate-500">added ${pushed} · already-present ${skipped} · errors ${errors} · sessions ${total}${skipLine} <span class="text-slate-500">· last ${fmtDate(t.last_sync_ts)}</span></p>
+            ${t.message ? `<p class="text-xs text-slate-500 mt-1">${esc(t.message)}</p>` : ''}
         </div>`;
     }).join('');
 }
@@ -599,7 +599,7 @@ async function loadStalenessSweepStatus() {
         return;
     }
     if (!data || !data.last_sync_ts) {
-        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No sweep recorded yet. Click “Sweep now” to run one.</p>';
+        wrap.innerHTML = '<p class="text-xs text-slate-500 italic">No sweep recorded yet. Click “Sweep now” to run one.</p>';
         return;
     }
     const esc = escapeHtml;  // shared escaper (escapes &<>"')
@@ -611,8 +611,8 @@ async function loadStalenessSweepStatus() {
             <span class="text-sm font-bold text-slate-700">Cluster-wide</span>
             <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
         </div>
-        <p class="text-xs text-slate-500">scanned ${Number(data.scanned) || 0} · decommissioned ${Number(data.decommissioned) || 0} · deleted ${Number(data.deleted) || 0} · IPs freed ${Number(data.ip_freed) || 0} · errors ${Number(data.errors) || 0} <span class="text-slate-400">· last ${fmtDate(data.last_sync_ts)}</span></p>
-        ${data.message ? `<p class="text-xs text-slate-400 mt-1">${esc(data.message)}</p>` : ''}
+        <p class="text-xs text-slate-500">scanned ${Number(data.scanned) || 0} · decommissioned ${Number(data.decommissioned) || 0} · deleted ${Number(data.deleted) || 0} · IPs freed ${Number(data.ip_freed) || 0} · errors ${Number(data.errors) || 0} <span class="text-slate-500">· last ${fmtDate(data.last_sync_ts)}</span></p>
+        ${data.message ? `<p class="text-xs text-slate-500 mt-1">${esc(data.message)}</p>` : ''}
     </div>`;
 }
 
@@ -642,7 +642,7 @@ async function runNetboxDedupe(apply) {
     const wrap = document.getElementById('netbox-dedupe-status');
     if (apply && !confirm('Merge duplicate devices? The most complete record in each group is kept and the duplicates are deleted. This cannot be undone.')) return;
     [scanBtn, mergeBtn].forEach(b => { if (b) b.disabled = true; });
-    if (wrap) wrap.innerHTML = '<p class="text-xs text-slate-400 italic">Running…</p>';
+    if (wrap) wrap.innerHTML = '<p class="text-xs text-slate-500 italic">Running…</p>';
     try {
         const data = await apiJson('/setup/netbox-dedupe/run', {
             method: 'POST',
@@ -667,7 +667,7 @@ function renderNetboxDedupe(res, applied) {
     if (!wrap) return;
     const groups = res.groups || [];
     const head = `<p class="text-xs text-slate-500">Scanned <strong>${res.scanned || 0}</strong> device(s) — <strong>${groups.length}</strong> duplicate group(s)${applied ? `, merged <strong>${res.merged || 0}</strong> device(s)` : ' (dry run — nothing changed)'}${res.errors ? `, <span class="text-red-500">${res.errors} error(s)</span>` : ''}.</p>`;
-    if (!groups.length) { wrap.innerHTML = head + '<p class="text-xs text-slate-400 italic">No duplicate devices found.</p>'; return; }
+    if (!groups.length) { wrap.innerHTML = head + '<p class="text-xs text-slate-500 italic">No duplicate devices found.</p>'; return; }
     const rows = groups.map(g => {
         const dups = (g.duplicate_ids || []).map(id => '#' + id).join(', ');
         const name = g.survivor_name ? ' (' + escapeHtml(g.survivor_name) + ')' : '';
@@ -728,7 +728,7 @@ async function loadRepoSyncStatus() {
         return;
     }
     if (!data || !data.last_sync_ts) {
-        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No sync recorded yet. Click “Sync now” to run one.</p>';
+        wrap.innerHTML = '<p class="text-xs text-slate-500 italic">No sync recorded yet. Click “Sync now” to run one.</p>';
         return;
     }
     const esc = escapeHtml;  // shared escaper (escapes &<>"')
@@ -746,8 +746,8 @@ async function loadRepoSyncStatus() {
             : r.status === 'error' ? 'bg-red-500' : 'bg-slate-300';
         return `<div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full ${dot}"></span>
             <span class="text-xs text-slate-600">${esc(r.name)}</span>
-            <span class="text-xs text-slate-400">${esc(r.message || r.status)}</span></div>`;
-    }).join('') : '<p class="text-xs text-slate-400 italic">No provisioning source repos present.</p>';
+            <span class="text-xs text-slate-500">${esc(r.message || r.status)}</span></div>`;
+    }).join('') : '<p class="text-xs text-slate-500 italic">No provisioning source repos present.</p>';
     // Per-module spoke fan-out results (from perform_update, threaded through
     // repo_sync). Each entry is "sid: <outcome> (repo)"; classify the outcome
     // into a colored dot so the REAL module updates (le, pxmx, opnsense, …) are
@@ -773,25 +773,25 @@ async function loadRepoSyncStatus() {
         const nm = (_h && _h.name && _h.name !== sid) ? _h.name : sid;
         return `<div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full ${_spokeDot(txt)}"></span>
             <span class="text-xs text-slate-600 font-medium" title="${esc(sid)}">${esc(nm)}</span>
-            <span class="text-xs text-slate-400">${esc(txt)}</span></div>`;
-    }).join('') : '<p class="text-xs text-slate-400 italic">No module updates this sync (the hub was current — spokes fan out only when the hub or a module repo advances, or on a forced Sync).</p>';
+            <span class="text-xs text-slate-500">${esc(txt)}</span></div>`;
+    }).join('') : '<p class="text-xs text-slate-500 italic">No module updates this sync (the hub was current — spokes fan out only when the hub or a module repo advances, or on a forced Sync).</p>';
     wrap.innerHTML = `<div class="border border-slate-200 rounded-md p-3">
         <div class="flex items-center justify-between mb-1">
             <span class="text-sm font-bold text-slate-700">Hub update</span>
             <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(hs || '—')}</span>
         </div>
-        ${hub.message ? `<p class="text-xs text-slate-400 mt-1">${esc(hub.message)}</p>` : ''}
+        ${hub.message ? `<p class="text-xs text-slate-500 mt-1">${esc(hub.message)}</p>` : ''}
         <div class="mt-3">
-            <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">Module updates <span class="text-slate-400 font-normal normal-case">(spokes — pxmx / opnsense / cs / cppm / netbox / ldap / nw / le / roles)</span></div>
+            <div class="text-xs font-bold text-slate-500 mb-2">Module updates <span class="text-slate-500 font-normal normal-case">(spokes — pxmx / opnsense / cs / cppm / netbox / ldap / nw / le / roles)</span></div>
             <div class="space-y-1">${spokeRows}</div>
         </div>
         <div class="mt-3 pt-2 border-t border-slate-100">
-            <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">Provisioning source repos <span class="text-slate-400 font-normal normal-case">(auxiliary services on the hub — not LM modules)</span></div>
-            <p class="text-xs text-slate-500">${okN} ok · ${errN} error · ${skipN} skipped <span class="text-slate-400">· last ${fmtDate(data.last_sync_ts)}</span></p>
+            <div class="text-xs font-bold text-slate-500 mb-2">Provisioning source repos <span class="text-slate-500 font-normal normal-case">(auxiliary services on the hub — not LM modules)</span></div>
+            <p class="text-xs text-slate-500">${okN} ok · ${errN} error · ${skipN} skipped <span class="text-slate-500">· last ${fmtDate(data.last_sync_ts)}</span></p>
             ${changed.length ? `<p class="text-xs text-slate-500 mt-1">changed: ${esc(changed.join(', '))}</p>` : ''}
             <div class="mt-1 space-y-1">${provRows}</div>
         </div>
-        ${data.message ? `<p class="text-xs text-slate-400 mt-2 pt-2 border-t border-slate-100">${esc(data.message)}</p>` : ''}
+        ${data.message ? `<p class="text-xs text-slate-500 mt-2 pt-2 border-t border-slate-100">${esc(data.message)}</p>` : ''}
     </div>`;
 }
 
@@ -972,7 +972,7 @@ async function saveHubTlsVerify() {
         if ((f.failed || []).length) t += `, failed: ${f.failed.join(', ')}`;
         t += '.';
         if (refused.length) t += ' Refused (hub cert does not verify from these nodes — they keep their current setting): ' + refused.map(x => x.spoke_id).join(', ') + '.';
-        if (msg) { msg.textContent = t; msg.className = 'text-xs mt-3 ' + (refused.length ? 'text-amber-600' : 'text-slate-400'); }
+        if (msg) { msg.textContent = t; msg.className = 'text-xs mt-3 ' + (refused.length ? 'text-amber-600' : 'text-slate-500'); }
         showToast('Hub TLS verification saved.', refused.length ? 'warning' : 'success');
     } catch (e) {
         if (msg) msg.textContent = '';
@@ -993,7 +993,7 @@ async function loadSpokeAlerts() {
     }
     const alerts = (data && data.active_alerts) || [];
     if (!alerts.length) {
-        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No active alerts — every approved spoke is in contact.</p>';
+        wrap.innerHTML = '<p class="text-xs text-slate-500 italic">No active alerts — every approved spoke is in contact.</p>';
         return;
     }
     const esc = escapeHtml;  // shared escaper (escapes &<>"')
@@ -1011,8 +1011,8 @@ async function loadSpokeAlerts() {
                 <span class="text-sm font-mono text-slate-700" title="${esc(a.spoke_id)}">${esc(_nm)}</span>
                 <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(a.tier)}</span>
             </div>
-            <p class="text-xs text-slate-500">out of contact ${mins}m <span class="text-slate-400">· since ${fmtDate(a.since_ts)}</span></p>
-            ${a.detail ? `<p class="text-xs text-slate-400 mt-1">${esc(a.detail)}</p>` : ''}
+            <p class="text-xs text-slate-500">out of contact ${mins}m <span class="text-slate-500">· since ${fmtDate(a.since_ts)}</span></p>
+            ${a.detail ? `<p class="text-xs text-slate-500 mt-1">${esc(a.detail)}</p>` : ''}
         </div>`;
     }).join('');
 }
@@ -1089,14 +1089,14 @@ async function loadVmSyncStatus() {
     const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const rows = data.tenants || [];
     if (!rows.length) {
-        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
+        wrap.innerHTML = '<p class="text-xs text-slate-500 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
         return;
     }
     wrap.innerHTML = rows.map(t => {
         const st = String(t.status || '');
         const pill = st === 'success' ? 'bg-green-100 text-green-700'
             : st === 'error' ? 'bg-red-100 text-red-700'
-            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-400';
+            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-500';
         const pushed = Number(t.pushed) || 0;
         const errors = Number(t.errors) || 0;
         const deleted = Number(t.deleted) || 0;
@@ -1107,11 +1107,11 @@ async function loadVmSyncStatus() {
             : '';
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-1">
-                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-400">${esc(t.tenant_id)}</span></span>
+                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-500">${esc(t.tenant_id)}</span></span>
                 <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
             </div>
-            <p class="text-xs text-slate-500">pushed ${pushed} · deleted ${deleted} · errors ${errors} · vms ${total}${skipLine} <span class="text-slate-400">· last ${fmtDate(t.last_sync_ts)}</span></p>
-            ${t.message ? `<p class="text-xs text-slate-400 mt-1">${esc(t.message)}</p>` : ''}
+            <p class="text-xs text-slate-500">pushed ${pushed} · deleted ${deleted} · errors ${errors} · vms ${total}${skipLine} <span class="text-slate-500">· last ${fmtDate(t.last_sync_ts)}</span></p>
+            ${t.message ? `<p class="text-xs text-slate-500 mt-1">${esc(t.message)}</p>` : ''}
         </div>`;
     }).join('');
 }
@@ -1225,14 +1225,14 @@ async function loadFwDiscoveryStatus() {
     const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const rows = data.tenants || [];
     if (!rows.length) {
-        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
+        wrap.innerHTML = '<p class="text-xs text-slate-500 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
         return;
     }
     wrap.innerHTML = rows.map(t => {
         const st = String(t.status || '');
         const pill = st === 'success' ? 'bg-green-100 text-green-700'
             : st === 'error' ? 'bg-red-100 text-red-700'
-            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-400';
+            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-500';
         const pushed = Number(t.pushed) || 0;
         const errors = Number(t.errors) || 0;
         const deleted = Number(t.deleted) || 0;
@@ -1241,11 +1241,11 @@ async function loadFwDiscoveryStatus() {
         const skipLine = skipped > 0 ? ` · <span class="text-amber-600">skipped ${skipped}</span>` : '';
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-1">
-                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-400">${esc(t.tenant_id)}</span></span>
+                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-500">${esc(t.tenant_id)}</span></span>
                 <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
             </div>
-            <p class="text-xs text-slate-500">pushed ${pushed} · deleted ${deleted} · errors ${errors} · discovered ${total}${skipLine} <span class="text-slate-400">· last ${fmtDate(t.last_sync_ts)}</span></p>
-            ${t.message ? `<p class="text-xs text-slate-400 mt-1">${esc(t.message)}</p>` : ''}
+            <p class="text-xs text-slate-500">pushed ${pushed} · deleted ${deleted} · errors ${errors} · discovered ${total}${skipLine} <span class="text-slate-500">· last ${fmtDate(t.last_sync_ts)}</span></p>
+            ${t.message ? `<p class="text-xs text-slate-500 mt-1">${esc(t.message)}</p>` : ''}
         </div>`;
     }).join('');
 }
@@ -1350,14 +1350,14 @@ async function loadNwDiscoveryStatus() {
     const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const rows = data.tenants || [];
     if (!rows.length) {
-        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
+        wrap.innerHTML = '<p class="text-xs text-slate-500 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
         return;
     }
     wrap.innerHTML = rows.map(t => {
         const st = String(t.status || '');
         const pill = st === 'success' ? 'bg-green-100 text-green-700'
             : st === 'error' ? 'bg-red-100 text-red-700'
-            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-400';
+            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-500';
         const pushed = Number(t.pushed) || 0;
         const errors = Number(t.errors) || 0;
         const deleted = Number(t.deleted) || 0;
@@ -1366,11 +1366,11 @@ async function loadNwDiscoveryStatus() {
         const skipLine = skipped > 0 ? ` · <span class="text-amber-600">skipped ${skipped}</span>` : '';
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-1">
-                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-400">${esc(t.tenant_id)}</span></span>
+                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-500">${esc(t.tenant_id)}</span></span>
                 <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
             </div>
-            <p class="text-xs text-slate-500">pushed ${pushed} · deleted ${deleted} · errors ${errors} · discovered ${total}${skipLine} <span class="text-slate-400">· last ${fmtDate(t.last_sync_ts)}</span></p>
-            ${t.message ? `<p class="text-xs text-slate-400 mt-1">${esc(t.message)}</p>` : ''}
+            <p class="text-xs text-slate-500">pushed ${pushed} · deleted ${deleted} · errors ${errors} · discovered ${total}${skipLine} <span class="text-slate-500">· last ${fmtDate(t.last_sync_ts)}</span></p>
+            ${t.message ? `<p class="text-xs text-slate-500 mt-1">${esc(t.message)}</p>` : ''}
         </div>`;
     }).join('');
 }
@@ -1465,15 +1465,15 @@ async function loadMonitoringSync() {
     const iv = document.getElementById('mon-sync-interval');
     if (iv) iv.value = d.interval_minutes || 5;
     const st = d.status;
-    if (!st) { wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet.</p>'; return; }
+    if (!st) { wrap.innerHTML = '<p class="text-xs text-slate-500 italic">No syncs recorded yet.</p>'; return; }
     const pill = st.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700';
     wrap.innerHTML = `<div class="border border-slate-200 rounded-md p-3">
         <div class="flex items-center justify-between mb-1">
-            <span class="text-sm font-bold text-slate-700">All tenants <span class="text-xs text-slate-400">(${escapeHtml(st.trigger || '')})</span></span>
+            <span class="text-sm font-bold text-slate-700">All tenants <span class="text-xs text-slate-500">(${escapeHtml(st.trigger || '')})</span></span>
             <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${escapeHtml(st.status || '—')}</span>
         </div>
-        <p class="text-xs text-slate-500">created ${Number(st.created) || 0} · refreshed ${Number(st.refreshed) || 0} · disabled ${Number(st.disabled) || 0} · deleted ${Number(st.deleted) || 0} · errors ${Number(st.errors) || 0} <span class="text-slate-400">· last ${fmtDate(st.ts)}</span></p>
-        ${st.message ? `<p class="text-xs text-slate-400 mt-1">${escapeHtml(st.message)}</p>` : ''}
+        <p class="text-xs text-slate-500">created ${Number(st.created) || 0} · refreshed ${Number(st.refreshed) || 0} · disabled ${Number(st.disabled) || 0} · deleted ${Number(st.deleted) || 0} · errors ${Number(st.errors) || 0} <span class="text-slate-500">· last ${fmtDate(st.ts)}</span></p>
+        ${st.message ? `<p class="text-xs text-slate-500 mt-1">${escapeHtml(st.message)}</p>` : ''}
     </div>`;
 }
 
@@ -1533,23 +1533,23 @@ async function loadConsoleNetboxStatus() {
     const esc = escapeHtml;
     const rows = data.tenants || [];
     if (!rows.length) {
-        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No console syncs yet. A device is pushed the moment a Console spoke identifies it.</p>';
+        wrap.innerHTML = '<p class="text-xs text-slate-500 italic">No console syncs yet. A device is pushed the moment a Console spoke identifies it.</p>';
         return;
     }
     wrap.innerHTML = rows.map(t => {
         const st = String(t.status || '');
         const pill = st === 'success' ? 'bg-green-100 text-green-700'
             : st === 'error' ? 'bg-red-100 text-red-700'
-            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-400';
+            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-500';
         const synced = Number(t.synced) || 0;
         const errors = Number(t.errors) || 0;
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-1">
-                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-400">${esc(t.tenant_id)}</span></span>
+                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-500">${esc(t.tenant_id)}</span></span>
                 <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
             </div>
-            <p class="text-xs text-slate-500">synced ${synced} · errors ${errors}${t.last_device ? ` · last <span class="font-mono">${esc(t.last_device)}</span>` : ''} <span class="text-slate-400">· ${fmtDate(t.last_sync_ts)}</span></p>
-            ${t.message ? `<p class="text-xs text-slate-400 mt-1">${esc(t.message)}</p>` : ''}
+            <p class="text-xs text-slate-500">synced ${synced} · errors ${errors}${t.last_device ? ` · last <span class="font-mono">${esc(t.last_device)}</span>` : ''} <span class="text-slate-500">· ${fmtDate(t.last_sync_ts)}</span></p>
+            ${t.message ? `<p class="text-xs text-slate-500 mt-1">${esc(t.message)}</p>` : ''}
         </div>`;
     }).join('');
 }
@@ -1584,7 +1584,7 @@ async function loadSubnetFilterToggles() {
             const on = !!_subnetFilterState[m.key];
             return `<div class="flex items-center justify-between py-1.5 border-b border-slate-100 last:border-0">
                 <span class="text-sm text-slate-700">${m.label}</span>
-                <button onclick="toggleSubnetFilter('${m.key}')" class="relative inline-flex h-5 w-10 items-center rounded-full transition-colors ${on ? 'bg-[#01A982]' : 'bg-slate-300'}">
+                <button onclick="toggleSubnetFilter('${m.key}')" class="relative inline-flex h-5 w-10 items-center rounded-full transition-colors ${on ? 'bg-primary' : 'bg-slate-300'}">
                     <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${on ? 'translate-x-5' : 'translate-x-1'}"></span>
                 </button>
             </div>`;
@@ -1676,46 +1676,46 @@ async function loadUsbOverview() {
         ? (g.certified || []).map(d => `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border border-slate-200 rounded-md">
             <span class="font-mono text-xs text-slate-700 w-28">${escapeHtml(d.vidpid)}</span>
             <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">${escapeHtml(d.label && d.label !== d.vidpid ? d.label : (usbDeviceName(d.vidpid) || '—'))}</span>
-            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-green-100 text-green-700">Certified globally</span>
-            <button onclick="removeGlobalUsbCert('${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-approve</button>
+            <span class="px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700">Certified globally</span>
+            <button onclick="removeGlobalUsbCert('${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded-full text-xs font-bold">Un-approve</button>
           </div>`).join('')
-        : '<p class="text-xs text-slate-400 italic">None certified.</p>';
+        : '<p class="text-xs text-slate-500 italic">None certified.</p>';
     ignWrap.innerHTML = (g.ignored || []).length
         ? (g.ignored || []).map(vp => `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border border-slate-200 rounded-md">
             <span class="font-mono text-xs text-slate-700 w-28">${escapeHtml(vp)}</span>
             <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">${escapeHtml(usbDeviceName(vp) || '—')}</span>
-            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-200 text-slate-600">Ignored globally</span>
-            <button onclick="removeGlobalUsbIgnore('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-ignore</button>
+            <span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-200 text-slate-600">Ignored globally</span>
+            <button onclick="removeGlobalUsbIgnore('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded-full text-xs font-bold">Un-ignore</button>
           </div>`).join('')
-        : '<p class="text-xs text-slate-400 italic">None ignored.</p>';
+        : '<p class="text-xs text-slate-500 italic">None ignored.</p>';
 
     const list = document.getElementById('tenant-usb-list');
     const tenants = data.tenants || [];
-    if (!tenants.length) { list.innerHTML = '<p class="text-xs text-slate-400 italic">No tenants configured.</p>'; return; }
+    if (!tenants.length) { list.innerHTML = '<p class="text-xs text-slate-500 italic">No tenants configured.</p>'; return; }
     list.innerHTML = tenants.map(t => {
         const cert = (t.certified || []).map(d => `<div class="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 border border-slate-200 rounded-md">
                 <span class="font-mono text-xs text-slate-700">${escapeHtml(d.vidpid)}</span>
                 <span class="text-xs text-slate-500 flex-1 min-w-[6rem]">${escapeHtml(usbDeviceName(d.vidpid) || d.type || '—')}</span>
-                <button onclick="tenantUsbRemove('${t.id}','${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded text-[11px] font-bold">Un-approve</button>
-              </div>`).join('') || '<span class="text-xs text-slate-400 italic">none</span>';
+                <button onclick="tenantUsbRemove('${t.id}','${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded-full text-xs font-bold">Un-approve</button>
+              </div>`).join('') || '<span class="text-xs text-slate-500 italic">none</span>';
         const ign = (t.ignored || []).map(vp => `<div class="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 border border-slate-200 rounded-md">
                 <span class="font-mono text-xs text-slate-700">${escapeHtml(vp)}</span>
                 <span class="text-xs text-slate-500 flex-1 min-w-[6rem]">${escapeHtml(usbDeviceName(vp) || '—')}</span>
-                <button onclick="tenantUsbRemove('${t.id}','${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded text-[11px] font-bold">Un-ignore</button>
-              </div>`).join('') || '<span class="text-xs text-slate-400 italic">none</span>';
+                <button onclick="tenantUsbRemove('${t.id}','${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded-full text-xs font-bold">Un-ignore</button>
+              </div>`).join('') || '<span class="text-xs text-slate-500 italic">none</span>';
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-2">
-                <span class="text-sm font-bold text-slate-700">${t.name} <span class="text-xs font-mono text-slate-400">${t.id}</span></span>
+                <span class="text-sm font-bold text-slate-700">${t.name} <span class="text-xs font-mono text-slate-500">${t.id}</span></span>
             </div>
             <div class="grid grid-cols-2 gap-3 text-xs">
-                <div><p class="text-[10px] uppercase font-bold text-slate-400 mb-1">Certified (local)</p><div class="flex flex-col gap-1 min-h-[1.5rem]">${cert}</div></div>
-                <div><p class="text-[10px] uppercase font-bold text-slate-400 mb-1">Ignored (local)</p><div class="flex flex-col gap-1 min-h-[1.5rem]">${ign}</div></div>
+                <div><p class="text-xs font-bold text-slate-500 mb-1">Certified (local)</p><div class="flex flex-col gap-1 min-h-[1.5rem]">${cert}</div></div>
+                <div><p class="text-xs font-bold text-slate-500 mb-1">Ignored (local)</p><div class="flex flex-col gap-1 min-h-[1.5rem]">${ign}</div></div>
             </div>
             <div class="flex gap-1 mt-2">
                 <input id="tusbc-${t.id}" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${'w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800'}" onkeydown="if(event.key==='Enter')tenantUsbAdd('${t.id}','certify')">
                 <select id="tusbt-${t.id}" title="Dongle type" class="text-xs ${'w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800'}"><option>wireless</option><option>wired</option><option>storage</option><option>other</option></select>
-                <button onclick="tenantUsbAdd('${t.id}','certify')" class="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold">Certify</button>
-                <button onclick="tenantUsbAdd('${t.id}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-1 rounded text-xs font-bold">Ignore</button>
+                <button onclick="tenantUsbAdd('${t.id}','certify')" class="bg-green-100 text-green-700 px-2 py-1 rounded-full text-xs font-bold">Certify</button>
+                <button onclick="tenantUsbAdd('${t.id}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-1 rounded-full text-xs font-bold">Ignore</button>
             </div>
         </div>`;
     }).join('');
@@ -1737,7 +1737,7 @@ async function loadDiscoveredUsb() {
     }
     const devs = data.devices || [];
     if (!devs.length) {
-        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No USB devices discovered yet.</p>';
+        wrap.innerHTML = '<p class="text-xs text-slate-500 italic">No USB devices discovered yet.</p>';
         return;
     }
     const esc = escapeHtml;  // shared escaper (escapes &<>"')
@@ -1747,30 +1747,30 @@ async function loadDiscoveredUsb() {
         _discoveredUsbByName[vp] = d.name || vp;
         const seen = (d.seen_on || []).map(s => `${esc(s.tenant_name)} / ${esc(s.spoke_name)}`).join(', ') || '—';
         let badge;
-        if (d.is_global) badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-green-100 text-green-700">Certified globally</span>';
-        else if (d.is_global_ignored) badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-200 text-slate-600">Ignored globally</span>';
-        else if (d.locally_ignored) badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-100 text-amber-700">Locally ignored</span>';
-        else badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-100 text-slate-500">Unapproved</span>';
+        if (d.is_global) badge = '<span class="px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700">Certified globally</span>';
+        else if (d.is_global_ignored) badge = '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-200 text-slate-600">Ignored globally</span>';
+        else if (d.locally_ignored) badge = '<span class="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700">Locally ignored</span>';
+        else badge = '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500">Unapproved</span>';
         // Dongle-type picker paired with the approve button — the chosen type
         // becomes the device's certified `type` (wireless/wired/…), which the
         // pxmx agent uses as each provisioned VM's sim_phy. Defaults to
         // wireless (the agent's own default); hidden once already global.
         const approveBtn = d.is_global
-            ? `<button onclick="removeGlobalUsbCert('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-approve globally</button>`
+            ? `<button onclick="removeGlobalUsbCert('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded-full text-xs font-bold">Un-approve globally</button>`
             : `<select id="gusbt-${esc(vp)}" title="Dongle type" class="text-xs bg-white border border-slate-300 rounded-md px-2 py-1 outline-none focus:ring-2 focus:ring-green-500 text-slate-800"><option>wireless</option><option>wired</option><option>storage</option><option>other</option></select>
-               <button onclick="approveGlobalUsb('${vp}')" class="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold">Approve globally</button>`;
+               <button onclick="approveGlobalUsb('${vp}')" class="bg-green-100 text-green-700 px-2 py-1 rounded-full text-xs font-bold">Approve globally</button>`;
         const ignoreBtn = d.is_global_ignored
-            ? `<button onclick="removeGlobalUsbIgnore('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-ignore globally</button>`
-            : `<button onclick="ignoreGlobalUsb('${vp}')" class="bg-slate-200 text-slate-600 px-2 py-1 rounded text-xs font-bold">Ignore globally</button>`;
+            ? `<button onclick="removeGlobalUsbIgnore('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded-full text-xs font-bold">Un-ignore globally</button>`
+            : `<button onclick="ignoreGlobalUsb('${vp}')" class="bg-slate-200 text-slate-600 px-2 py-1 rounded-full text-xs font-bold">Ignore globally</button>`;
         // Per-tenant LOCAL un-approve — one button per tenant that certified this
         // device locally (drops it from that tenant's usb_vidpids).
         const localBtns = (d.locally_certified || []).map(c =>
-            `<button onclick="tenantUsbRemove('${esc(c.tenant_id)}','${vp}')" title="Un-approve locally for ${esc(c.tenant_name)}" class="bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 px-2 py-1 rounded text-[11px] font-bold">Un-approve @${esc(c.tenant_name)}</button>`
+            `<button onclick="tenantUsbRemove('${esc(c.tenant_id)}','${vp}')" title="Un-approve locally for ${esc(c.tenant_name)}" class="bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 px-2 py-1 rounded-full text-xs font-bold">Un-approve @${esc(c.tenant_name)}</button>`
         ).join('');
         return `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border border-slate-200 rounded-md">
             <span class="font-mono text-xs text-slate-700 w-28">${esc(vp)}</span>
             <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">${esc(d.name || '—')}</span>
-            <span class="text-[11px] text-slate-400 flex-1 min-w-[10rem]">${seen}</span>
+            <span class="text-xs text-slate-500 flex-1 min-w-[10rem]">${seen}</span>
             ${badge}
             <span class="flex flex-wrap gap-1">${approveBtn}${ignoreBtn}${localBtns}</span>
         </div>`;
@@ -1955,10 +1955,10 @@ async function loadCacheStatus() {
                 <td class="py-1.5 pr-3 text-slate-700">${escapeHtml(n.namespace)}</td>
                 <td class="py-1.5 pr-3 text-center">${entries.length}</td>
                 <td class="py-1.5 pr-3 text-center">${_cacheAge(oldest)}</td>
-                <td class="py-1.5 pr-3 text-center">${active ? '<span class="text-green-600">active</span>' : '<span class="text-slate-400">idle</span>'}</td>
-                <td class="py-1.5 pr-3 text-center ${errors ? 'text-red-500' : 'text-slate-400'}">${errors}</td>
-                <td class="py-1.5 pr-3 text-right text-slate-400">${kb}</td>
-                <td class="py-1.5 text-right"><button class="text-xs text-[#01A982] hover:underline" onclick="refreshCacheNamespace('${escapeHtml(n.namespace)}')">Refresh</button></td>
+                <td class="py-1.5 pr-3 text-center">${active ? '<span class="text-green-600">active</span>' : '<span class="text-slate-500">idle</span>'}</td>
+                <td class="py-1.5 pr-3 text-center ${errors ? 'text-red-500' : 'text-slate-500'}">${errors}</td>
+                <td class="py-1.5 pr-3 text-right text-slate-500">${kb}</td>
+                <td class="py-1.5 text-right"><button class="text-xs text-primary-text hover:underline" onclick="refreshCacheNamespace('${escapeHtml(n.namespace)}')">Refresh</button></td>
             </tr>`;
         }).join('');
         const iv = d.intervals || {};
@@ -1966,10 +1966,10 @@ async function loadCacheStatus() {
             <p class="text-xs text-slate-500 mb-2">Every page is served from this cache. Refreshed every ${iv.active_s || 60}s while users are active, ${Math.round((iv.idle_s || 300) / 60)}m otherwise.
                Stored on disk ${d.encrypted ? 'encrypted' : '<span class="text-red-500">unencrypted</span>'} so it survives a restart.</p>
             <table class="w-full text-xs">
-                <thead><tr class="text-slate-400 uppercase tracking-wider">
+                <thead><tr class="text-slate-500">
                     <th class="text-left py-1">Module</th><th>Entries</th><th>Oldest</th><th>Users</th><th>Errors</th><th class="text-right">Disk</th><th></th>
                 </tr></thead>
-                <tbody>${rows || '<tr><td colspan="7" class="py-3 text-center text-slate-400 italic">Nothing cached yet</td></tr>'}</tbody>
+                <tbody>${rows || '<tr><td colspan="7" class="py-3 text-center text-slate-500 italic">Nothing cached yet</td></tr>'}</tbody>
             </table>`;
     } catch (e) {
         if (container) container.innerHTML = `<p class="py-3 text-center text-xs text-red-400">${escapeHtml(e.message)}</p>`;
@@ -2004,12 +2004,12 @@ async function loadFirewallsList() {
     try {
         const firewalls = await loadFirewalls();
         if (firewalls.length === 0) {
-            listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No firewalls configured.</p>';
+            listEl.innerHTML = '<p class="text-xs text-slate-500 italic">No firewalls configured.</p>';
             return;
         }
         listEl.innerHTML = firewalls.map(fw => `
             <div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-                <div><span class="text-sm font-medium text-slate-700">${fw.name || fw.id}</span><span class="ml-2 text-xs text-slate-400">${fw.model} · ${fw.host || ''}:${fw.port || ''}</span></div>
+                <div><span class="text-sm font-medium text-slate-700">${fw.name || fw.id}</span><span class="ml-2 text-xs text-slate-500">${fw.model} · ${fw.host || ''}:${fw.port || ''}</span></div>
                 <div class="flex gap-2">
                     <button onclick="editFirewall('${fw.id}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
                     <button onclick="deleteFirewallEntry('${fw.id}')" class="text-xs text-red-400 hover:text-red-600 font-medium" title="Delete this firewall entry">Delete</button>

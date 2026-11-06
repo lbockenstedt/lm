@@ -1943,7 +1943,8 @@ def create_app(hub):
         # high-value directives (object-src/base-uri/frame-ancestors/
         # form-action) and pins script/style/connect to a known allowlist
         # (self + the one CDN the UI still actually pulls from). All WebSockets are
-        # same-origin, covered by connect-src 'self'.
+        # same-origin, covered by connect-src 'self'. font-src also allows
+        # www.hpe.com for the HPE Graphik web font (falls back to Arial).
         resp.headers.setdefault(
             "Content-Security-Policy",
             "; ".join((
@@ -1953,7 +1954,7 @@ def create_app(hub):
                 "frame-ancestors 'none'",
                 "form-action 'self'",
                 "img-src 'self' data: blob:",
-                "font-src 'self' data: https://cdn.jsdelivr.net",
+                "font-src 'self' data: https://cdn.jsdelivr.net https://www.hpe.com",
                 "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
                 "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
                 "https://cdn.jsdelivr.net",

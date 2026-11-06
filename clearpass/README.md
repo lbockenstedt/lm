@@ -2,7 +2,7 @@
 
 Importable ClearPass Context Server Actions (CSAs) that resolve **which NetBox
 tenant an endpoint belongs to** and expose it as Authorization attributes
-(`NetBox_Tenant_Slug` / `NetBox_Tenant_ID` / `NetBox_Tenant_Name`) for use as a
+(`NetBox_Tenant_Name` / `NetBox_Tenant_ID`) for use as a
 condition in an Enforcement Policy. This is the "ClearPass references the NetBox
 API to get a Tenant ID for a policy decision" integration.
 
@@ -69,7 +69,7 @@ minor keys (`content_type` / `response_type`, `use_proxy`) occasionally differ.
 - **Primary/secondary:** set as a secondary source so a NetBox outage doesn't
   break auth entirely.
 - **On failure / no attribute:** decide deliberately. When NetBox is
-  unreachable, or the IP isn't in any tenant prefix, `NetBox_Tenant_Slug` is
+  unreachable, or the IP isn't in any tenant prefix, `NetBox_Tenant_Name` is
   empty. Choose fail-closed (deny / default-reject role) or fail-open
   (default role) in the **Enforcement Policy**, not here.
 
@@ -80,14 +80,16 @@ minor keys (`content_type` / `response_type`, `use_proxy`) occasionally differ.
 Add a condition on the extracted attribute, e.g.:
 
 ```
-Authorization:NetBox_Tenant_Slug  EQUALS  "contoso"   →  Enforcement Profile: Contoso_Employee_VLAN
-Authorization:NetBox_Tenant_Slug  EQUALS  "guests"    →  Enforcement Profile: Guest_VLAN
-Authorization:NetBox_Tenant_Slug  IS EMPTY            →  Enforcement Profile: Deny_or_Default
+Authorization:NetBox_Tenant_Name  EQUALS  "Contoso"   →  Enforcement Profile: Contoso_Employee_VLAN
+Authorization:NetBox_Tenant_Name  EQUALS  "Guests"    →  Enforcement Profile: Guest_VLAN
+Authorization:NetBox_Tenant_Name  IS EMPTY            →  Enforcement Profile: Deny_or_Default
 ```
 
-`NetBox_Tenant_Slug` here is the same slug the LM hub scopes everything else by
-(`core/src/main.py` `NETBOX_GET_TENANTS`, `api.py` `netbox_tenant_slug`), so the
-NAC decision and the rest of LM agree on tenant identity.
+`NetBox_Tenant_Name` is the same tenant name the LM endpoint sync writes, so the
+condition matches whether the endpoint was pre-synced or tagged at auth time.
+LM does not push the tenant slug to ClearPass. Note that this CSA's
+`NetBox_Tenant_ID` is the NetBox numeric tenant id, while the endpoint sync
+writes the LM tenant id — match on the name when you need both to agree.
 
 ## 5. Caveats worth knowing
 
@@ -118,8 +120,8 @@ NAC decision and the rest of LM agree on tenant identity.
 ClearPass API Probing (the LM hub's CPPM module exposes this too, per
 `docs/modules/cppm.md`) lets you send a raw request to NetBox from the hub
 diagnostics — use it to confirm the URL + token + JSON path before wiring the
-Enforcement Policy. A successful probe returns a `results[0].tenant.slug`
-matching the LM hub's `netbox_tenant_slug` for that tenant.
+Enforcement Policy. A successful probe returns a `results[0].tenant.name`
+matching that tenant's name in LM.
 
 ---
 
