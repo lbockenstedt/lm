@@ -682,16 +682,25 @@ async def reveal_secret(hub, bucket: str, name: str, *, psk: str, actor: str = "
 async def automation_get(hub, bucket: str, name: str) -> Dict[str, Any]:
     """Unattended retrieval for tooling — NO pass-phrase. Only works for
     ``hub``-mode (automation-readable) secrets; ``psk``-mode secrets raise."""
-    # Record the sensitive access with the sentinel.
-    sentinel.guard("vault.automation_get", detail=f"{bucket}/{name}")
     # Find the secret; only hub-mode secrets may be read without a PSK.
     sm = _meta(hub)["secrets"].get(bucket, {}).get(name)
     if not sm:
+        sentinel.guard("vault.automation_get", detail=f"{bucket}/{name}")
         raise CredVaultError(f"secret '{name}' not found")
     if sm.get("mode") != _MODE_HUB:
+        sentinel.guard("vault.automation_get", detail=f"{bucket}/{name}")
         raise CredVaultError(f"secret '{name}' is pass-phrase-only and cannot be read unattended")
+    # Serve repeat reads from the 60s cache (edits change updated_at and miss it).
+    # Only real cloud-vault reads count toward the sentinel's rate baseline; the
+    # canary is always guarded so a cached honeytoken read still trips it.
+    key = _cache_key(bucket, name, sm.get("updated_at", ""))
+    cached = None if name == CANARY_SECRET else _cache_get(key)
+    if cached is not None:
+        return cached
+    sentinel.guard("vault.automation_get", detail=f"{bucket}/{name}")
     # Decrypt with the hub key.
     value = await _fetch_and_decrypt(hub, bucket, name, psk=None)
+    _cache_set(key, copy.deepcopy(value))
     # Record the automated access.
     sm["last_accessed_at"] = _now()
     sm["last_accessed_by"] = "automation"
