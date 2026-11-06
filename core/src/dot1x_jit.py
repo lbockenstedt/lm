@@ -367,8 +367,7 @@ async def _backend_upsert(hub, rec: Dict[str, Any], password: str, *, owned: boo
     spoke = _nac_spoke(hub, tid)
     await _rr(hub, spoke, "CPPM_CREATE_LOCAL_USER", {
         "user_id": username, "password": password,
-        "role_name": get_config(hub)["cppm_role"],
-        "tenant_slug": access.ldap_tenant_slug(hub, tid) or tid})
+        "role_name": get_config(hub)["cppm_role"]})
     rec["upn"] = username
 
 

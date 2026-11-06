@@ -65,9 +65,9 @@ def test_all_three_merged_dhcp_views_render_the_banner():
     # string; every one must be prefixed with the banner. (The DHCP Overview
     # panel reuses "No subnets configured." but is a single-spoke view, so it
     # is matched by class here to avoid colliding with it.)
-    empties = ['<p class="p-4 text-slate-400 italic text-sm">No subnets configured.</p>',
-               '<p class="p-4 text-slate-400 italic text-sm">No active leases.</p>',
-               '<p class="p-4 text-slate-400 italic text-sm">No static reservations configured.</p>']
+    empties = ['<p class="p-4 text-slate-500 italic text-sm">No subnets configured.</p>',
+               '<p class="p-4 text-slate-500 italic text-sm">No active leases.</p>',
+               '<p class="p-4 text-slate-500 italic text-sm">No static reservations configured.</p>']
     for empty in empties:
         assert _SRC.count(empty) == 1, empty
         window = _SRC[max(0, _SRC.index(empty) - 400):_SRC.index(empty)]

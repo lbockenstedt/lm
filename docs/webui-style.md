@@ -1,77 +1,95 @@
 ---
-summary: "The LM WebUI (WebUI/main.js, WebUI/sim-views.js, index.html) has an implicit design system."
-keywords: [blind, buttons, cards, consistency, css, design, drift, find, layout, lm, style, styling, theme, webui]
+summary: "The LM WebUI follows the HPE Design System (design-system.hpe.design): HPE color tokens, HPE Graphik, sentence case, pill buttons, WCAG 2.1 AA."
+keywords: [a11y, accessibility, buttons, cards, color, consistency, contrast, css, design, font, graphik, hpe, layout, lm, style, styling, theme, tokens, webui]
 ---
 
-# WebUI style guide (canonical UI tokens)
+# WebUI style guide (HPE Design System)
 
-The LM WebUI (`WebUI/main.js`, `WebUI/sim-views.js`, `index.html`) has an implicit
-design system. This is its canonical form — **match these when adding UI** so the
-app stays consistent. Derived from the dominant patterns already in use (a scan
-counted usage; these are the majority styles).
+The LM WebUI (`WebUI/main.js`, `WebUI/js/*.js`, `WebUI/sim-views.js`, `index.html`)
+follows the [HPE Design System](https://design-system.hpe.design). Match these
+rules when adding UI. Tokens come from the `hpe-design-tokens` package (light
+theme) and live in `scripts/build-tailwind.sh` (rebuild `WebUI/assets/tailwind.css`
+after any class change).
+
+## Color tokens
+
+| Tailwind class | Value | Use |
+|---|---|---|
+| `bg-primary` / `hover:bg-primary-hover` | `#068667` / `#006750` | Filled primary button, toast, selected state. White text = 4.55:1. |
+| `text-primary-text` | `#006750` | Green text and links on light surfaces (6.9:1). On dark surfaces CSS renders it `#05CC93`. |
+| `brand` (`bg-brand/10`, `border-brand`, `ring-brand`) | `#01A982` | **Decorative only**: tints, borders, focus rings, accents. Never as text or behind white text (3.0:1). |
+| `navy` (`text-navy`, `bg-navy`) | `#263040` | Titles, topbar, footer, login panel. |
+| `focus` | `#292D3A` | Keyboard focus outline (white on dark surfaces). |
+| red / amber / green / blue `-500`, `-50` | HPE critical / warning / ok / info | Status colors. `red-500`/`600` = `#CC1F1A`. |
+
+Muted text is **`text-slate-500`** (4.76:1). `text-slate-400`/`300` fail AA on
+white; don't use them on light surfaces. On dark surfaces (navy, slate-800+,
+topbar, footer, login) CSS renders `text-slate-500` as slate-400 automatically.
 
 ## Typography
 
-| Role | Class | Notes |
-|---|---|---|
-| Page / card **title** | `text-lg font-bold text-[#263040]` | brand navy. NOT slate-800/700, NOT text-xl/base. |
-| Modal title | `text-lg font-bold text-[#263040]` | same as page title |
-| **Section sub-label** (small caps) | `text-sm font-bold text-slate-500 uppercase tracking-wider` | grey group header; add `mb-2` when it needs an explicit bottom margin (normalized — was mb-1/3/4) |
-| Body text | `text-sm text-slate-600/700` | |
-| Secondary / meta | `text-xs text-slate-500` | table cells, captions |
-| Micro (badges, pills) | `text-[10px]` / `text-[11px]` uppercase | status pills, chips |
-| **Left-nav item** | `text-xs font-medium` | forced uniform in JS (renderNav) regardless of cached index.html |
-| Sub-nav tab | `px-1.5 py-1 text-xs uppercase tracking-normal` | uniform across every view |
+- Font: **HPE Graphik** (`'HPE Graphik', Arial, sans-serif`). Loaded from a local
+  install first, then the HPE CDN; offline hubs fall back to Arial. The font is
+  licensed, so it is never committed to this repo.
+- **Sentence case everywhere.** No `uppercase` class or wide letter-spacing
+  (`tracking-wider`/`widest`). The novelty themes (sw, cicada) are exempt.
+- **12px minimum**: use `text-xs`, never `text-[9px]`/`[10px]`/`[11px]`.
 
-Avoid: `text-slate-800`/`text-slate-700` on titles (use `#263040`), `text-xl` for
-normal page titles, `tracking-widest` on tab strips (overflows many-tab views).
-
-## Cards & spacing
-
-- Card container: `hpe-card rounded-lg shadow-sm` (radius + shadow are uniform).
-- Card padding: **`p-5`** for every primary content card (now normalized — was
-  drifting p-3/p-4/p-6). Exceptions: `p-0` for a `<details>` collapsible (its
-  header owns the padding), `p-8` for a centered empty/error-state card.
-- Root view wrapper: `space-y-4` (page sections) — the dominant vertical rhythm.
-- Inside a card: `space-y-2` (fields) or `space-y-3`.
-
-## Tables
-
-- Cell padding: **`px-4 py-2`** (standard density). `px-4 py-3` only for a roomy
-  "primary" table; `px-3 py-2` for a dense/compact table. Pick one per table —
-  don't mix within a view.
-- Header row: `bg-slate-50 text-xs text-slate-500 uppercase` + `th px-4 py-2 font-medium`.
-- Row: `border-b border-slate-100 hover:bg-slate-50`.
+| Role | Class |
+|---|---|
+| Page / card title | `text-lg font-bold text-navy` |
+| Section label | `text-sm font-bold text-slate-500` (+ `mb-2`) |
+| Body | `text-sm text-slate-600/700` |
+| Secondary / meta, badges | `text-xs text-slate-500` |
+| Left-nav item | `text-xs font-medium` (forced in `renderNav`) |
+| Sub-nav tab | `px-1.5 py-1 text-xs` |
 
 ## Buttons
 
-- **Primary (HPE green)**: `bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982]`.
-- Sizes (pick by context, be consistent within a toolbar):
-  - large (modal submit / primary CTA): `px-6 py-2 rounded-md text-sm font-bold`
-  - medium (toolbar action): `px-4 py-2 rounded-md text-xs font-bold` OR `px-3 py-1.5`
-  - small (inline row action): `px-2 py-1 rounded text-xs font-bold`
-- Destructive: `bg-red-100 hover:bg-red-200 text-red-700` (light) or `bg-red-600 text-white` (solid CTA).
-- Neutral: `bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200`.
-- **Save / action buttons are right-pinned**: put them in a `flex justify-end`
-  row (a modal/form footer, settings-card action row, Save+Cancel). Exceptions
-  that stay inline (NOT right-pinned): an inline field+Save row (`<input> <Save>`),
-  a `w-full` full-width action, and a Save with adjacent helper-text explaining it.
+HPE buttons are **pills** (`rounded-full`).
 
-## Normalized (2026-07 consistency pass)
+- Primary: `bg-primary hover:bg-primary-hover text-white px-4 py-2 rounded-full text-sm font-bold`.
+- Primary (tinted, toolbar): `bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand rounded-full`.
+- Secondary / neutral: `bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full`.
+- Destructive: `bg-red-600 hover:bg-red-700 text-white rounded-full` (or `bg-red-50 text-red-700`).
+- Sizes: large `px-6 py-2 text-sm`, toolbar `px-4 py-2`/`px-3 py-1.5 text-xs`, inline `px-2 py-1 text-xs`.
+- Tabs, icon-only squares, full-width and grouped (segmented) buttons keep
+  their own shape.
+- Save / action buttons are right-pinned in a `flex justify-end` row, except an
+  inline field+Save row, a `w-full` action, or a Save with adjacent helper text.
 
-- Titles → `text-lg font-bold text-[#263040]` (was slate-800/700, text-xl).
-- hpe-card padding → `p-5` uniform (was p-3/p-4/p-6); p-0 collapsibles + p-8 empty
-  states kept.
-- Section-label explicit margins → `mb-2` (was mb-1/3/4).
-- Nav font → `text-xs`, force-normalized in JS; sub-nav tabs uniform.
+## Accessibility (WCAG 2.1 AA)
 
-## Known remaining drift (per-instance — NOT safe for a blind find/replace)
+`WebUI/js/a11y.js` patches the live DOM, so existing markup works with the
+keyboard and screen readers:
 
-- **Table / input density**: `px-4 py-2` vs `px-4 py-3` vs `px-3 py-2`. These
-  classes are shared by table cells, form inputs, AND buttons, so a global
-  replace would break inputs/buttons. Normalize per-table (default `px-4 py-2`)
-  when touching a specific view.
-- **Button size tiers**: `px-6 py-2` (large CTA) / `px-4 py-2` / `px-3 py-1.5`
-  (toolbar) / `px-2 py-1` (inline) — contextual, keep consistent *within* a
-  toolbar rather than globally.
-- **Modal widths** (`max-w-md`…`max-w-4xl`): intentionally sized to content.
+- clickable `<div>`/`<span>`/`<tr>` with `onclick` get `tabindex=0` (+ `role=button`)
+  and respond to Enter/Space;
+- icon-only buttons get `aria-label` from `title` (or "Close" for ×/✕);
+- the active nav item gets `aria-current="page"`.
+
+For new UI, prefer a real `<button>`, and give icon-only buttons a `title` or
+`aria-label`. Don't remove the `:focus-visible` outline.
+
+## Time
+
+Timestamps show the time zone. `Date#toLocaleString()`/`toLocaleTimeString()`
+with no arguments add it automatically (see the top of `main.js`); if you pass
+options, include `timeZoneName: 'short'`.
+
+## Cards, spacing and tables
+
+- Card: `hpe-card rounded-lg shadow-sm`, padding **`p-5`** (`p-0` for a
+  `<details>` collapsible, `p-8` for an empty/error-state card).
+- View wrapper `space-y-4`; inside a card `space-y-2` or `space-y-3`.
+- Table cells `px-4 py-2` (roomy `px-4 py-3`, dense `px-3 py-2` — one per table).
+- Header row `bg-slate-50 text-xs text-slate-500` + `th px-4 py-2 font-medium`.
+- Row `border-b border-slate-100 hover:bg-slate-50`.
+- Modal widths (`max-w-md`…`max-w-4xl`) are sized to content.
+
+## Backing out
+
+The HPE pass landed as one merge of branch `hpe-design-compliance` (one commit
+per area: tokens, contrast, a11y, typography, buttons, time). The tag
+`pre-hpe-design` marks the commit before it. `git revert -m 1 <merge>` undoes
+all of it; reverting a single area commit undoes just that area.
