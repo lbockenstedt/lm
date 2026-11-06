@@ -91,3 +91,26 @@ def test_compliance_route_combines_hub_poller_and_relayed_spokes(tmp_path):
     assert rows[("Central", "dns_fail")]["d7"] == 100.0
     assert rows[("Mist", "ap_down")]["d7"] == 50.0
     assert r.json()["overall"]["d7"]["pct"] == round(100 * 2 / 3, 1)
+
+
+def test_email_report_is_the_compliance_view(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+    from simulations.email_report import build_report
+    from simulations.service import SimulationsService
+    from test_central_on_prem_routes import _OnPremStore, _RouteHub
+
+    hub = _RouteHub(_OnPremStore())
+    health = CheckHealthHistory(str(tmp_path))
+    for st in ["ok", "ok", "ok", "error"]:
+        health.record("acme", "MIA", "dns_fail", st)
+    health.record("acme", "MIA", "ap_down", "ok")
+    hub.central_hub_poller = SimpleNamespace(_health=health)
+    subject, html = asyncio.run(build_report(
+        hub, SimulationsService(hub), "acme", {"sections": {"checks": True, "clients": False}}))
+    assert subject.endswith("80% this month")
+    # Every check is listed with its %, plus the overall row and the period cards.
+    assert "dns_fail" in html and "ap_down" in html and "Overall" in html
+    assert "75%" in html and "100%" in html
+    assert "Last 12 months" in html and "Quarter" in html
+    assert "Client Count" not in html
