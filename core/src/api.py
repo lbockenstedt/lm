@@ -954,6 +954,9 @@ def _spoke_payload_or_raise(data):
         if data.get("updating") or data.get("draining"):
             raise HTTPException(status_code=503, detail=SPOKE_UPDATING_DETAIL)
         msg = data.get("message") or data.get("error") or "Spoke returned an error"
+        # Overloaded spoke: a retryable 503, not a failure.
+        if "queue full" in msg or "spoke busy" in msg:
+            raise HTTPException(status_code=503, detail=f"{msg} — try again shortly")
         raise HTTPException(status_code=502, detail=msg)
     return data
 

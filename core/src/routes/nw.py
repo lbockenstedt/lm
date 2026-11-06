@@ -3034,18 +3034,23 @@ def register(app, hub, ctx):
             # Take everything pending and push the matching registry entries.
             ips = _NW_SEEN_PENDING.pop(tid)
             reg = _seen_registry(tid)
-            await _nw_push_seen(tid, [reg[ip] for ip in sorted(ips) if ip in reg])
+            # Skip hosts NetBox already has as they are now and refreshed recently.
+            due = nw_seen_hosts.due_for_push(reg, ips, time.time())
+            if due and await _nw_push_seen(tid, [reg[ip] for ip in due]):
+                nw_seen_hosts.mark_pushed(reg, due, time.time())
+                hub.state._mark_dirty()
 
     async def _nw_push_seen(tid, entries):
         """Push sightings to NetBox (NETBOX_SYNC_DEVICES, own source tag, no
-        replace): creates unknown hosts, refreshes ``last_seen`` on known ones."""
+        replace): creates unknown hosts, refreshes ``last_seen`` on known ones.
+        Returns True when NetBox accepted the push."""
         # The tenant's NetBox slug and the NetBox spoke; without both nothing is pushed.
         slug = access.netbox_tenant_scope(hub, tid).get("tenant")
         nb = access.get_netbox_spoke(hub)
         if not slug or not nb:
             logger.info("nw seen-hosts tenant=%s: %d host(s) not pushed (%s)", tid, len(entries),
                         "no NetBox tenant" if not slug else "NetBox spoke offline")
-            return
+            return False
         # Sightings go under their own source tag and never replace other records.
         cfg = hub._nw_discovery_cfg() if callable(getattr(hub, "_nw_discovery_cfg", None)) else {}
         payload = {"tenant_id": tid, "tenant_slug": slug, "source": _NW_SEEN_SOURCE,
@@ -3058,8 +3063,10 @@ def register(app, hub, ctx):
             logger.info("nw seen-hosts tenant=%s NetBox push: sent=%d pushed=%s skipped=%s errors=%s %s",
                         tid, len(entries), res.get("pushed"), res.get("skipped"),
                         res.get("errors"), res.get("message") or "")
+            return not res.get("errors")
         except Exception as e:  # noqa: BLE001
             logger.warning("[sync-error] nw seen-hosts tenant=%s NetBox push failed: %s", tid, e)
+            return False
 
     def _gw_state(hub, tid):
         """The tenant's stored gateway-pass progress, created with defaults on first use."""

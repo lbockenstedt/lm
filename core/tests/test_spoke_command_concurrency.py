@@ -152,3 +152,27 @@ def test_concurrency_limits_default_and_clamped(monkeypatch):
     assert spoke._max_concurrent_commands() == 8  # fallback
     monkeypatch.setenv("LM_SPOKE_MAX_CONCURRENT_COMMANDS", "0")
     assert spoke._max_concurrent_commands() == 1  # clamped to >=1
+
+# ── Commands the hub stopped waiting for are skipped ────────────────────────
+
+async def test_command_queued_past_hub_wait_is_skipped():
+    """With one slot busy for 0.3s, a command whose hub wait is 0.1s is not run
+    once it gets the slot — it answers "spoke busy" instead."""
+    spoke = _build()
+    ws = _Ws()
+    send_lock = asyncio.Lock()
+    sem = asyncio.Semaphore(1)
+    slow = asyncio.create_task(
+        spoke._handle_one_command(ws, "SLOW_CMD", {}, "corrA", send_lock, sem))
+    await asyncio.sleep(0)
+    await spoke._handle_one_command(ws, "FAST_CMD", {}, "corrB", send_lock, sem,
+                                    max_wait_s=0.1)
+    await slow
+    assert spoke.modules["test"].calls == ["SLOW_CMD"]
+    by_corr = {f["corr"]: f["data"] for f in ws.sent}
+    assert by_corr["corrB"] == {"status": "ERROR", "message": "spoke busy, try again"}
+
+
+def test_hub_wait_comes_from_header_ttl():
+    assert cp._hub_wait_s({"header": {"ttl": 31}}) == 31.0
+    assert cp._hub_wait_s({"header": {}}) is None
