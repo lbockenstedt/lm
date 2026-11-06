@@ -452,6 +452,26 @@ def _purge_agent_state(hub, agent_id):
     return dirty
 
 
+async def cached_agents(hub, agent_spokes):
+    """The aggregated agents payload, stale-while-revalidate: served from
+    ``_AGENTS_CACHE`` while younger than ``_AGENTS_STALE_S`` (past
+    ``_AGENTS_FRESH_S`` one background refresh starts); a live fan-out only
+    when there is no servable cache."""
+    # Age of the cached payload (None when there is none).
+    cached = _AGENTS_CACHE["data"]
+    age = (time.time() - _AGENTS_CACHE["ts"]) if cached is not None else None
+    # Inside the stale window → serve instantly; past fresh-TTL, kick ONE
+    # background refresh (the ``not refreshing`` guard avoids a pile-up).
+    if cached is not None and age is not None and age < _AGENTS_STALE_S:
+        if age >= _AGENTS_FRESH_S and not _AGENTS_CACHE["refreshing"]:
+            asyncio.create_task(_maybe_refresh_agents(hub, agent_spokes))
+        return cached
+    # No servable cache → forced refresh. The lock serializes concurrent
+    # first-loaders into a single fan-out; each re-checks under the lock.
+    return await _maybe_refresh_agents(hub, agent_spokes, force=True) \
+        or {"agents": [], "pending_agents": [], "spoke_connected": True}
+
+
 async def _maybe_refresh_agents(hub, agent_spokes, force=False):
     """Under ``_agents_lock``: serve the cached payload if it's still fresh
     (unless ``force``); otherwise recompute it concurrently and store.
@@ -593,20 +613,7 @@ async def pxmx_agents_payload(hub, tid):
         # seen + deleted (was: empty, agents invisible/undeletable).
         live = {"agents": [], "pending_agents": [], "spoke_connected": False}
     else:
-        # Age of the cached payload (None when there is none).
-        cached = _AGENTS_CACHE["data"]
-        age = (time.time() - _AGENTS_CACHE["ts"]) if cached is not None else None
-        # Inside the stale window → serve instantly; past fresh-TTL, kick ONE
-        # background refresh (the ``not refreshing`` guard avoids a pile-up).
-        if cached is not None and age is not None and age < _AGENTS_STALE_S:
-            if age >= _AGENTS_FRESH_S and not _AGENTS_CACHE["refreshing"]:
-                asyncio.create_task(_maybe_refresh_agents(hub, agent_spokes))
-            live = cached
-        else:
-            # No servable cache → forced refresh. The lock serializes concurrent
-            # first-loaders into a single fan-out; each re-checks under the lock.
-            live = await _maybe_refresh_agents(hub, agent_spokes, force=True) \
-                or {"agents": [], "pending_agents": [], "spoke_connected": True}
+        live = await cached_agents(hub, agent_spokes)
 
     # Ids already shown as live or pending, so the offline roster skips them.
     # Append the offline relayed-agent roster (reconstructed from persisted
@@ -1093,8 +1100,9 @@ def register(app, hub, ctx):
             for spoke_id in opn_spokes:
                 try:
                     # Fetch the rules that match the IP and the full DHCP lease table.
-                    rules_raw = await hub.request_response(spoke_id, "OPNSENSE_GET_RULES_BY_IP", {"ip": ip})
-                    dhcp_raw = await hub.request_response(spoke_id, "OPNSENSE_GET_DHCP_LEASES", {})
+                    rules_raw, dhcp_raw = await asyncio.gather(
+                        hub.request_response(spoke_id, "OPNSENSE_GET_RULES_BY_IP", {"ip": ip}),
+                        hub.request_response(spoke_id, "OPNSENSE_GET_DHCP_LEASES", {}))
 
                     rules_res = rules_raw.get("payload", {}).get("data", {}) if isinstance(rules_raw, dict) else {}
                     dhcp_res = dhcp_raw.get("payload", {}).get("data", []) if isinstance(dhcp_raw, dict) else []

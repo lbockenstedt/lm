@@ -1,5 +1,6 @@
 """VNC + serial console relay routes and helpers."""
 # Logging (a dedicated "Console" logger, set up below).
+import asyncio
 import logging
 # Environment/file access used by some helpers.
 import os
@@ -1943,13 +1944,15 @@ def register(app, hub, ctx):
         await _console_seed_credentials(hub, spokes)
         # Ask each spoke for its diagnostics (a failure is recorded per spoke).
         rows, errors, summaries = [], {}, {}
-        for sid in spokes:
+        # All spokes at once, so one slow console doesn't add its 15s to the rest.
+        replies = await asyncio.gather(
+            *(hub.request_response(sid, "CONSOLE_DIAGNOSTICS", {}, timeout=15.0) for sid in spokes),
+            return_exceptions=True)
+        for sid, r in zip(spokes, replies):
             agent_name = hub.state.get_module_name(sid)
             stenant = hub.state.get_spoke_tenant(sid) or ""
-            try:
-                r = await hub.request_response(sid, "CONSOLE_DIAGNOSTICS", {}, timeout=15.0)
-            except Exception as e:  # noqa: BLE001 - one dead console shouldn't blank the rest
-                errors[sid] = str(e)
+            if isinstance(r, BaseException):  # one dead console shouldn't blank the rest
+                errors[sid] = str(r)
                 continue
             # Keep the spoke's summary, then tag and keep each visible row.
             payload = _console_unwrap(r)
