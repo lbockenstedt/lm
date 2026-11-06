@@ -110,11 +110,11 @@ function _renderSettingsSection(subMenu) {
             <div class="space-y-4">
                 <div class="${card} p-5 flex flex-wrap items-center gap-3">
                     <div>
-                        <p class="text-lg font-bold text-[#263040]">Module Diagnostics</p>
+                        <p class="text-lg font-bold text-navy">Module Diagnostics</p>
                         <p class="text-[11px] text-slate-400">Every producer behind the footer MODULE STATUS dot, with the evidence for each alert.</p>
                     </div>
                     <div class="ml-auto flex items-center gap-2">
-                        <button onclick="copyModuleDiagnostics(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-xs font-bold" title="Copy every alert + finding as plain text for a ticket or chat">⧉ Copy all</button>
+                        <button onclick="copyModuleDiagnostics(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-xs font-bold" title="Copy every alert + finding as plain text for a ticket or chat">⧉ Copy all</button>
                         <button onclick="loadModuleDiagnostics()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
                     </div>
                 </div>
@@ -257,19 +257,19 @@ function _renderSettingsSection(subMenu) {
                     <div id="mtls-spokes" class="mb-3 hidden"></div>
                     <div class="flex items-center gap-3 mb-3 pb-3 border-b border-slate-100">
                         <label class="flex items-center gap-2 text-sm text-slate-600">
-                            <input type="checkbox" id="mtls-auto-provision" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                            <input type="checkbox" id="mtls-auto-provision" class="rounded border-slate-300 text-primary-text focus:ring-green-500">
                             Auto-provision mTLS
                         </label>
-                        <button onclick="saveMtlsAutoProvision(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm ml-auto">Save</button>
+                        <button onclick="saveMtlsAutoProvision(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm ml-auto">Save</button>
                         <span id="mtls-auto-provision-hint" class="text-xs text-slate-400"></span>
                     </div>
                     <p class="text-xs text-slate-400 mb-3"><b>Auto-provision</b> = the hub distributes the LE wildcard + CA bundle to the hub and every spoke, then enables mTLS once the whole fleet is ready. No manual file copying.</p>
                     <div class="flex items-center gap-3">
                         <label class="flex items-center gap-2 text-sm text-slate-600">
-                            <input type="checkbox" id="mtls-enabled" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                            <input type="checkbox" id="mtls-enabled" class="rounded border-slate-300 text-primary-text focus:ring-green-500">
                             Enable mutual TLS
                         </label>
-                        <button onclick="saveMtlsEnable(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
+                        <button onclick="saveMtlsEnable(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
                     </div>
                 </div>
                 <div class="${card} p-6">
@@ -285,7 +285,7 @@ function _renderSettingsSection(subMenu) {
                             <option value="240">4 hours</option>
                             <option value="480">8 hours</option>
                         </select>
-                        <button onclick="saveSessionTimeout(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
+                        <button onclick="saveSessionTimeout(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
                     </div>
                 </div>
                 <div class="${card} p-6">
@@ -334,7 +334,7 @@ function _renderSettingsSection(subMenu) {
                 <div class="flex items-end gap-2">
                     <label class="text-xs text-slate-500 flex-1">Token name<br>
                         <input type="text" id="apitok-name" placeholder="e.g. ci-pipeline" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
-                    <button onclick="createApiToken()" id="apitok-create-btn" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Create token</button>
+                    <button onclick="createApiToken()" id="apitok-create-btn" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Create token</button>
                 </div>
                 <div id="apitok-new" class="hidden"></div>
                 <div class="overflow-hidden rounded-md border border-slate-200">
@@ -422,7 +422,7 @@ const _SETUP_CLS = {
     card: 'hpe-card rounded-lg p-5 shadow-sm space-y-4',
     inputCls: 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800',
     labelCls: 'text-xs text-slate-500 uppercase font-bold',
-    btnCls: 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm',
+    btnCls: 'bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm',
     btnSecCls: 'bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium border border-slate-200',
 };
 
@@ -804,7 +804,7 @@ function _renderSetupTenantTile(content) {
                 <div id="tenant-list" class="space-y-2"></div>
                 <div id="tenant-empty-state" class="py-8 text-center text-slate-400 italic text-sm">No tenants configured.</div>
                 <div id="tenant-editor" class="hidden space-y-4 border-t border-slate-200 pt-4">
-                    <p class="text-xs text-slate-500 font-bold uppercase">Editing: <span id="edit-tenant-id" class="font-mono text-[#01A982]"></span></p>
+                    <p class="text-xs text-slate-500 font-bold uppercase">Editing: <span id="edit-tenant-id" class="font-mono text-primary-text"></span></p>
                     <div class="space-y-1"><label class="${labelCls}">Display Name</label><input type="text" id="tenant-name" class="${inputCls}"></div>
                     <div class="flex items-center gap-2"><input type="checkbox" id="tenant-active" class="w-4 h-4 text-green-600 rounded"><label class="text-sm text-slate-600">Set as active tenant</label></div>
                     ${isAdmin() ? `<div class="flex items-center gap-2"><input type="checkbox" id="tenant-shared" class="w-4 h-4 text-green-600 rounded"><label class="text-sm text-slate-600"><b>Shared tenant</b> — its spokes are visible to <b>all</b> tenants (objects still subnet-scoped). Only one tenant can be shared.</label></div>` : ''}
@@ -1068,7 +1068,7 @@ async function loadSelfBackupStatus() {
                     <code class="break-all">${escapeHtml(f.name)}</code>
                     <span class="ml-3 whitespace-nowrap flex items-center gap-3">
                         <span class="text-slate-400">${_sbFmtBytes(f.size)} · ${when}</span>
-                        <button type="button" onclick="downloadSelfBackup('${escapeHtml(f.name).replace(/'/g, "\\'")}')" class="text-[#01A982] hover:underline font-bold">Download</button>
+                        <button type="button" onclick="downloadSelfBackup('${escapeHtml(f.name).replace(/'/g, "\\'")}')" class="text-primary-text hover:underline font-bold">Download</button>
                     </span>
                 </div>`;
             }).join('');
@@ -1932,7 +1932,7 @@ function _renderSetupModuleMgmtTile(content) {
                 <p class="text-xs text-slate-400 mb-3">NetBox is the source of truth for the network-device fleet. Devices in NetBox whose <b>role</b> matches the categories below are imported into the nw module automatically; devices you add manually here are written back to NetBox. NetBox-imported devices that are deleted or re-roled in NetBox are removed from nw (manual devices are never touched). Add credentials to an imported device to make it pollable.</p>
                 <div class="space-y-3">
                     <label class="flex items-center gap-2 text-sm text-slate-600">
-                        <input type="checkbox" id="nw-import-enabled" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                        <input type="checkbox" id="nw-import-enabled" class="rounded border-slate-300 text-primary-text focus:ring-green-500">
                         Enable NetBox → NW import
                     </label>
                     <div class="grid grid-cols-2 gap-4">
@@ -1990,18 +1990,18 @@ function _renderSetupModuleMgmtTile(content) {
                 <div id="nwscan-instances-list" class="space-y-2 mb-4"><p class="text-xs text-slate-400 italic animate-pulse">Loading credentials…</p></div>
                 <div class="space-y-3">
                     <div class="flex flex-wrap gap-4">
-                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-enabled" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500"> Enable scanning</label>
-                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-crawl" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500"> Crawl LLDP neighbors</label>
-                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-autoadd" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500"> Auto-add discovered</label>
-                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-snmp" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500" checked> Try SNMP</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-enabled" class="rounded border-slate-300 text-primary-text focus:ring-green-500"> Enable scanning</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-crawl" class="rounded border-slate-300 text-primary-text focus:ring-green-500"> Crawl LLDP neighbors</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-autoadd" class="rounded border-slate-300 text-primary-text focus:ring-green-500"> Auto-add discovered</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-snmp" class="rounded border-slate-300 text-primary-text focus:ring-green-500" checked> Try SNMP</label>
                     </div>
                     <div class="space-y-1">
                         <label class="text-xs text-slate-500 uppercase font-bold">IP sources</label>
                         <div class="flex flex-wrap gap-4">
-                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-netbox" class="rounded border-slate-300 text-[#01A982]" checked> NetBox prefixes</label>
-                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-nac" class="rounded border-slate-300 text-[#01A982]"> NAC endpoints</label>
-                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-dhcp" class="rounded border-slate-300 text-[#01A982]"> DHCP leases</label>
-                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-dns" class="rounded border-slate-300 text-[#01A982]"> DNS records</label>
+                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-netbox" class="rounded border-slate-300 text-primary-text" checked> NetBox prefixes</label>
+                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-nac" class="rounded border-slate-300 text-primary-text"> NAC endpoints</label>
+                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-dhcp" class="rounded border-slate-300 text-primary-text"> DHCP leases</label>
+                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-dns" class="rounded border-slate-300 text-primary-text"> DNS records</label>
                         </div>
                     </div>
                     <div class="grid grid-cols-2 gap-4">
@@ -2283,7 +2283,7 @@ async function showRackElevationModal(rackId) {
             <span><span class="text-slate-400">Site:</span> ${escapeHtml(r.site || '—')}</span>
             <span><span class="text-slate-400">Tenant:</span> ${escapeHtml(r.tenant || '—')}</span>
             <span><span class="text-slate-400">Height:</span> ${r.u_height || 0}U</span>
-            <button onclick="_addDeviceFromElev(${rackId})" class="ml-auto bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all">+ Add device</button>
+            <button onclick="_addDeviceFromElev(${rackId})" class="ml-auto bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold transition-all">+ Add device</button>
         </div>`;
         const front = (d.faces && d.faces.front) || [];
         const rear  = (d.faces && d.faces.rear)  || [];
@@ -3111,7 +3111,7 @@ function _renderSimQuotaDefaultsEditor() {
         <details class="text-xs text-slate-500 mb-2">
           <summary class="cursor-pointer">Suggested alert → sim linkage</summary>
           <ul class="mt-1 list-disc list-inside space-y-0.5">
-            ${Object.entries(suggested).map(([a, s]) => `<li><span class="font-mono">${a}</span> → <span class="font-mono">${s}</span> <button onclick="addSimQuotaDefaultSuggested('${a}','${s}')" class="text-[#01A982] hover:underline ml-1">add</button></li>`).join('')}
+            ${Object.entries(suggested).map(([a, s]) => `<li><span class="font-mono">${a}</span> → <span class="font-mono">${s}</span> <button onclick="addSimQuotaDefaultSuggested('${a}','${s}')" class="text-primary-text hover:underline ml-1">add</button></li>`).join('')}
           </ul>
         </details>` : '';
     rowsEl.innerHTML = suggestHtml + (rowHtml || '<p class="text-xs text-slate-400 italic">No default quotas defined. Add one or pick a suggested linkage above.</p>');
@@ -3523,7 +3523,7 @@ function _renderObservedCatalog() {
           <td class="px-4 py-2 text-slate-500 whitespace-nowrap">${esc(fmtDate(e.first_seen))}</td>
           <td class="px-4 py-2 text-slate-500 whitespace-nowrap">${esc(fmtDate(e.last_seen))}</td>
           <td class="px-4 py-2 text-slate-700 tabular-nums">${esc(String(e.count == null ? 1 : e.count))}</td>
-          <td class="px-4 py-2"><button data-obs-type="${esc(type)}" data-obs-id="${esc(e.id || '')}" data-obs-name="${esc(e.name || e.id || '')}" onclick="_useInSimQuota(this)" class="text-[#01A982] hover:underline text-xs font-medium">Use in Sim-Quota</button></td>
+          <td class="px-4 py-2"><button data-obs-type="${esc(type)}" data-obs-id="${esc(e.id || '')}" data-obs-name="${esc(e.name || e.id || '')}" onclick="_useInSimQuota(this)" class="text-primary-text hover:underline text-xs font-medium">Use in Sim-Quota</button></td>
         </tr>`;
     }).join('');
     const empty = '<tr><td colspan="10" class="px-4 py-6 text-center text-slate-400">No entries match your search.</td></tr>';
@@ -3568,7 +3568,7 @@ function _renderSetupGeneralTile(content) {
             <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Cert Expiry Monitor</h3>
             <p class="text-xs text-slate-400">Daily check of the TLS certificates on the public Aruba Central / HPE GreenLake and Juniper Mist cloud endpoints. When enabled, a <b>Cert Monitor</b> item appears in the left menu (Global Admins only).</p>
             <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
-                <input type="checkbox" id="certmon-enabled" onchange="saveCertMonEnabled(this)" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                <input type="checkbox" id="certmon-enabled" onchange="saveCertMonEnabled(this)" class="rounded border-slate-300 text-primary-text focus:ring-green-500">
                 Enable Cert Expiry Monitor
             </label>
         </div>` : '';
@@ -3616,7 +3616,7 @@ function _renderSetupGeneralTile(content) {
                     <input id="appearance-logo-url" type="text" class="${inputCls}" placeholder="hpe-svg">
                 </div>
                 <div class="flex items-center gap-2">
-                    <input id="appearance-show-logo" type="checkbox" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                    <input id="appearance-show-logo" type="checkbox" class="rounded border-slate-300 text-primary-text focus:ring-green-500">
                     <label for="appearance-show-logo" class="text-sm text-slate-600">Show header logo</label>
                 </div>
                 <div class="flex justify-end items-center gap-3">
@@ -3740,7 +3740,7 @@ function _renderSettingsCloudNacTile(content) {
             <div class="mt-4">
                 <div class="flex items-center justify-between mb-1">
                     <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Provisioned accounts <span id="cn-count" class="text-slate-400 font-normal"></span></div>
-                    <button type="button" onclick="sweepCloudNac()" class="text-[#01A982] hover:underline text-xs font-bold">Sweep idle now</button>
+                    <button type="button" onclick="sweepCloudNac()" class="text-primary-text hover:underline text-xs font-bold">Sweep idle now</button>
                 </div>
                 <div id="cn-accounts" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-72 overflow-y-auto text-xs"></div>
             </div>
@@ -4452,7 +4452,7 @@ function _renderSettingsNotificationsTile(content) {
                 <span id="notif-action-out" class="text-[11px] font-mono text-slate-600 break-all"></span>
                 <div class="ml-auto flex items-center gap-2">
                     <button type="button" onclick="testNotifications()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Send test email</button>
-                    <button type="button" onclick="saveNotifications()" class="bg-[#01A982] hover:bg-[#01A982]/90 text-white px-3 py-1.5 rounded-md text-xs font-bold">Save</button>
+                    <button type="button" onclick="saveNotifications()" class="bg-primary hover:bg-brand/90 text-white px-3 py-1.5 rounded-md text-xs font-bold">Save</button>
                 </div>
             </div>
         </div>`;
@@ -4874,7 +4874,7 @@ const LM_ICON_LIBRARY = [
 function _renderSettingsIconsTile(content) {
     const { card } = _SETUP_CLS;
     const cell = ic => `
-        <div class="flex flex-col items-center justify-center gap-2 p-4 rounded-lg border border-slate-200 hover:border-[#01A982] hover:bg-[#01A982]/5 transition">
+        <div class="flex flex-col items-center justify-center gap-2 p-4 rounded-lg border border-slate-200 hover:border-brand hover:bg-brand/5 transition">
             <div class="text-slate-600">${ic.svg}</div>
             <div class="text-sm font-semibold text-slate-700 text-center">${escapeHtml(ic.name)}</div>
             <div class="text-[11px] font-mono text-slate-400">ID ${ic.id}${ic.key ? ' · ' + escapeHtml(ic.key) : ''}</div>
@@ -4923,7 +4923,7 @@ function _renderSettingsNetboxSsoTile(content) {
             <div class="mt-4">
                 <div class="flex items-center justify-between mb-1">
                     <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Entra group → NetBox group map</div>
-                    <button type="button" onclick="nbssoSeedGroupMap()" class="text-[#01A982] hover:underline text-xs font-bold">Seed from Permission Groups</button>
+                    <button type="button" onclick="nbssoSeedGroupMap()" class="text-primary-text hover:underline text-xs font-bold">Seed from Permission Groups</button>
                 </div>
                 <p class="text-[11px] text-slate-400 mb-2">Each login sets the user's NetBox groups to exactly the mapped set. Left = Entra group object ID, right = NetBox group name. Leave empty to use the Permission Groups mapping automatically.</p>
                 <div id="nbsso-map-rows" class="space-y-2"></div>
@@ -5612,13 +5612,13 @@ function _renderSettingsSsoTile(content) {
             <div class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
                 <div class="flex items-center justify-between gap-2 flex-wrap">
                     <div class="text-xs text-slate-600"><span class="font-bold">Client certificate</span> <span id="oidc-cert-status" class="text-slate-400">checking…</span></div>
-                    <button onclick="generateOidcCert()" id="oidc-gen-btn" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold">Generate certificate</button>
+                    <button onclick="generateOidcCert()" id="oidc-gen-btn" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-xs font-bold">Generate certificate</button>
                 </div>
                 <p class="text-[11px] text-slate-400 mt-1">Auto-creates a self-signed keypair on the hub (in the hub's writable state directory by default — no root/<code>/etc</code> access needed). This is a client credential Entra matches by thumbprint — it is <em>not</em> a TLS/LE cert. Upload the generated certificate below to the Entra app registration → Certificates &amp; secrets → Certificates.</p>
                 <div id="oidc-cert-output" class="hidden mt-2">
                     <div class="flex items-center justify-between gap-2 mb-1">
                         <div class="text-[11px] text-slate-500">Thumbprint (x5t): <code id="oidc-cert-thumb" class="text-slate-700"></code></div>
-                        <button type="button" onclick="downloadOidcCert()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-[11px] font-bold">Download .cer</button>
+                        <button type="button" onclick="downloadOidcCert()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-[11px] font-bold">Download .cer</button>
                     </div>
                     <label class="text-[11px] text-slate-500"><span class="font-semibold">Download</span> the certificate above and upload the <em>file</em> to Entra → App registration → Certificates &amp; secrets → Certificates (Entra takes a file, not pasted text). This is the <em>public</em> cert — never upload the private key.</label>
                     <textarea id="oidc-cert-pem" readonly rows="6" class="w-full mt-1 bg-white border border-slate-300 rounded-md px-2 py-1 text-[11px] font-mono"></textarea>
@@ -5863,7 +5863,7 @@ function _renderSetupTestFeedTile(content) {
 function _tfBadge(el, text, tone) {
     if (!el) return;
     const tones = {
-        on:   'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]',
+        on:   'bg-brand/10 text-primary-text border border-brand',
         off:  'bg-slate-100 text-slate-500',
         warn: 'bg-amber-100 text-amber-700',
         err:  'bg-red-100 text-red-700',
@@ -5919,14 +5919,14 @@ async function tfLoad() {
             if (c.receiver_preserve_tenants) {
                 const fb = c.receiver_tenant || (c.shared_tenant ? `shared "${c.shared_tenant}"` : null);
                 if (fb) {
-                    ten.className = 'block mt-1 text-[#01A982]';
+                    ten.className = 'block mt-1 text-primary-text';
                     ten.textContent = `Preserving source tenants: each spoke lands in its matching local tenant; unmatched spokes fall back to ${fb}.`;
                 } else {
                     ten.className = 'block mt-1 text-red-600 font-semibold';
                     ten.textContent = 'Preserving source tenants, but there is no fallback — name a tenant above or mark one shared in Setup → Tenants for spokes with no local match.';
                 }
             } else if (c.shared_tenant) {
-                ten.className = 'block mt-1 text-[#01A982]';
+                ten.className = 'block mt-1 text-primary-text';
                 ten.textContent = c.receiver_tenant
                     ? `Fleet will land in tenant "${c.receiver_tenant}".`
                     : `Fleet will land in shared tenant "${c.shared_tenant}" — visible in Spokes & Agents, but name a real tenant above to see it in Simulations.`;

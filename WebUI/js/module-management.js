@@ -15,7 +15,7 @@ function showAddNwDeviceModal(prefillDevice) {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
-                <h3 class="text-lg font-bold text-[#263040]" id="nw-modal-title">Add Network Device</h3>
+                <h3 class="text-lg font-bold text-navy" id="nw-modal-title">Add Network Device</h3>
                 <button onclick="closeNwDeviceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">
@@ -57,7 +57,7 @@ function showAddNwDeviceModal(prefillDevice) {
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
                 <button onclick="closeNwDeviceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveNwDevice()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Device</button>
+                <button onclick="saveNwDevice()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Device</button>
             </div>
         </div>
     `;
@@ -241,7 +241,7 @@ function showAddTruenasApplianceModal() {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
-                <h3 class="text-lg font-bold text-[#263040]" id="truenas-modal-title">Add TrueNAS Appliance</h3>
+                <h3 class="text-lg font-bold text-navy" id="truenas-modal-title">Add TrueNAS Appliance</h3>
                 <button onclick="closeTruenasApplianceModal()" class="text-slate-400 hover:text-slate-600 transition-colors" title="Close modal"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">
@@ -270,7 +270,7 @@ function showAddTruenasApplianceModal() {
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
                 <button onclick="closeTruenasApplianceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors" title="Cancel and close dialog">Cancel</button>
-                <button onclick="saveTruenasAppliance()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Save appliance credentials and settings">Save Appliance</button>
+                <button onclick="saveTruenasAppliance()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Save appliance credentials and settings">Save Appliance</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -640,7 +640,7 @@ function showAddInstanceModal(productKey, editItem) {
     // newly-added fields without a reinstall). Hidden for non-IPAM products.
     const schemaBtnHtml = productKey === 'ipam'
         ? `<div class="pt-3 mt-2 border-t border-slate-100 space-y-1">
-                <button onclick="applyIpamSchema()" class="w-full px-4 py-2 rounded-md text-sm font-semibold text-[#01A982] border border-[#01A982] hover:bg-[#01A982] hover:text-white transition-all">Apply schema changes</button>
+                <button onclick="applyIpamSchema()" class="w-full px-4 py-2 rounded-md text-sm font-semibold text-primary-text border border-brand hover:bg-primary hover:text-white transition-all">Apply schema changes</button>
                 <p class="text-[11px] text-slate-400 leading-snug">Provisions the Lab Manager custom fields used by the Proxmox, OPNsense, and ClearPass syncs on the connected NetBox. Idempotent — safe to run as many times as needed; existing fields are left in place.</p>
             </div>`
         : '';
@@ -665,7 +665,7 @@ function showAddInstanceModal(productKey, editItem) {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">${editItem ? 'Edit' : 'Add'} ${p.title}</h3>
+                <h3 class="text-lg font-bold text-navy">${editItem ? 'Edit' : 'Add'} ${p.title}</h3>
                 <button onclick="closeInstanceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">
@@ -678,7 +678,7 @@ ${schemaBtnHtml}
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeInstanceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveInstance('${productKey}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save</button>
+                <button onclick="saveInstance('${productKey}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -1061,7 +1061,7 @@ function showAddDeviceModal(editTypeKey, editItem) {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
-                <h3 class="text-lg font-bold text-[#263040]">${editItem ? 'Edit' : 'Add'} Managed Device</h3>
+                <h3 class="text-lg font-bold text-navy">${editItem ? 'Edit' : 'Add'} Managed Device</h3>
                 <button onclick="closeDeviceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1072,7 +1072,7 @@ function showAddDeviceModal(editTypeKey, editItem) {
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
                 <button onclick="closeDeviceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveDevice()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save</button>
+                <button onclick="saveDevice()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -1500,14 +1500,14 @@ async function _initApp() {
                     // menu stays open while the user moves to / clicks an item.
                     wrap.innerHTML = `
                         <div class="relative" id="tenant-picker-wrap">
-                            <button onclick="toggleTenantPicker(event)" class="px-2 py-0.5 rounded-full bg-[#01A982] text-white text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
+                            <button onclick="toggleTenantPicker(event)" class="px-2 py-0.5 rounded-full bg-primary text-white text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
                                 <span id="user-chip-tenant">${escapeHtml(chipLabel)}</span>
                                 <svg class="w-2.5 h-2.5 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"/></svg>
                             </button>
                             <div id="tenant-picker-menu" class="hidden absolute top-full left-1/2 -translate-x-1/2 mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl z-50 min-w-[200px] max-h-[60vh] overflow-y-auto py-1">
                                 ${pickerTenants.map(t => `
-                                    <div class="flex items-center hover:bg-[#01A982] group">
-                                    <button data-tid="${escapeHtml(t.id)}" onclick="viewAsTenant('${escapeHtml(t.id)}')" title="${t.isGroup ? escapeHtml('Tenant group — shows: ' + (t.members.join(', ') || 'no members')) : ''}" class="flex-1 text-left pl-3 pr-1 py-1.5 text-[11px] text-slate-200 group-hover:text-white transition-colors flex items-center justify-between gap-2 ${t.id===currentTenant?'font-bold text-[#01A982]':''}">
+                                    <div class="flex items-center hover:bg-primary group">
+                                    <button data-tid="${escapeHtml(t.id)}" onclick="viewAsTenant('${escapeHtml(t.id)}')" title="${t.isGroup ? escapeHtml('Tenant group — shows: ' + (t.members.join(', ') || 'no members')) : ''}" class="flex-1 text-left pl-3 pr-1 py-1.5 text-[11px] text-slate-200 group-hover:text-white transition-colors flex items-center justify-between gap-2 ${t.id===currentTenant?'font-bold text-primary-text':''}">
                                         <span>${escapeHtml(t.name)}</span>
                                         ${t.isGroup ? `<span class="px-1 rounded bg-slate-600 text-slate-200 text-[9px] font-bold uppercase tracking-wider shrink-0">Group</span>` : ''}
                                     </button>
@@ -1519,7 +1519,7 @@ async function _initApp() {
                     _bindTenantPickerListeners();
                     _appendImpersonationToPicker();
                 } else if (currentTenant && currentTenant !== 'default') {
-                    wrap.innerHTML = `<span id="user-chip-tenant" class="px-2 py-0.5 rounded-full bg-[#01A982] text-white text-[10px] font-bold uppercase tracking-wider">${escapeHtml(chipLabel)}</span>`;
+                    wrap.innerHTML = `<span id="user-chip-tenant" class="px-2 py-0.5 rounded-full bg-primary text-white text-[10px] font-bold uppercase tracking-wider">${escapeHtml(chipLabel)}</span>`;
                 } else {
                     wrap.innerHTML = '';
                 }

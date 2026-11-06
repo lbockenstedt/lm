@@ -74,7 +74,7 @@ async function loadAllTenantsOverview(forceRefresh = false) {
             const hasDown = sp && (sp.down || 0) > 0;
             return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer at-row ${active ? 'bg-green-50/60' : ''}" data-tid="${esc(t.id)}">
                 <td class="px-4 py-2 text-sm">
-                    <span class="font-medium text-[#263040] ${active ? 'text-[#01A982]' : ''}">${esc(t.name)}</span>
+                    <span class="font-medium text-navy ${active ? 'text-primary-text' : ''}">${esc(t.name)}</span>
                     ${t.description ? `<span class="block text-xs text-slate-400">${esc(t.description)}</span>` : ''}
                 </td>
                 <td class="${cell}">${num(t.devices)}</td>
@@ -83,7 +83,7 @@ async function loadAllTenantsOverview(forceRefresh = false) {
                 <td class="${cell}">${num(t.prefixes)}</td>
                 <td class="${cell}">${num(t.ips_used)}</td>
                 <td class="${cell}">${spokeCell(sp)}</td>
-                <td class="px-4 py-2 text-xs text-slate-400 text-right">${active ? '<span class="text-[#01A982] font-medium">viewing</span>' : 'View →'}</td>
+                <td class="px-4 py-2 text-xs text-slate-400 text-right">${active ? '<span class="text-primary-text font-medium">viewing</span>' : 'View →'}</td>
             </tr>${hasDown ? `<tr class="bg-red-50/30"><td colspan="8">${downList(sp, t.id)}</td></tr>` : ''}`;
         }).join('');
         // Shared/unassigned spokes (untagged) get their own trailing block so an
@@ -354,7 +354,7 @@ async function showDeviceDashboard(item) {
         <div class="flex items-center justify-between px-6 py-4 border-b border-slate-100">
             <div>
                 <p class="text-xs text-slate-400 uppercase font-bold tracking-widest mb-0.5">Device Dashboard</p>
-                <p class="text-base font-bold text-[#263040] font-mono" id="dd-identity">Searching…</p>
+                <p class="text-base font-bold text-navy font-mono" id="dd-identity">Searching…</p>
             </div>
             <button class="dd-close text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
         </div>
@@ -401,7 +401,7 @@ async function showDeviceDashboard(item) {
         if (nac) {
             const statusCls = nac.status_val === 'Known' ? 'bg-green-100 text-green-700' : nac.status_val === 'Unknown' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500';
             const sessCount = (nac.sessions || []).length;
-            cards.push(card('ClearPass NAC', 'bg-[#263040]/10 text-[#263040]', `
+            cards.push(card('ClearPass NAC', 'bg-navy/10 text-navy', `
                 ${nac.status_val ? badge(nac.status_val, statusCls) : ''}
                 <div class="mt-2">
                     ${row('Vendor', nac.device_vendor)}
@@ -503,14 +503,14 @@ async function showDeviceDashboard(item) {
         if (con.length === 0 && item.source === 'console') {
             con = [item];
         }
-        cards.push(card('Console', con.length ? 'bg-[#01A982]/10 text-[#01A982]' : 'bg-slate-50 text-slate-400',
+        cards.push(card('Console', con.length ? 'bg-brand/10 text-primary-text' : 'bg-slate-50 text-slate-400',
             con.length ? con.map(c => {
                 const meta = [c.device, c.baud ? c.baud + 'bps' : '', c.model || c.vendor || '', c.agent_name || '']
                     .filter(Boolean).join(' · ');
                 const busy = c.in_use ? `<span class="ml-2 px-1.5 py-0.5 rounded text-[9px] bg-amber-100 text-amber-700 font-bold">IN USE</span>` : '';
                 const canConnect = c.spoke_id && c.port_id;
                 const btn = canConnect
-                    ? `<button onclick="openConsoleTerminal('${escJsAttr(c.spoke_id)}','${escJsAttr(c.port_id)}','${escJsAttr(c.name || '')}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold shrink-0">🖥 Connect</button>`
+                    ? `<button onclick="openConsoleTerminal('${escJsAttr(c.spoke_id)}','${escJsAttr(c.port_id)}','${escJsAttr(c.name || '')}')" class="text-[11px] px-2 py-1 rounded bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold shrink-0">🖥 Connect</button>`
                     : '';
                 return `<div class="flex items-center justify-between gap-2 py-1.5 border-b border-slate-50 last:border-0">
                     <div class="min-w-0">

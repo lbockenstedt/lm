@@ -32,7 +32,7 @@ async function loadLeAcmeInfo() {
         const reqProfile = a.clientauth_profile || 'classic';
         const reqMissing = names.length && !names.includes(reqProfile);
         const profChips = names.length
-            ? names.map(n => `<span class="inline-block px-1.5 py-0.5 rounded ${/classic/i.test(n) ? 'bg-[#01A982]/15 text-[#01A982]' : 'bg-slate-100 text-slate-600'} font-mono mr-1" title="${esc(profs[n] || '')}">${esc(n)}</span>`).join('')
+            ? names.map(n => `<span class="inline-block px-1.5 py-0.5 rounded ${/classic/i.test(n) ? 'bg-brand/15 text-primary-text' : 'bg-slate-100 text-slate-600'} font-mono mr-1" title="${esc(profs[n] || '')}">${esc(n)}</span>`).join('')
             : `<span class="text-amber-600">CA advertises no profiles (this ACME server may not support profile selection)</span>`;
         const warn = (supp === false)
             ? `<div class="mt-1 text-red-600 font-bold">⚠ certbot too old (need ≥ 4.0) — the le spoke's certbot auto-upgrade hasn't landed; clientAuth/short-lived profiles will be ignored until it does.</div>`
@@ -41,7 +41,7 @@ async function loadLeAcmeInfo() {
             <span class="font-bold uppercase tracking-wider text-slate-400 mr-2">certbot / ACME</span>
             <span>certbot <span class="font-mono">${esc(a.certbot_version || '?')}</span></span>
             <span class="mx-2 text-slate-300">|</span>
-            <span>profiles: <b class="${supp ? 'text-[#01A982]' : 'text-red-600'}">${supp === null ? 'unknown' : (supp ? 'supported' : 'NOT supported')}</b></span>
+            <span>profiles: <b class="${supp ? 'text-primary-text' : 'text-red-600'}">${supp === null ? 'unknown' : (supp ? 'supported' : 'NOT supported')}</b></span>
             <span class="mx-2 text-slate-300">|</span>
             <span>clientAuth via <span class="font-mono">${esc(reqProfile)}</span></span>
             <div class="mt-1">CA profiles: ${profChips}</div>
@@ -68,7 +68,7 @@ function _leLegend() {
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Add')}
-          <span class="flex items-center gap-1.5">${pill('bg-[#01A982]/10 text-[#01A982] border border-[#01A982]', 'target \u2713')} added (this cert deploys here)</span>
+          <span class="flex items-center gap-1.5">${pill('bg-brand/10 text-primary-text border border-brand', 'target \u2713')} added (this cert deploys here)</span>
           <span class="flex items-center gap-1.5">${pill('bg-slate-100 text-slate-500 border border-slate-200', 'target +')} available — click to add</span>
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -306,7 +306,7 @@ async function loadLEData(subMenu) {
             // Change ops (Renew/Revoke) require ownership; a read-only (shared,
             // not-owned) cert only exposes Manage (→ deploy to your own devices).
             const canEdit = (c.can_edit !== false);
-            const manageBtn = `<button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="${canEdit ? 'Manage distribution targets, AppBuilder identity + clientAuth' : 'Deploy this shared certificate to your own devices'}">${canEdit ? 'Manage' : 'Deploy'}</button>`;
+            const manageBtn = `<button onclick="showLeTargetsModal('${dEsc}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="${canEdit ? 'Manage distribution targets, AppBuilder identity + clientAuth' : 'Deploy this shared certificate to your own devices'}">${canEdit ? 'Manage' : 'Deploy'}</button>`;
             const changeBtns = canEdit
                 ? `<button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
                             <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>`
@@ -775,8 +775,8 @@ async function showLeTargetsModal(domain) {
                 <label class="text-xs text-slate-500 mb-1">Device</label>
                 <select id="le-tgt-id" title="Select target device or node identifier" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></select>
             </div>
-            <button onclick="addLeTarget('${esc(domain)}')" title="Add distribution target for this certificate" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add target</button>
-            <button onclick="leDistributeCert('${esc(domain)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold" title="Deploy this certificate to all of its targets">Distribute now</button>
+            <button onclick="addLeTarget('${esc(domain)}')" title="Add distribution target for this certificate" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Add target</button>
+            <button onclick="leDistributeCert('${esc(domain)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold" title="Deploy this certificate to all of its targets">Distribute now</button>
             <button onclick="document.getElementById('le-targets-modal').remove()" title="Close dialog" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
         </div>` : `<div class="flex border-t border-slate-200 pt-4">
             <button onclick="document.getElementById('le-targets-modal').remove()" title="Close dialog" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
@@ -847,7 +847,7 @@ async function _leRenderTenantsSection(domain, cert, canEdit) {
                 <select id="le-tenant-add" title="Select tenant to grant certificate ownership or sharing" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">— select —</option>${opts}</select>
             </div>
             <button onclick="_leAddTenantChip()" title="Add selected tenant to owners" class="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-3 py-2 rounded-md text-sm font-medium">Add</button>
-            <button onclick="_leSaveTenants()" title="Save tenant ownership list" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save tenants</button>
+            <button onclick="_leSaveTenants()" title="Save tenant ownership list" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save tenants</button>
         </div>`);
 }
 
@@ -986,7 +986,7 @@ function _leRenderDeviceTable(d) {
         const did = String(v.device_id || v.name || '');
         const capable = v.cert_capable === true || String(v.object_type || '').toLowerCase() === 'cx_switch';
         const action = capable
-            ? `<button onclick="leDeployDevice('${escJsAttr(domain)}','${escJsAttr(did)}','${escJsAttr(mt)}','${escJsAttr(ident)}',this)" title="Deploy certificate directly to this network device" class="text-sm text-[#01A982] hover:underline font-bold">Deploy</button>`
+            ? `<button onclick="leDeployDevice('${escJsAttr(domain)}','${escJsAttr(did)}','${escJsAttr(mt)}','${escJsAttr(ident)}',this)" title="Deploy certificate directly to this network device" class="text-sm text-primary-text hover:underline font-bold">Deploy</button>`
             : `<span class="text-xs text-slate-400" title="${escapeHtml(v.message || 'cert install not supported for this device type')}">unsupported</span>`;
         return `<tr class="border-b border-slate-100">
             <td class="px-3 py-1.5 text-sm font-mono text-slate-700">${escapeHtml(v.name || did || '—')}</td>
@@ -1466,7 +1466,7 @@ async function showLeIssueModal(prefill) {
         </div>
         <div class="flex justify-end gap-2 mt-5">
             <button onclick="document.getElementById('le-issue-modal').remove()" title="Cancel and close dialog" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Cancel</button>
-            <button id="le-issue-submit" onclick="leIssueCert()" title="Submit certificate issuance request" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Issue certificate</button>
+            <button id="le-issue-submit" onclick="leIssueCert()" title="Submit certificate issuance request" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Issue certificate</button>
         </div>`, { card: 'max-w-2xl w-full p-6 my-auto', overlay: 'overflow-y-auto py-6' });
     leIssuePopulateDomains();
     leIssueRenderTargets();
@@ -1814,13 +1814,13 @@ async function showDnsCredentialsModal() {
             <div id="dns-cred-fields" class="grid grid-cols-2 gap-3 mt-3"></div>
             <div class="flex justify-end gap-2 mt-3">
               <button onclick="dnsCredResetForm()" title="Clear form fields" class="px-3 py-1.5 text-sm text-slate-600 hover:text-slate-800">Clear</button>
-              <button onclick="saveDnsCredential()" title="Save DNS provider credential" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">Save credential</button>
+              <button onclick="saveDnsCredential()" title="Save DNS provider credential" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold">Save credential</button>
             </div>
           </div>`;
     modal.innerHTML = `
       <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
         <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-          <h3 class="text-lg font-bold text-[#263040]">DNS Credentials</h3>
+          <h3 class="text-lg font-bold text-navy">DNS Credentials</h3>
           <button onclick="document.getElementById('dns-creds-modal').remove()" title="Close dialog" class="text-slate-400 hover:text-slate-600">✕</button>
         </div>
         <div class="p-6 space-y-4 overflow-y-auto">
@@ -2076,7 +2076,7 @@ function _hubHealthHtml(d) {
     const th = d.thresholds || {};
     const lagHi = th.loop_lag_high_s || 0.75;
     const lag = d.loop_lag_s || 0, lagMax = d.loop_lag_max_s || 0;
-    const lagColor = lag >= lagHi ? 'text-red-600' : lag >= lagHi/2 ? 'text-amber-600' : 'text-[#01A982]';
+    const lagColor = lag >= lagHi ? 'text-red-600' : lag >= lagHi/2 ? 'text-amber-600' : 'text-primary-text';
     const cpuColor = (d.cpu_pct||0) >= (th.cpu_high_pct||90) ? 'text-red-600' : 'text-slate-800';
     const memColor = (d.mem_pct||0) >= (th.mem_high_pct||90) ? 'text-red-600' : 'text-slate-800';
     const conns = d.connections || [];
@@ -2564,7 +2564,7 @@ function _alertDiagHtml(d) {
             <div class="mb-1">${esc(f.detail)}</div>
             <div class="text-[11px] opacity-80">${f.ids.map(named).join(', ')}</div>
         </div>`).join('')
-        : `<p class="text-xs text-[#01A982]">No stale or false alert state detected — every active alert reflects a real condition.</p>`;
+        : `<p class="text-xs text-primary-text">No stale or false alert state detected — every active alert reflects a real condition.</p>`;
 
     const alertRows = alerts.length ? alerts.map(a => `
         <tr class="border-b border-slate-100">
@@ -2578,14 +2578,14 @@ function _alertDiagHtml(d) {
 
     // Per-spoke forensics: the exact lookups the alert loop performs, so a false
     // positive is visible as "no bare heartbeat, but a fresh composite one".
-    const yn = (v, good) => `<span class="${v === good ? 'text-[#01A982]' : 'text-red-600'} font-bold">${v ? 'yes' : 'no'}</span>`;
+    const yn = (v, good) => `<span class="${v === good ? 'text-primary-text' : 'text-red-600'} font-bold">${v ? 'yes' : 'no'}</span>`;
     const forensicRows = rows.length ? rows.map(r => {
         const comp = (r.heartbeat_composite || []);
         return `<tr class="border-b border-slate-100">
             <td class="px-3 py-1.5 text-xs font-medium">${named(r.spoke_id)}</td>
             <td class="px-3 py-1.5 text-center text-xs ${r.tier === 'error' ? 'text-red-600 font-bold' : 'text-amber-600'}">${esc(r.tier)}</td>
             <td class="px-3 py-1.5 text-center text-xs">${r.heartbeat_bare != null ? ago(r.heartbeat_bare) + ' ago' : '<span class="text-red-600">none</span>'}</td>
-            <td class="px-3 py-1.5 text-center text-xs">${comp.length ? comp.map(c => `<span class="text-[#01A982]" title="${esc(c.key)}">${c.age_s}s ago</span>`).join(', ') : '—'}</td>
+            <td class="px-3 py-1.5 text-center text-xs">${comp.length ? comp.map(c => `<span class="text-primary-text" title="${esc(c.key)}">${c.age_s}s ago</span>`).join(', ') : '—'}</td>
             <td class="px-3 py-1.5 text-center text-xs">${yn(r.is_relayed_agent, false)}</td>
             <td class="px-3 py-1.5 text-center text-xs">${yn(r.is_approved, true)}</td>
             <td class="px-3 py-1.5 text-center text-xs text-slate-500">${esc(r.latched_tier || '—')}</td>
@@ -2640,33 +2640,33 @@ async function showMtlsDebug() {
         <tr class="border-b border-slate-100">
             <td class="px-3 py-1.5 font-medium" title="${esc(c.spoke_id)}">${esc(c.label || c.spoke_id)}</td>
             <td class="px-3 py-1.5">${esc(c.module_type || '—')}</td>
-            <td class="px-3 py-1.5 font-bold ${c.local ? 'text-slate-400' : (c.mtls_active ? 'text-[#01A982]' : 'text-amber-600')}" title="${c.local ? 'Co-located spoke — connects over plaintext loopback (ws://127.0.0.1). No TLS leg, so mTLS does not apply. mTLS is remote-only (wss).' : (c.mtls_active ? 'Presenting a verified Hub-CA client cert' : 'Remote spoke connected without presenting a client cert — issue one')}">${c.local ? 'local · N/A' : (c.mtls_active ? 'mTLS ✓' : 'cert-less')}</td>
+            <td class="px-3 py-1.5 font-bold ${c.local ? 'text-slate-400' : (c.mtls_active ? 'text-primary-text' : 'text-amber-600')}" title="${c.local ? 'Co-located spoke — connects over plaintext loopback (ws://127.0.0.1). No TLS leg, so mTLS does not apply. mTLS is remote-only (wss).' : (c.mtls_active ? 'Presenting a verified Hub-CA client cert' : 'Remote spoke connected without presenting a client cert — issue one')}">${c.local ? 'local · N/A' : (c.mtls_active ? 'mTLS ✓' : 'cert-less')}</td>
             <td class="px-3 py-1.5 text-xs">${c.sans && c.sans.length ? esc(c.sans.join(', ')) : '—'}${c.is_ab_pinned ? ' <span class="text-purple-700 font-bold">★ AppBuilder</span>' : ''}</td>
             <td class="px-3 py-1.5 text-xs text-slate-500">${esc(c.not_after || '')}</td>
             <td class="px-3 py-1.5 whitespace-nowrap">
                 ${c.local
                   ? `<span class="text-xs text-slate-400 italic" title="mTLS is remote-only (wss). A co-located spoke on loopback has no TLS leg to present a client cert.">loopback — mTLS N/A</span>`
-                  : `<button onclick="mtlsProvision('${esc(c.spoke_id)}')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2 py-0.5 rounded font-bold" title="Issue/renew this spoke's Hub-Local-CA mTLS client cert now">issue</button>
+                  : `<button onclick="mtlsProvision('${esc(c.spoke_id)}')" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2 py-0.5 rounded font-bold" title="Issue/renew this spoke's Hub-Local-CA mTLS client cert now">issue</button>
                 ${c.mtls_active ? `<button onclick="mtlsRevoke('${esc(c.spoke_id)}','${esc(c.label || c.spoke_id)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded font-bold ml-1" title="Revoke this spoke's mTLS client cert (it reconnects cert-less)">revoke</button>` : ''}`}
             </td>
         </tr>`).join('') : `<tr><td colspan="6" class="px-3 py-3 text-slate-400 italic">No connected spokes.</td></tr>`;
     const lmca = (d.lm_mtls_ca_certs || []).map(c => `<div>${esc(c.subject)} <span class="text-slate-400">← ${esc(c.issuer)}</span></div>`).join('') || '<div class="text-slate-400">— none —</div>';
-    const pin = (d.pinned_cert_checks || []).map(p => `<div>${esc(p.domain)}: <span class="font-bold ${p.ok ? 'text-[#01A982]' : 'text-red-600'}">${p.ok ? 'accepted' : 'REJECTED'}</span> <span class="text-slate-400">${esc(p.detail || '')}</span></div>`).join('') || '<div class="text-slate-400">no cert tagged AppBuilder</div>';
+    const pin = (d.pinned_cert_checks || []).map(p => `<div>${esc(p.domain)}: <span class="font-bold ${p.ok ? 'text-primary-text' : 'text-red-600'}">${p.ok ? 'accepted' : 'REJECTED'}</span> <span class="text-slate-400">${esc(p.detail || '')}</span></div>`).join('') || '<div class="text-slate-400">no cert tagged AppBuilder</div>';
     const dupes = (d.duplicate_subjects || []);
     openModal('mtls-debug-modal', `
         <div class="p-6 space-y-4">
             <div class="flex items-center justify-between">
-                <h3 class="text-lg font-bold text-[#263040]">🔒 mTLS status</h3>
+                <h3 class="text-lg font-bold text-navy">🔒 mTLS status</h3>
                 <span class="text-xs px-2 py-1 rounded-full ${d.mtls_enabled ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-600'}">${d.mtls_enabled ? 'mTLS ENABLED' : 'mTLS off'}</span>
             </div>
             <div class="flex items-center justify-between gap-2 flex-wrap">
-              <div class="text-sm text-slate-600">${cs.connected ?? 0} connected · <b class="text-[#01A982]">${cs.mtls_active ?? 0}</b> presenting a verified client cert · <b class="text-slate-500">${cs.cert_less ?? 0}</b> cert-less</div>
+              <div class="text-sm text-slate-600">${cs.connected ?? 0} connected · <b class="text-primary-text">${cs.mtls_active ?? 0}</b> presenting a verified client cert · <b class="text-slate-500">${cs.cert_less ?? 0}</b> cert-less</div>
               <div class="flex items-center gap-3">
                 <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none" title="When ON, the hub auto-mints + delivers a Hub-Local-CA mTLS client cert to every spoke on connect (and renews 7 days before expiry). Turn OFF to manage certs manually.">
                   <input type="checkbox" id="mtls-autoprov-chk" ${d.auto_provision ? 'checked' : ''} onchange="mtlsSetAutoProvision(this.checked)" class="w-4 h-4 rounded">
                   Auto-provision
                 </label>
-                <button onclick="mtlsProvision('')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md font-bold whitespace-nowrap" title="Issue/renew a Hub-Local-CA mTLS client cert for EVERY connected spoke now">⟳ Provision all connected</button>
+                <button onclick="mtlsProvision('')" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md font-bold whitespace-nowrap" title="Issue/renew a Hub-Local-CA mTLS client cert for EVERY connected spoke now">⟳ Provision all connected</button>
               </div>
             </div>
             <div class="text-xs text-slate-500">The hub mints each spoke's clientAuth mTLS client cert from its <b>Local CA</b> (public CAs no longer issue clientAuth) — done automatically on connect; use these buttons to (re)issue on demand.</div>
@@ -2701,12 +2701,12 @@ async function showMtlsDebug() {
                 const profs = a.profiles || {};
                 const names = Object.keys(profs);
                 const profList = names.length
-                    ? names.map(n => `<span class="font-mono ${/classic/i.test(n) ? 'text-[#01A982] font-bold' : 'text-slate-700'}">${esc(n)}</span> <span class="text-slate-400">${esc((profs[n] || '').slice(0, 60))}</span>`).join('<br>')
+                    ? names.map(n => `<span class="font-mono ${/classic/i.test(n) ? 'text-primary-text font-bold' : 'text-slate-700'}">${esc(n)}</span> <span class="text-slate-400">${esc((profs[n] || '').slice(0, 60))}</span>`).join('<br>')
                     : '<span class="text-amber-600">CA advertises no profiles (this ACME server may not support profile selection)</span>';
                 const supp = a.supports_profiles;
                 el.innerHTML =
                     `<div class="font-semibold text-slate-600 mb-1">certbot / ACME profiles (le spoke)</div>` +
-                    `<div>certbot: <span class="font-mono">${esc(a.certbot_version || '?')}</span> · --preferred-profile support: <b class="${supp ? 'text-[#01A982]' : 'text-red-600'}">${supp === null ? 'unknown' : (supp ? 'yes' : 'NO — certbot too old (need ≥4.0)')}</b></div>` +
+                    `<div>certbot: <span class="font-mono">${esc(a.certbot_version || '?')}</span> · --preferred-profile support: <b class="${supp ? 'text-primary-text' : 'text-red-600'}">${supp === null ? 'unknown' : (supp ? 'yes' : 'NO — certbot too old (need ≥4.0)')}</b></div>` +
                     `<div class="mt-1">clientAuth profile requested: <span class="font-mono">${esc(a.clientauth_profile || 'classic')}</span> ${names.length && !names.some(n => n === (a.clientauth_profile || 'classic')) ? '<span class="text-red-600 font-bold">← not in the CA profile list! set LM_LE_CLIENTAUTH_PROFILE to a name below</span>' : ''}</div>` +
                     `<div class="mt-1">CA (${esc(a.acme_directory || '')}) profiles:</div><div class="mt-0.5 pl-2 border-l-2 border-slate-200">${profList}</div>`;
             }
@@ -2752,7 +2752,7 @@ async function showMtlsDebug() {
                         <td class="px-3 py-1.5 text-xs ${expired ? 'text-red-600 font-bold' : 'text-slate-500'}">${esc(naStr || '—')}</td>
                         <td class="px-3 py-1.5 whitespace-nowrap">${statusBadge}${expBadge}</td>
                         <td class="px-3 py-1.5 whitespace-nowrap">
-                            <button onclick="mtlsProvision('${esc(pk)}')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2 py-0.5 rounded font-bold" title="Re-issue/renew this Hub-Local-CA mTLS client cert from its registry entry">Reissue</button>
+                            <button onclick="mtlsProvision('${esc(pk)}')" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2 py-0.5 rounded font-bold" title="Re-issue/renew this Hub-Local-CA mTLS client cert from its registry entry">Reissue</button>
                             <button onclick="mtlsRemoveCert('${esc(pk)}','${esc(label)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded font-bold ml-1" title="Remove this stored mTLS cert from the hub registry — use for a stale/orphaned entry left by a replaced or reset box">Remove</button>
                         </td>
                     </tr>`;
@@ -2836,7 +2836,7 @@ function showDnsRecordModal(editItem) {
     const typeOpts = ['A', 'AAAA', 'CNAME', 'PTR'].map(t =>
         `<option value="${t}"${editing && editItem.type === t ? ' selected' : ''}>${t}</option>`).join('');
     const modal = openModal('dns-record-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} DNS Record</h3>
+        <h3 class="text-lg font-bold text-navy">${editing ? 'Edit' : 'Add'} DNS Record</h3>
         <div class="space-y-3">
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Name</label><input id="dns-r-name" title="Fully-qualified domain name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" ${editing ? 'readonly' : ''}></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="dns-r-type" title="DNS record type (A, AAAA, CNAME, PTR)" class="${selectCls}" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
@@ -2844,7 +2844,7 @@ function showDnsRecordModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="dns-r-ttl" title="Time to Live in seconds (minimum 60s)" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsRecord()" title="Save record changes" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
+            <button onclick="saveDnsRecord()" title="Save record changes" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
             <button onclick="document.getElementById('dns-record-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; }
@@ -2886,7 +2886,7 @@ function showDnsForwarderModal(editItem) {
     const upstreamsVal = isEdit && editItem.upstreams ? (Array.isArray(editItem.upstreams) ? editItem.upstreams.join(', ') : editItem.upstreams) : '';
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     openModal('dns-forwarder-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${isEdit ? 'Edit DNS Forwarder' : 'Add DNS Forwarder'}</h3>
+        <h3 class="text-lg font-bold text-navy">${isEdit ? 'Edit DNS Forwarder' : 'Add DNS Forwarder'}</h3>
         <div class="space-y-3">
             <div class="space-y-1">
                 <label class="text-xs text-slate-500 font-bold uppercase">Zone</label>
@@ -2900,7 +2900,7 @@ function showDnsForwarderModal(editItem) {
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsForwarder()" title="Save forwarder configuration" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Forwarder'}</button>
+            <button onclick="saveDnsForwarder()" title="Save forwarder configuration" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Forwarder'}</button>
             <button onclick="document.getElementById('dns-forwarder-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     const modal = document.getElementById('dns-forwarder-modal');
@@ -3021,7 +3021,7 @@ function _dnsOverridesView(d, editIcon, delIcon) {
             <td class="px-4 py-2 text-xs font-mono">${escapeHtml((p.block || []).slice(0, 4).join(', '))}${(p.block || []).length > 4 ? ` … +${p.block.length - 4}` : ''}</td>
             <td class="px-4 py-2 text-center text-xs">${counts[p.name] || 0}</td>
             <td class="px-4 py-2 whitespace-nowrap">${admin ? `
-                <button onclick="editDnsOverrideProfile('${n}')" class="text-slate-400 hover:text-[#01A982] mr-2" title="Edit profile">${editIcon}</button>
+                <button onclick="editDnsOverrideProfile('${n}')" class="text-slate-400 hover:text-primary-text mr-2" title="Edit profile">${editIcon}</button>
                 <button onclick="deleteDnsOverrideProfile('${n}')" class="text-slate-400 hover:text-red-500" title="Delete profile">${delIcon}</button>` : ''}</td>
         </tr>`;
     }).join('');
@@ -3034,15 +3034,15 @@ function _dnsOverridesView(d, editIcon, delIcon) {
             <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">${escapeHtml(a.profile)}</span></td>
             <td class="px-4 py-2 text-xs text-slate-600">${escapeHtml(a.comment || '')}</td>
             <td class="px-4 py-2 whitespace-nowrap">${removable ? `
-                <button onclick="editDnsOverrideAssignment('${t}')" class="text-slate-400 hover:text-[#01A982] mr-2" title="Edit this override (IP/subnet, profile, label, comment)">${editIcon}</button>
+                <button onclick="editDnsOverrideAssignment('${t}')" class="text-slate-400 hover:text-primary-text mr-2" title="Edit this override (IP/subnet, profile, label, comment)">${editIcon}</button>
                 <button onclick="removeDnsOverrideAssignment('${t}')" class="text-slate-400 hover:text-red-500" title="Remove this override (client returns to normal DNS)">${delIcon}</button>` : ''}</td>
         </tr>`;
     }).join('');
     return `<div class="p-4">${intro}${memberHtml}
-        <h4 class="text-sm font-bold text-[#263040] mb-2">Profiles</h4>
+        <h4 class="text-sm font-bold text-navy mb-2">Profiles</h4>
         ${profiles.length ? `<div class="mb-6">${tableWrap(tableHead(['Name', 'Description', 'Answers', 'Blocked', 'Clients', '']) + `<tbody>${profRows}</tbody>`)}</div>`
             : `<p class="text-sm text-slate-400 mb-6">No override profiles defined${admin ? ' — use <b>+ Add Profile</b>.' : '.'}</p>`}
-        <h4 class="text-sm font-bold text-[#263040] mb-2">Assigned clients</h4>
+        <h4 class="text-sm font-bold text-navy mb-2">Assigned clients</h4>
         ${assignments.length ? tableWrap(tableHead(['Client IP / Subnet', 'Label', 'Profile', 'Comment', '']) + `<tbody>${asgRows}</tbody>`)
             : `<p class="text-sm text-slate-400">No clients have an override applied.</p>`}
         <div id="dns-override-live" class="mt-6"></div>
@@ -3058,7 +3058,7 @@ async function loadDnsOverrideLiveCheck(minutes) {
     if (!box) return;
     const mins = minutes || parseInt(box.dataset.minutes || '60', 10);
     box.dataset.minutes = mins;
-    box.innerHTML = `<h4 class="text-sm font-bold text-[#263040] mb-2">Live check</h4><p class="text-sm text-slate-400">Checking every DNS server…</p>`;
+    box.innerHTML = `<h4 class="text-sm font-bold text-navy mb-2">Live check</h4><p class="text-sm text-slate-400">Checking every DNS server…</p>`;
     const qs = _tenantQS();
     try {
         const { ok, data: d, detail } = await _spokeFetch(`/api/dns/overrides/verify${qs}${qs ? '&' : '?'}minutes=${mins}`);
@@ -3075,11 +3075,11 @@ async function loadDnsOverrideLiveCheck(minutes) {
 function _dnsOverrideLiveView(d, mins, error) {
     const windows = [[60, 'Last hour'], [1440, 'Last 24 hours'], [10080, 'Last 7 days']];
     const header = `<div class="flex items-center gap-2 mb-2">
-        <h4 class="text-sm font-bold text-[#263040]">Live check</h4>
+        <h4 class="text-sm font-bold text-navy">Live check</h4>
         <select onchange="loadDnsOverrideLiveCheck(parseInt(this.value, 10))" class="ml-auto border border-slate-300 rounded-md px-2 py-1 text-xs">
             ${windows.map(([v, t]) => `<option value="${v}" ${v === mins ? 'selected' : ''}>${t}</option>`).join('')}
         </select>
-        <button onclick="loadDnsOverrideLiveCheck()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold">Re-check</button>
+        <button onclick="loadDnsOverrideLiveCheck()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold">Re-check</button>
     </div>`;
     if (!d) return header + `<p class="text-sm text-red-600">${escapeHtml(error || 'Live check unavailable')}</p>`;
     const hits = d.hits || [];
@@ -3149,7 +3149,7 @@ function showDnsOverrideProfileModal(editItem) {
     const isEdit = !!editItem;
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     openModal('dns-override-profile-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${isEdit ? 'Edit Override Profile' : 'Add Override Profile'}</h3>
+        <h3 class="text-lg font-bold text-navy">${isEdit ? 'Edit Override Profile' : 'Add Override Profile'}</h3>
         <div class="space-y-3">
             <div class="space-y-1">
                 <label class="text-xs text-slate-500 font-bold uppercase">Name</label>
@@ -3171,7 +3171,7 @@ function showDnsOverrideProfileModal(editItem) {
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsOverrideProfile()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Profile'}</button>
+            <button onclick="saveDnsOverrideProfile()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Profile'}</button>
             <button onclick="document.getElementById('dns-override-profile-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     const modal = document.getElementById('dns-override-profile-modal');
@@ -3298,7 +3298,7 @@ function showDnsOverrideAssignModal(preset) {
                 </select>
             </div>` : '';
     openModal('dns-override-assign-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${p.edit ? 'Edit DNS Override' : 'DNS Override'}</h3>
+        <h3 class="text-lg font-bold text-navy">${p.edit ? 'Edit DNS Override' : 'DNS Override'}</h3>
         <div class="space-y-3">${scopeHtml}
             <div class="space-y-1">
                 <label class="text-xs text-slate-500 font-bold uppercase">Client IP or subnet</label>
@@ -3319,7 +3319,7 @@ function showDnsOverrideAssignModal(preset) {
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsOverrideAssignment()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${p.edit ? 'Save Changes' : 'Apply'}</button>
+            <button onclick="saveDnsOverrideAssignment()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">${p.edit ? 'Save Changes' : 'Apply'}</button>
             <button onclick="document.getElementById('dns-override-assign-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     const modal = document.getElementById('dns-override-assign-modal');

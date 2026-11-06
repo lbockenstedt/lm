@@ -24,7 +24,8 @@
         /* System font stack — matches the Client-Sim UI; no external font fetch
            (the hub often runs on a disconnected management network). */
         :root {
-            --hpe-green: #01A982;
+            --hpe-green: #01A982;       /* HPE decorative.brand — accents/borders only */
+            --hpe-green-text: #006750;  /* HPE text.primary — green text on light surfaces (AA) */
             --hpe-navy: #263040;
             --hpe-bg-light: #F5F5F5;
             --hpe-white: #FFFFFF;
@@ -34,6 +35,7 @@
 
         /* Star Wars Imperial Theme Overrides */
         body.sw-theme {
+            --hpe-green-text: #ff0000;
             --hpe-bg-light: #0a0a0a;
             --hpe-white: #111;
             --hpe-text-main: #e2e2e2;
@@ -181,6 +183,7 @@
 
         /* Cicada Theme (Cyber-Industrial) */
         body.cicada-theme {
+            --hpe-green-text: #00ff41;
             --hpe-bg-light: #0a0a0a;
             --hpe-white: #1a1a1a;
             --hpe-text-main: #d1d1d1;
@@ -296,11 +299,11 @@
         }
         .nav-item:hover {
             background: rgba(1, 169, 130, 0.1);
-            color: var(--hpe-green);
+            color: var(--hpe-green-text);
         }
         .nav-item.active {
             background: rgba(1, 169, 130, 0.15);
-            color: var(--hpe-green);
+            color: var(--hpe-green-text);
             font-weight: 600;
             border-left: 4px solid var(--hpe-green);
         }
@@ -311,10 +314,17 @@
             border-bottom: 3px solid transparent; /* reserve space so the active underline doesn't shift layout */
         }
         .sub-nav-item:hover { color: #0f172a; } /* slate-900 */
-        .sub-nav-item.active { color: #01A982; font-weight: 600; border-bottom-color: var(--hpe-green); }
+        .sub-nav-item.active { color: var(--hpe-green-text); font-weight: 600; border-bottom-color: var(--hpe-green); }
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 10px; }
+    
+        /* ── HPE Design System (docs/webui-style.md) ──────────────────────
+           Dark surfaces use the HPE dark-mode tokens so text keeps AA contrast. */
+        :is(.hpe-topbar, .bg-navy, .bg-slate-800, .bg-slate-900, .bg-slate-950, .bg-black, .bg-gray-800, .bg-gray-900) .text-primary-text,
+        :is(.hpe-topbar, .bg-navy, .bg-slate-800, .bg-slate-900, .bg-slate-950, .bg-black, .bg-gray-800, .bg-gray-900).text-primary-text {
+            color: #05CC93;
+        }
     </style>
 </head>
 <body class="flex flex-col h-screen w-screen overflow-hidden">
@@ -329,24 +339,24 @@
                 <h1 class="text-2xl font-bold text-white tracking-tight">Lab Manager</h1>
                 <p class="text-slate-400 text-sm mt-1">Sign in to continue</p>
             </div>
-            <div class="bg-[#263040] rounded-xl shadow-2xl border border-slate-700 p-8 space-y-5">
+            <div class="bg-navy rounded-xl shadow-2xl border border-slate-700 p-8 space-y-5">
                 <div>
                     <label class="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">Username</label>
                     <input id="login-username" type="text" autocomplete="username"
-                        class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-[#01A982] focus:border-transparent"
+                        class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="username"
                         onkeydown="if(event.key==='Enter')document.getElementById('login-password').focus()">
                 </div>
                 <div>
                     <label class="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">Password</label>
                     <input id="login-password" type="password" autocomplete="current-password"
-                        class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-[#01A982] focus:border-transparent"
+                        class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="••••••••"
                         onkeydown="if(event.key==='Enter')doLogin()">
                 </div>
                 <p id="login-error" class="hidden text-xs text-red-400 font-medium"></p>
                 <button onclick="doLogin()"
-                    class="w-full bg-[#01A982] hover:bg-[#008c6a] text-white font-bold py-2.5 px-4 rounded-lg text-sm transition-colors">
+                    class="w-full bg-primary hover:bg-primary-hover text-white font-bold py-2.5 px-4 rounded-lg text-sm transition-colors">
                     Sign In
                 </button>
                 <!-- Entra ID (OIDC) SSO — shown only when /auth/oidc/enabled reports
@@ -378,42 +388,42 @@
                 <h1 class="text-2xl font-bold text-white tracking-tight">Lab Manager</h1>
                 <p class="text-slate-400 text-sm mt-1">Create your admin account to get started</p>
             </div>
-            <div class="bg-[#263040] rounded-xl shadow-2xl border border-[#01A982] p-8 space-y-5">
+            <div class="bg-navy rounded-xl shadow-2xl border border-brand p-8 space-y-5">
                 <div class="flex items-center gap-2 mb-1">
-                    <span class="inline-block w-2 h-2 rounded-full bg-[#01A982]"></span>
-                    <span class="text-xs font-bold text-[#01A982] uppercase tracking-widest">First Run Setup</span>
+                    <span class="inline-block w-2 h-2 rounded-full bg-primary"></span>
+                    <span class="text-xs font-bold text-primary-text uppercase tracking-widest">First Run Setup</span>
                 </div>
                 <div>
                     <label class="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">Setup Token <span class="font-normal normal-case text-slate-500">(from install log — leave blank if not set)</span></label>
                     <input id="setup-token" type="password" autocomplete="off"
-                        class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-[#01A982] focus:border-transparent"
+                        class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="X-Setup-Token"
                         onkeydown="if(event.key==='Enter')document.getElementById('setup-username').focus()">
                 </div>
                 <div>
                     <label class="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">Admin Username</label>
                     <input id="setup-username" type="text" autocomplete="username"
-                        class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-[#01A982] focus:border-transparent"
+                        class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="admin"
                         onkeydown="if(event.key==='Enter')document.getElementById('setup-password').focus()">
                 </div>
                 <div>
                     <label class="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">Password</label>
                     <input id="setup-password" type="password" autocomplete="new-password"
-                        class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-[#01A982] focus:border-transparent"
+                        class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="min. 8 characters"
                         onkeydown="if(event.key==='Enter')document.getElementById('setup-password2').focus()">
                 </div>
                 <div>
                     <label class="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">Confirm Password</label>
                     <input id="setup-password2" type="password" autocomplete="new-password"
-                        class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-[#01A982] focus:border-transparent"
+                        class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="••••••••"
                         onkeydown="if(event.key==='Enter')doSetup()">
                 </div>
                 <p id="setup-error" class="hidden text-xs text-red-400 font-medium"></p>
                 <button onclick="doSetup()"
-                    class="w-full bg-[#01A982] hover:bg-[#008c6a] text-white font-bold py-2.5 px-4 rounded-lg text-sm transition-colors">
+                    class="w-full bg-primary hover:bg-primary-hover text-white font-bold py-2.5 px-4 rounded-lg text-sm transition-colors">
                     Create Account &amp; Sign In
                 </button>
             </div>
@@ -486,7 +496,7 @@
                 <span id="user-chip-name" class="font-medium"></span>
                 <!-- Tenant badge / switcher — populated by _initApp() -->
                 <div id="user-chip-tenant-wrap" class="relative">
-                    <span id="user-chip-tenant" class="px-2 py-0.5 rounded-full bg-[#01A982] text-white text-[10px] font-bold uppercase tracking-wider"></span>
+                    <span id="user-chip-tenant" class="px-2 py-0.5 rounded-full bg-primary text-white text-[10px] font-bold uppercase tracking-wider"></span>
                 </div>
                 <button onclick="doLogout()" class="ml-1 text-slate-400 hover:text-white transition-colors text-[10px] uppercase tracking-wider font-bold">Sign Out</button>
             </div>

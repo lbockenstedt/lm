@@ -814,7 +814,7 @@ function csChildPlaceholder(primary, child) {
     csSet(`<div class="max-w-2xl mx-auto mt-10">
         <div class="hpe-card rounded-lg p-8 shadow-sm text-center">
             <div class="text-3xl mb-3">🚧</div>
-            <h3 class="text-lg font-bold text-[#263040] mb-1">${csEscape(primary)} · ${csEscape(child)} ${helpIcon('cs', null, 'Simulations help')}</h3>
+            <h3 class="text-lg font-bold text-navy mb-1">${csEscape(primary)} · ${csEscape(child)} ${helpIcon('cs', null, 'Simulations help')}</h3>
             <p class="text-sm text-slate-500">This section is part of the ongoing webui-hub → cs module port and will be populated in a coming wave. The structure is in place so the navigation matches the original.</p>
         </div>
     </div>`);
@@ -1492,7 +1492,7 @@ function csDongleTriplet(d) {
     const inUseCls = d.absentAssigned ? 'text-red-600' : 'text-slate-700';
     return `<span class="font-mono text-xs font-bold" title="${csEscape(csDongleTitle(d))}">`
          + `<span class="${inUseCls}">${csEscape(String(d.inUse || 0))}</span>`
-         + sep + seg(d.avail, d.avail > 0 ? 'text-[#01A982]' : 'text-amber-600')
+         + sep + seg(d.avail, d.avail > 0 ? 'text-primary-text' : 'text-amber-600')
          + sep + seg(d.qtTotal, 'text-red-600')
          + sep + seg(d.excludedTotal, 'text-amber-600')
          + `</span>`;
@@ -1533,7 +1533,7 @@ function csDongleStats(h) {
       <div class="text-xl font-mono font-bold ${cls} mt-1">${value}</div>
     </div>`;
     return tile('In use', d.inUse, 'text-slate-700')
-         + tile('Available', d.avail, d.avail > 0 ? 'text-[#01A982]' : 'text-amber-600')
+         + tile('Available', d.avail, d.avail > 0 ? 'text-primary-text' : 'text-amber-600')
          + tile('Quarantined', d.qtTotal, d.qtTotal > 0 ? 'text-red-600' : 'text-slate-700')
          // Assigned to a VM but gone from the bus. Shown only when nonzero, and
          // deliberately NOT folded into "In use" — that is what made USB 13 /
@@ -1880,10 +1880,10 @@ function csClientsLegend() {
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Sim')}
-          <span class="flex items-center gap-1.5">${sw('bg-[#263040]/10 text-[#263040] border border-[#263040]')} SID default ON</span>
+          <span class="flex items-center gap-1.5">${sw('bg-navy/10 text-navy border border-navy')} SID default ON</span>
           <span class="flex items-center gap-1.5">${sw('bg-white text-slate-400 border border-slate-200')} SID default OFF</span>
-          <span class="flex items-center gap-1.5">${sw('bg-white text-[#263040] border-2 border-[#263040]')} Override ON</span>
-          <span class="flex items-center gap-1.5">${sw('bg-[#263040]/5 text-[#263040]/60 border border-[#263040]/40')} Override OFF</span>
+          <span class="flex items-center gap-1.5">${sw('bg-white text-navy border-2 border-navy')} Override ON</span>
+          <span class="flex items-center gap-1.5">${sw('bg-navy/5 text-navy/60 border border-navy/40')} Override OFF</span>
           <span class="flex items-center gap-1.5"><span class="bolt text-amber-600 font-bold">⚡</span> Demo scenario active (auto-reverts in 2h)</span>
           <span class="flex items-center gap-1.5"><span class="bg-amber-50 border border-amber-200 px-1.5 rounded">row</span> highlighted while a demo runs</span>
         </div>
@@ -2137,11 +2137,11 @@ function csSimBtnClass(on, isOverride) {
     // ON; navy border = override (bold=on / faint=off); slate = default OFF.
     if (isOverride) {
         return 'px-[0.152rem] py-[0.051rem] rounded text-[12px] font-bold border transition-colors ' +
-            (on ? 'bg-white text-[#263040] border-2 border-[#263040] hover:bg-[#263040]/5'
-                : 'bg-[#263040]/5 text-[#263040]/60 border-[#263040]/40 hover:bg-[#263040]/10');
+            (on ? 'bg-white text-navy border-2 border-navy hover:bg-navy/5'
+                : 'bg-navy/5 text-navy/60 border-navy/40 hover:bg-navy/10');
     }
     return 'px-[0.152rem] py-[0.051rem] rounded text-[12px] font-bold border transition-colors ' +
-        (on ? 'bg-[#263040]/10 text-[#263040] border-[#263040]'
+        (on ? 'bg-navy/10 text-navy border-navy'
             : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-100');
 }
 
@@ -2351,7 +2351,7 @@ function csDemoCell(hostname) {
         ${csDemoOptions(a ? a.scenario : 'normal')}
       </select>
       <button data-cs-demo-host="${csEscape(hostname)}" onclick="csDemoTrigger(this)"
-        class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-1.5 py-0.5 rounded-md text-[11px] font-bold">Go</button>
+        class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-1.5 py-0.5 rounded-md text-[11px] font-bold">Go</button>
       <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlClear(this)"
         class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-1.5 py-0.5 rounded-md text-[11px] font-bold" title="Clear this client's sim overrides">Clear</button>
     </td>`;
@@ -2631,7 +2631,7 @@ function _csCentralTableBuild(id) {
     let bar = '';
     if (monOf) {
         const nMon = rows.filter(r => monOf(r)).length;
-        const mk = (val, label) => `<button onclick="csCentralFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-[#263040]/10 text-[#263040] border-[#263040]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
+        const mk = (val, label) => `<button onclick="csCentralFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
         bar = `<div class="flex items-center gap-2 mb-3">
             <span class="text-xs text-slate-500 font-semibold uppercase tracking-wider">Monitored:</span>
             ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
@@ -2723,7 +2723,7 @@ window.csMonitorSiteModal = async function (siteName, rerender) {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">${isMon ? 'Monitored' : 'Monitor'} — ${esc(siteName)}</h3>
+                <h3 class="text-lg font-bold text-navy">${isMon ? 'Monitored' : 'Monitor'} — ${esc(siteName)}</h3>
                 <button onclick="this.closest('#cs-monitor-site-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
@@ -3151,7 +3151,7 @@ function _csCentralOnPremTableBuild(id) {
     let bar = '';
     if (monOf) {
         const nMon = rows.filter(r => monOf(r)).length;
-        const mk = (val, label) => `<button onclick="csCentralOnPremFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-[#263040]/10 text-[#263040] border-[#263040]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
+        const mk = (val, label) => `<button onclick="csCentralOnPremFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
         bar = `<div class="flex items-center gap-2 mb-3">
             <span class="text-xs text-slate-500 font-semibold uppercase tracking-wider">Monitored:</span>
             ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
@@ -3243,7 +3243,7 @@ window.csMonitorCentralOnPremSiteModal = async function (siteName, rerender) {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">${isMon ? 'Monitored' : 'Monitor'} — ${esc(siteName)}</h3>
+                <h3 class="text-lg font-bold text-navy">${isMon ? 'Monitored' : 'Monitor'} — ${esc(siteName)}</h3>
                 <button onclick="this.closest('#cs-monitor-central-on-prem-site-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
@@ -3804,7 +3804,7 @@ function _csMistTableBuild(id) {
     let bar = '';
     if (monOf) {
         const nMon = rows.filter(r => monOf(r)).length;
-        const mk = (val, label) => `<button onclick="csMistFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-[#263040]/10 text-[#263040] border-[#263040]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
+        const mk = (val, label) => `<button onclick="csMistFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
         bar = `<div class="flex items-center gap-2 mb-3">
             <span class="text-xs text-slate-500 font-semibold uppercase tracking-wider">Monitored:</span>
             ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
@@ -3886,7 +3886,7 @@ window.csMonitorMistSiteModal = async function (siteName, rerender) {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">${isMon ? 'Monitored' : 'Monitor'} — ${esc(siteName)}</h3>
+                <h3 class="text-lg font-bold text-navy">${isMon ? 'Monitored' : 'Monitor'} — ${esc(siteName)}</h3>
                 <button onclick="this.closest('#cs-monitor-mist-site-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
@@ -4174,7 +4174,7 @@ async function csRenderConfig() {
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">API Config Push ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-400 mb-2">Paste a JSON config object to push to all spokes (unwrapped at the spoke's <code>_apply_hub_config</code>).</p>
       <textarea id="cs-configpush" rows="10" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500" placeholder='{ "key": "value" }'></textarea>
-      <div class="mt-3 flex justify-end"><button onclick="csSaveConfigPush()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Push Config</button></div>
+      <div class="mt-3 flex justify-end"><button onclick="csSaveConfigPush()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-md text-sm font-bold shadow-sm">Push Config</button></div>
     </div>`;
 
     // per-spoke config state (desired vs applied) — best-effort read from cache.
@@ -4475,7 +4475,7 @@ async function csRenderConfigSimulation() {
           ${cfgSource === 'hub'
             ? '<span class="inline-block bg-emerald-100 text-emerald-700 rounded-full px-2 py-0.5 text-[10px] font-bold">Hub-owned (GitHub sync ignored)</span>'
             : (cfgWritable
-              ? '<span class="inline-block bg-[#01A982]/10 text-[#01A982] border border-[#01A982] rounded-full px-2 py-0.5 text-[10px] font-bold">GitHub-managed (commits on save)</span>'
+              ? '<span class="inline-block bg-brand/10 text-primary-text border border-brand rounded-full px-2 py-0.5 text-[10px] font-bold">GitHub-managed (commits on save)</span>'
               : '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">GitHub-managed — READ-ONLY (no API key)</span>')}
           ${simSource === 'hub'
             ? '<span class="inline-block bg-slate-100 text-slate-500 rounded-full px-2 py-0.5 text-[10px] font-bold">hub config (from GitHub)</span>'
@@ -4488,7 +4488,7 @@ async function csRenderConfigSimulation() {
       <p class="text-xs text-slate-400 mb-3">Edit the labeled fields. Saved as the hub-managed <code>sim_conf_override</code> INI and pushed to the spoke (merged on top of the repo's simulation.conf). Clearing a field reverts it to the repo default.</p>
       <div id="cs-ini-sections">${simBody}</div>
       <div class="flex justify-end items-center gap-3 mt-4">
-        <button onclick="csSaveSimConfStructured()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save</button>
+        <button onclick="csSaveSimConfStructured()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save</button>
         <button onclick="csRenderConfigSimulation()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Refresh</button>
       </div>
     </div>`;
@@ -5009,7 +5009,7 @@ function csRenderSimQuotaEditor() {
         <details class="text-xs text-slate-500 mt-2">
           <summary class="cursor-pointer">Suggested alert → sim linkage</summary>
           <ul class="mt-1 list-disc list-inside space-y-0.5">
-            ${Object.entries(suggested).map(([a, s]) => `<li><span class="font-mono">${csEscape(a)}</span> → <span class="font-mono">${csEscape(s)}</span> <button onclick="csSimQuotaAddSuggested('${csEscape(a)}','${csEscape(s)}')" class="text-[#01A982] hover:underline ml-1">add</button></li>`).join('')}
+            ${Object.entries(suggested).map(([a, s]) => `<li><span class="font-mono">${csEscape(a)}</span> → <span class="font-mono">${csEscape(s)}</span> <button onclick="csSimQuotaAddSuggested('${csEscape(a)}','${csEscape(s)}')" class="text-primary-text hover:underline ml-1">add</button></li>`).join('')}
           </ul>
         </details>` : '';
     csSet(`<div class="space-y-4">
@@ -5019,9 +5019,9 @@ function csRenderSimQuotaEditor() {
           <div class="flex justify-end gap-2">
             ${window._csIgnoreGlobalQuotas
               ? `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant ignores the platform-wide Sim Quota defaults — only its own rows apply. Click to use global defaults again." class="bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-300 px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Global Defaults: Ignored</button>`
-              : `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant inherits the platform-wide Sim Quota defaults, merged with its own rows. Click to ignore them." class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Global Defaults: On</button>`}
-            <button onclick="csSimQuotaAdd()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add Quota</button>
-            <button onclick="csSimQuotaSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Quotas</button>
+              : `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant inherits the platform-wide Sim Quota defaults, merged with its own rows. Click to ignore them." class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Global Defaults: On</button>`}
+            <button onclick="csSimQuotaAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add Quota</button>
+            <button onclick="csSimQuotaSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Quotas</button>
           </div>
         </div>
         <p class="text-xs text-slate-500 mb-2">Link a monitored alert or insight (Central → Alerts/Insights → Monitor) to the simulation that produces it, then set how many online clients the engine keeps running that sim in the chosen site. The engine auto-selects from the online pool and self-heals when a runner dies. <span class="font-semibold">Re-home</span> lets it borrow runners from other sites (re-homing their <span class="font-mono">wsite</span>) when this site's pool can't fill the count. Sims + sites come from this tenant's <span class="font-semibold">Config Editor</span> (simulation.conf) and Central site mappings.</p>
@@ -5201,8 +5201,8 @@ function csPoolConfigCardHtml() {
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Pool &amp; SSID</h3>
           <div class="flex justify-end gap-2">
-            <button onclick="csPoolCellAdd()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add SSID</button>
-            <button onclick="csSavePoolConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Pool</button>
+            <button onclick="csPoolCellAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add SSID</button>
+            <button onclick="csSavePoolConfig()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Pool</button>
           </div>
         </div>
         <p class="text-xs text-slate-500 mb-2"><code>1X</code> auth uses <code>dot1x_eap</code> and <code>dot1x_password</code> from the Simulation config; PEAP falls back to the SSID Ssidpw when the Dot1x Password is empty. Set a 1X cell's <span class="font-semibold">Account location</span> to have the engine create each assigned client's account in Entra ID, the tenant LDAP OU or ClearPass with a random vaulted password (see NAC → My Users).</p>
@@ -5219,7 +5219,7 @@ function csPoolConfigCardHtml() {
         <div>
           <div class="flex items-center justify-between mb-1">
             <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Weighted random distribution</div>
-            <button onclick="csPoolWeightAdd()" class="text-[#01A982] hover:underline text-xs font-bold">+ Add rule</button>
+            <button onclick="csPoolWeightAdd()" class="text-primary-text hover:underline text-xs font-bold">+ Add rule</button>
           </div>
           <p class="text-[11px] text-slate-400 mb-1 leading-tight">Spreads the spare pool across a site's SSIDs. Weight 5 vs 1 = 5× the clients; weight 0 = none; <span class="font-semibold">All</span> = balance of the pool goes to that SSID.</p>
           <div class="space-y-2">${weightRows || '<div class="text-xs text-slate-400 italic">No weighted rules. Click + Add rule.</div>'}</div>
@@ -5870,7 +5870,7 @@ async function csRenderSimQuotaState() {
             return `<div class="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-emerald-700"${at ? ` title="Achieved ${csEscape(at)}"` : ''}>
                 <span class="font-semibold">✅ known-good:</span>
                 <span>${csEscape(String(n))} clients · stable in ${csEscape(stable)} · knobs: ${knobStr}</span>
-                <button onclick="csResetToKnownGood(${csEscape(JSON.stringify(ak))})" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2 py-0.5 rounded text-[10px] font-bold">Reset to known-good</button>
+                <button onclick="csResetToKnownGood(${csEscape(JSON.stringify(ak))})" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2 py-0.5 rounded text-[10px] font-bold">Reset to known-good</button>
             </div>`;
         };
         const rows = eff.map(q => {
@@ -5890,7 +5890,7 @@ async function csRenderSimQuotaState() {
             const _fl = _as ? _as.floor : null;
             const _belowFloor = (_fl != null && _fl > 0) && clients.length < _fl;
             let fill = (clients.length >= target || !_belowFloor)
-                ? `<span class="text-[#01A982] font-semibold">${clients.length}/${target}</span>`
+                ? `<span class="text-primary-text font-semibold">${clients.length}/${target}</span>`
                 : `<span class="text-amber-600 font-semibold">${clients.length}/${target}</span>`;
             if (_as) {
                 const _m = _as.mode || 'learning';
@@ -6055,9 +6055,9 @@ async function csRenderSimQuotaState() {
             <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
               <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Engine State ${helpIcon('cs', null, 'Simulations help')}</h3>
               <div class="flex gap-2">
-                ${kgCount ? `<button onclick="csResetToKnownGood('')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold shadow-sm" title="Restore every alert with a recorded known-good operating point, then hold ~1h before resuming learning">✅ Reset ALL to known-good</button>` : ''}
+                ${kgCount ? `<button onclick="csResetToKnownGood('')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-sm font-bold shadow-sm" title="Restore every alert with a recorded known-good operating point, then hold ~1h before resuming learning">✅ Reset ALL to known-good</button>` : ''}
                 <button onclick="csResetSimQuota()" class="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1.5 rounded-md text-sm font-bold shadow-sm" title="Clear ALL engine assignments and re-shuffle every client from scratch">↻ Reset &amp; Reshuffle</button>
-                <button onclick="csRenderSimQuotaState()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
+                <button onclick="csRenderSimQuotaState()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
               </div>
             </div>
             <p class="text-xs text-slate-500 mb-3">Live SimQuotaEngine ledger — which clients are currently assigned to each effective quota. The engine tops up to the target count from the online pool each 60s sweep; amber = under-filled.</p>
@@ -6121,7 +6121,7 @@ async function csRenderEngineDiag() {
                     ? '<span class="italic text-slate-500">Clients Associated (presence)</span>'
                     : `<span class="font-mono text-slate-700">${csEscape(d.sim_id)}</span>`;
                 const under = (d.assigned || 0) < (d.target || 0);
-                const fill = `<span class="${under ? 'text-amber-600' : 'text-[#01A982]'} font-semibold">${d.assigned || 0}/${d.target || 0}</span>`;
+                const fill = `<span class="${under ? 'text-amber-600' : 'text-primary-text'} font-semibold">${d.assigned || 0}/${d.target || 0}</span>`;
                 const free = d.eligible_free || 0;
                 const freeCell = (under && free > 0)
                     ? `<span class="text-red-600 font-bold" title="Underfilled but ${free} eligible client(s) available — a real placement bug">${free} ⚠</span>`
@@ -6141,7 +6141,7 @@ async function csRenderEngineDiag() {
           <div class="hpe-card rounded-lg p-5 shadow-sm">
             <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
               <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Engine Diagnostic ${helpIcon('cs', null, 'Simulations help')}</h3>
-              <button onclick="csRenderEngineDiag()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
+              <button onclick="csRenderEngineDiag()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
             </div>
             <p class="text-xs text-slate-500 mb-3">Why each quota fills or under-fills, from the engine's LAST 60s sweep. <b>Free-eligible</b> = pool clients this quota could still take (non-zero on an underfilled quota = a real placement bug, flagged red); <b>Blocked</b> = clients excluded this quota, by reason. Refresh after a sweep.</p>
             <div class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
@@ -6592,7 +6592,7 @@ function csRenderPxmxSiteMapEditor() {
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Server to Site Assignments ${helpIcon('cs', null, 'Simulations help')}</h3>
-          <button onclick="csPxmxSiteSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Assignments</button>
+          <button onclick="csPxmxSiteSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Assignments</button>
         </div>
         <p class="text-xs text-slate-500 mb-2">Assign <span class="font-semibold">every</span> pxmx server to a pool: a <span class="font-semibold">Site Pool</span> (RF chamber — its clients are physically at that site and only run that site's SSID) or the <span class="font-semibold">Tenant-Wide Pool</span> (site-based SSID — its clients are assignable to any site/SSID by the Pool &amp; SSID placement). A deployment can mix both. Pools are always per-tenant. A client's own wsite override still wins; the bucket-default wsite is the fallback.</p>
         <div class="space-y-2 mt-2" id="cs-px-rows">${rowHtml || '<div class="text-xs text-slate-400 italic">No pxmx servers connected and no assignments saved. A server appears here once its agent connects to this spoke.</div>'}</div>
@@ -6628,8 +6628,8 @@ function csSiteLinksCardHtml() {
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Site Links (wsite ↔ Central)</h3>
           <div class="flex justify-end gap-2">
-            <button onclick="csSiteLinkAdd()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add Link</button>
-            <button onclick="csSiteLinkSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Links</button>
+            <button onclick="csSiteLinkAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add Link</button>
+            <button onclick="csSiteLinkSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Links</button>
           </div>
         </div>
         <p class="text-xs text-slate-500 mb-3">Tie a simulation <b>wsite</b> (the SSID prefix, e.g. <span class="font-mono">MIA</span>) to its <b>Central site</b> (e.g. <span class="font-mono">Miami</span>). The link <b>Name</b> is what shows in the assignment dropdown below, and it lets an alert-driven quota at that site match where the alert fires in Central.</p>
@@ -6732,7 +6732,7 @@ function csConfigSourceCard(source, cfg) {
     const repo = cfg.repo_url || '';
     const branch = cfg.repo_branch || 'main';
     const btn = (val, label, active) =>
-        `<button onclick="csSetConfigSource('${val}')" class="px-3 py-1.5 rounded-md text-sm font-bold border transition-colors ${active ? 'bg-[#01A982]/10 text-[#01A982] border-[#01A982]' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}">${label}</button>`;
+        `<button onclick="csSetConfigSource('${val}')" class="px-3 py-1.5 rounded-md text-sm font-bold border transition-colors ${active ? 'bg-brand/10 text-primary-text border-brand' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}">${label}</button>`;
     let status;
     if (isHub) {
         status = '<span class="text-emerald-700">Hub-owned — the GitHub sync is ignored; your edits are authoritative and are never reverted by a repo pull.</span>';
@@ -6916,8 +6916,8 @@ function csRenderUserOverridesCard(uo, uoErr) {
       </div>
       <p class="text-xs text-slate-400 mb-3">Per-user simulation overrides — pin a hostname to specific sim settings (a <code>[username]</code> section overrides the simulation profile for that user).</p>
       <div class="flex justify-end items-center gap-3 mb-3">
-        <button onclick="csUOAdd()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">＋ Add User</button>
-        <button onclick="csUOSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">Save</button>
+        <button onclick="csUOAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold">＋ Add User</button>
+        <button onclick="csUOSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold">Save</button>
       </div>
       <div id="cs-uo-cards">${csUORenderCards()}</div>
       <div class="flex justify-end mt-3">
@@ -7550,7 +7550,7 @@ async function csProcessingModesCard() {
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Processing Modes ${helpIcon('cs', null, 'Simulations help')}</h3>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${fields}</div>
-      <div class="flex justify-end mt-4"><button onclick="csSaveProcessingModes()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Modes</button></div>
+      <div class="flex justify-end mt-4"><button onclick="csSaveProcessingModes()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Modes</button></div>
     </div>`;
 }
 
@@ -7577,7 +7577,7 @@ async function csNotificationsCard() {
       <div class="grid grid-cols-1 gap-3">
         ${f('cs-notif-emails', 'To Emails (comma-separated)', Array.isArray(n.to_emails) ? n.to_emails.join(', ') : (n.to_emails || ''))}
       </div>
-      <div class="mt-4 flex justify-end"><button onclick="csSaveNotifications()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Notifications</button></div>
+      <div class="mt-4 flex justify-end"><button onclick="csSaveNotifications()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Notifications</button></div>
     </div>`;
 }
 
@@ -7721,7 +7721,7 @@ async function csRenderSetupCentralApi() {
         </label>
       </div>
       <div class="flex justify-end gap-2 mt-4">
-        <button onclick="csSaveCentralConn()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
+        <button onclick="csSaveCentralConn()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
         <button onclick="csTestCentral()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Test Central</button>
       </div>
       <div id="cs-csc-test" class="mt-3 text-xs text-slate-500"></div>
@@ -7744,17 +7744,17 @@ async function csRenderSetupCentralApi() {
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Site Mappings (wireless site → Central site)</p>
       ${_discoveredSites.length ? `<p class="text-[10px] text-slate-400 mb-1">${_discoveredSites.length} Central site(s) discovered — pick from the dropdown (refreshes as more are found).</p>` : '<p class="text-[10px] text-slate-400 mb-1">No Central sites discovered yet (check the connection); the dropdown lists discovered sites once loaded.</p>'}
       <div id="cs-csc-sm-rows" class="space-y-2">${smRows || '<p class="text-xs text-slate-400 italic">No site mappings.</p>'}</div>
-      <button onclick="csCscAddSm()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add mapping</button>
+      <button onclick="csCscAddSm()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add mapping</button>
 
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Monitored Checks</p>
       <div id="cs-csc-monitored">${mcList}</div>
 
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Hardware Checks</p>
       <div id="cs-csc-hw-rows" class="space-y-2">${hwRows || '<p class="text-xs text-slate-400 italic">No hardware checks.</p>'}</div>
-      <button onclick="csCscAddHw()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add hardware check</button>
+      <button onclick="csCscAddHw()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add hardware check</button>
 
       <div class="flex justify-end gap-2 mt-4">
-        <button onclick="csSaveCentralSites()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
+        <button onclick="csSaveCentralSites()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
       </div>
     </div>`;
 
@@ -8036,7 +8036,7 @@ async function csRenderSetupCentralOnPremApi() {
         </label>
       </div>
       <div class="flex justify-end gap-2 mt-4">
-        <button onclick="csSaveCentralOnPremConn()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
+        <button onclick="csSaveCentralOnPremConn()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
         <button onclick="csTestCentralOnPrem()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Test Central On-Prem</button>
       </div>
       <div id="cs-cop-csc-test" class="mt-3 text-xs text-slate-500"></div>
@@ -8059,17 +8059,17 @@ async function csRenderSetupCentralOnPremApi() {
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Site Mappings (wireless site → Central site)</p>
       ${_discoveredSites.length ? `<p class="text-[10px] text-slate-400 mb-1">${_discoveredSites.length} Central site(s) discovered — pick from the dropdown (refreshes as more are found).</p>` : '<p class="text-[10px] text-slate-400 mb-1">No Central sites discovered yet (check the connection); the dropdown lists discovered sites once loaded.</p>'}
       <div id="cs-cop-csc-sm-rows" class="space-y-2">${smRows || '<p class="text-xs text-slate-400 italic">No site mappings.</p>'}</div>
-      <button onclick="csCopCscAddSm()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add mapping</button>
+      <button onclick="csCopCscAddSm()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add mapping</button>
 
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Monitored Checks</p>
       <div id="cs-cop-csc-monitored">${mcList}</div>
 
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Hardware Checks</p>
       <div id="cs-cop-csc-hw-rows" class="space-y-2">${hwRows || '<p class="text-xs text-slate-400 italic">No hardware checks.</p>'}</div>
-      <button onclick="csCopCscAddHw()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add hardware check</button>
+      <button onclick="csCopCscAddHw()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add hardware check</button>
 
       <div class="flex justify-end gap-2 mt-4">
-        <button onclick="csSaveCentralOnPremSites()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
+        <button onclick="csSaveCentralOnPremSites()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
       </div>
     </div>`;
 
@@ -8325,7 +8325,7 @@ async function csRenderSetupMistApi() {
         </label>
       </div>
       <div class="flex justify-end gap-2 mt-4">
-        <button onclick="csSaveMistConn()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
+        <button onclick="csSaveMistConn()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
         <button onclick="csTestMist()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Test Mist</button>
       </div>
       <div id="cs-msc-test" class="mt-3 text-xs text-slate-500"></div>
@@ -8348,17 +8348,17 @@ async function csRenderSetupMistApi() {
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Site Mappings (wireless site → Mist site)</p>
       ${_discoveredSites.length ? `<p class="text-[10px] text-slate-400 mb-1">${_discoveredSites.length} Mist site(s) discovered — pick from the dropdown (refreshes as more are found).</p>` : '<p class="text-[10px] text-slate-400 mb-1">No Mist sites discovered yet (check the connection); the dropdown lists discovered sites once loaded.</p>'}
       <div id="cs-msc-sm-rows" class="space-y-2">${smRows || '<p class="text-xs text-slate-400 italic">No site mappings.</p>'}</div>
-      <button onclick="csMscAddSm()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add mapping</button>
+      <button onclick="csMscAddSm()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add mapping</button>
 
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Monitored Checks</p>
       <div id="cs-msc-monitored">${mcList}</div>
 
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Hardware Checks</p>
       <div id="cs-msc-hw-rows" class="space-y-2">${hwRows || '<p class="text-xs text-slate-400 italic">No hardware checks.</p>'}</div>
-      <button onclick="csMscAddHw()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add hardware check</button>
+      <button onclick="csMscAddHw()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add hardware check</button>
 
       <div class="flex justify-end gap-2 mt-4">
-        <button onclick="csSaveMistSites()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
+        <button onclick="csSaveMistSites()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
       </div>
     </div>`;
 
@@ -8574,7 +8574,7 @@ async function csRenderSetupGithub() {
           ${f('cs-gh-token', 'GitHub Token ' + (cfg.has_token ? '(set — leave blank to keep)' : '(new)'), '', 'password')}
         </div>
         <div class="flex justify-end gap-2 mt-4">
-          <button onclick="csSaveGithub()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save</button>
+          <button onclick="csSaveGithub()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save</button>
           <button onclick="csClearGithub()" class="bg-red-100 text-red-700 px-4 py-2 rounded-md text-sm font-bold">Clear</button>
         </div>
       </div></div>`);
@@ -8617,7 +8617,7 @@ async function csRenderSetupSecurity() {
           ${f('cs-sec-timeout', 'Session Timeout (minutes)', cfg.session_timeout_minutes)}
           ${f('cs-sec-provider', 'Auth Provider', cfg.auth_provider)}
         </div>
-        <div class="mt-4 flex justify-end"><button onclick="csSaveSecurity()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save</button></div>
+        <div class="mt-4 flex justify-end"><button onclick="csSaveSecurity()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save</button></div>
       </div></div>`);
 }
 
@@ -8974,7 +8974,7 @@ async function csRenderVmServer() {
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Fleet Reclone</p>
         <div class="flex items-center gap-2">
-          <button onclick="csFleetReclone()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold" title="Destroy and re-clone every VM in the fleet from its template — all in-VM state is lost">Reclone All</button>
+          <button onclick="csFleetReclone()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-xs font-bold" title="Destroy and re-clone every VM in the fleet from its template — all in-VM state is lost">Reclone All</button>
           <button id="cs-fleet-reclone-stop" onclick="csFleetRecloneStop()" class="hidden bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Stop the running fleet reclone — VMs already in progress finish, the rest are skipped">Stop</button>
           <button id="cs-fleet-reclone-clear" onclick="csFleetRecloneClear()" class="hidden bg-white hover:bg-slate-50 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Clear the finished reclone's errors and per-VM log. Refused while a batch is running — stop it first.">Clear errors</button>
         </div>
@@ -9167,7 +9167,7 @@ function csFleetRecloneProgress() {
         const cur = rs.current_vm ? ` · recloning VM ${csEscape(String(rs.current_vm))}` : '';
         const ph = rs.phase ? ` (${csEscape(rs.phase)})` : '';
         const bar = total
-            ? `<div class="w-full bg-slate-100 rounded-full h-1.5 my-1"><div class="bg-[#01A982] h-1.5 rounded-full" style="width:${pct}%"></div></div>
+            ? `<div class="w-full bg-slate-100 rounded-full h-1.5 my-1"><div class="bg-primary h-1.5 rounded-full" style="width:${pct}%"></div></div>
                <div class="text-[10px] text-slate-400">${done} / ${total} VMs (${pct}%)${cur}${ph}</div>`
             : `<div class="text-[10px] text-slate-400">starting${cur}${ph}</div>`;
         const log = (rs.log || []).slice(-4).reverse().map(e => {
@@ -9276,7 +9276,7 @@ window.csFleetRefreshTemplates = async function () {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">↻ Refresh Template(s) — distribute seed</h3>
+                <h3 class="text-lg font-bold text-navy">↻ Refresh Template(s) — distribute seed</h3>
                 <button onclick="this.closest('#cs-refresh-tpl-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
@@ -9421,7 +9421,7 @@ window.csUploadTemplate = async function () {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">⬆ Upload template to hub</h3>
+                <h3 class="text-lg font-bold text-navy">⬆ Upload template to hub</h3>
                 <button onclick="this.closest('#cs-upload-tpl-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
@@ -9453,7 +9453,7 @@ window.csUploadTemplate = async function () {
                 <div id="cs-up-status" class="text-xs text-slate-500 font-mono hidden"></div>
                 <div class="pt-2 flex justify-end gap-3">
                     <button onclick="this.closest('#cs-upload-tpl-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                    <button id="cs-up-go" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Upload</button>
+                    <button id="cs-up-go" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Upload</button>
                 </div>
             </div>
         </div>`;
@@ -9597,7 +9597,7 @@ async function csRenderMyTemplates() {
     host.innerHTML = `
       <div class="hpe-card rounded-lg overflow-hidden border border-slate-200">
         <div class="flex items-center justify-between px-4 py-2 bg-slate-50 border-b border-slate-200">
-          <h3 class="text-sm font-bold text-[#263040]">My Templates <span class="text-slate-400 font-normal">(${templates.length})</span></h3>
+          <h3 class="text-sm font-bold text-navy">My Templates <span class="text-slate-400 font-normal">(${templates.length})</span></h3>
           <button onclick="window.csRenderMyTemplates ? window.csRenderMyTemplates() : csRenderMyTemplates()" class="px-2 py-1 rounded text-[11px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200" title="Reload the list of templates backed up to the hub for your tenant.">↻ Refresh</button>
         </div>
         <div class="overflow-x-auto"><table class="w-full text-sm">
@@ -9644,7 +9644,7 @@ window.csBackupTemplateToHub = async function (key) {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">⬆ Back up to Hub</h3>
+                <h3 class="text-lg font-bold text-navy">⬆ Back up to Hub</h3>
                 <button onclick="this.closest('#cs-backup-tpl-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
@@ -9739,7 +9739,7 @@ async function csRefreshAutoProvStatus() {
         if (btn) {
             btn.textContent = on ? 'Enabled' : 'Disabled';
             btn.className = on
-                ? 'px-3 py-1 rounded-md text-xs font-bold border bg-[#01A982]/10 text-[#01A982] border-[#01A982]'
+                ? 'px-3 py-1 rounded-md text-xs font-bold border bg-brand/10 text-primary-text border-brand'
                 : 'px-3 py-1 rounded-md text-xs font-bold border bg-slate-100 text-slate-500 border-slate-300';
         }
         if (!st) return;
@@ -10003,7 +10003,7 @@ async function csRenderVmServerVms() {
     const cats = ['Simulation Clients', 'Other', 'Containers', 'Templates'];
     const grouped = {};
     cats.forEach(c => grouped[c] = vms.filter(v => csVmCategory(v) === c));
-    const tabs = cats.map((c, i) => `<button onclick="csVmVmsTab('${c}')" id="cs-vmtab-${csEscape(c)}" class="px-3 py-1.5 rounded-md text-xs font-bold ${i === 0 ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}">${csEscape(c)} <span class="opacity-60">(${grouped[c].length})</span></button>`).join('');
+    const tabs = cats.map((c, i) => `<button onclick="csVmVmsTab('${c}')" id="cs-vmtab-${csEscape(c)}" class="px-3 py-1.5 rounded-md text-xs font-bold ${i === 0 ? 'bg-brand/10 text-primary-text border border-brand' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}">${csEscape(c)} <span class="opacity-60">(${grouped[c].length})</span></button>`).join('');
     csVmPage = 1;
     const _initList = grouped['Simulation Clients'] || [];
     const rows = csVmRenderRows(_initList);
@@ -10419,7 +10419,7 @@ function csAutoProvPanel(h) {
             ${pill}
         </div>
         ${active ? `<div class="flex items-center justify-between text-xs text-slate-500 mb-1"><span>${Math.min(run.completed, run.total)} of ${run.total} complete${run.failed ? ` · ${run.failed} failed` : ''}</span><span>${pct}%</span></div>
-        <div class="h-2 rounded-full bg-slate-100 overflow-hidden mb-2"><div class="h-full bg-gradient-to-r from-[#01A982] to-sky-400" style="width:${pct}%"></div></div>` : ''}
+        <div class="h-2 rounded-full bg-slate-100 overflow-hidden mb-2"><div class="h-full bg-gradient-to-r from-brand to-sky-400" style="width:${pct}%"></div></div>` : ''}
         <div class="max-h-48 overflow-y-auto">${feed}</div>
         ${haltLine}
     </div>`;
@@ -10589,7 +10589,7 @@ window.csVmVmsTab = function (cat) {
     if (list) list.innerHTML = csVmTable(rows) + csVmPager(_list.length);
     ['Simulation Clients','Other','Containers','Templates'].forEach(c => {
         const b = csEl('cs-vmtab-' + c);
-        if (b) b.className = 'px-3 py-1.5 rounded-md text-xs font-bold ' + (c === cat ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50');
+        if (b) b.className = 'px-3 py-1.5 rounded-md text-xs font-bold ' + (c === cat ? 'bg-brand/10 text-primary-text border border-brand' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50');
     });
 };
 
@@ -10761,7 +10761,7 @@ async function csRenderVmServerTerminal() {
       <div class="hpe-card rounded-lg overflow-hidden shadow-sm" style="background:#1e1e1e">
         <div class="px-4 py-2 flex justify-between items-center bg-[#2d2d2d] text-slate-200">
           <div class="text-sm font-mono">⌨️ ${csEscape(hostLabel)} — root shell ${helpIcon('cs', null, 'Simulations help')}</div>
-          <button onclick="csVmShellReconnect()" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold">↻ Reconnect</button>
+          <button onclick="csVmShellReconnect()" class="text-[11px] px-2 py-1 rounded bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold">↻ Reconnect</button>
         </div>
         <div id="cs-vm-term-body" style="height:60vh" class="p-1"></div>
         <div id="cs-vm-term-status" class="px-4 py-1 text-[11px] text-slate-400 bg-[#2d2d2d] font-mono">Connecting…</div>
@@ -11224,7 +11224,7 @@ async function csRenderVmServerQueue(live) {
           <input id="cs-cmd-target" value="${csVmSelectedHostIds.length === 1 ? csEscape([..._scopeHosts][0] || '') : ''}" class="border border-slate-200 rounded-md px-2 py-1 w-40" placeholder="proxmox"/></div>
         <div><label class="text-xs text-slate-400">Args JSON</label>
           <input id="cs-cmd-args" class="border border-slate-200 rounded-md px-2 py-1 w-56" placeholder='{"vmid":90050}'/></div>
-        <button onclick="csSendCommand()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold">Send</button>
+        <button onclick="csSendCommand()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-xs font-bold">Send</button>
         <button onclick="csClearCommands()" class="bg-red-100 text-red-700 px-3 py-1.5 rounded-md text-xs font-bold">Clear Queue</button>
       </div></div>`;
     csSet(`<div>${csVmHostBanner()}${sendForm}
@@ -12369,7 +12369,7 @@ window._csDiagData = window._csDiagData || {};
 function csDiagTile(label, val, hint, tone) {
     const v = tone === 'bad' ? 'text-red-600'
         : tone === 'warn' ? 'text-amber-600'
-        : tone === 'good' ? 'text-[#01A982]' : 'text-slate-700';
+        : tone === 'good' ? 'text-primary-text' : 'text-slate-700';
     return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2">
         <div class="text-[10px] uppercase tracking-wider text-slate-400">${csEscape(label)}</div>
         <div class="text-sm font-mono font-bold ${v} truncate" title="${csEscape(val)}">${csEscape(val)}</div>
@@ -12399,7 +12399,7 @@ function csDiagSection(id, title, opts) {
     return `<details id="${id}-wrap" class="hpe-card rounded-lg shadow-sm p-0 mb-3"${o.open ? ' open' : ''}>
       <summary class="cursor-pointer select-none px-5 py-3 flex items-center gap-3">
         <span id="${id}-dot" class="inline-block w-2.5 h-2.5 rounded-full ${tone.dot} shrink-0"></span>
-        <span class="text-sm font-bold text-[#263040] shrink-0">${csEscape(title)}</span>
+        <span class="text-sm font-bold text-navy shrink-0">${csEscape(title)}</span>
         <span id="${id}-sum" class="text-xs ${tone.cls} truncate">${o.summary || ''}</span>
         <span class="ml-auto flex items-center gap-2 shrink-0">${o.actions || ''}</span>
       </summary>
@@ -12602,11 +12602,11 @@ async function csRenderSetupDiagnostics() {
     csSet(`<div>
       <div class="hpe-card rounded-lg shadow-sm p-5 mb-4 flex flex-wrap items-center gap-3">
         <div>
-          <p class="text-lg font-bold text-[#263040]">Diagnostics</p>
+          <p class="text-lg font-bold text-navy">Diagnostics</p>
           <p class="text-[11px] text-slate-400">Captured ${csEscape(window._csDiagData.fetched_at)} — sections with a problem open automatically.</p>
         </div>
         <div class="ml-auto flex items-center gap-2">
-          <button type="button" onclick="csCopyAllDiagnostics(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-xs font-bold" title="Copy EVERY section below as plain text — repo status, CS bridge, missing dongles, sim tags and sim DHCP. Paste straight into a ticket or chat.">⧉ Copy all diagnostics</button>
+          <button type="button" onclick="csCopyAllDiagnostics(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-xs font-bold" title="Copy EVERY section below as plain text — repo status, CS bridge, missing dongles, sim tags and sim DHCP. Paste straight into a ticket or chat.">⧉ Copy all diagnostics</button>
           <button type="button" onclick="csRenderSetupDiagnostics()" class="${_btn}">↻ Refresh all</button>
         </div>
       </div>
@@ -12744,7 +12744,7 @@ function _csDongleDiagHost(h) {
               ? ` · <span class="text-slate-400">${csEscape(String(attr.self_inflicted))} self-inflicted (agent usb_reset — not hardware evidence)</span>`
               : '')
           + (attr.spontaneous === 0 && attr.self_inflicted
-              ? ` — <span class="text-[#01A982] font-bold">every logged event was ours; no hardware fault evidenced</span>`
+              ? ` — <span class="text-primary-text font-bold">every logged event was ours; no hardware fault evidenced</span>`
               : '')
           + `</div>`
         : '';
@@ -13187,7 +13187,7 @@ async function csRenderSpokeManagement() {
     csSetToolbar(`<input id="cs-spoke-q" oninput="csSpokeFilter()" placeholder="Search spokes…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-64">
       <button onclick="csSpokeExpandAll(true)" class="ml-2 text-xs text-slate-500 hover:text-slate-700">Expand all</button>
       <button onclick="csSpokeExpandAll(false)" class="ml-1 text-xs text-slate-500 hover:text-slate-700">Collapse all</button>
-      <button onclick="csRenderSpokeManagement()" class="ml-2 text-xs text-[#01A982] font-bold hover:underline">Refresh</button>`);
+      <button onclick="csRenderSpokeManagement()" class="ml-2 text-xs text-primary-text font-bold hover:underline">Refresh</button>`);
 
     const banner = (admin && (pending || unbound))
         ? `<div class="hpe-card rounded-lg p-5 shadow-sm border-l-4 border-amber-400 bg-amber-50">
@@ -13213,7 +13213,7 @@ async function csRenderSpokeManagement() {
     window._csSpokeRowHtml = function (s) {
         const isPending = !s.approved;
         const assignBtn = admin
-            ? `<button onclick="openSpokeAssignModal('${csEscape(s.spoke_id)}','${csEscape(s.tenant_id || '')}')" class="text-xs text-[#01A982] font-bold hover:underline whitespace-nowrap">${!s.tenant_id ? 'Assign' : 'Rebind'}</button>`
+            ? `<button onclick="openSpokeAssignModal('${csEscape(s.spoke_id)}','${csEscape(s.tenant_id || '')}')" class="text-xs text-primary-text font-bold hover:underline whitespace-nowrap">${!s.tenant_id ? 'Assign' : 'Rebind'}</button>`
             : '';
         const approveBtn = admin
             ? `<button onclick="csSpokeApprove('${csEscape(s.spoke_id)}',${isPending ? 'true' : 'false'})" class="text-xs ${isPending ? 'text-green-600 font-bold' : 'text-amber-600'} hover:underline whitespace-nowrap">${isPending ? 'Approve' : 'Revoke'}</button>`
@@ -13263,7 +13263,7 @@ async function csRenderSpokeManagement() {
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
         <input id="cs-claim-id" placeholder="spoke-id" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono">
         <input id="cs-claim-psk" placeholder="onboarding PSK" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono">
-        <button onclick="csClaimSpoke()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold shadow-sm">Claim</button>
+        <button onclick="csClaimSpoke()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold shadow-sm">Claim</button>
       </div>
     </div>`;
 
@@ -13364,7 +13364,7 @@ async function csSpokeMgmtPskCard() {
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex justify-between items-center mb-3">
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Onboarding PSK <span class="text-slate-400 normal-case font-normal">· tenant ${csEscape(tenant)}</span> ${helpIcon('cs', null, 'Simulations help')}</h3>
-        <button onclick="csSpokeMgmtGenPsk()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-xs font-bold shadow-sm">+ Generate</button>
+        <button onclick="csSpokeMgmtGenPsk()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-xs font-bold shadow-sm">+ Generate</button>
       </div>
       ${psks.length ? csTable(['PSK', ''], rows) : '<p class="text-xs text-slate-400 italic py-4 text-center">No PSKs issued.</p>'}
       ${deploy}
@@ -13415,7 +13415,7 @@ window._csAssistantMessages = window._csAssistantMessages || [];
 
 function _csAssistantBubble(role, text) {
     const isUser = role === 'user';
-    const bg = isUser ? 'bg-[#01A982] text-white' : 'bg-white border border-slate-200 text-slate-800';
+    const bg = isUser ? 'bg-primary text-white' : 'bg-white border border-slate-200 text-slate-800';
     const align = isUser ? 'justify-end' : 'justify-start';
     let body = window.renderHelpMarkdown ? window.renderHelpMarkdown(text) :
         '<p>' + csEscape(text) + '</p>';
@@ -13449,10 +13449,10 @@ function _csAssistantRenderLog() {
             'Tell me what you want to build — e.g. "I want a simulation that runs this ' +
             'script" and paste it in. I\'ll ask if I need more.</p>' +
             '<div class="flex flex-wrap gap-2 justify-center max-w-lg mx-auto">' +
-            '<button onclick="csAssistantSetInput(\'I want to create a new simulation based on dns_fail with custom burst rate and interval.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-[#01A982] hover:text-[#01A982] shadow-sm transition-colors">Clone dns_fail (custom burst/rate)</button>' +
-            '<button onclick="csAssistantSetInput(\'I want to create a steady high-bandwidth TCP traffic simulation using iperf.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-[#01A982] hover:text-[#01A982] shadow-sm transition-colors">High-Throughput Iperf</button>' +
-            '<button onclick="csAssistantSetInput(\'I want to create an alert simulation that causes client DHCP exhaustion.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-[#01A982] hover:text-[#01A982] shadow-sm transition-colors">DHCP Starvation Sim</button>' +
-            '<button onclick="csAssistantSetInput(\'I want a web browsing simulation that requests external HTTPS sites with randomized pauses.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-[#01A982] hover:text-[#01A982] shadow-sm transition-colors">Web HTTPS Latency</button>' +
+            '<button onclick="csAssistantSetInput(\'I want to create a new simulation based on dns_fail with custom burst rate and interval.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-brand hover:text-primary-text shadow-sm transition-colors">Clone dns_fail (custom burst/rate)</button>' +
+            '<button onclick="csAssistantSetInput(\'I want to create a steady high-bandwidth TCP traffic simulation using iperf.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-brand hover:text-primary-text shadow-sm transition-colors">High-Throughput Iperf</button>' +
+            '<button onclick="csAssistantSetInput(\'I want to create an alert simulation that causes client DHCP exhaustion.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-brand hover:text-primary-text shadow-sm transition-colors">DHCP Starvation Sim</button>' +
+            '<button onclick="csAssistantSetInput(\'I want a web browsing simulation that requests external HTTPS sites with randomized pauses.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-brand hover:text-primary-text shadow-sm transition-colors">Web HTTPS Latency</button>' +
             '</div>';
         return;
     }
@@ -13612,11 +13612,11 @@ function _csAsstRenderLog() {
     let html = a.events.map(_csAsstEventHtml).join('');
     if (_csAsstBusy(a.state)) {
         html += '<div class="flex items-center gap-2 text-xs text-slate-500 ml-2 mb-2">' +
-            '<span class="inline-block w-3 h-3 border-2 border-slate-300 border-t-[#01A982] rounded-full animate-spin"></span>' +
+            '<span class="inline-block w-3 h-3 border-2 border-slate-300 border-t-brand rounded-full animate-spin"></span>' +
             (a.state === 'submitting' ? 'Handing off to AppBuilder…' : 'Working…') + '</div>';
     } else if (a.choices && a.choices.length && !(a.submitted || []).length) {
         html += '<div class="flex flex-wrap gap-2 mb-3 ml-2">' + a.choices.map((c, i) =>
-            '<button onclick="csAssistantChoose(' + i + ')" class="px-3 py-1.5 text-xs rounded-full border border-[#01A982] text-[#01A982] bg-white hover:bg-emerald-50">' +
+            '<button onclick="csAssistantChoose(' + i + ')" class="px-3 py-1.5 text-xs rounded-full border border-brand text-primary-text bg-white hover:bg-emerald-50">' +
             csEscape(c) + '</button>').join('') + '</div>';
     }
     log.innerHTML = html;
@@ -13697,9 +13697,9 @@ function _csAsstRenderSpec() {
         const label = { queued: 'Queued for AppBuilder', feature_needs_info: 'AppBuilder needs info',
             feature_built: 'PR opened', feature_flagged: 'Needs a human (boundary)', feature_failed: 'Build failed' };
         html += '<div class="mt-4 pt-3 border-t border-slate-200 text-xs font-semibold text-slate-700 mb-1">Build</div>' +
-            builds.map(b => '<div class="text-xs mb-1"><a class="text-[#01A982] hover:underline" target="_blank" rel="noopener" href="' +
+            builds.map(b => '<div class="text-xs mb-1"><a class="text-primary-text hover:underline" target="_blank" rel="noopener" href="' +
                 csEscape(b.url || '#') + '">' + csEscape(b.repo + '#' + b.number) + '</a> — ' + csEscape(label[b.status] || b.status) +
-                (b.pr_url ? ' · <a class="text-[#01A982] hover:underline" target="_blank" rel="noopener" href="' + csEscape(b.pr_url) + '">PR</a>' : '') +
+                (b.pr_url ? ' · <a class="text-primary-text hover:underline" target="_blank" rel="noopener" href="' + csEscape(b.pr_url) + '">PR</a>' : '') +
                 (b.reason ? '<div class="text-slate-500">' + short(b.reason) + '</div>' : '') + '</div>').join('');
     }
     if (a.premium) html += '<div class="mt-4 text-[10px] text-slate-400">Copilot premium requests used: ' + csEscape(a.premium) + '</div>';
@@ -13907,7 +13907,7 @@ async function _csRenderAssistantSessions(caps) {
                     <button onclick="csAssistantNewSession()"
                         class="text-xs px-3 py-1.5 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">New conversation</button>
                     <button id="cs-assistant-submit" onclick="csAssistantSubmitSession()" disabled
-                        class="text-xs px-3 py-1.5 rounded-md bg-[#01A982] text-white font-semibold hover:bg-[#019172] opacity-50">Submit to AppBuilder</button>
+                        class="text-xs px-3 py-1.5 rounded-md bg-primary text-white font-semibold hover:bg-primary-hover opacity-50">Submit to AppBuilder</button>
                 </div>
             </div>
             <div class="flex-1 flex gap-3 min-h-0">
@@ -13915,11 +13915,11 @@ async function _csRenderAssistantSessions(caps) {
                     <div id="cs-assistant-log" class="flex-1 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-4"></div>
                     <form class="flex gap-2 mt-3 items-end" onsubmit="event.preventDefault(); csAssistantSessionSend();">
                         <textarea id="cs-assistant-input" rows="2" onkeydown="_csAsstInputKey(event)"
-                            class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#01A982] resize-y"></textarea>
+                            class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-brand resize-y"></textarea>
                         <button id="cs-assistant-stop" type="button" onclick="csAssistantStop()"
                             class="hidden border border-slate-300 text-slate-600 rounded-lg px-3 py-2 text-sm hover:bg-slate-50">Stop</button>
                         <button id="cs-assistant-send" type="submit"
-                            class="bg-[#01A982] text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-[#019172]">Send</button>
+                            class="bg-primary text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-primary-hover">Send</button>
                     </form>
                 </div>
                 <div id="cs-assistant-spec" class="w-72 shrink-0 overflow-y-auto rounded-lg border border-slate-200 bg-white p-4"></div>
@@ -13976,7 +13976,7 @@ async function csRenderAssistant() {
                         New conversation
                     </button>
                     <button onclick="csAssistantSubmitFeatureRequest()"
-                        class="text-xs px-3 py-1.5 rounded-md bg-[#01A982] text-white font-semibold hover:bg-[#019172]">
+                        class="text-xs px-3 py-1.5 rounded-md bg-primary text-white font-semibold hover:bg-primary-hover">
                         File as Feature Request
                     </button>
                 </div>
@@ -13984,9 +13984,9 @@ async function csRenderAssistant() {
             <div id="cs-assistant-log" class="flex-1 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-4"></div>
             <form id="cs-assistant-form" class="flex gap-2 mt-3" onsubmit="event.preventDefault(); csAssistantSend();">
                 <input id="cs-assistant-input" type="text" placeholder="e.g. I want a simulation that runs this script… or: copy dns_fail for the LRB deployment"
-                    class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#01A982]">
+                    class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-brand">
                 <button id="cs-assistant-send" type="submit"
-                    class="bg-[#01A982] text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-[#019172]">
+                    class="bg-primary text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-primary-hover">
                     Send
                 </button>
             </form>

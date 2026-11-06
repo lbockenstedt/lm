@@ -1081,7 +1081,7 @@ function showToast(message, type = 'success') {
         }
     }
     // Green for everything except errors (red) — no grey/info toasts.
-    const colors = { success: '#01A982', error: '#e53e3e', info: '#01A982' };
+    const colors = { success: '#068667', error: '#CC1F1A', info: '#068667' };  // HPE primary.strong / critical (white text, AA)
     const toast = document.createElement('div');
     toast.className = 'lm-toast';
     // Appended to the shared #lm-toast-region flex column — the container
@@ -1121,9 +1121,9 @@ function showToast(message, type = 'success') {
 // show for the button-driven update, instead of a silent blank screen. Only one
 // is ever shown at a time (updateStatus reuses the single handle).
 function showStickyToast(message, type = 'info') {
-    // Brand green (#01A982) for the informative "please wait" case, matching the
+    // HPE primary green for the informative "please wait" case, matching the
     // other success/info toasts — it's a reassurance message, not an error.
-    const colors = { success: '#01A982', error: '#e53e3e', info: '#01A982' };
+    const colors = { success: '#068667', error: '#CC1F1A', info: '#068667' };  // HPE primary.strong / critical (white text, AA)
     const toast = document.createElement('div');
     toast.className = 'lm-toast';
     toast.style.cssText = `
@@ -1358,7 +1358,7 @@ function showConfirmToast(message, opts = {}) {
         cancelBtn.addEventListener('click', () => close(false));
         const okBtn = document.createElement('button');
         okBtn.textContent = confirmLabel;
-        okBtn.style.cssText = `background:${danger ? '#e53e3e' : '#01A982'};border:none;color:#fff;` +
+        okBtn.style.cssText = `background:${danger ? '#CC1F1A' : '#068667'};border:none;color:#fff;` +
             'cursor:pointer;font-size:.8rem;font-weight:700;padding:.35rem .8rem;border-radius:.35rem;';
         okBtn.addEventListener('click', () => close(true));
         row.appendChild(cancelBtn);
@@ -1417,7 +1417,7 @@ function showPromptToast(message, opts = {}) {
         cancelBtn.addEventListener('click', () => close(null));
         const okBtn = document.createElement('button');
         okBtn.textContent = confirmLabel;
-        okBtn.style.cssText = 'background:#01A982;border:none;color:#fff;' +
+        okBtn.style.cssText = 'background:#068667;border:none;color:#fff;' +
             'cursor:pointer;font-size:.8rem;font-weight:700;padding:.35rem .8rem;border-radius:.35rem;';
         okBtn.addEventListener('click', () => close(input.value));
         input.addEventListener('keydown', (e) => {
@@ -1462,9 +1462,9 @@ async function fileBug(prefill = '') {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[92vh] flex flex-col">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">🐞 Bug / Feature Request</h3>
+                <h3 class="text-lg font-bold text-navy">🐞 Bug / Feature Request</h3>
                 <div class="flex items-center gap-3">
-                    <button id="bug-mode-guided" onclick="bugUseGuided()" class="hidden text-xs font-semibold text-[#01A982] hover:underline">Guided assistant</button>
+                    <button id="bug-mode-guided" onclick="bugUseGuided()" class="hidden text-xs font-semibold text-primary-text hover:underline">Guided assistant</button>
                     <button id="bug-mode-quick" onclick="bugUseQuickForm()" class="hidden text-xs font-semibold text-slate-500 hover:underline">Use quick form</button>
                     <button onclick="this.closest('#file-bug-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
@@ -1484,7 +1484,7 @@ async function fileBug(prefill = '') {
                 <div id="req-asst-checklist" class="text-[11px] leading-relaxed"></div>
                 <div class="flex gap-2 items-end">
                     <textarea id="req-asst-input" rows="2" placeholder="Describe what went wrong, or what you'd like added…" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></textarea>
-                    <button id="req-asst-send" onclick="reqAsstSend()" class="bg-[#01A982] hover:bg-[#019672] text-white px-4 py-2 rounded-md text-sm font-bold">Send</button>
+                    <button id="req-asst-send" onclick="reqAsstSend()" class="bg-primary hover:bg-primary-hover text-white px-4 py-2 rounded-md text-sm font-bold">Send</button>
                     <button id="req-asst-stop" onclick="reqAsstStop()" class="hidden bg-slate-200 hover:bg-slate-300 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Stop</button>
                 </div>
                 <p class="text-[11px] text-slate-400 leading-relaxed">
@@ -1495,7 +1495,7 @@ async function fileBug(prefill = '') {
                 <div id="req-asst-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="flex justify-end gap-3">
                     <button onclick="this.closest('#file-bug-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Close</button>
-                    <button id="req-asst-file" onclick="reqAsstFile()" disabled class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed">File report</button>
+                    <button id="req-asst-file" onclick="reqAsstFile()" disabled class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed">File report</button>
                 </div>
             </div>
             <div id="bug-quick" class="p-6 space-y-4 overflow-y-auto">
@@ -1505,7 +1505,7 @@ async function fileBug(prefill = '') {
                     <textarea id="bug-description" rows="4" placeholder="Describe what went wrong, or what you'd like added — e.g. 'Clicked Save on the firewall rule form and the page went blank.' or 'Add a CSV export button to the device list.'" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></textarea>
                 </div>
                 <div class="flex items-center gap-2">
-                    <input type="checkbox" id="bug-is-feature" class="rounded border-slate-300 text-[#01A982] focus:ring-[#01A982]">
+                    <input type="checkbox" id="bug-is-feature" class="rounded border-slate-300 text-primary-text focus:ring-brand">
                     <label for="bug-is-feature" class="text-xs text-slate-600 select-none cursor-pointer">
                         This is a <b>feature request</b>, not a bug (something I'd like added or changed)
                     </label>
@@ -1527,7 +1527,7 @@ async function fileBug(prefill = '') {
                 <div id="bug-submit-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="pt-2 flex justify-end gap-3">
                     <button onclick="this.closest('#file-bug-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                    <button id="bug-submit-btn" onclick="submitBugReport()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Submit</button>
+                    <button id="bug-submit-btn" onclick="submitBugReport()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Submit</button>
                 </div>
             </div>
         </div>`;
@@ -1642,7 +1642,7 @@ function _reqAsstApply(data) {
 
 function _reqAsstBubble(role, text) {
     const isUser = role === 'user';
-    const bg = isUser ? 'bg-[#01A982] text-white' : 'bg-white border border-slate-200 text-slate-800';
+    const bg = isUser ? 'bg-primary text-white' : 'bg-white border border-slate-200 text-slate-800';
     let body = (!isUser && window.renderHelpMarkdown) ? window.renderHelpMarkdown(text)
         : '<p class="whitespace-pre-wrap">' + escapeHtml(text) + '</p>';
     body = body.replace(/<pre><code/g, '<pre class="bg-slate-800 text-slate-100 p-3 rounded-lg overflow-x-auto text-xs my-2"><code');
@@ -1681,7 +1681,7 @@ function _reqAsstRender() {
     document.querySelectorAll('#file-bug-modal .req-asst-type').forEach(b => {
         const on = (b.getAttribute('data-reqtype') || '') === intent;
         b.className = 'req-asst-type px-3 py-1 rounded-full border ' + (on
-            ? 'bg-[#01A982] text-white border-[#01A982]' : 'bg-white text-slate-600 border-slate-300 hover:border-[#01A982]');
+            ? 'bg-primary text-white border-brand' : 'bg-white text-slate-600 border-slate-300 hover:border-brand');
         b.disabled = !!a.sid;
     });
 
@@ -1690,7 +1690,7 @@ function _reqAsstRender() {
     const ch = document.getElementById('req-asst-choices');
     if (ch) {
         ch.innerHTML = (!busy && !done ? (a.choices || []) : []).map((c, i) =>
-            `<button onclick="reqAsstChoose(${i})" class="px-3 py-1 rounded-full border border-[#01A982] text-[#01A982] text-xs hover:bg-[#01A982]/10">${escapeHtml(String(c))}</button>`).join('');
+            `<button onclick="reqAsstChoose(${i})" class="px-3 py-1 rounded-full border border-brand text-primary-text text-xs hover:bg-brand/10">${escapeHtml(String(c))}</button>`).join('');
     }
     const cl = document.getElementById('req-asst-checklist');
     if (cl) {
@@ -2945,7 +2945,7 @@ async function viewAsTenant(tenantId) {
     document.querySelectorAll('#tenant-picker-menu button[data-tid]').forEach(b => {
         const on = b.dataset.tid === tenantId;
         b.classList.toggle('font-bold', on);
-        b.classList.toggle('text-[#01A982]', on);
+        b.classList.toggle('text-primary-text', on);
     });
     closeTenantPicker();
     // Reload any open spoke data views so they reflect the tenant filter
@@ -4651,7 +4651,7 @@ function renderView(viewId) {
 function _viewTemplate(viewId) {
     const card = 'hpe-card rounded-lg p-5 shadow-sm';
     const input = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800';
-    const btn = 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm';
+    const btn = 'bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm';
 
     switch (viewId) {
         case 'dashboard':
@@ -4676,7 +4676,7 @@ function _viewTemplate(viewId) {
   </div>
   <div class="${card}" id="tenant-summary-card">
     <div class="flex justify-between items-center mb-3">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenant Summary — <span id="dash-tenant-name" class="text-[#01A982] font-mono normal-case"></span> ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenant Summary — <span id="dash-tenant-name" class="text-primary-text font-mono normal-case"></span> ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
     </div>
     <div id="tenant-summary-grid" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
       <span><b id="dash-devices" class="text-sm text-slate-700">—</b> Devices</span>
@@ -4733,7 +4733,7 @@ function _viewTemplate(viewId) {
   <div class="${card}">
     <div class="flex items-center justify-between mb-4">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes &amp; Agents</h3>
-      <button onclick="loadMyDeviceSpokes()" class="text-xs text-[#01A982] hover:underline">Refresh</button>
+      <button onclick="loadMyDeviceSpokes()" class="text-xs text-primary-text hover:underline">Refresh</button>
     </div>
     <p class="text-xs text-slate-400 mb-3">Every spoke and agent bound to your tenant — approved or awaiting approval, connected or offline. Your first spoke can onboard itself with an onboarding key below (no admin approval needed).</p>
     <div id="my-spokes-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
@@ -4742,7 +4742,7 @@ function _viewTemplate(viewId) {
   <div class="${card}">
     <div class="flex items-center justify-between mb-4">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Proxmox Node Agents</h3>
-      <button onclick="loadMyDeviceAgents()" class="text-xs text-[#01A982] hover:underline">Refresh</button>
+      <button onclick="loadMyDeviceAgents()" class="text-xs text-primary-text hover:underline">Refresh</button>
     </div>
     <p class="text-xs text-slate-400 mb-3">Proxmox host agents relayed through one of your tenant's spokes (see Proxmox Host Agent below) — connected, pending, or offline. A pending agent relayed through a spoke already bound to your tenant can be approved right here, no admin needed. An agent relayed through a spoke NOT bound to your tenant (e.g. a shared spoke) still needs an admin — or install it with an onboarding key's <code>--onboarding-psk</code>/<code>--tenant-hint</code> to skip approval entirely. Once approved, use <strong>Enable/Disable CS</strong> to toggle Client-Simulation mode — an agent that connects through a <strong>simulation (cs)</strong> spoke gets this turned on automatically; one on a hypervisor (pxmx) spoke starts off and can be enabled here.</p>
     <div id="my-pxmx-agents-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
@@ -4765,11 +4765,11 @@ function _viewTemplate(viewId) {
     <p class="text-[11px] font-bold text-slate-500 mb-1">Install command:</p>
     <pre id="my-pxmx-install" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh \\
   | sudo bash</pre>
-    <button onclick="_myDevCopyEl('my-pxmx-install')" class="mt-1 text-xs text-[#01A982] hover:underline">Copy command</button>
+    <button onclick="_myDevCopyEl('my-pxmx-install')" class="mt-1 text-xs text-primary-text hover:underline">Copy command</button>
     <p class="text-[11px] font-bold text-slate-500 mt-2 mb-1">Uninstall (removes all LM components from that host):</p>
     <pre id="my-pxmx-uninstall" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/uninstall.sh \\
   | sudo bash -s -- --yes</pre>
-    <button onclick="_myDevCopyEl('my-pxmx-uninstall')" class="mt-1 text-xs text-[#01A982] hover:underline">Copy uninstall</button>
+    <button onclick="_myDevCopyEl('my-pxmx-uninstall')" class="mt-1 text-xs text-primary-text hover:underline">Copy uninstall</button>
     <p class="text-[11px] text-slate-400 mt-2"><code>uninstall.sh</code> has no remote/spoke targeting — always run it locally on the box being removed. Other flags, not included above (add manually if needed): <code>--dry-run</code>/<code>-n</code> preview only, no changes; <code>--ollama</code> also remove the shared Ollama install; <code>--letsencrypt</code> also remove Let's Encrypt/certbot state; <code>--netbox-db</code> also <b>drop the NetBox Postgres database</b> (destructive); <code>--nginx-site</code> also remove the NetBox nginx site config; <code>--keep-ab</code> skip removing AppBuilder (removed by default).</p>
   </div>
 </div>`;
@@ -4848,8 +4848,8 @@ function _viewTemplate(viewId) {
         case 'cppm':
             return `<div class="space-y-6">
   <div id="nac-summary" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
-    <span><b id="nac-sessions" class="text-sm text-[#01A982]">—</b> Active Sessions</span>
-    <span><b id="nac-total" class="text-sm text-[#263040]">—</b> Total Devices</span>
+    <span><b id="nac-sessions" class="text-sm text-primary-text">—</b> Active Sessions</span>
+    <span><b id="nac-total" class="text-sm text-navy">—</b> Total Devices</span>
     <span><b id="nac-known" class="text-sm text-green-600">—</b> Known</span>
     <span><b id="nac-unknown" class="text-sm text-amber-500">—</b> Unknown</span>
   </div>
@@ -4906,9 +4906,9 @@ function _viewTemplate(viewId) {
   <div id="le-status-bar" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500"></div>
   <div class="space-y-2">
     <div class="flex items-center gap-2 flex-nowrap">
-      <button onclick="showLeIssueModal()" title="Issue a new Let's Encrypt / ACME TLS certificate for a domain" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">＋ Issue certificate</button>
-      ${isAdmin() ? `<button onclick="leRenewAll()" title="Renew all eligible managed certificates nearing expiry" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
-      <button onclick="leDistributeNow()" title="Immediately push all managed certificates to their configured distribution targets" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>` : ''}
+      <button onclick="showLeIssueModal()" title="Issue a new Let's Encrypt / ACME TLS certificate for a domain" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">＋ Issue certificate</button>
+      ${isAdmin() ? `<button onclick="leRenewAll()" title="Renew all eligible managed certificates nearing expiry" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
+      <button onclick="leDistributeNow()" title="Immediately push all managed certificates to their configured distribution targets" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>` : ''}
       <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned AppBuilder cert check">🔒 mTLS status</button>
       <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200 whitespace-nowrap" title="Manage this tenant's DNS credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-based certificate issuance">🔑 DNS Credentials</button>
     </div>

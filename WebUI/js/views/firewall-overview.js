@@ -16,7 +16,7 @@ function usageBar(label, percent, detail) {
     if (percent === null || percent === undefined) {
         return safeHtml`<div class="text-xs text-slate-400">${label}: n/a</div>`;
     }
-    const color = percent >= 90 ? 'bg-red-500' : percent >= 70 ? 'bg-amber-500' : 'bg-[#01A982]';
+    const color = percent >= 90 ? 'bg-red-500' : percent >= 70 ? 'bg-amber-500' : 'bg-primary';
     return safeHtml`<div>
         <div class="flex justify-between text-xs text-slate-600 mb-1"><span>${label}</span><span>${percent}%${detail ? ` · ${detail}` : ''}</span></div>
         <div class="h-2 bg-slate-100 rounded"><div class="h-2 rounded ${color}" style="width:${Math.min(100, percent)}%"></div></div>

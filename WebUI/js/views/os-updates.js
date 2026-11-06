@@ -265,13 +265,13 @@ function osuFixAccess(key) {
     if (!n) return;
     const inp = 'w-full px-3 py-2 border border-slate-200 rounded-md text-sm';
     const modal = openModal('osu-fix-modal', safeHtml`
-      <h3 class="text-lg font-bold text-[#263040]">Fix update access — ${n.label}</h3>
+      <h3 class="text-lg font-bold text-navy">Fix update access — ${n.label}</h3>
       <p class="text-sm text-slate-500">Enter the root password (or a user that can sudo) for this node, one time. It is used once to install LM's update helper and is <b>never stored</b>.</p>
       <input id="osu-fix-user" type="text" value="root" autocomplete="off" placeholder="username" class="${inp}">
       <input id="osu-fix-pw" type="password" autocomplete="off" placeholder="password" class="${inp}">
       <div class="flex justify-end gap-2 pt-2">
         <button data-action="close" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-        <button id="osu-fix-go" data-action="fix" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Fix access</button>
+        <button id="osu-fix-go" data-action="fix" class="px-4 py-1.5 text-sm rounded-md bg-primary text-white font-bold hover:bg-primary-hover">Fix access</button>
       </div>`, { backdropClose: true });
     delegate(modal, { close: () => modal.remove(), fix: () => osuDoFixAccess(key) });
     document.getElementById('osu-fix-pw')?.focus();

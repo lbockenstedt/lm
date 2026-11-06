@@ -102,7 +102,7 @@ function _showDhcpConfigDetailsModal() {
     const status = cfg.ok ? '<span class="text-emerald-600 font-bold">PASS</span>' : '<span class="text-red-600 font-bold">FAIL</span>';
     openModal('dhcp-cfg-details-modal', `
         <div class="flex items-center justify-between pb-3 border-b border-slate-200">
-            <h3 class="text-base font-bold text-[#263040]">Kea DHCP Configuration Test — ${status}</h3>
+            <h3 class="text-base font-bold text-navy">Kea DHCP Configuration Test — ${status}</h3>
             <button onclick="document.getElementById('dhcp-cfg-details-modal').remove()" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
         </div>
         <div class="mt-3">
@@ -548,7 +548,7 @@ function openServiceClusterModal(kind, current) {
     // already stored. Only then may the secret field be left blank.
     const alreadyEnabled = members.length >= 2;
     const body = `
-        <h3 class="text-lg font-bold text-[#263040]">${isDns ? 'DNS resolver cluster' : 'Kea HA pair'}</h3>
+        <h3 class="text-lg font-bold text-navy">${isDns ? 'DNS resolver cluster' : 'Kea HA pair'}</h3>
         <p class="text-sm text-slate-500">${isDns
             ? 'Two Unbound hosts managed by this DNS module. The module owns the record set and keeps both resolvers identical.'
             : 'Two Kea hosts run as one HA pair. Both nodes get the same scopes and reservations; only their HA identity differs.'}</p>
@@ -611,7 +611,7 @@ function openServiceClusterModal(kind, current) {
             ${alreadyEnabled ? `<button onclick="deleteServiceCluster('${escapeHtml(kind)}')" class="px-4 py-1.5 text-sm rounded-md border border-red-300 text-red-600 hover:bg-red-50 font-bold">Delete cluster</button>` : '<span></span>'}
             <div class="flex gap-2">
                 <button onclick="document.getElementById('svc-cluster-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-                <button onclick="saveServiceCluster('${escapeHtml(kind)}', ${alreadyEnabled}, ${!!m(0).ha_password_set})" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
+                <button onclick="saveServiceCluster('${escapeHtml(kind)}', ${alreadyEnabled}, ${!!m(0).ha_password_set})" class="px-4 py-1.5 text-sm rounded-md bg-primary text-white font-bold hover:bg-primary-hover">Save</button>
             </div>
         </div>`;
     openModal('svc-cluster-modal', wrapped, {
@@ -800,7 +800,7 @@ function _dhcpPacketTracePanel() {
                     <input id="dhcp-trace-minutes" type="number" min="1" max="1440" value="${escapeHtml(String(last.minutes || 30))}" class="mt-1 block w-24 px-2 py-1.5 border border-slate-300 rounded text-xs"></label>
                 <label class="text-xs text-slate-600">Live capture (s, 0–60)
                     <input id="dhcp-trace-capture" type="number" min="0" max="60" value="${escapeHtml(String(last.capture_seconds != null ? last.capture_seconds : 20))}" class="mt-1 block w-24 px-2 py-1.5 border border-slate-300 rounded text-xs"></label>
-                <button id="dhcp-trace-btn" onclick="runDhcpPacketTrace()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982] text-white hover:bg-[#008f6e]">Trace</button>
+                <button id="dhcp-trace-btn" onclick="runDhcpPacketTrace()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-primary text-white hover:bg-primary-hover">Trace</button>
             </div>
             <div id="dhcp-trace-result" class="mt-4">${window._dhcpPacketTraceHtml || ''}</div>
         </div>`;
@@ -892,7 +892,7 @@ function _dhcpDnsHookPanel(dnsHook) {
                     <div class="text-sm font-semibold text-slate-700">Real-time DNS registration (Kea → Unbound)</div>
                     <div class="text-xs text-slate-400">Registers/retracts a client's DNS record in Unbound the instant a Kea lease is committed, renewed, released, expired, or declined — no dependency on the NetBox sync loop above.</div>
                 </div>
-                ${admin ? `<button onclick="toggleDhcpDnsHook(${enabled ? 'false' : 'true'})" class="px-3 py-1.5 rounded-md text-xs font-bold ${enabled ? 'bg-white border border-slate-300 hover:bg-slate-50' : 'bg-[#01A982] text-white hover:bg-[#018a6c]'} flex-shrink-0">${enabled ? 'Disable' : 'Enable'}</button>` : ''}
+                ${admin ? `<button onclick="toggleDhcpDnsHook(${enabled ? 'false' : 'true'})" class="px-3 py-1.5 rounded-md text-xs font-bold ${enabled ? 'bg-white border border-slate-300 hover:bg-slate-50' : 'bg-primary text-white hover:bg-[#018a6c]'} flex-shrink-0">${enabled ? 'Disable' : 'Enable'}</button>` : ''}
             </div>
             <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 ${_ddTile('Hook', enabled ? 'ENABLED' : 'DISABLED', enabled ? `targets: ${escapeHtml(targets)}` : 'not configured', enabled ? 'text-emerald-600' : 'text-slate-500')}
@@ -1022,16 +1022,16 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
     // actually worked for this module.
     if (navActions) {
         const addRecordBtn = ((subMenu === 'Records') && (isAdmin() || isTenantAdmin()))
-            ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" title="Add a new DNS record" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
+            ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" title="Add a new DNS record" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
             : '';
         const addForwarderBtn = (subMenu === 'Forwarders' && isAdmin())
-            ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" title="Add a new persistent upstream DNS forwarder" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Forwarder</button>`
+            ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" title="Add a new persistent upstream DNS forwarder" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Forwarder</button>`
             : '';
         const addProfileBtn = (subMenu === 'Overrides' && isAdmin())
-            ? `<button id="dns-override-profile-add-btn" onclick="showDnsOverrideProfileModal()" title="Define a new DNS override profile (custom answers for chosen clients)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Profile</button>`
+            ? `<button id="dns-override-profile-add-btn" onclick="showDnsOverrideProfileModal()" title="Define a new DNS override profile (custom answers for chosen clients)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Profile</button>`
             : '';
         const assignOverrideBtn = (subMenu === 'Overrides' && (isAdmin() || isTenantAdmin()))
-            ? `<button id="dns-override-assign-btn" onclick="showDnsOverrideAssignModal()" title="Apply an override profile to a device IP or subnet" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm ml-2">+ Assign</button>`
+            ? `<button id="dns-override-assign-btn" onclick="showDnsOverrideAssignModal()" title="Apply an override profile to a device IP or subnet" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm ml-2">+ Assign</button>`
             : '';
         navActions.innerHTML = addRecordBtn + addForwarderBtn + addProfileBtn + assignOverrideBtn;
     }
@@ -1188,7 +1188,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                                 <option value="60">Last 60 min</option>
                                 <option value="300">Last 300 min</option>
                             </select>
-                            <button id="dns-client-go" class="text-xs bg-[#01A982]/10 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md font-bold">Show</button>
+                            <button id="dns-client-go" class="text-xs bg-brand/10 text-primary-text border border-brand px-3 py-1 rounded-md font-bold">Show</button>
                         </div>
                     </div>
                     <div id="dns-client-list"><p class="text-slate-400 italic text-sm">Enter a device IP to list every DNS query it made in the chosen window.</p></div>
@@ -1419,7 +1419,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
             const overrideCell = !showOverrideCol ? '' : `<td class="px-4 py-2 text-xs whitespace-nowrap">${
                 !isHost ? '<span class="text-slate-300">—</span>'
                 : `${assigned ? `<span class="px-2 py-0.5 rounded-full font-medium ${assigned.exact ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'}" title="${assigned.exact ? 'Assigned to this device' : 'Inherited from subnet ' + escapeHtml(assigned.target)}">${escapeHtml(assigned.profile)}</span>` : '<span class="text-slate-400">none</span>'}${
-                    canAssign ? ` <button onclick="dnsOverrideForRecord(${idx})" title="Apply or remove a DNS override profile for this device or its subnet" class="ml-1 text-[#01A982] hover:underline font-bold">Override…</button>` : ''}`
+                    canAssign ? ` <button onclick="dnsOverrideForRecord(${idx})" title="Apply or remove a DNS override profile for this device or its subnet" class="ml-1 text-primary-text hover:underline font-bold">Override…</button>` : ''}`
             }</td>`;
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                 ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(r._tenant || '—')}</td>` : ''}

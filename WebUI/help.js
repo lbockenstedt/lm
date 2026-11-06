@@ -219,7 +219,7 @@
             '#lm-help-head{display:flex;align-items:center;gap:.75rem;padding:1rem 1.25rem;',
             '  background:#263040;color:#fff;flex-shrink:0;}',
             '#lm-help-head .lm-help-eyebrow{font-size:.6rem;letter-spacing:.12em;',
-            '  text-transform:uppercase;color:#01A982;font-weight:700;}',
+            '  text-transform:uppercase;color:#006750;font-weight:700;}',
             '#lm-help-title{font-size:1.05rem;font-weight:700;line-height:1.2;}',
             '#lm-help-close{margin-left:auto;background:none;border:none;color:#cbd5e1;',
             '  font-size:1.4rem;line-height:1;cursor:pointer;padding:.1rem .35rem;border-radius:.35rem;}',
@@ -233,7 +233,7 @@
             '.lm-doc p{margin:.5rem 0;}',
             '.lm-doc ul,.lm-doc ol{margin:.5rem 0 .5rem 1.25rem;}',
             '.lm-doc li{margin:.2rem 0;}',
-            '.lm-doc a{color:#01A982;text-decoration:none;font-weight:500;}',
+            '.lm-doc a{color:#006750;text-decoration:none;font-weight:500;}',
             '.lm-doc a:hover{text-decoration:underline;}',
             '.lm-doc code{background:#f1f5f9;color:#0f766e;padding:.05rem .3rem;border-radius:.25rem;',
             '  font-size:.8em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}',
@@ -252,7 +252,7 @@
             '  width:1.05rem;height:1.05rem;border-radius:9999px;border:1px solid #cbd5e1;',
             '  color:#64748b;background:#fff;font-size:.7rem;font-weight:700;line-height:1;',
             '  cursor:pointer;vertical-align:middle;transition:all .12s ease;font-style:normal;}',
-            '.lm-help-icon:hover{border-color:#01A982;color:#01A982;background:#f0fdf9;}'
+            '.lm-help-icon:hover{border-color:#006750;color:#006750;background:#f0fdf9;}'
         ].join('\n');
         document.head.appendChild(style);
 
@@ -322,7 +322,7 @@
             paint(data.title || name, renderMarkdown(data.markdown || ''), sectionSlug);
         } catch (err) {
             paint('Not found',
-                '<p style="color:#e53e3e">Could not load <code>' + esc(name) + '</code>: ' + esc(err.message) +
+                '<p style="color:#CC1F1A">Could not load <code>' + esc(name) + '</code>: ' + esc(err.message) +
                 '</p><p><a href="#" onclick="openHelp();return false;">Browse all documentation &rarr;</a></p>', null);
         }
     }
@@ -343,7 +343,7 @@
                 '<p>Single source of truth - the canonical <code>lm/docs</code> set. ' +
                 'Pick a topic:</p><ul class="lm-doc-index">' + items + '</ul>', null);
         } catch (err) {
-            paint('Documentation', '<p style="color:#e53e3e">Could not load the doc index.</p>', null);
+            paint('Documentation', '<p style="color:#CC1F1A">Could not load the doc index.</p>', null);
         }
     }
 
@@ -388,7 +388,7 @@
             '<input id="lm-ask-input" type="text" placeholder="' + ph + '" value="' +
             esc(prefill || '') + '" style="flex:1;border:1px solid #cbd5e1;border-radius:.5rem;' +
             'padding:.5rem .75rem;font-size:.85rem;outline:none">' +
-            '<button type="submit" style="background:#01A982;color:#fff;border:none;border-radius:.5rem;' +
+            '<button type="submit" style="background:#068667;color:#fff;border:none;border-radius:.5rem;' +
             'padding:.5rem .9rem;font-size:.8rem;font-weight:600;cursor:pointer">Ask</button>' +
             reset + '</form>';
     }
@@ -472,7 +472,7 @@
             if (inp) inp.focus();
         } catch (err) {
             body.innerHTML = _askFormHtml(q, _askHistory.length > 0) + prior +
-                '<p style="color:#e53e3e">' + esc(err.message) + '</p>';
+                '<p style="color:#CC1F1A">' + esc(err.message) + '</p>';
             _wireAskForm();
         }
     }

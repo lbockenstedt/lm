@@ -73,7 +73,7 @@ function renderGlvPending() {
             ${v.floor != null ? `<span class="text-slate-400">floor ${escapeHtml(String(v.floor))}</span>` : ''}
             <span class="text-slate-400">knobs: ${knobStr}</span>
             <div class="ml-auto flex gap-2">
-              <button onclick="approveGlvPending('${escJsAttr(k)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold">Approve</button>
+              <button onclick="approveGlvPending('${escJsAttr(k)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold">Approve</button>
               <button onclick="rejectGlvPending('${escJsAttr(k)}')" class="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1 rounded-md text-xs font-bold">Reject</button>
             </div>
         </div>`;
@@ -156,7 +156,7 @@ function renderGlvCandidates() {
                     <span class="text-slate-600">op <b>${escapeHtml(String(r.op))}</b></span>
                     ${r.floor != null ? `<span class="text-slate-400">floor ${escapeHtml(String(r.floor))}</span>` : ''}
                     <span class="text-slate-400">${escapeHtml(r.source_tenant)} · ${escapeHtml(r.site || 'all sites')}</span>
-                    <button onclick="publishGlv('${escJsAttr(ak)}', ${Number(r.op)||0}, ${r.floor!=null?Number(r.floor):'null'}, '${escJsAttr(r.source_tenant)}')" class="ml-auto ${isPublished && r === rows[0] ? 'bg-emerald-100 text-emerald-700 border border-emerald-300' : 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982]'} px-3 py-1 rounded-md text-xs font-bold">${isPublished && r === rows[0] ? 'Published' : 'Publish'}</button>
+                    <button onclick="publishGlv('${escJsAttr(ak)}', ${Number(r.op)||0}, ${r.floor!=null?Number(r.floor):'null'}, '${escJsAttr(r.source_tenant)}')" class="ml-auto ${isPublished && r === rows[0] ? 'bg-emerald-100 text-emerald-700 border border-emerald-300' : 'bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand'} px-3 py-1 rounded-md text-xs font-bold">${isPublished && r === rows[0] ? 'Published' : 'Publish'}</button>
                 </div>`).join('')}
             </div>
         </div>`;
@@ -1584,7 +1584,7 @@ async function loadSubnetFilterToggles() {
             const on = !!_subnetFilterState[m.key];
             return `<div class="flex items-center justify-between py-1.5 border-b border-slate-100 last:border-0">
                 <span class="text-sm text-slate-700">${m.label}</span>
-                <button onclick="toggleSubnetFilter('${m.key}')" class="relative inline-flex h-5 w-10 items-center rounded-full transition-colors ${on ? 'bg-[#01A982]' : 'bg-slate-300'}">
+                <button onclick="toggleSubnetFilter('${m.key}')" class="relative inline-flex h-5 w-10 items-center rounded-full transition-colors ${on ? 'bg-primary' : 'bg-slate-300'}">
                     <span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${on ? 'translate-x-5' : 'translate-x-1'}"></span>
                 </button>
             </div>`;
@@ -1958,7 +1958,7 @@ async function loadCacheStatus() {
                 <td class="py-1.5 pr-3 text-center">${active ? '<span class="text-green-600">active</span>' : '<span class="text-slate-400">idle</span>'}</td>
                 <td class="py-1.5 pr-3 text-center ${errors ? 'text-red-500' : 'text-slate-400'}">${errors}</td>
                 <td class="py-1.5 pr-3 text-right text-slate-400">${kb}</td>
-                <td class="py-1.5 text-right"><button class="text-xs text-[#01A982] hover:underline" onclick="refreshCacheNamespace('${escapeHtml(n.namespace)}')">Refresh</button></td>
+                <td class="py-1.5 text-right"><button class="text-xs text-primary-text hover:underline" onclick="refreshCacheNamespace('${escapeHtml(n.namespace)}')">Refresh</button></td>
             </tr>`;
         }).join('');
         const iv = d.intervals || {};
