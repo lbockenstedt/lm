@@ -8,7 +8,7 @@
 // Tiles render asynchronously, so watch the container instead of each tile.
 function _lmClampLongDescs(root) {
     if (!root || root._lmClampObs) return;
-    const apply = () => root.querySelectorAll('p.text-xs.text-slate-400:not(.lm-desc), p.text-xs.text-slate-500:not(.lm-desc)').forEach(p => {
+    const apply = () => root.querySelectorAll('p.text-xs.text-slate-500:not(.lm-desc), p.text-xs.text-slate-500:not(.lm-desc)').forEach(p => {
         if (p.textContent.length < 220 || p.closest('table')) return;
         p.classList.add('lm-desc');
         p.title = 'Click to show more';
@@ -110,16 +110,16 @@ function _renderSettingsSection(subMenu) {
             <div class="space-y-4">
                 <div class="${card} p-5 flex flex-wrap items-center gap-3">
                     <div>
-                        <p class="text-lg font-bold text-[#263040]">Module Diagnostics</p>
-                        <p class="text-[11px] text-slate-400">Every producer behind the footer MODULE STATUS dot, with the evidence for each alert.</p>
+                        <p class="text-lg font-bold text-navy">Module Diagnostics</p>
+                        <p class="text-xs text-slate-500">Every producer behind the footer MODULE STATUS dot, with the evidence for each alert.</p>
                     </div>
                     <div class="ml-auto flex items-center gap-2">
-                        <button onclick="copyModuleDiagnostics(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-xs font-bold" title="Copy every alert + finding as plain text for a ticket or chat">⧉ Copy all</button>
-                        <button onclick="loadModuleDiagnostics()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
+                        <button onclick="copyModuleDiagnostics(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-xs font-bold" title="Copy every alert + finding as plain text for a ticket or chat">⧉ Copy all</button>
+                        <button onclick="loadModuleDiagnostics()" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
                     </div>
                 </div>
                 <div id="service-cluster-summary"></div>
-                <div id="module-diag-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
+                <div id="module-diag-body"><p class="text-slate-500 italic text-xs">Loading…</p></div>
             </div>`;
         loadModuleDiagnostics();
         loadServiceClusterSummary();
@@ -130,77 +130,77 @@ function _renderSettingsSection(subMenu) {
         content.innerHTML = `
             <div class="space-y-4">
                 <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
-                    <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">CPU</p><div id="sys-cpu" class="text-2xl font-bold text-slate-700 mt-1">—</div></div>
-                    <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Memory</p><div id="sys-mem" class="text-2xl font-bold text-slate-700 mt-1">—</div></div>
-                    <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Disk</p><div id="sys-disk" class="text-2xl font-bold text-slate-700 mt-1">—</div></div>
-                    <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Throughput</p><div id="sys-throughput" class="text-2xl font-bold text-slate-700 mt-1">—</div></div>
+                    <div class="${card} p-6"><p class="text-xs text-slate-500 font-bold">CPU</p><div id="sys-cpu" class="text-2xl font-bold text-slate-700 mt-1">—</div></div>
+                    <div class="${card} p-6"><p class="text-xs text-slate-500 font-bold">Memory</p><div id="sys-mem" class="text-2xl font-bold text-slate-700 mt-1">—</div></div>
+                    <div class="${card} p-6"><p class="text-xs text-slate-500 font-bold">Disk</p><div id="sys-disk" class="text-2xl font-bold text-slate-700 mt-1">—</div></div>
+                    <div class="${card} p-6"><p class="text-xs text-slate-500 font-bold">Throughput</p><div id="sys-throughput" class="text-2xl font-bold text-slate-700 mt-1">—</div></div>
                 </div>
                 <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
-                    <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Msg/s</p><div id="sys-mps" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
-                    <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Queue Depth</p><div id="sys-queue" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
-                    <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Backlog</p><div id="sys-backlog" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
-                    <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Rate-Limit Drops</p><div id="sys-rate-drops" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
+                    <div class="${card} p-6"><p class="text-xs text-slate-500 font-bold">Msg/s</p><div id="sys-mps" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
+                    <div class="${card} p-6"><p class="text-xs text-slate-500 font-bold">Queue Depth</p><div id="sys-queue" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
+                    <div class="${card} p-6"><p class="text-xs text-slate-500 font-bold">Backlog</p><div id="sys-backlog" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
+                    <div class="${card} p-6"><p class="text-xs text-slate-500 font-bold">Rate-Limit Drops</p><div id="sys-rate-drops" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
                 </div>
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center">
                         <div>
-                            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub Service ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                            <p class="text-[10px] text-slate-400 mt-1">Restart <code>lm.service</code> to load freshly-pulled code. Use after an update when a new endpoint returns <b>405 Method Not Allowed</b> — the running process is still the old code until it cycles. Spokes reconnect automatically; this page reloads in a few seconds.</p>
+                            <h3 class="text-sm font-bold text-slate-500">Hub Service ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                            <p class="text-xs text-slate-500 mt-1">Restart <code>lm.service</code> to load freshly-pulled code. Use after an update when a new endpoint returns <b>405 Method Not Allowed</b> — the running process is still the old code until it cycles. Spokes reconnect automatically; this page reloads in a few seconds.</p>
                         </div>
-                        <button onclick="restartHubService()" id="restart-hub-btn" class="text-xs px-3 py-1 rounded-md border border-amber-300 text-amber-700 hover:bg-amber-50 transition-all whitespace-nowrap" title="Restart the hub service (lm.service) now">♻️ Restart hub service</button>
+                        <button onclick="restartHubService()" id="restart-hub-btn" class="text-xs px-3 py-1 rounded-full border border-amber-300 text-amber-700 hover:bg-amber-50 transition-all whitespace-nowrap" title="Restart the hub service (lm.service) now">♻️ Restart hub service</button>
                     </div>
                 </div>
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-3">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub Health &amp; Connectivity ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                        <button onclick="loadHubHealthCard()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Event-loop lag + per-spoke transport (RTT / write-buffer) — diagnoses fleet-wide WS backpressure (1011 drops): saturated hub loop vs network path (hub is in Azure)">↻ Refresh</button>
+                        <h3 class="text-sm font-bold text-slate-500">Hub Health &amp; Connectivity ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <button onclick="loadHubHealthCard()" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Event-loop lag + per-spoke transport (RTT / write-buffer) — diagnoses fleet-wide WS backpressure (1011 drops): saturated hub loop vs network path (hub is in Azure)">↻ Refresh</button>
                     </div>
-                    <div id="hub-health-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
+                    <div id="hub-health-body"><p class="text-slate-500 italic text-xs">Loading…</p></div>
                 </div>
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-1">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Alert Diagnostics ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                        <button onclick="loadAlertDiagnostics()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Why the footer MODULE STATUS dot is red — which producer raised each alert, and whether any are false positives">↻ Refresh</button>
+                        <h3 class="text-sm font-bold text-slate-500">Alert Diagnostics ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <button onclick="loadAlertDiagnostics()" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Why the footer MODULE STATUS dot is red — which producer raised each alert, and whether any are false positives">↻ Refresh</button>
                     </div>
-                    <p class="text-[10px] text-slate-400 mb-3">The footer <b>MODULE STATUS</b> dot turns red on <b>any</b> active error-tier alert, and that badge merges multiple producers — spoke out-of-contact, agent out-of-contact, and fleet availability. Every spoke green while the dot is red is therefore not a contradiction. This card names the producer behind each alert and flags the ones that are stale or false.</p>
-                    <div id="alert-diag-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
+                    <p class="text-xs text-slate-500 mb-3">The footer <b>MODULE STATUS</b> dot turns red on <b>any</b> active error-tier alert, and that badge merges multiple producers — spoke out-of-contact, agent out-of-contact, and fleet availability. Every spoke green while the dot is red is therefore not a contradiction. This card names the producer behind each alert and flags the ones that are stale or false.</p>
+                    <div id="alert-diag-body"><p class="text-slate-500 italic text-xs">Loading…</p></div>
                 </div>
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-1">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spoke Registry Diagnostics ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                        <button onclick="loadSpokeRegistryDiag()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Every spoke registration the hub holds — including ones a tenant view hides — plus which one is elected as each tenant's Client-Sim broker">↻ Refresh</button>
+                        <h3 class="text-sm font-bold text-slate-500">Spoke Registry Diagnostics ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <button onclick="loadSpokeRegistryDiag()" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Every spoke registration the hub holds — including ones a tenant view hides — plus which one is elected as each tenant's Client-Sim broker">↻ Refresh</button>
                     </div>
-                    <p class="text-[10px] text-slate-400 mb-3">A rebuilt spoke that was never deregistered leaves its <b>old id</b> behind, still tenant-bound and still electable. The Client-Sim broker is now <b>sticky</b>: it holds until the elected spoke stops being connected/approved/bound, so a spoke that reconnects no longer reassigns it. Before that, election was <code>bound[0]</code> over the connected set, and one flapping spoke moved the broker fleet-wide — the same host logging a different <code>cs_spoke</code>, quota re-pushes never converging. Registrations with <b>no tenant</b> are hidden from a non-admin Spokes list yet can still be claimed as a tenant's broker, which is why deleting everything visible does not always fix it.</p>
-                    <div id="spoke-registry-diag-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
+                    <p class="text-xs text-slate-500 mb-3">A rebuilt spoke that was never deregistered leaves its <b>old id</b> behind, still tenant-bound and still electable. The Client-Sim broker is now <b>sticky</b>: it holds until the elected spoke stops being connected/approved/bound, so a spoke that reconnects no longer reassigns it. Before that, election was <code>bound[0]</code> over the connected set, and one flapping spoke moved the broker fleet-wide — the same host logging a different <code>cs_spoke</code>, quota re-pushes never converging. Registrations with <b>no tenant</b> are hidden from a non-admin Spokes list yet can still be claimed as a tenant's broker, which is why deleting everything visible does not always fix it.</p>
+                    <div id="spoke-registry-diag-body"><p class="text-slate-500 italic text-xs">Loading…</p></div>
                 </div>
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-3">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Message Backlog &amp; Rate Limiting ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <h3 class="text-sm font-bold text-slate-500">Message Backlog &amp; Rate Limiting ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div class="flex items-center gap-2">
-                            <button onclick="resetRateLimitDrops()" id="reset-drops-btn" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Zero the rate-limit drop counters">Reset Drops</button>
-                            <button onclick="dropHubBacklog()" id="drop-backlog-btn" class="text-xs px-3 py-1 rounded-md border border-red-300 text-red-600 hover:bg-red-50 transition-all">Drop Backlog</button>
+                            <button onclick="resetRateLimitDrops()" id="reset-drops-btn" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Zero the rate-limit drop counters">Reset Drops</button>
+                            <button onclick="dropHubBacklog()" id="drop-backlog-btn" class="text-xs px-3 py-1 rounded-full border border-red-300 text-red-600 hover:bg-red-50 transition-all">Drop Backlog</button>
                         </div>
                     </div>
-                    <div id="sys-backlog-detail" class="text-xs text-slate-500 space-y-2"><p class="text-slate-400 italic">Loading…</p></div>
+                    <div id="sys-backlog-detail" class="text-xs text-slate-500 space-y-2"><p class="text-slate-500 italic">Loading…</p></div>
                     <div class="mt-4 pt-3 border-t border-slate-100">
-                        <p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-2">Rate Limit (per spoke)</p>
+                        <p class="text-xs text-slate-500 font-bold mb-2">Rate Limit (per spoke)</p>
                         <div class="flex flex-wrap items-end gap-3">
                             <label class="text-xs text-slate-500">Burst (capacity)<br>
                                 <input type="number" id="rl-capacity" min="1" step="1" class="mt-1 w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                             <label class="text-xs text-slate-500">Refill (msg/s)<br>
                                 <input type="number" id="rl-fillrate" min="0.1" step="0.1" class="mt-1 w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                         </div>
-                        <p class="text-[10px] text-slate-400 mt-2">Applies to each spoke on its next (re)connect. Raise both for relay spokes hosting many agents / at scale.</p>
+                        <p class="text-xs text-slate-500 mt-2">Applies to each spoke on its next (re)connect. Raise both for relay spokes hosting many agents / at scale.</p>
                     </div>
                 </div>
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-1">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Backpressure Tuning ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <h3 class="text-sm font-bold text-slate-500">Backpressure Tuning ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div class="flex justify-end items-center gap-2">
-                            <button onclick="resetBackpressureConfig()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore recommended defaults (not yet saved)">Reset Defaults</button>
+                            <button onclick="resetBackpressureConfig()" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore recommended defaults (not yet saved)">Reset Defaults</button>
                         </div>
                     </div>
-                    <p class="text-[10px] text-slate-400 mb-3">How hard the hub throttles spokes as it heats up. Applies LIVE (each 1s tick). Lower CPU marks + higher max slow-down = more aggressive (keeps CPU out of protect, telemetry gets staler while throttled).</p>
+                    <p class="text-xs text-slate-500 mb-3">How hard the hub throttles spokes as it heats up. Applies LIVE (each 1s tick). Lower CPU marks + higher max slow-down = more aggressive (keeps CPU out of protect, telemetry gets staler while throttled).</p>
                     <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs text-slate-500">
                         <label>Fleet slow-down at CPU %<br><input type="number" id="bp-fleet-cpu-soft" min="1" max="100" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                         <label>Max slow-down at CPU %<br><input type="number" id="bp-fleet-cpu-hard" min="1" max="100" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
@@ -218,12 +218,12 @@ function _renderSettingsSection(subMenu) {
                 </div>
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-1">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">Update / Maintenance Window ${helpIcon('lm-hub', null, 'Hub help')}<span id="ug-watchdog-pill" class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-500 normal-case">watchdog …</span></h3>
+                        <h3 class="text-sm font-bold text-slate-500 flex items-center gap-2">Update / Maintenance Window ${helpIcon('lm-hub', null, 'Hub help')}<span id="ug-watchdog-pill" class="text-xs px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500 normal-case">watchdog …</span></h3>
                         <div class="flex justify-end items-center gap-2">
-                            <button onclick="resetUpdateGateConfig()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore defaults (02:00 window)">Reset Defaults</button>
+                            <button onclick="resetUpdateGateConfig()" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore defaults (02:00 window)">Reset Defaults</button>
                         </div>
                     </div>
-                    <p class="text-[10px] text-slate-400 mb-3">When AUTO-updates <b>apply</b>. The hub pulls new code anytime; the restart into it is held for this window so it never interrupts logged-in users. The footer <b>Update</b> button bypasses this and restarts immediately. <span id="ug-watchdog-status" class="font-mono ml-1"></span></p>
+                    <p class="text-xs text-slate-500 mb-3">When AUTO-updates <b>apply</b>. The hub pulls new code anytime; the restart into it is held for this window so it never interrupts logged-in users. The footer <b>Update</b> button bypasses this and restarts immediately. <span id="ug-watchdog-status" class="font-mono ml-1"></span></p>
                     <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs text-slate-500">
                         <label>Apply auto-updates<br>
                             <select id="ug-mode" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -236,45 +236,45 @@ function _renderSettingsSection(subMenu) {
                         <label>Window length (hours)<br><input type="number" id="ug-window-duration" min="1" max="24" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                         <label title="IANA zone the window hour is in (e.g. America/Chicago). Blank = the hub's system clock, which is usually UTC.">Window timezone<br><input type="text" id="ug-timezone" placeholder="hub clock (UTC)" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                     </div>
-                    <div class="flex justify-end mt-3"><button id="ug-save-btn" onclick="saveUpdateGateConfig()" class="text-xs px-3 py-1 rounded-md bg-green-600 text-white hover:bg-green-700 transition-all">Save</button></div>
+                    <div class="flex justify-end mt-3"><button id="ug-save-btn" onclick="saveUpdateGateConfig()" class="text-xs px-3 py-1 rounded-full bg-green-600 text-white hover:bg-green-700 transition-all">Save</button></div>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="${card} p-6">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Spokes (<span id="spoke-count">0</span>) ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                        <div id="spoke-list" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                        <h3 class="text-sm font-bold text-slate-500 mb-2">Spokes (<span id="spoke-count">0</span>) ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <div id="spoke-list" class="space-y-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                     </div>
                     <div class="${card} p-6">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Agents (<span id="agent-count">0</span>) ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                        <div id="agent-list" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                        <h3 class="text-sm font-bold text-slate-500 mb-2">Agents (<span id="agent-count">0</span>) ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <div id="agent-list" class="space-y-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                     </div>
                 </div>
                 <div class="${card} p-6">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Mutual TLS (Hub ⇄ Spoke ⇄ Agent)</h3>
-                    <p class="text-xs text-slate-400 mb-3">Every leg is TLS-encrypted. Mutual authentication (client-cert verification) is <b>off by default</b>.</p>
-                    <p class="text-xs text-slate-400 mb-3"><b>Why optional (chicken-and-egg):</b> mTLS needs the LE wildcard + CA on the hub <i>and</i> on every spoke, but spokes receive those materials <i>through</i> their hub connection. The fleet must first come up without mTLS, the hub distributes the wildcard + CA, then mTLS can be switched on — there's no way to start already pinned to mTLS.</p>
+                    <h3 class="text-sm font-bold text-slate-500 mb-1">Mutual TLS (Hub ⇄ Spoke ⇄ Agent)</h3>
+                    <p class="text-xs text-slate-500 mb-3">Every leg is TLS-encrypted. Mutual authentication (client-cert verification) is <b>off by default</b>.</p>
+                    <p class="text-xs text-slate-500 mb-3"><b>Why optional (chicken-and-egg):</b> mTLS needs the LE wildcard + CA on the hub <i>and</i> on every spoke, but spokes receive those materials <i>through</i> their hub connection. The fleet must first come up without mTLS, the hub distributes the wildcard + CA, then mTLS can be switched on — there's no way to start already pinned to mTLS.</p>
                     <p class="text-xs text-amber-600 mb-3"><b>Don't enable too early:</b> a spoke that doesn't yet hold the wildcard + CA can't authenticate and is <b>orphaned</b> — and can't be fixed through the hub (manual on-box recovery). Use <b>Auto-provision</b> (or wait for every per-spoke dot below to turn green) before flipping Enable. Enabling mTLS also doesn't by itself verify the hub's cert — set <b>LM_HUB_TLS_VERIFY=1</b> (or serve a publicly-trusted cert) to close the dial-time hop too.</p>
                     <div id="mtls-readiness" class="flex items-center gap-3 mb-3 text-sm text-slate-500">Checking readiness…</div>
                     <div id="mtls-spokes" class="mb-3 hidden"></div>
                     <div class="flex items-center gap-3 mb-3 pb-3 border-b border-slate-100">
                         <label class="flex items-center gap-2 text-sm text-slate-600">
-                            <input type="checkbox" id="mtls-auto-provision" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                            <input type="checkbox" id="mtls-auto-provision" class="rounded border-slate-300 text-primary-text focus:ring-green-500">
                             Auto-provision mTLS
                         </label>
-                        <button onclick="saveMtlsAutoProvision(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm ml-auto">Save</button>
-                        <span id="mtls-auto-provision-hint" class="text-xs text-slate-400"></span>
+                        <button onclick="saveMtlsAutoProvision(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm ml-auto">Save</button>
+                        <span id="mtls-auto-provision-hint" class="text-xs text-slate-500"></span>
                     </div>
-                    <p class="text-xs text-slate-400 mb-3"><b>Auto-provision</b> = the hub distributes the LE wildcard + CA bundle to the hub and every spoke, then enables mTLS once the whole fleet is ready. No manual file copying.</p>
+                    <p class="text-xs text-slate-500 mb-3"><b>Auto-provision</b> = the hub distributes the LE wildcard + CA bundle to the hub and every spoke, then enables mTLS once the whole fleet is ready. No manual file copying.</p>
                     <div class="flex items-center gap-3">
                         <label class="flex items-center gap-2 text-sm text-slate-600">
-                            <input type="checkbox" id="mtls-enabled" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                            <input type="checkbox" id="mtls-enabled" class="rounded border-slate-300 text-primary-text focus:ring-green-500">
                             Enable mutual TLS
                         </label>
-                        <button onclick="saveMtlsEnable(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
+                        <button onclick="saveMtlsEnable(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
                     </div>
                 </div>
                 <div class="${card} p-6">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Idle Session Timeout</h3>
-                    <p class="text-xs text-slate-400 mb-3">Automatically log out a user who makes no requests for this long. Applies live to all sessions.</p>
+                    <h3 class="text-sm font-bold text-slate-500 mb-1">Idle Session Timeout</h3>
+                    <p class="text-xs text-slate-500 mb-3">Automatically log out a user who makes no requests for this long. Applies live to all sessions.</p>
                     <div class="flex items-center gap-3">
                         <select id="session-timeout-minutes" class="bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                             <option value="0">Never (disabled)</option>
@@ -285,16 +285,16 @@ function _renderSettingsSection(subMenu) {
                             <option value="240">4 hours</option>
                             <option value="480">8 hours</option>
                         </select>
-                        <button onclick="saveSessionTimeout(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
+                        <button onclick="saveSessionTimeout(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
                     </div>
                 </div>
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-4">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Active Sessions ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <h3 class="text-sm font-bold text-slate-500">Active Sessions ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     </div>
                     <div class="overflow-hidden rounded-md border border-slate-200">
                         <table class="w-full text-left text-sm">
-                            <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                            <thead class="bg-slate-100 text-slate-600 text-xs">
                                 <tr>
                                     <th class="px-4 py-3">User</th>
                                     <th class="px-4 py-3">Role</th>
@@ -304,7 +304,7 @@ function _renderSettingsSection(subMenu) {
                                 </tr>
                             </thead>
                             <tbody id="sessions-table-body" class="divide-y divide-slate-200">
-                                <tr><td colspan="5" class="px-4 py-8 text-center text-slate-400 italic animate-pulse">Loading…</td></tr>
+                                <tr><td colspan="5" class="px-4 py-8 text-center text-slate-500 italic animate-pulse">Loading…</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -328,22 +328,22 @@ function _renderSettingsSection(subMenu) {
         content.innerHTML = `
             <div class="${card} p-6 space-y-5">
                 <div class="flex justify-between items-center">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">API Tokens ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">API Tokens ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 </div>
-                <p class="text-[11px] text-slate-400 leading-relaxed">Bearer tokens for programmatic API access — they carry <b>your</b> permissions. Send <code>Authorization: Bearer &lt;access&gt;</code>. The access token expires in <b>4 hours</b>; POST the refresh token to <code>/auth/token/refresh</code> to rotate to a fresh pair with no re-login. Tokens are shown <b>once</b> — store them securely.</p>
+                <p class="text-xs text-slate-500 leading-relaxed">Bearer tokens for programmatic API access — they carry <b>your</b> permissions. Send <code>Authorization: Bearer &lt;access&gt;</code>. The access token expires in <b>4 hours</b>; POST the refresh token to <code>/auth/token/refresh</code> to rotate to a fresh pair with no re-login. Tokens are shown <b>once</b> — store them securely.</p>
                 <div class="flex items-end gap-2">
                     <label class="text-xs text-slate-500 flex-1">Token name<br>
                         <input type="text" id="apitok-name" placeholder="e.g. ci-pipeline" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
-                    <button onclick="createApiToken()" id="apitok-create-btn" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Create token</button>
+                    <button onclick="createApiToken()" id="apitok-create-btn" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Create token</button>
                 </div>
                 <div id="apitok-new" class="hidden"></div>
                 <div class="overflow-hidden rounded-md border border-slate-200">
                     <table class="w-full text-left text-sm">
-                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                        <thead class="bg-slate-100 text-slate-600 text-xs">
                             <tr><th class="px-4 py-3">Name</th><th class="px-4 py-3">Created</th><th class="px-4 py-3">Expires</th><th class="px-4 py-3"></th></tr>
                         </thead>
                         <tbody id="apitok-table-body" class="divide-y divide-slate-200">
-                            <tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 italic animate-pulse">Loading…</td></tr>
+                            <tr><td colspan="4" class="px-4 py-8 text-center text-slate-500 italic animate-pulse">Loading…</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -352,8 +352,8 @@ function _renderSettingsSection(subMenu) {
     } else {
         content.innerHTML = `
             <div class="${card} p-6 space-y-4">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub Status ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                <p class="text-xs text-slate-400 italic">Hub is running. See System → Hub Status for metrics and spoke health.</p>
+                <h3 class="text-sm font-bold text-slate-500">Hub Status ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <p class="text-xs text-slate-500 italic">Hub is running. See System → Hub Status for metrics and spoke health.</p>
             </div>`;
     }
 }
@@ -421,8 +421,8 @@ function _simSaveFnFor(el) {
 const _SETUP_CLS = {
     card: 'hpe-card rounded-lg p-5 shadow-sm space-y-4',
     inputCls: 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800',
-    labelCls: 'text-xs text-slate-500 uppercase font-bold',
-    btnCls: 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm',
+    labelCls: 'text-xs text-slate-500 font-bold',
+    btnCls: 'bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm',
     btnSecCls: 'bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium border border-slate-200',
 };
 
@@ -443,37 +443,37 @@ function _renderSetupSpokesTile(content) {
     content.innerHTML = `
             <div id="spokes-summary" class="flex flex-wrap items-center gap-3 text-xs"></div>
             <div class="flex items-center gap-2 text-xs mb-1">
-                <label for="sa-tenant-filter" class="font-bold text-slate-500 uppercase tracking-wider">Tenant</label>
+                <label for="sa-tenant-filter" class="font-bold text-slate-500">Tenant</label>
                 <select id="sa-tenant-filter" onchange="_onSaTenantFilterChange()" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-green-500">
                     <option value="default">ADMIN</option>
                     <option value="__unassigned__">Unassigned</option>
                     <option value="__all__" selected>All tenants</option>
                 </select>
-                <span class="text-[10px] text-slate-400 italic">show spokes &amp; agents for this tenant (Unassigned = not yet bound to one; All tenants = every spoke/agent incl. offline)</span>
+                <span class="text-xs text-slate-500 italic">show spokes &amp; agents for this tenant (Unassigned = not yet bound to one; All tenants = every spoke/agent incl. offline)</span>
             </div>
             <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
                 <div class="${saCard}">
                     <div class="flex justify-between items-center mb-2">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <h3 class="text-sm font-bold text-slate-500">Spokes ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     </div>
-                    <div id="spokes-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                    <div id="spokes-table-wrap"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
                 </div>
                 <div class="${saCard}">
                     <div class="flex justify-between items-center mb-2">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Agents ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <h3 class="text-sm font-bold text-slate-500">Agents ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     </div>
-                    <div id="agents-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                    <div id="agents-table-wrap"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
                 </div>
             </div>
             <div class="${saCard}">
                 <div class="flex justify-between items-center mb-1">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub Connection URL</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Hub Connection URL</h3>
                 </div>
                 <p class="text-xs text-slate-500 mb-2">The wss:// address agents and spokes check in to. Changing it repoints every connected remote agent/spoke to the new address (each restarts once to reconnect). Co-located (loopback) and auto-discovering spokes are left alone. Use when the hub's DNS name/IP changes — e.g. after issuing a new cert for a new name. <b>Set this before retiring the old DNS name</b>, while spokes are still connected via it.</p>
                 <div class="flex items-center gap-2">
                     <input id="sa-hub-url" type="text" placeholder="wss://hub.example.com:443  or  172.16.1.31" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800" />
                 </div>
-                <div id="sa-hub-url-note" class="text-[11px] text-slate-400 mt-1"></div>
+                <div id="sa-hub-url-note" class="text-xs text-slate-500 mt-1"></div>
             </div>
             ${_spokesAgentsLegend()}`;
     _populateSaTenantFilter();
@@ -550,9 +550,9 @@ async function saveSaHubUrl() {
 function _spokesAgentsLegend() {
     const dot = cls => `<span class="inline-block w-2 h-2 rounded-full ${cls}"></span>`;
     const box = cls => `<span class="inline-block w-4 h-3 rounded border ${cls} align-middle"></span>`;
-    const lbl = t => `<span class="font-bold uppercase tracking-wider text-slate-400 mr-1">${t}</span>`;
-    return `<div class="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
-      <span class="font-bold uppercase tracking-wider text-slate-400">Legend</span>
+    const lbl = t => `<span class="font-bold text-slate-500 mr-1">${t}</span>`;
+    return `<div class="mt-4 pt-3 border-t border-slate-100 text-xs text-slate-500">
+      <span class="font-bold text-slate-500">Legend</span>
       <div class="mt-2 space-y-1.5">
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Status dot')}
@@ -569,8 +569,8 @@ function _spokesAgentsLegend() {
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Flags')}
-          <span class="text-slate-400">the line under each name shows</span>
-          <span class="font-mono text-slate-400">id</span><span class="text-slate-300">·</span><span>type·module·version·seen&nbsp;Ns&nbsp;ago</span>,
+          <span class="text-slate-500">the line under each name shows</span>
+          <span class="font-mono text-slate-500">id</span><span class="text-slate-500">·</span><span>type·module·version·seen&nbsp;Ns&nbsp;ago</span>,
           <span class="text-red-600 font-semibold">out of date</span>
           <span class="text-amber-600 font-semibold">Pending approval</span>
           <span class="text-amber-600 font-semibold">alert: warning</span>/<span class="text-red-600 font-semibold">error</span>
@@ -636,10 +636,10 @@ function _renderSetupRemoteConsoleTile(content) {
     content.innerHTML = `
         <div class="${card} space-y-4">
             <div class="flex items-center justify-between">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Remote Console ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                <span id="rc-status" class="text-xs text-slate-400"></span>
+                <h3 class="text-sm font-bold text-slate-500">Remote Console ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <span id="rc-status" class="text-xs text-slate-500"></span>
             </div>
-            <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-[11px] text-amber-800 leading-snug">
+            <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-800 leading-snug">
                 Runs commands on the hub or a connected spoke/agent for troubleshooting — <b>Global-Admin only, every command is audit-logged</b>. Off by default.
                 In diagnostic mode only a curated allowlist runs (systemctl, journalctl, tail, grep, ps, df, ip, git …).
                 <b>Debug (shell) mode</b> unlocks arbitrary commands — enable it only while actively troubleshooting; this hub is internet-facing.
@@ -671,7 +671,7 @@ function _renderSetupRemoteConsoleTile(content) {
                 </div>
                 <div id="rc-output-wrap" class="hidden">
                     <div class="flex justify-end mb-1">
-                        <button onclick="copyRcOutput()" id="rc-copy" class="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-2 py-1 rounded-md font-semibold">📋 Copy</button>
+                        <button onclick="copyRcOutput()" id="rc-copy" class="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-2 py-1 rounded-full font-semibold">📋 Copy</button>
                     </div>
                     <pre id="rc-output" class="bg-slate-900 text-slate-100 text-xs font-mono rounded-md p-3 overflow-x-auto whitespace-pre-wrap max-h-96 overflow-y-auto"></pre>
                 </div>
@@ -685,7 +685,7 @@ function _rcReflectEnabled(enabled) {
     const runner = document.getElementById('rc-runner');
     if (runner) { runner.classList.toggle('opacity-40', !enabled); runner.classList.toggle('pointer-events-none', !enabled); }
     const status = document.getElementById('rc-status');
-    if (status) { status.textContent = enabled ? 'enabled' : 'disabled'; status.className = 'text-xs ' + (enabled ? 'text-green-600 font-bold' : 'text-slate-400'); }
+    if (status) { status.textContent = enabled ? 'enabled' : 'disabled'; status.className = 'text-xs ' + (enabled ? 'text-green-600 font-bold' : 'text-slate-500'); }
     const sh = document.getElementById('rc-shell');
     if (sh) sh.disabled = !enabled;
 }
@@ -794,17 +794,17 @@ function _renderSetupTenantTile(content) {
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex justify-between items-center">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenants ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Tenants ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <div class="flex gap-2">
                         ${isAdmin() ? `<button onclick="syncTenantsFromNetBox()" class="${btnSecCls} text-xs">↓ Sync from NetBox</button>
                         <input type="text" id="new-tenant-id" placeholder="new-tenant-id" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-40">
-                        <button onclick="addTenant()" class="${btnCls}">+ Tenant</button>` : `<span class="text-[10px] text-slate-400 italic">edit only — create/sync/re-scope are Global-Admin</span>`}
+                        <button onclick="addTenant()" class="${btnCls}">+ Tenant</button>` : `<span class="text-xs text-slate-500 italic">edit only — create/sync/re-scope are Global-Admin</span>`}
                     </div>
                 </div>
                 <div id="tenant-list" class="space-y-2"></div>
-                <div id="tenant-empty-state" class="py-8 text-center text-slate-400 italic text-sm">No tenants configured.</div>
+                <div id="tenant-empty-state" class="py-8 text-center text-slate-500 italic text-sm">No tenants configured.</div>
                 <div id="tenant-editor" class="hidden space-y-4 border-t border-slate-200 pt-4">
-                    <p class="text-xs text-slate-500 font-bold uppercase">Editing: <span id="edit-tenant-id" class="font-mono text-[#01A982]"></span></p>
+                    <p class="text-xs text-slate-500 font-bold">Editing: <span id="edit-tenant-id" class="font-mono text-primary-text"></span></p>
                     <div class="space-y-1"><label class="${labelCls}">Display Name</label><input type="text" id="tenant-name" class="${inputCls}"></div>
                     <div class="flex items-center gap-2"><input type="checkbox" id="tenant-active" class="w-4 h-4 text-green-600 rounded"><label class="text-sm text-slate-600">Set as active tenant</label></div>
                     ${isAdmin() ? `<div class="flex items-center gap-2"><input type="checkbox" id="tenant-shared" class="w-4 h-4 text-green-600 rounded"><label class="text-sm text-slate-600"><b>Shared tenant</b> — its spokes are visible to <b>all</b> tenants (objects still subnet-scoped). Only one tenant can be shared.</label></div>` : ''}
@@ -813,22 +813,22 @@ function _renderSetupTenantTile(content) {
                         <div class="space-y-1"><label class="${labelCls}">CPPM Quota</label><input type="number" id="quota-cppm" value="0" min="0" class="${inputCls}"></div>
                         <div class="space-y-1"><label class="${labelCls}">OPN Quota</label><input type="number" id="quota-opn" value="0" min="0" class="${inputCls}"></div>
                     </div>
-                    <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider pt-2">Spoke Scoping</p>
+                    <p class="text-xs font-semibold text-slate-500 pt-2">Spoke Scoping</p>
                     <div class="grid grid-cols-3 gap-4">
                         <div class="space-y-1">
                             <label class="${labelCls}">NetBox Tenant Slug</label>
                             <input type="text" id="tenant-netbox-slug" placeholder="acme-corp" class="${inputCls}">
-                            <p class="text-[10px] text-slate-400">Filters devices, IPs, and prefixes in NetBox by this tenant slug.</p>
+                            <p class="text-xs text-slate-500">Filters devices, IPs, and prefixes in NetBox by this tenant slug.</p>
                         </div>
                         <div class="space-y-1">
                             <label class="${labelCls}">Proxmox Tag</label>
                             <input type="text" id="tenant-proxmox-tag" placeholder="tenant-acme" class="${inputCls}">
-                            <p class="text-[10px] text-slate-400">Only show VMs tagged with this value in Proxmox.</p>
+                            <p class="text-xs text-slate-500">Only show VMs tagged with this value in Proxmox.</p>
                         </div>
                         <div class="space-y-1">
                             <label class="${labelCls}">LDAP Base DN</label>
                             <input type="text" id="tenant-ldap-base-dn" placeholder="ou=acme,dc=corp,dc=com" class="${inputCls}">
-                            <p class="text-[10px] text-slate-400">Scopes LDAP user/group queries to this OU.</p>
+                            <p class="text-xs text-slate-500">Scopes LDAP user/group queries to this OU.</p>
                         </div>
                     </div>
                     <div class="flex justify-end gap-2"><button onclick="saveTenantConfig()" class="${btnCls}">Save</button><button onclick="closeTenantEditor()" class="${btnSecCls}">Cancel</button></div>
@@ -843,27 +843,27 @@ function _renderSetupUserAccessTile(content) {
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex justify-between items-center">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">User Management ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">User Management ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button onclick="showAddUserModal()" class="${btnCls}">+ Add User</button>
                 </div>
                 <div class="overflow-hidden rounded-md border border-slate-200">
                     <table class="w-full text-left text-sm">
-                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr><th class="px-4 py-3">User</th><th class="px-4 py-3">Auth</th><th class="px-4 py-3">Tenants</th><th class="px-4 py-3">Groups</th><th class="px-4 py-3 text-center">Admin</th><th class="px-4 py-3 text-center">View</th><th class="px-4 py-3 text-center">Edit</th><th class="px-4 py-3 text-center">HV</th><th class="px-4 py-3 text-center">FW</th><th class="px-4 py-3 text-center">DNS</th><th class="px-4 py-3 text-center">NAC</th><th class="px-4 py-3 text-center">NW</th><th class="px-4 py-3 text-center">IPAM</th><th class="px-4 py-3 text-center">CS</th><th class="px-4 py-3 text-center">CON</th><th class="px-4 py-3 text-center">CW</th><th class="px-4 py-3"></th></tr></thead>
-                        <tbody id="user-permissions-body" class="divide-y divide-slate-200"><tr><td colspan="17" class="px-4 py-8 text-center text-slate-400 italic animate-pulse">Loading users…</td></tr></tbody>
+                        <thead class="bg-slate-100 text-slate-600 text-xs"><tr><th class="px-4 py-3">User</th><th class="px-4 py-3">Auth</th><th class="px-4 py-3">Tenants</th><th class="px-4 py-3">Groups</th><th class="px-4 py-3 text-center">Admin</th><th class="px-4 py-3 text-center">View</th><th class="px-4 py-3 text-center">Edit</th><th class="px-4 py-3 text-center">HV</th><th class="px-4 py-3 text-center">FW</th><th class="px-4 py-3 text-center">DNS</th><th class="px-4 py-3 text-center">NAC</th><th class="px-4 py-3 text-center">NW</th><th class="px-4 py-3 text-center">IPAM</th><th class="px-4 py-3 text-center">CS</th><th class="px-4 py-3 text-center">CON</th><th class="px-4 py-3 text-center">CW</th><th class="px-4 py-3"></th></tr></thead>
+                        <tbody id="user-permissions-body" class="divide-y divide-slate-200"><tr><td colspan="17" class="px-4 py-8 text-center text-slate-500 italic animate-pulse">Loading users…</td></tr></tbody>
                     </table>
                 </div>
-                <p class="text-[11px] text-slate-400 mt-2">Check-marks show <em>effective</em> access (permission groups ∪ per-user grants). Manage bundles below.</p>
+                <p class="text-xs text-slate-500 mt-2">Check-marks show <em>effective</em> access (permission groups ∪ per-user grants). Manage bundles below.</p>
             </div>
             <div class="${card} mt-4">
                 <div class="flex justify-between items-center">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Permission Groups</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Permission Groups</h3>
                     <button onclick="showGroupModal()" class="${btnCls}">+ New Group</button>
                 </div>
-                <p class="text-[11px] text-slate-400 mb-2">A group bundles module permissions; assign users to groups instead of setting each flag per user. Optionally map an LDAP group for directory-driven access.</p>
+                <p class="text-xs text-slate-500 mb-2">A group bundles module permissions; assign users to groups instead of setting each flag per user. Optionally map an LDAP group for directory-driven access.</p>
                 <div class="overflow-hidden rounded-md border border-slate-200">
                     <table class="w-full text-left text-sm">
-                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr><th class="px-4 py-3">Group</th><th class="px-4 py-3">Permissions</th><th class="px-4 py-3">LDAP Group</th><th class="px-4 py-3 text-center">Members</th><th class="px-4 py-3"></th></tr></thead>
-                        <tbody id="permission-groups-body" class="divide-y divide-slate-200"><tr><td colspan="5" class="px-4 py-6 text-center text-slate-400 italic animate-pulse">Loading groups…</td></tr></tbody>
+                        <thead class="bg-slate-100 text-slate-600 text-xs"><tr><th class="px-4 py-3">Group</th><th class="px-4 py-3">Permissions</th><th class="px-4 py-3">LDAP Group</th><th class="px-4 py-3 text-center">Members</th><th class="px-4 py-3"></th></tr></thead>
+                        <tbody id="permission-groups-body" class="divide-y divide-slate-200"><tr><td colspan="5" class="px-4 py-6 text-center text-slate-500 italic animate-pulse">Loading groups…</td></tr></tbody>
                     </table>
                 </div>
             </div>`;
@@ -908,10 +908,10 @@ function _renderSetupSelfBackupTile(content) {
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex items-center justify-between mb-2">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Scheduled Self-Backup ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Scheduled Self-Backup ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button onclick="runBackupNow()" id="sb-run-btn" class="${btnCls}">Back up now</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Periodically archives the hub state + key stores (Fernet-encrypted at rest already; the archive is an additional rotated copy) to <code>&lt;data_dir&gt;/self-backup/</code>. Archives are optionally Fernet-encrypted (<code>.tgz.enc</code>) and pruned to <em>keep_count</em>. The hub <code>.env</code> (secrets) is excluded unless explicitly included below. <strong>Global Admin only.</strong></p>
+                <p class="text-xs text-slate-500 mb-3">Periodically archives the hub state + key stores (Fernet-encrypted at rest already; the archive is an additional rotated copy) to <code>&lt;data_dir&gt;/self-backup/</code>. Archives are optionally Fernet-encrypted (<code>.tgz.enc</code>) and pruned to <em>keep_count</em>. The hub <code>.env</code> (secrets) is excluded unless explicitly included below. <strong>Global Admin only.</strong></p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="sb-enabled" class="w-4 h-4 text-green-600 rounded">Enable scheduled backup</label>
                     <div class="space-y-1">
@@ -926,15 +926,15 @@ function _renderSetupSelfBackupTile(content) {
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="sb-include-env" class="w-4 h-4 text-green-600 rounded">Include .env (secrets)</label>
                 </div>
                 <div class="mt-4 flex items-center justify-between gap-3">
-                    <span class="text-xs text-slate-400">Archives are encrypted with the hub Fernet key — restore requires the same <code>LM_FERNET_KEY</code>.</span>
+                    <span class="text-xs text-slate-500">Archives are encrypted with the hub Fernet key — restore requires the same <code>LM_FERNET_KEY</code>.</span>
                 </div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-2">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">SSH Copy to Remote</h3>
+                    <h3 class="text-sm font-bold text-slate-500">SSH Copy to Remote</h3>
                     <button onclick="testBackupCopy()" id="sb-test-btn" class="${btnSecCls}">Test copy</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Optionally <code>scp</code> each backup to a remote host using a private key on the hub. The hub SSH client must already have the key (path only is stored here; key material is never read by the WebUI). <code>after_each_backup</code> pushes right after every backup; <code>own_schedule</code> pushes on its own interval below.</p>
+                <p class="text-xs text-slate-500 mb-3">Optionally <code>scp</code> each backup to a remote host using a private key on the hub. The hub SSH client must already have the key (path only is stored here; key material is never read by the WebUI). <code>after_each_backup</code> pushes right after every backup; <code>own_schedule</code> pushes on its own interval below.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="sb-copy-enabled" class="w-4 h-4 text-green-600 rounded">Enable SSH copy</label>
                     <div class="space-y-1">
@@ -974,18 +974,18 @@ function _renderSetupSelfBackupTile(content) {
                 </div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Status &amp; Archives</h3>
-                <div id="sb-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                <h3 class="text-sm font-bold text-slate-500 mb-2">Status &amp; Archives</h3>
+                <div id="sb-status" class="space-y-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                 <div class="mt-4">
                     <div class="flex items-center justify-between mb-2">
-                        <div class="text-xs font-bold text-slate-500 uppercase tracking-wider">Local archives</div>
+                        <div class="text-xs font-bold text-slate-500">Local archives</div>
                         <div class="flex items-center gap-2">
                             <input type="file" id="sb-upload-file" accept=".tar.gz,.tgz.enc,application/gzip,application/octet-stream" class="hidden" onchange="uploadSelfBackup(this)">
-                            <button type="button" onclick="document.getElementById('sb-upload-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1 rounded-md text-xs font-bold">Upload archive…</button>
+                            <button type="button" onclick="document.getElementById('sb-upload-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1 rounded-full text-xs font-bold">Upload archive…</button>
                         </div>
                     </div>
-                    <p class="text-[11px] text-slate-400 mb-2">Download an archive to keep off-box, or upload one back onto this hub for a system-recovery restore.</p>
-                    <div id="sb-archives" class="space-y-1"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                    <p class="text-xs text-slate-500 mb-2">Download an archive to keep off-box, or upload one back onto this hub for a system-recovery restore.</p>
+                    <div id="sb-archives" class="space-y-1"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                 </div>
             </div>
         `;
@@ -1006,9 +1006,9 @@ function _sbFmtBytes(n) {
 
 function _sbFmtTs(ts) {
     const v = Number(ts) || 0;
-    if (!v) return '<span class="text-slate-400">never</span>';
+    if (!v) return '<span class="text-slate-500">never</span>';
     try { return new Date(v * 1000).toLocaleString(); }
-    catch (e) { return '<span class="text-slate-400">—</span>'; }
+    catch (e) { return '<span class="text-slate-500">—</span>'; }
 }
 
 // Populate the config form + status panel from GET /setup/backup/status.
@@ -1046,12 +1046,12 @@ async function loadSelfBackupStatus() {
         : '';
     const latest = data.latest
         ? `Latest: <code class="text-slate-700">${escapeHtml(data.latest)}</code>`
-        : '<span class="text-slate-400">no archive yet</span>';
+        : '<span class="text-slate-500">no archive yet</span>';
     const st = document.getElementById('sb-status');
     if (st) st.innerHTML = `
         <div class="text-xs text-slate-600">Scheduled backup: <strong>${data.enabled ? 'enabled' : 'disabled'}</strong> · interval ${data.backup_interval_hours ?? 24}h · keep ${data.keep_count ?? 7}</div>
         <div class="text-xs text-slate-600">Last backup: ${_sbFmtTs(data.last_backup_at)}</div>
-        <div class="text-xs text-slate-600">Last SSH copy: ${_sbFmtTs(data.last_copy_at)} ${data.copy_enabled ? '' : '<span class="text-slate-400">(copy disabled)</span>'}</div>
+        <div class="text-xs text-slate-600">Last SSH copy: ${_sbFmtTs(data.last_copy_at)} ${data.copy_enabled ? '' : '<span class="text-slate-500">(copy disabled)</span>'}</div>
         <div class="text-xs text-slate-600">${latest} · ${data.backup_count ?? 0} archive(s) · ${_sbFmtBytes(data.total_bytes)}</div>
         ${errLine}
     `;
@@ -1060,15 +1060,15 @@ async function loadSelfBackupStatus() {
     if (arc) {
         const files = Array.isArray(data.backups) ? data.backups : [];
         if (!files.length) {
-            arc.innerHTML = '<p class="text-xs text-slate-400 italic">No archives yet — click “Back up now” to take one.</p>';
+            arc.innerHTML = '<p class="text-xs text-slate-500 italic">No archives yet — click “Back up now” to take one.</p>';
         } else {
             arc.innerHTML = files.map(f => {
                 const when = (() => { try { return new Date((f.mtime || 0) * 1000).toLocaleString(); } catch (e) { return '—'; } })();
                 return `<div class="flex items-center justify-between text-xs text-slate-600 py-1 border-b border-slate-100 last:border-0">
                     <code class="break-all">${escapeHtml(f.name)}</code>
                     <span class="ml-3 whitespace-nowrap flex items-center gap-3">
-                        <span class="text-slate-400">${_sbFmtBytes(f.size)} · ${when}</span>
-                        <button type="button" onclick="downloadSelfBackup('${escapeHtml(f.name).replace(/'/g, "\\'")}')" class="text-[#01A982] hover:underline font-bold">Download</button>
+                        <span class="text-slate-500">${_sbFmtBytes(f.size)} · ${when}</span>
+                        <button type="button" onclick="downloadSelfBackup('${escapeHtml(f.name).replace(/'/g, "\\'")}')" class="text-primary-text hover:underline font-bold">Download</button>
                     </span>
                 </div>`;
             }).join('');
@@ -1183,14 +1183,14 @@ function _renderSetupSyncTile(content) {
     content.innerHTML = `
         <div class="mb-4 flex items-center justify-between">
             <h2 class="text-base font-bold text-slate-700">Sync settings ${helpIcon('lm-hub', null, 'Hub help')}</h2>
-            <span class="text-xs text-slate-400 italic">Auto-saves on change — no Save button.</span>
+            <span class="text-xs text-slate-500 italic">Auto-saves on change — no Save button.</span>
         </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">GitHub Repo Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">GitHub Repo Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="repo-sync-run-btn" onclick="runRepoSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Scheduled replication of <strong>all repos</strong>: pulls the hub tree + <code>provisioning_repos/*</code> locally and pushes <code>SPOKE_UPDATE</code> to every approved spoke (pxmx / opnsense / cs / cppm / netbox / ldap / nw / le, plus the in-repo dns / dhcp / console / statuspage roles) every <em>interval</em> (default 15 min). The hub self-restarts only when its own code changed (rolled back if it fails to boot); each spoke self-pulls and restarts only on its own version change. Replaces the old 1-hour auto-update loop — this is the single scheduled sync.</p>
+                <p class="text-xs text-slate-500 mb-3">Scheduled replication of <strong>all repos</strong>: pulls the hub tree + <code>provisioning_repos/*</code> locally and pushes <code>SPOKE_UPDATE</code> to every approved spoke (pxmx / opnsense / cs / cppm / netbox / ldap / nw / le, plus the in-repo dns / dhcp / console / statuspage roles) every <em>interval</em> (default 15 min). The hub self-restarts only when its own code changed (rolled back if it fails to boot); each spoke self-pulls and restarts only on its own version change. Replaces the old 1-hour auto-update loop — this is the single scheduled sync.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="repo-sync-enabled" class="w-4 h-4 text-green-600 rounded" checked>Enable scheduled sync</label>
                     <div class="space-y-1">
@@ -1199,16 +1199,16 @@ function _renderSetupSyncTile(content) {
                     </div>
                 </div>
                 <div class="mt-4">
-                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync</div>
-                    <div id="repo-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                    <div class="text-xs font-bold text-slate-500 mb-2">Last sync</div>
+                    <div id="repo-sync-status" class="space-y-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                 </div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">IPAM ↔ NAC Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">IPAM ↔ NAC Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="ep-sync-run-btn" onclick="runEndpointSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Bidirectional. <strong>Forward (IPAM → NAC):</strong> periodically pulls endpoint records (IP / MAC / tenant) from the selected IPAM source and populates ClearPass Device Inventory via the CPPM spoke. The IPAM source is the source of truth — each sync overwrites the tenant's CPPM endpoint set to match. Also fires automatically after any IPAM edit made through the LM module. <strong>Reverse (NAC → IPAM, realtime):</strong> the sub-block below pulls ClearPass Access Tracker / session data (MAC, IP, switch IP/port) every ~1 min and adds to NetBox the devices not already present (only-add-missing — NetBox stays source of truth). NetBox is registered today; the design is modular so another IPAM product can be swapped in by adding one entry to the hub's IPAM_SOURCES registry.</p>
+                <p class="text-xs text-slate-500 mb-3">Bidirectional. <strong>Forward (IPAM → NAC):</strong> periodically pulls endpoint records (IP / MAC / tenant) from the selected IPAM source and populates ClearPass Device Inventory via the CPPM spoke. The IPAM source is the source of truth — each sync overwrites the tenant's CPPM endpoint set to match. Also fires automatically after any IPAM edit made through the LM module. <strong>Reverse (NAC → IPAM, realtime):</strong> the sub-block below pulls ClearPass Access Tracker / session data (MAC, IP, switch IP/port) every ~1 min and adds to NetBox the devices not already present (only-add-missing — NetBox stays source of truth). NetBox is registered today; the design is modular so another IPAM product can be swapped in by adding one entry to the hub's IPAM_SOURCES registry.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="ep-sync-enabled" class="w-4 h-4 text-green-600 rounded">Enable scheduled sync</label>
                     <div class="space-y-1">
@@ -1234,15 +1234,15 @@ function _renderSetupSyncTile(content) {
                     </div>
                 </div>
                 <div class="mt-4">
-                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
-                    <div id="endpoint-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                    <div class="text-xs font-bold text-slate-500 mb-2">Last sync per tenant</div>
+                    <div id="endpoint-sync-status" class="space-y-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                 </div>
                 <div class="mt-5 pt-4 border-t border-slate-200">
                     <div class="flex items-center justify-between mb-3">
-                        <div class="text-xs font-bold text-slate-500 uppercase tracking-wider">Realtime NAC → IPAM (reverse)</div>
+                        <div class="text-xs font-bold text-slate-500">Realtime NAC → IPAM (reverse)</div>
                         <button id="rt-nac-sync-run-btn" onclick="runRealtimeNacNow()" class="${btnCls}">Sync now</button>
                     </div>
-                    <p class="text-xs text-slate-400 mb-3">Pulls ClearPass Access Tracker sessions started in the last <em>lookback</em> minutes every <em>interval</em> minutes and adds to NetBox the MACs not already present — each with a NIC interface (native MAC) + framed IP + a cable to a switch device's port interface. Only-add-missing: existing MACs are skipped (never duplicated, never deleted). Tenant attribution by IP prefix containment.</p>
+                    <p class="text-xs text-slate-500 mb-3">Pulls ClearPass Access Tracker sessions started in the last <em>lookback</em> minutes every <em>interval</em> minutes and adds to NetBox the MACs not already present — each with a NIC interface (native MAC) + framed IP + a cable to a switch device's port interface. Only-add-missing: existing MACs are skipped (never duplicated, never deleted). Tenant attribution by IP prefix containment.</p>
                     <div class="flex flex-wrap items-end gap-4">
                         <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="rt-nac-sync-enabled" class="w-4 h-4 text-green-600 rounded">Enable realtime reverse sync</label>
                         <div class="space-y-1">
@@ -1255,28 +1255,28 @@ function _renderSetupSyncTile(content) {
                         </div>
                     </div>
                     <div class="mt-4">
-                        <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last reverse sync per tenant</div>
-                        <div id="rt-nac-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                        <div class="text-xs font-bold text-slate-500 mb-2">Last reverse sync per tenant</div>
+                        <div id="rt-nac-sync-status" class="space-y-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                     </div>
                 </div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">DHCP → DNS (real-time)</h3>
+                    <h3 class="text-sm font-bold text-slate-500">DHCP → DNS (real-time)</h3>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Kea registers each lease's hostname in Unbound the moment the lease is committed, and removes it on release/expiry — suffixed with the lease's DHCP scope domain. The hub keeps every DHCP spoke's hook in this state (checked each DNS/DHCP sync cycle). The NetBox → DNS sync remains the durable backstop.</p>
+                <p class="text-xs text-slate-500 mb-3">Kea registers each lease's hostname in Unbound the moment the lease is committed, and removes it on release/expiry — suffixed with the lease's DHCP scope domain. The hub keeps every DHCP spoke's hook in this state (checked each DNS/DHCP sync cycle). The NetBox → DNS sync remains the durable backstop.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="dns-hook-enabled" class="w-4 h-4 text-green-600 rounded" checked>Enable real-time DHCP → DNS registration</label>
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="dns-hook-register-ptr" class="w-4 h-4 text-green-600 rounded">Also register PTR records</label>
                 </div>
-                <div id="dns-hook-status" class="text-xs text-slate-400 mt-3"></div>
+                <div id="dns-hook-status" class="text-xs text-slate-500 mt-3"></div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hypervisor → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Hypervisor → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="vm-sync-run-btn" onclick="runVmSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Periodically pulls each tenant's VMs from the selected hypervisor source (Proxmox via the pxmx spoke, scoped by the tenant's proxmox_tag) and mirrors them into NetBox virtualization records — vCPUs / disk / cluster / primary IP4 / NetBox tenant, matched by a <code>proxmox_unique_id</code> custom field. The hypervisor is the source of truth — each sync overwrites the tenant's NetBox VM set to match (stale records are deleted). Also fires automatically after a VM lifecycle action (start/stop/restart/snapshot). Proxmox is registered today; the design is modular so another hypervisor product can be swapped in by adding one entry to the hub's HYPERVISOR_SOURCES registry.</p>
+                <p class="text-xs text-slate-500 mb-3">Periodically pulls each tenant's VMs from the selected hypervisor source (Proxmox via the pxmx spoke, scoped by the tenant's proxmox_tag) and mirrors them into NetBox virtualization records — vCPUs / disk / cluster / primary IP4 / NetBox tenant, matched by a <code>proxmox_unique_id</code> custom field. The hypervisor is the source of truth — each sync overwrites the tenant's NetBox VM set to match (stale records are deleted). Also fires automatically after a VM lifecycle action (start/stop/restart/snapshot). Proxmox is registered today; the design is modular so another hypervisor product can be swapped in by adding one entry to the hub's HYPERVISOR_SOURCES registry.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="vm-sync-enabled" class="w-4 h-4 text-green-600 rounded">Enable scheduled sync</label>
                     <div class="space-y-1">
@@ -1308,16 +1308,16 @@ function _renderSetupSyncTile(content) {
                     </div>
                 </div>
                 <div class="mt-4">
-                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
-                    <div id="vm-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                    <div class="text-xs font-bold text-slate-500 mb-2">Last sync per tenant</div>
+                    <div id="vm-sync-status" class="space-y-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                 </div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Firewall → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Firewall → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="fw-sync-run-btn" onclick="runFwDiscoveryNow()" class="${btnCls}">Sync now</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Pulls DHCP leases + the ARP table from the selected firewall (OPNsense via the firewall spoke), attributes each discovered device to a tenant by prefix containment (the device IP must sit inside one of the tenant's NetBox prefixes), and mirrors them into NetBox DCIM devices + IP records — tenant-tagged, with the MAC written onto the IP's <code>mac_address</code> custom field (which feeds the IPAM → NAC endpoint sync, so static-IP devices DHCP can't see reach ClearPass). The firewall is the source of truth — each sync overwrites the tenant's discovered-device set to match (stale records are deleted). Devices whose IP matches no tenant prefix are dropped + counted. OPNsense is registered today; the design is modular so another firewall product can be swapped in by adding one entry to the hub's FIREWALL_DISCOVERY_SOURCES registry.</p>
+                <p class="text-xs text-slate-500 mb-3">Pulls DHCP leases + the ARP table from the selected firewall (OPNsense via the firewall spoke), attributes each discovered device to a tenant by prefix containment (the device IP must sit inside one of the tenant's NetBox prefixes), and mirrors them into NetBox DCIM devices + IP records — tenant-tagged, with the MAC written onto the IP's <code>mac_address</code> custom field (which feeds the IPAM → NAC endpoint sync, so static-IP devices DHCP can't see reach ClearPass). The firewall is the source of truth — each sync overwrites the tenant's discovered-device set to match (stale records are deleted). Devices whose IP matches no tenant prefix are dropped + counted. OPNsense is registered today; the design is modular so another firewall product can be swapped in by adding one entry to the hub's FIREWALL_DISCOVERY_SOURCES registry.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="fw-sync-enabled" class="w-4 h-4 text-green-600 rounded">Enable scheduled sync</label>
                     <div class="space-y-1">
@@ -1371,19 +1371,19 @@ function _renderSetupSyncTile(content) {
                     </div>
                 </div>
                 <div class="mt-4 flex items-center justify-end gap-3">
-                    <span class="text-xs text-slate-400">Defaults apply to newly created devices only.</span>
+                    <span class="text-xs text-slate-500">Defaults apply to newly created devices only.</span>
                 </div>
                 <div class="mt-4">
-                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
-                    <div id="fw-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                    <div class="text-xs font-bold text-slate-500 mb-2">Last sync per tenant</div>
+                    <div id="fw-sync-status" class="space-y-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                 </div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Network Devices → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Network Devices → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="nw-sync-run-btn" onclick="runNwDiscoveryNow()" class="${btnCls}">Sync now</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Pulls the ARP table from every device on the selected network-device source (switches + gateways via the nw spoke, attributed to the tenant by prefix containment), and mirrors each discovered IP↔MAC into NetBox DCIM devices + IP records — tenant-tagged <code>Network Devices</code>, with the MAC written onto the IP's <code>mac_address</code> custom field (which feeds the IPAM → NAC endpoint sync). The network devices are the source of truth — each sync overwrites the tenant's nw-discovered device set to match (stale nw-owned records are deleted; firewall-discovered records are never touched). Devices whose IP matches no tenant prefix are dropped + counted. Switch/gateway products are registered in the hub's NW_DISCOVERY_SOURCES registry.</p>
+                <p class="text-xs text-slate-500 mb-3">Pulls the ARP table from every device on the selected network-device source (switches + gateways via the nw spoke, attributed to the tenant by prefix containment), and mirrors each discovered IP↔MAC into NetBox DCIM devices + IP records — tenant-tagged <code>Network Devices</code>, with the MAC written onto the IP's <code>mac_address</code> custom field (which feeds the IPAM → NAC endpoint sync). The network devices are the source of truth — each sync overwrites the tenant's nw-discovered device set to match (stale nw-owned records are deleted; firewall-discovered records are never touched). Devices whose IP matches no tenant prefix are dropped + counted. Switch/gateway products are registered in the hub's NW_DISCOVERY_SOURCES registry.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="nw-sync-enabled" class="w-4 h-4 text-green-600 rounded">Enable scheduled sync</label>
                     <div class="space-y-1">
@@ -1423,16 +1423,16 @@ function _renderSetupSyncTile(content) {
                     </div>
                 </div>
                 <div class="mt-4">
-                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
-                    <div id="nw-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                    <div class="text-xs font-bold text-slate-500 mb-2">Last sync per tenant</div>
+                    <div id="nw-sync-status" class="space-y-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                 </div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Inventory → Monitoring Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Inventory → Monitoring Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="mon-sync-run-btn" onclick="runMonitoringSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Keeps the monitoring engine (Zabbix) converged with the LM network-device inventory, the source of truth: creates and refreshes hosts per tenant, assigns each tenant's proxy, and disables or removes devices that left the inventory.</p>
+                <p class="text-xs text-slate-500 mb-3">Keeps the monitoring engine (Zabbix) converged with the LM network-device inventory, the source of truth: creates and refreshes hosts per tenant, assigns each tenant's proxy, and disables or removes devices that left the inventory.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="mon-sync-enabled" class="w-4 h-4 text-green-600 rounded" checked>Enable scheduled sync</label>
                     <div class="space-y-1">
@@ -1441,16 +1441,16 @@ function _renderSetupSyncTile(content) {
                     </div>
                 </div>
                 <div class="mt-4">
-                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync</div>
-                    <div id="mon-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                    <div class="text-xs font-bold text-slate-500 mb-2">Last sync</div>
+                    <div id="mon-sync-status" class="space-y-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                 </div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Console → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                    <span class="text-xs text-slate-400">Event-driven</span>
+                    <h3 class="text-sm font-bold text-slate-500">Console → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <span class="text-xs text-slate-500">Event-driven</span>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">When a Console spoke <b>auto-identifies</b> a device on a serial port (hostname / vendor / model / <b>serial number</b> / MAC / IP scraped from the console session), the hub mirrors it into NetBox DCIM as a tenant-tagged device (<code>discovered_from = Console</code>). There is no schedule — each identify pushes immediately. The sink matches an existing device by <b>serial → IP → MAC → hostname</b> (serial is the strongest key, so a console-found box is reconciled with its firewall/switch-discovered record instead of duplicating). The device is attributed to the port's effective tenant; a tenant with no <code>netbox_tenant_slug</code> is skipped. Hardware is the source of truth: a device seen on the console is real.</p>
+                <p class="text-xs text-slate-500 mb-3">When a Console spoke <b>auto-identifies</b> a device on a serial port (hostname / vendor / model / <b>serial number</b> / MAC / IP scraped from the console session), the hub mirrors it into NetBox DCIM as a tenant-tagged device (<code>discovered_from = Console</code>). There is no schedule — each identify pushes immediately. The sink matches an existing device by <b>serial → IP → MAC → hostname</b> (serial is the strongest key, so a console-found box is reconciled with its firewall/switch-discovered record instead of duplicating). The device is attributed to the port's effective tenant; a tenant with no <code>netbox_tenant_slug</code> is skipped. Hardware is the source of truth: a device seen on the console is real.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="console-sync-enabled" class="w-4 h-4 text-green-600 rounded">Sync identified devices to NetBox</label>
                     <div class="space-y-1">
@@ -1476,19 +1476,19 @@ function _renderSetupSyncTile(content) {
                     </div>
                 </div>
                 <div class="mt-4 flex items-center justify-end gap-3">
-                    <span class="text-xs text-slate-400">Defaults apply to newly created devices only.</span>
+                    <span class="text-xs text-slate-500">Defaults apply to newly created devices only.</span>
                 </div>
                 <div class="mt-4">
-                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Recent console syncs per tenant</div>
-                    <div id="console-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                    <div class="text-xs font-bold text-slate-500 mb-2">Recent console syncs per tenant</div>
+                    <div id="console-sync-status" class="space-y-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                 </div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Staleness Sweep ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Staleness Sweep ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="staleness-sweep-run-btn" onclick="runStalenessSweepNow()" class="${btnCls}">Sweep now</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Cluster-wide NetBox age-out of sync-owned objects. A device / VM / IP the syncs stop seeing ages out: not seen for <em>stale days</em> → status <strong>offline</strong> (a <code>decommissioned_at</code> clock starts); offline + decommissioned for <em>delete days</em> → <strong>deleted</strong> (its IPs free automatically); an unassigned stale IP → freed. Objects with no <code>last_seen</code> custom field (hand-managed inventory the syncs never touched) are <strong>never swept</strong>. Each detection stamps <code>last_seen</code>, so an object the syncs keep seeing is never swept.</p>
+                <p class="text-xs text-slate-500 mb-3">Cluster-wide NetBox age-out of sync-owned objects. A device / VM / IP the syncs stop seeing ages out: not seen for <em>stale days</em> → status <strong>offline</strong> (a <code>decommissioned_at</code> clock starts); offline + decommissioned for <em>delete days</em> → <strong>deleted</strong> (its IPs free automatically); an unassigned stale IP → freed. Objects with no <code>last_seen</code> custom field (hand-managed inventory the syncs never touched) are <strong>never swept</strong>. Each detection stamps <code>last_seen</code>, so an object the syncs keep seeing is never swept.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="staleness-sweep-enabled" class="w-4 h-4 text-green-600 rounded">Enable scheduled sweep</label>
                     <div class="space-y-1">
@@ -1505,26 +1505,26 @@ function _renderSetupSyncTile(content) {
                     </div>
                 </div>
                 <div class="mt-4">
-                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sweep</div>
-                    <div id="staleness-sweep-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                    <div class="text-xs font-bold text-slate-500 mb-2">Last sweep</div>
+                    <div id="staleness-sweep-status" class="space-y-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                 </div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Device De-duplication ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Device De-duplication ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <div class="flex gap-2">
                         <button id="netbox-dedupe-scan-btn" onclick="runNetboxDedupe(false)" class="${btnCls}">Scan (dry run)</button>
                         <button id="netbox-dedupe-merge-btn" onclick="runNetboxDedupe(true)" class="${btnCls}">Merge duplicates</button>
                     </div>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Finds NetBox devices that are the <strong>same physical box</strong> landed as separate records — grouped by shared <strong>serial</strong> or <strong>MAC</strong> (the pre-existing duplicates the unified sync ladder can't retroactively fix). <strong>Scan</strong> is a dry run that lists the duplicate groups it would merge; <strong>Merge</strong> keeps the most complete record per group (back-filling any identity gaps from the duplicates), re-points their IPs onto it, and deletes the rest. Network hardware is the source of truth.</p>
-                <div id="netbox-dedupe-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Click “Scan (dry run)” to preview duplicate device groups.</p></div>
+                <p class="text-xs text-slate-500 mb-3">Finds NetBox devices that are the <strong>same physical box</strong> landed as separate records — grouped by shared <strong>serial</strong> or <strong>MAC</strong> (the pre-existing duplicates the unified sync ladder can't retroactively fix). <strong>Scan</strong> is a dry run that lists the duplicate groups it would merge; <strong>Merge</strong> keeps the most complete record per group (back-filling any identity gaps from the duplicates), re-points their IPs onto it, and deletes the rest. Network hardware is the source of truth.</p>
+                <div id="netbox-dedupe-status" class="space-y-2"><p class="text-xs text-slate-500 italic">Click “Scan (dry run)” to preview duplicate device groups.</p></div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spoke Out-of-Contact Alerts ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Spoke Out-of-Contact Alerts ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Forgiving liveness alerting, separate from the realtime heartbeat traffic-light. A spoke that blips for a few seconds (restart, WAN jitter) stays quiet; only once an approved spoke has been <strong>out of contact</strong> for <em>warn minutes</em> does a <strong>warning</strong> fire, and after <em>error minutes</em> it escalates to <strong>error</strong> (which also lands in the Error Log / ab feed). Decoupled from the 300s recovery watchdog — that still restarts stranded spokes on its own schedule.</p>
+                <p class="text-xs text-slate-500 mb-3">Forgiving liveness alerting, separate from the realtime heartbeat traffic-light. A spoke that blips for a few seconds (restart, WAN jitter) stays quiet; only once an approved spoke has been <strong>out of contact</strong> for <em>warn minutes</em> does a <strong>warning</strong> fire, and after <em>error minutes</em> it escalates to <strong>error</strong> (which also lands in the Error Log / ab feed). Decoupled from the 300s recovery watchdog — that still restarts stranded spokes on its own schedule.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="spoke-alert-enabled" class="w-4 h-4 text-green-600 rounded">Enable out-of-contact alerts</label>
                     <div class="space-y-1">
@@ -1537,15 +1537,15 @@ function _renderSetupSyncTile(content) {
                     </div>
                 </div>
                 <div class="mt-4">
-                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Active alerts</div>
-                    <div id="spoke-alerts-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                    <div class="text-xs font-bold text-slate-500 mb-2">Active alerts</div>
+                    <div id="spoke-alerts-status" class="space-y-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                 </div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub-Contact Watchdog ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Hub-Contact Watchdog ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Fleet-wide self-recovery for spokes &amp; agents that lose the hub. When a node can't reach the hub it escalates: <strong>restart the service</strong> after the first threshold, <strong>reboot the host</strong> after the second, then <strong>sleep</strong> and retry; after <em>max runs</em> it gives up and stays offline. The setting is pushed to every node and stored locally, so it still fires when the hub is unreachable. <strong class="text-amber-600">Caution:</strong> the reboot stage restarts the whole machine — on a Proxmox host agent that cycles every VM on it. Off by default.</p>
+                <p class="text-xs text-slate-500 mb-3">Fleet-wide self-recovery for spokes &amp; agents that lose the hub. When a node can't reach the hub it escalates: <strong>restart the service</strong> after the first threshold, <strong>reboot the host</strong> after the second, then <strong>sleep</strong> and retry; after <em>max runs</em> it gives up and stays offline. The setting is pushed to every node and stored locally, so it still fires when the hub is unreachable. <strong class="text-amber-600">Caution:</strong> the reboot stage restarts the whole machine — on a Proxmox host agent that cycles every VM on it. Off by default.</p>
                 <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="hcw-enabled" class="w-4 h-4 text-green-600 rounded">Enable hub-contact watchdog (fleet-wide)</label>
                 <div class="flex flex-wrap items-end gap-4">
                     <div class="space-y-1">
@@ -1565,13 +1565,13 @@ function _renderSetupSyncTile(content) {
                         <input type="number" id="hcw-max-runs" min="1" value="3" class="w-28 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
                 </div>
-                <p id="hcw-msg" class="text-xs text-slate-400 mt-3"></p>
+                <p id="hcw-msg" class="text-xs text-slate-500 mt-3"></p>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub TLS Verification ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Hub TLS Verification ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Whether spokes &amp; agents verify the hub's TLS certificate when they connect — set fleet-wide here instead of re-running installers. Pushed to every node and stored locally (overrides the install-time <code>--tls-verify</code>); a node restarts only if its setting changes. <strong>Always verify</strong> is refused by any node that can't verify the hub cert right now (listed below), so it can't lock a node out. Co-located (loopback) spokes and role sub-spokes are not affected.</p>
+                <p class="text-xs text-slate-500 mb-3">Whether spokes &amp; agents verify the hub's TLS certificate when they connect — set fleet-wide here instead of re-running installers. Pushed to every node and stored locally (overrides the install-time <code>--tls-verify</code>); a node restarts only if its setting changes. <strong>Always verify</strong> is refused by any node that can't verify the hub cert right now (listed below), so it can't lock a node out. Co-located (loopback) spokes and role sub-spokes are not affected.</p>
                 <div class="space-y-1">
                     <label class="${labelCls}">Spoke/agent hub-cert verification</label>
                     <select id="htv-mode" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -1581,13 +1581,13 @@ function _renderSetupSyncTile(content) {
                         <option value="off">Off (not recommended)</option>
                     </select>
                 </div>
-                <p id="htv-msg" class="text-xs text-slate-400 mt-3"></p>
+                <p id="htv-msg" class="text-xs text-slate-500 mt-3"></p>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Source of Truth ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Source of Truth ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Per-module owner: a module's source of truth is never overwritten by a sync that disagrees. <strong>External</strong> = the feed owns the object (the sync overwrites NetBox to match — e.g. Proxmox owns VMs, the discovery feed owns device MAC/IP). <strong>NetBox</strong> = NetBox owns the object (only-add-missing — existing records are refreshed but never clobbered, protecting hand-managed inventory). Defaults: VMs = Proxmox (external), Devices = NetBox, Access Tracker = NetBox, Endpoint sync = NetBox.</p>
+                <p class="text-xs text-slate-500 mb-3">Per-module owner: a module's source of truth is never overwritten by a sync that disagrees. <strong>External</strong> = the feed owns the object (the sync overwrites NetBox to match — e.g. Proxmox owns VMs, the discovery feed owns device MAC/IP). <strong>NetBox</strong> = NetBox owns the object (only-add-missing — existing records are refreshed but never clobbered, protecting hand-managed inventory). Defaults: VMs = Proxmox (external), Devices = NetBox, Access Tracker = NetBox, Endpoint sync = NetBox.</p>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div class="space-y-1">
                         <label class="${labelCls}">VMs (Hypervisor → IPAM)</label>
@@ -1704,23 +1704,23 @@ function _renderSetupLdapConfigTile(content) {
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex items-center justify-between mb-2">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Directory (LDAP)</h3>
-                    <span id="ldapcfg-spokes-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+                    <h3 class="text-sm font-bold text-slate-500">Directory (LDAP)</h3>
+                    <span id="ldapcfg-spokes-pill" class="text-xs px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Enter the domain and admin account. LM finds the LDAP servers (every agent with the <b>LDAP Server</b> role), sets the admin password on all of them, sets up replication between them, and connects the Directory module to them. The password is stored in the Credential Vault. <b>Global Admin only.</b></p>
+                <p class="text-xs text-slate-500 mb-3">Enter the domain and admin account. LM finds the LDAP servers (every agent with the <b>LDAP Server</b> role), sets the admin password on all of them, sets up replication between them, and connects the Directory module to them. The password is stored in the Credential Vault. <b>Global Admin only.</b></p>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div class="space-y-1"><label class="${labelCls}">Domain name</label><input id="ldapcfg-domain" type="text" placeholder="orange-tme.com" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
                     <div class="space-y-1"><label class="${labelCls}">Admin username</label><input id="ldapcfg-admin-user" type="text" value="Administrator" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
-                    <div class="space-y-1"><label class="${labelCls}">Admin password <span class="text-slate-400 normal-case font-normal">(blank = generate a new one)</span></label><input id="ldapcfg-admin-pw" type="password" autocomplete="new-password" class="${inputCls} font-mono text-xs"></div>
-                    <div id="ldapcfg-psk-wrap" class="space-y-1 hidden"><label class="${labelCls}">Vault pass-phrase <span class="text-slate-400 normal-case font-normal">(__admin__ bucket)</span></label><input id="ldapcfg-psk" type="password" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
+                    <div class="space-y-1"><label class="${labelCls}">Admin password <span class="text-slate-500 normal-case font-normal">(blank = generate a new one)</span></label><input id="ldapcfg-admin-pw" type="password" autocomplete="new-password" class="${inputCls} font-mono text-xs"></div>
+                    <div id="ldapcfg-psk-wrap" class="space-y-1 hidden"><label class="${labelCls}">Vault pass-phrase <span class="text-slate-500 normal-case font-normal">(__admin__ bucket)</span></label><input id="ldapcfg-psk" type="password" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
                 </div>
-                <p id="ldapcfg-derived" class="mt-2 text-[11px] text-slate-500 font-mono"></p>
+                <p id="ldapcfg-derived" class="mt-2 text-xs text-slate-500 font-mono"></p>
                 <div class="mt-4">
                     <p class="${labelCls} mb-1">LDAP servers</p>
                     <div id="ldapcfg-servers" class="text-xs text-slate-500">Loading…</div>
                 </div>
                 <div class="mt-4 flex items-center justify-between gap-3">
-                    <span id="ldapcfg-msg" class="text-xs text-slate-400"></span>
+                    <span id="ldapcfg-msg" class="text-xs text-slate-500"></span>
                     <button type="button" onclick="saveLdapConfig()" id="ldapcfg-save-btn" class="${btnCls}">Apply</button>
                 </div>
             </div>`;
@@ -1730,7 +1730,7 @@ function _renderSetupLdapConfigTile(content) {
 function _ldapServersTable(servers, results) {
     if (!servers.length) return '<p class="italic">No LDAP servers yet — load the <b>LDAP Server (OpenLDAP)</b> role on an agent. It joins this directory automatically.</p>';
     const res = Object.fromEntries((results || []).map(r => [r.spoke_id, r]));
-    return `<table class="w-full text-left"><thead><tr class="text-slate-400"><th class="py-1">Server</th><th>Address</th><th>Replication id</th><th>Status</th></tr></thead><tbody>${servers.map(s => {
+    return `<table class="w-full text-left"><thead><tr class="text-slate-500"><th class="py-1">Server</th><th>Address</th><th>Replication id</th><th>Status</th></tr></thead><tbody>${servers.map(s => {
         const r = res[s.spoke_id];
         const status = r ? (r.status === 'SUCCESS' ? '<span class="text-green-700">applying (re-deploying)</span>' : `<span class="text-red-700">${escapeHtml(r.message || 'failed')}</span>`)
             : (s.connected ? '<span class="text-green-700">online</span>' : '<span class="text-red-700">offline</span>');
@@ -1755,7 +1755,7 @@ async function loadLdapConfig() {
         if (pill) {
             const n = d.spokes_connected || 0;
             pill.textContent = n ? `${n} DIRECTORY SPOKE${n === 1 ? '' : 'S'} CONNECTED` : 'NO DIRECTORY SPOKE';
-            pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (n ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500');
+            pill.className = 'text-xs px-2 py-0.5 rounded-full font-bold ' + (n ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500');
         }
     } catch (e) { console.error('loadLdapConfig failed', e); }
 }
@@ -1774,7 +1774,7 @@ function _setHealthDot(dotId, labelId, status, detail) {
         degraded: { c: 'bg-amber-500', t: 'text-amber-700', s: 'Degraded' },
         down:     { c: 'bg-red-500',   t: 'text-red-700',   s: 'Offline' },
     };
-    const m = map[status] || { c: 'bg-slate-300', t: 'text-slate-400', s: 'Unknown' };
+    const m = map[status] || { c: 'bg-slate-300', t: 'text-slate-500', s: 'Unknown' };
     dot.className = 'w-2.5 h-2.5 rounded-full ' + m.c;
     lbl.className = m.t;
     lbl.textContent = detail ? `${m.s} — ${detail}` : m.s;  // textContent → no XSS from detail
@@ -1843,19 +1843,19 @@ function _renderSetupModuleMgmtTile(content) {
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Managed Devices ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Managed Devices ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <div class="flex gap-2">
                         ${isAdmin() ? `<button onclick="mergeDuplicateDevices()" class="${btnSecCls}" title="Fold network devices found at several addresses (same serial / MAC) into one entry — the one NetBox and Zabbix use">Merge duplicates</button>` : ''}
                         <button onclick="showAddDeviceModal()" class="${btnCls}">+ Add Device</button>
                     </div>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Every managed module device in one place — firewalls, network devices, NAC, IPAM, directory, DNS, and DHCP instances. Click <strong>Add Device</strong> then choose the module type to attach.</p>
+                <p class="text-xs text-slate-500 mb-3">Every managed module device in one place — firewalls, network devices, NAC, IPAM, directory, DNS, and DHCP instances. Click <strong>Add Device</strong> then choose the module type to attach.</p>
                 <div id="all-devices-tabs" class="mb-3"></div>
-                <div id="all-devices-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <div id="all-devices-list" class="space-y-2"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Network Devices — Auto-Poll Default</h3>
-                <p class="text-xs text-slate-400 mb-3">Module-level poll cadence applied to every network device that inherits it. A device's own Auto-Poll Interval always overrides this. The nw spoke polls on this cycle to warm the hub cache and sync device inventory into NetBox.</p>
+                <h3 class="text-sm font-bold text-slate-500 mb-1">Network Devices — Auto-Poll Default</h3>
+                <p class="text-xs text-slate-500 mb-3">Module-level poll cadence applied to every network device that inherits it. A device's own Auto-Poll Interval always overrides this. The nw spoke polls on this cycle to warm the hub cache and sync device inventory into NetBox.</p>
                 <div class="flex items-center gap-3">
                     <select id="nw-module-poll-default" class="bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         <option value="">Built-in default (6 hours)</option>
@@ -1871,8 +1871,8 @@ function _renderSetupModuleMgmtTile(content) {
                     <button onclick="saveNwPollConfig(this)" class="${btnCls} ml-auto">Save</button>
                 </div>
                 <div class="mt-4 pt-4 border-t border-slate-200">
-                    <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Anti-Stampede (Jitter &amp; Caps)</h4>
-                    <p class="text-xs text-slate-400 mb-3">Spreads the fleet's polls so devices never all poll at once. <b>Jitter</b> randomizes each device's cadence so schedules drift apart; the <b>caps</b> bound how many devices poll per 10-second tick and how many run at the same time. Leave on defaults unless a large fleet is causing load spikes.</p>
+                    <h4 class="text-xs font-bold text-slate-500 mb-1">Anti-Stampede (Jitter &amp; Caps)</h4>
+                    <p class="text-xs text-slate-500 mb-3">Spreads the fleet's polls so devices never all poll at once. <b>Jitter</b> randomizes each device's cadence so schedules drift apart; the <b>caps</b> bound how many devices poll per 10-second tick and how many run at the same time. Leave on defaults unless a large fleet is causing load spikes.</p>
                     <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <label class="text-xs font-medium text-slate-600">Poll Jitter
                             <select id="nw-poll-jitter" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -1906,8 +1906,8 @@ function _renderSetupModuleMgmtTile(content) {
                         </label>
                     </div>
                     <div class="mt-4 pt-4 border-t border-slate-200">
-                        <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Reachability Sweep (ICMP Ping)</h4>
-                        <p class="text-xs text-slate-400 mb-3">A lightweight ICMP ping of every device, on its own cadence (jittered with the same anti-stampede caps above), keeps the fleet <b>up/down</b> badge fresh between the slower data polls. A device the sweep finds offline is <b>not</b> SSH/SNMP/REST-polled. When the spoke itself is offline the badge shows <b>unknown</b> (yellow).</p>
+                        <h4 class="text-xs font-bold text-slate-500 mb-1">Reachability Sweep (ICMP Ping)</h4>
+                        <p class="text-xs text-slate-500 mb-3">A lightweight ICMP ping of every device, on its own cadence (jittered with the same anti-stampede caps above), keeps the fleet <b>up/down</b> badge fresh between the slower data polls. A device the sweep finds offline is <b>not</b> SSH/SNMP/REST-polled. When the spoke itself is offline the badge shows <b>unknown</b> (yellow).</p>
                         <label class="text-xs font-medium text-slate-600">Ping cadence
                             <select id="nw-ping-interval" class="mt-1 w-full sm:w-1/3 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                                 <option value="">Built-in default (5 minutes)</option>
@@ -1926,40 +1926,40 @@ function _renderSetupModuleMgmtTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-1">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">NetBox → Network Devices Import</h3>
+                    <h3 class="text-sm font-bold text-slate-500">NetBox → Network Devices Import</h3>
                     <button onclick="runNwNetboxImport(this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium">Import now</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">NetBox is the source of truth for the network-device fleet. Devices in NetBox whose <b>role</b> matches the categories below are imported into the nw module automatically; devices you add manually here are written back to NetBox. NetBox-imported devices that are deleted or re-roled in NetBox are removed from nw (manual devices are never touched). Add credentials to an imported device to make it pollable.</p>
+                <p class="text-xs text-slate-500 mb-3">NetBox is the source of truth for the network-device fleet. Devices in NetBox whose <b>role</b> matches the categories below are imported into the nw module automatically; devices you add manually here are written back to NetBox. NetBox-imported devices that are deleted or re-roled in NetBox are removed from nw (manual devices are never touched). Add credentials to an imported device to make it pollable.</p>
                 <div class="space-y-3">
                     <label class="flex items-center gap-2 text-sm text-slate-600">
-                        <input type="checkbox" id="nw-import-enabled" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                        <input type="checkbox" id="nw-import-enabled" class="rounded border-slate-300 text-primary-text focus:ring-green-500">
                         Enable NetBox → NW import
                     </label>
                     <div class="grid grid-cols-2 gap-4">
                         <div class="space-y-1">
-                            <label class="text-xs text-slate-500 uppercase font-bold">NetBox device roles</label>
+                            <label class="text-xs text-slate-500 font-bold">NetBox device roles</label>
                             <input type="text" id="nw-import-roles" placeholder="e.g. Switch, Router, Gateway" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                            <p class="text-[11px] text-slate-400">Comma-separated NetBox role names (matched case-insensitively).</p>
+                            <p class="text-xs text-slate-500">Comma-separated NetBox role names (matched case-insensitively).</p>
                         </div>
                         <div class="space-y-1">
-                            <label class="text-xs text-slate-500 uppercase font-bold">Default object type</label>
+                            <label class="text-xs text-slate-500 font-bold">Default object type</label>
                             <select id="nw-import-default-ot" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                                 <option value="gateway">Gateway</option>
                                 <option value="aos_switch">AOS Switch</option>
                                 <option value="cx_switch">CX Switch</option>
                                 <option value="ex_switch">EX Switch</option>
                             </select>
-                            <p class="text-[11px] text-slate-400">Used when a role isn't in the mapping below.</p>
+                            <p class="text-xs text-slate-500">Used when a role isn't in the mapping below.</p>
                         </div>
                     </div>
                     <div class="space-y-1">
-                        <label class="text-xs text-slate-500 uppercase font-bold">Role → object-type mapping</label>
+                        <label class="text-xs text-slate-500 font-bold">Role → object-type mapping</label>
                         <input type="text" id="nw-import-map" placeholder="Switch=aos_switch, Router=gateway" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500">
-                        <p class="text-[11px] text-slate-400">Optional. <code>role=object_type</code> pairs, comma-separated.</p>
+                        <p class="text-xs text-slate-500">Optional. <code>role=object_type</code> pairs, comma-separated.</p>
                     </div>
                     <div class="grid grid-cols-2 gap-4">
                         <div class="space-y-1">
-                            <label class="text-xs text-slate-500 uppercase font-bold">Import interval</label>
+                            <label class="text-xs text-slate-500 font-bold">Import interval</label>
                             <select id="nw-import-interval" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                                 <option value="300">Every 5 minutes</option>
                                 <option value="900" selected>Every 15 minutes</option>
@@ -1970,7 +1970,7 @@ function _renderSetupModuleMgmtTile(content) {
                             </select>
                         </div>
                         <div class="space-y-1">
-                            <label class="text-xs text-slate-500 uppercase font-bold">Owning nw spoke</label>
+                            <label class="text-xs text-slate-500 font-bold">Owning nw spoke</label>
                             <select id="nw-import-spoke" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                                 <option value="">Auto (first nw spoke)</option>
                             </select>
@@ -1983,48 +1983,48 @@ function _renderSetupModuleMgmtTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-1">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Network Scan — Discovery ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">Network Scan — Discovery ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button onclick="showAddInstanceModal('nwscan')" class="${btnSecCls} text-xs">+ Add Scan Credential</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Fingerprint the tenant's known IPs (from NetBox / NAC / DHCP / DNS) with the selected scan credentials — the nw spoke port-probes each address and tries SSH / SNMP to identify Aruba/HPE/Juniper switches &amp; gateways. Identified, not-already-known hardware can be auto-added to the fleet (tagged <code>scanned</code>). Optionally crawl LLDP neighbors to expand beyond the inventory. Credentials are vaulted; secrets are never logged.</p>
-                <div id="nwscan-instances-list" class="space-y-2 mb-4"><p class="text-xs text-slate-400 italic animate-pulse">Loading credentials…</p></div>
+                <p class="text-xs text-slate-500 mb-3">Fingerprint the tenant's known IPs (from NetBox / NAC / DHCP / DNS) with the selected scan credentials — the nw spoke port-probes each address and tries SSH / SNMP to identify Aruba/HPE/Juniper switches &amp; gateways. Identified, not-already-known hardware can be auto-added to the fleet (tagged <code>scanned</code>). Optionally crawl LLDP neighbors to expand beyond the inventory. Credentials are vaulted; secrets are never logged.</p>
+                <div id="nwscan-instances-list" class="space-y-2 mb-4"><p class="text-xs text-slate-500 italic animate-pulse">Loading credentials…</p></div>
                 <div class="space-y-3">
                     <div class="flex flex-wrap gap-4">
-                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-enabled" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500"> Enable scanning</label>
-                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-crawl" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500"> Crawl LLDP neighbors</label>
-                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-autoadd" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500"> Auto-add discovered</label>
-                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-snmp" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500" checked> Try SNMP</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-enabled" class="rounded border-slate-300 text-primary-text focus:ring-green-500"> Enable scanning</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-crawl" class="rounded border-slate-300 text-primary-text focus:ring-green-500"> Crawl LLDP neighbors</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-autoadd" class="rounded border-slate-300 text-primary-text focus:ring-green-500"> Auto-add discovered</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-snmp" class="rounded border-slate-300 text-primary-text focus:ring-green-500" checked> Try SNMP</label>
                     </div>
                     <div class="space-y-1">
-                        <label class="text-xs text-slate-500 uppercase font-bold">IP sources</label>
+                        <label class="text-xs text-slate-500 font-bold">IP sources</label>
                         <div class="flex flex-wrap gap-4">
-                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-netbox" class="rounded border-slate-300 text-[#01A982]" checked> NetBox prefixes</label>
-                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-nac" class="rounded border-slate-300 text-[#01A982]"> NAC endpoints</label>
-                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-dhcp" class="rounded border-slate-300 text-[#01A982]"> DHCP leases</label>
-                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-dns" class="rounded border-slate-300 text-[#01A982]"> DNS records</label>
+                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-netbox" class="rounded border-slate-300 text-primary-text" checked> NetBox prefixes</label>
+                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-nac" class="rounded border-slate-300 text-primary-text"> NAC endpoints</label>
+                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-dhcp" class="rounded border-slate-300 text-primary-text"> DHCP leases</label>
+                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-dns" class="rounded border-slate-300 text-primary-text"> DNS records</label>
                         </div>
                     </div>
                     <div class="grid grid-cols-2 gap-4">
                         <div class="space-y-1">
-                            <label class="text-xs text-slate-500 uppercase font-bold">Extra subnets (CIDR, comma/space/newline)</label>
+                            <label class="text-xs text-slate-500 font-bold">Extra subnets (CIDR, comma/space/newline)</label>
                             <textarea id="nwscan-subnets" rows="2" placeholder="10.0.0.0/24, 192.168.1.0/24" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500"></textarea>
                         </div>
                         <div class="space-y-1">
-                            <label class="text-xs text-slate-500 uppercase font-bold">Extra target IPs</label>
+                            <label class="text-xs text-slate-500 font-bold">Extra target IPs</label>
                             <textarea id="nwscan-targets" rows="2" placeholder="10.0.0.1, 10.0.0.2" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500"></textarea>
                         </div>
                     </div>
                     <div class="grid grid-cols-3 gap-4">
                         <div class="space-y-1">
-                            <label class="text-xs text-slate-500 uppercase font-bold">TCP ports</label>
+                            <label class="text-xs text-slate-500 font-bold">TCP ports</label>
                             <input type="text" id="nwscan-ports" placeholder="22, 443, 80, 23" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         </div>
                         <div class="space-y-1">
-                            <label class="text-xs text-slate-500 uppercase font-bold">Max targets</label>
+                            <label class="text-xs text-slate-500 font-bold">Max targets</label>
                             <input type="number" id="nwscan-maxtargets" min="1" max="4096" placeholder="1024" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         </div>
                         <div class="space-y-1">
-                            <label class="text-xs text-slate-500 uppercase font-bold">Concurrency</label>
+                            <label class="text-xs text-slate-500 font-bold">Concurrency</label>
                             <input type="number" id="nwscan-concurrency" min="1" max="128" placeholder="32" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         </div>
                     </div>
@@ -2038,22 +2038,22 @@ function _renderSetupModuleMgmtTile(content) {
             </div>
             ${isAdmin() ? `<div class="${card}">
                 <div class="flex items-center justify-between mb-1">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">NetBox → Seed Device Catalog</h3>
+                    <h3 class="text-sm font-bold text-slate-500">NetBox → Seed Device Catalog</h3>
                     <button onclick="seedNetboxCatalog(this)" class="${btnSecCls} text-xs">Seed catalog</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Loads the bundled Aruba/HPE/Juniper device-type catalog into NetBox — manufacturers, device types, and their interface (24/48-port + SFP+/QSFP28 uplinks), console, and power templates — so you don't hand-build each model. Idempotent: re-running after editing the catalog upserts types and adds any new templates without error (existing templates are never deleted or re-typed). Global-Admin only. After seeding, instantiate a device from a type and its interfaces are auto-created.</p>
+                <p class="text-xs text-slate-500 mb-3">Loads the bundled Aruba/HPE/Juniper device-type catalog into NetBox — manufacturers, device types, and their interface (24/48-port + SFP+/QSFP28 uplinks), console, and power templates — so you don't hand-build each model. Idempotent: re-running after editing the catalog upserts types and adds any new templates without error (existing templates are never deleted or re-typed). Global-Admin only. After seeding, instantiate a device from a type and its interfaces are auto-created.</p>
             </div>` : ''}
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">TrueNAS Appliances ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <h3 class="text-sm font-bold text-slate-500">TrueNAS Appliances ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button onclick="showAddTruenasApplianceModal()" class="${btnCls}" title="Register a new TrueNAS appliance with Lab Manager">+ Add Appliance</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">TrueNAS storage appliances polled over the official WebSocket JSON-RPC client. Each appliance is bound to a tenant + owning storage spoke; the spoke polls on its cycle (pools, datasets, shares, disks, alerts, services, capacity) and warms the hub cache. Use a per-appliance API key (created in TrueNAS → Settings → API Keys); self-signed boxes set Verify SSL off.</p>
-                <div id="truenas-appliances-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <p class="text-xs text-slate-500 mb-3">TrueNAS storage appliances polled over the official WebSocket JSON-RPC client. Each appliance is bound to a tenant + owning storage spoke; the spoke polls on its cycle (pools, datasets, shares, disks, alerts, services, capacity) and warms the hub cache. Use a per-appliance API key (created in TrueNAS → Settings → API Keys); self-signed boxes set Verify SSL off.</p>
+                <div id="truenas-appliances-list" class="space-y-2"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">TrueNAS — Auto-Poll Default</h3>
-                <p class="text-xs text-slate-400 mb-3">Module-level poll cadence applied to every TrueNAS appliance that inherits it. An appliance's own Auto-Poll Interval always overrides this. The storage spoke polls on this cycle to warm the hub cache.</p>
+                <h3 class="text-sm font-bold text-slate-500 mb-1">TrueNAS — Auto-Poll Default</h3>
+                <p class="text-xs text-slate-500 mb-3">Module-level poll cadence applied to every TrueNAS appliance that inherits it. An appliance's own Auto-Poll Interval always overrides this. The storage spoke polls on this cycle to warm the hub cache.</p>
                 <div class="flex items-center gap-3">
                     <select id="truenas-module-poll-default" class="bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Default polling interval applied to all TrueNAS appliances">
                         <option value="">Built-in default (15 minutes)</option>
@@ -2163,12 +2163,12 @@ async function showRackImportModal() {
     openModal('nb-rack-import-modal', `
         <div class="flex justify-between items-center mb-3">
             <h3 class="text-lg font-bold">Import rack layout from Excel</h3>
-            <button onclick="document.getElementById('nb-rack-import-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+            <button onclick="document.getElementById('nb-rack-import-modal').remove()" class="text-slate-500 hover:text-slate-600 text-xl leading-none">×</button>
         </div>
         <div class="space-y-3">
             <div class="flex items-center gap-3">
                 <input id="nb-rack-file" type="file" accept=".xlsx" class="hidden" onchange="uploadRackImportXlsx(this)">
-                <button onclick="document.getElementById('nb-rack-file').click()" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-600 border border-indigo-300 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm">Choose .xlsx…</button>
+                <button onclick="document.getElementById('nb-rack-file').click()" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-600 border border-indigo-300 px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm">Choose .xlsx…</button>
                 <span id="nb-rack-file-name" class="text-xs text-slate-500"></span>
             </div>
             <div id="nb-rack-import-status" class="text-xs text-slate-500"></div>
@@ -2208,12 +2208,12 @@ function _elevFaceTable(units, faceLabel) {
             while (i + span < units.length && units[i + span].device && units[i + span].device.id === dev.id) span++;
         }
         const rowStyle = `style="height:calc(var(--elev-uh,20px) * ${span})"`;
-        const label = `<td class="px-1 text-[9px] text-slate-400 font-mono w-7 text-right align-top border-b border-slate-100 leading-none pt-0.5">${u && u.unit != null ? u.unit : ''}</td>`;
+        const label = `<td class="px-1 text-xs text-slate-500 font-mono w-7 text-right align-top border-b border-slate-100 leading-none pt-0.5">${u && u.unit != null ? u.unit : ''}</td>`;
         let cell;
         if (dev) {
             const color = dev.role_color || '9e9e9e';
             const fg = _elevTextOn(color);
-            cell = `<td rowspan="${span}" class="px-1 text-[10px] align-top border-b border-white/20 overflow-hidden leading-tight" style="background:#${color};color:${fg}">
+            cell = `<td rowspan="${span}" class="px-1 text-xs align-top border-b border-white/20 overflow-hidden leading-tight" style="background:#${color};color:${fg}">
                 <div class="font-semibold truncate leading-tight">${escapeHtml(dev.name || '')}</div>
                 <div class="opacity-85 truncate leading-tight">${escapeHtml(dev.model || '')}${dev.role ? ' · ' + escapeHtml(dev.role) : ''}</div>
                 ${dev.primary_ip ? `<div class="font-mono opacity-85 truncate leading-tight">${escapeHtml(dev.primary_ip)}</div>` : ''}
@@ -2226,11 +2226,11 @@ function _elevFaceTable(units, faceLabel) {
     }
     if (!rows.length) {
         return `<div class="elev-face flex-1 min-w-0">
-            <div class="text-xs font-bold text-slate-400 uppercase mb-1">${faceLabel}</div>
-            <p class="text-xs text-slate-400 italic">empty</p></div>`;
+            <div class="text-xs font-bold text-slate-500 mb-1">${faceLabel}</div>
+            <p class="text-xs text-slate-500 italic">empty</p></div>`;
     }
     return `<div class="elev-face flex-1 min-w-0">
-        <div class="text-xs font-bold text-slate-500 uppercase mb-1">${faceLabel}</div>
+        <div class="text-xs font-bold text-slate-500 mb-1">${faceLabel}</div>
         <table class="w-full table-fixed border-collapse">${rows.join('')}</table>
     </div>`;
 }
@@ -2263,7 +2263,7 @@ async function showRackElevationModal(rackId) {
     openModal('nb-rack-elev-modal', `
         <div class="flex justify-between items-center mb-3">
             <h3 class="text-lg font-bold">Rack elevation — ${escapeHtml(rackName || '')}</h3>
-            <button onclick="document.getElementById('nb-rack-elev-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+            <button onclick="document.getElementById('nb-rack-elev-modal').remove()" class="text-slate-500 hover:text-slate-600 text-xl leading-none">×</button>
         </div>
         <div id="nb-rack-elev-body" class="text-xs text-slate-500">Loading…</div>
     `, { card: 'w-full max-w-3xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
@@ -2280,10 +2280,10 @@ async function showRackElevationModal(rackId) {
         window._nbElevMeta = window._nbElevMeta || {};
         window._nbElevMeta[rackId] = { site_slug: r.site_slug || '', rack: r.name || rackName };
         const meta = `<div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600 mb-3">
-            <span><span class="text-slate-400">Site:</span> ${escapeHtml(r.site || '—')}</span>
-            <span><span class="text-slate-400">Tenant:</span> ${escapeHtml(r.tenant || '—')}</span>
-            <span><span class="text-slate-400">Height:</span> ${r.u_height || 0}U</span>
-            <button onclick="_addDeviceFromElev(${rackId})" class="ml-auto bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all">+ Add device</button>
+            <span><span class="text-slate-500">Site:</span> ${escapeHtml(r.site || '—')}</span>
+            <span><span class="text-slate-500">Tenant:</span> ${escapeHtml(r.tenant || '—')}</span>
+            <span><span class="text-slate-500">Height:</span> ${r.u_height || 0}U</span>
+            <button onclick="_addDeviceFromElev(${rackId})" class="ml-auto bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold transition-all">+ Add device</button>
         </div>`;
         const front = (d.faces && d.faces.front) || [];
         const rear  = (d.faces && d.faces.rear)  || [];
@@ -2294,10 +2294,10 @@ async function showRackElevationModal(rackId) {
         const grid = `<div class="elev-grid flex gap-4 items-start" data-uheight="${uHeight}" style="--elev-uh:20px">${_elevFaceTable(front, 'Front')}${_elevFaceTable(rear, 'Rear')}</div>`;
         const zero = d.zero_u || [];
         const zeroHtml = zero.length ? `<div class="mt-4">
-            <div class="text-xs font-bold text-slate-500 uppercase mb-1">0U / side</div>
+            <div class="text-xs font-bold text-slate-500 mb-1">0U / side</div>
             <div class="flex flex-wrap gap-2">${zero.map(z => {
                 const c = z.role_color || '9e9e9e';
-                return `<div class="px-2 py-1 rounded text-[11px]" style="background:#${c};color:${_elevTextOn(c)}">
+                return `<div class="px-2 py-1 rounded text-xs" style="background:#${c};color:${_elevTextOn(c)}">
                     <span class="font-semibold">${escapeHtml(z.name || '')}</span>
                     <span class="opacity-85"> · ${escapeHtml(z.role || '')}</span>
                 </div>`;
@@ -2379,7 +2379,7 @@ function renderRackImportResults() {
             <summary class="px-3 py-2 text-sm font-medium flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" data-ri-include="${i}"${i === 0 ? ' checked' : ''} class="ri-include" onclick="event.stopPropagation()">
                 <span>${escapeHtml(rk.rack_name)}</span>
-                <span class="text-xs text-slate-400">${escapeHtml(rk.shape)} · ${rk.u_height}U · ${rk.device_count} slots</span>
+                <span class="text-xs text-slate-500">${escapeHtml(rk.shape)} · ${rk.u_height}U · ${rk.device_count} slots</span>
             </summary>
             <div class="px-3 pb-3 space-y-2">
                 <div class="grid grid-cols-3 gap-2">
@@ -2394,7 +2394,7 @@ function renderRackImportResults() {
                     </label>
                 </div>
                 ${isSummary
-                    ? '<p class="text-xs text-slate-400">Summary sheet: Front/Rear text cells become front/rear-face devices (named by their text). No column mapping needed.</p>'
+                    ? '<p class="text-xs text-slate-500">Summary sheet: Front/Rear text cells become front/rear-face devices (named by their text). No column mapping needed.</p>'
                     : renderColumnMap(rk, i)}
             </div>
         </details>`;
@@ -2403,8 +2403,8 @@ function renderRackImportResults() {
     html += `<div class="flex items-center justify-between pt-3 border-t">
         <label class="text-xs flex items-center gap-1"><input id="nb-ri-dryrun" type="checkbox"> Dry run (validate only, write nothing)</label>
         <div class="flex gap-2">
-            <button onclick="document.getElementById('nb-rack-import-modal').remove()" class="px-3 py-1.5 text-xs border border-slate-300 rounded hover:bg-slate-50">Cancel</button>
-            <button onclick="commitRackImport(this)" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded text-xs font-bold transition-all shadow-sm">Import</button>
+            <button onclick="document.getElementById('nb-rack-import-modal').remove()" class="px-3 py-1.5 text-xs border border-slate-300 rounded-full hover:bg-slate-50">Cancel</button>
+            <button onclick="commitRackImport(this)" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm">Import</button>
         </div>
     </div>`;
     document.getElementById('nb-rack-import-results').innerHTML = html;
@@ -2421,7 +2421,7 @@ function renderColumnMap(rk, i) {
             ? String(rk.preview_rows[0][ci]).slice(0, 40) : '';
         return `<tr>
             <td class="px-2 py-1 text-xs font-mono">${escapeHtml(c)}</td>
-            <td class="px-2 py-1 text-xs text-slate-400">${escapeHtml(sample)}</td>
+            <td class="px-2 py-1 text-xs text-slate-500">${escapeHtml(sample)}</td>
             <td class="px-2 py-1"><select data-ri-map="${i}" data-ri-col="${escapeHtml(c)}" class="border rounded px-1 py-0.5 text-xs">${opts}</select></td>
         </tr>`;
     }).join('');
@@ -2590,7 +2590,7 @@ async function runNwScan(btn, dryRun) {
     const out = document.getElementById('nwscan-results');
     const label = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = dryRun ? 'Scanning…' : 'Scanning & adding…'; }
-    if (out) out.innerHTML = '<p class="text-slate-400 italic animate-pulse">Scanning — this can take a while for large subnets…</p>';
+    if (out) out.innerHTML = '<p class="text-slate-500 italic animate-pulse">Scanning — this can take a while for large subnets…</p>';
     try {
         const body = {
             dry_run: !!dryRun,
@@ -2634,29 +2634,29 @@ function _nwScanResultsHtml(d) {
     let html = `<div class="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-md">
         <p class="text-slate-600"><b>${d.targets || 0}</b> target(s) scanned (${escapeHtml(srcTxt)}) · <b>${(d.identified || []).length}</b> identified · <b>${reachable.length}</b> reachable · <b>${d.dry_run ? (d.preview || []).length + ' to add (preview)' : (d.added || []).length + ' added'}</b></p>`;
     if ((d.batches || 0) > 1) {
-        html += `<p class="mt-1 text-[11px] text-slate-500">Large scan split into ${d.batches} batches.</p>`;
+        html += `<p class="mt-1 text-xs text-slate-500">Large scan split into ${d.batches} batches.</p>`;
     }
     if ((d.sources || {}).truncated) {
-        html += `<p class="mt-1 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">${d.sources.truncated} further address(es) exceeded the scan ceiling and were not scanned. Narrow the sources, or leave very large supernets to the background sweep.</p>`;
+        html += `<p class="mt-1 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">${d.sources.truncated} further address(es) exceeded the scan ceiling and were not scanned. Narrow the sources, or leave very large supernets to the background sweep.</p>`;
     }
     if ((d.sources || {}).failed_batches) {
-        html += `<p class="mt-1 text-[11px] text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1">${d.sources.failed_batches} batch(es) failed or timed out; results are partial.</p>`;
+        html += `<p class="mt-1 text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1">${d.sources.failed_batches} batch(es) failed or timed out; results are partial.</p>`;
     }
     if (d.discovery_only) {
-        html += `<p class="mt-1 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">Discovery-only scan — no scan credentials were selected, so hosts were probed for reachability and open ports but not logged into. Nothing can be auto-added from this run. Select a credential set to identify and add devices.</p>`;
+        html += `<p class="mt-1 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">Discovery-only scan — no scan credentials were selected, so hosts were probed for reachability and open ports but not logged into. Nothing can be auto-added from this run. Select a credential set to identify and add devices.</p>`;
     }
     if (rows.length) {
-        html += '<table class="w-full mt-2 text-left"><thead><tr class="text-slate-400 uppercase text-[10px]"><th class="py-1">Address</th><th>Type</th><th>Name</th><th>OS</th><th>Via</th></tr></thead><tbody>';
+        html += '<table class="w-full mt-2 text-left"><thead><tr class="text-slate-500 text-xs"><th class="py-1">Address</th><th>Type</th><th>Name</th><th>OS</th><th>Via</th></tr></thead><tbody>';
         for (const dev of rows) {
             html += `<tr class="border-t border-slate-100"><td class="py-1 font-mono">${escapeHtml(dev.address || '')}</td><td>${escapeHtml(dev.object_type || '')}</td><td>${escapeHtml(dev.name || dev.hostname || '')}</td><td>${escapeHtml(dev.os || '')}</td><td>${escapeHtml(dev.method || '')}</td></tr>`;
         }
         html += '</tbody></table>';
     } else {
-        html += '<p class="text-slate-400 italic mt-1">No new manageable devices identified.</p>';
+        html += '<p class="text-slate-500 italic mt-1">No new manageable devices identified.</p>';
     }
     if (reachable.length) {
-        html += `<p class="mt-3 text-[10px] uppercase tracking-wide text-slate-400">Reachable hosts (not identified as a manageable device)</p>`;
-        html += '<table class="w-full mt-1 text-left"><thead><tr class="text-slate-400 uppercase text-[10px]"><th class="py-1">Address</th><th>Open ports</th><th>Hostname</th></tr></thead><tbody>';
+        html += `<p class="mt-3 text-xs text-slate-500">Reachable hosts (not identified as a manageable device)</p>`;
+        html += '<table class="w-full mt-1 text-left"><thead><tr class="text-slate-500 text-xs"><th class="py-1">Address</th><th>Open ports</th><th>Hostname</th></tr></thead><tbody>';
         for (const h of reachable) {
             html += `<tr class="border-t border-slate-100"><td class="py-1 font-mono">${escapeHtml(h.address || '')}</td><td class="font-mono text-xs">${escapeHtml((h.open_ports || []).join(', '))}</td><td>${escapeHtml(h.hostname || '')}</td></tr>`;
         }
@@ -2741,26 +2741,26 @@ function _renderSetupSimulationsTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
             <div class="flex items-center gap-6 border-b border-slate-200 mb-4 text-sm font-medium text-slate-600">
-                <div id="simtab-btn-usb" onclick="_simSetupTab('usb')" class="sub-nav-item active px-1.5 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">USB</div>
-                <div id="simtab-btn-pci" onclick="_simSetupTab('pci')" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">PCI (Tiers)</div>
-                <div id="simtab-btn-dhcp" onclick="_simSetupTab('dhcp')" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">DHCP</div>
-                <div id="simtab-btn-simq" onclick="_simSetupTab('simq')" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">Quotas</div>
-                <div id="simtab-btn-catalog" onclick="_simSetupTab('catalog')" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">Catalog</div>
-                <div id="simtab-btn-glv" onclick="_simSetupTab('glv')" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">Learned Values</div>
+                <div id="simtab-btn-usb" onclick="_simSetupTab('usb')" class="sub-nav-item active px-1.5 py-1 text-xs tracking-normal cursor-pointer select-none">USB</div>
+                <div id="simtab-btn-pci" onclick="_simSetupTab('pci')" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal cursor-pointer select-none">PCI (Tiers)</div>
+                <div id="simtab-btn-dhcp" onclick="_simSetupTab('dhcp')" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal cursor-pointer select-none">DHCP</div>
+                <div id="simtab-btn-simq" onclick="_simSetupTab('simq')" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal cursor-pointer select-none">Quotas</div>
+                <div id="simtab-btn-catalog" onclick="_simSetupTab('catalog')" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal cursor-pointer select-none">Catalog</div>
+                <div id="simtab-btn-glv" onclick="_simSetupTab('glv')" class="sub-nav-item px-1.5 py-1 text-xs tracking-normal cursor-pointer select-none">Learned Values</div>
             </div>
             <div id="simtab-usb" class="space-y-4">
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Discovered USB Devices ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 mb-2">Discovered USB Devices ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Every USB VID:PID seen across all tenants' spokes (plus tenant-certified/ignored entries not yet in telemetry). Approve or ignore a device type globally — applies to every tenant.</p>
-                <div id="global-usb-discovered" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <div id="global-usb-discovered" class="space-y-2"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Global USB Approvals ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 mb-2">Global USB Approvals ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide USB dongle approvals — applies to every tenant (merged with each tenant's own list).</p>
                 <div class="space-y-6">
                     <div>
                         <p class="${labelCls} mb-1">Certified globally</p>
-                        <div id="global-usb-certified" class="space-y-2 mb-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                        <div id="global-usb-certified" class="space-y-2 mb-2"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                         <div class="flex gap-1">
                             <input id="gusbc-vp" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${inputCls} px-2 py-1" title="Vendor ID and Product ID (e.g. 1a2b:3c4d)">
                             <input id="gusbc-label" placeholder="label" class="flex-1 text-xs ${inputCls} px-2 py-1" title="Friendly device description label">
@@ -2770,7 +2770,7 @@ function _renderSetupSimulationsTile(content) {
                     </div>
                     <div>
                         <p class="${labelCls} mb-1">Ignored globally</p>
-                        <div id="global-usb-ignored" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                        <div id="global-usb-ignored" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                         <div class="flex gap-1">
                             <input id="gusbi-vp" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${inputCls} px-2 py-1" title="Vendor ID and Product ID to ignore">
                             <button onclick="addGlobalUsbIgnore()" class="${btnCls} text-xs px-3 py-1" title="Add device to global ignored USB list">+ Add</button>
@@ -2779,19 +2779,19 @@ function _renderSetupSimulationsTile(content) {
                 </div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Per-Tenant USB ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 mb-2">Per-Tenant USB ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Each tenant's own certified/ignored VID:PIDs (merged with the global list when pushed to their spoke). Approve/ignore per tenant below.</p>
-                <div id="tenant-usb-list" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <div id="tenant-usb-list" class="space-y-3"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             </div>
             <div id="simtab-pci" class="space-y-4 hidden">
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Global Tier PCI VID:PIDs ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 mb-2">Global Tier PCI VID:PIDs ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide PCI-passthrough device IDs that classify a VM's tier — applies to every tenant (merged with each tenant's own list). <b>T1</b> = physical / base PCI (e.g. <span class="font-mono">1912:0015</span>); <b>T3</b> = the IoT adapter (e.g. <span class="font-mono">168c:0034</span>). T2 = USB dongle (above). Only T2 is ever auto-deleted under resource pressure; T1/T3 are never torn down.</p>
                 <div class="grid grid-cols-2 gap-6">
                     <div>
                         <p class="${labelCls} mb-1">T1 PCI (never torn down)</p>
-                        <div id="global-t1-pci" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                        <div id="global-t1-pci" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                         <div class="flex gap-1">
                             <input id="gt1-vp" placeholder="1912:0015" class="w-28 font-mono text-xs ${inputCls} px-2 py-1" title="PCI vendor:product ID for T1 base hardware">
                             <button onclick="addGlobalTierPci('t1')" class="${btnCls} text-xs px-3 py-1" title="Register T1 physical PCI passthrough device">+ Add</button>
@@ -2799,7 +2799,7 @@ function _renderSetupSimulationsTile(content) {
                     </div>
                     <div>
                         <p class="${labelCls} mb-1">T3 PCI (never torn down)</p>
-                        <div id="global-t3-pci" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                        <div id="global-t3-pci" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-500 italic">Loading…</p></div>
                         <div class="flex gap-1">
                             <input id="gt3-vp" placeholder="168c:0034" class="w-28 font-mono text-xs ${inputCls} px-2 py-1" title="PCI vendor:product ID for T3 IoT hardware">
                             <button onclick="addGlobalTierPci('t3')" class="${btnCls} text-xs px-3 py-1" title="Register T3 IoT adapter PCI device">+ Add</button>
@@ -2810,41 +2810,41 @@ function _renderSetupSimulationsTile(content) {
             </div>
             <div id="simtab-dhcp" class="space-y-4 hidden">
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">DHCP Server (Kea) ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 mb-2">DHCP Server (Kea) ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Isolated sim-client DHCP (Kea <span class="font-mono">kea-dhcp4-sim</span>) on each cs spoke's second NIC (provisioned by install_cs.sh). Shows whether Kea is running and how full the lease pool is. A spoke without Kea shows "Not configured".</p>
-                <div id="cs-dhcp-server-status" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <div id="cs-dhcp-server-status" class="space-y-3"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             </div>
             <div id="simtab-simq" class="space-y-4 hidden">
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sim Quota Defaults ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 mb-2">Sim Quota Defaults ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide default templates a tenant inherits unless it overrides per alert/insight + site in Config → Sim Quotas. Site blank = "all sites". The engine (Chunk 2) merges these with each tenant's overrides. Sims come from the full primitive catalog; a tenant's simulation.conf may offer a subset.</p>
                 <div class="flex justify-end flex-wrap gap-2 mb-3">
                     <button onclick="addSimQuotaDefault()" class="${btnCls} text-xs px-3 py-1" title="Define new platform-wide simulation quota default">+ Add Default</button>
                 </div>
-                <div id="sim-quota-defaults-rows" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <div id="sim-quota-defaults-rows" class="space-y-2"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
                 <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-                  <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Dongle Quarantine — Exclusion Sims</h3>
+                  <h3 class="text-sm font-bold text-slate-500">Dongle Quarantine — Exclusion Sims</h3>
                   <button onclick="saveQtExcludeSims()" class="${btnCls} text-xs px-3 py-1" title="Save quarantine exclusion simulations">Save</button>
                 </div>
                 <p class="text-xs text-slate-500 mb-3">Sims whose no-IP / no-SSID outcome is the <b>point</b> of the sim (e.g. <span class="font-mono">dhcp_fail</span>, <span class="font-mono">assoc_fail</span>). A T2 (USB-dongle) client running <b>only</b> these past the 1h grace window is <b>not</b> quarantined. A client running any non-excluded sim (or none) that never connects is shed: its bus is struck + the VM destroyed + re-cloned. Per-tenant override: a tenant's Config → Sim Quotas csc <span class="font-mono">qt_exclude_sims</span> overrides this default.</p>
-                <div id="qt-exclude-sims-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <div id="qt-exclude-sims-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
                 <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-                  <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Sharing (Stacking)</h3>
+                  <h3 class="text-sm font-bold text-slate-500">Simulation Sharing (Stacking)</h3>
                   <div class="flex items-center gap-3">
-                    <label class="text-[11px] text-slate-500 flex items-center gap-1"><input type="checkbox" onchange="simSharingToggleHide(this)"> Hide N/A</label>
+                    <label class="text-xs text-slate-500 flex items-center gap-1"><input type="checkbox" onchange="simSharingToggleHide(this)"> Hide N/A</label>
                   </div>
                 </div>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide (all tenants): which simulations may be <b>stacked</b> onto a client already running another sim. A <b>non-shareable</b> sim is exclusive — no tenant's Quota Engine will pack it onto a client running other sims (authoritative, overrides a quota's Multi-capable). Mark a sim <b>N/A</b> to hide it via Hide N/A.</p>
-                <div id="sim-sharing-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <div id="sim-sharing-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
                 <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-                  <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Sim Stacking (Weighted)</h3>
+                  <h3 class="text-sm font-bold text-slate-500">Sim Stacking (Weighted)</h3>
                   <button onclick="saveSimStacking()" class="${btnSecCls} text-xs px-3 py-1">Save</button>
                 </div>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide (all tenants): the ambient pool <b>stacks multiple shareable sims</b> onto each spare client. A sim's <b>weight</b> sets its breadth — weight 3 runs on ~3× the clients of weight 1 (default 1). <b>Max / client</b> caps how many sims one client runs at once; <b>Rotation</b> is how often the assignment re-shuffles so no client keeps the same set forever. Only <b>shareable</b> sims (above) stack, and only sims a tenant lists in <span class="font-mono">randomizable_sims</span> (Config → Pool & SSID) are eligible — empty = stacking off.</p>
@@ -2856,37 +2856,37 @@ function _renderSetupSimulationsTile(content) {
                   <label class="text-xs text-slate-600 flex items-center gap-2" title="After a client is harvested for an alert sim it rests this long before it can be re-harvested — keeps Central data realistic (no flapping). 0 = off. T1 (PCI radio) clients are EXEMPT: they are the reliable clients the quota sims should run on, so a released T1 is immediately re-harvestable rather than resting while a T2 takes the slot.">Harvest cooldown (h)
                     <input id="harvest-cooldown-h" type="number" min="0" step="0.5" class="${inputCls} text-xs px-2 py-1 w-20"></label>
                 </div>
-                <div id="sim-stacking-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <div id="sim-stacking-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             </div>
             <div id="simtab-catalog" class="space-y-4 hidden">
             <div class="${card}">
                 <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-                  <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Observed Catalog ${helpIcon('cs', null, 'Simulations help')}</h3>
+                  <h3 class="text-sm font-bold text-slate-500">Observed Catalog ${helpIcon('cs', null, 'Simulations help')}</h3>
                   <div class="flex items-center gap-2">
                     <input id="obs-catalog-search" oninput="_renderObservedCatalog()" placeholder="Search name / category / type…" class="${inputCls} text-xs px-2 py-1 w-56">
                     <button onclick="loadObservedCatalog()" class="${btnSecCls} text-xs px-3 py-1">Refresh</button>
                   </div>
                 </div>
                 <p class="text-xs text-slate-500 mb-3">Every Central alert/insight the hub has ever observed across <b>all tenants</b> — populated automatically as the hub polls Central and as admins browse Central. This is the same shared library the Sim-Quota "Alert / Insight ID" pickers draw from. Occurrence <b>Count</b> is approximate across hub restarts. Click a column header to sort; use <b>Use in Sim-Quota</b> to stage an entry into a new Sim Quota Defaults row.</p>
-                <div id="obs-catalog-table"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <div id="obs-catalog-table"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             </div>
             <div id="simtab-glv" class="space-y-4 hidden">
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Pending Approval ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 mb-2">Pending Approval ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">A tenant's learning lab records a stable <b>known-good operating point</b> (the client count + config knobs that reliably fires an alert) and proposes it platform-wide. <b>Approve</b> to publish it for every tenant, or <b>Reject</b> to discard the proposal.</p>
-                <div id="glv-pending" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <div id="glv-pending" class="space-y-2"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Global Learned Values ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 mb-2">Global Learned Values ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Publish the learned client count needed to fire each alert, platform-wide. A tenant marks a quota row as a <b>Learning lab</b> (Config → Engine); its controller ratchets down to find the min count that fires and records a <b>learned_op</b>. Pick a tenant's stable learned value per alert and Publish it — every other tenant's <b>Consumer</b> rows (Learning off) then seed/lift from it (up-only; never down-ratchet). Highest learned op wins.</p>
-                <div id="glv-published" class="space-y-2 mb-4"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <div id="glv-published" class="space-y-2 mb-4"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Candidates from Learning Labs</h3>
+                <h3 class="text-sm font-bold text-slate-500 mb-2">Candidates from Learning Labs</h3>
                 <p class="text-xs text-slate-500 mb-3">Stable learned values from every tenant's Learning-lab rows, grouped by alert. The highest op per tenant leads. Click <b>Publish</b> to publish that value for the alert (replaces any current published value for it).</p>
-                <div id="glv-candidates" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <div id="glv-candidates" class="space-y-3"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             </div>`;
     loadSimAdminOverview();
@@ -2930,8 +2930,8 @@ async function loadGlobalTierPci() {
             const r = await fetch(_tierPciEndpoint(tier), { credentials: 'same-origin' });
             const list = r.ok ? (await r.json()).vidpids || [] : [];
             el.innerHTML = list.length
-                ? list.map(vp => `<span class="inline-flex items-center gap-1 text-[11px] font-mono bg-slate-100 text-slate-700 rounded px-2 py-0.5">${vp}<button onclick="removeGlobalTierPci('${tier}','${vp}')" class="text-slate-400 hover:text-red-500" title="Remove">×</button></span>`).join('')
-                : '<p class="text-xs text-slate-400 italic">None</p>';
+                ? list.map(vp => `<span class="inline-flex items-center gap-1 text-xs font-mono bg-slate-100 text-slate-700 rounded px-2 py-0.5">${vp}<button onclick="removeGlobalTierPci('${tier}','${vp}')" class="text-slate-500 hover:text-red-500" title="Remove">×</button></span>`).join('')
+                : '<p class="text-xs text-slate-500 italic">None</p>';
         } catch (e) {
             el.innerHTML = '<p class="text-xs text-red-400 italic">Failed to load</p>';
         }
@@ -3065,7 +3065,7 @@ function _renderSimQuotaDefaultsEditor() {
         // untethered (no alert needed). Presence rows have no alert at all.
         const typeCell = isPresence
             ? `<label class="${lblCls}">Presence
-                <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">Homes N clients to the site — no sim. They stay free for stackable sims.</div>
+                <div class="text-xs text-slate-500 italic mt-1 leading-tight">Homes N clients to the site — no sim. They stay free for stackable sims.</div>
               </label>`
             : `<div class="${lblCls}">
                 <label class="flex items-center gap-1 cursor-pointer font-semibold text-slate-700"><input data-sqd="tied" type="checkbox" onchange="_simQuotaDefaultOnTiedChange(this)" ${tied ? 'checked' : ''}> Tied to alert/insight</label>
@@ -3074,15 +3074,15 @@ function _renderSimQuotaDefaultsEditor() {
                        <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
                        <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
                      </select>`
-                  : `<div class="text-[11px] text-slate-400 italic mt-1 leading-tight">Presence — no alert/insight (keeps N clients on the sim)</div>`}
+                  : `<div class="text-xs text-slate-500 italic mt-1 leading-tight">Presence — no alert/insight (keeps N clients on the sim)</div>`}
               </div>`;
         const idCell = isPresence
             ? `<label class="${lblCls}">Alert / Insight ID
-                <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— none (presence) —</div>
+                <div class="text-xs text-slate-500 italic mt-1 leading-tight">— none (presence) —</div>
               </label>`
             : (!tied
               ? `<label class="${lblCls}">Alert / Insight ID
-                <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— not required —</div>
+                <div class="text-xs text-slate-500 italic mt-1 leading-tight">— not required —</div>
               </label>`
               : `<label class="${lblCls}">Alert / Insight ID
                 ${_simQuotaDefaultIdControl(r, ctlCls)}
@@ -3111,10 +3111,10 @@ function _renderSimQuotaDefaultsEditor() {
         <details class="text-xs text-slate-500 mb-2">
           <summary class="cursor-pointer">Suggested alert → sim linkage</summary>
           <ul class="mt-1 list-disc list-inside space-y-0.5">
-            ${Object.entries(suggested).map(([a, s]) => `<li><span class="font-mono">${a}</span> → <span class="font-mono">${s}</span> <button onclick="addSimQuotaDefaultSuggested('${a}','${s}')" class="text-[#01A982] hover:underline ml-1">add</button></li>`).join('')}
+            ${Object.entries(suggested).map(([a, s]) => `<li><span class="font-mono">${a}</span> → <span class="font-mono">${s}</span> <button onclick="addSimQuotaDefaultSuggested('${a}','${s}')" class="text-primary-text hover:underline ml-1">add</button></li>`).join('')}
           </ul>
         </details>` : '';
-    rowsEl.innerHTML = suggestHtml + (rowHtml || '<p class="text-xs text-slate-400 italic">No default quotas defined. Add one or pick a suggested linkage above.</p>');
+    rowsEl.innerHTML = suggestHtml + (rowHtml || '<p class="text-xs text-slate-500 italic">No default quotas defined. Add one or pick a suggested linkage above.</p>');
 }
 
 function _simQuotaDefaultsSyncFromDom() {
@@ -3246,7 +3246,7 @@ function _renderQtExcludeSims() {
             <input data-qtexclude="${esc(f)}" type="checkbox" ${sel.has(f) ? 'checked' : ''}>
             <span class="font-mono text-slate-600">${esc(f)}</span>
           </label>`).join('')
-        : '<p class="text-xs text-slate-400 italic">No simulations found.</p>';
+        : '<p class="text-xs text-slate-500 italic">No simulations found.</p>';
 }
 
 function _simSharingSyncFromDom() {
@@ -3265,7 +3265,7 @@ function _renderSimSharing() {
     sims.sort((a, b) => String(a).toLowerCase().localeCompare(String(b).toLowerCase()));
     const naVal = f => Object.prototype.hasOwnProperty.call(_simSharingNA, f) ? !!_simSharingNA[f] : false;
     const list = sims.filter(f => !_simSharingHideNA || !naVal(f));
-    if (!list.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No simulations found.</p>'; return; }
+    if (!list.length) { el.innerHTML = '<p class="text-xs text-slate-500 italic">No simulations found.</p>'; return; }
     const esc = escapeHtml;  // shared escaper (escapes &<>"')
     el.innerHTML = list.map(f => {
         const na = naVal(f);
@@ -3274,7 +3274,7 @@ function _renderSimSharing() {
         return `<label class="grid grid-cols-[minmax(0,1fr)_5rem_3.5rem] items-center gap-2 py-1 border-b border-slate-100 ${na ? 'opacity-60' : ''}">
           <span class="text-xs font-mono text-slate-600 truncate">${esc(f)}</span>
           <span class="flex items-center gap-1 text-xs"><input data-simshare="${esc(f)}" type="checkbox" ${cur ? 'checked' : ''} ${na ? 'disabled' : ''}> Share</span>
-          <span class="flex items-center gap-1 text-xs text-slate-400"><input data-simna="${esc(f)}" type="checkbox" onchange="simSharingOnNA()" ${na ? 'checked' : ''}> N/A</span>
+          <span class="flex items-center gap-1 text-xs text-slate-500"><input data-simna="${esc(f)}" type="checkbox" onchange="simSharingOnNA()" ${na ? 'checked' : ''}> N/A</span>
         </label>`;
     }).join('');
 }
@@ -3320,7 +3320,7 @@ function _renderSimStacking() {
     sims = sims.filter(isShare).sort((a, b) =>
         String(a).toLowerCase().localeCompare(String(b).toLowerCase()));
     if (!sims.length) {
-        el.innerHTML = '<p class="text-xs text-slate-400 italic">No shareable simulations — mark sims <b>Share</b> above to weight them for stacking.</p>';
+        el.innerHTML = '<p class="text-xs text-slate-500 italic">No shareable simulations — mark sims <b>Share</b> above to weight them for stacking.</p>';
         return;
     }
     const esc = escapeHtml;
@@ -3487,7 +3487,7 @@ function _renderObservedCatalog() {
     if (!el) return;
     const esc = escapeHtml;  // shared escaper (escapes &<>"')
     if (!_observedCatalog.length) {
-        el.innerHTML = '<p class="text-sm text-slate-400 italic py-4">No alerts/insights observed yet — they populate automatically as the hub polls Central.</p>';
+        el.innerHTML = '<p class="text-sm text-slate-500 italic py-4">No alerts/insights observed yet — they populate automatically as the hub polls Central.</p>';
         return;
     }
     const q = ((document.getElementById('obs-catalog-search') || {}).value || '').trim().toLowerCase();
@@ -3505,7 +3505,7 @@ function _renderObservedCatalog() {
     // Sortable columns carry an onclick; the rest are plain headers.
     const sortTh = (k, label) => `<th class="px-4 py-2 text-left font-medium cursor-pointer select-none hover:text-slate-700" onclick="_observedCatalogSortBy('${k}')">${label}${arrow(k)}</th>`;
     const plainTh = label => `<th class="px-4 py-2 text-left font-medium">${label}</th>`;
-    const head = `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>` +
+    const head = `<thead class="bg-slate-50 text-xs text-slate-500"><tr>` +
         sortTh('type', 'Type') + sortTh('name', 'Name') + plainTh('Category') +
         plainTh('Severity') + plainTh('Device Type') + plainTh('Site') +
         plainTh('First Seen') + sortTh('last_seen', 'Last Seen') + sortTh('count', 'Count') +
@@ -3514,7 +3514,7 @@ function _renderObservedCatalog() {
         const type = String(e.type || 'alert');
         const badgeCls = type === 'insight' ? 'bg-sky-100 text-sky-700' : 'bg-amber-100 text-amber-700';
         return `<tr class="border-t border-slate-100">
-          <td class="px-4 py-2"><span class="inline-block text-[11px] font-medium rounded px-2 py-0.5 ${badgeCls}">${esc(type)}</span></td>
+          <td class="px-4 py-2"><span class="inline-block text-xs font-medium rounded px-2 py-0.5 ${badgeCls}">${esc(type)}</span></td>
           <td class="px-4 py-2 text-slate-800">${esc(e.name || e.id || '')}</td>
           <td class="px-4 py-2 text-slate-500">${esc(e.category || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${esc(e.severity || '—')}</td>
@@ -3523,10 +3523,10 @@ function _renderObservedCatalog() {
           <td class="px-4 py-2 text-slate-500 whitespace-nowrap">${esc(fmtDate(e.first_seen))}</td>
           <td class="px-4 py-2 text-slate-500 whitespace-nowrap">${esc(fmtDate(e.last_seen))}</td>
           <td class="px-4 py-2 text-slate-700 tabular-nums">${esc(String(e.count == null ? 1 : e.count))}</td>
-          <td class="px-4 py-2"><button data-obs-type="${esc(type)}" data-obs-id="${esc(e.id || '')}" data-obs-name="${esc(e.name || e.id || '')}" onclick="_useInSimQuota(this)" class="text-[#01A982] hover:underline text-xs font-medium">Use in Sim-Quota</button></td>
+          <td class="px-4 py-2"><button data-obs-type="${esc(type)}" data-obs-id="${esc(e.id || '')}" data-obs-name="${esc(e.name || e.id || '')}" onclick="_useInSimQuota(this)" class="text-primary-text hover:underline text-xs font-medium">Use in Sim-Quota</button></td>
         </tr>`;
     }).join('');
-    const empty = '<tr><td colspan="10" class="px-4 py-6 text-center text-slate-400">No entries match your search.</td></tr>';
+    const empty = '<tr><td colspan="10" class="px-4 py-6 text-center text-slate-500">No entries match your search.</td></tr>';
     el.innerHTML = tableWrap(head + `<tbody>${body || empty}</tbody>`);
 }
 
@@ -3559,26 +3559,26 @@ function _renderSetupGeneralTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     const subnetFilterCard = currentView === 'settings' ? `
         <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenant Subnet Filtering ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+            <h3 class="text-sm font-bold text-slate-500">Tenant Subnet Filtering ${helpIcon('lm-hub', null, 'Hub help')}</h3>
             <p class="text-xs text-slate-500 mb-3">Filter each module's data by the tenant's NetBox prefixes, enforced server-side (a tenant cannot see another tenant's subnet data even via the API). Disable for modules that are scoped by tenant ID instead of subnet (e.g. Simulations).</p>
-            <div id="subnet-filter-toggles" class="grid grid-cols-1 md:grid-cols-2 gap-x-10"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            <div id="subnet-filter-toggles" class="grid grid-cols-1 md:grid-cols-2 gap-x-10"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
         </div>` : '';
     const certMonCard = (currentView === 'settings' && isAdmin()) ? `
         <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Cert Expiry Monitor</h3>
-            <p class="text-xs text-slate-400">Daily check of the TLS certificates on the public Aruba Central / HPE GreenLake and Juniper Mist cloud endpoints. When enabled, a <b>Cert Monitor</b> item appears in the left menu (Global Admins only).</p>
+            <h3 class="text-sm font-bold text-slate-500">Cert Expiry Monitor</h3>
+            <p class="text-xs text-slate-500">Daily check of the TLS certificates on the public Aruba Central / HPE GreenLake and Juniper Mist cloud endpoints. When enabled, a <b>Cert Monitor</b> item appears in the left menu (Global Admins only).</p>
             <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
-                <input type="checkbox" id="certmon-enabled" onchange="saveCertMonEnabled(this)" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                <input type="checkbox" id="certmon-enabled" onchange="saveCertMonEnabled(this)" class="rounded border-slate-300 text-primary-text focus:ring-green-500">
                 Enable Cert Expiry Monitor
             </label>
         </div>` : '';
     const monitoringCard = (currentView === 'settings' && isAdmin()) ? `
         <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Monitoring Server</h3>
-            <p class="text-xs text-slate-400">The DNS name (and port) of the monitoring server. It is pushed to every Monitoring Proxy installed from an agent, which connects out to it. Use a DNS name, not an IP.</p>
+            <h3 class="text-sm font-bold text-slate-500">Monitoring Server</h3>
+            <p class="text-xs text-slate-500">The DNS name (and port) of the monitoring server. It is pushed to every Monitoring Proxy installed from an agent, which connects out to it. Use a DNS name, not an IP.</p>
             <div class="flex items-center gap-3">
                 <input id="monitoring-server" type="text" placeholder="zabbix.example.com:10051" class="${inputCls} max-w-md font-mono">
-                <span id="monitoring-server-msg" class="text-xs text-slate-400"></span>
+                <span id="monitoring-server-msg" class="text-xs text-slate-500"></span>
             </div>
         </div>` : '';
     content.innerHTML = `
@@ -3588,45 +3588,45 @@ function _renderSetupGeneralTile(content) {
             ${monitoringCard}
             ${certMonCard}
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Toast Messages ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                <p class="text-xs text-slate-400">How long toast messages (success/error confirmations in the bottom/top-right corner) stay on screen before fading out. A visible dismiss (×) always closes one early regardless of this setting.</p>
+                <h3 class="text-sm font-bold text-slate-500">Toast Messages ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <p class="text-xs text-slate-500">How long toast messages (success/error confirmations in the bottom/top-right corner) stay on screen before fading out. A visible dismiss (×) always closes one early regardless of this setting.</p>
                 <div class="flex items-center gap-3">
                     <label class="${labelCls}">Toast Duration (seconds)</label>
                     <input type="number" id="toast-duration-input" min="1" max="300" value="10"
                         class="w-20 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                    <span id="toast-duration-status" class="text-xs text-slate-400"></span>
+                    <span id="toast-duration-status" class="text-xs text-slate-500"></span>
                 </div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Agent Relay Timeouts ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                <p class="text-xs text-slate-400">How long a cs spoke waits for its hosted Proxmox agent to acknowledge a relayed command. Long ops (delete / reclone / snapshot / clone / provision) ack immediately and stream their result, but a busy (auto-prov cloning) or WAN-connected agent can be slow — raise the long-op window to avoid false "Agent response timeout" failures. Pushed to cs spokes on connect.</p>
+                <h3 class="text-sm font-bold text-slate-500">Agent Relay Timeouts ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <p class="text-xs text-slate-500">How long a cs spoke waits for its hosted Proxmox agent to acknowledge a relayed command. Long ops (delete / reclone / snapshot / clone / provision) ack immediately and stream their result, but a busy (auto-prov cloning) or WAN-connected agent can be slow — raise the long-op window to avoid false "Agent response timeout" failures. Pushed to cs spokes on connect.</p>
                 <div class="flex flex-wrap items-end gap-3">
                     <div class="space-y-1"><label class="${labelCls}">Long-op timeout (s)</label>
                         <input type="number" id="relay-timeout-long" min="1" max="600" value="60" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                     <div class="space-y-1"><label class="${labelCls}">Fast timeout (s)</label>
                         <input type="number" id="relay-timeout-fast" min="1" max="600" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                    <span id="relay-timeout-status" class="text-xs text-slate-400"></span>
+                    <span id="relay-timeout-status" class="text-xs text-slate-500"></span>
                 </div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Appearance ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                <p class="text-xs text-slate-400">Configure the header logo shown to the left of the title. Use <code>hpe-svg</code> for the built-in HPE mark, or any image URL/path.</p>
+                <h3 class="text-sm font-bold text-slate-500">Appearance ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <p class="text-xs text-slate-500">Configure the header logo shown to the left of the title. Use <code>hpe-svg</code> for the built-in HPE mark, or any image URL/path.</p>
                 <div class="space-y-1">
                     <label class="${labelCls}">Header logo URL / <code>hpe-svg</code></label>
                     <input id="appearance-logo-url" type="text" class="${inputCls}" placeholder="hpe-svg">
                 </div>
                 <div class="flex items-center gap-2">
-                    <input id="appearance-show-logo" type="checkbox" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                    <input id="appearance-show-logo" type="checkbox" class="rounded border-slate-300 text-primary-text focus:ring-green-500">
                     <label for="appearance-show-logo" class="text-sm text-slate-600">Show header logo</label>
                 </div>
                 <div class="flex justify-end items-center gap-3">
-                    <span id="appearance-status" class="text-xs text-slate-400"></span>
+                    <span id="appearance-status" class="text-xs text-slate-500"></span>
                 </div>
             </div>
         </div>
         <div class="${card}">
             <div class="flex justify-between items-center">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Update Configuration ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500">Update Configuration ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 <div class="flex gap-2">
                     <button onclick="triggerUpdate(event)" class="${btnCls}">Update All</button>
                 </div>
@@ -3644,10 +3644,10 @@ function _renderSetupGeneralTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Certificates (LE) Repo</label><input type="text" id="update-source-le" class="${inputCls}"></div>
             </div>
             <div class="flex items-center gap-4 pt-2">
-                <span id="last-update-ts" class="text-xs text-slate-400"></span>
+                <span id="last-update-ts" class="text-xs text-slate-500"></span>
             </div>
             <div class="border-t border-slate-200 mt-4 pt-4">
-                <p class="text-xs text-slate-400 mb-3">How often the hub checks GitHub and syncs: pulls the hub tree + <code>provisioning_repos/*</code> locally and pushes an update to every approved spoke. Same schedule as System → Sync's "GitHub Repo Sync" card — either one saves/shows it.</p>
+                <p class="text-xs text-slate-500 mb-3">How often the hub checks GitHub and syncs: pulls the hub tree + <code>provisioning_repos/*</code> locally and pushes an update to every approved spoke. Same schedule as System → Sync's "GitHub Repo Sync" card — either one saves/shows it.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="repo-sync-enabled" class="w-4 h-4 text-green-600 rounded" checked>Enable scheduled sync</label>
                     <div class="space-y-1">
@@ -3659,14 +3659,14 @@ function _renderSetupGeneralTile(content) {
         </div>
         <div class="${card}">
             <div class="flex justify-between items-center">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Data Cache ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500">Data Cache ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 <div class="flex items-center gap-3">
                     <button onclick="refreshCacheNamespace()" class="${btnSecCls}" title="Refresh every cached module from the spokes now">Refresh now</button>
                     <button onclick="purgeAllCaches()" class="${btnSecCls}" title="Drop all cached data; it is fetched again right away">Purge All</button>
                 </div>
             </div>
             <div id="cache-status-rows" class="mt-3 text-sm">
-                <p class="py-4 text-center text-slate-400 italic text-xs">Loading…</p>
+                <p class="py-4 text-center text-slate-500 italic text-xs">Loading…</p>
             </div>
         </div>
         </div>`;
@@ -3710,42 +3710,42 @@ function _renderSettingsCloudNacTile(content) {
     content.innerHTML = `
         <div class="${card}">
             <div class="flex items-center justify-between mb-2">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Cloud NAC — JIT Entra accounts</h3>
-                <span id="cn-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+                <h3 class="text-sm font-bold text-slate-500">Cloud NAC — JIT Entra accounts</h3>
+                <span id="cn-state-pill" class="text-xs px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
             </div>
-            <p class="text-xs text-slate-400 mb-3">When the engine moves a sim client onto a <b>1X SSID</b>, the hub creates an Entra account for that user, sets a random password, and delivers it to the client as its 802.1X password. Idle accounts (no sign-in for <b>Idle days</b>) are swept + deleted. Reuses the <b>SSO Entra app</b> cert — the app needs Graph <b>User.ReadWrite.All</b> + <b>AuditLog.Read.All</b> (Application) consented, and Entra ID P1 for the sign-in-activity sweep.</p>
+            <p class="text-xs text-slate-500 mb-3">When the engine moves a sim client onto a <b>1X SSID</b>, the hub creates an Entra account for that user, sets a random password, and delivers it to the client as its 802.1X password. Idle accounts (no sign-in for <b>Idle days</b>) are swept + deleted. Reuses the <b>SSO Entra app</b> cert — the app needs Graph <b>User.ReadWrite.All</b> + <b>AuditLog.Read.All</b> (Application) consented, and Entra ID P1 for the sign-in-activity sweep.</p>
             <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="cn-enabled" class="w-4 h-4 text-green-600 rounded">Enable Cloud NAC provisioning</label>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div class="space-y-1"><label class="${labelCls}">UPN domain</label><input id="cn-domain" type="text" placeholder="ssplm.onmicrosoft.com" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Idle days (delete after)</label><input id="cn-idle" type="number" placeholder="7" class="${inputCls}"></div>
             </div>
             <div class="mt-3 space-y-1">
-                <label class="${labelCls}">Add provisioned users to Entra group <span class="text-slate-400 normal-case font-normal">(optional — target this group with a CA MFA-exclusion / Cloud Auth policy)</span></label>
+                <label class="${labelCls}">Add provisioned users to Entra group <span class="text-slate-500 normal-case font-normal">(optional — target this group with a CA MFA-exclusion / Cloud Auth policy)</span></label>
                 <div class="flex gap-2">
                     <input id="cn-group-id" type="text" placeholder="group object ID" class="${inputCls} font-mono text-xs flex-1">
                     <input id="cn-group-name" type="text" placeholder="(name)" readonly class="${inputCls} text-xs flex-1 bg-slate-50">
-                    <button type="button" onclick="loadCloudNacGroupPicker()" id="cn-group-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold">Pick from Entra</button>
+                    <button type="button" onclick="loadCloudNacGroupPicker()" id="cn-group-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold">Pick from Entra</button>
                 </div>
                 <select id="cn-group-select" onchange="onCloudNacGroupPick(this)" class="hidden w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></select>
-                <p id="cn-group-msg" class="text-[11px] text-amber-600 hidden"></p>
+                <p id="cn-group-msg" class="text-xs text-amber-600 hidden"></p>
             </div>
             <div class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
-                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Test provision</div>
+                <div class="text-xs font-bold text-slate-500 mb-1">Test provision</div>
                 <div class="flex gap-2">
                     <input id="cn-test-user" type="text" placeholder="username (e.g. cschmidt)" class="${inputCls} font-mono text-xs flex-1">
-                    <button type="button" onclick="provisionCloudNac()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">Provision</button>
+                    <button type="button" onclick="provisionCloudNac()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold whitespace-nowrap">Provision</button>
                 </div>
-                <p id="cn-test-out" class="text-[11px] font-mono text-slate-600 mt-1 break-all"></p>
+                <p id="cn-test-out" class="text-xs font-mono text-slate-600 mt-1 break-all"></p>
             </div>
             <div class="mt-4">
                 <div class="flex items-center justify-between mb-1">
-                    <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Provisioned accounts <span id="cn-count" class="text-slate-400 font-normal"></span></div>
-                    <button type="button" onclick="sweepCloudNac()" class="text-[#01A982] hover:underline text-xs font-bold">Sweep idle now</button>
+                    <div class="text-xs font-bold text-slate-500">Provisioned accounts <span id="cn-count" class="text-slate-500 font-normal"></span></div>
+                    <button type="button" onclick="sweepCloudNac()" class="text-primary-text hover:underline text-xs font-bold">Sweep idle now</button>
                 </div>
                 <div id="cn-accounts" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-72 overflow-y-auto text-xs"></div>
             </div>
             <div class="mt-4 flex items-center justify-between gap-3">
-                <span id="cn-msg" class="text-xs text-slate-400"></span>
+                <span id="cn-msg" class="text-xs text-slate-500"></span>
             </div>
         </div>`;
     loadCloudNac();
@@ -3765,7 +3765,7 @@ async function loadCloudNac() {
         set('cn-domain', c.domain); set('cn-idle', c.idle_days || 7);
         set('cn-group-id', c.group_id); set('cn-group-name', c.group_name);
         const pill = document.getElementById('cn-state-pill');
-        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-xs px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         const cnt = document.getElementById('cn-count'); if (cnt) cnt.textContent = `(${d.count || 0})`;
         const box = document.getElementById('cn-accounts');
         if (box) {
@@ -3773,10 +3773,10 @@ async function loadCloudNac() {
             box.innerHTML = accts.length ? accts.map(a => `
               <div class="flex items-center gap-2 px-2 py-1">
                 <span class="font-mono text-slate-700 w-40 shrink-0 truncate" title="${escapeHtml(a.upn || a.username)}">${escapeHtml(a.username)}</span>
-                <span class="text-slate-400 flex-1 truncate" title="provisioned ${escapeHtml(a.provisioned_at || '')}">${escapeHtml(a.upn || '')}</span>
+                <span class="text-slate-500 flex-1 truncate" title="provisioned ${escapeHtml(a.provisioned_at || '')}">${escapeHtml(a.upn || '')}</span>
                 <button type="button" onclick="deprovisionCloudNac('${escapeHtml(a.username)}')" title="Delete Entra account" class="text-red-500 hover:text-red-700 font-bold px-1">✕</button>
               </div>`).join('')
-              : '<div class="text-slate-400 italic px-2 py-2">No accounts provisioned yet.</div>';
+              : '<div class="text-slate-500 italic px-2 py-2">No accounts provisioned yet.</div>';
         }
     } catch (e) { console.error('loadCloudNac failed', e); }
 }
@@ -3932,10 +3932,10 @@ function _renderCollabTile(content) {
     content.innerHTML = `
         <div class="${card}">
             <div class="flex items-center justify-between mb-2">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Collab Traffic Sim — Teams / Zoom / WebEx</h3>
-                <span id="cb-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+                <h3 class="text-sm font-bold text-slate-500">Collab Traffic Sim — Teams / Zoom / WebEx</h3>
+                <span id="cb-state-pill" class="text-xs px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
             </div>
-            <p class="text-xs text-slate-400 mb-3">Simulates collaboration-app media by sending raw UDP to a passive hub sink over the wired/USB network path (not the WebSocket). Choose which apps are active — their real media ports drive both the client sender and the firewall alias. The sink (<code>lm-collab-sink</code>) listens on the union of active app ports; verify with <code>systemctl status lm-collab-sink</code> on the hub. Client knobs live in the cs repo (<code>configs/simulation.conf</code>: <code>collab</code>/<code>collab_app</code>/<code>collab_bw</code>/<code>collab_server</code>).</p>
+            <p class="text-xs text-slate-500 mb-3">Simulates collaboration-app media by sending raw UDP to a passive hub sink over the wired/USB network path (not the WebSocket). Choose which apps are active — their real media ports drive both the client sender and the firewall alias. The sink (<code>lm-collab-sink</code>) listens on the union of active app ports; verify with <code>systemctl status lm-collab-sink</code> on the hub. Client knobs live in the cs repo (<code>configs/simulation.conf</code>: <code>collab</code>/<code>collab_app</code>/<code>collab_bw</code>/<code>collab_server</code>).</p>
             <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="cb-enabled" class="w-4 h-4 text-green-600 rounded">Enable collab traffic sim</label>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div class="space-y-1"><label class="${labelCls}">Default app</label>
@@ -3949,35 +3949,35 @@ function _renderCollabTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Sink / hub LAN IP (clients target)</label><input id="cb-server" type="text" placeholder="172.16.1.31" class="${inputCls} font-mono text-xs"></div>
             </div>
             <div class="mt-3">
-                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Active apps <span class="text-slate-400 font-normal">(ports the sink listens on + firewall alias opens)</span></div>
+                <div class="text-xs font-bold text-slate-500 mb-1">Active apps <span class="text-slate-500 font-normal">(ports the sink listens on + firewall alias opens)</span></div>
                 <div id="cb-app-toggles" class="grid grid-cols-1 sm:grid-cols-3 gap-2"></div>
-                <p id="cb-ports" class="text-[11px] font-mono text-slate-500 mt-2"></p>
+                <p id="cb-ports" class="text-xs font-mono text-slate-500 mt-2"></p>
             </div>
             <div class="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
-                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Replay capture (high-fidelity mode)</div>
-                <p class="text-[11px] text-slate-500 mb-2">Upload a real Teams/Zoom/WebEx call capture (<code>.pcap</code>/<code>.pcapng</code>, ≤64&nbsp;MB). Clients replay its <b>client→server</b> frames at the sink and the hub sink replays the capture's <b>server→client</b> frames back — a genuine bidirectional flow DPI/AppRF classifies as the real app. With no capture, clients fall back to synthetic UDP on the same ports.</p>
-                <label class="flex items-center gap-2 text-sm text-slate-600 mb-2 cursor-pointer"><input type="checkbox" id="cb-responder" class="w-4 h-4 text-green-600 rounded">Sink responds with the capture's server→client frames <span class="text-[10px] text-slate-400">(applied on <code>lm-collab-sink</code> restart)</span></label>
-                <p id="cb-pcap-info" class="text-[11px] font-mono text-slate-500 mb-2">No capture uploaded.</p>
+                <div class="text-xs font-bold text-slate-500 mb-1">Replay capture (high-fidelity mode)</div>
+                <p class="text-xs text-slate-500 mb-2">Upload a real Teams/Zoom/WebEx call capture (<code>.pcap</code>/<code>.pcapng</code>, ≤64&nbsp;MB). Clients replay its <b>client→server</b> frames at the sink and the hub sink replays the capture's <b>server→client</b> frames back — a genuine bidirectional flow DPI/AppRF classifies as the real app. With no capture, clients fall back to synthetic UDP on the same ports.</p>
+                <label class="flex items-center gap-2 text-sm text-slate-600 mb-2 cursor-pointer"><input type="checkbox" id="cb-responder" class="w-4 h-4 text-green-600 rounded">Sink responds with the capture's server→client frames <span class="text-xs text-slate-500">(applied on <code>lm-collab-sink</code> restart)</span></label>
+                <p id="cb-pcap-info" class="text-xs font-mono text-slate-500 mb-2">No capture uploaded.</p>
                 <div class="flex flex-wrap gap-2 items-center">
                     <input type="file" id="cb-pcap-file" accept=".pcap,.pcapng" class="text-xs">
                     <button type="button" onclick="uploadCollabPcap()" id="cb-pcap-up" class="${btnSecCls} whitespace-nowrap">Upload capture</button>
                     <button type="button" onclick="deleteCollabPcap()" id="cb-pcap-del" class="${btnSecCls} whitespace-nowrap">Remove</button>
-                    <a href="#" onclick="downloadCollabPcap(event)" id="cb-pcap-dl" class="text-[11px] text-blue-600 hover:underline">Download</a>
+                    <a href="#" onclick="downloadCollabPcap(event)" id="cb-pcap-dl" class="text-xs text-blue-600 hover:underline">Download</a>
                 </div>
-                <p id="cb-pcap-msg" class="text-[11px] text-slate-500 mt-2"></p>
+                <p id="cb-pcap-msg" class="text-xs text-slate-500 mt-2"></p>
             </div>
             <div class="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
-                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Apply to firewall</div>
-                <p class="text-[11px] text-slate-500 mb-2">Creates an OPNsense <b>port alias</b> (<code>lm-collab-ports</code>) from the active app ports + a <b>pass</b> rule (UDP, source → hub IP on that alias). Uses the existing firewall endpoints (tenant-scoped). Re-running skips the alias if it already exists; the rule is created each time — delete duplicates in Firewall → Rules.</p>
+                <div class="text-xs font-bold text-slate-500 mb-1">Apply to firewall</div>
+                <p class="text-xs text-slate-500 mb-2">Creates an OPNsense <b>port alias</b> (<code>lm-collab-ports</code>) from the active app ports + a <b>pass</b> rule (UDP, source → hub IP on that alias). Uses the existing firewall endpoints (tenant-scoped). Re-running skips the alias if it already exists; the rule is created each time — delete duplicates in Firewall → Rules.</p>
                 <div class="flex flex-wrap gap-2 items-end">
                     <div class="space-y-1 flex-1 min-w-[200px]"><label class="${labelCls}">Firewall</label><select id="cb-fw" class="${inputCls}"><option value="">— select a firewall —</option></select></div>
                     <div class="space-y-1 flex-1 min-w-[180px]"><label class="${labelCls}">Source (any / CIDR / alias)</label><input id="cb-src" type="text" placeholder="any" class="${inputCls} text-xs"></div>
                     <button type="button" onclick="applyCollabFirewall()" id="cb-apply" class="${btnSecCls} whitespace-nowrap">Create alias + allow rule</button>
                 </div>
-                <p id="cb-apply-msg" class="text-[11px] text-slate-500 mt-2"></p>
+                <p id="cb-apply-msg" class="text-xs text-slate-500 mt-2"></p>
             </div>
             <div class="mt-4 flex items-center justify-between gap-3">
-                <span id="cb-msg" class="text-xs text-slate-400"></span>
+                <span id="cb-msg" class="text-xs text-slate-500"></span>
             </div>
         </div>`;
     loadCollab();
@@ -3999,7 +3999,7 @@ async function loadCollab() {
         const resp = document.getElementById('cb-responder'); if (resp) resp.checked = c.responder_enabled !== false;
         _renderCollabPcap(c.pcap);
         const pill = document.getElementById('cb-state-pill');
-        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-xs px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         // Per-app toggles + the union port readout.
         const box = document.getElementById('cb-app-toggles');
         const active = c.apps || {};
@@ -4008,7 +4008,7 @@ async function loadCollab() {
                 <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer border border-slate-200 rounded-md px-3 py-2 bg-white">
                     <input type="checkbox" id="cb-app-${k}" class="w-4 h-4 text-green-600 rounded" ${active[k] !== false ? 'checked' : ''}>
                     <span class="font-medium">${escapeHtml(v.label || k)}</span>
-                    <span class="font-mono text-[10px] text-slate-400 ml-auto">${(v.ports || []).join(',')}</span>
+                    <span class="font-mono text-xs text-slate-500 ml-auto">${(v.ports || []).join(',')}</span>
                 </label>`).join('');
         }
         _updateCollabPorts(apps);
@@ -4124,7 +4124,7 @@ async function saveCollab() {
         if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || ('HTTP ' + r.status)); }
         const d = await r.json().catch(() => ({}));
         const pill = document.getElementById('cb-state-pill');
-        if (pill && d.config) { pill.textContent = d.config.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (d.config.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        if (pill && d.config) { pill.textContent = d.config.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-xs px-2 py-0.5 rounded-full font-bold ' + (d.config.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         const msg = document.getElementById('cb-msg'); if (msg) { msg.textContent = 'Saved.'; setTimeout(() => { if (msg) msg.textContent = ''; }, 2000); }
     } catch (e) {
         const msg = document.getElementById('cb-msg'); if (msg) msg.textContent = 'Error: ' + e.message;
@@ -4201,10 +4201,10 @@ function _renderSettingsKeyVaultTile(content) {
     content.innerHTML = `
         <div class="${card}">
             <div class="flex items-center justify-between mb-2">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Key Vault — DR &amp; break-glass</h3>
-                <span id="kv-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+                <h3 class="text-sm font-bold text-slate-500">Key Vault — DR &amp; break-glass</h3>
+                <span id="kv-state-pill" class="text-xs px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
             </div>
-            <p class="text-xs text-slate-400 mb-3">Stores disaster-recovery material in <b>Azure Key Vault</b> using the <b>SSO Entra app</b> cert — the app needs the <b>Key Vault Secrets Officer</b> role on the vault. On a schedule the hub rotates the local admin password (<b>break-glass</b> — afterwards it lives only in the vault), and pushes a <b>min bootstrap backup</b>: users/logins + the Azure connection + the Fernet key + a pointer to your real backup source. Restore that on a fresh hub → it can call home to Azure and let admins in → then pull the full backup from source.</p>
+            <p class="text-xs text-slate-500 mb-3">Stores disaster-recovery material in <b>Azure Key Vault</b> using the <b>SSO Entra app</b> cert — the app needs the <b>Key Vault Secrets Officer</b> role on the vault. On a schedule the hub rotates the local admin password (<b>break-glass</b> — afterwards it lives only in the vault), and pushes a <b>min bootstrap backup</b>: users/logins + the Azure connection + the Fernet key + a pointer to your real backup source. Restore that on a fresh hub → it can call home to Azure and let admins in → then pull the full backup from source.</p>
             <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="kv-enabled" class="w-4 h-4 text-green-600 rounded">Enable Key Vault DR automation</label>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Vault URL</label><input id="kv-url" type="text" placeholder="https://my-vault.vault.azure.net" class="${inputCls} font-mono text-xs"></div>
@@ -4212,35 +4212,35 @@ function _renderSettingsKeyVaultTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Keep backups (days)</label><input id="kv-retain" type="number" placeholder="7" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Admin-password secret name</label><input id="kv-admin-secret" type="text" placeholder="lm-admin-password" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">Fernet-key secret name</label><input id="kv-fernet-secret" type="text" placeholder="lm-fernet-key" class="${inputCls} font-mono text-xs"></div>
-                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Backup secret prefix <span class="text-slate-400 normal-case font-normal">(daily: prefix + YYYYMMDD)</span></label><input id="kv-prefix" type="text" placeholder="lm-min-backup-" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Backup secret prefix <span class="text-slate-500 normal-case font-normal">(daily: prefix + YYYYMMDD)</span></label><input id="kv-prefix" type="text" placeholder="lm-min-backup-" class="${inputCls} font-mono text-xs"></div>
             </div>
             <div class="mt-3 flex flex-wrap items-center gap-2">
-                <button type="button" onclick="testKeyVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Test connection</button>
-                <button type="button" onclick="testFernetTier1()" title="Tests the DIFFERENT auth path the hub actually uses at boot to source the Fernet key from Key Vault (managed identity via LM_KEYVAULT_URL/LM_FERNET_KEY_KV_SECRET) — separate from 'Test connection' above, which only checks the SSO app-cert path used by the buttons below." class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Test Fernet boot path (Tier 1)</button>
-                <button type="button" onclick="saveFernetTier1Config()" title="Writes LM_FERNET_KEY_KV_SECRET and LM_KEYVAULT_URL — using the Vault URL / Fernet-key secret name fields above — into this hub's .env, then restarts the hub to apply them. LM_FERNET_KEY stays in place as a fallback; nothing else in .env is touched." class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Save &amp; restart for Tier 1</button>
-                <button type="button" onclick="rotateKeyVaultAdmin()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Rotate admin now</button>
-                <button type="button" onclick="pushKeyVaultFernet()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Push Fernet key</button>
-                <button type="button" onclick="backupKeyVaultNow()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Backup now</button>
-                <span id="kv-action-out" class="text-[11px] font-mono text-slate-600 break-all"></span>
+                <button type="button" onclick="testKeyVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Test connection</button>
+                <button type="button" onclick="testFernetTier1()" title="Tests the DIFFERENT auth path the hub actually uses at boot to source the Fernet key from Key Vault (managed identity via LM_KEYVAULT_URL/LM_FERNET_KEY_KV_SECRET) — separate from 'Test connection' above, which only checks the SSO app-cert path used by the buttons below." class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Test Fernet boot path (Tier 1)</button>
+                <button type="button" onclick="saveFernetTier1Config()" title="Writes LM_FERNET_KEY_KV_SECRET and LM_KEYVAULT_URL — using the Vault URL / Fernet-key secret name fields above — into this hub's .env, then restarts the hub to apply them. LM_FERNET_KEY stays in place as a fallback; nothing else in .env is touched." class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Save &amp; restart for Tier 1</button>
+                <button type="button" onclick="rotateKeyVaultAdmin()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Rotate admin now</button>
+                <button type="button" onclick="pushKeyVaultFernet()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Push Fernet key</button>
+                <button type="button" onclick="backupKeyVaultNow()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Backup now</button>
+                <span id="kv-action-out" class="text-xs font-mono text-slate-600 break-all"></span>
             </div>
             <div class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
-                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Disaster recovery</div>
-                <p class="text-[11px] text-slate-400 mb-2">Download the min bootstrap bundle to keep off-box, or restore one onto this hub (from an uploaded file or a vault secret) to bring logins + Azure back, then pull the full backup from source.</p>
+                <div class="text-xs font-bold text-slate-500 mb-1">Disaster recovery</div>
+                <p class="text-xs text-slate-500 mb-2">Download the min bootstrap bundle to keep off-box, or restore one onto this hub (from an uploaded file or a vault secret) to bring logins + Azure back, then pull the full backup from source.</p>
                 <div class="flex flex-wrap items-center gap-2">
-                    <button type="button" onclick="downloadKeyVaultMin()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Download min backup</button>
+                    <button type="button" onclick="downloadKeyVaultMin()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Download min backup</button>
                     <input type="file" id="kv-restore-file" accept="application/json,.json" class="hidden" onchange="restoreKeyVaultFromFile(this)">
-                    <button type="button" onclick="document.getElementById('kv-restore-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Restore from file…</button>
+                    <button type="button" onclick="document.getElementById('kv-restore-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Restore from file…</button>
                     <input id="kv-restore-secret" type="text" placeholder="or vault secret name" class="${inputCls} font-mono text-xs flex-1 min-w-[10rem]">
-                    <button type="button" onclick="restoreKeyVaultFromVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Restore from vault</button>
+                    <button type="button" onclick="restoreKeyVaultFromVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Restore from vault</button>
                 </div>
-                <p id="kv-restore-out" class="text-[11px] font-mono text-slate-600 mt-1 break-all"></p>
+                <p id="kv-restore-out" class="text-xs font-mono text-slate-600 mt-1 break-all"></p>
             </div>
             <div class="mt-4">
-                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Backups in vault <span id="kv-bk-count" class="text-slate-400 font-normal"></span></div>
+                <div class="text-xs font-bold text-slate-500 mb-1">Backups in vault <span id="kv-bk-count" class="text-slate-500 font-normal"></span></div>
                 <div id="kv-backups" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-56 overflow-y-auto text-xs"></div>
             </div>
             <div class="mt-4 flex items-center justify-between gap-3">
-                <span id="kv-msg" class="text-xs text-slate-400"></span>
+                <span id="kv-msg" class="text-xs text-slate-500"></span>
             </div>
         </div>`;
     loadKeyVault();
@@ -4261,14 +4261,14 @@ async function loadKeyVault() {
         set('kv-fernet-secret', c.fernet_secret || 'lm-fernet-key');
         set('kv-prefix', c.backup_prefix || 'lm-min-backup-');
         const pill = document.getElementById('kv-state-pill');
-        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-xs px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         const st = d.status || {};
         const cnt = document.getElementById('kv-bk-count'); if (cnt) cnt.textContent = `(${(st.backups || []).length})`;
         const box = document.getElementById('kv-backups');
         if (box) {
             const bks = st.backups || [];
             box.innerHTML = bks.length ? bks.map(n => `<div class="px-2 py-1 font-mono text-slate-700">${escapeHtml(n)}</div>`).join('')
-                : `<div class="text-slate-400 italic px-2 py-2">${st.warning ? escapeHtml(st.warning) : 'No backups in the vault yet.'}</div>`;
+                : `<div class="text-slate-500 italic px-2 py-2">${st.warning ? escapeHtml(st.warning) : 'No backups in the vault yet.'}</div>`;
         }
         const msg = document.getElementById('kv-msg');
         if (msg) msg.textContent = [c.last_rotate ? 'rotated ' + c.last_rotate.slice(0, 10) : '', c.last_backup ? 'backup ' + c.last_backup.slice(0, 10) : ''].filter(Boolean).join(' · ');
@@ -4396,10 +4396,10 @@ function _renderSettingsNotificationsTile(content) {
     content.innerHTML = `
         <div class="${card}">
             <div class="flex items-center justify-between mb-2">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Notifications — email alerts</h3>
-                <span id="notif-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+                <h3 class="text-sm font-bold text-slate-500">Notifications — email alerts</h3>
+                <span id="notif-state-pill" class="text-xs px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
             </div>
-            <p class="text-xs text-slate-400 mb-3">The hub sends its own alerts (spoke out-of-contact, etc.) over email. Pick a provider; recipient list is always manual. <b>Azure ACS</b> pulls sender creds from <b>Key Vault</b> and defaults to the <b>REST API</b> (grant the SSO app the Communication Services permission) with an SMTP fallback. Other providers use SMTP with the password encrypted at rest.</p>
+            <p class="text-xs text-slate-500 mb-3">The hub sends its own alerts (spoke out-of-contact, etc.) over email. Pick a provider; recipient list is always manual. <b>Azure ACS</b> pulls sender creds from <b>Key Vault</b> and defaults to the <b>REST API</b> (grant the SSO app the Communication Services permission) with an SMTP fallback. Other providers use SMTP with the password encrypted at rest.</p>
             <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="notif-enabled" class="w-4 h-4 text-green-600 rounded">Enable email alerts</label>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="space-y-1"><label class="${labelCls}">Provider</label>
@@ -4424,35 +4424,35 @@ function _renderSettingsNotificationsTile(content) {
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
                         <div class="flex gap-1">
                             <select id="notif-acs-sub" class="${inputCls} font-mono text-xs flex-1" onchange="onAcsSubChanged()"><option value="">Subscription ID…</option></select>
-                            <button type="button" onclick="pullAzureSubs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
+                            <button type="button" onclick="pullAzureSubs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-full text-xs font-bold whitespace-nowrap">Pull</button>
                         </div>
                         <div class="flex gap-1">
                             <select id="notif-acs-rg" class="${inputCls} font-mono text-xs flex-1" onchange="onAcsRgChanged()"><option value="">Resource group…</option></select>
-                            <button type="button" onclick="pullAzureRgs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
+                            <button type="button" onclick="pullAzureRgs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-full text-xs font-bold whitespace-nowrap">Pull</button>
                         </div>
                         <div class="flex gap-1">
                             <select id="notif-acs-name" class="${inputCls} font-mono text-xs flex-1" onchange="onAcsResourceChanged()"><option value="">Resource name…</option></select>
-                            <button type="button" onclick="pullAcsResources()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
+                            <button type="button" onclick="pullAcsResources()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-full text-xs font-bold whitespace-nowrap">Pull</button>
                         </div>
                     </div>
-                    <p class="text-[11px] text-slate-400 mt-1">The SSO app calls <span class="font-mono">communicationServices/listKeys</span> via ARM (needs <b>Contributor</b> on the ACS resource/RG). The connection string is cached ~10 min and never touches the vault. <b>Pull</b> lists the subscriptions, resource groups, and ACS resources the app can see — choose top-down.</p></div>
+                    <p class="text-xs text-slate-500 mt-1">The SSO app calls <span class="font-mono">communicationServices/listKeys</span> via ARM (needs <b>Contributor</b> on the ACS resource/RG). The connection string is cached ~10 min and never touches the vault. <b>Pull</b> lists the subscriptions, resource groups, and ACS resources the app can see — choose top-down.</p></div>
                 <div class="space-y-1"><label class="${labelCls}">SMTP host</label><input id="notif-host" type="text" placeholder="smtp.example.com" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">SMTP port</label><input id="notif-port" type="number" placeholder="587" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">SMTP user</label><input id="notif-user" type="text" placeholder="user@example.com" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">SMTP password</label><input id="notif-pass" type="password" placeholder="" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1 md:col-span-2" id="notif-acs-kv-name-wrap"><label class="${labelCls}">ACS Key Vault secret name</label><input id="notif-acs-secret" type="text" placeholder="acs-email-connstr" class="${inputCls} font-mono text-xs"></div>
-                <div class="space-y-1 md:col-span-2" id="notif-acs-vault-wrap"><label class="${labelCls}">Key Vault URL <span class="text-slate-400 normal-case font-normal">(blank = reuse the DR Key Vault URL)</span></label><input id="notif-vault-url" type="text" placeholder="https://my-vault.vault.azure.net" class="${inputCls} font-mono text-xs"></div>
-                <div class="space-y-1 md:col-span-2" id="notif-acs-connstr-wrap"><label class="${labelCls}">ACS connection string <span class="text-slate-400 normal-case font-normal">(one-time push to Key Vault — the SSO app writes it for you)</span></label><textarea id="notif-acs-connstr" rows="2" placeholder="endpoint=https://<resourcename>.communication.azure.com;accesskey=<key>" class="${inputCls} font-mono text-xs"></textarea></div>
+                <div class="space-y-1 md:col-span-2" id="notif-acs-vault-wrap"><label class="${labelCls}">Key Vault URL <span class="text-slate-500 normal-case font-normal">(blank = reuse the DR Key Vault URL)</span></label><input id="notif-vault-url" type="text" placeholder="https://my-vault.vault.azure.net" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2" id="notif-acs-connstr-wrap"><label class="${labelCls}">ACS connection string <span class="text-slate-500 normal-case font-normal">(one-time push to Key Vault — the SSO app writes it for you)</span></label><textarea id="notif-acs-connstr" rows="2" placeholder="endpoint=https://<resourcename>.communication.azure.com;accesskey=<key>" class="${inputCls} font-mono text-xs"></textarea></div>
                 <div class="space-y-1 md:col-span-2"><label class="${labelCls}">From email</label><input id="notif-from" type="text" placeholder="DoNotReply@<resourcename>.azurecomm.net" class="${inputCls} font-mono text-xs"></div>
-                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">To emails <span class="text-slate-400 normal-case font-normal">(comma-separated)</span></label><input id="notif-to" type="text" placeholder="ops@example.com, oncall@example.com" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">To emails <span class="text-slate-500 normal-case font-normal">(comma-separated)</span></label><input id="notif-to" type="text" placeholder="ops@example.com, oncall@example.com" class="${inputCls} font-mono text-xs"></div>
             </div>
-            <p id="notif-acs-note" class="text-[11px] text-slate-400 mt-2 hidden">ACS API transport signs each request with the access key (HMAC-SHA256) — no Entra app permission needed. The access key is pulled from ARM (listKeys) or read from the Key Vault secret, depending on the credential source above.</p>
+            <p id="notif-acs-note" class="text-xs text-slate-500 mt-2 hidden">ACS API transport signs each request with the access key (HMAC-SHA256) — no Entra app permission needed. The access key is pulled from ARM (listKeys) or read from the Key Vault secret, depending on the credential source above.</p>
             <div class="mt-3 flex flex-wrap items-center gap-2">
-                <button type="button" id="notif-push-btn" onclick="pushAcsSecret()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Push ACS connection string to Key Vault</button>
-                <span id="notif-action-out" class="text-[11px] font-mono text-slate-600 break-all"></span>
+                <button type="button" id="notif-push-btn" onclick="pushAcsSecret()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Push ACS connection string to Key Vault</button>
+                <span id="notif-action-out" class="text-xs font-mono text-slate-600 break-all"></span>
                 <div class="ml-auto flex items-center gap-2">
-                    <button type="button" onclick="testNotifications()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Send test email</button>
-                    <button type="button" onclick="saveNotifications()" class="bg-[#01A982] hover:bg-[#01A982]/90 text-white px-3 py-1.5 rounded-md text-xs font-bold">Save</button>
+                    <button type="button" onclick="testNotifications()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Send test email</button>
+                    <button type="button" onclick="saveNotifications()" class="bg-primary hover:bg-brand/90 text-white px-3 py-1.5 rounded-full text-xs font-bold">Save</button>
                 </div>
             </div>
         </div>`;
@@ -4551,7 +4551,7 @@ async function loadNotifications() {
         const passEl = document.getElementById('notif-pass');
         if (passEl) { passEl.value = ''; passEl.placeholder = c.has_password ? 'set (leave blank to keep)' : ''; }
         const pill = document.getElementById('notif-state-pill');
-        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-xs px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         notifProviderChanged();
     } catch (e) { console.error('loadNotifications failed', e); }
 }
@@ -4874,22 +4874,22 @@ const LM_ICON_LIBRARY = [
 function _renderSettingsIconsTile(content) {
     const { card } = _SETUP_CLS;
     const cell = ic => `
-        <div class="flex flex-col items-center justify-center gap-2 p-4 rounded-lg border border-slate-200 hover:border-[#01A982] hover:bg-[#01A982]/5 transition">
+        <div class="flex flex-col items-center justify-center gap-2 p-4 rounded-lg border border-slate-200 hover:border-brand hover:bg-brand/5 transition">
             <div class="text-slate-600">${ic.svg}</div>
             <div class="text-sm font-semibold text-slate-700 text-center">${escapeHtml(ic.name)}</div>
-            <div class="text-[11px] font-mono text-slate-400">ID ${ic.id}${ic.key ? ' · ' + escapeHtml(ic.key) : ''}</div>
+            <div class="text-xs font-mono text-slate-500">ID ${ic.id}${ic.key ? ' · ' + escapeHtml(ic.key) : ''}</div>
         </div>`;
     const inUse = LM_NAV_ICONS.map(cell).join('');
     const library = LM_ICON_LIBRARY.map(cell).join('');
     content.innerHTML = `
         <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Left-nav icons — in use <span class="text-slate-400 font-normal">(${LM_NAV_ICONS.length})</span></h3>
-            <p class="text-xs text-slate-400 mb-4">The icon set on the left navigation bar. Each has a stable <b>ID</b> and <b>key</b> — reference them when adding a new module or keeping icons consistent. Icons scale to the current text color.</p>
+            <h3 class="text-sm font-bold text-slate-500 mb-1">Left-nav icons — in use <span class="text-slate-500 font-normal">(${LM_NAV_ICONS.length})</span></h3>
+            <p class="text-xs text-slate-500 mb-4">The icon set on the left navigation bar. Each has a stable <b>ID</b> and <b>key</b> — reference them when adding a new module or keeping icons consistent. Icons scale to the current text color.</p>
             <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">${inUse}</div>
         </div>
         <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Available icons <span class="text-slate-400 font-normal">(${LM_ICON_LIBRARY.length})</span></h3>
-            <p class="text-xs text-slate-400 mb-4">Extra icons in the same outline style, ready to assign to a new module or nav item — cite the <b>ID</b> and I'll wire it in.</p>
+            <h3 class="text-sm font-bold text-slate-500 mb-1">Available icons <span class="text-slate-500 font-normal">(${LM_ICON_LIBRARY.length})</span></h3>
+            <p class="text-xs text-slate-500 mb-4">Extra icons in the same outline style, ready to assign to a new module or nav item — cite the <b>ID</b> and I'll wire it in.</p>
             <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">${library}</div>
         </div>`;
 }
@@ -4904,36 +4904,36 @@ function _renderSettingsNetboxSsoTile(content) {
     content.innerHTML = `
         <div class="${card}">
             <div class="flex items-center justify-between mb-2">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">NetBox SSO — reuse the LM Entra app</h3>
-                <span id="nbsso-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+                <h3 class="text-sm font-bold text-slate-500">NetBox SSO — reuse the LM Entra app</h3>
+                <span id="nbsso-state-pill" class="text-xs px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
             </div>
-            <p class="text-xs text-slate-400 mb-3">Log into <b>NetBox</b> with the <b>same Entra connection</b> the LM hub uses — tenant, client ID, the hub's <b>client certificate</b>, allowed group and Permission Group mappings are carried over (Global Admin groups become NetBox superusers). Enabling adds a <b>Sign in with Microsoft</b> button to NetBox's login page; local NetBox logins keep working. The one Azure-side step: on that same app registration add the redirect URI <code>https://&lt;netbox-host&gt;/oauth/complete/oidc/</code>.</p>
+            <p class="text-xs text-slate-500 mb-3">Log into <b>NetBox</b> with the <b>same Entra connection</b> the LM hub uses — tenant, client ID, the hub's <b>client certificate</b>, allowed group and Permission Group mappings are carried over (Global Admin groups become NetBox superusers). Enabling adds a <b>Sign in with Microsoft</b> button to NetBox's login page; local NetBox logins keep working. The one Azure-side step: on that same app registration add the redirect URI <code>https://&lt;netbox-host&gt;/oauth/complete/oidc/</code>.</p>
             <div id="nbsso-auth-mode" class="hidden text-xs rounded-md p-2 mb-3 border"></div>
             <div id="nbsso-oidc-warn" class="hidden text-xs text-amber-600 border border-amber-200 bg-amber-50 rounded-md p-2 mb-3"></div>
             <div id="nbsso-target-warn" class="hidden text-xs text-amber-600 border border-amber-200 bg-amber-50 rounded-md p-2 mb-3"></div>
-            <div class="space-y-1 mb-3"><label class="${labelCls}">NetBox host <span class="text-slate-400 normal-case font-normal">(agent that runs NetBox — receives the hub's Entra certificate)</span></label><select id="nbsso-target" class="${inputCls} font-mono text-xs"></select></div>
+            <div class="space-y-1 mb-3"><label class="${labelCls}">NetBox host <span class="text-slate-500 normal-case font-normal">(agent that runs NetBox — receives the hub's Entra certificate)</span></label><select id="nbsso-target" class="${inputCls} font-mono text-xs"></select></div>
             <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="nbsso-enabled" class="w-4 h-4 text-green-600 rounded">Enable Entra SSO on NetBox (shows the <b>Sign in with Microsoft</b> button)</label>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div class="space-y-1"><label class="${labelCls}">Tenant ID <span class="text-slate-400 normal-case font-normal">(from hub SSO)</span></label><input id="nbsso-tenant" type="text" readonly class="${inputCls} font-mono text-xs bg-slate-50"></div>
-                <div class="space-y-1"><label class="${labelCls}">Client ID <span class="text-slate-400 normal-case font-normal">(from hub SSO)</span></label><input id="nbsso-client" type="text" readonly class="${inputCls} font-mono text-xs bg-slate-50"></div>
-                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Client secret <span class="text-slate-400 normal-case font-normal">(optional — only if the hub has no certificate)</span></label><input id="nbsso-secret" type="password" placeholder="not needed — uses the hub certificate" class="${inputCls} font-mono text-xs" autocomplete="new-password"></div>
+                <div class="space-y-1"><label class="${labelCls}">Tenant ID <span class="text-slate-500 normal-case font-normal">(from hub SSO)</span></label><input id="nbsso-tenant" type="text" readonly class="${inputCls} font-mono text-xs bg-slate-50"></div>
+                <div class="space-y-1"><label class="${labelCls}">Client ID <span class="text-slate-500 normal-case font-normal">(from hub SSO)</span></label><input id="nbsso-client" type="text" readonly class="${inputCls} font-mono text-xs bg-slate-50"></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Client secret <span class="text-slate-500 normal-case font-normal">(optional — only if the hub has no certificate)</span></label><input id="nbsso-secret" type="password" placeholder="not needed — uses the hub certificate" class="${inputCls} font-mono text-xs" autocomplete="new-password"></div>
                 <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Redirect URI</label><input id="nbsso-redirect" type="text" placeholder="https://<netbox-host>/oauth/complete/oidc/" class="${inputCls} font-mono text-xs"></div>
-                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Restrict login to Entra group <span class="text-slate-400 normal-case font-normal">(optional — object ID; blank = same as hub SSO)</span></label><input id="nbsso-allowed" type="text" placeholder="blank = inherit the hub's allowed group" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Restrict login to Entra group <span class="text-slate-500 normal-case font-normal">(optional — object ID; blank = same as hub SSO)</span></label><input id="nbsso-allowed" type="text" placeholder="blank = inherit the hub's allowed group" class="${inputCls} font-mono text-xs"></div>
             </div>
             <div class="mt-4">
                 <div class="flex items-center justify-between mb-1">
-                    <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Entra group → NetBox group map</div>
-                    <button type="button" onclick="nbssoSeedGroupMap()" class="text-[#01A982] hover:underline text-xs font-bold">Seed from Permission Groups</button>
+                    <div class="text-xs font-bold text-slate-500">Entra group → NetBox group map</div>
+                    <button type="button" onclick="nbssoSeedGroupMap()" class="text-primary-text hover:underline text-xs font-bold">Seed from Permission Groups</button>
                 </div>
-                <p class="text-[11px] text-slate-400 mb-2">Each login sets the user's NetBox groups to exactly the mapped set. Left = Entra group object ID, right = NetBox group name. Leave empty to use the Permission Groups mapping automatically.</p>
+                <p class="text-xs text-slate-500 mb-2">Each login sets the user's NetBox groups to exactly the mapped set. Left = Entra group object ID, right = NetBox group name. Leave empty to use the Permission Groups mapping automatically.</p>
                 <div id="nbsso-map-rows" class="space-y-2"></div>
                 <button type="button" onclick="nbssoAddMapRow()" class="mt-2 text-xs font-bold text-slate-500 hover:text-slate-700">+ Add mapping</button>
             </div>
             <div id="nbsso-test-out" class="hidden text-xs rounded-md p-2 mt-3 mb-1 border"></div>
             <div class="mt-4 flex items-center justify-between gap-3">
-                <span id="nbsso-msg" class="text-xs text-slate-400"></span>
+                <span id="nbsso-msg" class="text-xs text-slate-500"></span>
                 <div class="flex items-center gap-2">
-                    <button type="button" onclick="testNetboxSso()" id="nbsso-test-btn" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Test login</button>
+                    <button type="button" onclick="testNetboxSso()" id="nbsso-test-btn" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Test login</button>
                     <button onclick="saveNetboxSso()" id="nbsso-save-btn" class="${btnCls}">Save &amp; Apply</button>
                 </div>
             </div>
@@ -5020,7 +5020,7 @@ async function loadNetboxSso() {
         }
         _nbssoRenderMap(c.group_map);
         const pill = document.getElementById('nbsso-state-pill');
-        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-xs px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         const ow = document.getElementById('nbsso-oidc-warn');
         if (ow) { if (!oidc.configured) { ow.textContent = 'Hub Entra SSO is not configured yet — set it up in Settings → Cloud → Azure → SSO first (NetBox reuses its tenant + client ID).'; ow.classList.remove('hidden'); } else ow.classList.add('hidden'); }
         const cands = d.netbox_server_agents || [];
@@ -5077,10 +5077,10 @@ function _renderSettingsAzureNsgTile(content) {
     content.innerHTML = `
         <div class="${card}">
             <div class="flex items-center justify-between mb-2">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">NSG — IP allow-list</h3>
-                <span id="nsg-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+                <h3 class="text-sm font-bold text-slate-500">NSG — IP allow-list</h3>
+                <span id="nsg-state-pill" class="text-xs px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
             </div>
-            <p class="text-xs text-slate-400 mb-3">Manages one <b>allow rule</b> in an Azure Network Security Group as an IP allow-list (one rule, many IPs — add/remove below). Auth <b>reuses the SSO Entra app's certificate</b>, so set that up first in <b>Settings → SSO</b>. In Azure, grant that app the <b>Network Contributor</b> role on the NSG (or its resource group) — <b>Access control (IAM) → Add role assignment → Network Contributor → assign to the app</b>.</p>
+            <p class="text-xs text-slate-500 mb-3">Manages one <b>allow rule</b> in an Azure Network Security Group as an IP allow-list (one rule, many IPs — add/remove below). Auth <b>reuses the SSO Entra app's certificate</b>, so set that up first in <b>Settings → SSO</b>. In Azure, grant that app the <b>Network Contributor</b> role on the NSG (or its resource group) — <b>Access control (IAM) → Add role assignment → Network Contributor → assign to the app</b>.</p>
             <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="nsg-enabled" class="w-4 h-4 text-green-600 rounded">Enable NSG management (Save applies the IP list to Azure)</label>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="space-y-1"><label class="${labelCls}">Subscription ID</label><input id="nsg-sub" type="text" placeholder="xxxxxxxx-xxxx-…" class="${inputCls}"></div>
@@ -5088,29 +5088,29 @@ function _renderSettingsAzureNsgTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">NSG Name</label><input id="nsg-name" type="text" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Rule Name</label><input id="nsg-rule" type="text" placeholder="lm-allowlist" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Allow priority (100–4096)</label><input id="nsg-prio" type="number" placeholder="300" oninput="_nsgPrioLive()" class="${inputCls}"></div>
-                <div class="space-y-1"><label class="${labelCls}">Deny priority <span class="text-slate-400 normal-case font-normal">(threat-monitor block rule)</span></label><input id="nsg-deny-prio" type="number" placeholder="400" oninput="_nsgPrioLive()" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Deny priority <span class="text-slate-500 normal-case font-normal">(threat-monitor block rule)</span></label><input id="nsg-deny-prio" type="number" placeholder="400" oninput="_nsgPrioLive()" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Direction</label><select id="nsg-dir" class="${inputCls}"><option>Inbound</option><option>Outbound</option></select></div>
                 <div class="space-y-1"><label class="${labelCls}">Protocol</label><select id="nsg-proto" class="${inputCls}"><option value="*">Any</option><option value="Tcp">Tcp</option><option value="Udp">Udp</option></select></div>
                 <div class="space-y-1"><label class="${labelCls}">Destination Port(s)</label><input id="nsg-dport" type="text" placeholder="* or 443,22" class="${inputCls}"></div>
             </div>
-            <p class="text-[11px] text-slate-500 mt-2 bg-slate-50 rounded px-2 py-1.5 leading-relaxed"><b>Allow must be a lower number than Deny; both below 1000 (Azure's default allow on 443).</b> The <b>Deny priority</b> belongs to the threat monitor (<b>Security</b> view) — editing it here updates <b>both</b> (allow → Azure NSG, deny → threat monitor). <span id="nsg-prio-check"></span></p>
+            <p class="text-xs text-slate-500 mt-2 bg-slate-50 rounded px-2 py-1.5 leading-relaxed"><b>Allow must be a lower number than Deny; both below 1000 (Azure's default allow on 443).</b> The <b>Deny priority</b> belongs to the threat monitor (<b>Security</b> view) — editing it here updates <b>both</b> (allow → Azure NSG, deny → threat monitor). <span id="nsg-prio-check"></span></p>
             <div class="mt-3 space-y-1">
                 <div class="flex items-center justify-between">
-                    <label class="${labelCls}">Allow-list — IP / CIDR + description <span class="text-slate-400 normal-case font-normal">(descriptions are kept in LM only — Azure has no per-IP note)</span></label>
-                    <span id="nsg-drift" class="text-[11px] text-slate-400"></span>
+                    <label class="${labelCls}">Allow-list — IP / CIDR + description <span class="text-slate-500 normal-case font-normal">(descriptions are kept in LM only — Azure has no per-IP note)</span></label>
+                    <span id="nsg-drift" class="text-xs text-slate-500"></span>
                 </div>
-                <p class="text-[11px] text-slate-400 mb-1">This is a <b>shared trusted list</b>: every IP here is also <b>never auto-blocked</b> by the threat monitor, and the same list is editable under <b>Security → Trusted IPs</b>. IPs open an NSG allow rule only when NSG management is enabled above.</p>
+                <p class="text-xs text-slate-500 mb-1">This is a <b>shared trusted list</b>: every IP here is also <b>never auto-blocked</b> by the threat monitor, and the same list is editable under <b>Security → Trusted IPs</b>. IPs open an NSG allow rule only when NSG management is enabled above.</p>
                 <div class="flex gap-2 mb-2">
                     <input id="nsg-add-ip" type="text" placeholder="1.2.3.4 or 10.0.0.0/24" class="${inputCls} font-mono text-xs flex-1">
                     <input id="nsg-add-desc" type="text" placeholder="description (optional)" class="${inputCls} text-xs flex-1">
-                    <button type="button" onclick="addNsgEntry()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">+ Add</button>
+                    <button type="button" onclick="addNsgEntry()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold whitespace-nowrap">+ Add</button>
                 </div>
                 <div id="nsg-entries" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-72 overflow-y-auto"></div>
             </div>
             <div class="mt-4 flex items-center justify-between gap-3">
-                <span id="nsg-msg" class="text-xs text-slate-400"></span>
+                <span id="nsg-msg" class="text-xs text-slate-500"></span>
                 <div class="flex items-center gap-3">
-                    <button onclick="testAzureNsg()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Test connection</button>
+                    <button onclick="testAzureNsg()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-full text-sm font-bold">Test connection</button>
                     <button onclick="saveAzureNsg()" id="nsg-save-btn" class="${btnCls}">Save &amp; Apply</button>
                 </div>
             </div>
@@ -5131,7 +5131,7 @@ function renderNsgEntries() {
         <input data-nsg-desc="${i}" value="${escapeHtml(e.description || '')}" placeholder="description" class="flex-1 bg-white border border-slate-200 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-green-400">
         <button type="button" onclick="removeNsgEntry(${i})" title="Remove" class="text-red-500 hover:text-red-700 text-xs font-bold px-1">✕</button>
       </div>`).join('')
-      : '<div class="text-xs text-slate-400 italic px-2 py-2">No IPs yet. Add one above, or hit Test/Save to import what\'s already on the NSG.</div>';
+      : '<div class="text-xs text-slate-500 italic px-2 py-2">No IPs yet. Add one above, or hit Test/Save to import what\'s already on the NSG.</div>';
 }
 function _syncNsgEntriesFromDom() {
     (window._nsgEntries || []).forEach((e, i) => {
@@ -5189,7 +5189,7 @@ async function loadAzureNsg() {
         renderNsgEntries();
         _nsgPrioLive();
         const pill = document.getElementById('nsg-state-pill');
-        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-xs px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         const drift = document.getElementById('nsg-drift');
         if (drift) {
             if (d.warning) drift.textContent = 'Live read failed: ' + d.warning;
@@ -5258,22 +5258,22 @@ function _renderSettingsOciNsgTile(content) {
     content.innerHTML = `
         <div class="${card}">
             <div class="flex items-center justify-between mb-2">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OCI NSG — IP allow-list</h3>
-                <span id="oci-nsg-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+                <h3 class="text-sm font-bold text-slate-500">OCI NSG — IP allow-list</h3>
+                <span id="oci-nsg-state-pill" class="text-xs px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
             </div>
-            <p class="text-xs text-slate-400 mb-3">Manages a set of <b>allow rules</b> (one per IP/CIDR, tagged so a reconcile only touches rules it created) on an Oracle Cloud Infrastructure <b>Network Security Group</b>. Auth is a dedicated <b>OCI API signing key</b> — create one for a user with an IAM policy granting <code>manage security-lists</code> (or <code>use network-security-groups</code>) in the NSG's compartment, then paste its details below. <b>OCI NSGs allow-only</b> — traffic not matched by a rule is denied by default, so there is no deny/priority to configure here (unlike Azure NSG).</p>
+            <p class="text-xs text-slate-500 mb-3">Manages a set of <b>allow rules</b> (one per IP/CIDR, tagged so a reconcile only touches rules it created) on an Oracle Cloud Infrastructure <b>Network Security Group</b>. Auth is a dedicated <b>OCI API signing key</b> — create one for a user with an IAM policy granting <code>manage security-lists</code> (or <code>use network-security-groups</code>) in the NSG's compartment, then paste its details below. <b>OCI NSGs allow-only</b> — traffic not matched by a rule is denied by default, so there is no deny/priority to configure here (unlike Azure NSG).</p>
             <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="oci-nsg-enabled" class="w-4 h-4 text-green-600 rounded">Enable NSG management (Save applies the IP list to OCI)</label>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="space-y-1"><label class="${labelCls}">Tenancy OCID</label><input id="oci-nsg-tenancy" type="text" placeholder="ocid1.tenancy.oc1..…" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">User OCID</label><input id="oci-nsg-user" type="text" placeholder="ocid1.user.oc1..…" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">Key fingerprint</label><input id="oci-nsg-fp" type="text" placeholder="aa:bb:cc:…" class="${inputCls} font-mono text-xs"></div>
-                <div class="space-y-1"><label class="${labelCls}">Private key path <span class="text-slate-400 normal-case font-normal">(or kv:&lt;name&gt;)</span></label>
+                <div class="space-y-1"><label class="${labelCls}">Private key path <span class="text-slate-500 normal-case font-normal">(or kv:&lt;name&gt;)</span></label>
                     <div class="flex gap-2">
                         <input id="oci-nsg-key" type="text" placeholder="/etc/lm/oci/api-key.pem or kv:oci-api-key" class="${inputCls} font-mono text-xs flex-1">
-                        <button type="button" onclick="document.getElementById('oci-nsg-key-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">Upload…</button>
+                        <button type="button" onclick="document.getElementById('oci-nsg-key-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold whitespace-nowrap">Upload…</button>
                         <input type="file" id="oci-nsg-key-file" accept=".pem,.key,text/plain,application/x-pem-file" class="hidden" onchange="uploadOciNsgKey(this)">
                     </div>
-                    <p class="text-[11px] text-slate-400">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
+                    <p class="text-xs text-slate-500">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
                 </div>
                 <div class="space-y-1"><label class="${labelCls}">Region</label><select id="oci-nsg-region" class="${inputCls}"><option value="">Loading regions…</option></select></div>
                 <div class="space-y-1"><label class="${labelCls}">NSG OCID</label><input id="oci-nsg-id" type="text" placeholder="ocid1.networksecuritygroup.oc1..…" class="${inputCls} font-mono text-xs"></div>
@@ -5281,20 +5281,20 @@ function _renderSettingsOciNsgTile(content) {
             </div>
             <div class="mt-3 space-y-1">
                 <div class="flex items-center justify-between">
-                    <label class="${labelCls}">Allow-list — IP / CIDR + description <span class="text-slate-400 normal-case font-normal">(descriptions are kept in LM only — OCI has no per-IP note)</span></label>
-                    <span id="oci-nsg-drift" class="text-[11px] text-slate-400"></span>
+                    <label class="${labelCls}">Allow-list — IP / CIDR + description <span class="text-slate-500 normal-case font-normal">(descriptions are kept in LM only — OCI has no per-IP note)</span></label>
+                    <span id="oci-nsg-drift" class="text-xs text-slate-500"></span>
                 </div>
                 <div class="flex gap-2 mb-2">
                     <input id="oci-nsg-add-ip" type="text" placeholder="1.2.3.4 or 10.0.0.0/24" class="${inputCls} font-mono text-xs flex-1">
                     <input id="oci-nsg-add-desc" type="text" placeholder="description (optional)" class="${inputCls} text-xs flex-1">
-                    <button type="button" onclick="addOciNsgEntry()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">+ Add</button>
+                    <button type="button" onclick="addOciNsgEntry()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold whitespace-nowrap">+ Add</button>
                 </div>
                 <div id="oci-nsg-entries" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-72 overflow-y-auto"></div>
             </div>
             <div class="mt-4 flex items-center justify-between gap-3">
-                <span id="oci-nsg-msg" class="text-xs text-slate-400"></span>
+                <span id="oci-nsg-msg" class="text-xs text-slate-500"></span>
                 <div class="flex items-center gap-3">
-                    <button onclick="testOciNsg()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Test connection</button>
+                    <button onclick="testOciNsg()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-full text-sm font-bold">Test connection</button>
                     <button onclick="saveOciNsg()" id="oci-nsg-save-btn" class="${btnCls}">Save &amp; Apply</button>
                 </div>
             </div>
@@ -5316,7 +5316,7 @@ function renderOciNsgEntries() {
         <input data-oci-nsg-desc="${i}" value="${escapeHtml(e.description || '')}" placeholder="description" class="flex-1 bg-white border border-slate-200 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-green-400">
         <button type="button" onclick="removeOciNsgEntry(${i})" title="Remove" class="text-red-500 hover:text-red-700 text-xs font-bold px-1">✕</button>
       </div>`).join('')
-      : '<div class="text-xs text-slate-400 italic px-2 py-2">No IPs yet. Add one above, or hit Test/Save to import what\'s already on the NSG.</div>';
+      : '<div class="text-xs text-slate-500 italic px-2 py-2">No IPs yet. Add one above, or hit Test/Save to import what\'s already on the NSG.</div>';
 }
 function _syncOciNsgEntriesFromDom() {
     (window._ociNsgEntries || []).forEach((e, i) => {
@@ -5393,7 +5393,7 @@ async function loadOciNsg() {
         window._ociNsgEntries = (c.entries || []).map(e => ({ ip: e.ip, description: e.description || '' }));
         renderOciNsgEntries();
         const pill = document.getElementById('oci-nsg-state-pill');
-        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-xs px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         const drift = document.getElementById('oci-nsg-drift');
         if (drift) {
             if (d.warning) drift.textContent = 'Live read failed: ' + d.warning;
@@ -5474,22 +5474,22 @@ function _renderSettingsOciVaultTile(content) {
     content.innerHTML = `
         <div class="${card}">
             <div class="flex items-center justify-between mb-2">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OCI Vault — Key Vault backend</h3>
-                <span id="oci-vault-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+                <h3 class="text-sm font-bold text-slate-500">OCI Vault — Key Vault backend</h3>
+                <span id="oci-vault-state-pill" class="text-xs px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
             </div>
-            <p class="text-xs text-slate-400 mb-3">Connects the hub's <b>Credential Vault</b> (secret storage abstraction) to an Oracle Cloud Infrastructure <b>Vault</b>. Auth is a dedicated <b>OCI API signing key</b> — create one for a user with an IAM policy granting <code>manage secret-family</code> (create/update secrets) and <code>manage vaults</code> (read-only use is enough for Test connection) in the vault's compartment, then paste its details below. This is a <b>separate</b> OCI user/key from OCI NSG's — a narrower-scoped key per integration is fine.</p>
+            <p class="text-xs text-slate-500 mb-3">Connects the hub's <b>Credential Vault</b> (secret storage abstraction) to an Oracle Cloud Infrastructure <b>Vault</b>. Auth is a dedicated <b>OCI API signing key</b> — create one for a user with an IAM policy granting <code>manage secret-family</code> (create/update secrets) and <code>manage vaults</code> (read-only use is enough for Test connection) in the vault's compartment, then paste its details below. This is a <b>separate</b> OCI user/key from OCI NSG's — a narrower-scoped key per integration is fine.</p>
             <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="oci-vault-enabled" class="w-4 h-4 text-green-600 rounded">Enable OCI Vault (this hub's Key Vault backend)</label>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="space-y-1"><label class="${labelCls}">Tenancy OCID</label><input id="oci-vault-tenancy" type="text" placeholder="ocid1.tenancy.oc1..…" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">User OCID</label><input id="oci-vault-user" type="text" placeholder="ocid1.user.oc1..…" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">Key fingerprint</label><input id="oci-vault-fp" type="text" placeholder="aa:bb:cc:…" class="${inputCls} font-mono text-xs"></div>
-                <div class="space-y-1"><label class="${labelCls}">Private key path <span class="text-slate-400 normal-case font-normal">(or kv:&lt;name&gt;)</span></label>
+                <div class="space-y-1"><label class="${labelCls}">Private key path <span class="text-slate-500 normal-case font-normal">(or kv:&lt;name&gt;)</span></label>
                     <div class="flex gap-2">
                         <input id="oci-vault-key" type="text" placeholder="/etc/lm/oci/api-key.pem or kv:oci-vault-key" class="${inputCls} font-mono text-xs flex-1">
-                        <button type="button" onclick="document.getElementById('oci-vault-key-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">Upload…</button>
+                        <button type="button" onclick="document.getElementById('oci-vault-key-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold whitespace-nowrap">Upload…</button>
                         <input type="file" id="oci-vault-key-file" accept=".pem,.key,text/plain,application/x-pem-file" class="hidden" onchange="uploadOciVaultKey(this)">
                     </div>
-                    <p class="text-[11px] text-slate-400">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
+                    <p class="text-xs text-slate-500">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
                 </div>
                 <div class="space-y-1"><label class="${labelCls}">Region</label><select id="oci-vault-region" class="${inputCls}"><option value="">Loading regions…</option></select></div>
                 <div class="space-y-1"><label class="${labelCls}">Compartment OCID</label><input id="oci-vault-compartment" type="text" placeholder="ocid1.compartment.oc1..…" class="${inputCls} font-mono text-xs"></div>
@@ -5497,9 +5497,9 @@ function _renderSettingsOciVaultTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Master encryption key OCID</label><input id="oci-vault-keyid" type="text" placeholder="ocid1.key.oc1..…" class="${inputCls} font-mono text-xs"></div>
             </div>
             <div class="mt-4 flex items-center justify-between gap-3">
-                <span id="oci-vault-msg" class="text-xs text-slate-400"></span>
+                <span id="oci-vault-msg" class="text-xs text-slate-500"></span>
                 <div class="flex items-center gap-3">
-                    <button onclick="testOciVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Test connection</button>
+                    <button onclick="testOciVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-full text-sm font-bold">Test connection</button>
                     <button onclick="saveOciVault()" id="oci-vault-save-btn" class="${btnCls}">Save</button>
                 </div>
             </div>
@@ -5532,7 +5532,7 @@ async function loadOciVault() {
         await _ociPopulateRegions('oci-vault-region', c.region);
         set('oci-vault-vault', c.vault_id); set('oci-vault-keyid', c.key_id);
         const pill = document.getElementById('oci-vault-state-pill');
-        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-xs px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
     } catch (e) { console.error('loadOciVault failed', e); }
 }
 
@@ -5582,52 +5582,52 @@ function _renderSettingsSsoTile(content) {
     content.innerHTML = `
         <div class="${card}">
             <div class="flex items-center justify-between mb-2">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Single Sign-On — Microsoft Entra ID (OIDC)</h3>
-                <span id="oidc-state-pill" class="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 font-bold">—</span>
+                <h3 class="text-sm font-bold text-slate-500">Single Sign-On — Microsoft Entra ID (OIDC)</h3>
+                <span id="oidc-state-pill" class="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 font-bold">—</span>
             </div>
-            <p class="text-xs text-slate-400 mb-3">Users sign in with Microsoft Entra ID. On callback the hub verifies the id_token against Entra's JWKS, maps Entra <strong>group membership</strong> to LM RBAC + tenant scope, and (when required) <strong>hard-enforces MFA</strong> via the <code>amr</code> claim. Auth uses a <strong>client certificate</strong> (cert + key paths on the hub), not a client secret. Enabling this shows the <em>Sign in with Microsoft</em> button on the login page. <strong>Global Admin only.</strong> Environment overrides (<code>LM_OIDC_*</code>) win over these stored values.</p>
+            <p class="text-xs text-slate-500 mb-3">Users sign in with Microsoft Entra ID. On callback the hub verifies the id_token against Entra's JWKS, maps Entra <strong>group membership</strong> to LM RBAC + tenant scope, and (when required) <strong>hard-enforces MFA</strong> via the <code>amr</code> claim. Auth uses a <strong>client certificate</strong> (cert + key paths on the hub), not a client secret. Enabling this shows the <em>Sign in with Microsoft</em> button on the login page. <strong>Global Admin only.</strong> Environment overrides (<code>LM_OIDC_*</code>) win over these stored values.</p>
             <div class="flex flex-wrap items-center gap-6 mb-3">
                 <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="oidc-enabled" class="w-4 h-4 text-green-600 rounded">Enable Entra ID SSO</label>
-                <span class="text-[11px] text-slate-400">MFA is enforced in Entra via Conditional Access — see the SSO setup doc.</span>
+                <span class="text-xs text-slate-500">MFA is enforced in Entra via Conditional Access — see the SSO setup doc.</span>
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="space-y-1"><label class="${labelCls}">Directory (tenant) ID</label><input id="oidc-tenant" type="text" placeholder="xxxxxxxx-xxxx-xxxx-…" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Application (client) ID</label><input id="oidc-client" type="text" placeholder="xxxxxxxx-xxxx-xxxx-…" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Redirect URI</label><input id="oidc-redirect" type="text" placeholder="https://your-hub/auth/oidc/callback" class="${inputCls}"></div>
                 <div class="space-y-1 md:col-span-2">
-                    <label class="${labelCls}">Additional redirect URIs <span class="text-slate-400 normal-case font-normal">(optional — one per edge-proxy hostname, comma/newline separated)</span></label>
+                    <label class="${labelCls}">Additional redirect URIs <span class="text-slate-500 normal-case font-normal">(optional — one per edge-proxy hostname, comma/newline separated)</span></label>
                     <textarea id="oidc-redirect-uris" rows="2" placeholder="https://proxy-a.example.com/auth/oidc/callback&#10;https://proxy-b.example.com/auth/oidc/callback" class="${inputCls} font-mono text-xs"></textarea>
-                    <span class="text-[11px] text-slate-400">Lets SSO return users to the edge proxy they started from. Each URI must ALSO be registered as a redirect URI in the Entra app registration.</span>
+                    <span class="text-xs text-slate-500">Lets SSO return users to the edge proxy they started from. Each URI must ALSO be registered as a redirect URI in the Entra app registration.</span>
                 </div>
                 <div class="space-y-1">
-                    <label class="${labelCls}">Allowed groups <span class="text-slate-400 normal-case font-normal">(object IDs, optional — comma/space separated; membership in ANY grants login)</span></label>
+                    <label class="${labelCls}">Allowed groups <span class="text-slate-500 normal-case font-normal">(object IDs, optional — comma/space separated; membership in ANY grants login)</span></label>
                     <div class="flex gap-2">
                         <input id="oidc-group" type="text" placeholder="Entra group object IDs — blank = any user in the tenant" class="${inputCls} font-mono text-xs flex-1">
-                        <button type="button" onclick="loadOidcGroupPicker()" id="oidc-group-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold">＋ Pick from Entra</button>
+                        <button type="button" onclick="loadOidcGroupPicker()" id="oidc-group-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold">＋ Pick from Entra</button>
                     </div>
                     <select id="oidc-group-select" onchange="onOidcGroupPick(this)" class="hidden w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></select>
-                    <p id="oidc-group-msg" class="text-[11px] text-amber-600 hidden"></p>
+                    <p id="oidc-group-msg" class="text-xs text-amber-600 hidden"></p>
                 </div>
             </div>
             <div class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
                 <div class="flex items-center justify-between gap-2 flex-wrap">
-                    <div class="text-xs text-slate-600"><span class="font-bold">Client certificate</span> <span id="oidc-cert-status" class="text-slate-400">checking…</span></div>
-                    <button onclick="generateOidcCert()" id="oidc-gen-btn" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold">Generate certificate</button>
+                    <div class="text-xs text-slate-600"><span class="font-bold">Client certificate</span> <span id="oidc-cert-status" class="text-slate-500">checking…</span></div>
+                    <button onclick="generateOidcCert()" id="oidc-gen-btn" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-full text-xs font-bold">Generate certificate</button>
                 </div>
-                <p class="text-[11px] text-slate-400 mt-1">Auto-creates a self-signed keypair on the hub (in the hub's writable state directory by default — no root/<code>/etc</code> access needed). This is a client credential Entra matches by thumbprint — it is <em>not</em> a TLS/LE cert. Upload the generated certificate below to the Entra app registration → Certificates &amp; secrets → Certificates.</p>
+                <p class="text-xs text-slate-500 mt-1">Auto-creates a self-signed keypair on the hub (in the hub's writable state directory by default — no root/<code>/etc</code> access needed). This is a client credential Entra matches by thumbprint — it is <em>not</em> a TLS/LE cert. Upload the generated certificate below to the Entra app registration → Certificates &amp; secrets → Certificates.</p>
                 <div id="oidc-cert-output" class="hidden mt-2">
                     <div class="flex items-center justify-between gap-2 mb-1">
-                        <div class="text-[11px] text-slate-500">Thumbprint (x5t): <code id="oidc-cert-thumb" class="text-slate-700"></code></div>
-                        <button type="button" onclick="downloadOidcCert()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-[11px] font-bold">Download .cer</button>
+                        <div class="text-xs text-slate-500">Thumbprint (x5t): <code id="oidc-cert-thumb" class="text-slate-700"></code></div>
+                        <button type="button" onclick="downloadOidcCert()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold">Download .cer</button>
                     </div>
-                    <label class="text-[11px] text-slate-500"><span class="font-semibold">Download</span> the certificate above and upload the <em>file</em> to Entra → App registration → Certificates &amp; secrets → Certificates (Entra takes a file, not pasted text). This is the <em>public</em> cert — never upload the private key.</label>
-                    <textarea id="oidc-cert-pem" readonly rows="6" class="w-full mt-1 bg-white border border-slate-300 rounded-md px-2 py-1 text-[11px] font-mono"></textarea>
+                    <label class="text-xs text-slate-500"><span class="font-semibold">Download</span> the certificate above and upload the <em>file</em> to Entra → App registration → Certificates &amp; secrets → Certificates (Entra takes a file, not pasted text). This is the <em>public</em> cert — never upload the private key.</label>
+                    <textarea id="oidc-cert-pem" readonly rows="6" class="w-full mt-1 bg-white border border-slate-300 rounded-md px-2 py-1 text-xs font-mono"></textarea>
                 </div>
             </div>
             <div class="mt-4 flex items-center justify-between gap-3">
-                <span id="oidc-save-msg" class="text-xs text-slate-400"></span>
+                <span id="oidc-save-msg" class="text-xs text-slate-500"></span>
             </div>
-            <p class="text-[11px] text-slate-400 mt-2">The certificate + key are <em>auto-managed on the hub</em> (Generate above) — the WebUI never sees the key material. In Entra: register the app, add the redirect URI above, upload the generated certificate, and grant Graph <code>Group.Read.All</code> (app) for the group picker + the <code>GroupMember.Read.All</code> &gt;200-group fallback. Advanced: override the location with <code>LM_OIDC_DIR</code> / <code>LM_OIDC_CLIENT_KEY</code>.</p>
+            <p class="text-xs text-slate-500 mt-2">The certificate + key are <em>auto-managed on the hub</em> (Generate above) — the WebUI never sees the key material. In Entra: register the app, add the redirect URI above, upload the generated certificate, and grant Graph <code>Group.Read.All</code> (app) for the group picker + the <code>GroupMember.Read.All</code> &gt;200-group fallback. Advanced: override the location with <code>LM_OIDC_DIR</code> / <code>LM_OIDC_CLIENT_KEY</code>.</p>
         </div>`;
     loadOidcConfig();
     // Auto-save on change (allowlist mapper — cert-management controls are
@@ -5649,7 +5649,7 @@ async function loadOidcConfig() {
         const pill = document.getElementById('oidc-state-pill');
         if (pill) {
             pill.textContent = cfg.enabled ? 'ENABLED' : 'DISABLED';
-            pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' +
+            pill.className = 'text-xs px-2 py-0.5 rounded-full font-bold ' +
                 (cfg.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500');
         }
         // Cert status: whether the key/cert files exist on the hub + thumbprint.
@@ -5763,10 +5763,10 @@ function _renderSetupTestFeedTile(content) {
     content.innerHTML = `
         <div class="${card} space-y-4">
             <div class="flex items-center justify-between">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Test Data Feed ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                <span id="tf-status" class="text-xs text-slate-400"></span>
+                <h3 class="text-sm font-bold text-slate-500">Test Data Feed ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <span id="tf-status" class="text-xs text-slate-500"></span>
             </div>
-            <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-[11px] text-amber-800 leading-snug">
+            <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-800 leading-snug">
                 Gives a test hub a realistic fleet without duplicating lab hardware — <b>Global-Admin only, every change is audit-logged</b>.
                 One hub <b>publishes</b> a snapshot of its fleet; another <b>subscribes</b> and replays it as synthetic spokes.
                 By default the copy is <b>verbatim</b> — real hostnames, addresses, MACs and serials — so a production issue reproduces against the identifiers you actually see in the field. Passwords, tokens and keys are <b>never</b> included either way.
@@ -5775,10 +5775,10 @@ function _renderSetupTestFeedTile(content) {
 
             <div class="border border-slate-200 rounded-md p-4 space-y-3">
                 <div class="flex items-center justify-between">
-                    <h4 class="text-xs font-bold text-slate-600 uppercase tracking-wider">This hub as a SOURCE</h4>
-                    <span id="tf-src-badge" class="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">off</span>
+                    <h4 class="text-xs font-bold text-slate-600">This hub as a SOURCE</h4>
+                    <span id="tf-src-badge" class="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">off</span>
                 </div>
-                <p class="text-[11px] text-slate-500 leading-snug">
+                <p class="text-xs text-slate-500 leading-snug">
                     Publishing serves this hub's fleet to any client holding a valid API token.
                     Issue one under <b>Settings → API Tokens</b> and give it to the receiving hub; revoking it stops that feed immediately.
                 </p>
@@ -5790,19 +5790,19 @@ function _renderSetupTestFeedTile(content) {
                     <input type="checkbox" id="tf-anonymise" class="w-4 h-4 text-green-600 rounded" onchange="tfSaveSource()" title="Replace hostnames, addresses, MACs and serials with stable pseudonyms before publishing. Off = verbatim copy. Passwords/tokens/keys are never included either way.">
                     Anonymise before publishing — replace hostnames, addresses, MACs and serials
                 </label>
-                <p id="tf-mode-state" class="text-[11px] leading-snug"></p>
+                <p id="tf-mode-state" class="text-xs leading-snug"></p>
                 <div id="tf-salt-row" class="flex flex-wrap items-center gap-2 hidden">
                     <button onclick="tfRegenSalt()" class="${btnSecCls} text-xs" title="Mint a new pseudonym salt, so every synthetic identity this hub publishes from now on is different and cannot be correlated with anything already sent">↻ Regenerate pseudonyms</button>
-                    <span id="tf-salt-state" class="text-[11px] text-slate-400"></span>
+                    <span id="tf-salt-state" class="text-xs text-slate-500"></span>
                 </div>
             </div>
 
             <div class="border border-slate-200 rounded-md p-4 space-y-3">
                 <div class="flex items-center justify-between">
-                    <h4 class="text-xs font-bold text-slate-600 uppercase tracking-wider">This hub as a RECEIVER</h4>
-                    <span id="tf-rcv-badge" class="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">stopped</span>
+                    <h4 class="text-xs font-bold text-slate-600">This hub as a RECEIVER</h4>
+                    <span id="tf-rcv-badge" class="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">stopped</span>
                 </div>
-                <p class="text-[11px] text-slate-500 leading-snug">
+                <p class="text-xs text-slate-500 leading-snug">
                     Pulls from the source on an interval and replays it into this hub as synthetic spokes, prefixed so you can bulk-delete them later from <b>Spokes &amp; Agents</b>.
                     The replayed fleet joins this hub's <b>shared tenant</b>, so it is visible to every tenant rather than walled into one.
                     Both tokens come from <b>one pair</b> issued on the SOURCE hub (Settings → API Tokens there). The access token expires after a few hours; with the refresh token the feed rotates it on its own instead of stopping overnight.
@@ -5817,21 +5817,21 @@ function _renderSetupTestFeedTile(content) {
                         <input type="text" id="tf-source-url" placeholder="https://lm-hub.example.com" class="${inputCls}" title="Base URL of the SOURCE hub that is publishing the feed (the hub where you enabled 'Publish this hub's fleet').">
                     </div>
                     <div class="space-y-1">
-                        <label class="${labelCls}">Access token (Bearer) <span id="tf-token-set" class="normal-case font-normal text-slate-400"></span></label>
+                        <label class="${labelCls}">Access token (Bearer) <span id="tf-token-set" class="normal-case font-normal text-slate-500"></span></label>
                         <input type="password" id="tf-token" placeholder="paste to set / change" class="${inputCls}" title="Bearer access token issued on the SOURCE hub (Settings → API Tokens there). Sent to authenticate each snapshot pull. Leave blank to keep the stored value.">
                     </div>
                     <div class="space-y-1">
-                        <label class="${labelCls}">Refresh token <span id="tf-refresh-set" class="normal-case font-normal text-slate-400"></span></label>
+                        <label class="${labelCls}">Refresh token <span id="tf-refresh-set" class="normal-case font-normal text-slate-500"></span></label>
                         <input type="password" id="tf-refresh" placeholder="paste to set / change" class="${inputCls}" title="Refresh token from the same pair on the SOURCE hub. Lets the feed rotate the short-lived access token on its own instead of stopping when it expires. Leave blank to keep the stored value.">
                     </div>
                     <div class="space-y-1">
-                        <label class="${labelCls}">Tenant <span class="normal-case font-normal text-slate-400">· blank = shared</span></label>
+                        <label class="${labelCls}">Tenant <span class="normal-case font-normal text-slate-500">· blank = shared</span></label>
                         <input type="text" id="tf-tenant" placeholder="leave blank for the shared tenant" class="${inputCls}" title="Name a real tenant to make the replayed fleet show in that tenant's Simulations views. Blank binds it to the shared tenant (visible in Spokes & Agents to every tenant). In 'preserve source tenants' mode this is only the fallback for spokes whose source tenant has no local match.">
                     </div>
                     <div class="space-y-1 md:col-span-2">
                         <label class="flex items-center gap-2 text-xs text-slate-600 cursor-pointer" title="Replay each synthetic spoke into the LOCAL tenant matching its SOURCE tenant, so a multi-tenant production fleet keeps its tenant layout here instead of collapsing into one. A source tenant with no local match (and any unattributed spoke) falls back to the Tenant field above / the shared tenant. Only takes effect when the source is publishing verbatim (an anonymised source omits per-spoke tenant).">
                             <input type="checkbox" id="tf-preserve" class="rounded border-slate-300">
-                            <span>Preserve source tenants <span class="text-slate-400 font-normal">— receive all tenants into their matching local tenants</span></span>
+                            <span>Preserve source tenants <span class="text-slate-500 font-normal">— receive all tenants into their matching local tenants</span></span>
                         </label>
                     </div>
                     <div class="space-y-1">
@@ -5846,11 +5846,11 @@ function _renderSetupTestFeedTile(content) {
                 <div class="flex flex-wrap items-center gap-2 pt-1">
                     <button onclick="tfTestSource()" class="${btnSecCls} text-xs" title="Fetch one snapshot from the source and show what it would replay, without starting the feed or connecting any synthetic spoke">Test source</button>
                     <button onclick="tfStart()" id="tf-start" class="${btnCls}" title="Start pulling from the source and replaying it into this hub as synthetic spokes">Start feed</button>
-                    <button onclick="tfStop()" id="tf-stop" class="bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded-md text-sm font-bold border border-red-200" title="Stop the feeder; the synthetic spokes go offline but stay registered until you delete them">Stop feed</button>
+                    <button onclick="tfStop()" id="tf-stop" class="bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded-full text-sm font-bold border border-red-200" title="Stop the feeder; the synthetic spokes go offline but stay registered until you delete them">Stop feed</button>
                     <button onclick="tfSaveReceiver()" class="${btnSecCls} ml-auto" title="Save the source URL, credentials and polling settings without starting the feed">Save</button>
                 </div>
                 <div id="tf-output" class="hidden">
-                    <pre id="tf-output-body" class="bg-slate-900 text-slate-100 text-[11px] font-mono rounded-md p-3 overflow-x-auto max-h-64"></pre>
+                    <pre id="tf-output-body" class="bg-slate-900 text-slate-100 text-xs font-mono rounded-md p-3 overflow-x-auto max-h-64"></pre>
                 </div>
             </div>
         </div>`;
@@ -5863,12 +5863,12 @@ function _renderSetupTestFeedTile(content) {
 function _tfBadge(el, text, tone) {
     if (!el) return;
     const tones = {
-        on:   'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]',
+        on:   'bg-brand/10 text-primary-text border border-brand',
         off:  'bg-slate-100 text-slate-500',
         warn: 'bg-amber-100 text-amber-700',
         err:  'bg-red-100 text-red-700',
     };
-    el.className = `text-[11px] px-2 py-0.5 rounded-full ${tones[tone] || tones.off}`;
+    el.className = `text-xs px-2 py-0.5 rounded-full ${tones[tone] || tones.off}`;
     el.textContent = text;
 }
 
@@ -5904,10 +5904,10 @@ async function tfLoad() {
         const mode = document.getElementById('tf-mode-state');
         if (mode) {
             if (c.source_anonymise) {
-                mode.className = 'text-[11px] leading-snug text-slate-500';
+                mode.className = 'text-xs leading-snug text-slate-500';
                 mode.textContent = 'Anonymised: identifiers are replaced with stable stand-ins before anything leaves this hub.';
             } else {
-                mode.className = 'text-[11px] leading-snug text-amber-700 font-semibold';
+                mode.className = 'text-xs leading-snug text-amber-700 font-semibold';
                 mode.textContent = 'Verbatim: real hostnames, addresses, MACs and serials leave this hub as-is. Secrets are still never included.';
             }
         }
@@ -5919,14 +5919,14 @@ async function tfLoad() {
             if (c.receiver_preserve_tenants) {
                 const fb = c.receiver_tenant || (c.shared_tenant ? `shared "${c.shared_tenant}"` : null);
                 if (fb) {
-                    ten.className = 'block mt-1 text-[#01A982]';
+                    ten.className = 'block mt-1 text-primary-text';
                     ten.textContent = `Preserving source tenants: each spoke lands in its matching local tenant; unmatched spokes fall back to ${fb}.`;
                 } else {
                     ten.className = 'block mt-1 text-red-600 font-semibold';
                     ten.textContent = 'Preserving source tenants, but there is no fallback — name a tenant above or mark one shared in Setup → Tenants for spokes with no local match.';
                 }
             } else if (c.shared_tenant) {
-                ten.className = 'block mt-1 text-[#01A982]';
+                ten.className = 'block mt-1 text-primary-text';
                 ten.textContent = c.receiver_tenant
                     ? `Fleet will land in tenant "${c.receiver_tenant}".`
                     : `Fleet will land in shared tenant "${c.shared_tenant}" — visible in Spokes & Agents, but name a real tenant above to see it in Simulations.`;

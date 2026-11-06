@@ -9,7 +9,7 @@
 async function loadNetboxData(subMenu) {
     const container = document.getElementById('netbox-content');
     if (!container) return;
-    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
+    container.innerHTML = '<p class="text-sm text-slate-500 italic p-4">Loading…</p>';
 
     // Show/hide the "+ Add" button based on writable sub-views. It lives in the
     // menu strip (far-right #top-nav-actions) rather than the page body.
@@ -22,16 +22,16 @@ async function loadNetboxData(subMenu) {
             // already has (RFC1918 free-space scan) and assigns the pick. The
             // manual "+ Add" (carve-from-parent) flow stays alongside it.
             const findBtn = subMenu === 'Prefixes'
-                ? `<button onclick="showFindSubnetModal()" class="bg-white border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2" title="Scan for and allocate the next available contiguous subnet">Add Prefix</button>`
+                ? `<button onclick="showFindSubnetModal()" class="bg-white border border-brand text-primary-text hover:bg-primary hover:text-white px-3 py-1 rounded-full text-xs font-bold transition-all shadow-sm mr-2" title="Scan for and allocate the next available contiguous subnet">Add Prefix</button>`
                 : '';
             // Admin-only Excel rack-layout importer (Setup → Module Management
             // gating is mirrored here: only admins see the button; the hub
             // routes are admin-gated too — defense in depth).
             const importBtn = (subMenu === 'Racks' && isAdmin())
-                ? `<button onclick="showRackImportModal()" class="bg-white border border-indigo-500 text-indigo-600 hover:bg-indigo-500 hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2" title="Import rack elevation layout from an Excel spreadsheet">Import .xlsx</button>`
+                ? `<button onclick="showRackImportModal()" class="bg-white border border-indigo-500 text-indigo-600 hover:bg-indigo-500 hover:text-white px-3 py-1 rounded-full text-xs font-bold transition-all shadow-sm mr-2" title="Import rack elevation layout from an Excel spreadsheet">Import .xlsx</button>`
                 : '';
             actions.innerHTML = canEdit()
-                ? `${importBtn}${findBtn}<button onclick="showNetboxAddModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm" title="Add a new item to NetBox">+ Add</button>`
+                ? `${importBtn}${findBtn}<button onclick="showNetboxAddModal()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold transition-all shadow-sm" title="Add a new item to NetBox">+ Add</button>`
                 : importBtn;
         } else {
             actions.innerHTML = '';
@@ -67,9 +67,9 @@ async function loadNetboxData(subMenu) {
                 return (res.value.d[res.value.key] || []).length;
             };
             const card = (label, n, target) => `
-                <div onclick="setSubView('${target}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-[#01A982] hover:shadow-md transition-all">
-                    <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">${label}</p>
-                    <p class="text-3xl font-bold text-[#263040]">${n === null ? '<span class="text-base font-medium text-amber-600">Unavailable</span>' : n}</p>
+                <div onclick="setSubView('${target}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-brand hover:shadow-md transition-all">
+                    <p class="text-xs font-bold text-slate-500 mb-2">${label}</p>
+                    <p class="text-3xl font-bold text-navy">${n === null ? '<span class="text-base font-medium text-amber-600">Unavailable</span>' : n}</p>
                 </div>`;
             container.innerHTML = `
                 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 p-4">
@@ -85,7 +85,7 @@ async function loadNetboxData(subMenu) {
             // builds returned 200+{status:'ERROR',message}. Handle both so the operator
             // sees the "spoke not connected" notice either way instead of "No devices".
             const d = await r.json().catch(() => ({}));
-            if (!r.ok || d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || d.detail || 'NetBox spoke not connected'}</p><p class="px-4 pb-4 text-xs text-slate-400">Verify the NetBox URL and API Token in Setup → IPAM.</p>`; return; }
+            if (!r.ok || d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || d.detail || 'NetBox spoke not connected'}</p><p class="px-4 pb-4 text-xs text-slate-500">Verify the NetBox URL and API Token in Setup → IPAM.</p>`; return; }
             const devices = d.devices || [];
             window._nbDevices = devices;
             const cols = ['Name', 'Status', 'Site', 'Rack', 'Unit', 'Role', 'Type', 'Primary IP', ''];
@@ -101,13 +101,13 @@ async function loadNetboxData(subMenu) {
                     <td class="px-4 py-2 text-xs">${dv.device_type || '—'}</td>
                     <td class="px-4 py-2 text-xs font-mono">${dv.primary_ip || '—'}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
-                        <button onclick="editNetboxDevice(${dv.id})" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                        <button onclick="deleteNetboxDevice(${dv.id})" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                        <button onclick="editNetboxDevice(${dv.id})" title="Edit" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${editIcon}</button>
+                        <button onclick="deleteNetboxDevice(${dv.id})" title="Delete" class="p-1 text-slate-500 hover:text-red-500 transition-colors">${delIcon}</button>
                     </td>
                 </tr>`;
             }).join('');
             container.innerHTML = devices.length === 0
-                ? '<p class="p-4 text-slate-400 italic text-sm">No devices found in NetBox.</p>'
+                ? '<p class="p-4 text-slate-500 italic text-sm">No devices found in NetBox.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
 
         } else if (subMenu === 'Racks') {
@@ -127,13 +127,13 @@ async function loadNetboxData(subMenu) {
                 <td class="px-4 py-2 text-xs font-mono">${rk.facility_id || '—'}</td>
                 <td class="px-4 py-2 text-center">${rk.u_height}</td>
                 <td class="px-4 py-2 whitespace-nowrap">
-                    <button onclick="showRackElevationModal(${rk.id})" title="View elevation" class="p-1 text-slate-400 hover:text-[#01A982] transition-colors">${viewIcon}</button>
-                    <button onclick="editNetboxRack(${rk.id})" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                    <button onclick="deleteNetboxRack(${rk.id})" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                    <button onclick="showRackElevationModal(${rk.id})" title="View elevation" class="p-1 text-slate-500 hover:text-primary-text transition-colors">${viewIcon}</button>
+                    <button onclick="editNetboxRack(${rk.id})" title="Edit" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${editIcon}</button>
+                    <button onclick="deleteNetboxRack(${rk.id})" title="Delete" class="p-1 text-slate-500 hover:text-red-500 transition-colors">${delIcon}</button>
                 </td>
             </tr>`).join('');
             container.innerHTML = racks.length === 0
-                ? '<p class="p-4 text-slate-400 italic text-sm">No racks found in NetBox.</p>'
+                ? '<p class="p-4 text-slate-500 italic text-sm">No racks found in NetBox.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
 
         } else if (subMenu === 'Prefixes') {
@@ -150,7 +150,7 @@ async function loadNetboxData(subMenu) {
                 const isDhcp = !!cf.dhcp_enabled && p.status !== 'container';
                 const dhcpBadge = isDhcp
                     ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800" title="DHCP scope enabled">DHCP</span>'
-                    : '<span class="text-slate-300 text-xs">—</span>';
+                    : '<span class="text-slate-500 text-xs">—</span>';
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(p.prefix)}</td>
                     <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${escapeHtml(p.status)}</span></td>
@@ -159,15 +159,15 @@ async function loadNetboxData(subMenu) {
                     <td class="px-4 py-2 text-xs">${p.vrf || 'Global'}</td>
                     <td class="px-4 py-2 text-xs">${p.description || '—'}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
-                        <button onclick="showNetboxAllocateIPModal('${p.prefix}')" title="Allocate IP address in this subnet" class="p-1 text-slate-400 hover:text-[#01A982] transition-colors text-xs font-medium">+IP</button>
-                        <button onclick="releaseSubnetToPool(${p.id}, '${p.prefix}')" title="Return to pool — releases subnet and all its allocated IPs back to available pool for reassignment" class="p-1 text-slate-400 hover:text-amber-600 transition-colors text-xs font-medium">Pool</button>
-                        <button onclick="editNetboxPrefix(${p.id})" title="Edit subnet details" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                        <button onclick="deleteNetboxPrefix(${p.id})" title="Delete subnet directly from NetBox" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                        <button onclick="showNetboxAllocateIPModal('${p.prefix}')" title="Allocate IP address in this subnet" class="p-1 text-slate-500 hover:text-primary-text transition-colors text-xs font-medium">+IP</button>
+                        <button onclick="releaseSubnetToPool(${p.id}, '${p.prefix}')" title="Return to pool — releases subnet and all its allocated IPs back to available pool for reassignment" class="p-1 text-slate-500 hover:text-amber-600 transition-colors text-xs font-medium">Pool</button>
+                        <button onclick="editNetboxPrefix(${p.id})" title="Edit subnet details" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${editIcon}</button>
+                        <button onclick="deleteNetboxPrefix(${p.id})" title="Delete subnet directly from NetBox" class="p-1 text-slate-500 hover:text-red-500 transition-colors">${delIcon}</button>
                     </td>
                 </tr>`;
             }).join('');
             container.innerHTML = prefixes.length === 0
-                ? '<p class="p-4 text-slate-400 italic text-sm">No prefixes found in NetBox.</p>'
+                ? '<p class="p-4 text-slate-500 italic text-sm">No prefixes found in NetBox.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
 
         } else if (subMenu === 'IP Addresses') {
@@ -187,7 +187,7 @@ async function loadNetboxData(subMenu) {
                 // and gate the Reserve action on it.
                 const nbMac = (ip.custom_fields || {}).mac_address || '';
                 const reserveBtn = nbMac
-                    ? `<button onclick="reserveNetboxIP(${ip.id})" title="Create a DHCP reservation pinning this address to ${escapeHtml(nbMac)}" class="p-1 text-slate-400 hover:text-[#01A982] transition-colors text-xs font-medium">Reserve</button>`
+                    ? `<button onclick="reserveNetboxIP(${ip.id})" title="Create a DHCP reservation pinning this address to ${escapeHtml(nbMac)}" class="p-1 text-slate-500 hover:text-primary-text transition-colors text-xs font-medium">Reserve</button>`
                     : `<span title="No MAC on this NetBox IP record yet — a DHCP reservation needs one to match the client. Discovery fills it in once the device is seen." class="p-1 text-slate-200 text-xs cursor-not-allowed">Reserve</span>`;
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(ip.address)}</td>
@@ -199,13 +199,13 @@ async function loadNetboxData(subMenu) {
                     <td class="px-4 py-2 text-xs">${ip.device || '—'}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
                         ${reserveBtn}
-                        <button onclick="editNetboxIP(${ip.id})" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                        <button onclick="releaseNetboxIP(${ip.id})" title="Release" class="p-1 text-slate-300 hover:text-red-500 transition-colors text-xs">Release</button>
+                        <button onclick="editNetboxIP(${ip.id})" title="Edit" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${editIcon}</button>
+                        <button onclick="releaseNetboxIP(${ip.id})" title="Release" class="p-1 text-slate-500 hover:text-red-500 transition-colors text-xs">Release</button>
                     </td>
                 </tr>`;
             }).join('');
             container.innerHTML = ips.length === 0
-                ? '<p class="p-4 text-slate-400 italic text-sm">No IP addresses found.</p>'
+                ? '<p class="p-4 text-slate-500 italic text-sm">No IP addresses found.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
         }
     } catch (err) {
@@ -224,10 +224,10 @@ function showNetboxAddModal() {
 async function showCPPMDeviceDetail(mac) {
     const modal = openModal('cppm-device-modal', `
         <div class="flex justify-between items-start">
-            <p class="font-mono text-base font-bold text-[#263040]">${mac}</p>
-            <button class="cppm-modal-close text-slate-400 hover:text-slate-600 text-xl leading-none" title="Close modal">&times;</button>
+            <p class="font-mono text-base font-bold text-navy">${mac}</p>
+            <button class="cppm-modal-close text-slate-500 hover:text-slate-600 text-xl leading-none" title="Close modal">&times;</button>
         </div>
-        <div class="cppm-modal-body"><p class="text-xs text-slate-400 italic">Loading…</p></div>`, { card: 'w-full max-w-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
+        <div class="cppm-modal-body"><p class="text-xs text-slate-500 italic">Loading…</p></div>`, { card: 'w-full max-w-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
     modal.querySelector('.cppm-modal-close').addEventListener('click', () => modal.remove());
 
     const body = modal.querySelector('.cppm-modal-body');
@@ -242,9 +242,9 @@ async function showCPPMDeviceDetail(mac) {
         const sources = ep.sources || {};
 
         const srcBadge = key => sources[key] && sources[key] !== 'ClearPass'
-            ? `<span class="ml-1 text-[9px] font-bold uppercase px-1 py-0.5 rounded bg-blue-50 text-blue-500">${sources[key]}</span>` : '';
+            ? `<span class="ml-1 text-xs font-bold px-1 py-0.5 rounded bg-blue-50 text-blue-500">${sources[key]}</span>` : '';
         const field = (label, val, srcKey) => val
-            ? `<div><p class="text-[10px] text-slate-400 uppercase font-bold tracking-wide mb-0.5">${label}${srcKey ? srcBadge(srcKey) : ''}</p><p class="text-sm text-slate-700">${val}</p></div>`
+            ? `<div><p class="text-xs text-slate-500 font-bold mb-0.5">${label}${srcKey ? srcBadge(srcKey) : ''}</p><p class="text-sm text-slate-700">${val}</p></div>`
             : '';
 
         const statusVal = ep.status_val || '';
@@ -252,25 +252,25 @@ async function showCPPMDeviceDetail(mac) {
         // Full endpoint attribute dump (the summary grid above shows the common
         // fields; this section lists EVERY attribute on the endpoint record so a
         // click on a My Devices / Unknown Devices row surfaces the whole set,
-        // including Tenant / Tenant_Slug / NetBox_Tenant_* and profiler attrs).
+        // including Tenant / NetBox_Tenant_* and profiler attrs).
         const allAttrs = ep.attributes || {};
         // Untagged = assigned to no tenant → eligible to Claim into NetBox.
-        const isUntagged = !(allAttrs["NetBox_Tenant_Slug"] || allAttrs["Tenant_Slug"]);
+        const isUntagged = !allAttrs["NetBox_Tenant_ID"];
         const attrEntries = Object.entries(allAttrs).filter(([, v]) => v != null && v !== '');
         const attrSection = attrEntries.length
             ? `<div class="mt-3">
-                <p class="text-xs text-slate-500 font-bold uppercase tracking-wide mb-2">Endpoint Attributes</p>
+                <p class="text-xs text-slate-500 font-bold mb-2">Endpoint Attributes</p>
                 <div class="border border-slate-100 rounded-md p-3 bg-slate-50/50 space-y-1 max-h-56 overflow-y-auto">${attrEntries.map(([k, v]) =>
-                    `<div class="flex gap-2 text-xs"><span class="text-slate-400 font-mono min-w-[140px] shrink-0">${k}</span><span class="text-slate-700 break-all">${v}</span></div>`
+                    `<div class="flex gap-2 text-xs"><span class="text-slate-500 font-mono min-w-[140px] shrink-0">${k}</span><span class="text-slate-700 break-all">${v}</span></div>`
                 ).join('')}</div>
             </div>`
-            : '<p class="text-xs text-slate-400 italic mt-3">No endpoint attributes.</p>';
+            : '<p class="text-xs text-slate-500 italic mt-3">No endpoint attributes.</p>';
 
         const sessions = sd.sessions || [];
         const sessionHtml = sessions.length === 0
-            ? '<p class="text-xs text-slate-400 italic">No RADIUS accounting sessions found for this device.</p>'
+            ? '<p class="text-xs text-slate-500 italic">No RADIUS accounting sessions found for this device.</p>'
             : `<table class="w-full text-left text-xs border-collapse">
-                <thead><tr class="border-b border-slate-200 text-slate-400 uppercase text-[10px]">
+                <thead><tr class="border-b border-slate-200 text-slate-500 text-xs">
                     <th class="px-3 py-1.5">Username</th><th class="px-3 py-1.5">IP</th>
                     <th class="px-3 py-1.5">NAS</th><th class="px-3 py-1.5">Port</th><th class="px-3 py-1.5">Role</th>
                     <th class="px-3 py-1.5">Start</th><th class="px-3 py-1.5">State</th>
@@ -298,12 +298,12 @@ async function showCPPMDeviceDetail(mac) {
             </div>
             ${attrSection}
             <div class="mt-3">
-                <p class="text-xs text-slate-500 font-bold uppercase tracking-wide mb-2">Session History</p>
+                <p class="text-xs text-slate-500 font-bold mb-2">Session History</p>
                 ${sessionHtml}
             </div>
             ${isUntagged ? `<div class="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between">
-                <p class="text-xs text-slate-400">Not assigned to any tenant - claim this device to your tenant.</p>
-                <button onclick="showClaimDeviceModal('${encodeURIComponent(mac)}')" title="Claim this unassigned device into NetBox IPAM" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shrink-0">Claim Device</button>
+                <p class="text-xs text-slate-500">Not assigned to any tenant - claim this device to your tenant.</p>
+                <button onclick="showClaimDeviceModal('${encodeURIComponent(mac)}')" title="Claim this unassigned device into NetBox IPAM" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-full text-sm font-bold shrink-0">Claim Device</button>
             </div>` : ''}`;
     } catch (e) {
         body.innerHTML = `<p class="text-xs text-red-400 italic">Error: ${e.message}</p>`;
@@ -332,26 +332,26 @@ async function showClaimDeviceModal(mac) {
     const nameDefault = dev.hostname || `endpoint-${(mac || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase()}`;
 
     const modal = openModal('nb-claim-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">Claim in NetBox</h3>
+        <h3 class="text-lg font-bold text-navy">Claim in NetBox</h3>
         <p class="text-xs text-slate-500">Creates a NetBox device owned by a tenant and attaches this endpoint's IP. After a sync, the device leaves Unknown Devices and appears under My Devices.</p>
         <div class="rounded-md bg-slate-50 border border-slate-100 p-3 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
-            <div><span class="text-slate-400">MAC:</span> <span class="font-mono text-slate-700">${esc(dev.mac || mac || '—')}</span></div>
-            <div><span class="text-slate-400">IP:</span> <span class="font-mono text-slate-700">${esc(dev.ip || '—')}</span></div>
-            <div><span class="text-slate-400">Hostname:</span> <span class="text-slate-700">${esc(dev.hostname || '—')}</span></div>
-            <div><span class="text-slate-400">Vendor/OS:</span> <span class="text-slate-700">${esc([dev.device_vendor, dev.device_os].filter(Boolean).join(' / ') || '—')}</span></div>
+            <div><span class="text-slate-500">MAC:</span> <span class="font-mono text-slate-700">${esc(dev.mac || mac || '—')}</span></div>
+            <div><span class="text-slate-500">IP:</span> <span class="font-mono text-slate-700">${esc(dev.ip || '—')}</span></div>
+            <div><span class="text-slate-500">Hostname:</span> <span class="text-slate-700">${esc(dev.hostname || '—')}</span></div>
+            <div><span class="text-slate-500">Vendor/OS:</span> <span class="text-slate-700">${esc([dev.device_vendor, dev.device_os].filter(Boolean).join(' / ') || '—')}</span></div>
         </div>
         <div class="grid grid-cols-2 gap-3">
-            <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Device Name</label><input id="cl-name" value="${esc(nameDefault)}" class="${inputCls}" placeholder="router-01" title="Device name in NetBox"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site <span class="text-red-400">*</span></label><select id="cl-site" class="${selCls}" title="NetBox site to assign device to"><option value="">Select site…</option>${opt(opts.sites, '', o => o.name)}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Tenant <span class="text-red-400">*</span></label><select id="cl-tenant" class="${selCls}" ${tenantLocked ? 'disabled' : ''} title="Tenant that owns this device"><option value="">Select tenant…</option>${opt(opts.tenants, preTenant, o => o.name)}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Device Type <span class="text-red-400">*</span></label><select id="cl-type" class="${selCls}" title="Hardware model and manufacturer"><option value="">Select type…</option>${opt(opts.device_types, '', o => `${o.model}${o.manufacturer ? ' (' + o.manufacturer + ')' : ''}`)}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Role</label><select id="cl-role" class="${selCls}" title="Functional role in the network"><option value="">Select role…</option>${opt(opts.device_roles, '', o => o.name)}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="cl-status" class="${selCls}" title="Operational status in NetBox"><option value="active">active</option><option value="planned">planned</option><option value="offline">offline</option><option value="failed">failed</option><option value="inventory">inventory</option></select></div>
-            <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description</label><input id="cl-desc" class="${inputCls}" placeholder="optional" title="Optional description or notes"></div>
+            <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold">Device Name</label><input id="cl-name" value="${esc(nameDefault)}" class="${inputCls}" placeholder="router-01" title="Device name in NetBox"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Site <span class="text-red-400">*</span></label><select id="cl-site" class="${selCls}" title="NetBox site to assign device to"><option value="">Select site…</option>${opt(opts.sites, '', o => o.name)}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Tenant <span class="text-red-400">*</span></label><select id="cl-tenant" class="${selCls}" ${tenantLocked ? 'disabled' : ''} title="Tenant that owns this device"><option value="">Select tenant…</option>${opt(opts.tenants, preTenant, o => o.name)}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Device Type <span class="text-red-400">*</span></label><select id="cl-type" class="${selCls}" title="Hardware model and manufacturer"><option value="">Select type…</option>${opt(opts.device_types, '', o => `${o.model}${o.manufacturer ? ' (' + o.manufacturer + ')' : ''}`)}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Role</label><select id="cl-role" class="${selCls}" title="Functional role in the network"><option value="">Select role…</option>${opt(opts.device_roles, '', o => o.name)}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Status</label><select id="cl-status" class="${selCls}" title="Operational status in NetBox"><option value="active">active</option><option value="planned">planned</option><option value="offline">offline</option><option value="failed">failed</option><option value="inventory">inventory</option></select></div>
+            <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold">Description</label><input id="cl-desc" class="${inputCls}" placeholder="optional" title="Optional description or notes"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button id="cl-submit" onclick="submitClaimDevice('${encodeURIComponent(mac)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="Provision device into NetBox and tag endpoint">Claim Device</button>
-            <button onclick="document.getElementById('nb-claim-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel device claim">Cancel</button>
+            <button id="cl-submit" onclick="submitClaimDevice('${encodeURIComponent(mac)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="Provision device into NetBox and tag endpoint">Claim Device</button>
+            <button onclick="document.getElementById('nb-claim-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Cancel device claim">Cancel</button>
         </div>`, { backdropClose: true });
 }
 
@@ -409,20 +409,20 @@ function showNetboxAddDeviceModal(editItem, prefill) {
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const modal = openModal('nb-device-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} Device</h3>
+        <h3 class="text-lg font-bold text-navy">${editing ? 'Edit' : 'Add'} Device</h3>
         <div class="grid grid-cols-2 gap-3">
-            <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Device Name</label><input id="nb-d-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="router-01"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site Slug</label><input id="nb-d-site" value="${val(editItem?.site)}" class="${inputCls}" placeholder="lab-a" ${editing ? 'readonly' : ''}></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Rack Name</label><input id="nb-d-rack" value="${val(editItem?.rack)}" class="${inputCls}" placeholder="Rack-01"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Rack Unit</label><input id="nb-d-unit" type="number" min="1" value="${val(editItem?.position)}" class="${inputCls}" placeholder="1"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Face</label><select id="nb-d-face" class="${inputCls}"><option value="front">Front</option><option value="rear">Rear</option></select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Device Type Slug</label><input id="nb-d-type" class="${inputCls}" placeholder="cisco-catalyst-9200" ${editing ? 'readonly' : ''}></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Role Slug</label><input id="nb-d-role" class="${inputCls}" placeholder="access-switch" ${editing ? 'readonly' : ''}></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-d-status" class="${inputCls}"><option value="active">active</option><option value="planned">planned</option><option value="offline">offline</option><option value="failed">failed</option><option value="inventory">inventory</option></select></div>
+            <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold">Device Name</label><input id="nb-d-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="router-01"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Site Slug</label><input id="nb-d-site" value="${val(editItem?.site)}" class="${inputCls}" placeholder="lab-a" ${editing ? 'readonly' : ''}></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Rack Name</label><input id="nb-d-rack" value="${val(editItem?.rack)}" class="${inputCls}" placeholder="Rack-01"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Rack Unit</label><input id="nb-d-unit" type="number" min="1" value="${val(editItem?.position)}" class="${inputCls}" placeholder="1"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Face</label><select id="nb-d-face" class="${inputCls}"><option value="front">Front</option><option value="rear">Rear</option></select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Device Type Slug</label><input id="nb-d-type" class="${inputCls}" placeholder="cisco-catalyst-9200" ${editing ? 'readonly' : ''}></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Role Slug</label><input id="nb-d-role" class="${inputCls}" placeholder="access-switch" ${editing ? 'readonly' : ''}></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Status</label><select id="nb-d-status" class="${inputCls}"><option value="active">active</option><option value="planned">planned</option><option value="offline">offline</option><option value="failed">failed</option><option value="inventory">inventory</option></select></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxAddDevice()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to device' : 'Register new device in NetBox'}">${editing ? 'Save Changes' : 'Add Device'}</button>
-            <button onclick="document.getElementById('nb-device-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
+            <button onclick="submitNetboxAddDevice()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="${editing ? 'Save changes to device' : 'Register new device in NetBox'}">${editing ? 'Save Changes' : 'Add Device'}</button>
+            <button onclick="document.getElementById('nb-device-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-lg p-6 space-y-4' });
     if (editing) modal.dataset.deviceId = editItem.id;
     if (editing && editItem.status) {
@@ -536,16 +536,16 @@ async function showNetboxRackModal(editItem) {
     }
 
     const modal = openModal('nb-rack-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} Rack</h3>
+        <h3 class="text-lg font-bold text-navy">${editing ? 'Edit' : 'Add'} Rack</h3>
         <div class="space-y-3">
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Rack Name</label><input id="nb-r-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="Rack-01"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site</label>${siteField}</div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Height (U)</label><input id="nb-r-uheight" type="number" min="1" value="${val(editItem?.u_height) || 42}" class="${inputCls}" placeholder="42"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Facility ID (optional)</label><input id="nb-r-facility" value="${val(editItem?.facility_id)}" class="${inputCls}" placeholder="A1"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Rack Name</label><input id="nb-r-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="Rack-01"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Site</label>${siteField}</div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Height (U)</label><input id="nb-r-uheight" type="number" min="1" value="${val(editItem?.u_height) || 42}" class="${inputCls}" placeholder="42"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Facility ID (optional)</label><input id="nb-r-facility" value="${val(editItem?.facility_id)}" class="${inputCls}" placeholder="A1"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxRack()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to rack' : 'Add new rack to NetBox'}">${editing ? 'Save Changes' : 'Add Rack'}</button>
-            <button onclick="document.getElementById('nb-rack-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
+            <button onclick="submitNetboxRack()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="${editing ? 'Save changes to rack' : 'Add new rack to NetBox'}">${editing ? 'Save Changes' : 'Add Rack'}</button>
+            <button onclick="document.getElementById('nb-rack-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) modal.dataset.rackId = editItem.id;
 }
@@ -602,11 +602,11 @@ async function showNetboxAllocatePrefixModal(editItem) {
     const selectCls = inputCls;
     const allocFields = editing ? '' : `
         <div class="space-y-1">
-            <label class="text-xs text-slate-500 font-bold uppercase">Parent Prefix</label>
+            <label class="text-xs text-slate-500 font-bold">Parent Prefix</label>
             <select id="nb-p-parent" class="${selectCls}"><option value="">Loading…</option></select>
         </div>
-        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Prefix Length</label><input id="nb-p-len" type="number" min="1" max="32" value="24" class="${inputCls}"></div>
-        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Subnet (optional)</label><input id="nb-p-prefix" class="${inputCls}" placeholder="10.0.0.16/28 — exact subnet to create; blank = auto"></div>`;
+        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Prefix Length</label><input id="nb-p-len" type="number" min="1" max="32" value="24" class="${inputCls}"></div>
+        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Subnet (optional)</label><input id="nb-p-prefix" class="${inputCls}" placeholder="10.0.0.16/28 — exact subnet to create; blank = auto"></div>`;
     const statusOpts = ['active', 'container', 'reserved', 'deprecated'].map(s =>
         `<option value="${s}"${editing && editItem.status === s ? ' selected' : ''}>${s}</option>`).join('');
     // dhcp_enabled is the explicit opt-in checkbox: a prefix only becomes a
@@ -624,7 +624,7 @@ async function showNetboxAllocatePrefixModal(editItem) {
     // everything else is tucked behind "Advanced options" so the common case
     // stays a short form.
     const opt = (id, label, placeholder, value) =>
-        `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">${label}</label><input id="${id}" value="${val(value)}" class="${inputCls}" placeholder="${placeholder}"></div>`;
+        `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold">${label}</label><input id="${id}" value="${val(value)}" class="${inputCls}" placeholder="${placeholder}"></div>`;
     const leaseVal = (cf.lease_time != null && String(cf.lease_time).trim() !== '') ? cf.lease_time : '2419200';
     const exclVal = cf.exclusion_ranges || cf.exclusions || '';
     const commonOptionFields = `
@@ -641,35 +641,35 @@ async function showNetboxAllocatePrefixModal(editItem) {
             ${opt('nb-p-netbios', 'NetBIOS Name Servers', 'comma-separated', cf.netbios_name_servers)}
             ${opt('nb-p-bcast', 'Broadcast Address', 'e.g. 10.0.0.255', cf.broadcast_address)}`;
     const modal = openModal('nb-prefix-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Allocate'} Subnet${editing ? ` — <span class="font-mono text-sm">${val(editItem.prefix)}</span>` : ''}</h3>
+        <h3 class="text-lg font-bold text-navy">${editing ? 'Edit' : 'Allocate'} Subnet${editing ? ` — <span class="font-mono text-sm">${val(editItem.prefix)}</span>` : ''}</h3>
         <div class="space-y-4">
             ${allocFields ? `<div class="grid grid-cols-1 md:grid-cols-3 gap-3">${allocFields}</div>` : ''}
             <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description</label><input id="nb-p-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Lab Tenant A VLAN10"></div>
-                <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site</label><select id="nb-p-site" class="${selectCls}" title="NetBox site this subnet belongs to; scanned devices with an IP in it are placed in this site"><option value="">Loading sites…</option></select></div>
-                ${editing ? `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-p-status" class="${selectCls}">${statusOpts}</select></div>` : ''}
+                <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Description</label><input id="nb-p-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Lab Tenant A VLAN10"></div>
+                <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Site</label><select id="nb-p-site" class="${selectCls}" title="NetBox site this subnet belongs to; scanned devices with an IP in it are placed in this site"><option value="">Loading sites…</option></select></div>
+                ${editing ? `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Status</label><select id="nb-p-status" class="${selectCls}">${statusOpts}</select></div>` : ''}
             </div>
             <div>
                 <label class="flex items-center gap-2 text-sm text-slate-600">
-                    <input type="checkbox" id="nb-p-dhcp" class="rounded border-slate-300 text-[#01A982]" ${dhcpChecked ? 'checked' : ''}>
+                    <input type="checkbox" id="nb-p-dhcp" class="rounded border-slate-300 text-primary-text" ${dhcpChecked ? 'checked' : ''}>
                     Enable DHCP scope for this subnet
                 </label>
-                <p class="text-xs text-slate-400 mt-0.5">Only checked, non-container prefixes are synced to Kea as a DHCP scope. Leave unchecked on a parent/aggregate block — carve smaller child subnets and enable this on those instead.</p>
+                <p class="text-xs text-slate-500 mt-0.5">Only checked, non-container prefixes are synced to Kea as a DHCP scope. Leave unchecked on a parent/aggregate block — carve smaller child subnets and enable this on those instead.</p>
             </div>
             <div class="border-t border-slate-200 pt-3 space-y-3">
-                <div class="text-xs font-bold uppercase text-slate-500">DHCP Options</div>
+                <div class="text-xs font-bold text-slate-500">DHCP Options</div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                     ${commonOptionFields}
                 </div>
                 <div>
-                    <button type="button" onclick="document.getElementById('nb-p-advanced').classList.toggle('hidden'); this.textContent = this.textContent.startsWith('Show') ? 'Hide advanced options' : 'Show advanced options ▾'" class="text-xs font-bold text-[#01A982] hover:underline" title="Toggle visibility of advanced DHCP options (NTP, TFTP, Bootfile, NetBIOS, Broadcast)">Show advanced options ▾</button>
+                    <button type="button" onclick="document.getElementById('nb-p-advanced').classList.toggle('hidden'); this.textContent = this.textContent.startsWith('Show') ? 'Hide advanced options' : 'Show advanced options ▾'" class="text-xs font-bold text-primary-text hover:underline" title="Toggle visibility of advanced DHCP options (NTP, TFTP, Bootfile, NetBIOS, Broadcast)">Show advanced options ▾</button>
                 </div>
                 <div id="nb-p-advanced" class="hidden grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 pt-1">${advancedOptionFields}</div>
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxAllocatePrefix()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to prefix' : 'Allocate subnet prefix in NetBox'}">${editing ? 'Save Changes' : 'Allocate'}</button>
-            <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
+            <button onclick="submitNetboxAllocatePrefix()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="${editing ? 'Save changes to prefix' : 'Allocate subnet prefix in NetBox'}">${editing ? 'Save Changes' : 'Allocate'}</button>
+            <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-4xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     if (editing) modal.dataset.prefixId = editItem.id;
     loadNetboxPrefixSiteOptions(editItem?.site_slug || '');
@@ -813,16 +813,16 @@ async function showFindSubnetModal() {
     if (existing) { existing.remove(); return; }
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const modal = openModal('nb-find-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">Add Prefix</h3>
+        <h3 class="text-lg font-bold text-navy">Add Prefix</h3>
         <p class="text-xs text-slate-500 -mt-2">Finds the closest available subnet to one you already have (RFC1918 only; free = not in NetBox or unassigned).</p>
         <div class="space-y-3">
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div class="space-y-1">
-                    <label class="text-xs text-slate-500 font-bold uppercase">Close to (your existing subnet)</label>
+                    <label class="text-xs text-slate-500 font-bold">Close to (your existing subnet)</label>
                     <select id="nb-f-near" class="${inputCls}"><option value="">Loading…</option></select>
                 </div>
                 <div class="space-y-1">
-                    <label class="text-xs text-slate-500 font-bold uppercase">Size</label>
+                    <label class="text-xs text-slate-500 font-bold">Size</label>
                     <div class="flex gap-2 items-center">
                         <select id="nb-f-size-mode" class="${inputCls} flex-none w-36" onchange="_onFindSizeModeChange()">
                             <option value="mask">Prefix length</option>
@@ -833,12 +833,12 @@ async function showFindSubnetModal() {
                         </select>
                         <input id="nb-f-hosts" type="number" min="1" value="60" class="${inputCls} flex-1 hidden" oninput="_updateFindSizeHint()">
                     </div>
-                    <p id="nb-f-size-hint" class="text-[10px] text-slate-400"></p>
+                    <p id="nb-f-size-hint" class="text-xs text-slate-500"></p>
                 </div>
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div class="space-y-1">
-                    <label class="text-xs text-slate-500 font-bold uppercase">Description (optional)</label>
+                    <label class="text-xs text-slate-500 font-bold">Description (optional)</label>
                     <input id="nb-f-desc" class="${inputCls}" placeholder="e.g. Lab Tenant A VLAN11">
                 </div>
                 <div class="space-y-1 flex items-end">
@@ -846,32 +846,32 @@ async function showFindSubnetModal() {
                 </div>
             </div>
             <div class="space-y-1 hidden" id="nb-f-typewrap">
-                <label class="text-xs text-slate-500 font-bold uppercase">Type a subnet to search near (exact tried first, else nearest)</label>
+                <label class="text-xs text-slate-500 font-bold">Type a subnet to search near (exact tried first, else nearest)</label>
                 <input id="nb-f-typed" class="${inputCls}" placeholder="10.50.0.0/24">
             </div>
             <div id="nb-f-results" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 max-h-48 overflow-y-auto"></div>
             <div>
                 <label class="flex items-center gap-2 text-sm text-slate-600">
-                    <input type="checkbox" id="nb-f-dhcp" class="rounded border-slate-300 text-[#01A982]">
+                    <input type="checkbox" id="nb-f-dhcp" class="rounded border-slate-300 text-primary-text">
                     Enable DHCP scope for this subnet
                 </label>
-                <p class="text-xs text-slate-400 mt-0.5">Only checked, non-container prefixes are synced to Kea as a DHCP scope.</p>
+                <p class="text-xs text-slate-500 mt-0.5">Only checked, non-container prefixes are synced to Kea as a DHCP scope.</p>
             </div>
             <div class="border-t border-slate-200 pt-3 space-y-3">
-                <div class="text-xs font-bold uppercase text-slate-500">DHCP Options</div>
+                <div class="text-xs font-bold text-slate-500">DHCP Options</div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Gateway</label><input id="nb-f-gateway" class="${inputCls}" placeholder="e.g. 10.0.0.1"></div>
-                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DNS Servers</label><input id="nb-f-dns" class="${inputCls}" placeholder="comma-separated, e.g. 10.0.0.53, 10.0.0.54"></div>
-                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Domain Name</label><input id="nb-f-domain" class="${inputCls}" placeholder="e.g. lab.local"></div>
-                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Search Domain</label><input id="nb-f-search" class="${inputCls}" placeholder="comma-separated, e.g. lab.local"></div>
-                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Lease Time (seconds)</label><input id="nb-f-lease" class="${inputCls}" placeholder="2419200" value="2419200"></div>
-                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Exclusion Range(s)</label><input id="nb-f-exclusions" class="${inputCls}" placeholder="comma-separated, e.g. 10.0.0.1-10.0.0.20"></div>
+                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Gateway</label><input id="nb-f-gateway" class="${inputCls}" placeholder="e.g. 10.0.0.1"></div>
+                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">DNS Servers</label><input id="nb-f-dns" class="${inputCls}" placeholder="comma-separated, e.g. 10.0.0.53, 10.0.0.54"></div>
+                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Domain Name</label><input id="nb-f-domain" class="${inputCls}" placeholder="e.g. lab.local"></div>
+                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Search Domain</label><input id="nb-f-search" class="${inputCls}" placeholder="comma-separated, e.g. lab.local"></div>
+                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Lease Time (seconds)</label><input id="nb-f-lease" class="${inputCls}" placeholder="2419200" value="2419200"></div>
+                    <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Exclusion Range(s)</label><input id="nb-f-exclusions" class="${inputCls}" placeholder="comma-separated, e.g. 10.0.0.1-10.0.0.20"></div>
                 </div>
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button id="nb-f-assign-btn" onclick="submitFindSubnetAssign()" disabled class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed">Assign</button>
-            <button onclick="document.getElementById('nb-find-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button id="nb-f-assign-btn" onclick="submitFindSubnetAssign()" disabled class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed">Assign</button>
+            <button onclick="document.getElementById('nb-find-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-4xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
     window._nbFindAvail = [];
     window._nbFindSelected = null;
@@ -938,7 +938,7 @@ async function searchAvailableSubnets() {
     const prefixLength = _findPrefixLength();
     const resultsEl = document.getElementById('nb-f-results');
     const assignBtn = document.getElementById('nb-f-assign-btn');
-    resultsEl.innerHTML = '<p class="text-xs text-slate-400 italic">Searching…</p>';
+    resultsEl.innerHTML = '<p class="text-xs text-slate-500 italic">Searching…</p>';
     assignBtn.disabled = true;
     window._nbFindSelected = null;
     try {
@@ -960,7 +960,7 @@ async function searchAvailableSubnets() {
             return `<label class="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-slate-50 cursor-pointer border border-slate-100">
                 <input type="radio" name="nb-f-pick" value="${i}" onchange="_pickFindSubnet(${i})">
                 <span class="font-mono text-sm">${a.prefix}</span>
-                <span class="text-[10px] text-slate-400 ml-auto">${distLabel}</span>
+                <span class="text-xs text-slate-500 ml-auto">${distLabel}</span>
             </label>`;
         }).join('');
         _pickFindSubnet(0);
@@ -1042,25 +1042,25 @@ function showNetboxAllocateIPModal(prefixHint, editItem) {
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const allocFields = editing ? '' : `
-        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Prefix</label><input id="nb-ip-prefix" value="${prefixHint}" class="${inputCls}" placeholder="10.0.0.0/24"></div>
-        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">IP Address (optional)</label><input id="nb-ip-address" class="${inputCls}" placeholder="10.0.0.5 — exact address; blank = auto"></div>`;
+        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Prefix</label><input id="nb-ip-prefix" value="${prefixHint}" class="${inputCls}" placeholder="10.0.0.0/24"></div>
+        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">IP Address (optional)</label><input id="nb-ip-address" class="${inputCls}" placeholder="10.0.0.5 — exact address; blank = auto"></div>`;
     const statusOpts = ['active', 'reserved', 'deprecated', 'dhcp'].map(s =>
         `<option value="${s}"${editing && editItem.status === s ? ' selected' : ''}>${s}</option>`).join('');
     const modal = openModal('nb-ip-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Allocate'} IP Address${editing ? ` — <span class="font-mono text-sm">${val(editItem.address)}</span>` : ''}</h3>
+        <h3 class="text-lg font-bold text-navy">${editing ? 'Edit' : 'Allocate'} IP Address${editing ? ` — <span class="font-mono text-sm">${val(editItem.address)}</span>` : ''}</h3>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             ${allocFields}
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DNS Name (optional)</label><input id="nb-ip-dns" value="${val(editItem?.dns_name)}" class="${inputCls}" placeholder="host.example.com"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description (optional)</label><input id="nb-ip-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Gateway VM"></div>
-            ${editing ? `<div class="space-y-1 col-span-1 md:col-span-2"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-ip-status" class="${inputCls}">${statusOpts}</select></div>` : ''}
-            ${editing ? `<div class="space-y-1 col-span-1 md:col-span-2"><label class="text-xs text-slate-500 font-bold uppercase">NAC Role Override</label>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">DNS Name (optional)</label><input id="nb-ip-dns" value="${val(editItem?.dns_name)}" class="${inputCls}" placeholder="host.example.com"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Description (optional)</label><input id="nb-ip-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Gateway VM"></div>
+            ${editing ? `<div class="space-y-1 col-span-1 md:col-span-2"><label class="text-xs text-slate-500 font-bold">Status</label><select id="nb-ip-status" class="${inputCls}">${statusOpts}</select></div>` : ''}
+            ${editing ? `<div class="space-y-1 col-span-1 md:col-span-2"><label class="text-xs text-slate-500 font-bold">NAC Role Override</label>
                 <div class="flex gap-2"><select id="nb-ip-nac-role" class="${inputCls}"><option value="">Loading…</option></select>
-                <button type="button" id="nb-ip-nac-refresh" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 rounded-md text-sm" title="Re-read the role list from ClearPass">Refresh</button></div>
+                <button type="button" id="nb-ip-nac-refresh" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 rounded-full text-sm" title="Re-read the role list from ClearPass">Refresh</button></div>
                 <p id="nb-ip-nac-role-note" class="text-xs text-slate-500">ClearPass role for this device (needs the IP's MAC address). Changing it disconnects the device so it re-authenticates.</p></div>` : ''}
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxAllocateIP()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to IP address' : 'Allocate next available IP address in subnet'}">${editing ? 'Save Changes' : 'Allocate'}</button>
-            <button onclick="document.getElementById('nb-ip-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
+            <button onclick="submitNetboxAllocateIP()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="${editing ? 'Save changes to IP address' : 'Allocate next available IP address in subnet'}">${editing ? 'Save Changes' : 'Allocate'}</button>
+            <button onclick="document.getElementById('nb-ip-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     if (editing) {
         modal.dataset.ipId = editItem.id;

@@ -632,7 +632,7 @@ def register(app, hub, ctx):
         scoping = get_tenant_scoping(hub, resolved)
         sess = _session_user(request)
         is_admin = bool(sess and _is_admin(sess))
-        # NetBox tenant slug drives netbox + cppm scoping and is the LDAP OU
+        # NetBox tenant slug drives netbox scoping (cppm gates on it) and is the LDAP OU
         # slug. For a non-default tenant with no bound NetBox slug, fall back to
         # the tenant id so LDAP OU derivation (ou=<slug>,<base>) still works.
         nb_slug = scoping.get("netbox_tenant_slug") or (resolved if resolved and resolved != "default" else "")
@@ -769,7 +769,8 @@ def register(app, hub, ctx):
         # live path fills "prefixes" after its (slow) NetBox prefix fetch.
         payload = {
             "q": q_search,
-            "tenant": nb_slug,           # netbox + cppm + ldap OU slug
+            "tenant": nb_slug,           # netbox + ldap OU slug
+            "tenant_id": resolved if nb_slug else "",  # cppm (NetBox_Tenant_ID)
             "proxmox_tag": proxmox_tag,  # pxmx/kvm tag_filter
             "prefixes": [],              # opnsense DHCP filter (live path only)
             "is_admin": is_admin,

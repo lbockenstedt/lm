@@ -88,7 +88,7 @@ async function _renderCppmSessions(container, subMenu, th, tableWrap) {
     </tr>`).join('');
     const sessRefreshBtn = !isAdmin() ? `<button onclick="refreshModuleCache('cppm_sessions').then(()=>loadCPPMData('${subMenu}'))"
         title="Refresh session cache from ClearPass"
-        class="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1">
+        class="text-xs text-slate-500 hover:text-slate-600 flex items-center gap-1">
         <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
         Refresh</button>` : '';
     const limitSel = `<select onchange="window._cppmSessionLimit=+this.value; loadCPPMData('${subMenu}')"
@@ -97,9 +97,9 @@ async function _renderCppmSessions(container, subMenu, th, tableWrap) {
         ${[50,100,200,500,1000].map(n => `<option value="${n}"${n===limit?' selected':''}>${n} records</option>`).join('')}
     </select>`;
     container.innerHTML = `<div class="flex justify-between items-center mb-1 px-1">
-        <h3 class="text-base font-semibold text-[#263040]">Access Tracker <span class="text-xs text-slate-400 font-normal">(${sessions.length} of ${d.total ?? sessions.length})</span> ${helpIcon('cppm', null, 'NAC help')}</h3>
+        <h3 class="text-base font-semibold text-navy">Access Tracker <span class="text-xs text-slate-500 font-normal">(${sessions.length} of ${d.total ?? sessions.length})</span> ${helpIcon('cppm', null, 'NAC help')}</h3>
         <div class="flex items-center gap-2">${addServerButtonHtml('cppm', 'ClearPass')}${limitSel}${sessRefreshBtn}</div>
-    </div>` + tableWrap(th(cols) + `<tbody>${rows || `<tr><td colspan="${cols.length}" class="px-4 py-6 text-center text-slate-400">No active sessions</td></tr>`}</tbody>`);
+    </div>` + tableWrap(th(cols) + `<tbody>${rows || `<tr><td colspan="${cols.length}" class="px-4 py-6 text-center text-slate-500">No active sessions</td></tr>`}</tbody>`);
 }
 
 // _renderCppmDevices() — the My Devices / Unknown Devices branch of
@@ -150,15 +150,15 @@ async function _renderCppmDevices(container, subMenu, th, tableWrap) {
         const entries = Object.entries(attrs || {})
             .filter(([k, v]) => v != null && v !== '' && !HIDDEN_ATTRS.has(k))
             .sort((a, b) => a[0].localeCompare(b[0]));
-        if (!entries.length) return '<span class="text-slate-300">—</span>';
+        if (!entries.length) return '<span class="text-slate-500">—</span>';
         return `<div class="flex flex-wrap gap-1 max-h-16 overflow-y-auto pr-1">${entries.map(([k, v]) =>
-            `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-mono whitespace-nowrap" title="${esc(k)}: ${esc(v)}"><span class="text-slate-400">${esc(k)}</span>:${esc(v)}</span>`
+            `<span class="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-mono whitespace-nowrap" title="${esc(k)}: ${esc(v)}"><span class="text-slate-500">${esc(k)}</span>:${esc(v)}</span>`
         ).join('')}</div>`;
     };
     window._cppmDeviceMap = Object.fromEntries(devices.map(d => [d.mac, d]));
     const rows = devices.map(d => `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer cppm-dev-row" data-mac="${d.mac || ''}">
         ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(d._tenant || '—')}</td>` : ''}
-        <td class="px-4 py-2 font-mono text-xs text-[#01A982] hover:underline">${d.mac || '—'}</td>
+        <td class="px-4 py-2 font-mono text-xs text-primary-text hover:underline">${d.mac || '—'}</td>
         <td class="px-4 py-2">${statusBadge(d.status)}</td>
         <td class="px-4 py-2 text-xs">${d.hostname || '—'}</td>
         <td class="px-4 py-2 font-mono text-xs">${d.ip || '—'}</td>
@@ -169,14 +169,14 @@ async function _renderCppmDevices(container, subMenu, th, tableWrap) {
     </tr>`).join('');
     const devRefreshBtn = !isAdmin() ? `<button id="cppm-dev-refresh"
         title="Refresh device cache from ClearPass"
-        class="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1">
+        class="text-xs text-slate-500 hover:text-slate-600 flex items-center gap-1">
         <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
         Refresh</button>` : '';
     const devTitle = isUnknown ? 'Unknown Devices' : 'My Devices';
     container.innerHTML = `<div class="flex justify-between items-center mb-1 px-1">
-        <h3 class="text-base font-semibold text-[#263040]">${devTitle} <span class="text-xs text-slate-400 font-normal">(${devices.length} devices)</span> ${helpIcon('cppm', null, 'NAC help')}</h3>
+        <h3 class="text-base font-semibold text-navy">${devTitle} <span class="text-xs text-slate-500 font-normal">(${devices.length} devices)</span> ${helpIcon('cppm', null, 'NAC help')}</h3>
         <div class="flex items-center gap-2">${addServerButtonHtml('cppm', 'ClearPass')}${devRefreshBtn}</div>
-    </div>` + tableWrap(th(cols) + `<tbody>${rows || `<tr><td colspan="${cols.length}" class="px-4 py-6 text-center text-slate-400">No devices found</td></tr>`}</tbody>`);
+    </div>` + tableWrap(th(cols) + `<tbody>${rows || `<tr><td colspan="${cols.length}" class="px-4 py-6 text-center text-slate-500">No devices found</td></tr>`}</tbody>`);
     document.getElementById('cppm-dev-refresh')?.addEventListener('click', () => refreshModuleCache('cppm_devices').then(() => loadCPPMData(subMenu)));
     container.querySelectorAll('.cppm-dev-row').forEach(tr => {
         tr.addEventListener('click', () => showCPPMDeviceDetail(tr.dataset.mac));
@@ -216,7 +216,7 @@ async function _renderCppmMyUsers(container, th, tableWrap) {
         <td class="px-4 py-2 font-medium">${esc(u.username)}</td>
         <td class="px-4 py-2 text-xs">${esc(u.backend_label || u.backend)}</td>
         <td class="px-4 py-2 font-mono text-xs">${esc(u.identity || '—')}</td>
-        <td class="px-4 py-2 text-xs" title="${esc((u.hostnames || []).join(', '))}">${(u.hostnames || []).length ? esc((u.hostnames || []).slice(0, 3).join(', ')) + ((u.hostnames || []).length > 3 ? ` +${u.hostnames.length - 3}` : '') : '<span class="text-slate-300">none</span>'}</td>
+        <td class="px-4 py-2 text-xs" title="${esc((u.hostnames || []).join(', '))}">${(u.hostnames || []).length ? esc((u.hostnames || []).slice(0, 3).join(', ')) + ((u.hostnames || []).length > 3 ? ` +${u.hostnames.length - 3}` : '') : '<span class="text-slate-500">none</span>'}</td>
         <td class="px-4 py-2 text-xs">${esc((u.cells || []).join(', ') || '—')}</td>
         <td class="px-4 py-2 text-xs">${fmt(u.created_at)}</td>
         <td class="px-4 py-2 text-xs">${fmt(u.rotated_at)}</td>
@@ -225,17 +225,17 @@ async function _renderCppmMyUsers(container, th, tableWrap) {
         <td class="px-4 py-2 text-xs">${u.password_store === 'vault' ? 'Vault' : 'Local (encrypted)'}</td>
         <td class="px-4 py-2">${statusBadge(u)}</td>
         <td class="px-4 py-2 text-right whitespace-nowrap">
-            <button onclick="cppmMyUserAction(${i}, 'reset')" class="text-xs text-[#01A982] hover:underline font-semibold mr-3">Reset password</button>
+            <button onclick="cppmMyUserAction(${i}, 'reset')" class="text-xs text-primary-text hover:underline font-semibold mr-3">Reset password</button>
             <button onclick="cppmMyUserAction(${i}, 'delete')" class="text-xs text-red-600 hover:underline font-semibold">Delete</button>
         </td>
     </tr>`).join('');
     const rot = d.rotate_days || 30;
     container.innerHTML = `<div class="flex justify-between items-center mb-1 px-1">
-        <h3 class="text-base font-semibold text-[#263040]">My Users <span class="text-xs text-slate-400 font-normal">(${users.length} simulation 802.1X accounts)</span> ${helpIcon('cppm', null, 'NAC help')}</h3>
-        <button onclick="loadCPPMData('My Users')" class="text-xs text-slate-400 hover:text-slate-600">Refresh</button>
+        <h3 class="text-base font-semibold text-navy">My Users <span class="text-xs text-slate-500 font-normal">(${users.length} simulation 802.1X accounts)</span> ${helpIcon('cppm', null, 'NAC help')}</h3>
+        <button onclick="loadCPPMData('My Users')" class="text-xs text-slate-500 hover:text-slate-600">Refresh</button>
     </div>
     <p class="text-xs text-slate-500 mb-2 px-1">Accounts the simulation engine created for clients on a 1X SSID cell with an Account location (Config → Engine → SSID matrix). Passwords are random, kept in the vault (or the hub's encrypted store when no vault is enabled), rotate every ${esc(rot)} days and are never displayed. An account is removed when its client leaves the 1X cell or is torn down; unused accounts are swept after 30 days.</p>`
-        + tableWrap(th(cols) + `<tbody>${rows || `<tr><td colspan="${cols.length}" class="px-4 py-6 text-center text-slate-400">No simulation-created 802.1X accounts</td></tr>`}</tbody>`);
+        + tableWrap(th(cols) + `<tbody>${rows || `<tr><td colspan="${cols.length}" class="px-4 py-6 text-center text-slate-500">No simulation-created 802.1X accounts</td></tr>`}</tbody>`);
 }
 
 window.cppmMyUserAction = async function (idx, action) {
@@ -263,7 +263,7 @@ window.cppmMyUserAction = async function (idx, action) {
 async function loadCPPMData(subMenu) {
     const container = document.getElementById('cppm-content');
     if (!container) return;
-    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
+    container.innerHTML = '<p class="text-sm text-slate-500 italic p-4">Loading…</p>';
 
     const th = tableHead;  // shared helpers (tableWrap used directly)
 
@@ -330,7 +330,7 @@ function showOpnsenseAddModal(subMenu) {
     if (existing) existing.remove();
 
     const input = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800';
-    const label = 'text-xs text-slate-500 uppercase font-bold';
+    const label = 'text-xs text-slate-500 font-bold';
 
     // Target firewall: auto-select when only one is configured, otherwise show a
     // picker as the first field. submitOpnsenseAdd reads #add-opn-fw (or falls
@@ -394,13 +394,13 @@ function showOpnsenseAddModal(subMenu) {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">Add ${subMenu.replace(/s$/, '')}</h3>
-                <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-400 hover:text-slate-600" title="Close dialog"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <h3 class="text-lg font-bold text-navy">Add ${subMenu.replace(/s$/, '')}</h3>
+                <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-500 hover:text-slate-600" title="Close dialog"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">${fwPicker}${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800" title="Cancel and discard changes">Cancel</button>
-                <button onclick="${submitFn}" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Submit and save ${subMenu.replace(/s$/, '')}">Add</button>
+                <button onclick="${submitFn}" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm" title="Submit and save ${subMenu.replace(/s$/, '')}">Add</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -474,7 +474,7 @@ function showOpnsenseEditModal(fwId, subMenu, itemIdx) {
     if (existing) existing.remove();
 
     const input = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800';
-    const label = 'text-xs text-slate-500 uppercase font-bold';
+    const label = 'text-xs text-slate-500 font-bold';
     const v = k => (item[k] !== undefined && item[k] !== null ? String(item[k]) : '').replace(/"/g, '&quot;');
 
     let fields = '';
@@ -529,13 +529,13 @@ function showOpnsenseEditModal(fwId, subMenu, itemIdx) {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">Edit ${subMenu.replace(/s$/, '')}</h3>
-                <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-400 hover:text-slate-600" title="Close dialog"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <h3 class="text-lg font-bold text-navy">Edit ${subMenu.replace(/s$/, '')}</h3>
+                <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-500 hover:text-slate-600" title="Close dialog"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800" title="Cancel and discard changes">Cancel</button>
-                <button onclick="submitOpnsenseEdit('${fwId}','${subMenu}','${itemId.replace(/'/g,"\\'")}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Save changes to ${subMenu.replace(/s$/, '')}">Save</button>
+                <button onclick="submitOpnsenseEdit('${fwId}','${subMenu}','${itemId.replace(/'/g,"\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm" title="Save changes to ${subMenu.replace(/s$/, '')}">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -669,7 +669,7 @@ async function loadLDAPData(subMenu) {
     await ensureLDAPTenants();
     if (!window._ldapTenant) {
         headEl.innerHTML = '';
-        bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-400 italic">No tenant available to manage.</td></tr>`;
+        bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-500 italic">No tenant available to manage.</td></tr>`;
         return;
     }
     const canWrite = isAdmin() || isTenantAdmin();
@@ -680,14 +680,14 @@ async function loadLDAPData(subMenu) {
             ? ['Group', 'Members', 'Actions']
             : ['Username', 'Name', 'Auth', 'Email / UPN', 'Actions'];
         headEl.innerHTML = headers.map(h => `<th class="px-4 py-3 font-bold">${h}</th>`).join('');
-        bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-400 italic">Fetching ${subMenu.toLowerCase()}…</td></tr>`;
+        bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-500 italic">Fetching ${subMenu.toLowerCase()}…</td></tr>`;
 
         const data = await apiJson(endpoint);
         const items = (data && (data.users || data.groups || data.data)) || (Array.isArray(data) ? data : []);
         window._ldapRows = items;
 
         if (!items.length) {
-            bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-400 italic">No ${subMenu.toLowerCase()} in this tenant.</td></tr>`;
+            bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-500 italic">No ${subMenu.toLowerCase()} in this tenant.</td></tr>`;
             return;
         }
 
@@ -698,8 +698,8 @@ async function loadLDAPData(subMenu) {
                 const memCount = Array.isArray(members) ? members.length : (it.member_count || 0);
                 const eCn = String(it.cn || it.name || '').replace(/'/g, "\\'");
                 const actions = canWrite ? `<td class="px-4 py-3 text-right whitespace-nowrap">
-                    <button onclick="showLDAPMembersModal('${eCn}')" title="Manage group members" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${LDAP_ICONS.mem}</button>
-                    <button onclick="deleteLDAPGroup('${eCn}')" title="Delete group" class="p-1 text-slate-400 hover:text-red-600 transition-colors">${LDAP_ICONS.del}</button>
+                    <button onclick="showLDAPMembersModal('${eCn}')" title="Manage group members" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${LDAP_ICONS.mem}</button>
+                    <button onclick="deleteLDAPGroup('${eCn}')" title="Delete group" class="p-1 text-slate-500 hover:text-red-600 transition-colors">${LDAP_ICONS.del}</button>
                 </td>` : '<td></td>';
                 return `<tr class="hover:bg-slate-50 transition-colors"><td class="px-4 py-3 font-medium text-slate-700">${cn}</td><td class="px-4 py-3 text-slate-500 text-xs">${memCount} members</td>${actions}</tr>`;
             }
@@ -709,12 +709,12 @@ async function loadLDAPData(subMenu) {
             const name = escapeHtml(it.name || [it.first_name, it.last_name].filter(Boolean).join(' ') || '');
             const email = escapeHtml(it.email || it.upn || '');
             const badge = isEntra
-                ? '<span title="Authenticates via Entra — no local password" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">Entra</span>'
-                : '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600">Local</span>';
+                ? '<span title="Authenticates via Entra — no local password" class="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700">Entra</span>'
+                : '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-600">Local</span>';
             const actions = canWrite ? `<td class="px-4 py-3 text-right whitespace-nowrap">
-                <button onclick="editLDAPUser('${eUid}')" title="Edit user details" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${LDAP_ICONS.edit}</button>
-                ${isEntra ? '' : `<button onclick="showLDAPPasswordModal('${eUid}')" title="Reset user password" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${LDAP_ICONS.pw}</button>`}
-                <button onclick="deleteLDAPUser('${eUid}')" title="Delete user" class="p-1 text-slate-400 hover:text-red-600 transition-colors">${LDAP_ICONS.del}</button>
+                <button onclick="editLDAPUser('${eUid}')" title="Edit user details" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${LDAP_ICONS.edit}</button>
+                ${isEntra ? '' : `<button onclick="showLDAPPasswordModal('${eUid}')" title="Reset user password" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${LDAP_ICONS.pw}</button>`}
+                <button onclick="deleteLDAPUser('${eUid}')" title="Delete user" class="p-1 text-slate-500 hover:text-red-600 transition-colors">${LDAP_ICONS.del}</button>
             </td>` : '<td></td>';
             return `<tr class="hover:bg-slate-50 transition-colors"><td class="px-4 py-3 font-medium text-slate-700">${uid}</td><td class="px-4 py-3 text-slate-600">${name}</td><td class="px-4 py-3">${badge}</td><td class="px-4 py-3 text-slate-600">${email}</td>${actions}</tr>`;
         }).join('');
@@ -742,38 +742,38 @@ function showLDAPModal(subMenu, editItem) {
     let title = '';
     if (subMenu === 'Groups') {
         title = 'Add Group';
-        fields = `<div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Group Name (cn)</label><input type="text" id="ldap-group-cn" title="Common Name (cn) for the new group" class="${inp}"></div>`;
+        fields = `<div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Group Name (cn)</label><input type="text" id="ldap-group-cn" title="Common Name (cn) for the new group" class="${inp}"></div>`;
     } else {
         title = editing ? 'Edit User' : 'Add User';
         const curMode = editing ? (editItem.auth_mode === 'entra' ? 'entra' : 'local') : 'local';
         fields = `
             <div class="grid grid-cols-2 gap-4">
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Username (uid)</label><input type="text" id="ldap-user-uid" value="${val(editItem && (editItem.uid || editItem.username))}" ${editing ? 'readonly' : ''} title="Unique directory identifier (uid)" class="${inp} ${editing ? 'bg-slate-100 text-slate-500' : ''}"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Auth Mode</label>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Username (uid)</label><input type="text" id="ldap-user-uid" value="${val(editItem && (editItem.uid || editItem.username))}" ${editing ? 'readonly' : ''} title="Unique directory identifier (uid)" class="${inp} ${editing ? 'bg-slate-100 text-slate-500' : ''}"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Auth Mode</label>
                     <select id="ldap-user-auth" ${editing ? 'disabled' : ''} onchange="_syncLDAPAuthFields()" title="Authentication mode (Local password or Azure AD Entra-backed)" class="${inp} ${editing ? 'bg-slate-100 text-slate-500' : ''}">
                         <option value="local" ${curMode === 'local' ? 'selected' : ''}>Local (password)</option>
                         <option value="entra" ${curMode === 'entra' ? 'selected' : ''}>Entra-backed (UPN)</option>
                     </select>
                 </div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">First Name</label><input type="text" id="ldap-user-first" value="${val(editItem && editItem.first_name)}" title="User given name" class="${inp}"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Last Name</label><input type="text" id="ldap-user-last" value="${val(editItem && editItem.last_name)}" title="User surname / family name" class="${inp}"></div>
-                <div class="space-y-2 col-span-2"><label class="text-xs text-slate-500 uppercase font-bold">Email</label><input type="text" id="ldap-user-email" value="${val(editItem && editItem.email)}" title="User email address" class="${inp}"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">First Name</label><input type="text" id="ldap-user-first" value="${val(editItem && editItem.first_name)}" title="User given name" class="${inp}"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Last Name</label><input type="text" id="ldap-user-last" value="${val(editItem && editItem.last_name)}" title="User surname / family name" class="${inp}"></div>
+                <div class="space-y-2 col-span-2"><label class="text-xs text-slate-500 font-bold">Email</label><input type="text" id="ldap-user-email" value="${val(editItem && editItem.email)}" title="User email address" class="${inp}"></div>
             </div>
-            <div id="ldap-entra-wrap" class="space-y-2 ${curMode === 'entra' ? '' : 'hidden'}"><label class="text-xs text-slate-500 uppercase font-bold">UPN (Entra user principal name)</label><input type="text" id="ldap-user-upn" value="${val(editItem && editItem.upn)}" placeholder="user@tenant.onmicrosoft.com" title="Entra User Principal Name (UPN)" class="${inp}"></div>
-            ${editing ? '' : `<div id="ldap-local-wrap" class="space-y-2 ${curMode === 'local' ? '' : 'hidden'}"><label class="text-xs text-slate-500 uppercase font-bold">Password <span class="text-slate-400 normal-case font-normal">(leave blank to auto-generate)</span></label><input type="password" id="ldap-user-password" title="Initial password (leave blank to auto-generate)" class="${inp}"></div>`}
+            <div id="ldap-entra-wrap" class="space-y-2 ${curMode === 'entra' ? '' : 'hidden'}"><label class="text-xs text-slate-500 font-bold">UPN (Entra user principal name)</label><input type="text" id="ldap-user-upn" value="${val(editItem && editItem.upn)}" placeholder="user@tenant.onmicrosoft.com" title="Entra User Principal Name (UPN)" class="${inp}"></div>
+            ${editing ? '' : `<div id="ldap-local-wrap" class="space-y-2 ${curMode === 'local' ? '' : 'hidden'}"><label class="text-xs text-slate-500 font-bold">Password <span class="text-slate-500 normal-case font-normal">(leave blank to auto-generate)</span></label><input type="password" id="ldap-user-password" title="Initial password (leave blank to auto-generate)" class="${inp}"></div>`}
         `;
     }
 
     modal.innerHTML = `
         <div class="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
-                <h3 class="text-lg font-bold text-[#263040]">${title}</h3>
-                <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="text-slate-400 hover:text-slate-600"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <h3 class="text-lg font-bold text-navy">${title}</h3>
+                <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="text-slate-500 hover:text-slate-600"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="this.closest('.fixed').remove()" title="Cancel and close dialog" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                <button onclick="${subMenu === 'Groups' ? 'saveLDAPGroup()' : `saveLDAPUser(${editing ? 'true' : 'false'})`}" title="Save directory changes" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all">Save</button>
+                <button onclick="${subMenu === 'Groups' ? 'saveLDAPGroup()' : `saveLDAPUser(${editing ? 'true' : 'false'})`}" title="Save directory changes" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -893,17 +893,17 @@ function showLDAPPasswordModal(uid) {
     modal.innerHTML = `
         <div class="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
-                <h3 class="text-lg font-bold text-[#263040]">Reset Password</h3>
-                <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="text-slate-400 hover:text-slate-600">✕</button>
+                <h3 class="text-lg font-bold text-navy">Reset Password</h3>
+                <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="text-slate-500 hover:text-slate-600">✕</button>
             </div>
             <div class="p-6 space-y-4">
                 <p class="text-xs text-slate-500 font-mono">${escapeHtml(uid)}</p>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">New Password</label><input type="password" id="ldap-new-password" title="Enter new user password" class="${inputCls}" autocomplete="new-password"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Confirm Password</label><input type="password" id="ldap-confirm-password" title="Re-enter new user password to confirm" class="${inputCls}" autocomplete="new-password"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">New Password</label><input type="password" id="ldap-new-password" title="Enter new user password" class="${inputCls}" autocomplete="new-password"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Confirm Password</label><input type="password" id="ldap-confirm-password" title="Re-enter new user password to confirm" class="${inputCls}" autocomplete="new-password"></div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="this.closest('.fixed').remove()" title="Cancel and close dialog" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
-                <button onclick="changeUserPassword('${eUid}')" title="Apply new password" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all">Set Password</button>
+                <button onclick="changeUserPassword('${eUid}')" title="Apply new password" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all">Set Password</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -939,15 +939,15 @@ async function showLDAPMembersModal(cn) {
     modal.innerHTML = `
         <div class="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
-                <h3 class="text-lg font-bold text-[#263040]">Members — ${escapeHtml(cn)}</h3>
-                <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="text-slate-400 hover:text-slate-600">✕</button>
+                <h3 class="text-lg font-bold text-navy">Members — ${escapeHtml(cn)}</h3>
+                <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="text-slate-500 hover:text-slate-600">✕</button>
             </div>
             <div class="p-6 space-y-4">
                 <div class="flex items-center gap-2">
                     <select id="ldap-member-add" title="Select user to add to group" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading users…</option></select>
-                    <button onclick="addLDAPMember('${String(cn).replace(/'/g, "\\'")}')" title="Add selected user to group" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add</button>
+                    <button onclick="addLDAPMember('${String(cn).replace(/'/g, "\\'")}')" title="Add selected user to group" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Add</button>
                 </div>
-                <div id="ldap-members-list" class="space-y-1 max-h-64 overflow-y-auto"><p class="text-xs text-slate-400 italic">Loading members…</p></div>
+                <div id="ldap-members-list" class="space-y-1 max-h-64 overflow-y-auto"><p class="text-xs text-slate-500 italic">Loading members…</p></div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end">
                 <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="px-4 py-2 text-sm text-slate-600">Close</button>
@@ -972,7 +972,7 @@ async function _renderLDAPMembers(cn) {
         if (listEl) {
             listEl.innerHTML = members.length
                 ? members.map(m => `<div class="flex items-center justify-between px-3 py-1.5 bg-slate-50 rounded-md text-sm"><span class="text-slate-700">${escapeHtml(m)}</span><button onclick="removeLDAPMember('${String(cn).replace(/'/g, "\\'")}','${String(m).replace(/'/g, "\\'")}')" title="Remove user from group" class="text-xs font-bold text-red-600 hover:text-red-700">Remove</button></div>`).join('')
-                : '<p class="text-xs text-slate-400 italic">No members.</p>';
+                : '<p class="text-xs text-slate-500 italic">No members.</p>';
         }
         if (addSel) {
             const avail = users.map(u => u.uid || u.username).filter(u => u && !members.includes(String(u)));
@@ -1020,20 +1020,20 @@ async function showAddUserModal() {
     const _tenants = tadm ? [] : (window._allTenants || []);
     const _tenantRows = _tenants.length
         ? _tenants.map(t => `<label class="flex items-center gap-2 text-sm text-slate-600 py-1"><input type="checkbox" value="${escapeHtml(t.id)}" class="new-user-tenant w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"> ${escapeHtml(t.name || t.id)}</label>`).join('')
-        : '<span class="text-[11px] text-slate-400 italic">No tenants defined yet.</span>';
+        : '<span class="text-xs text-slate-500 italic">No tenants defined yet.</span>';
     const modal = document.createElement('div');
     modal.id = 'add-user-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">Add New User</h3>
-                <button onclick="closeAddUserModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <h3 class="text-lg font-bold text-navy">Add New User</h3>
+                <button onclick="closeAddUserModal()" class="text-slate-500 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">
                 <div class="grid grid-cols-2 gap-4">
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">User ID / Username</label><input type="text" id="new-user-id" placeholder="e.g. jsmith" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Auth Type</label>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">User ID / Username</label><input type="text" id="new-user-id" placeholder="e.g. jsmith" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Auth Type</label>
                         <select id="new-user-auth-type" onchange="document.getElementById('new-user-password-wrap').classList.toggle('hidden', this.value==='ldap')" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                             <option value="local">Local</option>
                             <option value="ldap">LDAP</option>
@@ -1041,38 +1041,38 @@ async function showAddUserModal() {
                     </div>
                 </div>
                 <div id="new-user-password-wrap" class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Password <span class="text-slate-400 normal-case font-normal">(leave blank to set later)</span></label>
+                    <label class="text-xs text-slate-500 font-bold">Password <span class="text-slate-500 normal-case font-normal">(leave blank to set later)</span></label>
                     <input type="password" id="new-user-password" placeholder="••••••••" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
                 <div class="grid grid-cols-6 gap-3">
-                    ${tadm ? '' : `<div><label class="text-xs text-slate-500 uppercase font-bold" title="System-wide admin (all tenants + system config)">Global Admin</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-admin" onchange="document.getElementById('perm-tenant_admin').checked = false" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold" title="Tenant-level admin (admin within assigned tenants only)">Admin (tenant)</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-tenant_admin" onchange="document.getElementById('perm-admin').checked = false" class="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold" title="Read-only: can view everything its role allows, but every change is rejected by the hub (for automated UI checks such as the AB walker)">Read-only</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-read_only" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>`}
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">View</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Edit</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-edit" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Hypervisor</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-pxmx" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Firewall</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-firewall" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">DNS</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-dns" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">DHCP</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-dhcp" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">NAC</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-nac" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Network Devices</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-nw" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">IPAM</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-ipam" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Simulations</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-cs" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Console</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Console Write</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console_write" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    ${tadm ? '' : `<div><label class="text-xs text-slate-500 font-bold" title="System-wide admin (all tenants + system config)">Global Admin</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-admin" onchange="document.getElementById('perm-tenant_admin').checked = false" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold" title="Tenant-level admin (admin within assigned tenants only)">Admin (tenant)</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-tenant_admin" onchange="document.getElementById('perm-admin').checked = false" class="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold" title="Read-only: can view everything its role allows, but every change is rejected by the hub (for automated UI checks such as the AB walker)">Read-only</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-read_only" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>`}
+                    <div><label class="text-xs text-slate-500 font-bold">View</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Edit</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-edit" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Hypervisor</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-pxmx" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Firewall</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-firewall" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">DNS</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-dns" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">DHCP</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-dhcp" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">NAC</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-nac" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Network Devices</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-nw" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">IPAM</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-ipam" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Simulations</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-cs" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Console</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Console Write</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console_write" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                 </div>
-                ${tadm ? `<div class="space-y-2 border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Tenant</label><div class="text-sm text-slate-600">User is created in <span class="font-mono font-bold text-green-700">${escapeHtml(currentTenant || 'default')}</span> (your tenant). Module rights only — admin roles are Global-Admin-only.</div></div>` : `<div class="space-y-2 border-t border-slate-200 pt-3">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Assigned Tenants <span class="text-slate-400 normal-case font-normal">(required for Tenant Admin; also confines a regular user)</span></label>
+                ${tadm ? `<div class="space-y-2 border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 font-bold">Tenant</label><div class="text-sm text-slate-600">User is created in <span class="font-mono font-bold text-green-700">${escapeHtml(currentTenant || 'default')}</span> (your tenant). Module rights only — admin roles are Global-Admin-only.</div></div>` : `<div class="space-y-2 border-t border-slate-200 pt-3">
+                    <label class="text-xs text-slate-500 font-bold">Assigned Tenants <span class="text-slate-500 normal-case font-normal">(required for Tenant Admin; also confines a regular user)</span></label>
                     <div id="new-user-tenants" class="grid grid-cols-3 gap-x-4 gap-y-1 mt-1 max-h-36 overflow-y-auto pr-1">${_tenantRows}</div>
                 </div>
                 <div class="space-y-2 border-t border-slate-200 pt-3">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Permission Groups <span class="text-slate-400 normal-case font-normal">(bundle access; unioned with the flags above)</span></label>
-                    <div id="new-user-groups" class="flex flex-wrap gap-2 text-sm text-slate-400 italic">Loading groups…</div>
+                    <label class="text-xs text-slate-500 font-bold">Permission Groups <span class="text-slate-500 normal-case font-normal">(bundle access; unioned with the flags above)</span></label>
+                    <div id="new-user-groups" class="flex flex-wrap gap-2 text-sm text-slate-500 italic">Loading groups…</div>
                 </div>`}
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeAddUserModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveUser()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Create User</button>
+                <button onclick="saveUser()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Create User</button>
             </div>
         </div>
     `;
@@ -1216,7 +1216,7 @@ async function editUser(userId) {
                     : '';
             return `
             <div class="space-y-2">
-                <label class="text-xs text-slate-500 uppercase font-bold" title="${p.title || ''}">${p.label}</label>
+                <label class="text-xs text-slate-500 font-bold" title="${p.title || ''}">${p.label}</label>
                 <div class="flex items-center gap-2 py-2">
                     <input type="checkbox" id="edit-perm-${p.id}" ${isChecked ? 'checked' : ''} ${onchange} class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
                 </div>
@@ -1234,28 +1234,28 @@ async function editUser(userId) {
         const groupHtml = Object.entries(allGroups).map(([gid, g]) => `
             <div class="flex items-center gap-3 p-2 hover:bg-slate-100 rounded-md transition-colors cursor-pointer">
                 <input type="checkbox" id="edit-grp-${gid}" ${userGroups.includes(gid) ? 'checked' : ''} value="${gid}" class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500">
-                <label for="edit-grp-${gid}" class="text-sm text-slate-700 cursor-pointer flex-1">${g.name || gid}<span class="text-[10px] text-slate-400 ml-1">${Object.keys(g.permissions || {}).filter(k => k !== 'role').join(', ')}</span></label>
+                <label for="edit-grp-${gid}" class="text-sm text-slate-700 cursor-pointer flex-1">${g.name || gid}<span class="text-xs text-slate-500 ml-1">${Object.keys(g.permissions || {}).filter(k => k !== 'role').join(', ')}</span></label>
             </div>
         `).join('');
 
         modal.innerHTML = `
             <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden">
                 <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                    <h3 class="text-lg font-bold text-[#263040]">Edit User: ${userId}</h3>
-                    <button onclick="closeEditUserModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                    <h3 class="text-lg font-bold text-navy">Edit User: ${userId}</h3>
+                    <button onclick="closeEditUserModal()" class="text-slate-500 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
                 </div>
                 <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-8">
-                    <div class="space-y-6"><div><h4 class="text-xs font-bold text-slate-400 uppercase mb-4">Permissions</h4><div class="grid grid-cols-2 gap-4">${permHtml}</div></div></div>
+                    <div class="space-y-6"><div><h4 class="text-xs font-bold text-slate-500 mb-4">Permissions</h4><div class="grid grid-cols-2 gap-4">${permHtml}</div></div></div>
                     <div class="space-y-6">
-                        ${tadm ? '' : `<div><h4 class="text-xs font-bold text-slate-400 uppercase mb-4">Permission Groups</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-40 overflow-y-auto p-2 space-y-1">${groupHtml || '<div class="text-xs text-slate-400 italic p-2">No groups defined.</div>'}</div></div>`}
-                        <div><h4 class="text-xs font-bold text-slate-400 uppercase mb-4">Tenant Associations</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-40 overflow-y-auto p-2 space-y-1">${tenantHtml || '<div class="text-xs text-slate-400 italic p-2">No tenants available.</div>'}</div></div>
+                        ${tadm ? '' : `<div><h4 class="text-xs font-bold text-slate-500 mb-4">Permission Groups</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-40 overflow-y-auto p-2 space-y-1">${groupHtml || '<div class="text-xs text-slate-500 italic p-2">No groups defined.</div>'}</div></div>`}
+                        <div><h4 class="text-xs font-bold text-slate-500 mb-4">Tenant Associations</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-40 overflow-y-auto p-2 space-y-1">${tenantHtml || '<div class="text-xs text-slate-500 italic p-2">No tenants available.</div>'}</div></div>
                     </div>
                 </div>
                 <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-between items-center gap-3">
                     <button onclick="promptSetPassword('${userId}')" class="text-xs text-slate-500 hover:text-blue-600 transition-colors">Set Password</button>
                     <div class="flex justify-end gap-3">
                         <button onclick="closeEditUserModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                        <button onclick="saveUserEdits('${userId}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Changes</button>
+                        <button onclick="saveUserEdits('${userId}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Save Changes</button>
                     </div>
                 </div>
             </div>
