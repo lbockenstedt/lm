@@ -2435,16 +2435,16 @@ async function loadModuleDiagnostics() {
             <div class="overflow-x-auto"><table class="w-full text-sm">
               <thead class="bg-slate-50 text-xs text-slate-500"><tr>
                 <th class="px-4 py-2 text-left font-medium">Module</th>
-                <th class="px-4 py-2 text-left font-medium">Tier</th>
-                <th class="px-4 py-2 text-left font-medium">For</th>
+                <th class="px-4 py-2 text-left font-medium">Severity</th>
+                <th class="px-4 py-2 text-left font-medium">Duration</th>
                 <th class="px-4 py-2 text-left font-medium">Detail</th>
-                <th class="px-4 py-2 text-left font-medium">Forensics</th>
+                <th class="px-4 py-2 text-left font-medium">Evidence</th>
               </tr></thead><tbody>${body}</tbody></table></div>
           </div>`;
     }).filter(Boolean).join('');
 
     const findingHtml = findings.length ? `<div class="hpe-card rounded-lg p-5 shadow-sm">
-        <p class="text-sm font-bold text-slate-500 mb-2">Verdicts</p>
+        <p class="text-sm font-bold text-slate-500 mb-2">Findings</p>
         ${findings.map(f => {
             const cls = f.severity === 'error' ? 'border-red-200 bg-red-50 text-red-700'
                       : f.severity === 'warning' ? 'border-amber-200 bg-amber-50 text-amber-700'
@@ -2463,7 +2463,7 @@ async function loadModuleDiagnostics() {
         ${pill('Warnings', nWarn, nWarn ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500')}
         <span class="text-xs text-slate-500 ml-auto">as of ${escapeHtml(d._fetched_at)}</span>
       </div>
-      ${alerts.length ? groups : `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-slate-500">No active alerts from any producer — the MODULE STATUS dot should be green.</p></div>`}
+      ${alerts.length ? groups : `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-slate-500">No active alerts — the Module Status indicator should be green.</p></div>`}
       ${findingHtml}`;
 }
 window.loadModuleDiagnostics = loadModuleDiagnostics;
@@ -2495,13 +2495,15 @@ function copyModuleDiagnostics(btn) {
             if (r.is_relayed_agent) f.push('relayed agent');
             if (r.is_approved === false) f.push('NOT approved');
             if (r.is_connected) f.push('socket connected (alert may be stale)');
-            if (f.length) L.push(`      forensics: ${f.join(' · ')}`);
+            if (f.length) L.push(`      evidence: ${f.join(' · ')}`);
         });
         L.push('');
     });
-    if (!(d.alerts || []).length) L.push('No active alerts from any producer.', '');
+    if (!(d.alerts || []).length) L.push('No active alerts.', '');
+    const clustered = document.getElementById('service-cluster-summary')?.dataset.copyText;
+    if (clustered) L.push(clustered);
     (d.findings || []).forEach(f =>
-        L.push(`VERDICT [${f.severity}] ${f.code}: ${f.detail}` +
+        L.push(`FINDING [${f.severity}] ${f.code}: ${f.detail}` +
                ((f.ids || []).length ? `  ids=${(f.ids || []).join(',')}` : '')));
     const txt = L.join('\n');
     if (navigator.clipboard) navigator.clipboard.writeText(txt);
