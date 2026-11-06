@@ -257,11 +257,21 @@ async function loadHenet() {
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
 
+    // The four reads are independent: start them together so the page waits
+    // for the slowest one, not the sum.
+    const credUrl = (admin && adminScope)
+        ? '/api/henet/credential?tenant=' + encodeURIComponent(adminScope)
+        : '/api/henet/credential';
+    const statusReq = _spokeFetch('/api/henet/status').catch(() => null);
+    const schedReq = admin ? _spokeFetch('/api/henet/sync-config').catch(() => null) : null;
+    const credReq = _spokeFetch(credUrl).catch(() => null);
+    const recordsReq = _spokeFetch('/api/henet/records');
+
     // Status line (HE dyndns reachability + record count — fleet-wide, not
     // per-tenant data).
     let statusHtml = '';
     try {
-        const s = await _spokeFetch('/api/henet/status');
+        const s = await statusReq;
         if (s.ok && s.data && s.data.status === 'SUCCESS') {
             const dot = s.data.reachable ? 'text-emerald-600' : 'text-amber-600';
             const why = (!s.data.reachable && s.data.detail)
@@ -276,7 +286,7 @@ async function loadHenet() {
     let scheduleHtml = '';
     if (admin) {
         try {
-            const sc = await _spokeFetch('/api/henet/sync-config');
+            const sc = await schedReq;
             if (sc.ok && sc.data && sc.data.config) {
                 window._henetScheduleCfg = sc.data.config;
                 const cfg = sc.data.config;
@@ -298,10 +308,7 @@ async function loadHenet() {
     let assignedCred = null;
     let tenantCreds = {};
     try {
-        const credUrl = (admin && adminScope)
-            ? '/api/henet/credential?tenant=' + encodeURIComponent(adminScope)
-            : '/api/henet/credential';
-        const c = await _spokeFetch(credUrl);
+        const c = await credReq;
         if (c.ok && c.data) {
             assignedCred = c.data.credential || null;
             tenantCreds = c.data.tenants || {};
@@ -338,7 +345,7 @@ async function loadHenet() {
       </div>`;
 
     try {
-        const { ok, data: d, detail } = await _spokeFetch('/api/henet/records');
+        const { ok, data: d, detail } = await recordsReq;
         if (!ok) {
             container.innerHTML = backBar + actionBar + `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-500">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>'}`;
             return;
@@ -877,12 +884,12 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
         }
 
         if (subMenu === 'Diagnostics') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/diagnostics' + _tenantQS());
-            // Real-time DNS hook status is a separate, best-effort fetch — a
-            // spoke running an older version without the route/command must
-            // not blank the whole Diagnostics tab. A 200 carrying
-            // status:ERROR is treated as unavailable, not as 'disabled'.
-            const dnsHook = await (async () => {
+            const diagReq = _spokeFetch('/api/dhcp/diagnostics' + _tenantQS());
+            // Real-time DNS hook status is a separate, best-effort fetch (run
+            // alongside diagnostics) — a spoke running an older version without
+            // the route/command must not blank the whole Diagnostics tab. A 200
+            // carrying status:ERROR is treated as unavailable, not as 'disabled'.
+            const hookReq = (async () => {
                 try {
                     const r = await fetch('/api/dhcp/dns-hook' + _tenantQS());
                     if (!r.ok) return null;
@@ -891,6 +898,8 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     return j;
                 } catch (e) { return null; }
             })();
+            const { ok, data: d, detail } = await diagReq;
+            const dnsHook = await hookReq;
             window._dhcpDnsHookStatus = dnsHook;
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP diagnostics unavailable') + _dhcpDnsHookPanel(dnsHook); return; }
             const updating = !!(d.updating || (d.cluster && d.cluster.updating));
