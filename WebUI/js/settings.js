@@ -1274,6 +1274,13 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500">DHCP declined addresses</h3>
+                </div>
+                <p class="text-xs text-slate-500 mb-3">When a client finds its offered address already answering (its own ARP probe), it sends DHCPDECLINE and Kea parks that address. Off: Kea frees it again after 60 seconds. On: Kea holds it for 24 hours (Kea's default) — safer when a real duplicate device is on the network. Applied on the next DNS/DHCP sync cycle.</p>
+                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="dhcp-decline-hold" class="w-4 h-4 text-green-600 rounded">Hold declined addresses for 24 hours</label>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500">Hypervisor → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="vm-sync-run-btn" onclick="runVmSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
@@ -1626,6 +1633,7 @@ function _renderSetupSyncTile(content) {
     loadRealtimeNacSyncConfig();
     loadRealtimeNacSyncStatus();
     loadDnsHookConfig();
+    loadDhcpDeclineConfig();
     loadVmSyncSources();
     loadVmSyncConfig();
     loadVmSyncStatus();
@@ -1661,6 +1669,7 @@ function _syncSaveFnFor(el) {
     if (id.startsWith('repo-sync-'))        return saveRepoSyncConfig;
     if (id.startsWith('rt-nac-sync-'))      return saveRealtimeNacSyncConfig;
     if (id.startsWith('dns-hook-'))         return saveDnsHookConfig;
+    if (id.startsWith('dhcp-decline-'))     return saveDhcpDeclineConfig;
     if (id.startsWith('ep-sync-'))          return saveEndpointSyncConfig;
     if (id.startsWith('vm-sync-'))          return saveVmSyncConfig;
     if (id.startsWith('fw-sync-'))          return saveFwDiscoveryConfig;

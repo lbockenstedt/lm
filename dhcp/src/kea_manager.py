@@ -137,6 +137,69 @@ def _add_option(kea_subnet: dict, name: str, value) -> None:
     kea_subnet["option-data"].append({"name": name, "data": value})
 
 
+def _clean_gateway(raw, net) -> str:
+    """The scope gateway as a bare IPv4 address, or "" when it is unusable.
+
+    The value is free text from NetBox. Kea rejects the WHOLE config-set when
+    one ``routers`` option is malformed (e.g. "172.21.0.1/24"), and then keeps
+    running its old config — so one bad gateway silently froze every scope.
+    A trailing "/mask" is dropped; anything else invalid is logged and skipped.
+    """
+    value = str(raw or "").strip().split("/")[0].strip()
+    if not value:
+        return ""
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        logger.warning("Scope %s: gateway %r is not an IP address — no router option sent", net, raw)
+        return ""
+    if ip.version != 4:
+        logger.warning("Scope %s: gateway %s is not IPv4 — no router option sent", net, ip)
+        return ""
+    if ip not in net:
+        logger.warning("Scope %s: gateway %s is outside the subnet", net, ip)
+    return str(ip)
+
+
+def _routers_of(options) -> str:
+    """The ``routers`` option value from a Kea option-data list ("" if none)."""
+    for o in options or []:
+        if isinstance(o, dict) and (o.get("name") == "routers" or o.get("code") == 3):
+            return str(o.get("data") or "").strip()
+    return ""
+
+
+def scope_gateway_findings(config: dict) -> tuple:
+    """Per-scope default gateway as Kea will hand it out, plus problems.
+
+    Returns ``(gateways, problems)``: ``gateways`` maps subnet → router ("" when
+    none); ``problems`` lists one readable line per scope with no router or a
+    router outside the subnet. A subnet-level ``routers`` option wins over the
+    global one, matching Kea.
+    """
+    global_router = _routers_of((config or {}).get("option-data"))
+    gateways, problems = {}, []
+    for sub in (config or {}).get("subnet4") or []:
+        subnet = str(sub.get("subnet") or "")
+        router = _routers_of(sub.get("option-data")) or global_router
+        gateways[subnet] = router
+        if not router:
+            problems.append(f"Scope {subnet} hands out no default gateway — set "
+                            "Gateway on its NetBox prefix, then sync DHCP.")
+            continue
+        try:
+            net = ipaddress.ip_network(subnet, strict=False)
+            outside = [r.strip() for r in router.split(",")
+                       if ipaddress.ip_address(r.strip()) not in net]
+        except ValueError:
+            problems.append(f"Scope {subnet} has an unreadable gateway {router!r}.")
+            continue
+        if outside:
+            problems.append(f"Scope {subnet} gateway {', '.join(outside)} is outside "
+                            "the subnet — clients cannot reach it.")
+    return gateways, problems
+
+
 # Standard DHCPv4 options beyond gateway/DNS that a scope may carry, sourced
 # from the same NetBox prefix custom_fields as gateway/dns_servers (see
 # ``dns_dhcp_sync.build_dhcp_payload``). Table-driven so adding another
@@ -204,6 +267,22 @@ def _parse_exclusion_ranges(raw_exclusions) -> list:
     return parsed
 
 
+def _pools_without(pools: list, ip: str) -> list:
+    """Return ``pools`` with ``ip`` removed, so Kea never offers e.g. the gateway.
+
+    Offering the router's own address makes the client's ARP probe hit the
+    router, the client sends DHCPDECLINE and Kea parks the address as Declined.
+    """
+    target = int(ipaddress.ip_address(ip))
+    ranges = []
+    for p in pools:
+        start, end = (int(ipaddress.ip_address(x.strip())) for x in p["pool"].split("-"))
+        ranges.append((start, end))
+    if not any(start <= target <= end for start, end in ranges):
+        return pools
+    return _carve_pools(ranges, [(target, target)])
+
+
 def _carve_pools(base_ranges: list, exclusions: list) -> list:
     """Carve exclusion ranges out of base IP ranges [(start_int, end_int)]."""
     # No exclusions: one pool per valid base range.
@@ -250,14 +329,54 @@ def _carve_pools(base_ranges: list, exclusions: list) -> list:
 
 
 #: Global ``Dhcp4`` settings the coordinator owns on every node, alongside
-#: ``subnet4``. ``authoritative`` makes Kea answer a DHCPREQUEST for an address
-#: that is wrong for the client's subnet (e.g. a client moved to another VLAN,
-#: still in INIT-REBOOT asking for its old lease) with a DHCPNAK, so the client
-#: falls back to DISCOVER and gets a correct address. Kea's default (false)
-#: silently DROPS such requests when it has no lease for the client, leaving
-#: the client retrying its stale address until the old lease expires.
-#: DHCPv4-only: Kea has no ``authoritative`` for Dhcp6.
-DHCP4_COORDINATOR_GLOBALS = {"authoritative": True}
+#: ``subnet4``. ``authoritative`` is pinned OFF (Kea's default). With it on, a
+#: device that boots with its address already up and sends INIT-REBOOT for it
+#: gets a DHCPNAK, re-DISCOVERs, is offered that same address, ARP-probes it,
+#: hears ITSELF answer and sends DHCPDECLINE — so the address sits Declined.
+#: Off, Kea just ignores an INIT-REBOOT it has no lease for and the device keeps
+#: its address. DHCPv4-only: Kea has no ``authoritative`` for Dhcp6.
+#:
+#: ``decline-probation-period`` is how long Kea parks an address a client
+#: DHCPDECLINEd. Kea's default is 24h; LM uses 60s unless the operator turns
+#: "Hold declined addresses" on (System → Sync), so a device that declines its
+#: own address is not locked out of it for a day.
+DECLINE_PROBATION_SHORT = 60
+DECLINE_PROBATION_HOLD = 86400
+DHCP_SETTINGS_PATH = os.getenv("LM_DHCP_SETTINGS", "/etc/lm-dhcp/kea-settings.json")
+
+
+def _read_hold_declined() -> bool:
+    """The saved "hold declined addresses" choice (False when unset)."""
+    try:
+        with open(DHCP_SETTINGS_PATH) as fh:
+            return bool(json.load(fh).get("hold_declined"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+DHCP4_COORDINATOR_GLOBALS = {
+    "authoritative": False,
+    "decline-probation-period": (DECLINE_PROBATION_HOLD if _read_hold_declined()
+                                 else DECLINE_PROBATION_SHORT),
+}
+
+
+def set_hold_declined(hold: bool) -> None:
+    """Apply the hub's "hold declined addresses" choice to every later render.
+
+    Saved to disk so a spoke restart (or an HA reconcile before the next hub
+    sync) keeps the operator's choice.
+    """
+    period = DECLINE_PROBATION_HOLD if hold else DECLINE_PROBATION_SHORT
+    if DHCP4_COORDINATOR_GLOBALS["decline-probation-period"] == period:
+        return
+    DHCP4_COORDINATOR_GLOBALS["decline-probation-period"] = period
+    try:
+        os.makedirs(os.path.dirname(DHCP_SETTINGS_PATH), exist_ok=True)
+        with open(DHCP_SETTINGS_PATH, "w") as fh:
+            json.dump({"hold_declined": bool(hold)}, fh)
+    except OSError as e:
+        logger.warning("Could not save %s: %s", DHCP_SETTINGS_PATH, e)
 
 
 def build_subnet4(subnets: list, reservations: list) -> tuple:
@@ -336,11 +455,11 @@ def build_subnet4(subnets: list, reservations: list) -> tuple:
         description = (s.get("description") or "").strip()
         if description:
             kea_subnet["user-context"] = {"description": description}
-        # Router option from the gateway.
-        if s.get("gateway"):
-            kea_subnet["option-data"].append(
-                {"name": "routers", "data": s["gateway"]}
-            )
+        # Router option from the gateway (cleaned; a bad value must not break the config-set).
+        gateway = _clean_gateway(s.get("gateway"), net)
+        if gateway:
+            kea_subnet["option-data"].append({"name": "routers", "data": gateway})
+            kea_subnet["pools"] = _pools_without(kea_subnet["pools"], gateway)
         # DNS servers option.
         dns = s.get("dns_servers", [])
         if dns:
@@ -393,6 +512,14 @@ def build_subnet4(subnets: list, reservations: list) -> tuple:
 
         # Add the finished subnet.
         kea_subnets.append(kea_subnet)
+
+    # Scopes going out with no default gateway are a silent client-side
+    # outage (Kea logs nothing), so say so on every sync.
+    no_gateway = [k["subnet"] for k in kea_subnets
+                  if not _routers_of(k["option-data"])]
+    if no_gateway:
+        logger.warning("DHCP scopes with no default gateway (set Gateway on the "
+                       "NetBox prefix): %s", ", ".join(no_gateway))
 
     # Count applied and skipped reservations.
     applied_count = sum(1 for flag in applied if flag)
@@ -1391,8 +1518,31 @@ class KeaManager:
             actions.extend(self._heal_control_socket_ownership())
         except Exception as e:  # noqa: BLE001
             logger.warning("self-heal (control socket) failed: %s", e)
+        try:
+            actions.extend(self._heal_config_dir_mode())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("self-heal (config dir mode) failed: %s", e)
         # Return what was done.
         return actions
+
+    _CONFIG_DIR = "/etc/kea"
+
+    def _heal_config_dir_mode(self) -> list:
+        """Align /etc/kea with the unit's ConfigurationDirectoryMode (0755).
+
+        The Debian package creates it 0750, so systemd logs "ConfigurationDirectory
+        'kea' already exists but the mode is different" on every start. Harmless,
+        but it buries real errors in the warnings panel. install_dhcp.sh fixes new
+        installs; this fixes hosts installed before that.
+        """
+        try:
+            mode = os.stat(self._CONFIG_DIR).st_mode & 0o777
+        except OSError:
+            return []
+        if mode == 0o755:
+            return []
+        os.chmod(self._CONFIG_DIR, 0o755)
+        return [f"set {self._CONFIG_DIR} mode {oct(mode)[2:]} -> 755"]
 
     def _heal_api_password_file(self) -> list:
         """Recreate the Kea API password file if it is missing or empty.
@@ -1726,7 +1876,7 @@ class KeaManager:
         # Recent warnings from both Kea units.
         recent = self._run_diag([
             "journalctl", "-u", "kea-dhcp4-server", "-u", "kea-ctrl-agent",
-            "-p", "warning", "-n", "20", "--no-pager",
+            "-p", "warning", "-n", "20", "--since", "7 days ago", "--no-pager",
         ])
         recent_errors = [
             line for line in recent["output"].splitlines()
@@ -1796,6 +1946,9 @@ class KeaManager:
         if not dhcp_listeners:
             recommendations.append(
                 "Nothing is listening on DHCP server port UDP/67.")
+        # Scopes with no (or an unreachable) default gateway.
+        scope_gateways, gateway_problems = scope_gateway_findings(config)
+        recommendations.extend(gateway_problems)
 
         # Healthy only when every check passes.
         healthy = (
@@ -1823,6 +1976,7 @@ class KeaManager:
             "interface_missing": missing_interfaces,
             "subnets": [
                 {"id": s.get("id"), "subnet": s.get("subnet", ""),
+                 "gateway": scope_gateways.get(str(s.get("subnet") or ""), ""),
                  "pools": [p.get("pool", "") for p in (s.get("pools", []) or [])]}
                 for s in subnets
             ],

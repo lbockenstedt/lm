@@ -419,7 +419,7 @@ def build_ha_hooks(this_name: str, peers: List[Dict[str, Any]], mode: str,
 #: lease-database, option-def, loggers, client-classes,
 #: expired-leases-processing, unrelated hooks — belongs to that node and is
 #: carried through untouched.
-COORDINATOR_OWNED_KEYS = ("subnet4", "authoritative")
+COORDINATOR_OWNED_KEYS = ("subnet4", "authoritative", "decline-probation-period")
 
 
 def build_node_config(node_dhcp4: Dict[str, Any], this_name: str,
