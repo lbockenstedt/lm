@@ -9,7 +9,7 @@ from api import (
 )
 # Access-control helpers: permission resolution, shared-tenant cache and input validators.
 from access import (
-    ENFORCED_RIGHTS, resolve_effective_permissions, refresh_shared_tenant,
+    ENFORCED_RIGHTS, SHARED_ACCESS_MODES, resolve_effective_permissions, refresh_shared_tenant,
     valid_display_name as _valid_display_name,
     valid_hostname as _valid_hostname,
     valid_identifier as _valid_identifier,
@@ -279,6 +279,8 @@ def register(app, hub, ctx):
                 # A shared tenant's spokes/resources are visible to every tenant
                 # (objects still subnet-scoped). Exactly one tenant carries it.
                 "shared": bool(cfg.get("shared")),
+                # Shared-access mode: auto / allow / deny (Global Admin setting).
+                "shared_access": cfg.get("shared_access") or "auto",
                 # NetBox tenant GROUP: selectable like a tenant, but shows the
                 # union of its members. The WebUI badges it and indents the
                 # member tenants (tenant_group_slug) underneath it.
@@ -291,7 +293,7 @@ def register(app, hub, ctx):
         ]
         # Add the default (ADMIN) tenant if it is not stored.
         if "default" not in [t["id"] for t in tenant_list]:
-            tenant_list.insert(0, {"id": "default", "name": "ADMIN", "slug": "default", "netbox_id": None, "description": "", "shared": False, "is_group": False, "group_slug": "", "members": []})
+            tenant_list.insert(0, {"id": "default", "name": "ADMIN", "slug": "default", "netbox_id": None, "description": "", "shared": False, "shared_access": "auto", "is_group": False, "group_slug": "", "members": []})
         # Keep the shared-tenant cache fresh whenever the list is loaded.
         shared_id = refresh_shared_tenant(hub)
         return {"tenants": tenant_list, "shared_tenant_id": shared_id}
@@ -465,6 +467,12 @@ def register(app, hub, ctx):
                 results[tid] = f"error: {e}"
         return {"status": "ok", "provisioned": len(results), "results": results}
 
+    def _check_shared_access(config):
+        """Reject an unknown shared-access mode (Global-Admin-only field)."""
+        if "shared_access" in config and config["shared_access"] not in SHARED_ACCESS_MODES:
+            raise HTTPException(status_code=400,
+                                detail=f"shared_access must be one of {', '.join(SHARED_ACCESS_MODES)}")
+
     @app.post("/setup/tenant")
     async def update_tenant(request: Request):
         """Create or update a tenant's config, optionally making it shared or active.
@@ -477,6 +485,7 @@ def register(app, hub, ctx):
             data = await request.json()
             tenant_id = data.get("tenant_id", "default")
             config = data.get("config", {})
+            _check_shared_access(config)
 
             # Single-shared invariant: setting shared=True on a tenant clears the
             # flag on every OTHER tenant, so exactly one shared tenant exists.
@@ -1180,6 +1189,7 @@ def register(app, hub, ctx):
                                     detail=f"Tenant {tenant} not found")
             if ctx._is_admin(sess):
                 merged = dict(config)  # Global — full merge (mirrors /setup/tenant)
+                _check_shared_access(merged)
             else:
                 # tenant_admin — allowlist only; scoping/active silently dropped.
                 merged = {k: v for k, v in config.items() if k in _TA_TENANT_EDITABLE}

@@ -338,7 +338,7 @@ def register(app, hub, ctx):
         # Otherwise a spoke bound to the tenant, then the shared spoke (only if the tenant has none
         # of its own).
         resolved = hub.get_dns_spoke_for_tenant(tid)
-        if not resolved and not access.tenant_has_own_spoke(hub, tid, "dns"):
+        if not resolved and not access.tenant_shared_fallback_blocked(hub, tid, "dns"):
             resolved = hub.get_dns_spoke_for_shared()
         return spoke_or_503(resolved, "DNS")
 
@@ -4236,7 +4236,7 @@ def register(app, hub, ctx):
         # Otherwise a spoke bound to the tenant, then the shared spoke (only if the tenant has none
         # of its own).
         resolved = hub.get_dhcp_spoke_for_tenant(tid)
-        if not resolved and not access.tenant_has_own_spoke(hub, tid, "dhcp"):
+        if not resolved and not access.tenant_shared_fallback_blocked(hub, tid, "dhcp"):
             resolved = hub.get_dhcp_spoke_for_shared()
         return spoke_or_503(resolved, "DHCP")
 
@@ -4256,7 +4256,7 @@ def register(app, hub, ctx):
         if any(isinstance(i, dict) and i.get("tenant_id") == tid for i in instances):
             return False
         return not (hub.get_dhcp_spoke_for_tenant(tid)
-                    or access.tenant_has_own_spoke(hub, tid, "dhcp"))
+                    or access.tenant_shared_fallback_blocked(hub, tid, "dhcp"))
 
     # Hub-side routing keys the merge fanout adds to each row. They must never
     # be relayed on to a spoke, which knows nothing about them.
@@ -4399,10 +4399,10 @@ def register(app, hub, ctx):
                     status_code=403,
                     detail="that DHCP spoke belongs to another tenant")
             if not access.spoke_owner_tenant(hub, requested) \
-                    and access.tenant_has_own_spoke(hub, tid, "dhcp"):
+                    and access.tenant_shared_fallback_blocked(hub, tid, "dhcp"):
                 raise HTTPException(
                     status_code=403,
-                    detail="this tenant uses its own DHCP spoke, not the shared one")
+                    detail="this tenant may not use the shared DHCP spoke")
         return requested
 
     async def _discover_dhcp_workers_for_spoke(dhcp_spoke: str):

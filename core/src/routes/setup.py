@@ -2814,7 +2814,7 @@ def register(app, hub, ctx):
             # access holds the tenant/firewall ownership helpers.
             import access
             tid = access.request_effective_tenant(sess, request)
-            if access.tenant_has_own_firewall(hub, tid):
+            if access.tenant_left_shared(hub, tid, "firewall"):
                 firewalls = [f for f in firewalls
                              if access.firewall_owner_tenant(hub, (f or {}).get("id"))]
         # Return the filtered list.

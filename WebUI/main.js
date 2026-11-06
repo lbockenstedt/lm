@@ -2786,6 +2786,8 @@ async function editTenant(tenantId) {
         document.getElementById('tenant-active').checked = (currentTenant === tenantId);
         const _shEl = document.getElementById('tenant-shared');
         if (_shEl) _shEl.checked = !!config.shared;
+        const _saEl = document.getElementById('tenant-shared-access');
+        if (_saEl) _saEl.value = config.shared_access || 'auto';
 
         const quotas = config.quotas || {};
         document.getElementById('quota-vm').value = quotas.vm || 0;
@@ -2837,6 +2839,8 @@ async function saveTenantConfig() {
     // save route ignores it server-side.
     const _shEl = document.getElementById('tenant-shared');
     if (_shEl && isAdmin()) config.shared = _shEl.checked;
+    const _saEl = document.getElementById('tenant-shared-access');
+    if (_saEl && isAdmin()) config.shared_access = _saEl.value;
 
     try {
         // A tenant Admin saves via the tenant-scoped route (POST
