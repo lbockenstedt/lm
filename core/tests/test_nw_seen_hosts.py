@@ -31,3 +31,14 @@ def test_prune_and_monitor_window():
     # .2 is two days stale; .3 clashes with a monitored name so it uses its IP.
     assert rows == [{"tenant_id": "t", "name": "10.0.0.3", "address": "10.0.0.3",
                      "type": "host", "snmp_ok": False, "snmp_secret": ""}]
+
+
+def test_unchanged_hosts_are_pushed_at_most_every_interval():
+    reg = {}
+    seen.record(reg, [{"address": "10.0.0.1"}, {"address": "10.0.0.2"}], 0)
+    assert seen.due_for_push(reg, ["10.0.0.2", "10.0.0.1"], 0) == ["10.0.0.1", "10.0.0.2"]
+    seen.mark_pushed(reg, ["10.0.0.1", "10.0.0.2"], 0)
+    seen.record(reg, [{"address": "10.0.0.1"}, {"address": "10.0.0.2", "hostname": "sw2"}], 60)
+    # Only the host whose details changed is due; the other waits for the interval.
+    assert seen.due_for_push(reg, ["10.0.0.1", "10.0.0.2"], 60) == ["10.0.0.2"]
+    assert seen.due_for_push(reg, ["10.0.0.1"], seen.PUSH_EVERY) == ["10.0.0.1"]
