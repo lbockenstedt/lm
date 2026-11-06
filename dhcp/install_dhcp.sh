@@ -313,6 +313,11 @@ if [ -d /etc/apparmor.d/local ]; then
             if ! grep -qs '/etc/kea/kea-dhcp4.conf rw,' "$override" 2>/dev/null; then
                 echo "  /etc/kea/kea-dhcp4.conf rw," >> "$override"
             fi
+            if [ "$profile" = usr.sbin.kea-dhcp4 ] && \
+               ! grep -qs '/etc/kea/scripts/lm-dns-sync.sh Ux,' "$override" 2>/dev/null; then
+                # Real-time DNS hook (kea_dns_hook.py): Kea must be allowed to exec it.
+                echo "  /etc/kea/scripts/lm-dns-sync.sh Ux," >> "$override"
+            fi
             apparmor_parser -r "/etc/apparmor.d/$profile" 2>/dev/null || true
         fi
     done
