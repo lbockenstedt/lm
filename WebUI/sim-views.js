@@ -365,8 +365,8 @@ function csErrorBox(label, err) {
 
 function csOnlineBadge(online) {
     return online
-        ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-bold uppercase tracking-wider"><span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>Online</span>`
-        : `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-bold uppercase tracking-wider"><span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span>Offline</span>`;
+        ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-xs font-bold"><span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>Online</span>`
+        : `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-xs font-bold"><span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span>Offline</span>`;
 }
 
 // Host state badge — driven by the host's OWN telemetry freshness (host_online /
@@ -393,7 +393,7 @@ function csHostStateBadge(h) {
         // so it doesn't read as freshly-accurate (and so a busy/wedged host reads
         // "online · stale", never "offline while still connected").
         if (h.telemetry_stale) {
-            return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase tracking-wider" title="Connected — but the agent's live collect is failing/timing out, so VM/node data is a reused snapshot"><span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>Online · stale</span>`;
+            return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-bold" title="Connected — but the agent's live collect is failing/timing out, so VM/node data is a reused snapshot"><span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>Online · stale</span>`;
         }
         return csOnlineBadge(true);
     }
@@ -401,11 +401,11 @@ function csHostStateBadge(h) {
     // distinctly (amber) with the age so a dead/hung agent is obvious.
     if (h.host_stale && h.spoke_online) {
         const age = _csAgeLabel(h.host_age_s);
-        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase tracking-wider" title="Agent last reported ${age ? age + ' ago' : 'a while ago'} — spoke is up but this host stopped sending telemetry"><span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>Stale${age ? ' · ' + csEscape(age) : ''}</span>`;
+        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-bold" title="Agent last reported ${age ? age + ' ago' : 'a while ago'} — spoke is up but this host stopped sending telemetry"><span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>Stale${age ? ' · ' + csEscape(age) : ''}</span>`;
     }
     if (h.cache_fresh) {
         const age = (h.cache_age_s != null) ? Math.floor(h.cache_age_s / 60) + 'm' : '';
-        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 text-[10px] font-bold uppercase tracking-wider" title="Live connection down — showing cached data ${age ? '(' + csEscape(String(age)) + ' old)' : ''}"><span class="w-1.5 h-1.5 rounded-full bg-sky-400"></span>Cached</span>`;
+        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 text-xs font-bold" title="Live connection down — showing cached data ${age ? '(' + csEscape(String(age)) + ' old)' : ''}"><span class="w-1.5 h-1.5 rounded-full bg-sky-400"></span>Cached</span>`;
     }
     return csOnlineBadge(false);
 }
@@ -419,8 +419,8 @@ function csThrottleBadge(spokeId) {
     try {
         const bp = (window.__lmHubMetrics || {}).backpressure || {};
         const lvl = (bp.spoke_levels || {})[spokeId] || 0;
-        if (lvl === 1) return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase tracking-wider animate-pulse" title="Offending — over its message rate; coalescing updates locally at the hub's request">⚠ Offending</span>`;
-        if (lvl >= 2) return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-[10px] font-bold uppercase tracking-wider" title="Throttled — fleet-wide slow-down active; coalescing updates locally">⏳ Throttled</span>`;
+        if (lvl === 1) return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-bold animate-pulse" title="Offending — over its message rate; coalescing updates locally at the hub's request">⚠ Offending</span>`;
+        if (lvl >= 2) return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-xs font-bold" title="Throttled — fleet-wide slow-down active; coalescing updates locally">⏳ Throttled</span>`;
     } catch (e) { /* metrics not available — no badge */ }
     return '';
 }
@@ -435,7 +435,7 @@ function csStatusBadge(status) {
         no_data: 'bg-slate-100 text-slate-500', unknown: 'bg-slate-100 text-slate-500'
     };
     const cls = map[s] || 'bg-slate-100 text-slate-500';
-    return `<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${cls}">${csEscape(s)}</span>`;
+    return `<span class="px-2 py-0.5 rounded text-xs font-bold ${cls}">${csEscape(s)}</span>`;
 }
 
 function csAlertBadge(status) {
@@ -461,7 +461,7 @@ function csAlertBadge(status) {
     } else if (['warning', 'degraded'].includes(s)) {
         cls = amber; label = 'WARN';
     }
-    return `<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${cls}" title="Alert firing status — OK = the expected failure is present (firing), FAILED = the sim stopped producing it">${label}</span>`;
+    return `<span class="px-2 py-0.5 rounded text-xs font-bold ${cls}" title="Alert firing status — OK = the expected failure is present (firing), FAILED = the sim stopped producing it">${label}</span>`;
 }
 
 function csTable(headers, rowsHtml, opts = {}) {
@@ -480,7 +480,7 @@ function csTable(headers, rowsHtml, opts = {}) {
     return `<div class="overflow-x-auto">
       <table class="w-full text-sm">
         ${colgroup}
-        <thead class="bg-slate-50 text-slate-500 uppercase text-xs tracking-wider">${ths}</thead>
+        <thead class="bg-slate-50 text-slate-500 text-xs">${ths}</thead>
         <tbody class="divide-y divide-slate-100">${rowsHtml || `<tr><td class="px-4 py-8 text-center text-slate-500 italic" colspan="${headers.length}">No data.</td></tr>`}</tbody>
       </table>
     </div>`;
@@ -541,7 +541,7 @@ function csAutoRefreshControl() {
     const opts = csAutoRefreshOpts()
         .map(([v, lbl]) => `<option value="${v}"${Number(v) === csAutoRefreshGapS ? ' selected' : ''}>${csEscape(lbl)}</option>`)
         .join('');
-    return `<label class="text-[10px] text-slate-500 uppercase tracking-wider mr-1">Auto-refresh</label>`
+    return `<label class="text-xs text-slate-500 mr-1">Auto-refresh</label>`
         + `<select onchange="csSetAutoRefreshGap(this.value)" class="text-xs border border-slate-200 rounded-md px-2 py-1 bg-white text-slate-600" title="Throttle telemetry-driven page refreshes. Off = manual Refresh only.">`
         + opts + `</select>`;
 }
@@ -672,10 +672,10 @@ function csRenderLiveOps() {
     const ops = Object.values(window._csLiveOps).sort((a, b) => (Number(a.vmid) || 0) - (Number(b.vmid) || 0));
     if (!ops.length) { el.innerHTML = ''; return; }
     el.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <p class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Live operations <span class="text-slate-500 font-normal normal-case">(${ops.length} active)</span></p>
+      <p class="text-sm font-bold text-slate-500 mb-2">Live operations <span class="text-slate-500 font-normal normal-case">(${ops.length} active)</span></p>
       <div class="space-y-1 max-h-48 overflow-y-auto">${ops.map(o => `<div class="flex items-center justify-between gap-2 text-xs py-0.5 border-b border-slate-100 last:border-0">
         <span class="font-mono text-slate-600">${csEscape(_CS_OP_LABEL[o.action] || o.action || 'op')} · VM ${csEscape(String(o.vmid != null ? o.vmid : '—'))}</span>
-        <span class="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 font-bold uppercase tracking-wider text-[10px]"><span class="animate-spin inline-block w-2 h-2 rounded-full border-2 border-sky-500 border-t-transparent align-middle mr-1"></span>${csEscape(o.step || 'working')}${o.pct != null ? ' ' + o.pct + '%' : ''}</span>
+        <span class="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 font-bold text-xs"><span class="animate-spin inline-block w-2 h-2 rounded-full border-2 border-sky-500 border-t-transparent align-middle mr-1"></span>${csEscape(o.step || 'working')}${o.pct != null ? ' ' + o.pct + '%' : ''}</span>
       </div>`).join('')}</div></div>`;
 }
 
@@ -888,7 +888,7 @@ window.csKillSwitchMountChip = async function (elId) {
         ks = r && r.kill_switch; connected = !!(r && r.spoke_connected);
     } catch (e) { console.warn('csKillSwitchMountChip: read failed', e); }
     if (!connected) {
-        el.innerHTML = `<span class="text-[10px] normal-case tracking-normal text-slate-500">Kill switch: spoke offline</span>`;
+        el.innerHTML = `<span class="text-xs normal-case tracking-normal text-slate-500">Kill switch: spoke offline</span>`;
         return;
     }
     const ksBtn = ks
@@ -913,8 +913,8 @@ window.csKillSwitchMountChip = async function (elId) {
 // never hides the match). Empty when the check isn't a monitored alert/insight.
 function csCheckTypeTag(checkId) {
     const t = (window._csCheckType || {})[String(checkId || '').trim().replace(/^(central|mist):/i, '').toLowerCase()];
-    if (t === 'alert') return '<span class="text-[11px]" title="Alert">🔔</span> ';
-    if (t === 'insight') return '<span class="text-[11px]" title="Insight">ℹ️</span> ';
+    if (t === 'alert') return '<span class="text-xs" title="Alert">🔔</span> ';
+    if (t === 'insight') return '<span class="text-xs" title="Insight">ℹ️</span> ';
     return '';
 }
 
@@ -1138,7 +1138,7 @@ window.csHealthHover = async function (ev) {
         }
     }
     const date = new Date(day * 1000).toISOString().slice(0, 10);
-    pop.innerHTML = `<div style="font-size:10px;color:#64748b;margin-bottom:4px">${csEscape(check)} · ${date} · hourly <span style="opacity:.55">— hover an hour</span></div><div style="display:flex;gap:1px">${slots}</div>`;
+    pop.innerHTML = `<div style="font-size:12px;color:#64748b;margin-bottom:4px">${csEscape(check)} · ${date} · hourly <span style="opacity:.55">— hover an hour</span></div><div style="display:flex;gap:1px">${slots}</div>`;
     pop.style.cssText = 'position:fixed;z-index:9999;background:white;border:1px solid #cbd5e1;border-radius:6px;padding:6px;box-shadow:0 4px 12px rgba(0,0,0,.15);pointer-events:auto';
     pop.style.left = Math.min(rect.left, window.innerWidth - 230) + 'px';
     pop.style.top = (rect.bottom + 4) + 'px';
@@ -1243,7 +1243,7 @@ async function csRenderSimClientCount() {
 // Keeps the larger centred value: this is the headline row, not a data grid.
 function csStat(label, value) {
     return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 text-center">
-      <p class="text-[10px] uppercase tracking-wider text-slate-500">${csEscape(label)}</p>
+      <p class="text-xs text-slate-500">${csEscape(label)}</p>
       <div class="text-xl font-mono font-bold text-slate-700 mt-1">${csEscape(value)}</div>
     </div>`;
 }
@@ -1261,7 +1261,7 @@ function csKvTile(k, v) {
     // Freshness-panel treatment (see csStat). break-all + the max-h scroll are
     // kept: this grid renders arbitrary telemetry values, some of them long.
     return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2">
-      <p class="text-[10px] uppercase tracking-wider text-slate-500 break-all">${csEscape(k)}</p>
+      <p class="text-xs text-slate-500 break-all">${csEscape(k)}</p>
       <div class="text-sm font-mono font-bold text-slate-700 break-all${long ? ' max-h-28 overflow-auto' : ''}">${csEscape(raw)}</div>
     </div>`;
 }
@@ -1277,7 +1277,7 @@ function csProvisionCard(px) {
     const prov = (px && px.provision) || {};
     if (!Object.keys(prov).length) {
         return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 col-span-1 sm:col-span-2 lg:col-span-3 xl:col-span-4">
-      <p class="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Auto-Provisioning</p>
+      <p class="text-xs text-slate-500 mb-1">Auto-Provisioning</p>
       <div class="text-sm text-slate-500">No provision diagnostic reported by this host's agent.</div>
     </div>`;
     }
@@ -1312,10 +1312,10 @@ function csProvisionCard(px) {
     }
     // Status chips: CS-enabled, loop-running, auto-provision-on. Amber when a
     // gate is closed (the most common "enabled but nothing provisions" causes).
-    const chip = (label, ok) => `<span class="inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${ok ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">${csEscape(label)}</span>`;
+    const chip = (label, ok) => `<span class="inline-block rounded-full px-2 py-0.5 text-xs font-bold ${ok ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">${csEscape(label)}</span>`;
     let html = `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 col-span-1 sm:col-span-2 lg:col-span-3 xl:col-span-4">
       <div class="flex items-center gap-2 mb-2">
-        <p class="text-[10px] uppercase tracking-wider text-slate-500">Auto-Provisioning</p>
+        <p class="text-xs text-slate-500">Auto-Provisioning</p>
         ${chip(csOn ? 'CS-enabled' : 'CS disabled', csOn)}${chip(loopOn ? 'loop running' : 'loop stopped', loopOn)}${chip(autoOn ? 'auto-provision on' : 'auto-provision off', autoOn)}
       </div>
       <div class="text-sm text-slate-700 space-y-1">
@@ -1513,7 +1513,7 @@ function csResourceStat(px) {
     const c = val(p.cpu_1h_avg), m = val(p.mem_1h_avg);
     return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 text-center"
                  title="Rolling 1-hour averages the auto-provision delete gate acts on. Amber at 75%, red at 90%.">
-      <p class="text-[10px] uppercase tracking-wider text-slate-500">CPU / Mem 1h</p>
+      <p class="text-xs text-slate-500">CPU / Mem 1h</p>
       <div class="text-xl font-mono font-bold mt-1" style="font-variant-numeric:tabular-nums">
         <span class="${c.cls}">${csEscape(c.txt)}</span><span class="text-slate-500 mx-1">/</span><span class="${m.cls}">${csEscape(m.txt)}</span>
       </div>
@@ -1529,7 +1529,7 @@ function csDongleStats(h) {
     const t = csEscape(csDongleTitle(d));
     // Freshness-panel chrome, matching csStat / csKvTile.
     const tile = (label, value, cls) => `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 text-center" title="${t}">
-      <p class="text-[10px] uppercase tracking-wider text-slate-500">${csEscape(label)}</p>
+      <p class="text-xs text-slate-500">${csEscape(label)}</p>
       <div class="text-xl font-mono font-bold ${cls} mt-1">${value}</div>
     </div>`;
     return tile('In use', d.inUse, 'text-slate-700')
@@ -1723,7 +1723,7 @@ function csRenderClientsFaceted() {
     // Option labels carry the (other-facet-scoped) counts; the value is passed at
     // runtime via this.value (no interpolation into the handler → injection-safe).
     const selCls = 'bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500';
-    const lblCls = 'text-[11px] font-bold text-slate-500 uppercase tracking-wider';
+    const lblCls = 'text-xs font-bold text-slate-500';
     const opt = (v, label, count, cur) =>
         `<option value="${csEscape(v)}"${v === cur ? ' selected' : ''}>${csEscape(label)}${count != null ? ` (${count})` : ''}</option>`;
     const dropdown = (dim, allLabel, opts, cur) =>
@@ -1856,8 +1856,8 @@ function csFleetHealthBadge(fh) {
         title="Clients checking into the API ÷ running sim VMs. Every VM should check in (heartbeat is independent of the sim SSID); a running VM whose client never reports is dead and will be recloned. Bands: ≥90% OK, 75–90% low, <75% critical.">
       <span class="font-bold">Fleet Health</span>
       <span class="font-mono">${csEscape(String(fh.working))}/${csEscape(String(fh.eligible))} working · ${csEscape(String(fh.pct))}%</span>
-      <span class="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/60">${label}</span>
-      ${fh.not_reporting ? `<span class="text-[11px] font-semibold ${fh.status === 'critical' ? 'text-red-600' : 'text-amber-600'}">${csEscape(String(fh.not_reporting))} not checking in</span>` : ''}
+      <span class="text-xs font-bold px-1.5 py-0.5 rounded bg-white/60">${label}</span>
+      ${fh.not_reporting ? `<span class="text-xs font-semibold ${fh.status === 'critical' ? 'text-red-600' : 'text-amber-600'}">${csEscape(String(fh.not_reporting))} not checking in</span>` : ''}
     </div>`;
 }
 
@@ -1865,11 +1865,11 @@ function csFleetHealthBadge(fh) {
 // demo mark, the red last-seen, and the tier badges mean. Swatch classes mirror
 // csSimBtnClass / the row renderer so the samples match the live UI exactly.
 function csClientsLegend() {
-    const sw = cls => `<span class="${cls} px-2 py-0.5 rounded-md text-[11px] font-bold">sim</span>`;
+    const sw = cls => `<span class="${cls} px-2 py-0.5 rounded-md text-xs font-bold">sim</span>`;
     const tier = (cls, t) => `<span class="font-bold text-slate-600">${t}</span>`;
-    const lbl = t => `<span class="font-bold uppercase tracking-wider text-slate-500 mr-1">${t}</span>`;
-    return `<div class="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
-      <span class="font-bold uppercase tracking-wider text-slate-500">Legend</span>
+    const lbl = t => `<span class="font-bold text-slate-500 mr-1">${t}</span>`;
+    return `<div class="mt-4 pt-3 border-t border-slate-100 text-xs text-slate-500">
+      <span class="font-bold text-slate-500">Legend</span>
       <div class="mt-2 space-y-1.5">
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Status')}
@@ -2067,8 +2067,8 @@ function csHealthBadge(c) {
         ? (sv.length ? 'Radio sees: ' + sv.map(x => String(x.ssid)).join(', ')
                      : 'Radio sees NO SSIDs at all — compare with a working client on the same host')
         : '';
-    return `<span class="ml-1 text-[10px] font-semibold ${m[1]}" title="${csEscape(m[2])}">${csEscape(m[0])}</span>`
-         + (seen ? `<span class="ml-1 text-[10px] text-slate-500" title="${csEscape(seenTitle)}">${seen}</span>` : '');
+    return `<span class="ml-1 text-xs font-semibold ${m[1]}" title="${csEscape(m[2])}">${csEscape(m[0])}</span>`
+         + (seen ? `<span class="ml-1 text-xs text-slate-500" title="${csEscape(seenTitle)}">${seen}</span>` : '');
 }
 
 function csRenderClientRows(rows, targetId) {
@@ -2085,7 +2085,7 @@ function csRenderClientRows(rows, targetId) {
         const _demoOn = window._csDemoActive && window._csDemoActive[host];
         const _ls = csLastSeenAgo(c.last_seen);
         const line1 = `<tr class="border-t border-slate-100 ${_demoOn ? 'bg-amber-50' : ''}${c.never_reported ? ' bg-red-50/40' : ''}">
-          <td class="px-4 py-2 font-mono text-xs whitespace-nowrap">${csClientStatusDot(c)}${csEscape(host || '—')}${c.dns_ceiling ? `<span class="ml-1 text-[10px] font-semibold text-amber-600" title="Current DNS self-throttle rate (failures/min) the AIMD ratchet settled on for this dongle">DNS≤${csEscape(c.dns_ceiling)}/m</span>` : ''}${csHealthBadge(c)}${c.never_reported ? `<span class="ml-1 text-[10px] font-semibold text-red-600" title="This running sim VM has never checked into the API — dead/silent, a reclone candidate. It has no client record yet.">never checked in${c.vmid ? ` · vm ${csEscape(c.vmid)}` : ''}</span>` : ''}</td>
+          <td class="px-4 py-2 font-mono text-xs whitespace-nowrap">${csClientStatusDot(c)}${csEscape(host || '—')}${c.dns_ceiling ? `<span class="ml-1 text-xs font-semibold text-amber-600" title="Current DNS self-throttle rate (failures/min) the AIMD ratchet settled on for this dongle">DNS≤${csEscape(c.dns_ceiling)}/m</span>` : ''}${csHealthBadge(c)}${c.never_reported ? `<span class="ml-1 text-xs font-semibold text-red-600" title="This running sim VM has never checked into the API — dead/silent, a reclone candidate. It has no client record yet.">never checked in${c.vmid ? ` · vm ${csEscape(c.vmid)}` : ''}</span>` : ''}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(cfg.wsite || '—')}</td>
           <td class="px-4 py-2 font-mono text-xs text-slate-500">${csEscape(c.simulation_id || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(cfg.sim_phy || '—')}</td>
@@ -2100,7 +2100,7 @@ function csRenderClientRows(rows, targetId) {
           <td colspan="${CS_CLIENT_COLS}" class="px-4 pb-3 pt-0">
             <div class="flex flex-wrap items-center justify-between gap-2">
               ${csClientSimBar(c, host)}
-              <button onclick="csRemoveClient('${csEscape(host)}', this)" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-white hover:bg-red-50 text-red-500 border border-red-200 flex-shrink-0" title="Remove this client's registry record — for a stale/unrecognized entry (a renamed VM's old hostname, a one-off test client). Does NOT affect any actual VM; a client that's still alive just re-registers on its next check-in.">🗑 Remove</button>
+              <button onclick="csRemoveClient('${csEscape(host)}', this)" class="text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap bg-white hover:bg-red-50 text-red-500 border border-red-200 flex-shrink-0" title="Remove this client's registry record — for a stale/unrecognized entry (a renamed VM's old hostname, a one-off test client). Does NOT affect any actual VM; a client that's still alive just re-registers on its next check-in.">🗑 Remove</button>
             </div>
           </td>
         </tr>` : '';
@@ -2183,21 +2183,21 @@ function csClientSimBar(c, host) {
     return `<div class="space-y-1.5">
       <div class="grid gap-1 overflow-x-auto pb-0.5" style="grid-template-columns: repeat(${_simCols}, minmax(46px, 1fr));">${btns}</div>
       <div class="flex items-center gap-1.5">
-        <span id="${csEscape(csCtlId(host, 'msg'))}" class="text-[11px] text-slate-500"></span>
+        <span id="${csEscape(csCtlId(host, 'msg'))}" class="text-xs text-slate-500"></span>
       </div>
       <div class="flex items-center gap-1.5 pt-1 border-t border-slate-100">
-        <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Debug</span>
+        <span class="text-xs font-bold text-slate-500">Debug</span>
         <select id="${csEscape(csCtlId(host, 'dbglvl'))}" data-cs-debug-host="${csEscape(host)}"
-          class="border border-slate-200 rounded px-1 py-0.5 text-[11px]">
+          class="border border-slate-200 rounded px-1 py-0.5 text-xs">
           <option value="basic">basic</option>
           <option value="advanced">advanced</option>
         </select>
         <button data-cs-debug-host="${csEscape(host)}" data-cs-debug-on="0" onclick="csDebugToggle(this)"
           title="Stream this client's logs up to the hub for remote troubleshooting (30-min auto-off)"
-          class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-[11px] font-bold">Enable Debug</button>
+          class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-xs font-bold">Enable Debug</button>
         <button data-cs-debug-host="${csEscape(host)}" onclick="csDebugLogs(this)"
           title="Open the Client Debug log panel for this host"
-          class="bg-indigo-100 hover:bg-indigo-200 text-indigo-700 px-2 py-0.5 rounded text-[11px] font-bold">View Logs</button>
+          class="bg-indigo-100 hover:bg-indigo-200 text-indigo-700 px-2 py-0.5 rounded text-xs font-bold">View Logs</button>
       </div>
     </div>`;
 }
@@ -2344,16 +2344,16 @@ function csDemoTickCountdowns() {
 function csDemoCell(hostname) {
     const a = window._csDemoActive[hostname];
     const exp = a && a.expires_at != null ? a.expires_at : '';
-    const badge = a ? `<span class="inline-flex items-center gap-1 bg-amber-100 text-amber-800 border border-amber-300 rounded px-1.5 py-0.5 text-[10px] font-bold mr-1 animate-pulse" title="Simulation '${csEscape(a.scenario)}' active">⚡ ${csEscape(a.scenario)} <span class="cs-demo-countdown font-mono" data-demo-expires="${csEscape(String(exp))}">${csEscape(a.minutes_remaining != null ? Math.round(a.minutes_remaining) + 'm' : '')}</span></span>` : '';
+    const badge = a ? `<span class="inline-flex items-center gap-1 bg-amber-100 text-amber-800 border border-amber-300 rounded px-1.5 py-0.5 text-xs font-bold mr-1 animate-pulse" title="Simulation '${csEscape(a.scenario)}' active">⚡ ${csEscape(a.scenario)} <span class="cs-demo-countdown font-mono" data-demo-expires="${csEscape(String(exp))}">${csEscape(a.minutes_remaining != null ? Math.round(a.minutes_remaining) + 'm' : '')}</span></span>` : '';
     return `<td class="px-4 py-2 whitespace-nowrap ${a ? 'bg-amber-50' : ''}">
       ${badge}
-      <select id="cs-demo-${csEscape(hostname)}" class="border border-slate-200 rounded-md px-1 py-0.5 text-[11px]">
+      <select id="cs-demo-${csEscape(hostname)}" class="border border-slate-200 rounded-md px-1 py-0.5 text-xs">
         ${csDemoOptions(a ? a.scenario : 'normal')}
       </select>
       <button data-cs-demo-host="${csEscape(hostname)}" onclick="csDemoTrigger(this)"
-        class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-1.5 py-0.5 rounded-md text-[11px] font-bold">Go</button>
+        class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-1.5 py-0.5 rounded-md text-xs font-bold">Go</button>
       <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlClear(this)"
-        class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-1.5 py-0.5 rounded-md text-[11px] font-bold" title="Clear this client's sim overrides">Clear</button>
+        class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-1.5 py-0.5 rounded-md text-xs font-bold" title="Clear this client's sim overrides">Clear</button>
     </td>`;
 }
 
@@ -2363,13 +2363,13 @@ async function csDemoCard() {
     if (!active.length) return '';
     const rows = active.map(a => `<div class="flex items-center justify-between py-1">
       <span class="text-sm"><span class="font-mono text-xs font-bold">${csEscape(a.hostname)}</span>
-        <span class="ml-2 inline-block bg-amber-100 text-amber-700 rounded px-1.5 py-0.5 text-[10px] font-bold">${csEscape(a.scenario)}</span>
+        <span class="ml-2 inline-block bg-amber-100 text-amber-700 rounded px-1.5 py-0.5 text-xs font-bold">${csEscape(a.scenario)}</span>
         <span class="ml-2 text-xs text-slate-500">${csEscape(a.minutes_remaining)}m remaining</span></span>
       <button data-cs-demo-host="${csEscape(a.hostname)}" onclick="csDemoClear(this)"
-        class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-[11px] font-bold">Clear</button>
+        class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-xs font-bold">Clear</button>
     </div>`).join('');
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">Active Demo Scenarios (${active.length})</p>
+      <p class="text-xs font-bold text-slate-500 mb-2">Active Demo Scenarios (${active.length})</p>
       ${rows}
     </div>`;
 }
@@ -2484,7 +2484,7 @@ function csOsChipsHtml(data, opts) {
     }).join('');
     const label = opts.label === undefined ? 'Client OS' : opts.label;
     return '<div class="flex flex-wrap items-center gap-1.5 text-xs">'
-        + (label ? '<span class="text-[10px] text-slate-500 uppercase tracking-wider mr-1">' + csEscape(label) + '</span>' : '')
+        + (label ? '<span class="text-xs text-slate-500 mr-1">' + csEscape(label) + '</span>' : '')
         + chips
         + '<span class="text-slate-500 ml-1">\u00b7 ' + csEscape(String(total)) + ' total</span></div>';
 }
@@ -2572,8 +2572,8 @@ function csCentralLiveCol(data) {
     return {
         label: 'Live',
         render: (r) => ok
-            ? `<span class="inline-flex items-center gap-1 text-emerald-600 text-[11px] font-bold" title="From the last successful raw Central query">● Live</span>`
-            : `<span class="inline-flex items-center gap-1 text-amber-600 text-[11px] font-bold" title="Last raw Central query failed">● Stale</span>`,
+            ? `<span class="inline-flex items-center gap-1 text-emerald-600 text-xs font-bold" title="From the last successful raw Central query">● Live</span>`
+            : `<span class="inline-flex items-center gap-1 text-amber-600 text-xs font-bold" title="Last raw Central query failed">● Stale</span>`,
         sort: (r) => ok ? 1 : 0,
     };
 }
@@ -2633,12 +2633,12 @@ function _csCentralTableBuild(id) {
         const nMon = rows.filter(r => monOf(r)).length;
         const mk = (val, label) => `<button onclick="csCentralFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
         bar = `<div class="flex items-center gap-2 mb-3">
-            <span class="text-xs text-slate-500 font-semibold uppercase tracking-wider">Monitored:</span>
+            <span class="text-xs text-slate-500 font-semibold">Monitored:</span>
             ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
         </div>`;
     }
     const caption = opts.caption ? `<div class="text-xs text-slate-500 mb-2">${csEscape(opts.caption)}</div>` : '';
-    return `${bar}${caption}<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 uppercase text-xs tracking-wider">${ths}</thead><tbody class="divide-y divide-slate-100">${body}</tbody></table></div>`;
+    return `${bar}${caption}<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs">${ths}</thead><tbody class="divide-y divide-slate-100">${body}</tbody></table></div>`;
 }
 
 // Click handlers — local re-render from the cached rows (NO Central refetch).
@@ -2730,9 +2730,9 @@ window.csMonitorSiteModal = async function (siteName, rerender) {
             </div>
             <div class="p-6 space-y-4">
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Minimum clients <span class="font-normal normal-case text-slate-500">(optional floor)</span></label>
+                    <label class="text-xs text-slate-500 font-bold">Minimum clients <span class="font-normal normal-case text-slate-500">(optional floor)</span></label>
                     <input id="cs-monitor-min" type="number" min="0" step="1" value="${esc(curMin)}" placeholder="blank = no floor (drop-based only)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                    <p class="text-[11px] text-slate-500 leading-relaxed">If this site's live client count drops below this number, an error is raised on the dashboard — in addition to the existing % drop check. Leave blank to monitor for change only.</p>
+                    <p class="text-xs text-slate-500 leading-relaxed">If this site's live client count drops below this number, an error is raised on the dashboard — in addition to the existing % drop check. Leave blank to monitor for change only.</p>
                 </div>
                 <div id="cs-monitor-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="pt-2 flex justify-between gap-3">
@@ -2856,10 +2856,10 @@ async function csRenderCentralAlerts() {
         { label: 'Severity', render: r => r.status === 'not_firing' ? '<span class="text-slate-500">—</span>' : csStatusBadge(r.severity),
           sort: r => _sevRank[String(r.severity).toLowerCase()] || 0 },
         { label: 'State',    render: r => r.status === 'not_firing'
-            ? `<span class="text-[11px] font-semibold text-slate-500 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full" title="Monitored, but Central isn't reporting it right now">Not Firing</span>`
+            ? `<span class="text-xs font-semibold text-slate-500 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full" title="Monitored, but Central isn't reporting it right now">Not Firing</span>`
             : r.status === 'cleared'
-            ? `<span class="text-[11px] font-semibold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">Closed</span>`
-            : `<span class="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Active</span>`,
+            ? `<span class="text-xs font-semibold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">Closed</span>`
+            : `<span class="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Active</span>`,
           sort: r => r.status === 'not_firing' ? -1 : r.status === 'cleared' ? 0 : 1 },
         { label: 'Category', render: r => `<span class="text-slate-500 text-xs">${csEscape(r.category)}</span>`, sort: r => r.category },
         csCentralLiveCol(data),
@@ -2920,8 +2920,8 @@ async function csRenderCentralInsights() {
         { label: 'Category', render: r => `<span class="text-slate-500">${csEscape(r.category)}</span>`, sort: r => r.category },
         { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
         { label: 'Firing',   render: r => r.firing
-            ? `<span class="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Firing</span>`
-            : `<span class="text-[11px] font-semibold text-slate-500 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full" title="Monitored, but Central isn't reporting it right now">Not Firing</span>`,
+            ? `<span class="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Firing</span>`
+            : `<span class="text-xs font-semibold text-slate-500 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full" title="Monitored, but Central isn't reporting it right now">Not Firing</span>`,
           sort: r => r.firing ? 1 : 0 },
         csCentralLiveCol(data),
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
@@ -3153,12 +3153,12 @@ function _csCentralOnPremTableBuild(id) {
         const nMon = rows.filter(r => monOf(r)).length;
         const mk = (val, label) => `<button onclick="csCentralOnPremFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
         bar = `<div class="flex items-center gap-2 mb-3">
-            <span class="text-xs text-slate-500 font-semibold uppercase tracking-wider">Monitored:</span>
+            <span class="text-xs text-slate-500 font-semibold">Monitored:</span>
             ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
         </div>`;
     }
     const caption = opts.caption ? `<div class="text-xs text-slate-500 mb-2">${csEscape(opts.caption)}</div>` : '';
-    return `${bar}${caption}<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 uppercase text-xs tracking-wider">${ths}</thead><tbody class="divide-y divide-slate-100">${body}</tbody></table></div>`;
+    return `${bar}${caption}<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs">${ths}</thead><tbody class="divide-y divide-slate-100">${body}</tbody></table></div>`;
 }
 
 // Click handlers — local re-render from the cached rows (NO Central refetch).
@@ -3250,9 +3250,9 @@ window.csMonitorCentralOnPremSiteModal = async function (siteName, rerender) {
             </div>
             <div class="p-6 space-y-4">
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Minimum clients <span class="font-normal normal-case text-slate-500">(optional floor)</span></label>
+                    <label class="text-xs text-slate-500 font-bold">Minimum clients <span class="font-normal normal-case text-slate-500">(optional floor)</span></label>
                     <input id="cs-monitor-min" type="number" min="0" step="1" value="${esc(curMin)}" placeholder="blank = no floor (drop-based only)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                    <p class="text-[11px] text-slate-500 leading-relaxed">If this site's live client count drops below this number, an error is raised on the dashboard — in addition to the existing % drop check. Leave blank to monitor for change only.</p>
+                    <p class="text-xs text-slate-500 leading-relaxed">If this site's live client count drops below this number, an error is raised on the dashboard — in addition to the existing % drop check. Leave blank to monitor for change only.</p>
                 </div>
                 <div id="cs-monitor-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="pt-2 flex justify-between gap-3">
@@ -3355,8 +3355,8 @@ async function csRenderCentralOnPremAlerts() {
         { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
         { label: 'Severity', render: r => csStatusBadge(r.severity), sort: r => _sevRank[String(r.severity).toLowerCase()] || 0 },
         { label: 'State',    render: r => r.status === 'cleared'
-            ? `<span class="text-[11px] font-semibold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">Closed</span>`
-            : `<span class="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Active</span>`,
+            ? `<span class="text-xs font-semibold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">Closed</span>`
+            : `<span class="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Active</span>`,
           sort: r => r.status === 'cleared' ? 0 : 1 },
         { label: 'Category', render: r => `<span class="text-slate-500 text-xs">${csEscape(r.category)}</span>`, sort: r => r.category },
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
@@ -3610,14 +3610,14 @@ function _csFormatCcDebug(debug) {
               : ' <span class="text-slate-500">— displayed status matches this cycle\'s own numbers</span>')
           + `</div>`
         : '';
-    return `<details class="mt-1"><summary class="text-[10px] text-indigo-600 cursor-pointer select-none">🔍 debug breakdown</summary>
-        <div class="mt-1 text-[10px] text-slate-500 font-mono">${csEscape(thresh)}</div>
-        <div class="mt-1 overflow-x-auto"><table class="text-[10px] font-mono">
+    return `<details class="mt-1"><summary class="text-xs text-indigo-600 cursor-pointer select-none">🔍 debug breakdown</summary>
+        <div class="mt-1 text-xs text-slate-500 font-mono">${csEscape(thresh)}</div>
+        <div class="mt-1 overflow-x-auto"><table class="text-xs font-mono">
         <thead class="text-slate-500"><tr><td class="pr-3">series</td><td class="pr-3">status</td><td class="pr-3">current</td>
         <td class="pr-3">hr_avg</td><td class="pr-3">avg_7d</td><td class="pr-3">avg_30d</td><td class="pr-3">max_7d</td>
         <td class="pr-3">max_30d</td><td class="pr-3">day%</td><td class="pr-3">week%</td><td class="pr-3">rate%</td>
         <td class="pr-3">triggered</td></tr></thead><tbody>${rows}</tbody></table></div>
-        <div class="text-[10px] text-slate-500">${pwLine}</div>
+        <div class="text-xs text-slate-500">${pwLine}</div>
     </details>`;
 }
 
@@ -3701,15 +3701,15 @@ async function _csRenderDiag(source) {
         <div><b>Diagnosis</b> — <b>✓ Consistent</b>: raw ${prod} and the derived status agree. <b>⚠️ Logic</b>: they disagree (a mapping / count / id bug). <b>⚠️ Resolution miss</b>: ${prod} has the alert but it never resolved to a derived status for this site (alert-id or site-alias mismatch) — why a check can look green on Checks yet read "not firing".</div>
     </div>`;
     const cols = [
-        { label: 'Check', render: r => `<div><div class="text-sm">${csEscape(r.name)}</div><div class="text-[10px] text-slate-500 font-mono">${csEscape(r.id)}${r.type ? ' · ' + csEscape(r.type) : ''}</div></div>`, sort: r => r.name },
+        { label: 'Check', render: r => `<div><div class="text-sm">${csEscape(r.name)}</div><div class="text-xs text-slate-500 font-mono">${csEscape(r.id)}${r.type ? ' · ' + csEscape(r.type) : ''}</div></div>`, sort: r => r.name },
         { label: 'Site', render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
         { label: `${prod} (raw API)`, render: r => r.rawN > 0
-            ? `<span class="text-emerald-700 font-semibold">${r.rawN} present</span>${r.rawSev ? `<span class="text-[10px] text-slate-500"> · ${csEscape(r.rawSev)}</span>` : ''}`
+            ? `<span class="text-emerald-700 font-semibold">${r.rawN} present</span>${r.rawSev ? `<span class="text-xs text-slate-500"> · ${csEscape(r.rawSev)}</span>` : ''}`
             : `<span class="text-slate-500">none</span>`, sort: r => r.rawN },
         { label: 'Dashboard (derived)', render: r => r.derived != null
-            ? `${csStatusBadge(r.derived)}${r.dmsg ? `<div class="text-[10px] text-slate-500 mt-0.5">${csEscape(r.dmsg)}</div>` : ''}${_csFormatCcDebug(r.debug)}`
+            ? `${csStatusBadge(r.derived)}${r.dmsg ? `<div class="text-xs text-slate-500 mt-0.5">${csEscape(r.dmsg)}</div>` : ''}${_csFormatCcDebug(r.debug)}`
             : `<span class="text-slate-500">—</span>`, sort: r => String(r.derived || '~') },
-        { label: 'Firing', render: r => r.derived != null ? csAlertBadge(r.derived) : `<span class="text-[10px] text-slate-500 italic">unresolved</span>`, sort: r => r.firing },
+        { label: 'Firing', render: r => r.derived != null ? csAlertBadge(r.derived) : `<span class="text-xs text-slate-500 italic">unresolved</span>`, sort: r => r.firing },
         { label: 'Diagnosis', render: r => chip(r.diag, dc[r.dcls] || dc.slate), sort: r => r.dcls },
     ];
     // Copy payload: TSV of every row so it pastes cleanly into a sheet or chat.
@@ -3806,12 +3806,12 @@ function _csMistTableBuild(id) {
         const nMon = rows.filter(r => monOf(r)).length;
         const mk = (val, label) => `<button onclick="csMistFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
         bar = `<div class="flex items-center gap-2 mb-3">
-            <span class="text-xs text-slate-500 font-semibold uppercase tracking-wider">Monitored:</span>
+            <span class="text-xs text-slate-500 font-semibold">Monitored:</span>
             ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
         </div>`;
     }
     const caption = opts.caption ? `<div class="text-xs text-slate-500 mb-2">${csEscape(opts.caption)}</div>` : '';
-    return `${bar}${caption}<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 uppercase text-xs tracking-wider">${ths}</thead><tbody class="divide-y divide-slate-100">${body}</tbody></table></div>`;
+    return `${bar}${caption}<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs">${ths}</thead><tbody class="divide-y divide-slate-100">${body}</tbody></table></div>`;
 }
 window.csMistSort = function (id, col) {
     const st = _csMistTbl[id]; if (!st) return;
@@ -3893,9 +3893,9 @@ window.csMonitorMistSiteModal = async function (siteName, rerender) {
             </div>
             <div class="p-6 space-y-4">
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Minimum clients <span class="font-normal normal-case text-slate-500">(optional floor)</span></label>
+                    <label class="text-xs text-slate-500 font-bold">Minimum clients <span class="font-normal normal-case text-slate-500">(optional floor)</span></label>
                     <input id="cs-monitor-mist-min" type="number" min="0" step="1" value="${esc(curMin)}" placeholder="blank = no floor (drop-based only)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                    <p class="text-[11px] text-slate-500 leading-relaxed">If this site's live client count drops below this number, an error is raised on the dashboard — in addition to the existing % drop check. Leave blank to monitor for change only.</p>
+                    <p class="text-xs text-slate-500 leading-relaxed">If this site's live client count drops below this number, an error is raised on the dashboard — in addition to the existing % drop check. Leave blank to monitor for change only.</p>
                 </div>
                 <div id="cs-monitor-mist-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="pt-2 flex justify-between gap-3">
@@ -3991,8 +3991,8 @@ async function csRenderMistAlerts() {
         { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
         { label: 'Severity', render: r => csStatusBadge(r.severity), sort: r => _sevRank[String(r.severity).toLowerCase()] || 0 },
         { label: 'State',    render: r => r.status === 'cleared'
-            ? `<span class="text-[11px] font-semibold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">Closed</span>`
-            : `<span class="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Active</span>`,
+            ? `<span class="text-xs font-semibold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">Closed</span>`
+            : `<span class="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Active</span>`,
           sort: r => r.status === 'cleared' ? 0 : 1 },
         { label: 'Category', render: r => `<span class="text-slate-500 text-xs">${csEscape(r.category)}</span>`, sort: r => r.category },
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
@@ -4171,7 +4171,7 @@ async function csRenderConfig() {
     // Config → API child (default): config-push JSON editor + per-spoke state.
     csSetToolbar('');
     const pushCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">API Config Push ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 mb-2">API Config Push ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-500 mb-2">Paste a JSON config object to push to all spokes (unwrapped at the spoke's <code>_apply_hub_config</code>).</p>
       <textarea id="cs-configpush" rows="10" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500" placeholder='{ "key": "value" }'></textarea>
       <div class="mt-3 flex justify-end"><button onclick="csSaveConfigPush()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-md text-sm font-bold shadow-sm">Push Config</button></div>
@@ -4189,7 +4189,7 @@ async function csRenderConfig() {
           <td class="px-3 py-2 text-xs text-slate-500">${csEscape(h.hub_last_checkin ? new Date(h.hub_last_checkin * 1000).toLocaleString() : '—')}</td>
         </tr>`).join('');
         stateCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Per-Spoke Config State ${helpIcon('cs', null, 'Simulations help')}</h3>
+          <h3 class="text-sm font-bold text-slate-500 mb-2">Per-Spoke Config State ${helpIcon('cs', null, 'Simulations help')}</h3>
           ${csTable(['Spoke', 'Online', 'Conf Read Error', 'Last Check-in'], rows)}
         </div>`;
     } catch (e) { console.error('csRenderConfig: per-spoke config state load failed, hiding card', e); stateCard = ''; }
@@ -4335,7 +4335,7 @@ function csSimField(section, key, label, value, type) {
     if (type === 'select') {
         // Empty defaults are omitted by the existing INI serializer.
         return `<div class="flex flex-col gap-1">
-          <label class="text-[10px] text-slate-500 uppercase font-bold tracking-wider">${csEscape(label)}</label>
+          <label class="text-xs text-slate-500 font-bold">${csEscape(label)}</label>
           <select id="${id}" data-cs-section="${csEscape(section)}" data-cs-key="${csEscape(key)}"
                   class="border border-slate-200 rounded-md px-2 py-1.5 text-sm text-slate-600">${csSimSelectOptions(key, v)}</select>
         </div>`;
@@ -4345,7 +4345,7 @@ function csSimField(section, key, label, value, type) {
         // data-cs-list tells the serializer to re-join lines with a space.
         const lines = String(v).trim().split(/[\s,]+/).filter(Boolean).join('\n');
         return `<div class="flex flex-col gap-1 md:col-span-3">
-          <label class="text-[10px] text-slate-500 uppercase font-bold tracking-wider">${csEscape(label)}</label>
+          <label class="text-xs text-slate-500 font-bold">${csEscape(label)}</label>
           <textarea id="${id}" data-cs-section="${csEscape(section)}" data-cs-key="${csEscape(key)}" data-cs-list="1"
                     rows="6" placeholder="one DNS server IP per line — add as many as you want" class="border border-slate-200 rounded-md px-2 py-1.5 text-sm font-mono">${csEscape(lines)}</textarea>
         </div>`;
@@ -4358,7 +4358,7 @@ function csSimField(section, key, label, value, type) {
         // been flipping web_server off and disabling clients). Empty serializes
         // to nothing, so the client keeps its base/bucket value.
         return `<div class="flex flex-col gap-1">
-          <label class="text-[10px] text-slate-500 uppercase font-bold tracking-wider">${csEscape(label)}</label>
+          <label class="text-xs text-slate-500 font-bold">${csEscape(label)}</label>
           <select id="${id}" data-cs-section="${csEscape(section)}" data-cs-key="${csEscape(key)}"
                   class="border border-slate-200 rounded-md px-2 py-1.5 text-sm ${on ? 'text-emerald-700 font-semibold' : 'text-slate-600'}">
             <option value="" ${(!on && !off) ? 'selected' : ''}>— default —</option>
@@ -4367,7 +4367,7 @@ function csSimField(section, key, label, value, type) {
           </select></div>`;
     }
     return `<div class="flex flex-col gap-1">
-      <label class="text-[10px] text-slate-500 uppercase font-bold tracking-wider">${csEscape(label)}</label>
+      <label class="text-xs text-slate-500 font-bold">${csEscape(label)}</label>
       <input id="${id}" data-cs-section="${csEscape(section)}" data-cs-key="${csEscape(key)}"
              value="${csEscape(v)}" class="border border-slate-200 rounded-md px-2 py-1.5 text-sm font-mono">
     </div>`;
@@ -4450,40 +4450,40 @@ async function csRenderConfigSimulation() {
         simBody = `
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
             <div class="border border-slate-200 rounded-lg p-3">
-              <p class="text-[10px] text-slate-500 uppercase font-bold tracking-widest mb-2">[simulation]</p>
+              <p class="text-xs text-slate-500 font-bold mb-2">[simulation]</p>
               <div class="grid grid-cols-2 md:grid-cols-3 gap-3">${simFields}</div>
             </div>
             <div class="border border-slate-200 rounded-lg p-3">
-              <p class="text-[10px] text-slate-500 uppercase font-bold tracking-widest mb-2">[server] / [address]</p>
+              <p class="text-xs text-slate-500 font-bold mb-2">[server] / [address]</p>
               <div class="grid grid-cols-1 md:grid-cols-2 gap-3">${serverFields}${addressFields}</div>
             </div>
           </div>
           ${webServerOn
             ? `<div class="border border-slate-200 rounded-lg p-3 bg-slate-50/60">
-                 <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Per-simulation profiles [s0]–[s9]</p>
+                 <p class="text-xs font-bold text-slate-500 mb-1">Per-simulation profiles [s0]–[s9]</p>
                  <p class="text-xs text-slate-500 leading-snug">This deployment runs in <span class="font-semibold">hub / engine mode</span> (<code>web_server=on</code>), so the engine drives placement and ambient distribution and the <span class="font-semibold">s0–s9 buckets are ignored</span>. Configure how sims spread across the fleet in <span class="font-semibold">Config → Engine → Pool &amp; SSID → Simulation distribution</span>. The buckets only apply to standalone (GitHub-synced) deployments with <code>web_server=off</code>.</p>
                </div>`
-            : `<p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">Per-simulation profiles [s0]–[s9]</p>
+            : `<p class="text-xs font-bold text-slate-500 mb-2">Per-simulation profiles [s0]–[s9]</p>
           ${bucketCards}`}
-          ${extras.length ? `<p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-3 mb-2">Extra sections</p>${extraBlocks}` : ''}
-          <details class="mt-3 text-xs"><summary class="cursor-pointer text-slate-500">Raw merged simulation.conf</summary><pre class="mt-2 p-2 bg-slate-50 rounded font-mono text-[11px] whitespace-pre-wrap break-all">${csEscape(raw)}</pre></details>`;
+          ${extras.length ? `<p class="text-xs font-bold text-slate-500 mt-3 mb-2">Extra sections</p>${extraBlocks}` : ''}
+          <details class="mt-3 text-xs"><summary class="cursor-pointer text-slate-500">Raw merged simulation.conf</summary><pre class="mt-2 p-2 bg-slate-50 rounded font-mono text-xs whitespace-pre-wrap break-all">${csEscape(raw)}</pre></details>`;
     }
     const simCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex flex-wrap justify-between items-center mb-3 gap-2">
         <div class="flex items-center gap-2">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Config ${helpIcon('cs', null, 'Simulations help')}</h3>
+          <h3 class="text-sm font-bold text-slate-500">Simulation Config ${helpIcon('cs', null, 'Simulations help')}</h3>
           ${cfgSource === 'hub'
-            ? '<span class="inline-block bg-emerald-100 text-emerald-700 rounded-full px-2 py-0.5 text-[10px] font-bold">Hub-owned (GitHub sync ignored)</span>'
+            ? '<span class="inline-block bg-emerald-100 text-emerald-700 rounded-full px-2 py-0.5 text-xs font-bold">Hub-owned (GitHub sync ignored)</span>'
             : (cfgWritable
-              ? '<span class="inline-block bg-brand/10 text-primary-text border border-brand rounded-full px-2 py-0.5 text-[10px] font-bold">GitHub-managed (commits on save)</span>'
-              : '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">GitHub-managed — READ-ONLY (no API key)</span>')}
+              ? '<span class="inline-block bg-brand/10 text-primary-text border border-brand rounded-full px-2 py-0.5 text-xs font-bold">GitHub-managed (commits on save)</span>'
+              : '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-xs font-bold">GitHub-managed — READ-ONLY (no API key)</span>')}
           ${simSource === 'hub'
-            ? '<span class="inline-block bg-slate-100 text-slate-500 rounded-full px-2 py-0.5 text-[10px] font-bold">hub config (from GitHub)</span>'
+            ? '<span class="inline-block bg-slate-100 text-slate-500 rounded-full px-2 py-0.5 text-xs font-bold">hub config (from GitHub)</span>'
             : (simSource === 'spoke' ? '' : (simConnected
-              ? '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">spoke online — live config fetch timed out, showing stored override</span>'
-              : '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">spoke offline — showing stored override</span>'))}
+              ? '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-xs font-bold">spoke online — live config fetch timed out, showing stored override</span>'
+              : '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-xs font-bold">spoke offline — showing stored override</span>'))}
         </div>
-        <span class="text-[10px] text-slate-500">Last fetched: ${csEscape(fetchedSim)}</span>
+        <span class="text-xs text-slate-500">Last fetched: ${csEscape(fetchedSim)}</span>
       </div>
       <p class="text-xs text-slate-500 mb-3">Edit the labeled fields. Saved as the hub-managed <code>sim_conf_override</code> INI and pushed to the spoke (merged on top of the repo's simulation.conf). Clearing a field reverts it to the repo default.</p>
       <div id="cs-ini-sections">${simBody}</div>
@@ -4828,7 +4828,7 @@ function _csKnobInheritRows(r, cat) {
         const learnedVal = learnedKnobs[k];
         const floorVal = learnedVal != null ? _csKnobFloorFromLearned(learnedVal) : null;
         if (inherit) {
-            return `<div class="flex items-center gap-1 text-[11px]">
+            return `<div class="flex items-center gap-1 text-xs">
                 <span class="font-mono text-slate-500 w-32 truncate" title="${csEscape(k)}">${csEscape(k)}</span>
                 <span class="text-slate-500">${floorVal != null ? floorVal : '—'}</span>
                 ${learnedVal != null ? `<span class="text-slate-500">(learned ${learnedVal} +20%, cap ${learnedVal * 2})</span>` : `<span class="text-slate-500 italic">not yet learned</span>`}
@@ -4836,11 +4836,11 @@ function _csKnobInheritRows(r, cat) {
         }
         const ov = overrides[k];
         const isOverridden = ov != null && String(ov).trim() !== '';
-        return `<div class="flex items-center gap-1 text-[11px]">
+        return `<div class="flex items-center gap-1 text-xs">
             <span class="font-mono text-slate-500 w-32 truncate" title="${csEscape(k)}">${csEscape(k)}</span>
             <input data-cs-sq-knob="${csEscape(k)}" type="number" placeholder="${floorVal != null ? floorVal : 'inherit'}"
                    value="${ov != null ? csEscape(String(ov)) : ''}"
-                   class="w-20 border rounded px-1.5 py-0.5 text-[11px] ${isOverridden ? 'border-red-400 text-red-600 font-semibold' : 'border-slate-300 text-slate-500'}">
+                   class="w-20 border rounded px-1.5 py-0.5 text-xs ${isOverridden ? 'border-red-400 text-red-600 font-semibold' : 'border-slate-300 text-slate-500'}">
             <span class="text-slate-500">${floorVal != null ? `default ${floorVal}` : 'not yet learned'}</span>
         </div>`;
     }).join('');
@@ -4890,14 +4890,14 @@ function csRenderSimQuotaEditor() {
         // only seam; picking a Mist: alert makes the row a Mist row.
         const _src = r.source || _csQuotaSource(r.alert_id);
         const _srcBadge = _src === 'mist'
-            ? `<span class="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full border text-violet-700 bg-violet-50 border-violet-200" title="Juniper Mist alert">Mist</span>`
-            : `<span class="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full border text-sky-700 bg-sky-50 border-sky-200" title="Aruba Central alert">Central</span>`;
+            ? `<span class="inline-block text-xs font-bold px-2 py-0.5 rounded-full border text-violet-700 bg-violet-50 border-violet-200" title="Juniper Mist alert">Mist</span>`
+            : `<span class="inline-block text-xs font-bold px-2 py-0.5 rounded-full border text-sky-700 bg-sky-50 border-sky-200" title="Aruba Central alert">Central</span>`;
         // The "Tied to alert/insight" toggle leads the alert section of every sim
         // row so it's obvious it governs the Type / Alert ID fields. Off =
         // untethered (no alert needed). Presence rows have no alert at all.
         const alertCell = isPresence
             ? `<label class="text-xs text-slate-500" data-cs-sq-presence-note>${_srcBadge} Presence
-                <div class="text-[11px] text-slate-500 italic mt-1 leading-tight">Homes N clients to the site — no sim. They stay free for stackable sims.</div>
+                <div class="text-xs text-slate-500 italic mt-1 leading-tight">Homes N clients to the site — no sim. They stay free for stackable sims.</div>
               </label>`
             : `<div class="text-xs text-slate-500">
                 <div class="mb-1">${_srcBadge}</div>
@@ -4906,15 +4906,15 @@ function csRenderSimQuotaEditor() {
                        <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
                        <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
                      </select>`
-                  : `<div class="text-[11px] text-slate-500 italic mt-1 leading-tight">Presence — no alert/insight (keeps N clients on the sim)</div>`}
+                  : `<div class="text-xs text-slate-500 italic mt-1 leading-tight">Presence — no alert/insight (keeps N clients on the sim)</div>`}
               </div>`;
         const idCell = isPresence
             ? `<label class="text-xs text-slate-500">Alert / Insight ID
-                <div class="text-[11px] text-slate-500 italic mt-1 leading-tight">— none (presence) —</div>
+                <div class="text-xs text-slate-500 italic mt-1 leading-tight">— none (presence) —</div>
               </label>`
             : (!tied
               ? `<label class="text-xs text-slate-500">Alert / Insight ID
-                <div class="text-[11px] text-slate-500 italic mt-1 leading-tight">— not required —</div>
+                <div class="text-xs text-slate-500 italic mt-1 leading-tight">— not required —</div>
               </label>`
               : `<label class="text-xs text-slate-500">Alert / Insight ID
                 <select data-cs-sq="alert_id" class="w-full h-9 appearance-none bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${idOpts}</select>
@@ -4940,7 +4940,7 @@ function csRenderSimQuotaEditor() {
                     const _computedMax = _floorVal * 2;
                     const _minVal = _inheritCount ? _lop : (r.min != null ? r.min : (r.count || 1));
                     const _maxVal = _inheritCount ? _computedMax : (r.max != null ? r.max : (r.count || 1));
-                    _learnedOpFooter = `<div class="text-[11px] text-slate-500">Learned op ${_lop} (floor ${_lv.floor}${_lv.source === 'global' ? ' · global' : ''})${_inheritCount ? ` — max auto = floor×2 = ${_computedMax}` : ' — overridden (not inherited)'}</div>`;
+                    _learnedOpFooter = `<div class="text-xs text-slate-500">Learned op ${_lop} (floor ${_lv.floor}${_lv.source === 'global' ? ' · global' : ''})${_inheritCount ? ` — max auto = floor×2 = ${_computedMax}` : ' — overridden (not inherited)'}</div>`;
                     return `<label class="text-xs text-slate-500" title="Min = keep-alive floor; Max = the hard cap. Inheriting derives both from the learned value each tick (min = learned+20%, max = double the learned floor) instead of a fixed stored number.">Min / Max
             <div class="flex gap-1 mt-1">
               <input data-cs-sq="min" type="number" min="1" value="${csEscape(String(_minVal))}" ${_inheritCount ? 'readonly' : ''}
@@ -4957,7 +4957,7 @@ function csRenderSimQuotaEditor() {
                 const _maxVal = r.max != null ? r.max : (r.count || 1);
                 const _maxUnder = _lop != null && Number(_maxVal) < _lop;
                 if (_lop != null) {
-                    _learnedOpFooter = `<div class="text-[11px] ${_maxUnder ? 'text-amber-700 font-semibold' : 'text-slate-500'}">Learned: ${_lop}${_lv && _lv.floor != null ? ` <span class="text-slate-500 font-normal">(floor ${_lv.floor})</span>` : ''}${_lv && _lv.source === 'global' ? ' <span class="text-slate-500 font-normal">· global</span>' : ''}${_maxUnder ? ` — ⚠️ Max is below the learned value (${_lop})` : ''}</div>`;
+                    _learnedOpFooter = `<div class="text-xs ${_maxUnder ? 'text-amber-700 font-semibold' : 'text-slate-500'}">Learned: ${_lop}${_lv && _lv.floor != null ? ` <span class="text-slate-500 font-normal">(floor ${_lv.floor})</span>` : ''}${_lv && _lv.source === 'global' ? ' <span class="text-slate-500 font-normal">· global</span>' : ''}${_maxUnder ? ` — ⚠️ Max is below the learned value (${_lop})` : ''}</div>`;
                 }
                 return `<label class="text-xs text-slate-500" title="Min = keep-alive floor; Max = the hard cap for lab + production (one alert can't exhaust the client pool). Adaptive ramps clients UP to keep the alert firing, capped at Max; Learning ramps up AND down to find the floor.">Min / Max
             <div class="flex gap-1 mt-1">
@@ -5015,7 +5015,7 @@ function csRenderSimQuotaEditor() {
     csSet(`<div class="space-y-4">
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Engine Config ${helpIcon('cs', null, 'Simulations help')}${helpIcon('alert-generation', null, 'How to generate each alert (negative sims): config + quota settings')}</h3>
+          <h3 class="text-sm font-bold text-slate-500">Engine Config ${helpIcon('cs', null, 'Simulations help')}${helpIcon('alert-generation', null, 'How to generate each alert (negative sims): config + quota settings')}</h3>
           <div class="flex justify-end gap-2">
             ${window._csIgnoreGlobalQuotas
               ? `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant ignores the platform-wide Sim Quota defaults — only its own rows apply. Click to use global defaults again." class="bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-300 px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Global Defaults: Ignored</button>`
@@ -5068,7 +5068,7 @@ function csAmbientDistHtml() {
     };
     // Per-sim weight inputs (relative split — which sims the active clients run).
     const simGrid = !control ? '' : `
-          <div class="text-[11px] font-semibold text-slate-500 mt-2 mb-1">Per-sim — weight <span class="font-normal text-slate-500">(relative · 3 = 3× the clients of 1)</span></div>
+          <div class="text-xs font-semibold text-slate-500 mt-2 mb-1">Per-sim — weight <span class="font-normal text-slate-500">(relative · 3 = 3× the clients of 1)</span></div>
           <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
             ${rsims.length ? rsims.map(s => `
               <label class="text-xs text-slate-500 flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-md px-2 py-1">
@@ -5081,7 +5081,7 @@ function csAmbientDistHtml() {
           </div>`;
     // Per-site load-weight inputs (relative — how much of the level each site gets).
     const siteGrid = !control ? '' : `
-          <div class="text-[11px] font-semibold text-slate-500 mt-3 mb-1">Per-site — load weight <span class="font-normal text-slate-500">(relative · 3 = 3× the random load of 1)</span></div>
+          <div class="text-xs font-semibold text-slate-500 mt-3 mb-1">Per-site — load weight <span class="font-normal text-slate-500">(relative · 3 = 3× the random load of 1)</span></div>
           <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
             ${sites.length ? sites.map(st => `
               <label class="text-xs text-slate-500 flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-md px-2 py-1">
@@ -5093,8 +5093,8 @@ function csAmbientDistHtml() {
               : '<div class="text-xs text-slate-500 italic">Define SSIDs (with sites) above to weight sites.</div>'}
           </div>`;
     return `<div class="mb-3">
-          <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Simulation distribution <span class="text-slate-500 normal-case font-normal">(engine / Auto mode)</span></div>
-          <p class="text-[11px] text-slate-500 mb-1 leading-tight"><span class="font-semibold">Ambient level</span> is the % of the fleet doing benign traffic at once (<code>40</code> ≈ 40% of clients). Those active clients are split by relative <span class="font-semibold">weights</span> — a sim or site weighted <code>3</code> gets 3× the clients of one weighted <code>1</code>. By default every weight is 1 (even split). Turn on <span class="font-semibold">weight control</span> to steer the per-sim and per-site split.</p>
+          <div class="text-xs font-bold text-slate-500 mb-1">Simulation distribution <span class="text-slate-500 normal-case font-normal">(engine / Auto mode)</span></div>
+          <p class="text-xs text-slate-500 mb-1 leading-tight"><span class="font-semibold">Ambient level</span> is the % of the fleet doing benign traffic at once (<code>40</code> ≈ 40% of clients). Those active clients are split by relative <span class="font-semibold">weights</span> — a sim or site weighted <code>3</code> gets 3× the clients of one weighted <code>1</code>. By default every weight is 1 (even split). Turn on <span class="font-semibold">weight control</span> to steer the per-sim and per-site split.</p>
           <div class="flex flex-wrap items-center gap-4">
             <label class="text-xs text-slate-500 flex items-center gap-2">Ambient level % <span class="text-slate-500">(of fleet active)</span>
               <input data-cs-ambient="pct" type="number" min="0" max="100" value="${esc(pct)}"
@@ -5112,7 +5112,7 @@ function csAmbientDistHtml() {
               </select>
             </label>
           </div>
-          <p class="text-[11px] text-slate-500 mt-1 leading-tight"><span class="font-semibold">Tier priority</span> decides which radio a quota gets. T1 (PCI) clients are the more reliable ones, so by default quotas fill with T1 first and only reach for T2 dongles once the T1s run out — if the T1s cover every quota, no T2 is used for one. <span class="font-semibold">Every spare client still does background work</span>, T1 included; nothing sits idle. When a quota needs a T1 that is running background traffic, it is <span class="font-semibold">harvested into the quota</span> — displacing a T2 already in it if necessary. A quota that pins its own tier always wins over this setting. <code>T1/T2 only</code> makes unpinned quotas use that tier exclusively, underfilling rather than degrading.</p>
+          <p class="text-xs text-slate-500 mt-1 leading-tight"><span class="font-semibold">Tier priority</span> decides which radio a quota gets. T1 (PCI) clients are the more reliable ones, so by default quotas fill with T1 first and only reach for T2 dongles once the T1s run out — if the T1s cover every quota, no T2 is used for one. <span class="font-semibold">Every spare client still does background work</span>, T1 included; nothing sits idle. When a quota needs a T1 that is running background traffic, it is <span class="font-semibold">harvested into the quota</span> — displacing a T2 already in it if necessary. A quota that pins its own tier always wins over this setting. <code>T1/T2 only</code> makes unpinned quotas use that tier exclusively, underfilling rather than degrading.</p>
           ${simGrid}
           ${siteGrid}
         </div>`;
@@ -5199,7 +5199,7 @@ function csPoolConfigCardHtml() {
     }).join('');
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Pool &amp; SSID</h3>
+          <h3 class="text-sm font-bold text-slate-500">Pool &amp; SSID</h3>
           <div class="flex justify-end gap-2">
             <button onclick="csPoolCellAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add SSID</button>
             <button onclick="csSavePoolConfig()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Pool</button>
@@ -5208,20 +5208,20 @@ function csPoolConfigCardHtml() {
         <p class="text-xs text-slate-500 mb-2"><code>1X</code> auth uses <code>dot1x_eap</code> and <code>dot1x_password</code> from the Simulation config; PEAP falls back to the SSID Ssidpw when the Dot1x Password is empty. Set a 1X cell's <span class="font-semibold">Account location</span> to have the engine create each assigned client's account in Entra ID, the tenant LDAP OU or ClearPass with a random vaulted password (see NAC → My Users).</p>
         <p class="text-xs text-slate-500 mb-3">The SSID matrix just <span class="font-semibold">defines</span> your SSIDs (site, SSID, auth, password). <span class="font-semibold">Sim Quotas</span> attach an exact (accounted) count of clients to a cell for an alert. The <span class="font-semibold">weighted rules</span> below spread the rest of the pool (random, unaccounted) across a site's SSIDs by weight. Whether a PXMX server is site-bound (RF chamber) or assignable is set in <span class="font-semibold">Config → Sites</span>.</p>
         <div class="mb-3">
-          <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Randomizable (ambient) sims</div>
+          <div class="text-xs font-bold text-slate-500 mb-1">Randomizable (ambient) sims</div>
           <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-x-4 gap-y-1">${simChecks}</div>
         </div>
         ${csAmbientDistHtml()}
         <div class="mb-3">
-          <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">SSID matrix</div>
+          <div class="text-xs font-bold text-slate-500 mb-1">SSID matrix</div>
           <div class="space-y-2">${matrixRows || '<div class="text-xs text-slate-500 italic">No SSIDs. Click + Add SSID.</div>'}</div>
         </div>
         <div>
           <div class="flex items-center justify-between mb-1">
-            <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Weighted random distribution</div>
+            <div class="text-xs font-bold text-slate-500">Weighted random distribution</div>
             <button onclick="csPoolWeightAdd()" class="text-primary-text hover:underline text-xs font-bold">+ Add rule</button>
           </div>
-          <p class="text-[11px] text-slate-500 mb-1 leading-tight">Spreads the spare pool across a site's SSIDs. Weight 5 vs 1 = 5× the clients; weight 0 = none; <span class="font-semibold">All</span> = balance of the pool goes to that SSID.</p>
+          <p class="text-xs text-slate-500 mb-1 leading-tight">Spreads the spare pool across a site's SSIDs. Weight 5 vs 1 = 5× the clients; weight 0 = none; <span class="font-semibold">All</span> = balance of the pool goes to that SSID.</p>
           <div class="space-y-2">${weightRows || '<div class="text-xs text-slate-500 italic">No weighted rules. Click + Add rule.</div>'}</div>
         </div>
       </div>`;
@@ -5821,7 +5821,7 @@ async function csRenderSimQuotaState() {
             return s ? csAlertBadge(s) : '';
         };
         const chips = (hosts) => (hosts || []).map(h =>
-            `<span class="inline-block bg-slate-100 text-slate-700 rounded px-1.5 py-0.5 mr-1 mb-1 font-mono text-[11px]">${csEscape(h)}</span>`).join('');
+            `<span class="inline-block bg-slate-100 text-slate-700 rounded px-1.5 py-0.5 mr-1 mb-1 font-mono text-xs">${csEscape(h)}</span>`).join('');
         // Per-quota candidate diagnostics (engine _quota_diag, keyed by _quota_key)
         // so an underfilled row explains WHY: how many pool clients are free-and-
         // eligible vs blocked, and by what. Keyed the same as keyOf(q).
@@ -5849,7 +5849,7 @@ async function csRenderSimQuotaState() {
             const bits = [`<b>${d.eligible_free || 0}</b> free-eligible`];
             if (bparts.length) bits.push(`blocked: ${csEscape(bparts.join(', '))}`);
             if (d.not_harvestable) bits.push(`${d.not_harvestable} offline`);
-            return `<div class="mt-1 text-[11px] text-amber-700/90">🔎 why: ${bits.join(' · ')}</div>`;
+            return `<div class="mt-1 text-xs text-amber-700/90">🔎 why: ${bits.join(' · ')}</div>`;
         };
         // Compact "Known-good" line for a quota row that has a recorded stable
         // operating point (matched by alert_key = "{alert_type}:{alert_id}"), plus
@@ -5867,10 +5867,10 @@ async function csRenderSimQuotaState() {
             const n = (g.count != null) ? g.count : '—';
             const stable = csDurShort(g.time_to_stable_s);
             const at = g.achieved_at != null ? csLastSeen(g.achieved_at) : '';
-            return `<div class="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-emerald-700"${at ? ` title="Achieved ${csEscape(at)}"` : ''}>
+            return `<div class="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-emerald-700"${at ? ` title="Achieved ${csEscape(at)}"` : ''}>
                 <span class="font-semibold">✅ known-good:</span>
                 <span>${csEscape(String(n))} clients · stable in ${csEscape(stable)} · knobs: ${knobStr}</span>
-                <button onclick="csResetToKnownGood(${csEscape(JSON.stringify(ak))})" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2 py-0.5 rounded text-[10px] font-bold">Reset to known-good</button>
+                <button onclick="csResetToKnownGood(${csEscape(JSON.stringify(ak))})" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2 py-0.5 rounded text-xs font-bold">Reset to known-good</button>
             </div>`;
         };
         const rows = eff.map(q => {
@@ -5897,12 +5897,12 @@ async function csRenderSimQuotaState() {
                 const _op = _as.learned_op != null ? _as.learned_op : null;
                 const _atMaxCount = target > 0 && clients.length >= target;
                 fill += ' ' + (_belowFloor
-                    ? `<span class="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="Underfilled ${clients.length}/${target} — below the learned floor ${_fl}. The engine can't fill to the floor from the online pool, so the alert may not fire reliably.">⚠️ Underfilled</span>`
+                    ? `<span class="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="Underfilled ${clients.length}/${target} — below the learned floor ${_fl}. The engine can't fill to the floor from the online pool, so the alert may not fire reliably.">⚠️ Underfilled</span>`
                     : (_atMaxCount && _m === 'at_max')
-                    ? `<span class="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="At max, alert not firing">⚠️ At max</span>`
+                    ? `<span class="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="At max, alert not firing">⚠️ At max</span>`
                     : _m === 'stable'
-                    ? `<span class="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full" title="Learned the firing floor; holding at floor + 20% (the operating point the admin approves and production sites maintain).">✅ Learned ${_fl != null ? _fl : '—'}${_op != null ? ' · +20% → ' + _op + ' per design' : ''}</span>`
-                    : `<span class="text-[10px] font-semibold text-slate-600 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded-full" title="Probing down to find/confirm the minimum count that fires the alert.">🔄 Learning</span>`);
+                    ? `<span class="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full" title="Learned the firing floor; holding at floor + 20% (the operating point the admin approves and production sites maintain).">✅ Learned ${_fl != null ? _fl : '—'}${_op != null ? ' · +20% → ' + _op + ' per design' : ''}</span>`
+                    : `<span class="text-xs font-semibold text-slate-600 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded-full" title="Probing down to find/confirm the minimum count that fires the alert.">🔄 Learning</span>`);
             }
             const fname = nameOf(q.alert_type, q.alert_id);
             const isPresence = !q.sim_id;
@@ -5914,7 +5914,7 @@ async function csRenderSimQuotaState() {
                 : untethered
                     ? `<span class="italic text-slate-500">— none —</span>`
                     : (fname
-                        ? `<span class="text-slate-700">${csEscape(fname)}</span> <span class="font-mono text-slate-500 text-[11px]">${csEscape(q.alert_id || '')}</span>`
+                        ? `<span class="text-slate-700">${csEscape(fname)}</span> <span class="font-mono text-slate-500 text-xs">${csEscape(q.alert_id || '')}</span>`
                         : `<span class="font-mono">${csEscape(q.alert_id || '')}</span>`);
             const typeCell = (isPresence || untethered) ? 'presence' : (q.alert_type || 'alert');
             const simCell = isPresence
@@ -5934,7 +5934,7 @@ async function csRenderSimQuotaState() {
             </tr>
             <tr>
               <td class="px-2 pt-0 pb-2 text-xs align-top" colspan="8">
-                <span class="text-[10px] text-slate-500 uppercase tracking-wider mr-1.5">Clients</span>${chips(clients) || '<span class="text-slate-500 italic">none</span>'}
+                <span class="text-xs text-slate-500 mr-1.5">Clients</span>${chips(clients) || '<span class="text-slate-500 italic">none</span>'}
                 ${kgLine(q)}${diagLine(q, k)}
               </td>
             </tr>`;
@@ -5945,7 +5945,7 @@ async function csRenderSimQuotaState() {
         const orphans = Object.entries(ledger).filter(([k]) => !effKeys.has(k));
         const orphanHtml = orphans.length ? `
             <div class="mt-4">
-              <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Releasing (no longer effective)</p>
+              <p class="text-xs font-bold text-slate-500 mb-2">Releasing (no longer effective)</p>
               ${orphans.map(([k, e]) => {
                   const parts = k.split(':');
                   const on = nameOf(parts[0], parts[1]);
@@ -6032,7 +6032,7 @@ async function csRenderSimQuotaState() {
             </div>`;
         };
         const adaptivePanel = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Adaptive Controllers</h3>
+            <h3 class="text-sm font-bold text-slate-500 mb-2">Adaptive Controllers</h3>
             ${_adEntries.length
               ? `<p class="text-xs text-slate-500 mb-2">Each adaptive quota ramps its runner count to keep its alert firing, then settles at the learned floor + 20%. 🧪 Lab rows run the full thermostat and record a publishable learned value; 📥 Consumer rows seed/lift from it (up-only, never down-ratchet). 🔄 learning · ✅ stable · ⚠️ at max / underfilled.</p>
                  <div class="space-y-0.5">${_adEntries.map(_adRow).join('')}</div>`
@@ -6053,7 +6053,7 @@ async function csRenderSimQuotaState() {
           <div class="hpe-card rounded-lg p-5 shadow-sm">
             ${warnBanner}
             <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-              <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Engine State ${helpIcon('cs', null, 'Simulations help')}</h3>
+              <h3 class="text-sm font-bold text-slate-500">Engine State ${helpIcon('cs', null, 'Simulations help')}</h3>
               <div class="flex gap-2">
                 ${kgCount ? `<button onclick="csResetToKnownGood('')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-sm font-bold shadow-sm" title="Restore every alert with a recorded known-good operating point, then hold ~1h before resuming learning">✅ Reset ALL to known-good</button>` : ''}
                 <button onclick="csResetSimQuota()" class="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1.5 rounded-md text-sm font-bold shadow-sm" title="Clear ALL engine assignments and re-shuffle every client from scratch">↻ Reset &amp; Reshuffle</button>
@@ -6063,7 +6063,7 @@ async function csRenderSimQuotaState() {
             <p class="text-xs text-slate-500 mb-3">Live SimQuotaEngine ledger — which clients are currently assigned to each effective quota. The engine tops up to the target count from the online pool each 60s sweep; amber = under-filled.</p>
             ${poolLine}
             ${eff.length ? `<table class="w-full text-left">
-              <thead><tr class="text-[11px] text-slate-500 uppercase tracking-wider">
+              <thead><tr class="text-xs text-slate-500">
                 <th class="px-2 py-1">Type</th><th class="px-2 py-1">Alert / Insight ID</th>
                 <th class="px-2 py-1 text-center">Alert</th>
                 <th class="px-2 py-1">Sim</th><th class="px-2 py-1">SSID</th>
@@ -6109,14 +6109,14 @@ async function csRenderEngineDiag() {
         const LBL = window.CS_ENGINE_DIAG_REASONS;
         const bySite = (pool.by_site && typeof pool.by_site === 'object') ? pool.by_site : {};
         const siteChips = Object.keys(bySite).sort().map(s =>
-            `<span class="inline-block bg-slate-100 text-slate-700 rounded px-2 py-0.5 mr-1 text-[11px]">${csEscape(s)}: <b>${bySite[s]}</b></span>`).join('')
-            || '<span class="text-slate-500 text-[11px]">none site-pinned</span>';
+            `<span class="inline-block bg-slate-100 text-slate-700 rounded px-2 py-0.5 mr-1 text-xs">${csEscape(s)}: <b>${bySite[s]}</b></span>`).join('')
+            || '<span class="text-slate-500 text-xs">none site-pinned</span>';
         const rows = diag.slice()
             .sort((a, b) => ((a.assigned || 0) - (a.target || 0)) - ((b.assigned || 0) - (b.target || 0)))
             .map(d => {
                 const blocked = (d.blocked && typeof d.blocked === 'object') ? d.blocked : {};
                 const bparts = Object.keys(blocked).sort((a, b) => blocked[b] - blocked[a]).map(r =>
-                    `<span class="inline-block bg-amber-50 text-amber-700 border border-amber-200 rounded px-1.5 py-0.5 mr-1 mb-1 text-[11px]">${blocked[r]} × ${csEscape(LBL[r] || r)}</span>`).join('');
+                    `<span class="inline-block bg-amber-50 text-amber-700 border border-amber-200 rounded px-1.5 py-0.5 mr-1 mb-1 text-xs">${blocked[r]} × ${csEscape(LBL[r] || r)}</span>`).join('');
                 const label = !d.sim_id
                     ? '<span class="italic text-slate-500">Clients Associated (presence)</span>'
                     : `<span class="font-mono text-slate-700">${csEscape(d.sim_id)}</span>`;
@@ -6140,7 +6140,7 @@ async function csRenderEngineDiag() {
         csSet(`<div class="space-y-4">
           <div class="hpe-card rounded-lg p-5 shadow-sm">
             <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-              <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Engine Diagnostic ${helpIcon('cs', null, 'Simulations help')}</h3>
+              <h3 class="text-sm font-bold text-slate-500">Engine Diagnostic ${helpIcon('cs', null, 'Simulations help')}</h3>
               <button onclick="csRenderEngineDiag()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
             </div>
             <p class="text-xs text-slate-500 mb-3">Why each quota fills or under-fills, from the engine's LAST 60s sweep. <b>Free-eligible</b> = pool clients this quota could still take (non-zero on an underfilled quota = a real placement bug, flagged red); <b>Blocked</b> = clients excluded this quota, by reason. Refresh after a sweep.</p>
@@ -6150,7 +6150,7 @@ async function csRenderEngineDiag() {
               <span class="text-slate-500">site-pinned:</span> ${siteChips}
             </div>
             ${diag.length ? `<div class="overflow-x-auto"><table class="w-full text-left">
-              <thead><tr class="text-[11px] text-slate-500 uppercase tracking-wider">
+              <thead><tr class="text-xs text-slate-500">
                 <th class="px-2 py-1">Sim / Quota</th><th class="px-2 py-1">Site</th><th class="px-2 py-1">Kind</th>
                 <th class="px-2 py-1 text-center">Assigned</th><th class="px-2 py-1 text-center">Free-eligible</th>
                 <th class="px-2 py-1 text-center">Offline</th><th class="px-2 py-1">Blocked (why)</th>
@@ -6232,8 +6232,8 @@ window.csRenderSimTagHealth = async function () {
         const rows = hosts.map(h => {
             const bad = (h.vms || []).filter(v => !v.in_sync);
             const agentBadge = h.agent_connected
-                ? '<span class="text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full text-[10px] font-bold">agent connected</span>'
-                : `<span class="text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full text-[10px] font-bold">NOT TAGGED — ${esc(h.skip_reason || 'agent not connected')}</span>`;
+                ? '<span class="text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full text-xs font-bold">agent connected</span>'
+                : `<span class="text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full text-xs font-bold">NOT TAGGED — ${esc(h.skip_reason || 'agent not connected')}</span>`;
             // A GHOST host: retained in proxmox_states from an old registration
             // (rebuild / rename / clone) and never aged out, so its stale VM list
             // still enters the tag map. Called out explicitly because a ghost is
@@ -6244,12 +6244,12 @@ window.csRenderSimTagHealth = async function () {
                 : h.telemetry_age_s < 5400 ? `${Math.round(h.telemetry_age_s / 60)}m ago`
                 : `${(h.telemetry_age_s / 3600).toFixed(1)}h ago`;
             const staleBadge = (h.stale || h.telemetry_age_s == null)
-                ? `<span class="text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full text-[10px] font-bold" title="No telemetry for a long time — likely a ghost entry left by a rebuild/rename. Its VM list is stale and should not be trusted.">STALE — last telemetry ${esc(ageTxt)}</span>`
-                : `<span class="text-[10px] text-slate-500">telemetry ${esc(ageTxt)}</span>`;
+                ? `<span class="text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full text-xs font-bold" title="No telemetry for a long time — likely a ghost entry left by a rebuild/rename. Its VM list is stale and should not be trusted.">STALE — last telemetry ${esc(ageTxt)}</span>`
+                : `<span class="text-xs text-slate-500">telemetry ${esc(ageTxt)}</span>`;
             const detail = !bad.length
-                ? '<div class="text-[11px] text-emerald-700 mt-1">all VMs in sync</div>'
-                : `<div class="overflow-x-auto mt-2"><table class="w-full text-[11px]">
-                     <thead class="text-slate-500 uppercase tracking-wider"><tr>
+                ? '<div class="text-xs text-emerald-700 mt-1">all VMs in sync</div>'
+                : `<div class="overflow-x-auto mt-2"><table class="w-full text-xs">
+                     <thead class="text-slate-500"><tr>
                        <th class="text-left py-1">VM</th><th class="text-left">Desired</th>
                        <th class="text-left">Actual</th><th class="text-left">Why</th></tr></thead>
                      <tbody class="divide-y divide-slate-100">${bad.map(v => `<tr>
@@ -6263,14 +6263,14 @@ window.csRenderSimTagHealth = async function () {
                 <div class="flex items-center justify-between gap-2">
                   <span class="text-xs font-bold text-slate-600">${esc(h.hostname)}</span>
                   <span class="flex flex-wrap items-center gap-2 justify-end">${agentBadge}${staleBadge}
-                    ${h.agent_points_at ? `<span class="text-[10px] text-slate-500" title="Where this host's agent is configured to dial. It should be THIS spoke — telemetry landing on another spoke is what makes a host look untagged.">points at ${esc(h.agent_points_at)}</span>` : ''}
-                    <span class="text-[10px] text-slate-500">${esc(String(h.drift_count))}/${esc(String(h.vm_count))} out of sync</span></span>
+                    ${h.agent_points_at ? `<span class="text-xs text-slate-500" title="Where this host's agent is configured to dial. It should be THIS spoke — telemetry landing on another spoke is what makes a host look untagged.">points at ${esc(h.agent_points_at)}</span>` : ''}
+                    <span class="text-xs text-slate-500">${esc(String(h.drift_count))}/${esc(String(h.vm_count))} out of sync</span></span>
                 </div>${detail}</div>`;
         }).join('');
         const self_ = sp.spoke_self || {};
         const selfTxt = self_.hostname
             ? `<span class="font-normal normal-case text-slate-500">· ${esc(self_.hostname)}${self_.hub_url ? ' → hub ' + esc(self_.hub_url) : ''}</span>` : '';
-        return `<div class="mb-3"><div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">${title} ${selfTxt}</div>${rows}</div>`;
+        return `<div class="mb-3"><div class="text-xs font-bold text-slate-500 mb-1">${title} ${selfTxt}</div>${rows}</div>`;
     }).join('');
 };
 
@@ -6399,19 +6399,19 @@ function _csDhcpWho(s) {
     const nm = String(s.spoke_name || '').trim();
     return nm
         ? `<span class="text-xs font-bold text-slate-700">${escapeHtml(nm)}</span>`
-          + `<span class="text-[10px] font-mono text-slate-500 ml-1.5">${escapeHtml(id.slice(0, 8))}</span>`
+          + `<span class="text-xs font-mono text-slate-500 ml-1.5">${escapeHtml(id.slice(0, 8))}</span>`
         : `<span class="font-mono text-xs text-slate-700">${escapeHtml(id)}</span>`;
 }
 
 function _csDhcpPill(txt, tone) {
     const map = { ok: 'bg-green-100 text-green-700', bad: 'bg-red-100 text-red-700',
                   warn: 'bg-amber-100 text-amber-700', dim: 'bg-slate-200 text-slate-600' };
-    return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${map[tone] || map.dim}">${escapeHtml(txt)}</span>`;
+    return `<span class="px-1.5 py-0.5 rounded text-xs font-bold ${map[tone] || map.dim}">${escapeHtml(txt)}</span>`;
 }
 
 function _csDhcpHealthHtml(d) {
     const stamp = (d && d._fetched_at)
-        ? `<p class="text-[10px] text-slate-500 mb-2">Data as of <b>${escapeHtml(d._fetched_at)}</b></p>` : '';
+        ? `<p class="text-xs text-slate-500 mb-2">Data as of <b>${escapeHtml(d._fetched_at)}</b></p>` : '';
     // Sort by NAME so the fleet reads in a stable, predictable order
     // (cs-svr-01..04) instead of whatever order the fan-out happened to
     // complete in — which changes every refresh and makes it hard to see that
@@ -6474,7 +6474,7 @@ function _csDhcpHealthHtml(d) {
         rows.push(['Lease DB', leaseTxt]);
         rows.push(['Config test', (s.config_test || {}).ok
             ? _csDhcpPill('valid', 'ok')
-            : `${_csDhcpPill('INVALID', 'bad')} <span class="text-[10px]">${escapeHtml(((s.config_test || {}).detail || '').slice(-300))}</span>`]);
+            : `${_csDhcpPill('INVALID', 'bad')} <span class="text-xs">${escapeHtml(((s.config_test || {}).detail || '').slice(-300))}</span>`]);
 
         // dmesg is a ring buffer, so old denials persist and read as current.
         // Show the age, and only colour the block red when something denied in
@@ -6483,14 +6483,14 @@ function _csDhcpHealthHtml(d) {
             || (s.apparmor_denials || []).map(l => ({ line: l, age_s: null }));
         const _age = a => a == null ? '' : (a < 90 ? `${a}s ago` : a < 5400 ? `${Math.round(a / 60)}m ago` : `${Math.round(a / 3600)}h ago`);
         const denials = _drows.length
-            ? `<div class="mt-2"><p class="text-[10px] uppercase ${s.apparmor_recent ? 'text-red-500' : 'text-slate-500'} font-bold tracking-widest mb-1">AppArmor denials ${s.apparmor_recent ? '' : '<span class="normal-case font-normal">(historical — none in the last 15 min)</span>'}</p>
-                 <pre class="text-[10px] ${s.apparmor_recent ? 'bg-red-50 border-red-200' : 'bg-slate-50 border-slate-200'} border rounded p-2 overflow-x-auto whitespace-pre-wrap">${_drows.map(r => escapeHtml((_age(r.age_s) ? `(${_age(r.age_s)}) ` : '') + r.line)).join('\n')}</pre>
-                 <p class="text-[10px] text-slate-500 mt-1">Kea names its runtime files after the config file, so the <span class="font-mono">-sim</span> instance falls outside Debian's stock profiles. Re-running the installer grants them${s.apparmor_recent ? '' : ' — these are from before that was applied'}.</p></div>` : '';
+            ? `<div class="mt-2"><p class="text-xs ${s.apparmor_recent ? 'text-red-500' : 'text-slate-500'} font-bold mb-1">AppArmor denials ${s.apparmor_recent ? '' : '<span class="normal-case font-normal">(historical — none in the last 15 min)</span>'}</p>
+                 <pre class="text-xs ${s.apparmor_recent ? 'bg-red-50 border-red-200' : 'bg-slate-50 border-slate-200'} border rounded p-2 overflow-x-auto whitespace-pre-wrap">${_drows.map(r => escapeHtml((_age(r.age_s) ? `(${_age(r.age_s)}) ` : '') + r.line)).join('\n')}</pre>
+                 <p class="text-xs text-slate-500 mt-1">Kea names its runtime files after the config file, so the <span class="font-mono">-sim</span> instance falls outside Debian's stock profiles. Re-running the installer grants them${s.apparmor_recent ? '' : ' — these are from before that was applied'}.</p></div>` : '';
         const errs = (s.last_errors || []).length
-            ? `<div class="mt-2"><p class="text-[10px] uppercase text-slate-500 font-bold tracking-widest mb-1">${s.last_errors_are_fatal ? 'Last errors' : 'Recent log'} <span class="normal-case font-normal text-slate-500">(may predate the current start — check the timestamps)</span></p>
-                 <pre class="text-[10px] bg-slate-50 border border-slate-200 rounded p-2 overflow-x-auto whitespace-pre-wrap">${escapeHtml((s.last_errors || []).join('\n'))}</pre></div>` : '';
+            ? `<div class="mt-2"><p class="text-xs text-slate-500 font-bold mb-1">${s.last_errors_are_fatal ? 'Last errors' : 'Recent log'} <span class="normal-case font-normal text-slate-500">(may predate the current start — check the timestamps)</span></p>
+                 <pre class="text-xs bg-slate-50 border border-slate-200 rounded p-2 overflow-x-auto whitespace-pre-wrap">${escapeHtml((s.last_errors || []).join('\n'))}</pre></div>` : '';
         const notes = (s.notes || []).length
-            ? `<p class="text-[10px] text-slate-500 mt-2">${(s.notes || []).map(escapeHtml).join(' · ')}</p>` : '';
+            ? `<p class="text-xs text-slate-500 mt-2">${(s.notes || []).map(escapeHtml).join(' · ')}</p>` : '';
 
         return `<div class="p-3 rounded border ${tone === 'ok' ? 'border-slate-200' : 'border-red-200 bg-red-50/30'} mb-3">
             <div class="flex items-center justify-between mb-2">
@@ -6576,8 +6576,8 @@ function csRenderPxmxSiteMapEditor() {
     const rowHtml = rows.map((r, i) => {
         const sel = csPxmxSiteMap[r.host] || '';
         const badge = r.connected
-            ? '<span class="text-emerald-600 text-[10px] font-bold uppercase">connected</span>'
-            : '<span class="text-amber-600 text-[10px] font-bold uppercase">offline</span>';
+            ? '<span class="text-emerald-600 text-xs font-bold">connected</span>'
+            : '<span class="text-amber-600 text-xs font-bold">offline</span>';
         return `<div class="grid grid-cols-1 md:grid-cols-3 gap-2 items-center bg-white border border-slate-200 rounded-md p-2" data-cs-pxrow="${i}">
           <label class="text-xs text-slate-600 font-mono">${csEscape(r.host)} ${badge}</label>
           <select data-cs-px="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">${siteOpts(sel)}</select>
@@ -6591,7 +6591,7 @@ function csRenderPxmxSiteMapEditor() {
       ${csSiteLinksCardHtml()}
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Server to Site Assignments ${helpIcon('cs', null, 'Simulations help')}</h3>
+          <h3 class="text-sm font-bold text-slate-500">Server to Site Assignments ${helpIcon('cs', null, 'Simulations help')}</h3>
           <button onclick="csPxmxSiteSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Assignments</button>
         </div>
         <p class="text-xs text-slate-500 mb-2">Assign <span class="font-semibold">every</span> pxmx server to a pool: a <span class="font-semibold">Site Pool</span> (RF chamber — its clients are physically at that site and only run that site's SSID) or the <span class="font-semibold">Tenant-Wide Pool</span> (site-based SSID — its clients are assignable to any site/SSID by the Pool &amp; SSID placement). A deployment can mix both. Pools are always per-tenant. A client's own wsite override still wins; the bucket-default wsite is the fallback.</p>
@@ -6626,7 +6626,7 @@ function csSiteLinksCardHtml() {
         </div>`).join('');
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Site Links (wsite ↔ Central)</h3>
+          <h3 class="text-sm font-bold text-slate-500">Site Links (wsite ↔ Central)</h3>
           <div class="flex justify-end gap-2">
             <button onclick="csSiteLinkAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add Link</button>
             <button onclick="csSiteLinkSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Links</button>
@@ -6743,7 +6743,7 @@ function csConfigSourceCard(source, cfg) {
     }
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex flex-wrap items-center gap-3">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Source of Truth</h3>
+        <h3 class="text-sm font-bold text-slate-500">Source of Truth</h3>
         <div class="flex gap-2">${btn('hub', 'Hub', isHub)}${btn('github', 'GitHub', !isHub)}</div>
       </div>
       <p class="text-xs mt-2">${status}</p>
@@ -6845,7 +6845,7 @@ function csUOField(user, key, value) {
         const lc = v.toLowerCase();
         const on = lc === 'on', off = lc === 'off';
         return `<div class="flex flex-col gap-1">
-          <label class="text-[10px] text-slate-500 uppercase font-bold tracking-wider">${csEscape(label)}</label>
+          <label class="text-xs text-slate-500 font-bold">${csEscape(label)}</label>
           <select ${attrs} onchange="csUOSet(this)"
                   class="border border-slate-200 rounded-md px-2 py-1.5 text-sm ${on ? 'text-emerald-700 font-semibold' : 'text-slate-600'}">
             <option value="" ${(!on && !off) ? 'selected' : ''}>— default —</option>
@@ -6854,7 +6854,7 @@ function csUOField(user, key, value) {
           </select></div>`;
     }
     return `<div class="flex flex-col gap-1">
-      <label class="text-[10px] text-slate-500 uppercase font-bold tracking-wider">${csEscape(label)}</label>
+      <label class="text-xs text-slate-500 font-bold">${csEscape(label)}</label>
       <input ${attrs} value="${csEscape(v)}" oninput="csUOSet(this)"
              class="border border-slate-200 rounded-md px-2 py-1.5 text-sm font-mono">
     </div>`;
@@ -6877,13 +6877,13 @@ function csUORenderCards() {
           <div class="flex items-center justify-between p-3 cursor-pointer select-none" onclick="csUOToggle(this)">
             <span class="text-sm font-bold text-slate-700 flex items-center gap-1.5">
               <span class="cs-uo-chev text-slate-500 inline-block w-3">▸</span>👤 ${csEscape(u)}
-              <span class="text-[10px] font-normal text-slate-500">(${cnt} override${cnt === 1 ? '' : 's'})</span>
+              <span class="text-xs font-normal text-slate-500">(${cnt} override${cnt === 1 ? '' : 's'})</span>
             </span>
             <div class="flex gap-2" onclick="event.stopPropagation()">
               <button data-uo-user="${csEscape(u)}" onclick="csUODownload(this)"
-                      class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-1 rounded-md text-[11px] font-bold">Download</button>
+                      class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-1 rounded-md text-xs font-bold">Download</button>
               <button data-uo-user="${csEscape(u)}" onclick="csUORemove(this)"
-                      class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-[11px] font-bold">✕ Remove</button>
+                      class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-xs font-bold">✕ Remove</button>
             </div>
           </div>
           <div class="cs-uo-body hidden px-3 pb-3">
@@ -6911,8 +6911,8 @@ function csRenderUserOverridesCard(uo, uoErr) {
     csUserOverridesFetched = (uo && uo.fetched_at) ? csFmtFetched(uo.fetched_at) : '—';
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex flex-wrap justify-between items-center mb-2 gap-2">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">User Overrides ${helpIcon('cs', null, 'Simulations help')}</h3>
-        <span class="text-[10px] text-slate-500">Last fetched: ${csEscape(csUserOverridesFetched)}</span>
+        <h3 class="text-sm font-bold text-slate-500">User Overrides ${helpIcon('cs', null, 'Simulations help')}</h3>
+        <span class="text-xs text-slate-500">Last fetched: ${csEscape(csUserOverridesFetched)}</span>
       </div>
       <p class="text-xs text-slate-500 mb-3">Per-user simulation overrides — pin a hostname to specific sim settings (a <code>[username]</code> section overrides the simulation profile for that user).</p>
       <div class="flex justify-end items-center gap-3 mb-3">
@@ -7204,7 +7204,7 @@ async function csHubConfigCard(path) {
         return `${label}${input}</label>`;
     }).join('');
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Hub Config ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 mb-2">Hub Config ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-500 mb-3">Changes save automatically — a select/checkbox saves on change, a text/number field saves when you click or tab away from it.</p>
       <label class="flex items-center gap-2 text-xs text-slate-600 mb-3"><input id="cs-hc-enabled" type="checkbox" ${enabled ? 'checked' : ''} onchange="csHcToggleEnabled(this.checked)"> Enable hub as source of truth</label>
       <div id="cs-hc-fields" class="${enabled ? '' : 'hidden'} grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -7346,7 +7346,7 @@ function csApVmImagesHtml(hc) {
       <label class="text-xs text-slate-500">VM Images (number of clone-source images)
         <input id="cs-ap-vm_image_count" type="number" min="1" max="20" value="${count}" onchange="csApVmImagesRebuild()" onblur="csSaveAutoProvConfig()" class="w-32 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1 block">
       </label>
-      <p class="text-[11px] text-slate-500 mt-1 mb-1 leading-snug">Set how many images, then a VMID or template name and a % for each. The %s should total 100.</p>
+      <p class="text-xs text-slate-500 mt-1 mb-1 leading-snug">Set how many images, then a VMID or template name and a % for each. The %s should total 100.</p>
       <div id="cs-ap-vm-images-rows" class="space-y-2 mt-1">${csApVmImageRowsHtml(hc, count)}</div>
     </div>`;
 }
@@ -7377,8 +7377,8 @@ async function csSetupAutoProvConfigCard() {
     } catch (e) { console.error('csSetupAutoProvConfigCard: hub-config fetch failed', e); }
     const rows = CS_AUTOPROV_FIELDS.map(col => {
         if (col.section) {
-            const help = col.help ? `<p class="text-[11px] text-slate-500 mt-1 mb-1 leading-snug">${csEscape(col.help)}</p>` : '';
-            return `<div class="md:col-span-3 mt-2"><p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">${csEscape(col.section)}</p>${help}</div>`;
+            const help = col.help ? `<p class="text-xs text-slate-500 mt-1 mb-1 leading-snug">${csEscape(col.help)}</p>` : '';
+            return `<div class="md:col-span-3 mt-2"><p class="text-xs font-bold text-slate-500 mb-1">${csEscape(col.section)}</p>${help}</div>`;
         }
         if (col.type === 'vm_images') return csApVmImagesHtml(hc);
         const valRaw = hc[col.key];
@@ -7395,7 +7395,7 @@ async function csSetupAutoProvConfigCard() {
     const note = enabled ? '<span class="text-slate-500">Hub-owned knobs; saved automatically as you edit (a select/checkbox on change, a text/number field when you click or tab away). Turning Auto-Provision VMs On also enables hub config (mirrors the Overview/USB toggle).</span>'
         : '<span class="text-amber-600">Hub config is not enabled — auto-save pushes to spokes only when Auto-Provision VMs is On (which enables hub config) or after you enable it in the Hub Config card below.</span>';
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">VM Auto-Provisioning ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 mb-2">VM Auto-Provisioning ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-500 mb-3">${note}</p>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${rows}</div>
     </div>`;
@@ -7548,7 +7548,7 @@ async function csProcessingModesCard() {
       <select id="cs-pm-${k}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">${opts(modes[k])}</select>
     </label>`).join('');
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Processing Modes ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 mb-2">Processing Modes ${helpIcon('cs', null, 'Simulations help')}</h3>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${fields}</div>
       <div class="flex justify-end mt-4"><button onclick="csSaveProcessingModes()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Modes</button></div>
     </div>`;
@@ -7572,8 +7572,8 @@ async function csNotificationsCard() {
       <input id="${id}" value="${csEscape(val != null ? val : '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
     </label>`;
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Notifications ${helpIcon('cs', null, 'Simulations help')}</h3>
-      <p class="text-[11px] text-slate-500 mb-3">The hub sends this tenant's spoke out-of-contact alerts using the hub's configured email provider (Hub → Setup → Notifications). Just enter where this tenant's alerts should go.</p>
+      <h3 class="text-sm font-bold text-slate-500 mb-2">Notifications ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <p class="text-xs text-slate-500 mb-3">The hub sends this tenant's spoke out-of-contact alerts using the hub's configured email provider (Hub → Setup → Notifications). Just enter where this tenant's alerts should go.</p>
       <div class="grid grid-cols-1 gap-3">
         ${f('cs-notif-emails', 'To Emails (comma-separated)', Array.isArray(n.to_emails) ? n.to_emails.join(', ') : (n.to_emails || ''))}
       </div>
@@ -7614,7 +7614,7 @@ async function csSetupAutoProvCard() {
         unknown = (hosts || []).reduce((n, h) => n + csUnknownUsbCount(h), 0);
     } catch (e) { console.error('csSetupAutoProvCard: vm load for USB counts failed, defaulting to 0', e); }
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Dongle / Auto-Provisioning ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 mb-2">Dongle / Auto-Provisioning ${helpIcon('cs', null, 'Simulations help')}</h3>
       <div class="grid grid-cols-3 gap-3 mb-3">${csStat('Auto-Provision', on ? 'On' : 'Off')}${csStat('Present USB', present)}${csStat('Unknown USB', unknown)}</div>
       <label class="flex items-center gap-2 text-sm text-slate-600">
         <input id="cs-setup-autoprov" type="checkbox" ${on ? 'checked' : ''} onchange="csToggleAutoProvision(this.checked)"/>
@@ -7685,7 +7685,7 @@ async function csRenderSetupCentralApi() {
     </label>`;
 
     const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Central API Connection ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 mb-2">Central API Connection ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-500 mb-3">Aruba Central cluster credentials. Pushed to the spoke as <code>central_config</code>; the spoke sentinel-merges them — secrets only overwrite when non-empty.</p>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label class="text-xs text-slate-500">Mode${modeSel}</label>
@@ -7697,27 +7697,27 @@ async function csRenderSetupCentralApi() {
         ${f('cs-csc-refreshtoken', 'Refresh Token (classic)', hc.refresh_token, 'password')}
         <label class="text-xs text-slate-500">Poll interval (minutes)
           <input id="cs-csc-pollmin" type="number" min="1" step="1" value="${Math.max(1, Math.round((Number(hc.poll_interval_s) || 300) / 60))}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">How often the hub polls Aruba Central for this tenant (default 5, minimum 1).</span>
+          <span class="block text-xs text-slate-500 mt-1">How often the hub polls Aruba Central for this tenant (default 5, minimum 1).</span>
         </label>
         <div class="md:col-span-2 mt-1 pt-3 border-t border-slate-200">
-          <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Client-count check thresholds</p>
-          <p class="text-[11px] text-slate-500 mb-2">Controls how the <b>Steady Client Count</b> dashboard check colours a site. Two independent rules: a drop vs the recent hourly average, and a sustained fall below the site's historical peak.</p>
+          <p class="text-xs font-bold text-slate-500 mb-1">Client-count check thresholds</p>
+          <p class="text-xs text-slate-500 mb-2">Controls how the <b>Steady Client Count</b> dashboard check colours a site. Two independent rules: a drop vs the recent hourly average, and a sustained fall below the site's historical peak.</p>
         </div>
         <label class="text-xs text-slate-500">Warning — drop vs recent average (%)
           <input id="cs-csc-cc-warn" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.warn_pct != null) ? hc.cc_thresholds.warn_pct : 20}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">Amber when a site's count is this % below its last-hour average (default 20).</span>
+          <span class="block text-xs text-slate-500 mt-1">Amber when a site's count is this % below its last-hour average (default 20).</span>
         </label>
         <label class="text-xs text-slate-500">Error — drop vs recent average (%)
           <input id="cs-csc-cc-error" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.error_pct != null) ? hc.cc_thresholds.error_pct : 50}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">Red when the drop reaches this % (default 50; kept ≥ warning).</span>
+          <span class="block text-xs text-slate-500 mt-1">Red when the drop reaches this % (default 50; kept ≥ warning).</span>
         </label>
         <label class="text-xs text-slate-500">Sustained die-off — % of peak
           <input id="cs-csc-cc-dieoff" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.die_off_pct != null) ? hc.cc_thresholds.die_off_pct : 20}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">Red when the hourly average falls below this % of the 7/30-day peak, even without a fresh drop (default 20). <b>Set 0 to disable</b> — this is the rule that reddens sites sitting well below their peak.</span>
+          <span class="block text-xs text-slate-500 mt-1">Red when the hourly average falls below this % of the 7/30-day peak, even without a fresh drop (default 20). <b>Set 0 to disable</b> — this is the rule that reddens sites sitting well below their peak.</span>
         </label>
         <label class="text-xs text-slate-500">Die-off — minimum peak (clients)
           <input id="cs-csc-cc-minpeak" type="number" min="1" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.min_peak != null) ? hc.cc_thresholds.min_peak : 5}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">Only arm die-off when the peak is at least this many clients, so a quiet site can't false-trigger (default 5).</span>
+          <span class="block text-xs text-slate-500 mt-1">Only arm die-off when the peak is at least this many clients, so a quiet site can't false-trigger (default 5).</span>
         </label>
       </div>
       <div class="flex justify-end gap-2 mt-4">
@@ -7733,7 +7733,7 @@ async function csRenderSetupCentralApi() {
         : '<p class="text-xs text-slate-500 italic">None configured. Load the available-checks catalog to pick Aruba Central alerts/insights.</p>';
 
     const sitesCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sites &amp; Checks ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 mb-2">Sites &amp; Checks ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-500 mb-3">Hub-owned site mappings + Aruba Central sim/hardware monitors. Pushed to the spoke as <code>central_sites_config</code> and applied to the spoke's runtime monitoring when hub-managed.</p>
 
       <div class="flex items-center gap-2 mb-2">
@@ -7741,15 +7741,15 @@ async function csRenderSetupCentralApi() {
         <span id="cs-csc-catalog-msg" class="text-xs text-slate-500"></span>
       </div>
 
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-4 mb-1">Site Mappings (wireless site → Central site)</p>
-      ${_discoveredSites.length ? `<p class="text-[10px] text-slate-500 mb-1">${_discoveredSites.length} Central site(s) discovered — pick from the dropdown (refreshes as more are found).</p>` : '<p class="text-[10px] text-slate-500 mb-1">No Central sites discovered yet (check the connection); the dropdown lists discovered sites once loaded.</p>'}
+      <p class="text-xs font-bold text-slate-500 mt-4 mb-1">Site Mappings (wireless site → Central site)</p>
+      ${_discoveredSites.length ? `<p class="text-xs text-slate-500 mb-1">${_discoveredSites.length} Central site(s) discovered — pick from the dropdown (refreshes as more are found).</p>` : '<p class="text-xs text-slate-500 mb-1">No Central sites discovered yet (check the connection); the dropdown lists discovered sites once loaded.</p>'}
       <div id="cs-csc-sm-rows" class="space-y-2">${smRows || '<p class="text-xs text-slate-500 italic">No site mappings.</p>'}</div>
       <button onclick="csCscAddSm()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add mapping</button>
 
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-4 mb-1">Monitored Checks</p>
+      <p class="text-xs font-bold text-slate-500 mt-4 mb-1">Monitored Checks</p>
       <div id="cs-csc-monitored">${mcList}</div>
 
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-4 mb-1">Hardware Checks</p>
+      <p class="text-xs font-bold text-slate-500 mt-4 mb-1">Hardware Checks</p>
       <div id="cs-csc-hw-rows" class="space-y-2">${hwRows || '<p class="text-xs text-slate-500 italic">No hardware checks.</p>'}</div>
       <button onclick="csCscAddHw()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add hardware check</button>
 
@@ -7857,8 +7857,8 @@ window.csLoadCentralAvailable = async function () {
           <span>${csEscape(c.name || c.id)}</span><span class="text-slate-500 font-mono">(${csEscape(c.id)})</span>
         </label>`;
         csEl('cs-csc-monitored').innerHTML = `<div class="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1">
-          <div><p class="text-[10px] font-bold text-slate-500 uppercase mb-1">Alerts</p>${alerts.map(a => toggle(a, 'alert')).join('') || '<p class="text-xs text-slate-500 italic">None.</p>'}</div>
-          <div><p class="text-[10px] font-bold text-slate-500 uppercase mb-1">Insights</p>${insights.map(a => toggle(a, 'insight')).join('') || '<p class="text-xs text-slate-500 italic">None.</p>'}</div>
+          <div><p class="text-xs font-bold text-slate-500 mb-1">Alerts</p>${alerts.map(a => toggle(a, 'alert')).join('') || '<p class="text-xs text-slate-500 italic">None.</p>'}</div>
+          <div><p class="text-xs font-bold text-slate-500 mb-1">Insights</p>${insights.map(a => toggle(a, 'insight')).join('') || '<p class="text-xs text-slate-500 italic">None.</p>'}</div>
         </div>`;
         csCscMonSync();
         if (msg) { msg.textContent = (alerts.length + insights.length) + ' checks loaded' + (cat.warning ? ' — ' + cat.warning : ''); }
@@ -8000,7 +8000,7 @@ async function csRenderSetupCentralOnPremApi() {
     </label>`;
 
     const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Central On-Prem API Connection ${helpIcon('central-on-prem', null, 'Central On-Prem help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 mb-2">Central On-Prem API Connection ${helpIcon('central-on-prem', null, 'Central On-Prem help')}</h3>
       <p class="text-xs text-slate-500 mb-3">Aruba Central cluster credentials. Pushed to the spoke as <code>central_config</code>; the spoke sentinel-merges them — secrets only overwrite when non-empty.</p>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label class="text-xs text-slate-500">Mode${modeSel}</label>
@@ -8012,27 +8012,27 @@ async function csRenderSetupCentralOnPremApi() {
         ${f('cs-cop-csc-refreshtoken', 'Refresh Token (classic)', hc.refresh_token, 'password')}
         <label class="text-xs text-slate-500">Poll interval (minutes)
           <input id="cs-cop-csc-pollmin" type="number" min="1" step="1" value="${Math.max(1, Math.round((Number(hc.poll_interval_s) || 300) / 60))}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">How often the hub polls Aruba Central for this tenant (default 5, minimum 1).</span>
+          <span class="block text-xs text-slate-500 mt-1">How often the hub polls Aruba Central for this tenant (default 5, minimum 1).</span>
         </label>
         <div class="md:col-span-2 mt-1 pt-3 border-t border-slate-200">
-          <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Client-count check thresholds</p>
-          <p class="text-[11px] text-slate-500 mb-2">Controls how the <b>Steady Client Count</b> dashboard check colours a site. Two independent rules: a drop vs the recent hourly average, and a sustained fall below the site's historical peak.</p>
+          <p class="text-xs font-bold text-slate-500 mb-1">Client-count check thresholds</p>
+          <p class="text-xs text-slate-500 mb-2">Controls how the <b>Steady Client Count</b> dashboard check colours a site. Two independent rules: a drop vs the recent hourly average, and a sustained fall below the site's historical peak.</p>
         </div>
         <label class="text-xs text-slate-500">Warning — drop vs recent average (%)
           <input id="cs-cop-csc-cc-warn" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.warn_pct != null) ? hc.cc_thresholds.warn_pct : 20}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">Amber when a site's count is this % below its last-hour average (default 20).</span>
+          <span class="block text-xs text-slate-500 mt-1">Amber when a site's count is this % below its last-hour average (default 20).</span>
         </label>
         <label class="text-xs text-slate-500">Error — drop vs recent average (%)
           <input id="cs-cop-csc-cc-error" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.error_pct != null) ? hc.cc_thresholds.error_pct : 50}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">Red when the drop reaches this % (default 50; kept ≥ warning).</span>
+          <span class="block text-xs text-slate-500 mt-1">Red when the drop reaches this % (default 50; kept ≥ warning).</span>
         </label>
         <label class="text-xs text-slate-500">Sustained die-off — % of peak
           <input id="cs-cop-csc-cc-dieoff" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.die_off_pct != null) ? hc.cc_thresholds.die_off_pct : 20}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">Red when the hourly average falls below this % of the 7/30-day peak, even without a fresh drop (default 20). <b>Set 0 to disable</b> — this is the rule that reddens sites sitting well below their peak.</span>
+          <span class="block text-xs text-slate-500 mt-1">Red when the hourly average falls below this % of the 7/30-day peak, even without a fresh drop (default 20). <b>Set 0 to disable</b> — this is the rule that reddens sites sitting well below their peak.</span>
         </label>
         <label class="text-xs text-slate-500">Die-off — minimum peak (clients)
           <input id="cs-cop-csc-cc-minpeak" type="number" min="1" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.min_peak != null) ? hc.cc_thresholds.min_peak : 5}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">Only arm die-off when the peak is at least this many clients, so a quiet site can't false-trigger (default 5).</span>
+          <span class="block text-xs text-slate-500 mt-1">Only arm die-off when the peak is at least this many clients, so a quiet site can't false-trigger (default 5).</span>
         </label>
       </div>
       <div class="flex justify-end gap-2 mt-4">
@@ -8048,7 +8048,7 @@ async function csRenderSetupCentralOnPremApi() {
         : '<p class="text-xs text-slate-500 italic">None configured. Load the available-checks catalog to pick Aruba Central alerts/insights.</p>';
 
     const sitesCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sites &amp; Checks ${helpIcon('central-on-prem', null, 'Central On-Prem help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 mb-2">Sites &amp; Checks ${helpIcon('central-on-prem', null, 'Central On-Prem help')}</h3>
       <p class="text-xs text-slate-500 mb-3">Hub-owned site mappings + Aruba Central sim/hardware monitors. Pushed to the spoke as <code>central_on_prem_sites_config</code> and applied to the spoke's runtime monitoring when hub-managed.</p>
 
       <div class="flex items-center gap-2 mb-2">
@@ -8056,15 +8056,15 @@ async function csRenderSetupCentralOnPremApi() {
         <span id="cs-cop-csc-catalog-msg" class="text-xs text-slate-500"></span>
       </div>
 
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-4 mb-1">Site Mappings (wireless site → Central site)</p>
-      ${_discoveredSites.length ? `<p class="text-[10px] text-slate-500 mb-1">${_discoveredSites.length} Central site(s) discovered — pick from the dropdown (refreshes as more are found).</p>` : '<p class="text-[10px] text-slate-500 mb-1">No Central sites discovered yet (check the connection); the dropdown lists discovered sites once loaded.</p>'}
+      <p class="text-xs font-bold text-slate-500 mt-4 mb-1">Site Mappings (wireless site → Central site)</p>
+      ${_discoveredSites.length ? `<p class="text-xs text-slate-500 mb-1">${_discoveredSites.length} Central site(s) discovered — pick from the dropdown (refreshes as more are found).</p>` : '<p class="text-xs text-slate-500 mb-1">No Central sites discovered yet (check the connection); the dropdown lists discovered sites once loaded.</p>'}
       <div id="cs-cop-csc-sm-rows" class="space-y-2">${smRows || '<p class="text-xs text-slate-500 italic">No site mappings.</p>'}</div>
       <button onclick="csCopCscAddSm()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add mapping</button>
 
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-4 mb-1">Monitored Checks</p>
+      <p class="text-xs font-bold text-slate-500 mt-4 mb-1">Monitored Checks</p>
       <div id="cs-cop-csc-monitored">${mcList}</div>
 
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-4 mb-1">Hardware Checks</p>
+      <p class="text-xs font-bold text-slate-500 mt-4 mb-1">Hardware Checks</p>
       <div id="cs-cop-csc-hw-rows" class="space-y-2">${hwRows || '<p class="text-xs text-slate-500 italic">No hardware checks.</p>'}</div>
       <button onclick="csCopCscAddHw()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add hardware check</button>
 
@@ -8172,8 +8172,8 @@ window.csLoadCentralOnPremAvailable = async function () {
           <span>${csEscape(c.name || c.id)}</span><span class="text-slate-500 font-mono">(${csEscape(c.id)})</span>
         </label>`;
         csEl('cs-cop-csc-monitored').innerHTML = `<div class="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1">
-          <div><p class="text-[10px] font-bold text-slate-500 uppercase mb-1">Alerts</p>${alerts.map(a => toggle(a, 'alert')).join('') || '<p class="text-xs text-slate-500 italic">None.</p>'}</div>
-          <div><p class="text-[10px] font-bold text-slate-500 uppercase mb-1">Insights</p>${insights.map(a => toggle(a, 'insight')).join('') || '<p class="text-xs text-slate-500 italic">None.</p>'}</div>
+          <div><p class="text-xs font-bold text-slate-500 mb-1">Alerts</p>${alerts.map(a => toggle(a, 'alert')).join('') || '<p class="text-xs text-slate-500 italic">None.</p>'}</div>
+          <div><p class="text-xs font-bold text-slate-500 mb-1">Insights</p>${insights.map(a => toggle(a, 'insight')).join('') || '<p class="text-xs text-slate-500 italic">None.</p>'}</div>
         </div>`;
         csCopCscMonSync();
         if (msg) { msg.textContent = (alerts.length + insights.length) + ' checks loaded' + (cat.warning ? ' — ' + cat.warning : ''); }
@@ -8293,7 +8293,7 @@ async function csRenderSetupMistApi() {
     </select>`;
 
     const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Mist API Connection ${helpIcon('mist', null, 'Mist help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 mb-2">Mist API Connection ${helpIcon('mist', null, 'Mist help')}</h3>
       <p class="text-xs text-slate-500 mb-3">Juniper Mist org credentials. Pushed to the spoke as <code>mist_config</code>; the spoke sentinel-merges them — the token only overwrites when non-empty.</p>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         ${f('cs-msc-token', 'API Token', hc.api_token, 'password')}
@@ -8301,27 +8301,27 @@ async function csRenderSetupMistApi() {
         <label class="text-xs text-slate-500">Region / API host${hostSel}</label>
         <label class="text-xs text-slate-500">Poll interval (minutes)
           <input id="cs-msc-pollmin" type="number" min="1" step="1" value="${Math.max(1, Math.round((Number(hc.poll_interval_s) || 300) / 60))}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">How often the hub polls Mist for this tenant (default 5, minimum 1).</span>
+          <span class="block text-xs text-slate-500 mt-1">How often the hub polls Mist for this tenant (default 5, minimum 1).</span>
         </label>
         <div class="md:col-span-2 mt-1 pt-3 border-t border-slate-200">
-          <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Client-count check thresholds</p>
-          <p class="text-[11px] text-slate-500 mb-2">Controls how the <b>Steady Client Count</b> dashboard check colours a site. Two independent rules: a drop vs the recent hourly average, and a sustained fall below the site's historical peak.</p>
+          <p class="text-xs font-bold text-slate-500 mb-1">Client-count check thresholds</p>
+          <p class="text-xs text-slate-500 mb-2">Controls how the <b>Steady Client Count</b> dashboard check colours a site. Two independent rules: a drop vs the recent hourly average, and a sustained fall below the site's historical peak.</p>
         </div>
         <label class="text-xs text-slate-500">Warning — drop vs recent average (%)
           <input id="cs-msc-cc-warn" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.warn_pct != null) ? hc.cc_thresholds.warn_pct : 20}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">Amber when a site's count is this % below its last-hour average (default 20).</span>
+          <span class="block text-xs text-slate-500 mt-1">Amber when a site's count is this % below its last-hour average (default 20).</span>
         </label>
         <label class="text-xs text-slate-500">Error — drop vs recent average (%)
           <input id="cs-msc-cc-error" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.error_pct != null) ? hc.cc_thresholds.error_pct : 50}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">Red when the drop reaches this % (default 50; kept ≥ warning).</span>
+          <span class="block text-xs text-slate-500 mt-1">Red when the drop reaches this % (default 50; kept ≥ warning).</span>
         </label>
         <label class="text-xs text-slate-500">Sustained die-off — % of peak
           <input id="cs-msc-cc-dieoff" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.die_off_pct != null) ? hc.cc_thresholds.die_off_pct : 20}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">Red when the hourly average falls below this % of the 7/30-day peak (default 20). <b>Set 0 to disable.</b></span>
+          <span class="block text-xs text-slate-500 mt-1">Red when the hourly average falls below this % of the 7/30-day peak (default 20). <b>Set 0 to disable.</b></span>
         </label>
         <label class="text-xs text-slate-500">Die-off — minimum peak (clients)
           <input id="cs-msc-cc-minpeak" type="number" min="1" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.min_peak != null) ? hc.cc_thresholds.min_peak : 5}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-          <span class="block text-[11px] text-slate-500 mt-1">Only arm die-off when the peak is at least this many clients (default 5).</span>
+          <span class="block text-xs text-slate-500 mt-1">Only arm die-off when the peak is at least this many clients (default 5).</span>
         </label>
       </div>
       <div class="flex justify-end gap-2 mt-4">
@@ -8337,7 +8337,7 @@ async function csRenderSetupMistApi() {
         : '<p class="text-xs text-slate-500 italic">None configured. Load the available-checks catalog to pick Mist alerts/insights.</p>';
 
     const sitesCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sites &amp; Checks ${helpIcon('mist', null, 'Mist help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 mb-2">Sites &amp; Checks ${helpIcon('mist', null, 'Mist help')}</h3>
       <p class="text-xs text-slate-500 mb-3">Hub-owned site mappings + Mist sim/hardware monitors. Pushed to the spoke as <code>mist_sites_config</code> and applied to the spoke's runtime monitoring when hub-managed.</p>
 
       <div class="flex items-center gap-2 mb-2">
@@ -8345,15 +8345,15 @@ async function csRenderSetupMistApi() {
         <span id="cs-msc-catalog-msg" class="text-xs text-slate-500"></span>
       </div>
 
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-4 mb-1">Site Mappings (wireless site → Mist site)</p>
-      ${_discoveredSites.length ? `<p class="text-[10px] text-slate-500 mb-1">${_discoveredSites.length} Mist site(s) discovered — pick from the dropdown (refreshes as more are found).</p>` : '<p class="text-[10px] text-slate-500 mb-1">No Mist sites discovered yet (check the connection); the dropdown lists discovered sites once loaded.</p>'}
+      <p class="text-xs font-bold text-slate-500 mt-4 mb-1">Site Mappings (wireless site → Mist site)</p>
+      ${_discoveredSites.length ? `<p class="text-xs text-slate-500 mb-1">${_discoveredSites.length} Mist site(s) discovered — pick from the dropdown (refreshes as more are found).</p>` : '<p class="text-xs text-slate-500 mb-1">No Mist sites discovered yet (check the connection); the dropdown lists discovered sites once loaded.</p>'}
       <div id="cs-msc-sm-rows" class="space-y-2">${smRows || '<p class="text-xs text-slate-500 italic">No site mappings.</p>'}</div>
       <button onclick="csMscAddSm()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add mapping</button>
 
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-4 mb-1">Monitored Checks</p>
+      <p class="text-xs font-bold text-slate-500 mt-4 mb-1">Monitored Checks</p>
       <div id="cs-msc-monitored">${mcList}</div>
 
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-4 mb-1">Hardware Checks</p>
+      <p class="text-xs font-bold text-slate-500 mt-4 mb-1">Hardware Checks</p>
       <div id="cs-msc-hw-rows" class="space-y-2">${hwRows || '<p class="text-xs text-slate-500 italic">No hardware checks.</p>'}</div>
       <button onclick="csMscAddHw()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add hardware check</button>
 
@@ -8438,8 +8438,8 @@ window.csLoadMistAvailable = async function () {
           <span>${csEscape(c.name || c.id)}</span><span class="text-slate-500 font-mono">(${csEscape(c.id)})</span>
         </label>`;
         csEl('cs-msc-monitored').innerHTML = `<div class="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1">
-          <div><p class="text-[10px] font-bold text-slate-500 uppercase mb-1">Alerts</p>${alerts.map(a => toggle(a, 'alert')).join('') || '<p class="text-xs text-slate-500 italic">None.</p>'}</div>
-          <div><p class="text-[10px] font-bold text-slate-500 uppercase mb-1">Insights</p>${insights.map(a => toggle(a, 'insight')).join('') || '<p class="text-xs text-slate-500 italic">None.</p>'}</div>
+          <div><p class="text-xs font-bold text-slate-500 mb-1">Alerts</p>${alerts.map(a => toggle(a, 'alert')).join('') || '<p class="text-xs text-slate-500 italic">None.</p>'}</div>
+          <div><p class="text-xs font-bold text-slate-500 mb-1">Insights</p>${insights.map(a => toggle(a, 'insight')).join('') || '<p class="text-xs text-slate-500 italic">None.</p>'}</div>
         </div>`;
         csMscMonSync();
         if (msg) { msg.textContent = (alerts.length + insights.length) + ' checks loaded' + (cat.warning ? ' — ' + cat.warning : ''); }
@@ -8531,7 +8531,7 @@ async function csRenderSetupProxmox() {
           <button onclick="csResetHubConfig()" class="shrink-0 bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded-md text-sm font-bold">Reset to Default</button>
         </div>`;
         csSet(`<div class="space-y-4">${autoProv}<div class="hpe-card rounded-lg p-5 shadow-sm">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Hub Config ${helpIcon('cs', null, 'Simulations help')}</h3>
+          <h3 class="text-sm font-bold text-slate-500 mb-2">Hub Config ${helpIcon('cs', null, 'Simulations help')}</h3>
           <p class="text-xs text-slate-500 mb-3">Remaining hub-owned knobs (reclone schedule, VMID range, VLANs, USB VID/PID lists, watchdog group). Pushed to the spoke on save.</p>
         </div>${card}${resetBar}</div>`);
     } catch (e) { console.error('csRenderSetupProxmox: proxmox config load failed', e); csSet(csErrorBox('Could not load Proxmox config', e)); }
@@ -8568,7 +8568,7 @@ async function csRenderSetupGithub() {
         _csBranchSelect('cs-gh-branch', cfg.repo_branch, branches, null)}</label>`;
     csSet(`<div class="max-w-2xl space-y-4">
       <div class="hpe-card rounded-lg p-5 shadow-sm">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">GitHub ${helpIcon('cs', null, 'Simulations help')}</h3>
+        <h3 class="text-sm font-bold text-slate-500 mb-2">GitHub ${helpIcon('cs', null, 'Simulations help')}</h3>
         <div class="grid grid-cols-1 gap-3">
           ${f('cs-gh-url', 'Repo URL', cfg.repo_url)}${branchField}
           ${f('cs-gh-token', 'GitHub Token ' + (cfg.has_token ? '(set — leave blank to keep)' : '(new)'), '', 'password')}
@@ -8611,7 +8611,7 @@ async function csRenderSetupSecurity() {
       <input id="${id}" value="${csEscape(val != null ? val : '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>`;
     csSet(`<div class="max-w-2xl space-y-4">
       <div class="hpe-card rounded-lg p-5 shadow-sm">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Security ${helpIcon('cs', null, 'Simulations help')}</h3>
+        <h3 class="text-sm font-bold text-slate-500 mb-2">Security ${helpIcon('cs', null, 'Simulations help')}</h3>
         <p class="text-xs text-slate-500 mb-3">Governs the spoke's local dashboard auth. LM hub auth is managed separately in LM settings.</p>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           ${f('cs-sec-timeout', 'Session Timeout (minutes)', cfg.session_timeout_minutes)}
@@ -8807,10 +8807,10 @@ function csVmHostBanner(opts) {
     }).join('');
     return `<div class="mb-4 relative" style="max-width:28rem">
       <div class="flex items-center gap-2">
-        <span class="text-[10px] font-bold uppercase tracking-widest text-slate-500">Host</span>
+        <span class="text-xs font-bold text-slate-500">Host</span>
         <button onclick="csVmHostPanelToggle()" class="flex-1 text-left px-3 py-1.5 rounded-md border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center justify-between">
           <span>${csEscape(summary)}</span><span class="text-slate-500">▾</span></button>
-        ${(!single && nSel) ? `<button onclick="csVmHostAll()" class="text-[11px] text-slate-500 hover:text-slate-600 underline">clear</button>` : ''}
+        ${(!single && nSel) ? `<button onclick="csVmHostAll()" class="text-xs text-slate-500 hover:text-slate-600 underline">clear</button>` : ''}
       </div>
       <div id="cs-host-panel" class="${_csHostPanelOpen ? '' : 'hidden'} absolute z-20 mt-1 w-full bg-white border border-slate-200 rounded-md shadow-lg">
         <div class="p-2 border-b border-slate-100">
@@ -8912,7 +8912,7 @@ function csProvThrottleBadge(px) {
     const prov = (px && px.provision) || {};
     const halt = prov.halt || {};
     const pill = (cls, txt, title) =>
-        `<span title="${csEscape(title || '')}" class="px-2 py-0.5 rounded text-[10px] font-bold uppercase ${cls}">${csEscape(txt)}</span>`;
+        `<span title="${csEscape(title || '')}" class="px-2 py-0.5 rounded text-xs font-bold ${cls}">${csEscape(txt)}</span>`;
     // No provision telemetry (a row with no proxmox/agent data) → neutral "—",
     // not a misleading "Active". Active/Off/throttled are only meaningful
     // once the pxmx agent has actually reported a provision block.
@@ -8959,7 +8959,7 @@ async function csRenderVmServer() {
     // force a one-shot refresh the moment the spoke/agent reconnect.
     window._csVmHadStale = staleHosts.length > 0;
     const staleNotice = staleHosts.length
-        ? `<span class="ml-auto inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-300 text-[11px] font-bold" title="${csEscape(staleHosts.map(h => (h.spoke_name || h.spoke_hostname || h.spoke_id) + (h.cache_age_s != null ? ' · ' + Math.floor(h.cache_age_s / 60) + 'm old' : '')).join('; '))}"><span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>Showing cached data (&gt;5 min old) — check Spoke &amp; Agent</span>`
+        ? `<span class="ml-auto inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-300 text-xs font-bold" title="${csEscape(staleHosts.map(h => (h.spoke_name || h.spoke_hostname || h.spoke_id) + (h.cache_age_s != null ? ' · ' + Math.floor(h.cache_age_s / 60) + 'm old' : '')).join('; '))}"><span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>Showing cached data (&gt;5 min old) — check Spoke &amp; Agent</span>`
         : '';
     const summary = `<div class="flex flex-wrap items-center gap-x-4 gap-y-1 mb-3 text-xs text-slate-500">
       <span><b class="text-sm text-slate-700">${hosts.length}</b> Hosts</span>
@@ -8972,22 +8972,22 @@ async function csRenderVmServer() {
 
     const fleetCards = `<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
       <div class="hpe-card rounded-lg p-5 shadow-sm">
-        <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">Fleet Reclone</p>
+        <p class="text-xs font-bold text-slate-500 mb-2">Fleet Reclone</p>
         <div class="flex items-center gap-2">
           <button onclick="csFleetReclone()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-xs font-bold" title="Destroy and re-clone every VM in the fleet from its template — all in-VM state is lost">Reclone All</button>
           <button id="cs-fleet-reclone-stop" onclick="csFleetRecloneStop()" class="hidden bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Stop the running fleet reclone — VMs already in progress finish, the rest are skipped">Stop</button>
           <button id="cs-fleet-reclone-clear" onclick="csFleetRecloneClear()" class="hidden bg-white hover:bg-slate-50 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Clear the finished reclone's errors and per-VM log. Refused while a batch is running — stop it first.">Clear errors</button>
         </div>
-        <div id="cs-fleet-reclone-progress" class="mt-2 text-[11px] text-slate-500 space-y-1">No reclone in progress.</div>
+        <div id="cs-fleet-reclone-progress" class="mt-2 text-xs text-slate-500 space-y-1">No reclone in progress.</div>
       </div>
       <div class="hpe-card rounded-lg p-5 shadow-sm flex flex-col">
         <div class="flex items-center justify-between mb-2">
-          <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Auto-Provisioning</p>
+          <p class="text-xs font-bold text-slate-500">Auto-Provisioning</p>
           <button id="cs-autoprov-enable-btn" onclick="csToggleAutoProvision()" class="px-3 py-1 rounded-md text-xs font-bold border">Enable</button>
         </div>
-        <div class="text-[9px] font-bold text-slate-500 uppercase tracking-wider mb-1">Provisioning now</div>
-        <div id="cs-autoprov-live" class="text-[11px] text-slate-500 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 content-start flex-1 min-h-0 overflow-y-auto">loading…</div>
-        <div id="cs-autoprov-status" class="text-[10px] text-slate-500 space-y-1 mt-2 pt-2 border-t border-slate-100">Status: loading…</div>
+        <div class="text-xs font-bold text-slate-500 mb-1">Provisioning now</div>
+        <div id="cs-autoprov-live" class="text-xs text-slate-500 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 content-start flex-1 min-h-0 overflow-y-auto">loading…</div>
+        <div id="cs-autoprov-status" class="text-xs text-slate-500 space-y-1 mt-2 pt-2 border-t border-slate-100">Status: loading…</div>
       </div>
     </div>`;
 
@@ -9009,7 +9009,7 @@ async function csRenderVmServer() {
         // dongles at the fleet level (count + tooltip of bus-id: reason). The
         // per-dongle live-recovery badges live on the USB detail card.
         const qtList = (px.quarantine || []).filter(q => q && q.bus_path);
-        const qtPill = qtList.length ? `<span class="ml-1 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[9px] font-bold uppercase tracking-wider" title="${csEscape(qtList.map(q => q.bus_path + ': ' + (q.reason || '')).join('; '))}">🚫 ${qtList.length} QT</span>` : '';
+        const qtPill = qtList.length ? `<span class="ml-1 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-xs font-bold" title="${csEscape(qtList.map(q => q.bus_path + ': ' + (q.reason || '')).join('; '))}">🚫 ${qtList.length} QT</span>` : '';
         const selCls = csVmHostId(h) === sel ? 'bg-green-50 ring-1 ring-green-300' : 'hover:bg-slate-50';
         return `<tr class="border-b border-slate-100 cursor-pointer ${selCls}" onclick="csVmSelectHost('${csEscape(csVmHostId(h))}','VMs')">
           <td class="px-4 py-2 text-center" onclick="event.stopPropagation()"><input type="checkbox" class="cs-host-sel" data-host="${csEscape((px.node && px.node.hostname) || csVmHostId(h))}" data-spoke="${csEscape(h.spoke_id || '')}" data-name="${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id || '')}"></td>
@@ -9037,7 +9037,7 @@ async function csRenderVmServer() {
         .map((c, i) => `<th class="px-4 py-2 ${i >= 1 && i <= 8 ? 'text-center' : 'text-left'} font-medium"${_thTitle[c] ? ` title="${_thTitle[c]}"` : ''}>${c}</th>`).join('');
     const selTh = `<th class="px-4 py-2 text-center"><input type="checkbox" onclick="csFleetSelectAll(this)" title="Select all hosts"></th>`;
     const table = `<div class="overflow-x-auto"><table class="w-full text-sm">
-      <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${selTh}${ths}</tr></thead>
+      <thead class="bg-slate-50 text-xs text-slate-500"><tr>${selTh}${ths}</tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
 
@@ -9050,8 +9050,8 @@ async function csRenderVmServer() {
         ? `<div class="flex items-center gap-2 flex-wrap">
              <button onclick="csFleetRefreshTemplates()" class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Distribute a seed template backup from the hub onto the selected host(s): pause auto-provisioning, delete each host's sim VMs + template, qmrestore the seed backup, then resume auto-provisioning.">↻ Refresh Template(s)</button>
              <button onclick="csUploadTemplate()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200 px-3 py-1.5 rounded-md text-xs font-bold" title="Upload a vzdump template archive (.vma.zst) from your browser straight into the hub Template Repo — for when the source Proxmox host is offline or you only have the archive as a file. Stamped to the current tenant.">⬆ Upload template</button>
-             <span class="text-[11px] text-slate-500">Select target host(s), then push a seed template backup from the hub onto them. This wipes each target's sim VMs.</span>
-             <span id="cs-refresh-status-chip" class="hidden text-[11px] font-bold px-2 py-1 rounded-full border"></span>
+             <span class="text-xs text-slate-500">Select target host(s), then push a seed template backup from the hub onto them. This wipes each target's sim VMs.</span>
+             <span id="cs-refresh-status-chip" class="hidden text-xs font-bold px-2 py-1 rounded-full border"></span>
            </div>`
         : '';
 
@@ -9116,13 +9116,13 @@ async function csRefreshStatusTick() {
             const prog = (h.total && h.bytes != null) ? ' · ' + _csFmtBytes(h.bytes) + ' / ' + _csFmtBytes(h.total) : '';
             return `${who} — ${csEscape(label)}${prog}`;
         }).join('  |  ');
-        chip.className = 'text-[11px] font-bold px-2 py-1 rounded-full border bg-amber-50 text-amber-700 border-amber-300';
+        chip.className = 'text-xs font-bold px-2 py-1 rounded-full border bg-amber-50 text-amber-700 border-amber-300';
         chip.innerHTML = `<span class="animate-spin inline-block w-3 h-3 rounded-full border-2 border-amber-500 border-t-transparent align-middle mr-1"></span>${lines}`;
         chip.title = '';
         chip.classList.remove('hidden');
     } else if (failed.length) {
         const lines = failed.map(h => csEscape(h.host || 'host') + ': ' + csEscape(h.error || 'failed')).join('; ');
-        chip.className = 'text-[11px] font-bold px-2 py-1 rounded-full border bg-red-50 text-red-700 border-red-300';
+        chip.className = 'text-xs font-bold px-2 py-1 rounded-full border bg-red-50 text-red-700 border-red-300';
         chip.title = lines;
         chip.textContent = '↻ Refresh failed on ' + (failed.length > 1 ? failed.length + ' hosts' : (failed[0].host || 'host')) + ' — see Template Repo';
         chip.classList.remove('hidden');
@@ -9168,15 +9168,15 @@ function csFleetRecloneProgress() {
         const ph = rs.phase ? ` (${csEscape(rs.phase)})` : '';
         const bar = total
             ? `<div class="w-full bg-slate-100 rounded-full h-1.5 my-1"><div class="bg-primary h-1.5 rounded-full" style="width:${pct}%"></div></div>
-               <div class="text-[10px] text-slate-500">${done} / ${total} VMs (${pct}%)${cur}${ph}</div>`
-            : `<div class="text-[10px] text-slate-500">starting${cur}${ph}</div>`;
+               <div class="text-xs text-slate-500">${done} / ${total} VMs (${pct}%)${cur}${ph}</div>`
+            : `<div class="text-xs text-slate-500">starting${cur}${ph}</div>`;
         const log = (rs.log || []).slice(-4).reverse().map(e => {
             const ic = e.status === 'completed' ? '✅' : e.status === 'failed' ? '❌'
                 : e.status === 'in_progress' ? '⏳' : '🕐';
-            return `<div class="text-[10px] text-slate-500">${ic} VM ${csEscape(String(e.vmid ?? '—'))} · ${csEscape(e.status || '')}</div>`;
+            return `<div class="text-xs text-slate-500">${ic} VM ${csEscape(String(e.vmid ?? '—'))} · ${csEscape(e.status || '')}</div>`;
         }).join('');
         return `<div class="border-t border-slate-100 pt-1 first:border-0 first:pt-0">
-            <div class="text-[10px] font-bold text-slate-600">${host}</div>${bar}${log}</div>`;
+            <div class="text-xs font-bold text-slate-600">${host}</div>${bar}${log}</div>`;
     }).join('');
 }
 
@@ -9283,27 +9283,27 @@ window.csFleetRefreshTemplates = async function () {
             </div>
             <div class="p-6 space-y-4">
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Seed backup (from Template Repo)</label>
+                    <label class="text-xs text-slate-500 font-bold">Seed backup (from Template Repo)</label>
                     <select id="cs-refresh-src" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${srcOpts}</select>
-                    <p class="text-[11px] text-slate-500 leading-relaxed">The selected backup is restored onto every target host below. Default = newest completed backup.</p>
+                    <p class="text-xs text-slate-500 leading-relaxed">The selected backup is restored onto every target host below. Default = newest completed backup.</p>
                 </div>
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Target VMID <span class="font-normal normal-case text-slate-500">(optional)</span></label>
+                    <label class="text-xs text-slate-500 font-bold">Target VMID <span class="font-normal normal-case text-slate-500">(optional)</span></label>
                     <input id="cs-refresh-vmid" type="number" min="1" placeholder="blank = each host's configured template VMID (VM Image 1)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                    <p class="text-[11px] text-slate-500 leading-relaxed">Override the VMID the backup is restored to on each host (e.g. backup is vmid 100, restore to 200). Leave blank to use each host's own configured template VMID.</p>
+                    <p class="text-xs text-slate-500 leading-relaxed">Override the VMID the backup is restored to on each host (e.g. backup is vmid 100, restore to 200). Leave blank to use each host's own configured template VMID.</p>
                 </div>
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Destination storage <span class="font-normal normal-case text-slate-500">(optional)</span></label>
+                    <label class="text-xs text-slate-500 font-bold">Destination storage <span class="font-normal normal-case text-slate-500">(optional)</span></label>
                     <select id="cs-refresh-storage" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         <option value="">— keep the backup's original storage —</option>
                     </select>
-                    <p class="text-[11px] text-slate-500 leading-relaxed">Where the restored disks land on each target host (<code>qmrestore --storage</code>). Options are read from the first selected host. Leave as-is when every target already has the backup's original storage; set it when the target's storage id differs (which otherwise makes the restore fail).</p>
+                    <p class="text-xs text-slate-500 leading-relaxed">Where the restored disks land on each target host (<code>qmrestore --storage</code>). Options are read from the first selected host. Leave as-is when every target already has the backup's original storage; set it when the target's storage id differs (which otherwise makes the restore fail).</p>
                 </div>
                 <div class="space-y-1">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Target host(s) — ${hostIds.length}</label>
+                    <label class="text-xs text-slate-500 font-bold">Target host(s) — ${hostIds.length}</label>
                     <div class="bg-slate-50 border border-slate-200 rounded-md p-2 text-xs text-slate-600 max-h-24 overflow-y-auto">${esc(names.join(', '))}</div>
                 </div>
-                <p class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2 leading-relaxed">⚠ Destructive: this PAUSES auto-provisioning, DELETES each target host's sim VMs + template, restores the seed backup, then resumes. Existing sim clients on the targets are wiped.</p>
+                <p class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2 leading-relaxed">⚠ Destructive: this PAUSES auto-provisioning, DELETES each target host's sim VMs + template, restores the seed backup, then resumes. Existing sim clients on the targets are wiped.</p>
                 <div id="cs-refresh-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="pt-2 flex justify-end gap-3">
                     <button onclick="this.closest('#cs-refresh-tpl-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
@@ -9427,27 +9427,27 @@ window.csUploadTemplate = async function () {
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <p class="text-[11px] text-slate-500 leading-relaxed">Upload a vzdump archive (.vma.zst / .vma / .gz / .lzo) straight into the hub Template Repo — the offline alternative to “⬆ Back up to Hub” (VMs → Templates tab) when the source Proxmox host is unavailable. Stamped to tenant <span class="font-mono text-slate-500">${esc(csTenant())}</span>.</p>
+                <p class="text-xs text-slate-500 leading-relaxed">Upload a vzdump archive (.vma.zst / .vma / .gz / .lzo) straight into the hub Template Repo — the offline alternative to “⬆ Back up to Hub” (VMs → Templates tab) when the source Proxmox host is unavailable. Stamped to tenant <span class="font-mono text-slate-500">${esc(csTenant())}</span>.</p>
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Archive file</label>
+                    <label class="text-xs text-slate-500 font-bold">Archive file</label>
                     <input id="cs-up-file" type="file" accept=".zst,.vma,.vma.zst,.gz,.lzo" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Name <span class="text-red-500">*</span></label>
+                    <label class="text-xs text-slate-500 font-bold">Name <span class="text-red-500">*</span></label>
                     <input id="cs-up-name" placeholder="t2-golden…" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
                 <div class="grid grid-cols-2 gap-3">
                     <div class="space-y-2">
-                        <label class="text-xs text-slate-500 uppercase font-bold">OS</label>
+                        <label class="text-xs text-slate-500 font-bold">OS</label>
                         <input id="cs-up-os" placeholder="Debian 12, Windows 11…" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
                     <div class="space-y-2">
-                        <label class="text-xs text-slate-500 uppercase font-bold">Version</label>
+                        <label class="text-xs text-slate-500 font-bold">Version</label>
                         <input id="cs-up-version" placeholder="v3, 2026-07 golden…" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
                 </div>
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Purpose</label>
+                    <label class="text-xs text-slate-500 font-bold">Purpose</label>
                     <textarea id="cs-up-purpose" rows="2" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></textarea>
                 </div>
                 <div id="cs-up-status" class="text-xs text-slate-500 font-mono hidden"></div>
@@ -9541,11 +9541,11 @@ function csCanManageTemplates() {
 // per LM's per-view status-badge convention (no central status registry).
 function csTplStatusBadge(t) {
     const s = String((t && t.status) || '').toLowerCase();
-    if (s === 'complete') return '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">Complete</span>';
-    if (s === 'failed') return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700" title="${csEscape((t && t.error) || '')}">Failed</span>`;
+    if (s === 'complete') return '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">Complete</span>';
+    if (s === 'failed') return `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700" title="${csEscape((t && t.error) || '')}">Failed</span>`;
     const label = s === 'dumping' ? 'Dumping' : (s === 'uploading' ? 'Uploading' : 'Pending');
     const pct = Math.max(0, Math.min(100, Number(t && t.progress) || 0));
-    return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-sky-100 text-sky-700"><span class="animate-spin inline-block w-2.5 h-2.5 rounded-full border-2 border-sky-500 border-t-transparent align-middle mr-1"></span>${label} ${pct}%</span>`;
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-sky-100 text-sky-700"><span class="animate-spin inline-block w-2.5 h-2.5 rounded-full border-2 border-sky-500 border-t-transparent align-middle mr-1"></span>${label} ${pct}%</span>`;
 }
 
 function csTplBytes(n) {
@@ -9584,7 +9584,7 @@ async function csRenderMyTemplates() {
             const src = `${esc(t.source_node || '—')} · vmid ${esc(String(t.source_vmid == null ? '—' : t.source_vmid))}`;
             const when = t.created_at ? new Date(t.created_at).toLocaleString() : '';
             return `<tr class="border-t border-slate-100 hover:bg-slate-50">
-              <td class="px-4 py-2 font-medium text-slate-700">${esc(t.name || '—')}<div class="text-[11px] text-slate-500">${esc(when)}</div></td>
+              <td class="px-4 py-2 font-medium text-slate-700">${esc(t.name || '—')}<div class="text-xs text-slate-500">${esc(when)}</div></td>
               <td class="px-4 py-2 text-slate-600">${esc(t.os || '—')}</td>
               <td class="px-4 py-2 text-slate-600">${esc(t.version || '—')}</td>
               <td class="px-4 py-2 text-slate-600">${esc(t.purpose || '—')}</td>
@@ -9598,10 +9598,10 @@ async function csRenderMyTemplates() {
       <div class="hpe-card rounded-lg overflow-hidden border border-slate-200">
         <div class="flex items-center justify-between px-4 py-2 bg-slate-50 border-b border-slate-200">
           <h3 class="text-sm font-bold text-navy">My Templates <span class="text-slate-500 font-normal">(${templates.length})</span></h3>
-          <button onclick="window.csRenderMyTemplates ? window.csRenderMyTemplates() : csRenderMyTemplates()" class="px-2 py-1 rounded text-[11px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200" title="Reload the list of templates backed up to the hub for your tenant.">↻ Refresh</button>
+          <button onclick="window.csRenderMyTemplates ? window.csRenderMyTemplates() : csRenderMyTemplates()" class="px-2 py-1 rounded text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200" title="Reload the list of templates backed up to the hub for your tenant.">↻ Refresh</button>
         </div>
         <div class="overflow-x-auto"><table class="w-full text-sm">
-          <thead class="bg-white text-xs text-slate-500 uppercase"><tr>
+          <thead class="bg-white text-xs text-slate-500"><tr>
             <th class="px-4 py-2 text-left font-medium">Name</th>
             <th class="px-4 py-2 text-left font-medium">OS</th>
             <th class="px-4 py-2 text-left font-medium">Version</th>
@@ -9650,11 +9650,11 @@ window.csBackupTemplateToHub = async function (key) {
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <p class="text-[11px] text-slate-500 leading-relaxed">Run vzdump on template <span class="font-mono text-slate-500">${esc(name || ('vmid ' + vmid))}</span> (vmid ${esc(String(vmid))} on <span class="font-mono text-slate-500">${esc(node || '—')}</span>) and stream a copy into the hub Template Repo. The archive is deleted from the chosen storage after streaming. This can take several minutes for a large template.</p>
+                <p class="text-xs text-slate-500 leading-relaxed">Run vzdump on template <span class="font-mono text-slate-500">${esc(name || ('vmid ' + vmid))}</span> (vmid ${esc(String(vmid))} on <span class="font-mono text-slate-500">${esc(node || '—')}</span>) and stream a copy into the hub Template Repo. The archive is deleted from the chosen storage after streaming. This can take several minutes for a large template.</p>
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">vzdump storage <span class="font-normal normal-case text-slate-500">(optional — file-based only; blank = hub tempdir fallback)</span></label>
+                    <label class="text-xs text-slate-500 font-bold">vzdump storage <span class="font-normal normal-case text-slate-500">(optional — file-based only; blank = hub tempdir fallback)</span></label>
                     <select id="cs-backup-storage" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading storages…</option></select>
-                    <p id="cs-backup-storage-note" class="text-[11px] text-slate-500 leading-relaxed"></p>
+                    <p id="cs-backup-storage-note" class="text-xs text-slate-500 leading-relaxed"></p>
                 </div>
                 <div id="cs-backup-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="pt-2 flex justify-end gap-3">
@@ -10067,8 +10067,8 @@ function csVmStatusLegend() {
         ['bg-blue-500', 'Reboots in', 'post-clone settle reboot countdown — restarts after settle + engine config + update.sh'],
     ];
     return `<div class="mt-3 px-1">
-      <p class="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Status legend</p>
-      <div class="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">${items.map(i => item(i[0], i[1], i[2])).join('')}</div>
+      <p class="text-xs font-bold text-slate-500 mb-1">Status legend</p>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs">${items.map(i => item(i[0], i[1], i[2])).join('')}</div>
     </div>`;
 }
 
@@ -10131,7 +10131,7 @@ function csShedBadge(v) {
     if (!v || !v._shed_at) return '';
     const secs = Number(v._shed_at) - Date.now() / 1000;
     if (secs <= 0) return '';
-    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700" title="Dongle removed — VM will be shed when the missing-dongle timer expires">`
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700" title="Dongle removed — VM will be shed when the missing-dongle timer expires">`
         + `<span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>🗑️ Sheds in `
         + `<span class="cs-shed-countdown" data-shed-at="${Number(v._shed_at)}">${csFmtDuration(secs)}</span></span>`;
 }
@@ -10149,7 +10149,7 @@ function csRebootBadge(v) {
     if (!v || !v._reboot_at) return '';
     const secs = Number(v._reboot_at) - Date.now() / 1000;
     if (secs <= 0) return '';
-    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-blue-100 text-blue-700" title="Post-clone settle reboot — the VM will gracefully restart once it has settled, pulled engine config, and run update.sh (the immediate post-clone reboot only set the hostname/first-boot bits; this one finalizes after the settle window)">`
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-blue-100 text-blue-700" title="Post-clone settle reboot — the VM will gracefully restart once it has settled, pulled engine config, and run update.sh (the immediate post-clone reboot only set the hostname/first-boot bits; this one finalizes after the settle window)">`
         + `<span class="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>🔄 Reboots in `
         + `<span class="cs-reboot-countdown" data-reboot-at="${Number(v._reboot_at)}">${csFmtDuration(secs)}</span></span>`;
 }
@@ -10180,7 +10180,7 @@ function csQtBadge(q) {
     const cnt = (isFinite(secs) && secs > 0)
         ? `<span class="cs-qt-countdown" data-qt-at="${at}">${csFmtDuration(secs)}</span>`
         : 'now';
-    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700" title="${csEscape(title)}">`
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700" title="${csEscape(title)}">`
         + `<span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>🚫 QT ${csEscape(q.bus_path)}${_csLoc(q)} · ${csEscape(reason)} · clears in ${cnt}</span>`;
 }
 
@@ -10198,9 +10198,9 @@ function csRecoveryBadge(e) {
         : 'reclone → quarantine';
     const title = `${String(r.reason || 'recovering')}. Ladder: ${ladder}.`;
     const vm = (e.vmid != null && e.vmid !== '') ? ` · VM ${csEscape(String(e.vmid))}` : '';
-    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800" title="${csEscape(title)}">`
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-800" title="${csEscape(title)}">`
         + `<span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>🔧 ${csEscape(e.bus_path || '')}${_csLoc(e)} · ${csEscape(e.name || e.vidpid || '')}${vm}`
-        + ` · <span class="uppercase">${csEscape(stage)}</span> ${Number(r.attempts || 0)}/${Number(r.max || 0)}</span>`;
+        + ` · <span class="">${csEscape(stage)}</span> ${Number(r.attempts || 0)}/${Number(r.max || 0)}</span>`;
 }
 
 // ── Optimistic in-flight VM state (click-driven) ─────────────────────────────
@@ -10229,14 +10229,14 @@ const _CS_INFLIGHT_META = {
 function csVmInflightKey(v) { return String((v && (v._key || v.unique_id)) || (v && v.vmid) || ''); }
 function csVmInflightBadge(op) {
     const m = _CS_INFLIGHT_META[op] || { label: op + '…', cls: 'bg-amber-100 text-amber-700', dot: 'border-amber-500' };
-    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${m.cls}" title="Operation in progress — waiting for telemetry to confirm"><span class="animate-spin w-2.5 h-2.5 rounded-full border-2 ${m.dot} border-t-transparent"></span>⏳ ${csEscape(m.label)}</span>`;
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold ${m.cls}" title="Operation in progress — waiting for telemetry to confirm"><span class="animate-spin w-2.5 h-2.5 rounded-full border-2 ${m.dot} border-t-transparent"></span>⏳ ${csEscape(m.label)}</span>`;
 }
 // Badge for an auto-prov placeholder row — a VM the run is provisioning that
 // hasn't materialised in the telemetry VM list yet. Dedupe-by-vmid means the real
 // row replaces it once it appears.
 function csVmPlaceholderBadge(v) {
     const vp = (v && v._vidpid) ? ` <span class="text-slate-500 font-normal normal-case">${csEscape(v._vidpid)}</span>` : '';
-    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-sky-100 text-sky-700" title="Auto-provisioning in progress — this VM is being created"><span class="animate-spin w-2.5 h-2.5 rounded-full border-2 border-sky-500 border-t-transparent"></span>⏳ provisioning…</span>${vp}`;
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-sky-100 text-sky-700" title="Auto-provisioning in progress — this VM is being created"><span class="animate-spin w-2.5 h-2.5 rounded-full border-2 border-sky-500 border-t-transparent"></span>⏳ provisioning…</span>${vp}`;
 }
 // Reconcile the in-flight map against a fresh telemetry VM list: drop confirmed
 // deletes (VM gone), hand back to the agent's own badge once telemetry reflects
@@ -10296,19 +10296,19 @@ function csVmStatusBadge(v) {
     if (_inf) return csVmInflightBadge(_inf.op);
     const ps = String(v.prov_status || '').toLowerCase();
     if (ps === 'tearing_down') {
-        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700"><span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>Deleting…</span>`;
+        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700"><span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>Deleting…</span>`;
     }
     // An active reclone (destroy + clone + boot + guest-agent wait) wins over the
     // steady status — the agent stamps prov_status="recloning" for its duration.
     if (ps === 'recloning') {
-        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-indigo-100 text-indigo-700"><span class="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>Recloning…</span>`;
+        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-indigo-100 text-indigo-700"><span class="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>Recloning…</span>`;
     }
     // Missing-dongle shed countdown wins over the steady status (it's imminent).
     const shed = csShedBadge(v);
     if (shed) return shed;
     if (ps === 'provisioning' || v.pending_checkin === true) {
         const label = (String(v.status || '').toLowerCase() === 'running') ? 'Configuring' : 'Provisioning';
-        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-sky-100 text-sky-700"><span class="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse"></span>${label}</span>`;
+        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-sky-100 text-sky-700"><span class="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse"></span>${label}</span>`;
     }
     // Steady status — append the post-clone settle-reboot countdown ALONGSIDE
     // it (the box keeps running until reboot_at, so the reboot badge is a
@@ -10405,17 +10405,17 @@ function csAutoProvPanel(h) {
         const name = it.vm_name || (it.vmid != null ? `VM ${it.vmid}` : (it.bus ? `Bus ${it.bus}` : 'Slot —'));
         return `<div class="flex items-center justify-between gap-2 py-1 border-b border-slate-100 last:border-0">
             <span class="text-xs font-mono text-slate-600 truncate">${csEscape(name)}</span>
-            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${meta.cls}">${meta.label}</span>
+            <span class="px-2 py-0.5 rounded text-xs font-bold ${meta.cls}">${meta.label}</span>
         </div>`;
     }).join('') || `<div class="text-xs text-slate-500 py-1">No active items.</div>`;
 
     const haltLine = (halt && halt.reason)
-        ? `<div class="text-[11px] text-amber-600 mt-2">⏸ Paused — ${csEscape(halt.reason)} (CPU ${halt.cpu_pct}% ≥ ${halt.cpu_threshold}%, Mem ${halt.mem_pct}% ≥ ${halt.mem_threshold}%)</div>`
+        ? `<div class="text-xs text-amber-600 mt-2">⏸ Paused — ${csEscape(halt.reason)} (CPU ${halt.cpu_pct}% ≥ ${halt.cpu_threshold}%, Mem ${halt.mem_pct}% ≥ ${halt.mem_threshold}%)</div>`
         : '';
 
     return `<div class="hpe-card rounded-lg p-5 mb-3">
         <div class="flex items-center justify-between gap-3 mb-2">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">VM Auto-Provisioning</h3>
+            <h3 class="text-sm font-bold text-slate-500">VM Auto-Provisioning</h3>
             ${pill}
         </div>
         ${active ? `<div class="flex items-center justify-between text-xs text-slate-500 mb-1"><span>${Math.min(run.completed, run.total)} of ${run.total} complete${run.failed ? ` · ${run.failed} failed` : ''}</span><span>${pct}%</span></div>
@@ -10479,24 +10479,24 @@ function csVmRow(v) {
     const busy = isPlaceholder || String(v.prov_status || '').toLowerCase() === 'tearing_down';
     // Route by composite key (spoke|host|vmid) — VMIDs can collide across hosts.
     const act = (label, action, cls) => busy
-        ? `<button disabled title="VM is being deleted" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 cursor-not-allowed">${label}</button>`
-        : `<button onclick="csVmAction('${key}','${action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${cls}">${label}</button>`;
+        ? `<button disabled title="VM is being deleted" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">${label}</button>`
+        : `<button onclick="csVmAction('${key}','${action}')" class="px-2 py-0.5 rounded text-xs font-bold ${cls}">${label}</button>`;
     // VNC console (mirrors the pxmx VM table's 🖥 Console button). qemu VMs
     // only — lxc containers have no VNC display, and templates aren't runnable.
     // Disabled while tearing_down. The opener resolves the VM's owning cs
     // spoke + host from the row so VNC_START routes to the right agent.
     const isLxc = String(v.type || '').toLowerCase() === 'lxc';
     const consoleBtn = (busy || isLxc || v.is_template)
-        ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : (v.is_template ? 'Templates have no console' : 'VM is being deleted')}" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 cursor-not-allowed">🖥 Console</button>`
-        : `<button onclick="csOpenVmConsole('${key}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-100" title="Open a noVNC console to this VM">🖥 Console</button>`;
+        ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : (v.is_template ? 'Templates have no console' : 'VM is being deleted')}" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">🖥 Console</button>`
+        : `<button onclick="csOpenVmConsole('${key}')" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-800 text-slate-100" title="Open a noVNC console to this VM">🖥 Console</button>`;
     const menuBtn = busy
-        ? `<button disabled class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 cursor-not-allowed">⋯ Actions ▾</button>`
-        : `<button onclick="event.stopPropagation(); csToggleVmActionMenu(event, '${key}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 hover:bg-slate-200">⋯ Actions ▾</button>`;
+        ? `<button disabled class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">⋯ Actions ▾</button>`
+        : `<button onclick="event.stopPropagation(); csToggleVmActionMenu(event, '${key}')" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200">⋯ Actions ▾</button>`;
     // Tenant-admin/admin: back a TEMPLATE VM up to the hub Template Repo. This is
     // the in-module equivalent of the Global-Admin "⬆ Back up to Hub" — the only
     // path a tenant admin (no Setup/Hypervisors nav) has to seed a template.
     const backupBtn = (!busy && v.is_template && csCanManageTemplates())
-        ? `<button onclick="csBackupTemplateToHub('${key}')" title="vzdump this template and store a copy in the hub Template Repo (My Templates). The archive is deleted from the chosen storage after streaming." class="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300">⬆ Back up to Hub</button>`
+        ? `<button onclick="csBackupTemplateToHub('${key}')" title="vzdump this template and store a copy in the hub Template Repo (My Templates). The archive is deleted from the chosen storage after streaming." class="px-2 py-0.5 rounded text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300">⬆ Back up to Hub</button>`
         : '';
     const selCell = isPlaceholder
         ? `<span class="inline-block w-3.5"></span> ${vid}`
@@ -10761,10 +10761,10 @@ async function csRenderVmServerTerminal() {
       <div class="hpe-card rounded-lg overflow-hidden shadow-sm" style="background:#1e1e1e">
         <div class="px-4 py-2 flex justify-between items-center bg-[#2d2d2d] text-slate-200">
           <div class="text-sm font-mono">⌨️ ${csEscape(hostLabel)} — root shell ${helpIcon('cs', null, 'Simulations help')}</div>
-          <button onclick="csVmShellReconnect()" class="text-[11px] px-2 py-1 rounded bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold">↻ Reconnect</button>
+          <button onclick="csVmShellReconnect()" class="text-xs px-2 py-1 rounded bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold">↻ Reconnect</button>
         </div>
         <div id="cs-vm-term-body" style="height:60vh" class="p-1"></div>
-        <div id="cs-vm-term-status" class="px-4 py-1 text-[11px] text-slate-400 bg-[#2d2d2d] font-mono">Connecting…</div>
+        <div id="cs-vm-term-status" class="px-4 py-1 text-xs text-slate-400 bg-[#2d2d2d] font-mono">Connecting…</div>
       </div></div>`);
     window.__csVmShellCtx = { agentId };
     await csVmShellConnect(agentId);
@@ -10894,10 +10894,10 @@ async function csRenderVmServerUsb() {
     // approval_scope (global / local / global+local) so the tenant can see how a
     // dongle was approved.
     const scopeBadge = s => {
-        if (s === 'global+local') return '<span class="bg-green-100 text-green-700 px-1.5 py-0.5 rounded text-[10px] font-bold mr-1">Global</span><span class="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-[10px] font-bold">Local</span>';
-        if (s === 'global') return '<span class="bg-green-100 text-green-700 px-1.5 py-0.5 rounded text-[10px] font-bold">Global</span>';
-        if (s === 'local') return '<span class="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-[10px] font-bold">Local</span>';
-        return '<span class="bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded text-[10px] font-bold">Certified</span>';
+        if (s === 'global+local') return '<span class="bg-green-100 text-green-700 px-1.5 py-0.5 rounded text-xs font-bold mr-1">Global</span><span class="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-xs font-bold">Local</span>';
+        if (s === 'global') return '<span class="bg-green-100 text-green-700 px-1.5 py-0.5 rounded text-xs font-bold">Global</span>';
+        if (s === 'local') return '<span class="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-xs font-bold">Local</span>';
+        return '<span class="bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded text-xs font-bold">Certified</span>';
     };
     const sc = u => u.approval_scope || '';
     const g = present.filter(u => sc(u) === 'global').length;
@@ -10934,9 +10934,9 @@ async function csRenderVmServerUsb() {
         _sidelined, ((scopeHosts[0] && (scopeHosts[0].proxmox || {}).usb_diagnostics) || {}).controllers);
     const qtBox = qt.length ? `<div class="mb-4 border border-red-200 bg-red-50 rounded-lg p-3">
       ${_cardBanner}
-      <p class="text-[11px] font-bold text-red-700 uppercase tracking-wider mb-2">Quarantined dongles (${qt.length}) — sidelined by kernel USB errors</p>
+      <p class="text-xs font-bold text-red-700 mb-2">Quarantined dongles (${qt.length}) — sidelined by kernel USB errors</p>
       <div class="flex flex-wrap gap-2">${qt.map(csQtBadge).join('')}</div>
-      <p class="text-[10px] text-red-600/80 mt-2">Each auto-recovers after 1h and gets retried; re-quarantines if the kernel errors persist. A failed clone never quarantines a dongle.</p>
+      <p class="text-xs text-red-600/80 mt-2">Each auto-recovers after 1h and gets retried; re-quarantines if the kernel errors persist. A failed clone never quarantines a dongle.</p>
     </div>` : '';
     // Recovering dongles: an assigned dongle the agent is actively trying to
     // restore (usb_state[].recovery, set while it climbs the recovery ladder)
@@ -10945,9 +10945,9 @@ async function csRenderVmServerUsb() {
     // can't see it; detached = passthrough keeps dropping (reclone strikes).
     const recovering = usbState.filter(e => e && e.recovery);
     const recBox = recovering.length ? `<div class="mb-4 border border-amber-200 bg-amber-50 rounded-lg p-3">
-      <p class="text-[11px] font-bold text-amber-700 uppercase tracking-wider mb-2">Recovering dongles (${recovering.length}) — trying to restore before quarantine</p>
+      <p class="text-xs font-bold text-amber-700 mb-2">Recovering dongles (${recovering.length}) — trying to restore before quarantine</p>
       <div class="flex flex-wrap gap-2">${recovering.map(csRecoveryBadge).join('')}</div>
-      <p class="text-[10px] text-amber-600/80 mt-2">A dongle whose guest can't see it, or whose passthrough keeps dropping, climbs a recovery ladder (USB reset → reattach → reboot → reclone → quarantine). This shows WHY a VM is recloning and WHICH dongle is at fault; if every stage fails it lands in Quarantine above.</p>
+      <p class="text-xs text-amber-600/80 mt-2">A dongle whose guest can't see it, or whose passthrough keeps dropping, climbs a recovery ladder (USB reset → reattach → reboot → reclone → quarantine). This shows WHY a VM is recloning and WHICH dongle is at fault; if every stage fails it lands in Quarantine above.</p>
     </div>` : '';
     // Type options for the per-row dropdown. A certified dongle that hasn't
     // been classified yet shows a "—" placeholder (selected) so the operator
@@ -10995,7 +10995,7 @@ async function csRenderVmServerUsb() {
         return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(g.name || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(g.vid)}:${csEscape(g.pid)}</td>
-      <td class="px-3 py-2"><select onchange="csUsbVidpid('${csEscape(g.vid)}','${csEscape(g.pid)}','certify', this.value)" class="text-[11px] border border-slate-200 rounded px-1 py-0.5 bg-white">${typeOpts(g.type)}</select></td>
+      <td class="px-3 py-2"><select onchange="csUsbVidpid('${csEscape(g.vid)}','${csEscape(g.pid)}','certify', this.value)" class="text-xs border border-slate-200 rounded px-1 py-0.5 bg-white">${typeOpts(g.type)}</select></td>
       <td class="px-3 py-2">${scopeBadge(g.scope)}</td>
       <td class="px-3 py-2 text-center text-sm font-bold text-slate-700">${g.items.length}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(vms.join(', ') || '—')}</td>
@@ -11007,9 +11007,9 @@ async function csRenderVmServerUsb() {
       <td class="px-3 py-2 font-mono text-xs">${csEscape(g.vid)}:${csEscape(g.pid)}</td>
       <td class="px-3 py-2 text-center text-sm font-bold text-slate-700">${g.items.length}</td>
       <td class="px-3 py-2"><div class="flex gap-1 items-center">
-        <select class="cs-usb-row-type text-[11px] border border-slate-200 rounded px-1 py-0.5 bg-white"><option value="">—</option><option value="wireless">wireless</option><option value="wired">wired</option></select>
-        <button onclick="csUsbCertifyRow(this, '${csEscape(g.vid)}','${csEscape(g.pid)}')" class="bg-green-100 text-green-700 px-2 py-0.5 rounded text-[10px] font-bold">Certify</button>
-        <button onclick="csUsbVidpid('${csEscape(g.vid)}','${csEscape(g.pid)}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-[10px] font-bold">Ignore</button>
+        <select class="cs-usb-row-type text-xs border border-slate-200 rounded px-1 py-0.5 bg-white"><option value="">—</option><option value="wireless">wireless</option><option value="wired">wired</option></select>
+        <button onclick="csUsbCertifyRow(this, '${csEscape(g.vid)}','${csEscape(g.pid)}')" class="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">Certify</button>
+        <button onclick="csUsbVidpid('${csEscape(g.vid)}','${csEscape(g.pid)}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-xs font-bold">Ignore</button>
       </div></td>
     </tr>`; }).join('');
     // Ignored (this tenant) — un-ignore restores the adapter to service. Uses the
@@ -11022,7 +11022,7 @@ async function csRenderVmServerUsb() {
         return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(nm || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(vid)}:${csEscape(pid)}</td>
-      <td class="px-3 py-2"><button onclick="csUsbVidpid('${csEscape(vid)}','${csEscape(pid)}','remove')" class="bg-slate-200 text-slate-600 hover:bg-green-100 hover:text-green-700 px-2 py-0.5 rounded text-[10px] font-bold">Un-ignore</button></td>
+      <td class="px-3 py-2"><button onclick="csUsbVidpid('${csEscape(vid)}','${csEscape(pid)}','remove')" class="bg-slate-200 text-slate-600 hover:bg-green-100 hover:text-green-700 px-2 py-0.5 rounded text-xs font-bold">Un-ignore</button></td>
     </tr>`;
     }).join('');
     // Diagnostic: when no dongles are present, show where the cs spoke put
@@ -11031,9 +11031,9 @@ async function csRenderVmServerUsb() {
     const dbg = window._csUsbDebug;
     const showDbg = (present.length + unknown.length === 0) && dbg && dbg.length;
     const dbgBox = showDbg ? `<details class="mb-3 border border-amber-200 bg-amber-50 rounded p-3">
-      <summary class="text-[11px] font-bold text-amber-700 cursor-pointer">No USB dongles received — raw telemetry structure (admin)</summary>
-      <pre class="text-[10px] text-slate-600 mt-2 whitespace-pre-wrap">${csEscape(JSON.stringify(dbg, null, 2))}</pre>
-      <p class="text-[10px] text-amber-700 mt-2">If <code>proxmox.usb</code>/<code>top.usb</code> show no <code>present_usb</code>/<code>usb_devices</code>, the cs spoke isn't aggregating USB into its telemetry. If they appear under <code>top.usb</code> but not <code>proxmox.usb</code>, it's a hub shape-mapping gap.</p>
+      <summary class="text-xs font-bold text-amber-700 cursor-pointer">No USB dongles received — raw telemetry structure (admin)</summary>
+      <pre class="text-xs text-slate-600 mt-2 whitespace-pre-wrap">${csEscape(JSON.stringify(dbg, null, 2))}</pre>
+      <p class="text-xs text-amber-700 mt-2">If <code>proxmox.usb</code>/<code>top.usb</code> show no <code>present_usb</code>/<code>usb_devices</code>, the cs spoke isn't aggregating USB into its telemetry. If they appear under <code>top.usb</code> but not <code>proxmox.usb</code>, it's a hub shape-mapping gap.</p>
     </details>` : '';
     // Start the live countdown ticker so the QT badges' "clears in" timer ticks
     // between telemetry pulses (idempotent — one interval for the whole page).
@@ -11043,23 +11043,23 @@ async function csRenderVmServerUsb() {
     // differ only in which state store they clear, so the operator can keep one.
     const _usbSid = csEscape(String((h && h.spoke_id) || ''));
     const _usbHost = csEscape(String((h && (h.hostname || h.spoke_hostname || h.spoke_id)) || ''));
-    const _btnCls = 'text-[11px] font-bold px-3 py-1.5 rounded-md border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 whitespace-nowrap';
+    const _btnCls = 'text-xs font-bold px-3 py-1.5 rounded-md border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 whitespace-nowrap';
     const _clearQtBtn = `<button onclick="csClearUsbQuarantine('${_usbSid}','${_usbHost}')" title="Clear the dmesg quarantine list (incl. the 5-strike permanent flag) + force-release driver-bound dongles on this host. Leaves the exclusion list intact." class="${_btnCls}">Clear Quarantine</button>`;
     const _clearExclBtn = `<button onclick="csClearUsbExclusions('${_usbSid}','${_usbHost}')" title="Clear the destroy-fail bus exclusions (repeated spin-up/down trips these) + force-release driver-bound dongles on this host. Leaves the quarantine list intact." class="${_btnCls}">Clear Exclusion List</button>`;
     csSet(`<div>${csVmHostBanner({ single: true })}
       ${dbgBox}
       <div class="flex items-center justify-between gap-3 mb-4">
-        <p class="text-[11px] text-slate-500 min-w-0">Release sidelined dongles. Both actions also force-unbind a driver-bound dongle from the host (no reboot); they differ only in which state store they clear.</p>
+        <p class="text-xs text-slate-500 min-w-0">Release sidelined dongles. Both actions also force-unbind a driver-bound dongle from the host (no reboot); they differ only in which state store they clear.</p>
         <div class="flex items-center gap-2">${_clearQtBtn}${_clearExclBtn}</div>
       </div>
       ${summary}
       ${recBox}
       ${qtBox}
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">Certified USB (${certGroups.length} type${certGroups.length === 1 ? '' : 's'} · ${present.length} dongle${present.length === 1 ? '' : 's'})</p>
+      <p class="text-xs font-bold text-slate-500 mb-2">Certified USB (${certGroups.length} type${certGroups.length === 1 ? '' : 's'} · ${present.length} dongle${present.length === 1 ? '' : 's'})</p>
       ${csTable(['Device', 'VID:PID', 'Type', 'Approved', 'Count', 'Active VMs', 'Status'], certRows)}
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-5 mb-2">Uncertified / Unknown (${unGroups.length} type${unGroups.length === 1 ? '' : 's'} · ${unknown.length} dongle${unknown.length === 1 ? '' : 's'}) — pick a type, then Certify</p>
+      <p class="text-xs font-bold text-slate-500 mt-5 mb-2">Uncertified / Unknown (${unGroups.length} type${unGroups.length === 1 ? '' : 's'} · ${unknown.length} dongle${unknown.length === 1 ? '' : 's'}) — pick a type, then Certify</p>
       ${csTable(['Device', 'VID:PID', 'Count', 'Type & Actions'], unRows)}
-      ${tenantIgnored.length ? `<p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-5 mb-2">Ignored (this tenant) (${tenantIgnored.length}) — un-ignore to bring an adapter back into service</p>${csTable(['Device', 'VID:PID', 'Action'], ignRows)}` : ''}
+      ${tenantIgnored.length ? `<p class="text-xs font-bold text-slate-500 mt-5 mb-2">Ignored (this tenant) (${tenantIgnored.length}) — un-ignore to bring an adapter back into service</p>${csTable(['Device', 'VID:PID', 'Action'], ignRows)}` : ''}
     </div>`);
 }
 
@@ -11101,7 +11101,7 @@ function csRenderVmServerIot() {
     const px = (h && h.proxmox) || {};
     const t3 = px.t3_pci_devices || [];
     csSet(`<div>${csVmHostBanner({ single: true })}
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">IoT / T3 PCI Devices (${t3.length})</p>
+      <p class="text-xs font-bold text-slate-500 mb-2">IoT / T3 PCI Devices (${t3.length})</p>
       ${t3.length ? csTable(['Device', 'Address', 'Driver'], t3.map(d => `<tr>
         <td class="px-3 py-2 text-sm">${csEscape(d.name || d.device || '—')}</td>
         <td class="px-3 py-2 font-mono text-xs">${csEscape(d.address || '—')}</td>
@@ -11131,7 +11131,7 @@ async function csRenderVmServerPci() {
     const t1Present = px.t1_pci_devices || [];
     const t3Present = px.t3_pci_devices || [];
     const _chips = (arr) => arr.length
-        ? '<div class="flex flex-wrap gap-1.5 mt-1">' + arr.map(v => `<span class="font-mono text-[11px] px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700">${csEscape(v)}</span>`).join('') + '</div>'
+        ? '<div class="flex flex-wrap gap-1.5 mt-1">' + arr.map(v => `<span class="font-mono text-xs px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700">${csEscape(v)}</span>`).join('') + '</div>'
         : '<div class="text-xs text-slate-500 mt-1">none allow-listed</div>';
     const _devTable = (arr, label) => arr.length
         ? csTable(['Device', 'Address', 'Driver'], arr.map(d => `<tr>
@@ -11143,13 +11143,13 @@ async function csRenderVmServerPci() {
       <div class="grid grid-cols-2 gap-3 mb-4">
         ${csStat('T1 allow-listed', t1.length)}${csStat('T3 allow-listed', t3.length)}
       </div>
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">T1 PCI VID:PIDs — allow-list (${t1.length})</p>
+      <p class="text-xs font-bold text-slate-500 mb-1">T1 PCI VID:PIDs — allow-list (${t1.length})</p>
       ${_chips(t1)}
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-4 mb-1">T3 PCI VID:PIDs — allow-list (${t3.length})</p>
+      <p class="text-xs font-bold text-slate-500 mt-4 mb-1">T3 PCI VID:PIDs — allow-list (${t3.length})</p>
       ${_chips(t3)}
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-5 mb-2">Present T1 PCI devices (${t1Present.length})</p>
+      <p class="text-xs font-bold text-slate-500 mt-5 mb-2">Present T1 PCI devices (${t1Present.length})</p>
       ${_devTable(t1Present, 'T1')}
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-4 mb-2">Present T3 PCI devices (${t3Present.length})</p>
+      <p class="text-xs font-bold text-slate-500 mt-4 mb-2">Present T3 PCI devices (${t3Present.length})</p>
       ${_devTable(t3Present, 'T3')}
     </div>`);
 }
@@ -11159,7 +11159,7 @@ async function csRenderVmServerVh() {
     csSetToolbar('');
     await csVmLoad().catch((e) => { console.error('csRenderVmServerVh: csVmLoad failed (non-fatal, placeholder view)', e); });
     csSet(`<div>${csVmHostBanner()}
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">VirtualHere</p>
+      <p class="text-xs font-bold text-slate-500 mb-2">VirtualHere</p>
       ${csEmpty('VirtualHere server/device state is not part of the CS telemetry relay yet.',
                 'Once the spoke exposes vh_devices in its telemetry, the grouped device table renders here.')}
     </div>`);
@@ -11208,13 +11208,13 @@ async function csRenderVmServerQueue(live) {
       <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(c.age_secs != null ? c.age_secs + 's' : '—')}</td>
       <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(c.message || '—')}</td>
       <td class="px-3 py-2"><button data-cs-cmd-id="${csEscape(c.id || '')}" onclick="csCmdDelete(this)"
-        class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-[11px] font-bold">Delete</button></td>
+        class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-xs font-bold">Delete</button></td>
     </tr><tr class="bg-slate-50/60">
-      <td colspan="7" class="px-3 pb-2 pt-0 font-mono text-[11px] text-slate-500 break-all">${csEscape(_cmdStr || '—')}</td>
+      <td colspan="7" class="px-3 pb-2 pt-0 font-mono text-xs text-slate-500 break-all">${csEscape(_cmdStr || '—')}</td>
     </tr>`;
     }).join('');
     const sendForm = `<div class="hpe-card rounded-lg p-5 shadow-sm mb-4">
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">Send Proxmox Command</p>
+      <p class="text-xs font-bold text-slate-500 mb-2">Send Proxmox Command</p>
       <div class="flex flex-wrap gap-2 items-end text-sm">
         <div><label class="text-xs text-slate-500">Action</label>
           <select id="cs-cmd-action" class="border border-slate-200 rounded-md px-2 py-1">
@@ -11228,7 +11228,7 @@ async function csRenderVmServerQueue(live) {
         <button onclick="csClearCommands()" class="bg-red-100 text-red-700 px-3 py-1.5 rounded-md text-xs font-bold">Clear Queue</button>
       </div></div>`;
     csSet(`<div>${csVmHostBanner()}${sendForm}
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">Queue (${shown.length}${csVmSelectedHostIds.length ? ' of ' + cmds.length : ''})</p>
+      <p class="text-xs font-bold text-slate-500 mb-2">Queue (${shown.length}${csVmSelectedHostIds.length ? ' of ' + cmds.length : ''})</p>
       ${csTable(['ID', 'Action', 'Target', 'Status', 'Age', 'Message', 'Actions'], rows)}
     </div>`);
 }
@@ -11399,9 +11399,9 @@ function csFreshnessPanel(h) {
         : (h.host_stale ? `<span class="text-amber-600 font-bold">● STALE (${csEscape(secs(h.host_age_s))})</span>`
                         : '<span class="text-slate-500 font-bold">● —</span>');
     const tile = (label, val, hint) => `<div class="rounded-md border border-slate-200 bg-white px-3 py-2">
-        <div class="text-[10px] uppercase tracking-wider text-slate-500">${csEscape(label)}</div>
+        <div class="text-xs text-slate-500">${csEscape(label)}</div>
         <div class="text-sm font-mono font-bold text-slate-700">${csEscape(val)}</div>
-        ${hint ? `<div class="text-[10px] text-slate-500">${csEscape(hint)}</div>` : ''}</div>`;
+        ${hint ? `<div class="text-xs text-slate-500">${csEscape(hint)}</div>` : ''}</div>`;
     // A tick that never COMPLETES is a distinct, serious state: the agent stamps
     // _last_tick_done_ts at the very end of the loop body, so a null here means
     // every tick has raised before finishing (logged as "Telemetry push failed")
@@ -11411,8 +11411,8 @@ function csFreshnessPanel(h) {
     // bare "—" this was invisible; it is the single most diagnostic field here.
     const _neverDone = (f.last_tick_done_ts == null) && (f.iter != null);
     const _stallBanner = _neverDone ? `<div class="mb-2 border border-red-200 bg-red-50 rounded-md px-3 py-2">
-        <p class="text-[11px] font-bold text-red-700">No telemetry tick has COMPLETED on this agent</p>
-        <p class="text-[10px] text-red-600/90">The agent stamps completion at the end of its loop body, so every tick is
+        <p class="text-xs font-bold text-red-700">No telemetry tick has COMPLETED on this agent</p>
+        <p class="text-xs text-red-600/90">The agent stamps completion at the end of its loop body, so every tick is
         either raising before it finishes (look for <code>Telemetry push failed</code> in the agent log) or the process is
         being restarted mid-tick (<code>Watchdog timeout</code> in journalctl). This also starves the systemd watchdog,
         which feeds only on that stamp — expect a kill once the 300s startup grace expires, and <b>tick #1</b> forever.</p>
@@ -11420,7 +11420,7 @@ function csFreshnessPanel(h) {
     return `<div class="hpe-card rounded-lg p-4 shadow-sm mb-4">
       ${_stallBanner}
       <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
-        <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Telemetry Freshness</p>
+        <p class="text-xs font-bold text-slate-500">Telemetry Freshness</p>
         <span class="text-xs text-slate-500">${state} · agent v${csEscape(String(f.agent_version || '—'))} · tick #${csEscape(String(f.iter != null ? f.iter : '—'))}</span>
       </div>
       <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 mb-3">
@@ -11430,7 +11430,7 @@ function csFreshnessPanel(h) {
         ${tile('Hub cached', secs(f.hub_cache_age_s) + ' ago', 'hub received frame')}
         ${tile('Tick cadence', f.interval_s != null ? f.interval_s + 's' : '—', 'agent loop interval')}
       </div>
-      <div class="text-[10px] text-slate-500 mt-2">VMs ${csEscape(String(f.vm_count != null ? f.vm_count : '—'))} · nodes ${csEscape(String(f.node_count != null ? f.node_count : '—'))} · loop body ${ms(ph.body_ms)}. Read <b>loop body</b> against the tick cadence first: a body far larger than the cadence means the AGENT is stuck, not the relay. Per-phase timings (metrics / get_vm_list / get_node_stats / compute_tiers) are in the <b>Show Tech</b> download.</div>
+      <div class="text-xs text-slate-500 mt-2">VMs ${csEscape(String(f.vm_count != null ? f.vm_count : '—'))} · nodes ${csEscape(String(f.node_count != null ? f.node_count : '—'))} · loop body ${ms(ph.body_ms)}. Read <b>loop body</b> against the tick cadence first: a body far larger than the cadence means the AGENT is stuck, not the relay. Per-phase timings (metrics / get_vm_list / get_node_stats / compute_tiers) are in the <b>Show Tech</b> download.</div>
     </div>`;
 }
 
@@ -11571,9 +11571,9 @@ function csCardSuspicionBanner(entries, ctrls) {
         // "3 of 7" would imply a missing device that was never there.
         const of = s.total ? ` of ${s.total} populated` : '';
         return `<div class="mb-2 rounded-md border px-3 py-2 ${hi ? 'border-red-300 bg-red-50' : 'border-amber-300 bg-amber-50'}">
-          <p class="text-[11px] font-bold ${hi ? 'text-red-700' : 'text-amber-700'}">
+          <p class="text-xs font-bold ${hi ? 'text-red-700' : 'text-amber-700'}">
             ⚠ Suspect controller — ${csEscape(s.label || s.key)}${(s.card && String(s.label || '').indexOf(s.card) < 0) ? ` <span class="font-mono">${csEscape(s.card)}</span>` : ''}${s.cardPorts ? ` <span class="font-normal">(${csEscape(String(s.cardPorts))}-port)</span>` : ''}${s.role ? ` [${csEscape(String(s.role).toUpperCase())}]` : ''}</p>
-          <p class="text-[11px] ${hi ? 'text-red-600/90' : 'text-amber-600/90'}">
+          <p class="text-xs ${hi ? 'text-red-600/90' : 'text-amber-600/90'}">
             ${s.nPorts}${of} port(s) sidelined on this one card (ports ${csEscape(s.ports.join(', '))})${s.sameReason && s.reason ? `, all with the same fault: <b>${csEscape(s.reason)}</b>` : ''}.
             Dongles failing together on a single controller point at the <b>card, its slot or its power</b> — not at the dongles.
             Reseat or replace the card, or move a dongle to a different controller to confirm, before swapping sticks.</p>
@@ -11703,13 +11703,13 @@ function _csRenderWatch() {
         timeout:  { cls: 'border-slate-300', dot: 'bg-slate-400',
                     head: 'Stopped watching', body: 'No change for 10 minutes.' },
     }[w.state] || { cls: 'border-slate-300', dot: 'bg-slate-400', head: w.state, body: '' };
-    const was = b.vidpid ? `<div class="text-[10px] text-slate-500 mt-1">was ${csEscape(b.product || '')} <span class="font-mono">${csEscape(b.vidpid)}</span>${b.mac ? ' · mac ' + csEscape(b.mac) : ''}</div>` : '';
-    const now = (p.present && w.state !== 'present') ? `<div class="text-[10px] text-slate-500">now <span class="font-mono">${csEscape(p.vidpid || '?')}</span>${p.mac ? ' · mac ' + csEscape(p.mac) : ''}${p.devnum ? ' · dev ' + csEscape(p.devnum) : ''}</div>` : '';
+    const was = b.vidpid ? `<div class="text-xs text-slate-500 mt-1">was ${csEscape(b.product || '')} <span class="font-mono">${csEscape(b.vidpid)}</span>${b.mac ? ' · mac ' + csEscape(b.mac) : ''}</div>` : '';
+    const now = (p.present && w.state !== 'present') ? `<div class="text-xs text-slate-500">now <span class="font-mono">${csEscape(p.vidpid || '?')}</span>${p.mac ? ' · mac ' + csEscape(p.mac) : ''}${p.devnum ? ' · dev ' + csEscape(p.devnum) : ''}</div>` : '';
     // Neighbours make "did I grab the one next to it?" answerable at a glance.
     const sibs = Array.isArray(p.siblings) ? p.siblings.filter(x => x && x.bus_path !== w.bus) : [];
     const sibHtml = sibs.length ? `<div class="mt-2 pt-2 border-t border-slate-100">
-        <p class="text-[10px] uppercase tracking-wider text-slate-500 mb-0.5">Others on this card</p>
-        ${sibs.map(x => `<div class="text-[10px] text-slate-500 font-mono">${csEscape(x.bus_path)} · ${csEscape(x.vidpid || '—')}</div>`).join('')}
+        <p class="text-xs text-slate-500 mb-0.5">Others on this card</p>
+        ${sibs.map(x => `<div class="text-xs text-slate-500 font-mono">${csEscape(x.bus_path)} · ${csEscape(x.vidpid || '—')}</div>`).join('')}
       </div>` : '';
     el.className = `fixed bottom-4 right-4 z-50 w-96 rounded-lg shadow-xl border-2 bg-white ${S.cls}`;
     el.innerHTML = `<div class="p-3">
@@ -11720,8 +11720,8 @@ function _csRenderWatch() {
           </div>
           <button onclick="csStopDongleWatch()" class="text-slate-500 hover:text-slate-600 text-xs font-bold">✕</button>
         </div>
-        <div class="text-[11px] text-slate-600 mt-1">${S.body}</div>
-        <div class="text-[10px] text-slate-500 mt-2 font-mono">${csEscape(w.bus)}${b.location ? ' · ' + csEscape(b.location) : ''}</div>
+        <div class="text-xs text-slate-600 mt-1">${S.body}</div>
+        <div class="text-xs text-slate-500 mt-2 font-mono">${csEscape(w.bus)}${b.location ? ' · ' + csEscape(b.location) : ''}</div>
         ${was}${now}${sibHtml}
       </div>`;
 }
@@ -11805,7 +11805,7 @@ function csFmtKnownObj(k, v) {
                 ? `<span class="text-slate-500" title="${esc(cardDevs + ' device(s) present on a ' + cardPorts + '-port card')}">${esc(cardDevs || '?')}/${esc(cardPorts)} ports</span>`
                 : '';
             const card = o.card_vidpid
-                ? `<span class="text-slate-600">card <span class="font-mono">${esc(o.card_vidpid)}</span>${cardLoad ? ' · ' + cardLoad : ''}${role ? ` <span title="${esc(roleTip)}" class="px-1 rounded bg-slate-200 text-slate-700 font-bold text-[10px]">${esc(role)}</span>` : ''}</span>`
+                ? `<span class="text-slate-600">card <span class="font-mono">${esc(o.card_vidpid)}</span>${cardLoad ? ' · ' + cardLoad : ''}${role ? ` <span title="${esc(roleTip)}" class="px-1 rounded bg-slate-200 text-slate-700 font-bold text-xs">${esc(role)}</span>` : ''}</span>`
                 : '';
             const id = [o.name ? esc(o.name) : '', card].filter(Boolean).join(' · ');
             const since = o.since
@@ -11828,10 +11828,10 @@ function csFmtKnownObj(k, v) {
               </div>
               ${id ? `<div class="text-slate-500">${id}</div>` : ''}
               <div class="text-slate-600">${esc(o.reason || (qt ? 'quarantined' : 'excluded'))}</div>
-              <div class="text-[11px] text-slate-500">${back} · ${flags}</div>
-              <div class="text-[11px] text-slate-500">since ${since}</div>
+              <div class="text-xs text-slate-500">${back} · ${flags}</div>
+              <div class="text-xs text-slate-500">since ${since}</div>
               ${o.bus_path ? `<button onclick="csReplaceDongle('${esc(o.bus_path)}')"
-                class="mt-1 px-2 py-0.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-[10px] font-bold text-slate-600"
+                class="mt-1 px-2 py-0.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-xs font-bold text-slate-600"
                 title="Watch this port live while you pull the dongle — confirms you removed the RIGHT one without touching the CLI.">⟳ Replace Dongle</button>` : ''}
             </div>`;
         }).join('');
@@ -11905,13 +11905,13 @@ function csTelemetryTile(k, v, spanCls) {
         const wide = _CS_WIDE_TELEMETRY_KEYS.has(k) || nKeys >= _CS_WIDE_TELEMETRY_MIN_KEYS;
         if (wide) {
             return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 ${spanCls || 'col-span-1 sm:col-span-2 lg:col-span-3 xl:col-span-4'}">
-              <p class="text-[10px] uppercase tracking-wider text-slate-500 break-all">${csEscape(k)}</p>
+              <p class="text-xs text-slate-500 break-all">${csEscape(k)}</p>
               <div class="text-xs text-slate-700 mt-1 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-x-6">${csFmtObjRows(v)}</div>
             </div>`;
         }
         const inner = known || csFmtObjRows(v);
         return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 ${spanCls || 'sm:col-span-2 lg:col-span-2'}">
-          <p class="text-[10px] uppercase tracking-wider text-slate-500 break-all">${csEscape(k)}</p>
+          <p class="text-xs text-slate-500 break-all">${csEscape(k)}</p>
           <div class="text-xs text-slate-700 mt-1 space-y-0.5 max-h-48 overflow-auto">${inner}</div>
         </div>`;
     }
@@ -11948,7 +11948,7 @@ function csLinkApprovalCard(h) {
         drop = ` · <span class="text-slate-500">last drop: ${csEscape(String(f.last_disconnect_reason))}${f.last_disconnect_age_s != null ? ' (' + csEscape(csAgeShort(f.last_disconnect_age_s)) + ' ago)' : ''}</span>`;
     }
     return `<div class="hpe-card rounded-lg p-4 shadow-sm mb-4">
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">Link &amp; Approval</p>
+      <p class="text-xs font-bold text-slate-500 mb-2">Link &amp; Approval</p>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm text-slate-700">
         <div><span class="text-slate-500">Spoke:</span> ${csEscape(String(spokeName))} ${spokeDot}</div>
         <div id="cs-link-agent"><span class="text-slate-500">Agent link:</span> <span class="text-slate-500">checking…</span></div>
@@ -12198,14 +12198,14 @@ async function csRenderVmServerDetails() {
       </div>
       ${csLinkApprovalCard(h)}
       ${csFreshnessPanel(h)}
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-4 mb-2">USB Diagnostics</p>
+      <p class="text-xs font-bold text-slate-500 mt-4 mb-2">USB Diagnostics</p>
       ${_csDongleDiagHost(h)}
       <div class="flex items-center justify-between mb-2">
-        <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Telemetry</p>
-        <span class="text-[10px] text-slate-500">${entries.length} field${entries.length === 1 ? '' : 's'}</span>
+        <p class="text-xs font-bold text-slate-500">Telemetry</p>
+        <span class="text-xs text-slate-500">${entries.length} field${entries.length === 1 ? '' : 's'}</span>
       </div>
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">${tiles}</div>
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-4 mb-2">Auto-Provisioning</p>
+      <p class="text-xs font-bold text-slate-500 mt-4 mb-2">Auto-Provisioning</p>
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">${csProvisionCard(px)}</div>
       <details class="mt-4 text-xs"><summary class="cursor-pointer text-slate-500">Raw payload</summary>${csJsonDump(h)}</details>
     </div>`);
@@ -12308,7 +12308,7 @@ function _csRepoStatusSection(apiData) {
                 <div class="flex items-center justify-between gap-2">
                   <span class="text-xs font-bold text-slate-600">${esc(name)}</span>${online}
                 </div>
-                <div class="text-[11px] text-slate-500 italic mt-1">repo status unavailable — spoke offline or pre-update</div>
+                <div class="text-xs text-slate-500 italic mt-1">repo status unavailable — spoke offline or pre-update</div>
               </div>`;
         }
         const rs = rp.scripts || {};
@@ -12328,12 +12328,12 @@ function _csRepoStatusSection(apiData) {
               <span class="text-xs font-bold text-slate-600">${esc(name)}</span>
               <span class="flex flex-wrap items-center gap-2 justify-end">
                 ${online}
-                <span class="border rounded-full px-2 py-0.5 text-[10px] font-bold ${branchCls}">${esc(rp.configured_branch || 'branch ?')}</span>
-                <span class="text-[10px] text-slate-500">v${esc(rp.served_version || '?')}</span>
+                <span class="border rounded-full px-2 py-0.5 text-xs font-bold ${branchCls}">${esc(rp.configured_branch || 'branch ?')}</span>
+                <span class="text-xs text-slate-500">v${esc(rp.served_version || '?')}</span>
               </span>
             </div>
-            <div class="text-[11px] text-slate-500 font-mono mt-1 break-all">simulation.sh ${esc(rs['simulation.sh'] || '?')} · dns_latency.sh ${esc(rp.dns_latency_present ? (rs['dns_latency.sh'] || 'yes') : 'MISSING')} · dns_fail ${esc(rs['dns_fail.sh'] || '?')} · head ${esc(rp.head || '?')} · checked-out ${esc(rp.checked_out_branch || '?')} · source ${esc(rp.source_of_truth || '?')}</div>
-            ${warns.map(([w, c]) => `<div class="text-[11px] ${c} mt-1">⚠️ ${w}</div>`).join('')}
+            <div class="text-xs text-slate-500 font-mono mt-1 break-all">simulation.sh ${esc(rs['simulation.sh'] || '?')} · dns_latency.sh ${esc(rp.dns_latency_present ? (rs['dns_latency.sh'] || 'yes') : 'MISSING')} · dns_fail ${esc(rs['dns_fail.sh'] || '?')} · head ${esc(rp.head || '?')} · checked-out ${esc(rp.checked_out_branch || '?')} · source ${esc(rp.source_of_truth || '?')}</div>
+            ${warns.map(([w, c]) => `<div class="text-xs ${c} mt-1">⚠️ ${w}</div>`).join('')}
           </div>`;
     }).join('');
     // Two-up on wide screens so a 4-spoke fleet fills the width instead of
@@ -12371,9 +12371,9 @@ function csDiagTile(label, val, hint, tone) {
         : tone === 'warn' ? 'text-amber-600'
         : tone === 'good' ? 'text-primary-text' : 'text-slate-700';
     return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2">
-        <div class="text-[10px] uppercase tracking-wider text-slate-500">${csEscape(label)}</div>
+        <div class="text-xs text-slate-500">${csEscape(label)}</div>
         <div class="text-sm font-mono font-bold ${v} truncate" title="${csEscape(val)}">${csEscape(val)}</div>
-        ${hint ? `<div class="text-[10px] text-slate-500 truncate" title="${csEscape(hint)}">${csEscape(hint)}</div>` : ''}</div>`;
+        ${hint ? `<div class="text-xs text-slate-500 truncate" title="${csEscape(hint)}">${csEscape(hint)}</div>` : ''}</div>`;
 }
 
 // Default 5-up on large screens, matching the freshness grid.
@@ -12384,13 +12384,13 @@ function csDiagTiles(tiles, cols) {
 // Group label inside a section (freshness's "Agent collect phase — last tick").
 function csDiagSub(text, right) {
     return `<div class="flex items-center justify-between mb-2 flex-wrap gap-2 mt-3">
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">${csEscape(text)}</p>
+      <p class="text-xs font-bold text-slate-500">${csEscape(text)}</p>
       ${right ? `<span class="text-xs text-slate-500">${right}</span>` : ''}</div>`;
 }
 
 // Footer note, freshness's closing-paragraph treatment.
 function csDiagNote(html) {
-    return `<div class="text-[10px] text-slate-500 mt-2">${html}</div>`;
+    return `<div class="text-xs text-slate-500 mt-2">${html}</div>`;
 }
 
 function csDiagSection(id, title, opts) {
@@ -12404,8 +12404,8 @@ function csDiagSection(id, title, opts) {
         <span class="ml-auto flex items-center gap-2 shrink-0">${o.actions || ''}</span>
       </summary>
       <div class="px-5 pb-5">
-        ${o.help ? `<details class="mb-3"><summary class="cursor-pointer text-[11px] text-slate-500 hover:text-slate-600">ℹ What this means</summary>
-          <div class="text-[11px] text-slate-500 mt-1 leading-relaxed">${o.help}</div></details>` : ''}
+        ${o.help ? `<details class="mb-3"><summary class="cursor-pointer text-xs text-slate-500 hover:text-slate-600">ℹ What this means</summary>
+          <div class="text-xs text-slate-500 mt-1 leading-relaxed">${o.help}</div></details>` : ''}
         <div id="${id}">${o.body || '<p class="text-slate-500 italic text-xs">Loading…</p>'}</div>
       </div>
     </details>`;
@@ -12593,7 +12593,7 @@ async function csRenderSetupDiagnostics() {
         ? `${_repoSpokes.length} spoke(s)` + (_offBranch ? ` · ${_offBranch} tracking a non-main branch` : ' · all on main')
         : 'no repo status reported';
     const _disabledLine = _disabled.length
-      ? `<p class="text-[11px] text-amber-600 mb-2">${csEscape(String(_disabled.length))} agent(s) hidden (CS disabled) — enable in Agent Config to manage their VMs.</p>`
+      ? `<p class="text-xs text-amber-600 mb-2">${csEscape(String(_disabled.length))} agent(s) hidden (CS disabled) — enable in Agent Config to manage their VMs.</p>`
       : '';
     const _btn = 'text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50';
     const _act = (label, fn, title) =>
@@ -12603,7 +12603,7 @@ async function csRenderSetupDiagnostics() {
       <div class="hpe-card rounded-lg shadow-sm p-5 mb-4 flex flex-wrap items-center gap-3">
         <div>
           <p class="text-lg font-bold text-navy">Diagnostics</p>
-          <p class="text-[11px] text-slate-500">Captured ${csEscape(window._csDiagData.fetched_at)} — sections with a problem open automatically.</p>
+          <p class="text-xs text-slate-500">Captured ${csEscape(window._csDiagData.fetched_at)} — sections with a problem open automatically.</p>
         </div>
         <div class="ml-auto flex items-center gap-2">
           <button type="button" onclick="csCopyAllDiagnostics(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-xs font-bold" title="Copy EVERY section below as plain text — repo status, CS bridge, missing dongles, sim tags and sim DHCP. Paste straight into a ticket or chat.">⧉ Copy all diagnostics</button>
@@ -12670,9 +12670,9 @@ function _csDongleDiagHost(h) {
         return `<div class="border border-slate-200 rounded-lg p-3 mb-3">
           <div class="flex items-center justify-between mb-1">
             <span class="font-mono text-xs font-bold text-slate-600">${name}</span>
-            <span class="text-[10px] text-slate-500">no diagnostic reported</span>
+            <span class="text-xs text-slate-500">no diagnostic reported</span>
           </div>
-          <p class="text-[11px] text-slate-500">This host's agent has not sent a dongle diagnostic. That is <b>not</b> the same as "no dongles missing" — it usually means the agent predates this feature and needs an update.</p>
+          <p class="text-xs text-slate-500">This host's agent has not sent a dongle diagnostic. That is <b>not</b> the same as "no dongles missing" — it usually means the agent predates this feature and needs an update.</p>
         </div>`;
     }
     const missing = Array.isArray(d.missing) ? d.missing : [];
@@ -12703,7 +12703,7 @@ function _csDongleDiagHost(h) {
       <td class="px-3 py-1.5 font-mono text-xs">${csEscape(m.bus_path || '—')}</td>
       <td class="px-3 py-1.5 text-xs text-slate-600">${csEscape(m.location || '—')}</td>
       <td class="px-3 py-1.5 text-xs text-slate-600">${csEscape(m.product || '—')}</td>
-      <td class="px-3 py-1.5 font-mono text-[11px] text-slate-500">${csEscape(m.vidpid || '—')}</td>
+      <td class="px-3 py-1.5 font-mono text-xs text-slate-500">${csEscape(m.vidpid || '—')}</td>
       <td class="px-3 py-1.5 text-xs text-slate-500">${csEscape(m.last_seen ? csAgeShort(nowS - m.last_seen) + ' ago' : '—')}</td>
       <td class="px-3 py-1.5 text-xs ${m.missing_for_s > 86400 ? 'text-red-600 font-bold' : 'text-amber-600'}">${m.missing_for_s != null ? csEscape(csAgeShort(m.missing_for_s)) : '—'}</td>
     </tr>`).join('');
@@ -12713,10 +12713,10 @@ function _csDongleDiagHost(h) {
         return `<div class="border rounded-md p-2 mb-1.5 ${cls}">
           <div class="flex items-center gap-2 mb-0.5">
             <span class="text-xs font-bold">${csEscape(c.cause || '—')}</span>
-            <span class="text-[9px] uppercase tracking-wider opacity-70">${csEscape(c.confidence || '')}</span>
+            <span class="text-xs opacity-70">${csEscape(c.confidence || '')}</span>
           </div>
-          <p class="text-[11px] opacity-90">${csEscape(c.detail || '')}</p>
-          ${c.remedy ? `<p class="text-[11px] mt-1"><b>Fix:</b> ${csEscape(c.remedy)}</p>` : ''}
+          <p class="text-xs opacity-90">${csEscape(c.detail || '')}</p>
+          ${c.remedy ? `<p class="text-xs mt-1"><b>Fix:</b> ${csEscape(c.remedy)}</p>` : ''}
         </div>`;
     }).join('');
 
@@ -12738,7 +12738,7 @@ function _csDongleDiagHost(h) {
     // the dongle is failing. Only SPONTANEOUS events are evidence of hardware.
     const attr = kernel.attribution || null;
     const attrLine = (attr && (attr.self_inflicted || attr.spontaneous))
-        ? `<div class="mt-1 text-[11px] ${attr.spontaneous ? 'text-slate-600' : 'text-slate-500'}">`
+        ? `<div class="mt-1 text-xs ${attr.spontaneous ? 'text-slate-600' : 'text-slate-500'}">`
           + `<b>${csEscape(String(attr.spontaneous))}</b> spontaneous`
           + (attr.self_inflicted
               ? ` · <span class="text-slate-500">${csEscape(String(attr.self_inflicted))} self-inflicted (agent usb_reset — not hardware evidence)</span>`
@@ -12763,7 +12763,7 @@ function _csDongleDiagHost(h) {
     const hubs = Array.isArray(d.hubs) ? d.hubs : [];
     const realHubs = hubs.filter(h => h && !h.is_root_hub);
     const hubHtml = !realHubs.length ? '' : `
-      <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mt-3 mb-1">USB hubs</p>
+      <p class="text-xs font-bold text-slate-500 mt-3 mb-1">USB hubs</p>
       <div class="overflow-x-auto">${csTable(['Hub', 'Product', 'Ports', 'Attached', 'Power', 'Per-port power'],
         realHubs.map(h => {
             const over = Number(h.attached || 0) > Number(d.hub_dongle_ceiling || 7);
@@ -12774,15 +12774,15 @@ function _csDongleDiagHost(h) {
               <td class="px-3 py-1.5 text-xs ${over ? 'text-red-600 font-bold' : 'text-slate-700'}">${csEscape(String(h.attached != null ? h.attached : '—'))}${over ? ` / ${csEscape(String(d.hub_dongle_ceiling || 7))}` : ''}</td>
               <td class="px-3 py-1.5 text-xs ${h.self_powered ? 'text-slate-600' : 'text-amber-600 font-bold'}">${h.self_powered ? 'self-powered' : 'bus-powered'}</td>
               <td class="px-3 py-1.5 text-xs">${h.ppps
-                  ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700" title="uhubctl can cut VBUS on an individual port — a far less destructive recovery rung than usb_reset, which yanks the device out from under a VM holding it.">✓ can power-cycle</span>'
-                  : '<span class="text-slate-500 text-[10px]">no PPPS</span>'}</td>
+                  ? '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700" title="uhubctl can cut VBUS on an individual port — a far less destructive recovery rung than usb_reset, which yanks the device out from under a VM holding it.">✓ can power-cycle</span>'
+                  : '<span class="text-slate-500 text-xs">no PPPS</span>'}</td>
             </tr>`;
         }).join(''))}</div>
       ${realHubs.flatMap(h => (h.warnings || []).map(w =>
-        `<div class="mt-1 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">⚠ ${csEscape(h.bus_path)}: ${csEscape(w)}</div>`)).join('')}`;
+        `<div class="mt-1 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">⚠ ${csEscape(h.bus_path)}: ${csEscape(w)}</div>`)).join('')}`;
     return `<div class="hpe-card rounded-lg p-4 shadow-sm mb-4">
       <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
-        <p class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">${name}</p>
+        <p class="text-xs font-bold text-slate-500">${name}</p>
         <span class="text-xs text-slate-500">${missing.length
             ? `<span class="text-red-600 font-bold">● ${missing.length} MISSING</span>`
             : '<span class="text-green-600 font-bold">● NONE MISSING</span>'} · collected ${csEscape(age)}</span>
@@ -12854,8 +12854,8 @@ async function csRenderDongleDiag() {
                   : `none missing · ${reported}/${sorted.length} host(s) reporting`);
     const summary = `<div class="flex flex-wrap items-center gap-2 mb-3 text-xs text-slate-500">
       <span><b class="text-sm ${totalMissing ? 'text-red-600' : 'text-slate-700'}">${totalMissing}</b> dongle(s) missing fleet-wide</span>
-      <span class="text-[11px]">·</span>
-      <span class="text-[11px]">${anyPpps
+      <span class="text-xs">·</span>
+      <span class="text-xs">${anyPpps
         ? 'at least one host can power-cycle ports with <code>uhubctl -a cycle</code>'
         : 'no host has a PPPS-capable hub — the fallback is an xHCI unbind/rebind, which resets every device on that controller'}</span>
     </div>`;
@@ -12944,7 +12944,7 @@ function csCompSinceNote(data) {
 }
 
 function csCompProductTag(c) {
-    return c.product ? `<span class="text-[10px] uppercase tracking-wider text-slate-500 mr-1">${csEscape(c.product)}</span>` : '';
+    return c.product ? `<span class="text-xs text-slate-500 mr-1">${csEscape(c.product)}</span>` : '';
 }
 
 // ── Option A: scorecard ─────────────────────────────────────────────────────
@@ -12955,19 +12955,19 @@ async function csRenderCompliance() {
         const o = data.overall[k] || {};
         const cover = o.days ? `based on ${o.days} day${o.days === 1 ? '' : 's'} of data` : 'no data';
         return `<div class="bg-white border border-slate-200 rounded-lg p-4">
-          <div class="text-xs uppercase tracking-wider text-slate-500 font-semibold">${label} <span class="normal-case font-normal">· last ${span}</span></div>
+          <div class="text-xs text-slate-500 font-semibold">${label} <span class="normal-case font-normal">· last ${span}</span></div>
           <div class="mt-1">${csCompPct(o.pct, 'text-3xl font-bold')}</div>
           <div class="text-xs mt-1">${csCompDelta(o.pct, o.prev)}</div>
-          <div class="text-[11px] text-slate-500 mt-1">${cover}</div>
+          <div class="text-xs text-slate-500 mt-1">${cover}</div>
         </div>`;
     }).join('');
     // Vertical bar per month; height = compliance %.
     const bars = data.months.map(m => {
         const h = m.pct === null ? 0 : Math.max(2, m.pct);
         return `<div class="flex flex-col items-center flex-1 min-w-0" title="${csCompMonthLabel(m.m)}: ${m.pct === null ? 'no data' : m.pct + '% (' + m.ok + ' of ' + m.graded + ' polls OK)'}">
-          <div class="text-[10px] ${csCompColor(m.pct)} font-semibold h-4">${m.pct === null ? '' : m.pct + '%'}</div>
+          <div class="text-xs ${csCompColor(m.pct)} font-semibold h-4">${m.pct === null ? '' : m.pct + '%'}</div>
           <div class="w-full h-32 flex items-end"><div class="w-full rounded-t ${csCompBg(m.pct).split(' ')[0]}" style="height:${h}%"></div></div>
-          <div class="text-[10px] text-slate-500 mt-1">${csCompMonthLabel(m.m)}</div>
+          <div class="text-xs text-slate-500 mt-1">${csCompMonthLabel(m.m)}</div>
         </div>`;
     }).join('');
     const quarters = data.quarters.map(q => `<div class="bg-white border border-slate-200 rounded-lg p-3 text-center">
@@ -12993,7 +12993,7 @@ async function csRenderCompliance() {
       <div class="bg-white border border-slate-200 rounded-lg overflow-x-auto">
         <div class="text-sm font-semibold text-slate-700 px-4 pt-4 pb-2">All checks <span class="text-xs font-normal text-slate-500">· worst month first</span></div>
         <table class="w-full text-sm">
-          <thead class="text-xs uppercase tracking-wider text-slate-500 bg-slate-50">
+          <thead class="text-xs text-slate-500 bg-slate-50">
             <tr><th class="px-3 py-2 text-left font-semibold">Check</th><th class="px-3 py-2 text-right font-semibold">Sites</th>${headCells}</tr>
           </thead>
           <tbody>${overallRow}${checkRows}</tbody>
@@ -13006,7 +13006,7 @@ async function csRenderCompliance() {
 // ── Option B: by check ──────────────────────────────────────────────────────
 // One cell per hour: green all OK, amber mixed (flapping), red mostly failing, grey no data.
 function csCompHourBar(hours) {
-    if (!hours || !hours.length) return '<span class="text-[11px] text-slate-500">daily data only</span>';
+    if (!hours || !hours.length) return '<span class="text-xs text-slate-500">daily data only</span>';
     return `<div class="flex gap-px">${hours.map(c => {
         const bad = c.w + c.e;
         const graded = c.o + bad;
@@ -13037,7 +13037,7 @@ async function csRenderComplianceByCheck() {
     </tr>`;
     const rows = data.checks.map(c => `<tr class="border-t border-slate-100">
       <td class="px-3 py-2 font-mono text-xs">${csCompProductTag(c)}${csEscape(c.check)}
-        <div class="text-[10px] text-slate-500">${c.sites} site${c.sites === 1 ? '' : 's'}</div></td>
+        <div class="text-xs text-slate-500">${c.sites} site${c.sites === 1 ? '' : 's'}</div></td>
       <td class="px-3 py-2">${csCompHourBar(c.hours)}</td>
       <td class="px-3 py-2 text-right">${csCompFlaps(c.flaps)}</td>
       ${cols.map(k => `<td class="px-3 py-2 text-right">${csCompPct(c[k])}</td>`).join('')}
@@ -13047,7 +13047,7 @@ async function csRenderComplianceByCheck() {
     csSet(`<div class="space-y-3">
       <div class="overflow-x-auto bg-white border border-slate-200 rounded-lg">
         <table class="w-full text-sm">
-          <thead class="text-xs uppercase tracking-wider text-slate-500 bg-slate-50">
+          <thead class="text-xs text-slate-500 bg-slate-50">
             <tr>${th('Check')}${th('Last 24 hours')}${thr('Flaps')}${thr('24h')}${thr('7d')}${thr('30d')}${thr('90d')}${thr('1y')}</tr>
           </thead>
           <tbody>${overall}${rows}</tbody>
@@ -13065,14 +13065,14 @@ async function csRenderComplianceByCheck() {
 async function csRenderComplianceHeatmap() {
     const data = await csComplianceLoad();
     if (!data) return;
-    const cell = v => `<td class="p-0.5"><div class="${csCompBg(v)} rounded text-[11px] font-semibold text-center py-1.5 min-w-[3.25rem]">${v === null || v === undefined ? '—' : v + '%'}</div></td>`;
+    const cell = v => `<td class="p-0.5"><div class="${csCompBg(v)} rounded text-xs font-semibold text-center py-1.5 min-w-[3.25rem]">${v === null || v === undefined ? '—' : v + '%'}</div></td>`;
     const head = data.months.map(m => `<th class="px-1 py-2 text-center font-semibold">${csCompMonthLabel(m.m)}</th>`).join('');
     const overall = `<tr><td class="px-3 py-1 text-sm font-semibold">Overall</td>${data.months.map(m => cell(m.pct)).join('')}${cell((data.overall.y1 || {}).pct)}</tr>`;
     const rows = data.checks.map(c => `<tr><td class="px-3 py-1 font-mono text-xs whitespace-nowrap">${csCompProductTag(c)}${csEscape(c.check)}</td>${c.months.map(cell).join('')}${cell(c.y1)}</tr>`).join('');
     csSet(`<div class="space-y-3">
       <div class="overflow-x-auto bg-white border border-slate-200 rounded-lg p-2">
         <table class="text-sm">
-          <thead class="text-xs uppercase tracking-wider text-slate-500"><tr><th class="px-3 py-2 text-left font-semibold">Check</th>${head}<th class="px-1 py-2 text-center font-semibold">Year</th></tr></thead>
+          <thead class="text-xs text-slate-500"><tr><th class="px-3 py-2 text-left font-semibold">Check</th>${head}<th class="px-1 py-2 text-center font-semibold">Year</th></tr></thead>
           <tbody>${overall}<tr><td colspan="${data.months.length + 2}" class="h-2"></td></tr>${rows}</tbody>
         </table>
       </div>
@@ -13201,7 +13201,7 @@ async function csRenderSpokeManagement() {
         const s = String(t || '').toLowerCase();
         const cls = (s === 'simulation' || s === 'client-sim' || s === 'cs')
             ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500';
-        return `<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${cls}">${csEscape(t || '—')}</span>`;
+        return `<span class="px-2 py-0.5 rounded text-xs font-bold ${cls}">${csEscape(t || '—')}</span>`;
     };
     const tenantCell = (t) => t ? csEscape(t) : `<span class="text-amber-600 font-semibold">unbound</span>`;
 
@@ -13236,7 +13236,7 @@ async function csRenderSpokeManagement() {
         const dataAttrs = `data-cs-spoke="${csEscape(s.spoke_id).toLowerCase()}" data-cs-name="${csEscape((s.display_name || s.spoke_id || '').toLowerCase())}"`;
         return `<tr class="cs-spoke-row" ${dataAttrs}>
           <td class="px-3 pt-2 pb-1 text-sm whitespace-nowrap">${csEscape((s.display_name && s.display_name !== s.spoke_id) ? s.display_name : (s.hostname || '—'))}</td>
-          <td class="px-3 pt-2 pb-1 font-mono text-[10px] text-slate-500 whitespace-nowrap">${csEscape(s.spoke_id)}</td>
+          <td class="px-3 pt-2 pb-1 font-mono text-xs text-slate-500 whitespace-nowrap">${csEscape(s.spoke_id)}</td>
           <td class="px-3 pt-2 pb-1 whitespace-nowrap">${typeBadge(s.module_type)}</td>
           <td class="px-3 pt-2 pb-1 whitespace-nowrap">${csOnlineBadge(s.connected)}</td>
           <td class="px-3 pt-2 pb-1 whitespace-nowrap">${s.approved ? '<span class="text-green-600 text-xs font-bold">Approved</span>' : '<span class="text-amber-600 text-xs font-bold">Pending</span>'}</td>
@@ -13251,15 +13251,15 @@ async function csRenderSpokeManagement() {
     const rows = spokes.map(window._csSpokeRowHtml).join('');
     const spokesCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex justify-between items-center mb-3">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes ${helpIcon('cs', null, 'Simulations help')}</h3>
+        <h3 class="text-sm font-bold text-slate-500">Spokes ${helpIcon('cs', null, 'Simulations help')}</h3>
         <span class="text-xs text-slate-500">${admin ? 'All tenants (admin)' : 'Tenant: ' + csEscape(tenant)}</span>
       </div>
       ${csTable(['Name', 'Spoke ID', 'Type', 'State', 'Approval', 'Tenant', 'VMs'], rows)}
     </div>`;
 
     const claimCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Claim a Pending Simulation Spoke ${helpIcon('cs', null, 'Simulations help')}</h3>
-      <p class="text-[11px] text-slate-500 mb-3">If a <b>Simulation</b> spoke connected <em>without</em> a PSK it lands as pending. Enter its Spoke ID and this tenant's onboarding PSK to approve + bind it to <span class="font-mono">${csEscape(tenant)}</span>. Only Simulation (Client-Sim) spokes can be claimed here.</p>
+      <h3 class="text-sm font-bold text-slate-500 mb-2">Claim a Pending Simulation Spoke ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <p class="text-xs text-slate-500 mb-3">If a <b>Simulation</b> spoke connected <em>without</em> a PSK it lands as pending. Enter its Spoke ID and this tenant's onboarding PSK to approve + bind it to <span class="font-mono">${csEscape(tenant)}</span>. Only Simulation (Client-Sim) spokes can be claimed here.</p>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
         <input id="cs-claim-id" placeholder="spoke-id" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono">
         <input id="cs-claim-psk" placeholder="onboarding PSK" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono">
@@ -13355,15 +13355,15 @@ async function csSpokeMgmtPskCard() {
       <td class="px-3 py-2 text-right"><button onclick="csSpokeMgmtRevokePsk('${csEscape(p)}')" class="text-xs text-red-500 hover:underline" title="Revoke this pre-shared key — agents using it will be disconnected">Revoke</button></td>
     </tr>`).join('');
     const deploy = psks.length
-        ? `<div class="mt-3 text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-md p-3">
+        ? `<div class="mt-3 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-md p-3">
              <p class="font-bold text-slate-600 mb-1">Self-provision a spoke (auto-bind to ${csEscape(tenant)}):</p>
              <p class="font-mono">LM_ONBOARDING_PSK=&lt;psk&gt; LM_TENANT_ID_HINT=${csEscape(tenant)}</p>
              <p class="mt-1 text-slate-500">Set these env vars (or <span class="font-mono">--onboarding-psk</span> / <span class="font-mono">--tenant-id-hint</span>) on the spoke and restart — it auto-approves + binds on connect.</p>
            </div>`
-        : '<p class="text-[11px] text-slate-500 mt-2">Generate a PSK to reveal the self-provision deploy snippet.</p>';
+        : '<p class="text-xs text-slate-500 mt-2">Generate a PSK to reveal the self-provision deploy snippet.</p>';
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex justify-between items-center mb-3">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Onboarding PSK <span class="text-slate-500 normal-case font-normal">· tenant ${csEscape(tenant)}</span> ${helpIcon('cs', null, 'Simulations help')}</h3>
+        <h3 class="text-sm font-bold text-slate-500">Onboarding PSK <span class="text-slate-500 normal-case font-normal">· tenant ${csEscape(tenant)}</span> ${helpIcon('cs', null, 'Simulations help')}</h3>
         <button onclick="csSpokeMgmtGenPsk()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-xs font-bold shadow-sm">+ Generate</button>
       </div>
       ${psks.length ? csTable(['PSK', ''], rows) : '<p class="text-xs text-slate-500 italic py-4 text-center">No PSKs issued.</p>'}
@@ -13592,7 +13592,7 @@ function _csAsstEventHtml(e) {
     const t = e.text || '';
     if (e.kind === 'user') return _csAssistantBubble('user', t);
     if (e.kind === 'assistant') return _csAssistantBubble('assistant', t);
-    if (e.kind === 'tool') return '<div class="text-[11px] font-mono text-slate-500 ml-2 mb-1 truncate" title="' +
+    if (e.kind === 'tool') return '<div class="text-xs font-mono text-slate-500 ml-2 mb-1 truncate" title="' +
         csEscape(t) + '">› ' + csEscape(t) + '</div>';
     if (e.kind === 'status') return '<div class="text-xs italic text-slate-500 ml-2 mb-2">' + csEscape(t) + '</div>';
     if (e.kind === 'error') return '<div class="text-xs text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2 mb-3">⚠️ ' + csEscape(t) + '</div>';
@@ -13638,20 +13638,20 @@ function _csAsstRenderSpec() {
     const intent = a.intent || s.intent || '';
     const explain = intent === 'explain';
     const intentLabel = { ui: 'UI change', create: 'New simulation', modify: 'Change existing', remove: 'Remove simulation', explain: 'Explain only' }[intent] || '';
-    const badge = explain ? '<span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-sky-100 text-sky-800">Explain only</span>'
-        : a.ready ? '<span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">Ready to build</span>'
-        : '<span class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">Gathering</span>';
+    const badge = explain ? '<span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-sky-100 text-sky-800">Explain only</span>'
+        : a.ready ? '<span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">Ready to build</span>'
+        : '<span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">Gathering</span>';
     let html = '<div class="flex items-center justify-between mb-3"><h3 class="text-sm font-bold text-slate-800">Spec</h3>' + badge + '</div>';
     html += _csAsstSpecRow('Request', !!intent, csEscape(intentLabel) +
         (s.target ? ' · <code>' + csEscape(s.target) + '</code>' : ''));
     if (explain) {
         html += '<div class="mt-2 text-xs text-slate-500">Read-only walkthrough of how this simulation works — nothing is filed or built. Ask to change it to get a buildable spec.</div>';
-        if (a.premium) html += '<div class="mt-4 text-[10px] text-slate-500">Copilot premium requests used: ' + csEscape(a.premium) + '</div>';
+        if (a.premium) html += '<div class="mt-4 text-xs text-slate-500">Copilot premium requests used: ' + csEscape(a.premium) + '</div>';
         el.innerHTML = html;
         return;
     }
     if (intent === 'modify') {
-        html += '<div class="mt-2 mb-2 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-900">' +
+        html += '<div class="mt-2 mb-2 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-900">' +
             '<b>Changing a working simulation</b> affects every client running it. Duplicating it and changing the copy is recommended. ' +
             'In-place changes ship as their own PR, recorded with your LM login.</div>';
         html += _csAsstSpecRow('Edit confirmed', !!s.modify_confirmed, s.modify_confirmed ? 'Yes' : '');
@@ -13660,13 +13660,13 @@ function _csAsstRenderSpec() {
             : (s.override_reason ? 'Works as built — user override: ' + short(s.override_reason) : '');
         html += _csAsstSpecRow('Why change in place', !!why, s.verified_broken ? csEscape(why) : why);
     } else if (intent === 'remove') {
-        html += '<div class="mt-2 mb-2 rounded-md border border-rose-300 bg-rose-50 px-2 py-1.5 text-[11px] text-rose-900">' +
+        html += '<div class="mt-2 mb-2 rounded-md border border-rose-300 bg-rose-50 px-2 py-1.5 text-xs text-rose-900">' +
             '<b>Removing a simulation</b> takes it away from every client running it. ' +
             'Removals ship as their own PR, recorded with your LM login and reason.</div>';
         html += _csAsstSpecRow('Removal confirmed', !!s.remove_confirmed, s.remove_confirmed ? 'Yes' : '');
         html += _csAsstSpecRow('Reason', !!s.remove_reason, short(s.remove_reason));
     } else if (intent === 'ui') {
-        html += '<div class="mt-2 mb-2 text-[11px] text-slate-500">Cosmetic change to the Simulations pages only — no simulation is changed or duplicated.</div>';
+        html += '<div class="mt-2 mb-2 text-xs text-slate-500">Cosmetic change to the Simulations pages only — no simulation is changed or duplicated.</div>';
     } else if (s.duplicate_of) {
         html += _csAsstSpecRow('Duplicated from', true, '<code>' + csEscape(s.duplicate_of) + '</code>');
     }
@@ -13702,7 +13702,7 @@ function _csAsstRenderSpec() {
                 (b.pr_url ? ' · <a class="text-primary-text hover:underline" target="_blank" rel="noopener" href="' + csEscape(b.pr_url) + '">PR</a>' : '') +
                 (b.reason ? '<div class="text-slate-500">' + short(b.reason) + '</div>' : '') + '</div>').join('');
     }
-    if (a.premium) html += '<div class="mt-4 text-[10px] text-slate-500">Copilot premium requests used: ' + csEscape(a.premium) + '</div>';
+    if (a.premium) html += '<div class="mt-4 text-xs text-slate-500">Copilot premium requests used: ' + csEscape(a.premium) + '</div>';
     el.innerHTML = html;
 }
 

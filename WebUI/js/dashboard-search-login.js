@@ -61,9 +61,9 @@ async function loadAllTenantsOverview(forceRefresh = false) {
             const items = ds.map(d => `<div class="flex items-center gap-2 py-0.5">
                 <span class="inline-block w-2 h-2 rounded-full bg-red-500"></span>
                 <span class="font-mono text-xs text-slate-600 truncate">${esc(d.name || d.spoke_id)}</span>
-                ${d.module_type ? `<span class="text-[10px] text-slate-500">${esc(d.module_type)}</span>` : ''}
-                <span class="text-[10px] text-red-500">offline · ${esc(ago(d.last_seen_epoch))}</span>
-                <button class="text-[11px] text-blue-500 hover:text-blue-700 font-medium ml-1" data-jump-tid="${esc(tid)}">manage →</button>
+                ${d.module_type ? `<span class="text-xs text-slate-500">${esc(d.module_type)}</span>` : ''}
+                <span class="text-xs text-red-500">offline · ${esc(ago(d.last_seen_epoch))}</span>
+                <button class="text-xs text-blue-500 hover:text-blue-700 font-medium ml-1" data-jump-tid="${esc(tid)}">manage →</button>
             </div>`).join('');
             return `<div class="pl-4 py-1 border-l-2 border-red-200 ml-4 mb-1">${items}</div>`;
         };
@@ -97,7 +97,7 @@ async function loadAllTenantsOverview(forceRefresh = false) {
             </tr>${(shared.down || 0) > 0 ? `<tr class="bg-red-50/30"><td colspan="8">${downList(shared, '__all__')}</td></tr>` : ''}`
             : '';
         container.innerHTML = `<table class="w-full text-left">
-            <thead class="text-slate-500 uppercase text-xs border-b border-slate-200"><tr>
+            <thead class="text-slate-500 text-xs border-b border-slate-200"><tr>
                 <th class="px-4 py-2">Tenant</th>
                 <th class="px-4 py-2">Devices</th>
                 <th class="px-4 py-2">VMs</th>
@@ -180,15 +180,15 @@ async function loadInfraStatus() {
     const dot = s => `<span class="inline-block w-2.5 h-2.5 rounded-full ${s === 'green' ? 'bg-green-500' : s === 'yellow' ? 'bg-amber-400' : 'bg-red-500'}"></span>`;
     const pill = (label, n, cls) => `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full ${cls} text-xs font-bold">${label} ${n}</span>`;
     const rows = items.map(i => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
-        <span class="flex items-center gap-2 min-w-0">${dot(i.status)}<span class="font-mono text-xs text-slate-600 truncate">${escapeHtml(i.name)}</span>${i.type ? `<span class="text-[10px] text-slate-500">${escapeHtml(i.type)}</span>` : ''}</span>
-        <span class="text-[10px] ${i.online ? (i.tier === 'warning' ? 'text-amber-600' : 'text-slate-500') : 'text-red-500'}">${i.online ? (i.tier === 'warning' ? 'warning' : 'online') : 'offline'}</span></div>`).join('');
+        <span class="flex items-center gap-2 min-w-0">${dot(i.status)}<span class="font-mono text-xs text-slate-600 truncate">${escapeHtml(i.name)}</span>${i.type ? `<span class="text-xs text-slate-500">${escapeHtml(i.type)}</span>` : ''}</span>
+        <span class="text-xs ${i.online ? (i.tier === 'warning' ? 'text-amber-600' : 'text-slate-500') : 'text-red-500'}">${i.online ? (i.tier === 'warning' ? 'warning' : 'online') : 'offline'}</span></div>`).join('');
     el.innerHTML = `
       <div class="flex flex-wrap items-center gap-2 mb-3">
         <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-100 text-green-700 text-xs font-bold">${dot('green')} Hub online</span>
         ${pill('Healthy', c.green || 0, 'bg-green-100 text-green-700')}
         ${pill('Warning', c.yellow || 0, 'bg-amber-100 text-amber-700')}
         ${pill('Down', c.red || 0, 'bg-red-100 text-red-700')}
-        <span class="text-[11px] text-slate-500 ml-auto">${items.length} spoke/agent(s)${d.all_tenants ? ' · all tenants' : ''}</span>
+        <span class="text-xs text-slate-500 ml-auto">${items.length} spoke/agent(s)${d.all_tenants ? ' · all tenants' : ''}</span>
       </div>
       <div class="max-h-56 overflow-y-auto">${items.length ? rows : '<p class="text-xs text-slate-500 italic">No spokes/agents in scope.</p>'}</div>`;
 }
@@ -222,7 +222,7 @@ function handleSearch(value) {
 
             const legNames = { NETBOX_SEARCH: 'NetBox', SEARCH_VMS: 'VMs', SEARCH_SESSIONS: 'NAC sessions', SEARCH_USERS: 'Directory', SEARCH_DHCP: 'DHCP' };
             const degradedNote = (Array.isArray(d.degraded) && d.degraded.length)
-                ? `<p class="text-[10px] text-amber-600 px-2 pt-1 border-t border-slate-100">Some sources did not answer: ${d.degraded.map(c => legNames[c] || c).join(', ')}</p>` : '';
+                ? `<p class="text-xs text-amber-600 px-2 pt-1 border-t border-slate-100">Some sources did not answer: ${d.degraded.map(c => legNames[c] || c).join(', ')}</p>` : '';
             if (d.total === 0) {
                 dropdown.innerHTML = '<p class="text-xs text-slate-500 italic px-2 py-1">No results</p>' + degradedNote;
                 return;
@@ -285,12 +285,12 @@ function handleSearch(value) {
                     <span class="text-base leading-none mt-0.5">${icon}</span>
                     <div class="min-w-0">
                         <div class="text-xs font-medium text-slate-800 truncate">${item.name || item.ip || '—'}</div>
-                        <div class="text-[10px] text-slate-500 truncate">${label} · ${item.source}${sub ? ' · ' + sub : ''}</div>
+                        <div class="text-xs text-slate-500 truncate">${label} · ${item.source}${sub ? ' · ' + sub : ''}</div>
                     </div>
                 </div>`;
             }).join('');
 
-            const more = d.total > 12 ? `<p class="text-[10px] text-slate-500 px-2 pt-1 border-t border-slate-100">${d.total - 12} more — narrow your search</p>` : '';
+            const more = d.total > 12 ? `<p class="text-xs text-slate-500 px-2 pt-1 border-t border-slate-100">${d.total - 12} more — narrow your search</p>` : '';
             dropdown.innerHTML = rows + more + degradedNote;
         } catch (err) {
             dropdown.innerHTML = `<p class="text-xs text-red-400 px-2 py-1">Error: ${err.message}</p>`;
@@ -353,7 +353,7 @@ async function showDeviceDashboard(item) {
     panel.innerHTML = `
         <div class="flex items-center justify-between px-6 py-4 border-b border-slate-100">
             <div>
-                <p class="text-xs text-slate-500 uppercase font-bold tracking-widest mb-0.5">Device Dashboard</p>
+                <p class="text-xs text-slate-500 font-bold mb-0.5">Device Dashboard</p>
                 <p class="text-base font-bold text-navy font-mono" id="dd-identity">Searching…</p>
             </div>
             <button class="dd-close text-slate-500 hover:text-slate-600 text-2xl leading-none">&times;</button>
@@ -382,13 +382,13 @@ async function showDeviceDashboard(item) {
         const identParts = [id.hostname, id.serial ? `SN: ${id.serial}` : null, id.ip, id.mac].filter(Boolean);
         document.getElementById('dd-identity').textContent = identParts.join('  ·  ') || item.name || '—';
 
-        const badge = (label, cls) => `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${cls}">${label}</span>`;
+        const badge = (label, cls) => `<span class="px-2 py-0.5 rounded-full text-xs font-bold ${cls}">${label}</span>`;
         const row = (label, val) => val ? `<div class="flex justify-between text-xs py-1 border-b border-slate-50"><span class="text-slate-500">${label}</span><span class="font-medium text-slate-700 font-mono">${val}</span></div>` : '';
 
         const card = (title, color, content) => `
             <div class="rounded-lg border border-slate-100 overflow-hidden">
                 <div class="px-4 py-2 ${color} flex items-center gap-2">
-                    <span class="text-xs font-bold uppercase tracking-wide">${title}</span>
+                    <span class="text-xs font-bold">${title}</span>
                 </div>
                 <div class="px-4 py-3">${content}</div>
             </div>`;
@@ -438,9 +438,9 @@ async function showDeviceDashboard(item) {
                 <div class="py-1.5 border-b border-slate-50 last:border-0">
                     <div class="flex items-center justify-between">
                         <span class="text-xs font-semibold text-slate-700">${escapeHtml(n.name || n.ip || '—')}</span>
-                        ${n.status ? `<span class="px-1.5 py-0.5 rounded text-[9px] uppercase font-bold ${n.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}">${escapeHtml(n.status)}</span>` : ''}
+                        ${n.status ? `<span class="px-1.5 py-0.5 rounded text-xs font-bold ${n.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}">${escapeHtml(n.status)}</span>` : ''}
                     </div>
-                    ${meta ? `<div class="text-[10px] text-slate-500 font-mono mt-0.5">${escapeHtml(meta)}</div>` : ''}
+                    ${meta ? `<div class="text-xs text-slate-500 font-mono mt-0.5">${escapeHtml(meta)}</div>` : ''}
                 </div>`;
             }).join('') : empty));
 
@@ -458,12 +458,12 @@ async function showDeviceDashboard(item) {
                     type: v.type || 'qemu', agent_id: v.agent_id || '', name: v.name || ''
                 }).replace(/"/g, '&quot;');
                 const btn = canVnc
-                    ? `<button onclick="ddOpenVnc(${vmArg})" class="text-[11px] px-2 py-1 rounded bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-300 font-bold shrink-0">🖥 VNC Console</button>`
+                    ? `<button onclick="ddOpenVnc(${vmArg})" class="text-xs px-2 py-1 rounded bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-300 font-bold shrink-0">🖥 VNC Console</button>`
                     : '';
                 return `<div class="flex items-center justify-between gap-2 py-1 border-b border-slate-50 last:border-0">
                     <div class="min-w-0">
                         <span class="text-xs font-medium text-slate-700">${v.name || '—'}</span>
-                        <span class="text-slate-500 ml-2 text-[10px]">${meta}</span>
+                        <span class="text-slate-500 ml-2 text-xs">${meta}</span>
                     </div>${btn}
                 </div>`;
             }).join('') : empty));
@@ -480,10 +480,10 @@ async function showDeviceDashboard(item) {
                 (h.interfaces || []).forEach(i => loc.push(`Iface ${i.name || ''}${i.ip ? ' · ' + i.ip : ''}${i.status ? ' · ' + i.status : ''}`));
                 const selfBadge = h.is_self ? badge('THIS DEVICE', 'bg-indigo-100 text-indigo-700') : '';
                 const lines = loc.length
-                    ? loc.slice(0, 6).map(l => `<div class="text-[10px] text-slate-500 font-mono truncate">${escapeHtml(l)}</div>`).join('')
+                    ? loc.slice(0, 6).map(l => `<div class="text-xs text-slate-500 font-mono truncate">${escapeHtml(l)}</div>`).join('')
                     : (h.is_self ? '' : empty);
                 return `<div class="py-1.5 border-b border-slate-50 last:border-0">
-                    <div class="text-xs font-medium text-slate-700 truncate">${escapeHtml(h.name || h.address || '—')} ${selfBadge}<span class="text-slate-500 ml-1 text-[10px]">${escapeHtml(h.object_type || '')}${h.address ? ' · ' + escapeHtml(h.address) : ''}</span></div>
+                    <div class="text-xs font-medium text-slate-700 truncate">${escapeHtml(h.name || h.address || '—')} ${selfBadge}<span class="text-slate-500 ml-1 text-xs">${escapeHtml(h.object_type || '')}${h.address ? ' · ' + escapeHtml(h.address) : ''}</span></div>
                     ${lines}
                 </div>`;
             }).join('') : empty));
@@ -507,15 +507,15 @@ async function showDeviceDashboard(item) {
             con.length ? con.map(c => {
                 const meta = [c.device, c.baud ? c.baud + 'bps' : '', c.model || c.vendor || '', c.agent_name || '']
                     .filter(Boolean).join(' · ');
-                const busy = c.in_use ? `<span class="ml-2 px-1.5 py-0.5 rounded text-[9px] bg-amber-100 text-amber-700 font-bold">IN USE</span>` : '';
+                const busy = c.in_use ? `<span class="ml-2 px-1.5 py-0.5 rounded text-xs bg-amber-100 text-amber-700 font-bold">IN USE</span>` : '';
                 const canConnect = c.spoke_id && c.port_id;
                 const btn = canConnect
-                    ? `<button onclick="openConsoleTerminal('${escJsAttr(c.spoke_id)}','${escJsAttr(c.port_id)}','${escJsAttr(c.name || '')}')" class="text-[11px] px-2 py-1 rounded bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold shrink-0">🖥 Connect</button>`
+                    ? `<button onclick="openConsoleTerminal('${escJsAttr(c.spoke_id)}','${escJsAttr(c.port_id)}','${escJsAttr(c.name || '')}')" class="text-xs px-2 py-1 rounded bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold shrink-0">🖥 Connect</button>`
                     : '';
                 return `<div class="flex items-center justify-between gap-2 py-1.5 border-b border-slate-50 last:border-0">
                     <div class="min-w-0">
                         <div class="text-xs font-medium text-slate-700 truncate">${escapeHtml(c.name || c.device || '—')}${busy}</div>
-                        <div class="text-[10px] text-slate-500 truncate font-mono">${escapeHtml(meta)}</div>
+                        <div class="text-xs text-slate-500 truncate font-mono">${escapeHtml(meta)}</div>
                     </div>${btn}
                 </div>`;
             }).join('') : empty));
@@ -595,9 +595,9 @@ async function loadWhatsNew() {
             const when    = f.fixed_at ? fmtDate(f.fixed_at) : '';
             const summary = escapeHtml(String(f.summary || ''));
             const isBug   = f.type === 'bug';
-            const badge   = `<span class="inline-block shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide ${isBug ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-emerald-600'}">${isBug ? 'Bug fix' : 'Feature'}</span>`;
+            const badge   = `<span class="inline-block shrink-0 px-1.5 py-0.5 rounded text-xs font-bold ${isBug ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-emerald-600'}">${isBug ? 'Bug fix' : 'Feature'}</span>`;
             const inner   = `<div class="flex items-start gap-1.5">${badge}<div class="text-xs font-medium text-slate-800">${summary}</div></div>`
-                + (when ? `<div class="text-[10px] text-slate-500 mt-0.5">${escapeHtml(when)}</div>` : '');
+                + (when ? `<div class="text-xs text-slate-500 mt-0.5">${escapeHtml(when)}</div>` : '');
             if (f.issue_url) {
                 return `<a href="${escapeHtml(String(f.issue_url))}" target="_blank" rel="noopener noreferrer"
                             class="block px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer no-underline">${inner}</a>`;

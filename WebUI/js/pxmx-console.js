@@ -20,7 +20,7 @@ function tableWrap(html) {
 }
 
 function tableHead(cols) {
-    return `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
+    return `<thead class="bg-slate-50 text-xs text-slate-500"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
 }
 
 // VM table — shared by the node-detail view and the no-nodes fallback.
@@ -203,20 +203,20 @@ function pxmxVmTableHtml(vms) {
             // disabled + locked. The hub enforces this too (403), so this is
             // UX, not the security boundary.
             if (spec.action === 'destroy' && vm.protected) {
-                return `<button disabled title="Protected from deletion — remove the safeguard in Setup → Hypervisors" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 cursor-not-allowed">🔒 Delete</button>`;
+                return `<button disabled title="Protected from deletion — remove the safeguard in Setup → Hypervisors" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">🔒 Delete</button>`;
             }
-            return `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${spec.action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${spec.cls}" title="${spec.label} this virtual machine">${spec.label}</button>`;
+            return `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${spec.action}')" class="px-2 py-0.5 rounded text-xs font-bold ${spec.cls}" title="${spec.label} this virtual machine">${spec.label}</button>`;
         };
         const consoleBtn = !canAct ? ''
             : (isLxc || tpl)
-                ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : 'Templates have no console'}" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 cursor-not-allowed">🖥 Console</button>`
-                : `<button onclick="event.stopPropagation(); pxmxOpenConsole('${uid}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-100 hover:bg-slate-700" title="Open a noVNC console to this VM">🖥 Console</button>`;
+                ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : 'Templates have no console'}" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">🖥 Console</button>`
+                : `<button onclick="event.stopPropagation(); pxmxOpenConsole('${uid}')" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-800 text-slate-100 hover:bg-slate-700" title="Open a noVNC console to this VM">🖥 Console</button>`;
         // Start/Stop/Restart/Snapshot/Backup live behind one "Actions ▾" menu
         // (pxmxToggleVmActionMenu) — Delete and Console stay as standalone
         // buttons (delete-protection and console-availability need their own
         // always-visible state, not a menu item you might miss).
         const destroySpec = PXMX_VM_ACTIONS.find(s => s.action === 'destroy');
-        const menuBtn = !canAct ? '' : `<button onclick="event.stopPropagation(); pxmxToggleVmActionMenu(event, '${uid}', ${tpl})" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 hover:bg-slate-200" title="Open VM actions menu">⋯ Actions ▾</button>`;
+        const menuBtn = !canAct ? '' : `<button onclick="event.stopPropagation(); pxmxToggleVmActionMenu(event, '${uid}', ${tpl})" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200" title="Open VM actions menu">⋯ Actions ▾</button>`;
         const actions = `<div class="flex flex-wrap gap-1 justify-end">
             ${consoleBtn}
             ${menuBtn}
@@ -289,7 +289,7 @@ function pxmxBulkBar() {
     // Render from the shared PXMX_VM_ACTIONS spec so the bulk buttons match the
     // inline per-row buttons exactly (icon, label, color, hover, sizing).
     const btns = PXMX_VM_ACTIONS.map(s =>
-        `<button onclick="pxmxBulkAction('${s.action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${s.cls}" title="Execute ${s.label} on all selected VMs">${s.label}</button>`).join('');
+        `<button onclick="pxmxBulkAction('${s.action}')" class="px-2 py-0.5 rounded text-xs font-bold ${s.cls}" title="Execute ${s.label} on all selected VMs">${s.label}</button>`).join('');
     return `<div class="flex flex-wrap items-center gap-2 mb-3 text-xs">
       <span class="text-slate-500 font-medium mr-1">Bulk (selected):</span>
       ${btns}
@@ -435,7 +435,7 @@ async function renderPxmxSettings(container) {
         </tr>`;
     }).join('') || `<tr><td colspan="4" class="px-3 py-3 text-xs text-slate-500 italic">No hosts reporting storages yet (agents fan PXMX_LIST_STORAGE on connect).</td></tr>`;
     const inp = 'border border-slate-200 rounded-md px-3 py-1.5 text-sm w-full';
-    const lbl = 'block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2';
+    const lbl = 'block text-xs font-bold text-slate-500 mb-2';
     // Delete-protection safeguard (Global Admin only): a checkbox per visible VM
     // so the admin can mark which VMs can't be deleted. Stored as this tenant's
     // ``protected_vms`` (unique_id list); enforced globally as the union across
@@ -459,7 +459,7 @@ async function renderPxmxSettings(container) {
             <div><label class="${lbl}">Mode</label><select id="hv-backup-mode" class="${inp}" title="Backup mode (snapshot, suspend, or stop)">${modeSel(cfg.backup_mode || 'snapshot', '')}</select></div>
             <div><label class="${lbl}">Keep last (0 = no prune)</label><input id="hv-backup-keep" type="number" min="0" value="${cfg.backup_keep ?? 3}" class="${inp}" title="Number of backup archives to keep per VM"/></div>
           </div>
-          <p class="text-[11px] text-slate-500 mt-2">Snapshot mode = no downtime. Storage list is pulled live from each host; per-host overrides below win over the default.</p>
+          <p class="text-xs text-slate-500 mt-2">Snapshot mode = no downtime. Storage list is pulled live from each host; per-host overrides below win over the default.</p>
         </div>
         <div class="hpe-card rounded-lg p-5 shadow-sm">
           <p class="text-sm font-bold text-navy mb-3">Snapshot</p>
@@ -471,7 +471,7 @@ async function renderPxmxSettings(container) {
         <div class="hpe-card rounded-lg p-5 shadow-sm">
           <p class="text-sm font-bold text-navy mb-3">Per-host overrides</p>
           <div class="overflow-x-auto"><table class="w-full text-sm" id="pxmx-perhost-rows">
-            <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr><th class="px-3 py-2 text-left font-medium">Host</th><th class="px-3 py-2 text-left font-medium">Backup storage</th><th class="px-3 py-2 text-left font-medium">Mode</th><th class="px-3 py-2 text-left font-medium">Keep</th></tr></thead>
+            <thead class="bg-slate-50 text-xs text-slate-500"><tr><th class="px-3 py-2 text-left font-medium">Host</th><th class="px-3 py-2 text-left font-medium">Backup storage</th><th class="px-3 py-2 text-left font-medium">Mode</th><th class="px-3 py-2 text-left font-medium">Keep</th></tr></thead>
             <tbody>${hostRows}</tbody>
           </table></div>
         </div>
@@ -482,7 +482,7 @@ async function renderPxmxSettings(container) {
         </div>
         ${isAdmin() ? `<div class="hpe-card rounded-lg p-5 shadow-sm">
           <p class="text-sm font-bold text-navy mb-1">Delete protection ${helpIcon('pxmx', null, 'Hypervisor help')}</p>
-          <p class="text-[11px] text-slate-500 mb-3">Checked VMs cannot be deleted from anywhere — the list is enforced globally across all tenants. Managed by Global Admin.</p>
+          <p class="text-xs text-slate-500 mb-3">Checked VMs cannot be deleted from anywhere — the list is enforced globally across all tenants. Managed by Global Admin.</p>
           <div class="max-h-64 overflow-y-auto border border-slate-200 rounded-md divide-y divide-slate-50">${protectRows}</div>
         </div>` : ''}
         ${isAdmin() ? `<div class="hpe-card rounded-lg p-5 shadow-sm" id="pxmx-snap-schedules"></div>` : ''}
@@ -553,7 +553,7 @@ async function pxmxOpenVmSnapSchedule(uid) {
     ].filter(Boolean);
     const others = d.schedules.filter(s => s !== own && via(s).length);
     const inScope = d.vms.some(v => v.unique_id === uid);
-    const btn = 'text-[11px] font-bold border border-slate-300 rounded px-2 py-0.5 hover:bg-slate-100';
+    const btn = 'text-xs font-bold border border-slate-300 rounded px-2 py-0.5 hover:bg-slate-100';
     const inp = 'border border-slate-200 rounded-md px-2 py-1 text-sm w-20';
     const otherRows = others.map(s => `<li class="text-xs text-slate-600">${escapeHtml(s.name)}${s.enabled ? '' : ' (paused)'} — every ${s.every_hours}h, keep ${s.keep}, via ${escapeHtml(via(s).join(', '))} · ${_pxmxSnapLastRun(s)}</li>`).join('');
     const sid = own ? escapeHtml(JSON.stringify(own.id)) : '';
@@ -565,8 +565,8 @@ async function pxmxOpenVmSnapSchedule(uid) {
       ${inScope ? '' : '<p class="text-xs text-amber-700 mb-2">This VM is not in the current tenant\'s VM list, so a schedule here would not snapshot it.</p>'}
       <div class="flex flex-wrap items-end gap-3">
         <label class="flex items-center gap-2 text-sm text-slate-700 self-center"><input id="vm-snap-enabled" type="checkbox" class="rounded" ${!own || own.enabled ? 'checked' : ''}/> Snapshot this VM</label>
-        <div><label class="block text-[10px] font-bold text-slate-500 uppercase">Every (hours)</label><input id="vm-snap-every" type="number" min="1" max="8760" class="${inp}" value="${own ? own.every_hours : 24}"/></div>
-        <div><label class="block text-[10px] font-bold text-slate-500 uppercase">Keep last</label><input id="vm-snap-keep" type="number" min="1" max="100" class="${inp}" value="${keep}"/></div>
+        <div><label class="block text-xs font-bold text-slate-500">Every (hours)</label><input id="vm-snap-every" type="number" min="1" max="8760" class="${inp}" value="${own ? own.every_hours : 24}"/></div>
+        <div><label class="block text-xs font-bold text-slate-500">Keep last</label><input id="vm-snap-keep" type="number" min="1" max="100" class="${inp}" value="${keep}"/></div>
         <button class="bg-primary hover:bg-[#018a6c] text-white px-3 py-1 rounded-md text-xs font-bold" onclick="pxmxSaveVmSnapSchedule(${escapeHtml(JSON.stringify(uid))})">${own ? 'Save' : 'Create schedule'}</button>
         ${own ? `<button class="${btn}" onclick="pxmxRunSnapSchedule(${sid})" ${own.running ? 'disabled' : ''}>Run now</button>
         <button class="${btn} text-red-700" onclick="pxmxDeleteSnapSchedule(${sid})">Delete</button>` : ''}
@@ -599,7 +599,7 @@ async function pxmxLoadSnapSchedules(editId) {
     try { d = await apiJson(_snapUrl()); }
     catch (e) { box.innerHTML = `<p class="text-sm text-red-600">Could not load snapshot schedules: ${escapeHtml(String(e.message || e))}</p>`; return; }
     window._pxmxSnapData = d;
-    const btn = 'text-[11px] font-bold border border-slate-300 rounded px-2 py-0.5 hover:bg-slate-100';
+    const btn = 'text-xs font-bold border border-slate-300 rounded px-2 py-0.5 hover:bg-slate-100';
     const rows = d.schedules.map(s => {
         const targets = [
             s.vms.length ? `${s.vms.length} VM(s)` : '',
@@ -631,7 +631,7 @@ async function pxmxLoadSnapSchedules(editId) {
 function _pxmxSnapForm(d, s) {
     s = s || { id: '', name: '', enabled: true, vms: [], tags: [], pools: [], every_hours: 24, keep: _defaultSnapKeep(window._pxmxHvConfig) };
     const inp = 'border border-slate-200 rounded-md px-3 py-1.5 text-sm w-full';
-    const lbl = 'block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1';
+    const lbl = 'block text-xs font-bold text-slate-500 mb-1';
     const boxes = (cls, items, picked, label) => items.length
         ? items.map(v => `<label class="flex items-center gap-2 px-3 py-1 text-xs text-slate-700 hover:bg-slate-50 cursor-pointer"><input type="checkbox" class="${cls} rounded" value="${escapeHtml(label ? v.unique_id : v)}" ${picked.includes(label ? v.unique_id : v) ? 'checked' : ''}/>${label ? label(v) : escapeHtml(v)}</label>`).join('')
         : '<div class="px-3 py-2 text-xs text-slate-500 italic">none</div>';
@@ -901,15 +901,15 @@ function _templateRepoLegend() {
         ['bg-sky-500', 'In progress', 'vzdump running on the node, or uploading to the hub (shows %)'],
         ['bg-red-500', 'Failed', 'backup did not complete — hover the badge for the error'],
     ];
-    return `<div class="mt-3 px-1"><p class="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Status legend</p><div class="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">${items.map(i => item(i[0], i[1], i[2])).join('')}</div></div>`;
+    return `<div class="mt-3 px-1"><p class="text-xs font-bold text-slate-500 mb-1">Status legend</p><div class="flex flex-wrap gap-x-4 gap-y-1 text-xs">${items.map(i => item(i[0], i[1], i[2])).join('')}</div></div>`;
 }
 function _tplStatusBadge(t) {
     const s = String(t.status || '').toLowerCase();
-    if (s === 'complete') return '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">Complete</span>';
-    if (s === 'failed') return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700" title="${escJsAttr(t.error || '')}">Failed</span>`;
+    if (s === 'complete') return '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">Complete</span>';
+    if (s === 'failed') return `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700" title="${escJsAttr(t.error || '')}">Failed</span>`;
     const label = s === 'dumping' ? 'Dumping' : (s === 'uploading' ? 'Uploading' : 'Pending');
     const pct = Math.max(0, Math.min(100, Number(t.progress) || 0));
-    return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-sky-100 text-sky-700"><span class="animate-spin inline-block w-2.5 h-2.5 rounded-full border-2 border-sky-500 border-t-transparent align-middle mr-1"></span>${label} ${pct}%</span>`;
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-sky-100 text-sky-700"><span class="animate-spin inline-block w-2.5 h-2.5 rounded-full border-2 border-sky-500 border-t-transparent align-middle mr-1"></span>${label} ${pct}%</span>`;
 }
 async function renderTemplateRepo() {
     const host = document.getElementById('template-repo-content');
@@ -938,7 +938,7 @@ async function renderTemplateRepo() {
             const items = groups[tenant].sort((a, b) =>
                 String(a.source_node || '').localeCompare(String(b.source_node || '')) ||
                 String(a.name || '').localeCompare(String(b.name || '')));
-            const hdr = `<tr class="bg-slate-100"><td colspan="8" class="px-4 py-1.5 text-xs font-bold text-slate-500 uppercase tracking-wider">Tenant: ${escapeHtml(tenant)} <span class="text-slate-500 font-normal normal-case">(${items.length})</span></td></tr>`;
+            const hdr = `<tr class="bg-slate-100"><td colspan="8" class="px-4 py-1.5 text-xs font-bold text-slate-500">Tenant: ${escapeHtml(tenant)} <span class="text-slate-500 font-normal normal-case">(${items.length})</span></td></tr>`;
             return hdr + items.map(_templateRepoRow).join('');
         }).join('');
     }
@@ -952,7 +952,7 @@ async function renderTemplateRepo() {
       </div>
       <div class="hpe-card rounded-lg overflow-hidden">
         <div class="overflow-x-auto"><table class="w-full text-sm">
-          <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
+          <thead class="bg-slate-50 text-xs text-slate-500"><tr>
             <th class="px-4 py-2 text-left font-medium">Name</th>
             <th class="px-4 py-2 text-left font-medium">OS</th>
             <th class="px-4 py-2 text-left font-medium">Version</th>
@@ -976,7 +976,7 @@ function _templateRepoRow(t) {
     const src = `${escapeHtml(t.source_node || '—')} · vmid ${escapeHtml(String(t.source_vmid == null ? '—' : t.source_vmid))}`;
     const when = t.created_at ? new Date(t.created_at).toLocaleString() : '';
     return `<tr class="border-t border-slate-100 hover:bg-slate-50">
-      <td class="px-4 py-2 font-medium text-slate-700">${escapeHtml(t.name || '—')}<div class="text-[11px] text-slate-500">${escapeHtml(when)}</div></td>
+      <td class="px-4 py-2 font-medium text-slate-700">${escapeHtml(t.name || '—')}<div class="text-xs text-slate-500">${escapeHtml(when)}</div></td>
       <td class="px-4 py-2 text-slate-600">${escapeHtml(t.os || '—')}</td>
       <td class="px-4 py-2 text-slate-600">${escapeHtml(t.version || '—')}</td>
       <td class="px-4 py-2 text-slate-600">${escapeHtml(t.purpose || '—')}</td>
@@ -1003,12 +1003,12 @@ function templateRepoEdit(id) {
           <button onclick="this.closest('#template-edit-modal').remove()" class="text-slate-500 hover:text-slate-600">✕</button>
         </div>
         <div class="p-6 space-y-3">
-          <div class="text-[11px] text-slate-500 font-mono">${esc(t.source_node)}/vmid ${esc(t.source_vmid)} · sha256 ${esc((t.sha256 || '').slice(0, 12))} · ${t.size ? _tplBytes(t.size) : '—'}</div>
-          <div><label class="text-xs text-slate-500 uppercase font-bold">Tenant</label><div class="w-full bg-slate-50 border border-slate-200 rounded-md px-3 py-2 text-sm text-slate-500">${esc(t.tenant) || '— Unassigned —'} <span class="text-[11px] text-slate-500">(derived from the PXMX host — not editable)</span></div></div>
-          <div><label class="text-xs text-slate-500 uppercase font-bold">Name</label><input id="tpl-edit-name" value="${esc(t.name)}" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
-          <div><label class="text-xs text-slate-500 uppercase font-bold">OS</label><input id="tpl-edit-os" value="${esc(t.os)}" placeholder="Debian 12, Windows 11…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
-          <div><label class="text-xs text-slate-500 uppercase font-bold">Version</label><input id="tpl-edit-version" value="${esc(t.version)}" placeholder="v3, 2026-07 golden…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
-          <div><label class="text-xs text-slate-500 uppercase font-bold">Purpose</label><textarea id="tpl-edit-purpose" rows="2" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm">${esc(t.purpose)}</textarea></div>
+          <div class="text-xs text-slate-500 font-mono">${esc(t.source_node)}/vmid ${esc(t.source_vmid)} · sha256 ${esc((t.sha256 || '').slice(0, 12))} · ${t.size ? _tplBytes(t.size) : '—'}</div>
+          <div><label class="text-xs text-slate-500 font-bold">Tenant</label><div class="w-full bg-slate-50 border border-slate-200 rounded-md px-3 py-2 text-sm text-slate-500">${esc(t.tenant) || '— Unassigned —'} <span class="text-xs text-slate-500">(derived from the PXMX host — not editable)</span></div></div>
+          <div><label class="text-xs text-slate-500 font-bold">Name</label><input id="tpl-edit-name" value="${esc(t.name)}" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
+          <div><label class="text-xs text-slate-500 font-bold">OS</label><input id="tpl-edit-os" value="${esc(t.os)}" placeholder="Debian 12, Windows 11…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
+          <div><label class="text-xs text-slate-500 font-bold">Version</label><input id="tpl-edit-version" value="${esc(t.version)}" placeholder="v3, 2026-07 golden…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
+          <div><label class="text-xs text-slate-500 font-bold">Purpose</label><textarea id="tpl-edit-purpose" rows="2" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm">${esc(t.purpose)}</textarea></div>
           <div class="pt-3 flex justify-end gap-3">
             <button onclick="this.closest('#template-edit-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
             <button onclick="templateRepoSaveMeta('${escJsAttr(id)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">Save</button>
@@ -1414,7 +1414,7 @@ function _consoleDpaBadge(p) {
         const th = (tb === '0.0.0.0' || tb === '::') ? (d.host || tb) : tb;
         parts.push(`<span class="font-mono px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200" title="Direct Port Access over telnet (unauthenticated, unencrypted; bound to ${escapeHtml(tb)})">🔌 telnet ${escapeHtml(String(th))}:${escapeHtml(String(d.telnet_port))}${d.telnet_override ? ' ' + pin : ''}</span>`);
     }
-    return `<div class="text-[11px] mt-0.5 space-x-1">${parts.join(' ')}</div>`;
+    return `<div class="text-xs mt-0.5 space-x-1">${parts.join(' ')}</div>`;
 }
 
 async function _consoleCopyDpa(btn) {
@@ -1444,22 +1444,22 @@ function _renderConsolePorts(el, data) {
         const identHost = (p.probe && p.probe.identity && p.probe.identity.hostname) || '';
         const label = p.alias || identHost || p.product || p.device;
         const baud = (p.settings && p.settings.baud) || '—';
-        const inUse = p.in_use ? ` <span class="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase">In use</span>` : '';
-        const staleBadge = p.stale ? ` <span title="Console agent offline — showing last-known data (names/settings restored from cache). Live status resumes when the agent reconnects." class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-bold uppercase">offline</span>` : '';
-        const disconnectedBadge = (p.present === false && !p.stale) ? ` <span title="Device not connected right now (adapter unplugged or target powered off). Its saved name is retained; the port reappears live when it reconnects." class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-500 font-bold uppercase">disconnected</span>` : '';
+        const inUse = p.in_use ? ` <span class="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold">In use</span>` : '';
+        const staleBadge = p.stale ? ` <span title="Console agent offline — showing last-known data (names/settings restored from cache). Live status resumes when the agent reconnects." class="text-xs px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-bold">offline</span>` : '';
+        const disconnectedBadge = (p.present === false && !p.stale) ? ` <span title="Device not connected right now (adapter unplugged or target powered off). Its saved name is retained; the port reappears live when it reconnects." class="text-xs px-2 py-0.5 rounded-full bg-slate-200 text-slate-500 font-bold">disconnected</span>` : '';
         const unreachable = (p.present === false || p.stale);
         const monDot = (p.monitoring && !p.in_use)
-            ? ` <span title="Passively monitoring — capturing console output while idle" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold uppercase">● monitoring</span>` : '';
+            ? ` <span title="Passively monitoring — capturing console output while idle" class="text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold">● monitoring</span>` : '';
         const bootBadge = _consoleBootBadge(p.boot);
         const stackBadge = _consoleStackBadge(p);
         const agentName = p.agent_name || p.spoke_id || '';
         const tenantId = p.tenant_id || 'unassigned';
         const eP = esc(p.port_id), eS = esc(p.spoke_id || ''), eT = esc(p.tenant_override || '');
-        const tenantBtn = admin ? `<button onclick="openConsolePortTenantModal('${eS}','${eP}','${eT}')" class="text-[11px] px-2 py-1 rounded border border-brand text-primary-text hover:bg-slate-50">Tenant</button>` : '';
-        const configBtn = hasConsoleWrite() ? `<button onclick="openConsoleConfigModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-indigo-400 text-indigo-600 hover:bg-slate-50">Config</button>` : '';
-        const profileBtn = hasConsoleView() ? `<button onclick="profileDevice('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile this device: use the known fingerprint if we have one, otherwise ask the AI to identify it from its (scrubbed) console output">🔎 Profile Device</button>` : '';
+        const tenantBtn = admin ? `<button onclick="openConsolePortTenantModal('${eS}','${eP}','${eT}')" class="text-xs px-2 py-1 rounded border border-brand text-primary-text hover:bg-slate-50">Tenant</button>` : '';
+        const configBtn = hasConsoleWrite() ? `<button onclick="openConsoleConfigModal('${eS}','${eP}')" class="text-xs px-2 py-1 rounded border border-indigo-400 text-indigo-600 hover:bg-slate-50">Config</button>` : '';
+        const profileBtn = hasConsoleView() ? `<button onclick="profileDevice('${eS}','${eP}')" class="text-xs px-2 py-1 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile this device: use the known fingerprint if we have one, otherwise ask the AI to identify it from its (scrubbed) console output">🔎 Profile Device</button>` : '';
         const captureBtn = (p.capture_bytes || p.monitoring || (p.probe && p.probe.banner))
-            ? `<button onclick="openConsoleCaptureModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50" title="View recent console output captured from this port">Capture</button>` : '';
+            ? `<button onclick="openConsoleCaptureModal('${eS}','${eP}')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50" title="View recent console output captured from this port">Capture</button>` : '';
         const dpaBadge = _consoleDpaBadge(p);
         return `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${staleBadge}${disconnectedBadge}${monDot}${bootBadge}${stackBadge}</div>
@@ -1469,32 +1469,32 @@ function _renderConsolePorts(el, data) {
               ${_consoleIdentityBlock(p)}</td>
             <td class="px-4 py-3 text-right whitespace-nowrap space-x-1">
               ${unreachable
-                ? `<button disabled title="Device not connected — reconnect it to open a session" class="text-[11px] px-2 py-1 rounded bg-slate-100 text-slate-500 border border-slate-200 font-bold cursor-not-allowed">🖥 Open</button>`
-                : `<button onclick="openConsoleTerminal('${eS}','${eP}','${esc(label)}')" class="text-[11px] px-2 py-1 rounded bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold">🖥 Open</button>`}
+                ? `<button disabled title="Device not connected — reconnect it to open a session" class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-500 border border-slate-200 font-bold cursor-not-allowed">🖥 Open</button>`
+                : `<button onclick="openConsoleTerminal('${eS}','${eP}','${esc(label)}')" class="text-xs px-2 py-1 rounded bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold">🖥 Open</button>`}
               ${profileBtn}
               ${captureBtn}
-              <button onclick="openConsoleSettingsModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Settings</button>
+              <button onclick="openConsoleSettingsModal('${eS}','${eP}')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Settings</button>
               ${configBtn}
               ${tenantBtn}
             </td></tr>`;
     }).join('');
     const profileAllBtn = hasConsoleView()
-        ? `<button onclick="profileAllDevices()" class="text-[11px] px-3 py-1.5 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile every listed device at once: known fingerprints are used as-is; unknown devices are sent (scrubbed) to the AI to identify. Ports open in a session are skipped.">🔎 Profile All Devices</button>`
+        ? `<button onclick="profileAllDevices()" class="text-xs px-3 py-1.5 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile every listed device at once: known fingerprints are used as-is; unknown devices are sent (scrubbed) to the AI to identify. Ports open in a session are skipped.">🔎 Profile All Devices</button>`
         : '';
     const diagBtn = hasConsoleView()
-        ? `<button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button>`
+        ? `<button onclick="openConsoleDiagnosticsModal()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button>`
         : '';
     const dpaBtn = (admin || _consoleDpaSpokes.length)
-        ? `<button onclick="openConsoleDpaModal()" class="text-[11px] px-3 py-1.5 rounded border border-sky-400 text-sky-700 hover:bg-slate-50" title="Direct Port Access: SSH (or telnet) straight to a serial port on the console server">🔌 Direct Port Access</button>`
+        ? `<button onclick="openConsoleDpaModal()" class="text-xs px-3 py-1.5 rounded border border-sky-400 text-sky-700 hover:bg-slate-50" title="Direct Port Access: SSH (or telnet) straight to a serial port on the console server">🔌 Direct Port Access</button>`
         : '';
     const adminTools = diagBtn + dpaBtn + ((admin || isTenantAdmin())
-        ? `<button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button>`
+        ? `<button onclick="openConsoleCredentialsModal()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button>`
         : '');
     const tools = (profileAllBtn || adminTools)
         ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100">${profileAllBtn}${adminTools}</div>`
         : '';
     el.innerHTML = `${tools}<div class="p-0 overflow-hidden"><table class="w-full text-left text-sm">
-        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>
+        <thead class="bg-slate-100 text-slate-600 text-xs"><tr>
           <th class="px-4 py-3">Device</th>
           <th class="px-4 py-3 text-right">Actions</th></tr></thead>
         <tbody class="divide-y divide-slate-200">${rows}</tbody></table></div>`;
@@ -1566,12 +1566,12 @@ function _consoleStackBadge(p) {
     if (!st || !st.is_stack) return '';
     const mbr = st.member_id ? ` ${st.member_id}` : '';
     if (st.role === 'conductor') {
-        return ` <span title="VSF stack conductor — this console line configures the whole stack" class="text-[10px] px-2 py-0.5 rounded-full bg-brand/15 text-primary-text font-bold uppercase">\u2b22 conductor${mbr}</span>`;
+        return ` <span title="VSF stack conductor — this console line configures the whole stack" class="text-xs px-2 py-0.5 rounded-full bg-brand/15 text-primary-text font-bold">\u2b22 conductor${mbr}</span>`;
     }
     if (st.role === 'standby') {
-        return ` <span title="VSF stack standby member — it will take over if the conductor fails. Most commands are rejected here; configure the stack from the conductor." class="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase">\u2b22 standby${mbr}</span>`;
+        return ` <span title="VSF stack standby member — it will take over if the conductor fails. Most commands are rejected here; configure the stack from the conductor." class="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold">\u2b22 standby${mbr}</span>`;
     }
-    return ` <span title="VSF stack member — configure the stack from its conductor" class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-bold uppercase">\u2b22 member${mbr}</span>`;
+    return ` <span title="VSF stack member — configure the stack from its conductor" class="text-xs px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-bold">\u2b22 member${mbr}</span>`;
 }
 
 // Second line of stack detail: image version, topology, and a jump to the
@@ -1591,7 +1591,7 @@ function _consoleStackLine(p) {
     } else if (!st.is_conductor && st.conductor_mac) {
         link = ` &middot; <span title="This stack's conductor MAC is ${escapeHtml(String(st.conductor_mac))} but no console port has identified it yet">conductor not on console</span>`;
     }
-    return `<div class="text-[11px] text-slate-500 mt-0.5">\u2b22 VSF ${bits.join(' \u00b7 ')}${link}</div>`;
+    return `<div class="text-xs text-slate-500 mt-0.5">\u2b22 VSF ${bits.join(' \u00b7 ')}${link}</div>`;
 }
 
 // Jump to another port's row (used by the stack "conductor:" link) — scroll it
@@ -1608,14 +1608,14 @@ function _consoleBootBadge(boot) {
     if (!boot || !boot.state || boot.state === 'idle') return '';
     const relock = boot.relocked ? ' 🔒baud' : '';
     if (boot.state === 'booting') {
-        return ` <span title="A boot/wake cycle is being captured${relock ? ' (re-locking baud)' : ''}" class="text-[10px] px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 font-bold uppercase">⟳ booting${relock}</span>`;
+        return ` <span title="A boot/wake cycle is being captured${relock ? ' (re-locking baud)' : ''}" class="text-xs px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 font-bold">⟳ booting${relock}</span>`;
     }
     if (boot.state === 'booted') {
-        return ` <span title="Captured a boot cycle and reached a prompt" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold uppercase">✓ booted</span>`;
+        return ` <span title="Captured a boot cycle and reached a prompt" class="text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold">✓ booted</span>`;
     }
     if (boot.state === 'stuck') {
         const why = boot.stuck_reason ? ` — ${escapeHtml(String(boot.stuck_reason)).slice(0, 80)}` : '';
-        return ` <span title="Boot appears stuck / failed${why}. Likely a hardware or boot problem — check the console capture." class="text-[10px] px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold uppercase">⚠ boot stuck</span>`;
+        return ` <span title="Boot appears stuck / failed${why}. Likely a hardware or boot problem — check the console capture." class="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold">⚠ boot stuck</span>`;
     }
     return '';
 }
@@ -1625,16 +1625,16 @@ function _consoleIdentityBlock(p) {
     const ident = probe.identity || {};
     const summary = _consoleIdentitySummary(ident);
     const seen = p.last_activity
-        ? `<span class="text-[10px] text-slate-500" title="Last console output seen">· 👂 ${_consoleRelTime(p.last_activity)}</span>` : '';
+        ? `<span class="text-xs text-slate-500" title="Last console output seen">· 👂 ${_consoleRelTime(p.last_activity)}</span>` : '';
     if (probe.vendor || summary) {
         const src = probe.stale
-            ? '<span class="text-[9px] px-1 py-0.5 rounded bg-amber-100 text-amber-700 font-bold uppercase" title="Last-known profile — the latest identify attempt did not re-confirm it; still retrying">last known</span>'
+            ? '<span class="text-xs px-1 py-0.5 rounded bg-amber-100 text-amber-700 font-bold" title="Last-known profile — the latest identify attempt did not re-confirm it; still retrying">last known</span>'
             : probe.source === 'active'
-            ? '<span class="text-[9px] px-1 py-0.5 rounded bg-green-100 text-green-700 font-bold uppercase" title="Verified via read-only login">verified</span>'
+            ? '<span class="text-xs px-1 py-0.5 rounded bg-green-100 text-green-700 font-bold" title="Verified via read-only login">verified</span>'
             : (probe.source === 'passive'
-                ? '<span class="text-[9px] px-1 py-0.5 rounded bg-slate-100 text-slate-500 font-bold uppercase" title="Observed passively from console output (no login)">observed</span>' : '');
+                ? '<span class="text-xs px-1 py-0.5 rounded bg-slate-100 text-slate-500 font-bold" title="Observed passively from console output (no login)">observed</span>' : '');
         const vpill = probe.vendor
-            ? `<span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-bold uppercase text-[9px]">${escapeHtml(probe.vendor)}</span> ` : '';
+            ? `<span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-bold text-xs">${escapeHtml(probe.vendor)}</span> ` : '';
         return `<div class="text-xs mt-0.5 flex items-center gap-1.5 flex-wrap">${vpill}${summary}${src}${seen}</div>`;
     }
     // Nothing gleaned yet. An active-source probe with no identity means we tried
@@ -1655,7 +1655,7 @@ function _consoleIdentityBlock(p) {
 function _consoleIdentitySummary(identity) {
     if (!identity) return '';
     const typePill = identity.type
-        ? `<span class="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 font-bold uppercase text-[9px]" title="Device role">${escapeHtml(identity.type)}</span> `
+        ? `<span class="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 font-bold text-xs" title="Device role">${escapeHtml(identity.type)}</span> `
         : '';
     const parts = [];
     if (identity.model) parts.push(`<span class="font-semibold text-slate-700">${escapeHtml(identity.model)}</span>`);
@@ -1688,11 +1688,11 @@ async function openConsoleCaptureModal(spokeId, portId) {
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-60 backdrop-blur-sm';
     modal.innerHTML = `<div class="bg-[#1e1e1e] rounded-xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col" style="height:70vh">
         <div class="px-4 py-2 flex justify-between items-center bg-[#2d2d2d] text-slate-200">
-          <div class="text-sm font-mono">${escapeHtml(portId)} <span class="text-[10px] text-slate-500">${escapeHtml(meta)}</span></div>
+          <div class="text-sm font-mono">${escapeHtml(portId)} <span class="text-xs text-slate-500">${escapeHtml(meta)}</span></div>
           <button onclick="document.getElementById('console-capture-modal').remove()" class="text-slate-500 hover:text-white text-2xl leading-none">&times;</button>
         </div>
         <pre class="flex-1 m-0 p-3 overflow-auto text-xs text-slate-100 font-mono whitespace-pre-wrap">${escapeHtml(text)}</pre>
-        <div class="px-4 py-2 bg-[#2d2d2d] text-right"><button class="js-capture-refresh text-[11px] px-3 py-1.5 rounded border border-slate-500 text-slate-200 hover:bg-slate-700">↻ Refresh</button></div>
+        <div class="px-4 py-2 bg-[#2d2d2d] text-right"><button class="js-capture-refresh text-xs px-3 py-1.5 rounded border border-slate-500 text-slate-200 hover:bg-slate-700">↻ Refresh</button></div>
       </div>`;
     modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
     _mountModal(modal);
@@ -1736,16 +1736,16 @@ async function refreshConsoleDiagnostics() {
         return;
     }
     const statusPill = (d) => {
-        if (!d.present) return '<span class="px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 text-[10px] font-bold uppercase">gone</span>';
-        if (d.currently_failing) return '<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase">failing</span>';
-        if (d.recoveries > 1) return '<span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase">flapping</span>';
-        return '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">recovered</span>';
+        if (!d.present) return '<span class="px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 text-xs font-bold">gone</span>';
+        if (d.currently_failing) return '<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-bold">failing</span>';
+        if (d.recoveries > 1) return '<span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-bold">flapping</span>';
+        return '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-bold">recovered</span>';
     };
     const failRows = rows.filter(d => d.open_failures || d.disconnects || d.currently_failing);
     const identRows = rows.filter(d => (d.identify && d.identify.attempts) || (d.present && d.schedule));
     const bootRows = rows.filter(d => d.boot && d.boot.state && d.boot.state !== 'idle');
-    const failTbl = failRows.length ? `<div class="text-[11px] font-bold text-slate-500 uppercase mb-1">Serial connection failures</div><table class="w-full text-left mb-5">
-        <thead class="text-slate-500 uppercase text-[10px] border-b border-slate-200"><tr>
+    const failTbl = failRows.length ? `<div class="text-xs font-bold text-slate-500 mb-1">Serial connection failures</div><table class="w-full text-left mb-5">
+        <thead class="text-slate-500 text-xs border-b border-slate-200"><tr>
           <th class="py-2 pr-3">Port</th><th class="py-2 pr-3">Agent</th><th class="py-2 pr-3">Status</th>
           <th class="py-2 pr-3 text-center">Open fails</th><th class="py-2 pr-3 text-center">Disconnects</th>
           <th class="py-2 pr-3 text-center">Recoveries</th><th class="py-2 pr-3">Last error</th><th class="py-2 pr-3">Last event</th>
@@ -1759,39 +1759,39 @@ async function refreshConsoleDiagnostics() {
           <td class="py-2 pr-3 text-xs text-red-500 max-w-[16rem] truncate" title="${escapeHtml(d.last_error || '')}">${escapeHtml(d.last_error || '')}</td>
           <td class="py-2 pr-3 text-xs text-slate-500">${_consoleRelTime(Math.max(d.last_failure || 0, d.last_disconnect || 0, d.last_recovery || 0))}</td>
         </tr>`).join('')}</tbody></table>` : '';
-    const identTbl = identRows.length ? `<div class="text-[11px] font-bold text-slate-500 uppercase mb-1">Identify / login telemetry</div><table class="w-full text-left">
-        <thead class="text-slate-500 uppercase text-[10px] border-b border-slate-200"><tr>
+    const identTbl = identRows.length ? `<div class="text-xs font-bold text-slate-500 mb-1">Identify / login telemetry</div><table class="w-full text-left">
+        <thead class="text-slate-500 text-xs border-b border-slate-200"><tr>
           <th class="py-2 pr-3">Port</th><th class="py-2 pr-3">Via</th><th class="py-2 pr-3">Outcome</th>
           <th class="py-2 pr-3" title="Identified hostname, its source, and whether it is stable or flapping">Hostname</th>
           <th class="py-2 pr-2 text-center" title="Login / Password / Shell prompt detected">L·P·S</th>
           <th class="py-2 pr-2 text-center" title="credentials tried / available">Creds</th>
           <th class="py-2 pr-2 text-center">Bytes</th><th class="py-2 pr-3">Why</th><th class="py-2 pr-3">Last</th>
         </tr></thead><tbody>${identRows.map(d => _consoleIdentDiagRow(d)).join('')}</tbody></table>
-        <div class="mt-2 text-[10px] text-slate-500">Tip: click a row's “Why” to see the last raw line the device emitted (control chars stripped). A <b>flapping</b> hostname changes across probes — hover it for the distinct values, their source (command output vs CLI prompt vs AI) and when each was seen. A port with <b>no attempt yet</b> shows why it isn't being logged into and when the next try is due.</div>` : '';
+        <div class="mt-2 text-xs text-slate-500">Tip: click a row's “Why” to see the last raw line the device emitted (control chars stripped). A <b>flapping</b> hostname changes across probes — hover it for the distinct values, their source (command output vs CLI prompt vs AI) and when each was seen. A port with <b>no attempt yet</b> shows why it isn't being logged into and when the next try is due.</div>` : '';
     const bootStatePill = (b) => {
-        if (b.state === 'stuck') return '<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase">stuck</span>';
-        if (b.state === 'booting') return '<span class="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 text-[10px] font-bold uppercase">booting</span>';
-        if (b.state === 'booted') return '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">booted</span>';
+        if (b.state === 'stuck') return '<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-bold">stuck</span>';
+        if (b.state === 'booting') return '<span class="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 text-xs font-bold">booting</span>';
+        if (b.state === 'booted') return '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-bold">booted</span>';
         return escapeHtml(b.state || '');
     };
-    const bootTbl = bootRows.length ? `<div class="text-[11px] font-bold text-slate-500 uppercase mb-1 mt-5">Boot / wake capture</div><table class="w-full text-left mb-2">
-        <thead class="text-slate-500 uppercase text-[10px] border-b border-slate-200"><tr>
+    const bootTbl = bootRows.length ? `<div class="text-xs font-bold text-slate-500 mb-1 mt-5">Boot / wake capture</div><table class="w-full text-left mb-2">
+        <thead class="text-slate-500 text-xs border-b border-slate-200"><tr>
           <th class="py-2 pr-3">Port</th><th class="py-2 pr-3">State</th>
           <th class="py-2 pr-3 text-center" title="Reached a login/shell prompt">Prompt</th>
           <th class="py-2 pr-3 text-center" title="Age of this boot episode">Age</th>
           <th class="py-2 pr-3">Why</th><th class="py-2 pr-3">Last output</th>
         </tr></thead><tbody>${bootRows.map(d => { const b = d.boot; return `<tr class="border-b border-slate-50">
           <td class="py-2 pr-3 font-mono text-xs">${escapeHtml(d.alias || d.device || d.port_id)}</td>
-          <td class="py-2 pr-3">${bootStatePill(b)}${b.relocked ? ' <span class="text-[9px] text-slate-500" title="Baud re-locked during this boot">🔒baud</span>' : ''}</td>
+          <td class="py-2 pr-3">${bootStatePill(b)}${b.relocked ? ' <span class="text-xs text-slate-500" title="Baud re-locked during this boot">🔒baud</span>' : ''}</td>
           <td class="py-2 pr-3 text-center">${b.prompt_seen ? '✅' : '—'}</td>
           <td class="py-2 pr-3 text-center text-xs text-slate-500">${b.age_s || 0}s</td>
           <td class="py-2 pr-3 text-xs ${b.state === 'stuck' ? 'text-red-600' : 'text-slate-500'} max-w-[20rem] truncate" title="${escapeHtml((b.reason || '') + (b.stuck_reason ? ' — ' + b.stuck_reason : '') + (b.transcript_tail ? '\n\n' + b.transcript_tail : ''))}">${escapeHtml(b.stuck_reason || b.reason || '')}</td>
           <td class="py-2 pr-3 text-xs text-slate-500">${b.since_output_s || 0}s ago</td>
         </tr>`; }).join('')}</tbody></table>
-        <div class="mb-3 text-[10px] text-slate-500">A device that just powered on is watched until it reaches a prompt (<b>booted</b>) or its boot stalls / faults (<b>stuck</b> — likely a hardware or boot problem). Hover “Why” to see the captured boot transcript.</div>` : '';
+        <div class="mb-3 text-xs text-slate-500">A device that just powered on is watched until it reaches a prompt (<b>booted</b>) or its boot stalls / faults (<b>stuck</b> — likely a hardware or boot problem). Hover “Why” to see the captured boot transcript.</div>` : '';
     const errHtml = errs.length
-        ? `<div class="mt-3 text-[11px] text-amber-600">Unreachable consoles: ${errs.map(([s, e]) => escapeHtml(s)).join(', ')}</div>` : '';
-    body.innerHTML = `${summaryBanner}${debugBanner}<div class="text-[11px] text-slate-500 mb-2">${failRows.length} port(s) with a failure/disconnect history · ${identRows.length} with identify attempts or pending (since each agent started).</div>${failTbl}${identTbl}${bootTbl}${errHtml}
+        ? `<div class="mt-3 text-xs text-amber-600">Unreachable consoles: ${errs.map(([s, e]) => escapeHtml(s)).join(', ')}</div>` : '';
+    body.innerHTML = `${summaryBanner}${debugBanner}<div class="text-xs text-slate-500 mb-2">${failRows.length} port(s) with a failure/disconnect history · ${identRows.length} with identify attempts or pending (since each agent started).</div>${failTbl}${identTbl}${bootTbl}${errHtml}
       <div class="pt-4 flex justify-end gap-2">${_consoleDiagFooterBtns()}</div>`;
 }
 
@@ -1813,9 +1813,9 @@ function _consoleDiagSummaryBanner(summaries) {
     }
     if (!warns.length) {
         const total = entries.reduce((n, [, s]) => n + (s.credentials_loaded || 0), 0);
-        return `<div class="mb-3 text-[11px] px-3 py-2 rounded bg-emerald-50 border border-emerald-100 text-emerald-700">✅ Auto-identify is on for every console agent (${total} operator credential(s) loaded); logins run on the auto-probe schedule.</div>`;
+        return `<div class="mb-3 text-xs px-3 py-2 rounded bg-emerald-50 border border-emerald-100 text-emerald-700">✅ Auto-identify is on for every console agent (${total} operator credential(s) loaded); logins run on the auto-probe schedule.</div>`;
     }
-    return `<div class="mb-3 text-[11px] px-3 py-2 rounded bg-amber-50 border border-amber-100 space-y-1">${warns.join('')}</div>`;
+    return `<div class="mb-3 text-xs px-3 py-2 rounded bg-amber-50 border border-amber-100 space-y-1">${warns.join('')}</div>`;
 }
 
 // Hub-side credential/seed debug banner — the authoritative "why is login
@@ -1832,12 +1832,12 @@ function _consoleDiagDebugBanner(dbg) {
         rows.push(`<div class="text-red-700">⛔ No operator credentials saved on the hub — every agent tries only the 9 factory defaults (<span class="font-mono">creds_tried=N/9</span>). Add them via 🔑 Credentials.</div>`);
     for (const [sid, st] of Object.entries(dbg.spokes || {})) {
         const bits = `seeded=${st.seeded} responded=${st.responded} summary=${st.summary_reported}`;
-        rows.push(`<div class="text-slate-500 text-[10px]">${escapeHtml(_spokeLabelFor(sid))}: ${bits}</div>`);
+        rows.push(`<div class="text-slate-500 text-xs">${escapeHtml(_spokeLabelFor(sid))}: ${bits}</div>`);
         if (saved && !st.seeded)
             rows.push(`<div class="text-amber-700">⚠ <b>${escapeHtml(_spokeLabelFor(sid))}</b>: creds saved but not yet pushed to this agent — Refresh (or open Console ports) to re-seed.</div>`);
     }
     const tone = !saved ? 'bg-red-50 border-red-100' : 'bg-slate-50 border-slate-200';
-    return `<div class="mb-3 text-[11px] px-3 py-2 rounded border ${tone} space-y-1">${rows.join('')}</div>`;
+    return `<div class="mb-3 text-xs px-3 py-2 rounded border ${tone} space-y-1">${rows.join('')}</div>`;
 }
 
 // Footer buttons shared by the diagnostics modal states: purge all collected
@@ -1845,11 +1845,11 @@ function _consoleDiagDebugBanner(dbg) {
 // spoke) + copy/refresh (available to the whole console view tier).
 function _consoleDiagFooterBtns() {
     const purgeBtn = isAdmin()
-        ? `<button onclick="purgeConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50" title="Delete all collected serial-health / identify telemetry across every console agent">🗑 Purge data</button>`
+        ? `<button onclick="purgeConsoleDiagnostics()" class="text-xs px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50" title="Delete all collected serial-health / identify telemetry across every console agent">🗑 Purge data</button>`
         : '';
-    return `<button onclick="copyConsoleDiagnostics(this)" class="text-[11px] px-3 py-1.5 rounded border border-brand text-primary-text hover:bg-brand/10 font-bold" title="Copy the full diagnostics — every port's login/identify telemetry, prompts, creds tried, skip reason and the last raw device line — as plain text to paste into a ticket or chat">⧉ Copy debug</button>`
+    return `<button onclick="copyConsoleDiagnostics(this)" class="text-xs px-3 py-1.5 rounded border border-brand text-primary-text hover:bg-brand/10 font-bold" title="Copy the full diagnostics — every port's login/identify telemetry, prompts, creds tried, skip reason and the last raw device line — as plain text to paste into a ticket or chat">⧉ Copy debug</button>`
          + purgeBtn
-         + `<button onclick="refreshConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">↻ Refresh</button>`;
+         + `<button onclick="refreshConsoleDiagnostics()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">↻ Refresh</button>`;
 }
 
 // Serialize the last-fetched console diagnostics to plain text so an operator can
@@ -1982,8 +1982,8 @@ function _consoleDiagFallbackCopy(txt) {
     m.innerHTML = `<div class="bg-white rounded-lg shadow-2xl w-full max-w-2xl p-4">
         <div class="flex justify-between items-center mb-2"><b class="text-sm">Copy diagnostics</b>
           <button onclick="this.closest('.fixed').remove()" class="text-slate-500 text-xl leading-none">&times;</button></div>
-        <textarea class="w-full h-80 border border-slate-300 rounded p-2 font-mono text-[11px]" readonly></textarea>
-        <div class="text-[11px] text-slate-500 mt-1">Select all (Ctrl/Cmd+A) and copy.</div></div>`;
+        <textarea class="w-full h-80 border border-slate-300 rounded p-2 font-mono text-xs" readonly></textarea>
+        <div class="text-xs text-slate-500 mt-1">Select all (Ctrl/Cmd+A) and copy.</div></div>`;
     m.querySelector('textarea').value = txt;
     document.body.appendChild(m);
     m.querySelector('textarea').focus();
@@ -2017,24 +2017,24 @@ function _consoleIdentDiagRow(d) {
         // No login/identify attempt recorded yet — explain the state instead of
         // mislabelling it "silent". This is the "isn't trying to login" case.
         pill = sched.active_identity
-            ? '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">identified</span>'
-            : '<span class="px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 text-[10px] font-bold uppercase">not tried yet</span>';
-    } else if (t.logged_in) pill = '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">logged in</span>';
-    else if (t.shell_prompt_seen) pill = '<span class="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-[10px] font-bold uppercase">shell, no id</span>';
-    else if (t.password_prompt_seen) pill = '<span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase">auth rejected</span>';
-    else if (t.login_prompt_seen) pill = '<span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase">login prompt</span>';
-    else if (t.any_output) pill = '<span class="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[10px] font-bold uppercase">no prompt</span>';
-    else pill = '<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase">silent</span>';
+            ? '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-bold">identified</span>'
+            : '<span class="px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 text-xs font-bold">not tried yet</span>';
+    } else if (t.logged_in) pill = '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs font-bold">logged in</span>';
+    else if (t.shell_prompt_seen) pill = '<span class="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-bold">shell, no id</span>';
+    else if (t.password_prompt_seen) pill = '<span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-bold">auth rejected</span>';
+    else if (t.login_prompt_seen) pill = '<span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-xs font-bold">login prompt</span>';
+    else if (t.any_output) pill = '<span class="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 text-xs font-bold">no prompt</span>';
+    else pill = '<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-bold">silent</span>';
     const via = t.method === 'llm' ? '🤖 AI' : (t.attempts ? '🔑 login' : '—');
     const cmds = (t.method === 'llm' && (t.commands_run || t.rejected))
-        ? `<div class="text-[10px] text-slate-500">ran ${(t.commands_run || []).length}${(t.rejected || []).length ? ` · ${t.rejected.length} rejected` : ''}</div>` : '';
-    const vend = t.vendor ? ` <span class="text-[10px] text-blue-600 font-bold uppercase">${escapeHtml(t.vendor)}</span>` : '';
+        ? `<div class="text-xs text-slate-500">ran ${(t.commands_run || []).length}${(t.rejected || []).length ? ` · ${t.rejected.length} rejected` : ''}</div>` : '';
+    const vend = t.vendor ? ` <span class="text-xs text-blue-600 font-bold">${escapeHtml(t.vendor)}</span>` : '';
     // "Why" = for attempted ports, the last reason/line the device gave; for
     // never-attempted ports, why it isn't being probed + when the next try lands.
     const nextTxt = (sched.next_attempt_in > 0)
         ? ` <span class="text-slate-500">(next in ${_consoleFmtDur(sched.next_attempt_in)})</span>` : '';
     const why = t.attempts
-        ? `${escapeHtml(t.reason || '')}${sched.skip_reason ? `<div class="text-[10px] text-slate-500">${escapeHtml(sched.skip_reason)}${nextTxt}</div>` : ''}`
+        ? `${escapeHtml(t.reason || '')}${sched.skip_reason ? `<div class="text-xs text-slate-500">${escapeHtml(sched.skip_reason)}${nextTxt}</div>` : ''}`
         : `<span class="text-slate-500">${escapeHtml(sched.skip_reason || 'pending')}${nextTxt}</span>`;
     const tail = escapeHtml(t.tail || '(no output)');
     const whyCell = t.attempts
@@ -2048,7 +2048,7 @@ function _consoleIdentDiagRow(d) {
       <td class="py-2 pr-2 text-center text-xs whitespace-nowrap">${yn(t.login_prompt_seen)}·${yn(t.password_prompt_seen)}·${yn(t.shell_prompt_seen)}</td>
       <td class="py-2 pr-2 text-center text-xs">${t.creds_tried || 0}/${t.creds_available || 0}</td>
       <td class="py-2 pr-2 text-center text-xs">${t.bytes || 0}</td>
-      <td class="py-2 pr-3 text-xs text-slate-500 max-w-[14rem]">${whyCell}${t.error ? `<div class="text-[10px] text-red-500">${escapeHtml(t.error)}</div>` : ''}</td>
+      <td class="py-2 pr-3 text-xs text-slate-500 max-w-[14rem]">${whyCell}${t.error ? `<div class="text-xs text-red-500">${escapeHtml(t.error)}</div>` : ''}</td>
       <td class="py-2 pr-3 text-xs text-slate-500">${t.attempts ? _consoleRelTime(t.last_attempt || 0) : '—'}</td>
     </tr>`;
 }
@@ -2071,14 +2071,14 @@ function _consoleHostnameCell(t) {
     const hn = t.hostname || '';
     if (!hn) return '<span class="text-slate-500">—</span>';
     const src = t.hostname_source || '';
-    const srcBadge = src ? ` <span class="text-[9px] px-1 rounded bg-slate-100 text-slate-500 uppercase" title="Where this name came from">${escapeHtml(src)}</span>` : '';
+    const srcBadge = src ? ` <span class="text-xs px-1 rounded bg-slate-100 text-slate-500" title="Where this name came from">${escapeHtml(src)}</span>` : '';
     const changes = t.hostname_changes || 0;
     const distinct = t.hostname_distinct || 1;
     const hist = t.hostname_history || [];
     const tip = hist.map(h => `${h.host}  —  ${h.source || '?'}, ${_consoleRelTime(h.ts)}`).join('&#10;');
     const mark = changes > 0
-        ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 font-bold cursor-help" title="Changed ${changes}× across ${distinct} distinct value(s):&#10;${escapeHtml(tip)}">⚠ flapping ×${changes}</span>`
-        : `<span class="text-[10px] text-emerald-600" title="Same name on every probe">✓ stable</span>`;
+        ? `<span class="text-xs px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 font-bold cursor-help" title="Changed ${changes}× across ${distinct} distinct value(s):&#10;${escapeHtml(tip)}">⚠ flapping ×${changes}</span>`
+        : `<span class="text-xs text-emerald-600" title="Same name on every probe">✓ stable</span>`;
     return `<div class="font-mono text-xs">${escapeHtml(hn)}${srcBadge}</div><div class="mt-0.5">${mark}</div>`;
 }
 
@@ -2132,21 +2132,21 @@ async function openConsoleCredentialsModal() {
     } catch (e) { console.error('console credential candidates fetch failed', e); }
     const selectionSection = credCandidates.length
         ? `<div class="pt-2 border-t border-slate-100">
-             <p class="text-[11px] font-semibold text-slate-500 mb-1">Accounts used for scanning &amp; auto-identify</p>
-             <p class="text-[11px] text-slate-500 mb-2">Every account is tried unless you narrow this list. Un-tick an account to keep the sweep from using it.</p>
+             <p class="text-xs font-semibold text-slate-500 mb-1">Accounts used for scanning &amp; auto-identify</p>
+             <p class="text-xs text-slate-500 mb-2">Every account is tried unless you narrow this list. Un-tick an account to keep the sweep from using it.</p>
              <div class="space-y-1">${credCandidates.map(c => `
                <label class="flex items-center gap-2 bg-slate-50 rounded px-2 py-1 cursor-pointer">
                  <input type="checkbox" class="console-cred-sel" data-name="${escapeHtml(c.name)}" ${c.selected ? 'checked' : ''}>
                  <span class="font-mono text-xs text-slate-600">${escapeHtml(c.username || '(no username)')}</span>
-                 <span class="text-[10px] text-slate-500 ml-auto truncate max-w-[45%]" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>
+                 <span class="text-xs text-slate-500 ml-auto truncate max-w-[45%]" title="${escapeHtml(c.name)}">${escapeHtml(c.name)}</span>
                </label>`).join('')}</div>
              <div class="flex justify-between items-center pt-2 gap-2">
-               <span class="text-[10px] ${selectionActive ? 'text-amber-600' : 'text-slate-500'}">${selectionActive
+               <span class="text-xs ${selectionActive ? 'text-amber-600' : 'text-slate-500'}">${selectionActive
                    ? 'Selection active — only ticked accounts are used.'
                    : 'No selection — every account is tried.'}</span>
                <span class="flex gap-2 shrink-0">
-                 <button onclick="clearConsoleCredentialSelection('${escJsAttr(tenantScope)}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Use all</button>
-                 <button onclick="saveConsoleCredentialSelection('${escJsAttr(tenantScope)}')" class="text-[11px] px-3 py-1 rounded border border-brand text-primary-text hover:bg-brand/10 font-bold">Save selection</button>
+                 <button onclick="clearConsoleCredentialSelection('${escJsAttr(tenantScope)}')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Use all</button>
+                 <button onclick="saveConsoleCredentialSelection('${escJsAttr(tenantScope)}')" class="text-xs px-3 py-1 rounded border border-brand text-primary-text hover:bg-brand/10 font-bold">Save selection</button>
                </span>
              </div>
            </div>`
@@ -2171,16 +2171,16 @@ async function openConsoleCredentialsModal() {
         // operator can clean them up (they can't be edited, only removed).
         const localSection = localCreds.length
             ? `<div class="pt-2 border-t border-slate-100">
-                 <p class="text-[11px] font-semibold text-slate-500 mb-1">Legacy local passwords (delete to clean up)</p>
+                 <p class="text-xs font-semibold text-slate-500 mb-1">Legacy local passwords (delete to clean up)</p>
                  <div class="space-y-1">${localCreds.map(c => `
                    <div class="flex items-center justify-between gap-2 bg-slate-50 rounded px-2 py-1">
                      <span class="font-mono text-xs text-slate-600">${escapeHtml(c.username)}${c.has_password ? '' : ' <span class="text-amber-500">(no password)</span>'}</span>
-                     <button onclick="deleteConsoleLocalCredential('${escJsAttr(c.username)}')" class="text-[11px] px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50" title="Delete this local credential">Delete</button>
+                     <button onclick="deleteConsoleLocalCredential('${escJsAttr(c.username)}')" class="text-xs px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50" title="Delete this local credential">Delete</button>
                    </div>`).join('')}</div>
                </div>`
             : '';
         const sharedNote = sharedGlobalCount
-            ? `<div class="text-[11px] px-3 py-2 rounded bg-slate-50 text-slate-500 border border-slate-200">➕ ${sharedGlobalCount} shared global login${sharedGlobalCount === 1 ? '' : 's'} (managed by a Global Admin) also appl${sharedGlobalCount === 1 ? 'ies' : 'y'} to your console devices.</div>`
+            ? `<div class="text-xs px-3 py-2 rounded bg-slate-50 text-slate-500 border border-slate-200">➕ ${sharedGlobalCount} shared global login${sharedGlobalCount === 1 ? '' : 's'} (managed by a Global Admin) also appl${sharedGlobalCount === 1 ? 'ies' : 'y'} to your console devices.</div>`
             : '';
         modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
@@ -2204,7 +2204,7 @@ async function openConsoleCredentialsModal() {
         <input class="console-cred-pass flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm" type="password" placeholder="password (blank = keep)">
         <button onclick="this.closest('.console-cred-row').remove()" class="px-2 text-red-400 hover:text-red-600">&times;</button></div>`;
     const pskRow = bucketHasPsk
-        ? `<div class="pt-1"><label class="block text-[11px] text-slate-500 mb-1">Vault pass-phrase (required to save — this bucket is PSK-protected)</label>
+        ? `<div class="pt-1"><label class="block text-xs text-slate-500 mb-1">Vault pass-phrase (required to save — this bucket is PSK-protected)</label>
              <input id="console-cred-psk" type="password" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm" placeholder="bucket pass-phrase"></div>`
         : '';
     const scopeNote = tenantScope
@@ -2217,9 +2217,9 @@ async function openConsoleCredentialsModal() {
         </div>
         <div class="p-6 space-y-3">
           ${scopeNote}
-          <p class="text-[11px] text-slate-500">Tried in order when scanning/auto-identifying serial-attached devices. Stored in the Credential Vault; passwords are never displayed back. Leave a password blank to keep the stored one. Remove all rows to clear this tenant's console logins.</p>
+          <p class="text-xs text-slate-500">Tried in order when scanning/auto-identifying serial-attached devices. Stored in the Credential Vault; passwords are never displayed back. Leave a password blank to keep the stored one. Remove all rows to clear this tenant's console logins.</p>
           <div id="console-cred-rows" class="space-y-2">${(existing.length ? existing.map(c => rowFor(c.username)).join('') : rowFor(''))}</div>
-          <button onclick="document.getElementById('console-cred-rows').insertAdjacentHTML('beforeend', _consoleCredRowHtml())" class="text-[11px] px-3 py-1 rounded border border-slate-300 hover:bg-slate-50">+ Add credential</button>
+          <button onclick="document.getElementById('console-cred-rows').insertAdjacentHTML('beforeend', _consoleCredRowHtml())" class="text-xs px-3 py-1 rounded border border-slate-300 hover:bg-slate-50">+ Add credential</button>
           ${pskRow}
           <div class="pt-3 flex justify-end gap-3">
             <button onclick="this.closest('#console-creds-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
@@ -2443,7 +2443,7 @@ function serialEnsureConsoleDock() {
         <div id="serial-console-resize-handle" title="Drag to resize — collapse to fit two consoles side-by-side"
              class="w-1.5 shrink-0 cursor-col-resize bg-slate-700 hover:bg-sky-500 active:bg-sky-500 relative">
             <button id="serial-console-sidebar-collapse" title="Collapse/expand the console list"
-                    class="absolute top-2 -left-2 w-4 h-8 flex items-center justify-center rounded-sm bg-slate-700 hover:bg-sky-600 text-slate-300 hover:text-white text-[10px] leading-none">◂</button>
+                    class="absolute top-2 -left-2 w-4 h-8 flex items-center justify-center rounded-sm bg-slate-700 hover:bg-sky-600 text-slate-300 hover:text-white text-xs leading-none">◂</button>
         </div>
         <div class="flex-1 flex flex-col min-w-0 min-h-0">
             <div class="flex items-center gap-3 px-4 py-2 bg-[#2d2d2d] border-b border-slate-700 text-slate-200 text-sm">
@@ -3030,11 +3030,11 @@ function serialRenderConsoleList() {
         const kAttr = escapeHtml(r.key);
         const sAttr = escapeHtml(r.spokeId);
         const pAttr = escapeHtml(r.portId);
-        const roBadge = (r.open && e.ro) ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-[9px]">RO</span>' : '';
+        const roBadge = (r.open && e.ro) ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-xs">RO</span>' : '';
         const stateBadge = r.open ? ''
             : (r.reachable
-                ? (r.inUse ? '<span class="ml-1 px-1 rounded bg-amber-700 text-amber-100 text-[9px]">IN USE</span>' : '')
-                : '<span class="ml-1 px-1 rounded bg-slate-700 text-slate-300 text-[9px]">OFFLINE</span>');
+                ? (r.inUse ? '<span class="ml-1 px-1 rounded bg-amber-700 text-amber-100 text-xs">IN USE</span>' : '')
+                : '<span class="ml-1 px-1 rounded bg-slate-700 text-slate-300 text-xs">OFFLINE</span>');
         const inGroup = !!(group && group.has(r.key));
         const lead = r.open
             ? `<input type="checkbox" data-bcast-key="${kAttr}" ${inGroup ? 'checked' : ''} title="Include in broadcast group" onclick="event.stopPropagation()">`
@@ -3176,7 +3176,7 @@ function serialRenderDockPill() {
     let pill = document.getElementById('serial-console-dock-pill');
     if (!window._serialDockCollapsed || count === 0) { if (pill) pill.remove(); return; }
     const inFooterCls = 'flex items-center gap-2 px-2 py-0.5 rounded-full border border-slate-500 ' +
-                        'text-[11px] text-white/90 hover:border-white transition-all';
+                        'text-xs text-white/90 hover:border-white transition-all';
     const floatCls = 'fixed bottom-2 right-4 z-50 flex items-center gap-2 px-3 py-1.5 rounded-full ' +
                      'bg-[#181818] border border-slate-600 shadow-2xl text-xs text-slate-200';
     if (!pill) {
@@ -3264,11 +3264,11 @@ function openConsoleSettingsModal(spokeId, portId) {
     // Direct Port Access: show the endpoint and let the operator pin this serial
     // port to a specific TCP port (blank = auto-assign). Only when DPA is on.
     const d = p.dpa || {};
-    const dpaField = (proto, cur, pinned, label) => `<div><label class="text-[11px] text-slate-500">${label} port <span class="text-slate-500">(current ${escapeHtml(String(cur))}${pinned ? ', pinned' : ', auto'})</span></label>
+    const dpaField = (proto, cur, pinned, label) => `<div><label class="text-xs text-slate-500">${label} port <span class="text-slate-500">(current ${escapeHtml(String(cur))}${pinned ? ', pinned' : ', auto'})</span></label>
                 <input id="console-cfg-dpa-${proto}" type="number" min="1024" max="65535" placeholder="auto" value="${pinned ? escapeHtml(String(cur)) : ''}" data-orig="${pinned ? escapeHtml(String(cur)) : ''}" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></div>`;
     const dpaSection = (d.ssh_port || d.telnet_port) ? `<div class="pt-2 border-t border-slate-100">
-            <div class="text-xs text-slate-500 uppercase font-bold mb-1">Direct Port Access <span class="normal-case text-slate-500 font-normal">— leave blank to auto-assign</span></div>
-            ${d.ssh_port ? `<div class="text-[11px] font-mono text-sky-700 mb-1">${escapeHtml(_consoleDpaSshCmd(p))}</div>` : ''}
+            <div class="text-xs text-slate-500 font-bold mb-1">Direct Port Access <span class="normal-case text-slate-500 font-normal">— leave blank to auto-assign</span></div>
+            ${d.ssh_port ? `<div class="text-xs font-mono text-sky-700 mb-1">${escapeHtml(_consoleDpaSshCmd(p))}</div>` : ''}
             <div class="grid grid-cols-2 gap-3">
               ${d.ssh_port ? dpaField('ssh', d.ssh_port, d.ssh_override, 'SSH') : ''}
               ${d.telnet_port ? dpaField('telnet', d.telnet_port, d.telnet_override, 'Telnet') : ''}
@@ -3284,19 +3284,19 @@ function openConsoleSettingsModal(spokeId, portId) {
         </div>
         <div class="p-6 space-y-4">
           <div class="text-xs font-mono text-slate-500">${escapeHtml(portId)}</div>
-          <div><label class="text-xs text-slate-500 uppercase font-bold">Alias</label>
+          <div><label class="text-xs text-slate-500 font-bold">Alias</label>
             <input id="console-cfg-alias" value="${(p.alias || '').replace(/"/g, '&quot;')}" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></div>
           <div class="grid grid-cols-3 gap-3">
-            <div><label class="text-xs text-slate-500 uppercase font-bold">Baud</label><select id="console-cfg-baud" class="w-full border border-slate-300 rounded-md px-2 py-2 text-sm mt-1">${baudOpts}</select></div>
-            <div><label class="text-xs text-slate-500 uppercase font-bold">Parity</label><select id="console-cfg-parity" class="w-full border border-slate-300 rounded-md px-2 py-2 text-sm mt-1">${parOpts}</select></div>
-            <div><label class="text-xs text-slate-500 uppercase font-bold">Flow</label><select id="console-cfg-flow" class="w-full border border-slate-300 rounded-md px-2 py-2 text-sm mt-1">${flowOpts}</select></div>
+            <div><label class="text-xs text-slate-500 font-bold">Baud</label><select id="console-cfg-baud" class="w-full border border-slate-300 rounded-md px-2 py-2 text-sm mt-1">${baudOpts}</select></div>
+            <div><label class="text-xs text-slate-500 font-bold">Parity</label><select id="console-cfg-parity" class="w-full border border-slate-300 rounded-md px-2 py-2 text-sm mt-1">${parOpts}</select></div>
+            <div><label class="text-xs text-slate-500 font-bold">Flow</label><select id="console-cfg-flow" class="w-full border border-slate-300 rounded-md px-2 py-2 text-sm mt-1">${flowOpts}</select></div>
           </div>
           <div class="pt-2 border-t border-slate-100">
-            <div class="text-xs text-slate-500 uppercase font-bold mb-1">Paste pacing <span class="normal-case text-slate-500 font-normal">— slows large pastes so slow devices don't drop lines</span></div>
+            <div class="text-xs text-slate-500 font-bold mb-1">Paste pacing <span class="normal-case text-slate-500 font-normal">— slows large pastes so slow devices don't drop lines</span></div>
             <div class="grid grid-cols-2 gap-3">
-              <div><label class="text-[11px] text-slate-500">Delay after each line (ms)</label>
+              <div><label class="text-xs text-slate-500">Delay after each line (ms)</label>
                 <input id="console-cfg-linedelay" type="number" min="0" max="2000" value="${Number.isFinite(+s.paste_line_delay_ms) ? +s.paste_line_delay_ms : 15}" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></div>
-              <div><label class="text-[11px] text-slate-500">Chunk size (bytes)</label>
+              <div><label class="text-xs text-slate-500">Chunk size (bytes)</label>
                 <input id="console-cfg-chunk" type="number" min="1" max="4096" value="${Number.isFinite(+s.paste_chunk) ? +s.paste_chunk : 64}" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></div>
             </div>
           </div>
@@ -3363,7 +3363,7 @@ function openConsoleDpaModal() {
       <button onclick="this.closest('#console-dpa-modal').remove()" class="text-slate-500 hover:text-slate-600 text-2xl leading-none">&times;</button>
     </div>
     <div class="p-6 space-y-4">
-      <div><label class="text-xs text-slate-500 uppercase font-bold">Spoke</label>
+      <div><label class="text-xs text-slate-500 font-bold">Spoke</label>
         <select id="dpa-spoke" onchange="_consoleDpaLoad(this.value)" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></select></div>
       <div id="dpa-status" class="text-xs text-slate-500"></div>
       <div><label class="flex items-center space-x-2">
@@ -3390,18 +3390,18 @@ function openConsoleDpaModal() {
         <div><label class="text-xs text-slate-500">Base port</label>
           <input id="dpa-telnet-base" type="number" placeholder="2200" class="w-full border border-slate-300 rounded-md px-3 py-1 text-sm"></div>
       </div></div>
-      <div><label class="text-xs text-slate-500 uppercase font-bold">Advertise host</label>
+      <div><label class="text-xs text-slate-500 font-bold">Advertise host</label>
         <input id="dpa-advertise-host" placeholder="auto-detect" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
         <div class="text-xs text-slate-500 mt-1">Address shown to users in the ssh command (leave blank to auto-detect)</div></div>
-      <div><label class="text-xs text-slate-500 uppercase font-bold">Allow from</label>
+      <div><label class="text-xs text-slate-500 font-bold">Allow from</label>
         <input id="dpa-allow" placeholder="source IPs/CIDRs, comma-separated (blank = any)" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></div>
-      <div><label class="text-xs text-slate-500 uppercase font-bold">Password</label>
+      <div><label class="text-xs text-slate-500 font-bold">Password</label>
         <input id="dpa-password" type="password" autocomplete="new-password" placeholder="leave blank to keep current" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
         <div><label class="flex items-center space-x-2 mt-1">
           <input type="checkbox" id="dpa-clear-password" class="rounded">
           <span class="text-sm">Remove password</span>
         </label></div></div>
-      <div><label class="text-xs text-slate-500 uppercase font-bold">Authorized SSH keys</label>
+      <div><label class="text-xs text-slate-500 font-bold">Authorized SSH keys</label>
         <textarea id="dpa-keys" rows="3" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono mt-1 text-xs" placeholder="authorized SSH public keys, one per line"></textarea></div>
       <div class="pt-3 flex justify-end gap-3">
         <button onclick="this.closest('#console-dpa-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
@@ -3548,7 +3548,7 @@ async function openConsolePortTenantModal(spokeId, portId, currentTenantId) {
         </div>
         <div class="p-6 space-y-4">
           <div class="text-xs font-mono text-slate-500">${escapeHtml(portId)}</div>
-          <p class="text-[11px] text-slate-500">A per-port override. Leave <b>(inherit agent)</b> to fall back to the whole console agent's tenant.</p>
+          <p class="text-xs text-slate-500">A per-port override. Leave <b>(inherit agent)</b> to fall back to the whole console agent's tenant.</p>
           <select id="console-port-tenant" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm">
             <option value="" ${!currentTenantId ? 'selected' : ''}>(inherit agent)</option>${tenantOptions}
           </select>
@@ -3584,8 +3584,8 @@ function openConsoleConfigModal(spokeId, portId) {
           <button onclick="this.closest('#console-config-modal').remove()" class="text-slate-500 hover:text-slate-600 text-2xl leading-none">&times;</button>
         </div>
         <div class="p-6 space-y-3 overflow-y-auto">
-          <p class="text-[11px] text-slate-500">Requires the device to have been Identified. Push is transactional — verify before + after, save on success, roll back on failure (a failed push is never saved).</p>
-          <button onclick="consoleConfigBackup('${eS}','${eP}')" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">⤓ Read / backup running-config</button>
+          <p class="text-xs text-slate-500">Requires the device to have been Identified. Push is transactional — verify before + after, save on success, roll back on failure (a failed push is never saved).</p>
+          <button onclick="consoleConfigBackup('${eS}','${eP}')" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">⤓ Read / backup running-config</button>
           <textarea id="console-config-text" rows="10" placeholder="Paste config to push (one command per line)…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono"></textarea>
           <div class="flex items-center gap-4 text-sm flex-wrap">
             <label class="flex items-center gap-2"><input type="checkbox" id="console-config-save" checked class="rounded border-slate-300"> Save to startup on success</label>
@@ -3740,14 +3740,14 @@ function pxmxEnsureConsoleDock() {
                            class="flex-1 min-w-0 text-xs bg-[#1a1a2e] border border-slate-600 rounded px-2 py-1 text-slate-100 focus:outline-none focus:border-sky-500">
                     <button id="pxmx-vnc-refresh" title="Refresh the searchable VM directory (only VMs you have rights to)" class="shrink-0 text-slate-500 hover:text-sky-400 text-sm leading-none px-1">⟳</button>
                 </div>
-                <p class="text-[10px] text-slate-500 leading-tight">Type to search any VNC-capable VM you can access; empty shows only open consoles.</p>
+                <p class="text-xs text-slate-500 leading-tight">Type to search any VNC-capable VM you can access; empty shows only open consoles.</p>
             </div>
             <div id="pxmx-vnc-list" class="flex-1 overflow-y-auto w-72"></div>
         </div>
         <div id="pxmx-vnc-resize-handle" title="Drag to resize — collapse to fit two consoles side-by-side"
              class="w-1.5 shrink-0 cursor-col-resize bg-slate-700 hover:bg-sky-500 active:bg-sky-500 relative">
             <button id="pxmx-vnc-sidebar-collapse" title="Collapse/expand the console list"
-                    class="absolute top-2 -left-2 w-4 h-8 flex items-center justify-center rounded-sm bg-slate-700 hover:bg-sky-600 text-slate-300 hover:text-white text-[10px] leading-none">◂</button>
+                    class="absolute top-2 -left-2 w-4 h-8 flex items-center justify-center rounded-sm bg-slate-700 hover:bg-sky-600 text-slate-300 hover:text-white text-xs leading-none">◂</button>
         </div>
         <div class="flex-1 flex flex-col min-w-0">
             <div class="flex items-center gap-3 px-4 py-2 bg-[#16213e] border-b border-slate-700 text-slate-200 text-sm">
@@ -4183,9 +4183,9 @@ function pxmxRenderConsoleList() {
             const rowCls = isA ? 'bg-[#1a1a2e] text-slate-100' : 'text-slate-500 hover:bg-[#1a1a30] hover:text-slate-200';
             const vc = (e.viewers && e.viewers.length) || 0;
             const viewerBadge = vc > 1
-                ? `<span title="${vc} viewers on this console" class="ml-1 px-1 rounded bg-brand/20 text-primary-text text-[10px]">👁 ${vc}</span>`
+                ? `<span title="${vc} viewers on this console" class="ml-1 px-1 rounded bg-brand/20 text-primary-text text-xs">👁 ${vc}</span>`
                 : '';
-            const roBadge = e.ro ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-[9px]">RO</span>' : '';
+            const roBadge = e.ro ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-xs">RO</span>' : '';
             return `<div data-key="${kAttr}" data-open="1" class="pxmx-vnc-row flex items-center gap-2 px-3 py-2 border-b border-[#1f1f38] cursor-pointer text-xs ${rowCls}">
                 <span class="w-2 h-2 rounded-full ${dot} shrink-0"></span>
                 <span class="truncate flex-1">${label}</span>${viewerBadge}${roBadge}
@@ -4197,8 +4197,8 @@ function pxmxRenderConsoleList() {
         // console fine, so keep them clickable and just flag the power state.
         const running = String(vm.status || '').toLowerCase() === 'running';
         const stateBadge = running
-            ? '<span class="ml-1 px-1 rounded bg-green-900/50 text-green-300 text-[9px]">RUNNING</span>'
-            : '<span class="ml-1 px-1 rounded bg-slate-700 text-slate-300 text-[9px]">STOPPED</span>';
+            ? '<span class="ml-1 px-1 rounded bg-green-900/50 text-green-300 text-xs">RUNNING</span>'
+            : '<span class="ml-1 px-1 rounded bg-slate-700 text-slate-300 text-xs">STOPPED</span>';
         return `<div data-key="${kAttr}" data-open="0" title="Open a noVNC console to this VM" class="pxmx-vnc-row flex items-center gap-2 px-3 py-2 border-b border-[#1f1f38] cursor-pointer text-xs text-slate-500 hover:bg-[#1a1a30] hover:text-slate-200">
             <span class="w-[13px] shrink-0 text-center text-slate-500">+</span>
             <span class="w-2 h-2 rounded-full ${running ? 'bg-green-500' : 'bg-slate-600'} shrink-0"></span>
@@ -4294,7 +4294,7 @@ function pxmxRenderDockPill() {
     let pill = document.getElementById('pxmx-vnc-dock-pill');
     if (!window._pxmxDockCollapsed || count === 0) { if (pill) pill.remove(); return; }
     const inFooterCls = 'flex items-center gap-2 px-2 py-0.5 rounded-full border border-slate-500 ' +
-                        'text-[11px] text-white/90 hover:border-white transition-all';
+                        'text-xs text-white/90 hover:border-white transition-all';
     const floatCls = 'fixed bottom-2 right-4 z-50 flex items-center gap-2 px-3 py-1.5 rounded-full ' +
                      'bg-[#181818] border border-slate-600 shadow-2xl text-xs text-slate-200';
     if (!pill) {
@@ -4604,19 +4604,19 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
     const summaryCardsHtml = `
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
             <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
-                <div class="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Drives</div>
+                <div class="text-xs font-medium text-slate-500">Total Drives</div>
                 <div class="text-2xl font-bold text-slate-800 mt-1">${summary.total_drives || 0}</div>
             </div>
             <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
-                <div class="text-xs font-medium text-emerald-600 uppercase tracking-wider">Healthy</div>
+                <div class="text-xs font-medium text-emerald-600">Healthy</div>
                 <div class="text-2xl font-bold text-emerald-700 mt-1">${summary.healthy || 0}</div>
             </div>
             <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
-                <div class="text-xs font-medium text-amber-600 uppercase tracking-wider">Warning (wear >= 80%)</div>
+                <div class="text-xs font-medium text-amber-600">Warning (wear >= 80%)</div>
                 <div class="text-2xl font-bold text-amber-700 mt-1">${summary.warning || 0}</div>
             </div>
             <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
-                <div class="text-xs font-medium text-red-600 uppercase tracking-wider">Critical (wear >= 90%)</div>
+                <div class="text-xs font-medium text-red-600">Critical (wear >= 90%)</div>
                 <div class="text-2xl font-bold text-red-700 mt-1">${summary.critical || 0}</div>
             </div>
         </div>`;
@@ -4662,7 +4662,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
         } else if (s === 'critical' || s === 'crit' || s === 'error' || s === 'failed') {
             cls = 'bg-red-100 text-red-800';
         }
-        return `<span class="px-2 py-0.5 rounded-full text-xs font-medium uppercase ${cls}">${escapeHtml(status || 'unknown')}</span>`;
+        return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}">${escapeHtml(status || 'unknown')}</span>`;
     }
 
     function getWearBar(wear) {
@@ -4698,33 +4698,33 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
         const diagUnavailable = !n.diagnostics || n.status === 'ERROR';
         let badgesHtml = '';
         if (n.agent_version) {
-            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">Agent v${escapeHtml(n.agent_version)}</span> `;
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200">Agent v${escapeHtml(n.agent_version)}</span> `;
         }
         if (diagUnavailable) {
-            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">smartctl: Unknown</span> `;
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200">smartctl: Unknown</span> `;
         } else if (n.diagnostics.smartctl_installed) {
-            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">smartctl: Installed</span> `;
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">smartctl: Installed</span> `;
         } else {
-            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">smartctl: Missing</span> `;
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-800 border border-red-200">smartctl: Missing</span> `;
         }
         if (n.diagnostics && n.diagnostics.is_hpe) {
-            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-800 border border-purple-200">HPE Server</span> `;
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-xs font-bold bg-purple-100 text-purple-800 border border-purple-200">HPE Server</span> `;
         }
         if (n.diagnostics && n.diagnostics.has_raid) {
             if (n.diagnostics.ssacli_installed) {
-                badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">ssacli: Installed</span> `;
+                badgesHtml += `<span class="px-2 py-0.5 rounded text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">ssacli: Installed</span> `;
             } else {
-                badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">ssacli: Missing</span> `;
+                badgesHtml += `<span class="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-800 border border-amber-200">ssacli: Missing</span> `;
             }
         }
         if (n.diagnostics && n.diagnostics.controller_type === 'direct_attached') {
-            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-100 text-sky-800 border border-sky-200">Direct-Attached</span> `;
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-xs font-bold bg-sky-100 text-sky-800 border border-sky-200">Direct-Attached</span> `;
         }
         if (n.diagnostics && n.diagnostics.controller_type === 'mixed') {
-            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">RAID + Direct/NVMe</span> `;
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-xs font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">RAID + Direct/NVMe</span> `;
         }
         if (n.diagnostics && n.diagnostics.nvme_tools_installed) {
-            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-teal-100 text-teal-800 border border-teal-200">nvme-cli: Installed</span> `;
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-xs font-bold bg-teal-100 text-teal-800 border border-teal-200">nvme-cli: Installed</span> `;
         }
 
         let alertHtml = '';
@@ -4734,7 +4734,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
                 <div class="font-bold flex items-center gap-1 mb-1">
                     <span>ℹ️ Diagnostics Unavailable</span>
                 </div>
-                ${n.error ? `<p class="mb-1 text-red-700 font-mono text-[11px]">Error: ${escapeHtml(n.error)}</p>` : '<p class="mb-1">Diagnostics not yet reported for this node.</p>'}
+                ${n.error ? `<p class="mb-1 text-red-700 font-mono text-xs">Error: ${escapeHtml(n.error)}</p>` : '<p class="mb-1">Diagnostics not yet reported for this node.</p>'}
             </div>`;
         } else if (!n.diagnostics.smartctl_installed) {
             alertHtml = `
@@ -4742,7 +4742,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
                 <div class="font-bold flex items-center gap-1 mb-1">
                     <span>⚠️ Software Prerequisites Incomplete</span>
                 </div>
-                <p>smartctl is not installed on this node. To collect drive wear and health telemetry, run on the hypervisor host:</p><code class="block mt-1 p-1 bg-white border border-amber-300 rounded font-mono text-[11px] text-slate-800 select-all">apt-get update && apt-get install -y smartmontools</code>
+                <p>smartctl is not installed on this node. To collect drive wear and health telemetry, run on the hypervisor host:</p><code class="block mt-1 p-1 bg-white border border-amber-300 rounded font-mono text-xs text-slate-800 select-all">apt-get update && apt-get install -y smartmontools</code>
             </div>`;
         }
 
@@ -4754,8 +4754,8 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
             const status = drive.health_status || (drive.success ? 'healthy' : 'unknown');
 
             const iface = (drive.interface || '').toUpperCase();
-            const ifaceBadge = iface ? `<span class="ml-1.5 px-1.5 py-0.5 rounded text-[9px] font-bold ${iface === 'NVME' ? 'bg-purple-100 text-purple-700' : (iface === 'SAS' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-600')}">${escapeHtml(iface)}</span>` : '';
-            const tempHtml = drive.temperature ? `<span class="ml-1 text-[10px] font-mono text-slate-500 font-normal">(${escapeHtml(drive.temperature)}°C)</span>` : '';
+            const ifaceBadge = iface ? `<span class="ml-1.5 px-1.5 py-0.5 rounded text-xs font-bold ${iface === 'NVME' ? 'bg-purple-100 text-purple-700' : (iface === 'SAS' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-600')}">${escapeHtml(iface)}</span>` : '';
+            const tempHtml = drive.temperature ? `<span class="ml-1 text-xs font-mono text-slate-500 font-normal">(${escapeHtml(drive.temperature)}°C)</span>` : '';
 
             return `
                 <tr class="border-b border-slate-100 hover:bg-slate-50 transition-colors">
@@ -4779,7 +4779,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
             <div class="mb-6 bg-white rounded-lg border border-slate-200 overflow-hidden shadow-sm">
                 <div class="bg-slate-50 px-4 py-2.5 border-b border-slate-200 flex items-center justify-between">
                     <div class="flex items-center gap-2">
-                        <span class="text-xs font-bold uppercase tracking-wider text-slate-500">Node:</span>
+                        <span class="text-xs font-bold text-slate-500">Node:</span>
                         <span class="text-sm font-semibold text-slate-800">${escapeHtml(nodeName)}</span>
                         ${clusterName ? `<span class="text-xs px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-mono">${escapeHtml(clusterName)}</span>` : ''}
                         <div class="ml-2 flex items-center gap-1 flex-wrap">

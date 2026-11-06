@@ -56,7 +56,7 @@ function firewallCard(name, reply) {
     return safeHtml`<div class="border border-slate-200 rounded-lg p-4 space-y-3">
         <div class="flex items-center justify-between">
             <div class="flex items-center gap-2 font-semibold text-slate-700">${dot(healthy ? 'bg-green-500' : 'bg-amber-500')}${name}</div>
-            <div class="text-[11px] text-slate-500">${o.hostname}${reply.stale ? ' (stale)' : ''}</div>
+            <div class="text-xs text-slate-500">${o.hostname}${reply.stale ? ' (stale)' : ''}</div>
         </div>
         <div class="text-xs text-slate-500">${subtitle}</div>
         ${usageBar('CPU', o.cpu_percent)}

@@ -149,7 +149,7 @@ function renderGlvCandidates() {
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center gap-2 mb-2">
                 <span class="font-mono text-xs text-slate-700 font-semibold">${escapeHtml(ak)}</span>
-                ${pub ? `<span class="text-[10px] uppercase tracking-wider text-emerald-700">published op ${escapeHtml(String(pub.op))}</span>` : ''}
+                ${pub ? `<span class="text-xs text-emerald-700">published op ${escapeHtml(String(pub.op))}</span>` : ''}
             </div>
             <div class="space-y-1">
                 ${rows.map(r => `<div class="flex flex-wrap items-center gap-3 text-xs py-0.5">
@@ -782,11 +782,11 @@ async function loadRepoSyncStatus() {
         </div>
         ${hub.message ? `<p class="text-xs text-slate-500 mt-1">${esc(hub.message)}</p>` : ''}
         <div class="mt-3">
-            <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">Module updates <span class="text-slate-500 font-normal normal-case">(spokes — pxmx / opnsense / cs / cppm / netbox / ldap / nw / le / roles)</span></div>
+            <div class="text-xs font-bold text-slate-500 mb-2">Module updates <span class="text-slate-500 font-normal normal-case">(spokes — pxmx / opnsense / cs / cppm / netbox / ldap / nw / le / roles)</span></div>
             <div class="space-y-1">${spokeRows}</div>
         </div>
         <div class="mt-3 pt-2 border-t border-slate-100">
-            <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">Provisioning source repos <span class="text-slate-500 font-normal normal-case">(auxiliary services on the hub — not LM modules)</span></div>
+            <div class="text-xs font-bold text-slate-500 mb-2">Provisioning source repos <span class="text-slate-500 font-normal normal-case">(auxiliary services on the hub — not LM modules)</span></div>
             <p class="text-xs text-slate-500">${okN} ok · ${errN} error · ${skipN} skipped <span class="text-slate-500">· last ${fmtDate(data.last_sync_ts)}</span></p>
             ${changed.length ? `<p class="text-xs text-slate-500 mt-1">changed: ${esc(changed.join(', '))}</p>` : ''}
             <div class="mt-1 space-y-1">${provRows}</div>
@@ -1676,7 +1676,7 @@ async function loadUsbOverview() {
         ? (g.certified || []).map(d => `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border border-slate-200 rounded-md">
             <span class="font-mono text-xs text-slate-700 w-28">${escapeHtml(d.vidpid)}</span>
             <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">${escapeHtml(d.label && d.label !== d.vidpid ? d.label : (usbDeviceName(d.vidpid) || '—'))}</span>
-            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-green-100 text-green-700">Certified globally</span>
+            <span class="px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700">Certified globally</span>
             <button onclick="removeGlobalUsbCert('${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-approve</button>
           </div>`).join('')
         : '<p class="text-xs text-slate-500 italic">None certified.</p>';
@@ -1684,7 +1684,7 @@ async function loadUsbOverview() {
         ? (g.ignored || []).map(vp => `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border border-slate-200 rounded-md">
             <span class="font-mono text-xs text-slate-700 w-28">${escapeHtml(vp)}</span>
             <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">${escapeHtml(usbDeviceName(vp) || '—')}</span>
-            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-200 text-slate-600">Ignored globally</span>
+            <span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-200 text-slate-600">Ignored globally</span>
             <button onclick="removeGlobalUsbIgnore('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-ignore</button>
           </div>`).join('')
         : '<p class="text-xs text-slate-500 italic">None ignored.</p>';
@@ -1696,20 +1696,20 @@ async function loadUsbOverview() {
         const cert = (t.certified || []).map(d => `<div class="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 border border-slate-200 rounded-md">
                 <span class="font-mono text-xs text-slate-700">${escapeHtml(d.vidpid)}</span>
                 <span class="text-xs text-slate-500 flex-1 min-w-[6rem]">${escapeHtml(usbDeviceName(d.vidpid) || d.type || '—')}</span>
-                <button onclick="tenantUsbRemove('${t.id}','${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded text-[11px] font-bold">Un-approve</button>
+                <button onclick="tenantUsbRemove('${t.id}','${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded text-xs font-bold">Un-approve</button>
               </div>`).join('') || '<span class="text-xs text-slate-500 italic">none</span>';
         const ign = (t.ignored || []).map(vp => `<div class="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 border border-slate-200 rounded-md">
                 <span class="font-mono text-xs text-slate-700">${escapeHtml(vp)}</span>
                 <span class="text-xs text-slate-500 flex-1 min-w-[6rem]">${escapeHtml(usbDeviceName(vp) || '—')}</span>
-                <button onclick="tenantUsbRemove('${t.id}','${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded text-[11px] font-bold">Un-ignore</button>
+                <button onclick="tenantUsbRemove('${t.id}','${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded text-xs font-bold">Un-ignore</button>
               </div>`).join('') || '<span class="text-xs text-slate-500 italic">none</span>';
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-2">
                 <span class="text-sm font-bold text-slate-700">${t.name} <span class="text-xs font-mono text-slate-500">${t.id}</span></span>
             </div>
             <div class="grid grid-cols-2 gap-3 text-xs">
-                <div><p class="text-[10px] uppercase font-bold text-slate-500 mb-1">Certified (local)</p><div class="flex flex-col gap-1 min-h-[1.5rem]">${cert}</div></div>
-                <div><p class="text-[10px] uppercase font-bold text-slate-500 mb-1">Ignored (local)</p><div class="flex flex-col gap-1 min-h-[1.5rem]">${ign}</div></div>
+                <div><p class="text-xs font-bold text-slate-500 mb-1">Certified (local)</p><div class="flex flex-col gap-1 min-h-[1.5rem]">${cert}</div></div>
+                <div><p class="text-xs font-bold text-slate-500 mb-1">Ignored (local)</p><div class="flex flex-col gap-1 min-h-[1.5rem]">${ign}</div></div>
             </div>
             <div class="flex gap-1 mt-2">
                 <input id="tusbc-${t.id}" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${'w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800'}" onkeydown="if(event.key==='Enter')tenantUsbAdd('${t.id}','certify')">
@@ -1747,10 +1747,10 @@ async function loadDiscoveredUsb() {
         _discoveredUsbByName[vp] = d.name || vp;
         const seen = (d.seen_on || []).map(s => `${esc(s.tenant_name)} / ${esc(s.spoke_name)}`).join(', ') || '—';
         let badge;
-        if (d.is_global) badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-green-100 text-green-700">Certified globally</span>';
-        else if (d.is_global_ignored) badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-200 text-slate-600">Ignored globally</span>';
-        else if (d.locally_ignored) badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-100 text-amber-700">Locally ignored</span>';
-        else badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-100 text-slate-500">Unapproved</span>';
+        if (d.is_global) badge = '<span class="px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700">Certified globally</span>';
+        else if (d.is_global_ignored) badge = '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-200 text-slate-600">Ignored globally</span>';
+        else if (d.locally_ignored) badge = '<span class="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700">Locally ignored</span>';
+        else badge = '<span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500">Unapproved</span>';
         // Dongle-type picker paired with the approve button — the chosen type
         // becomes the device's certified `type` (wireless/wired/…), which the
         // pxmx agent uses as each provisioned VM's sim_phy. Defaults to
@@ -1765,12 +1765,12 @@ async function loadDiscoveredUsb() {
         // Per-tenant LOCAL un-approve — one button per tenant that certified this
         // device locally (drops it from that tenant's usb_vidpids).
         const localBtns = (d.locally_certified || []).map(c =>
-            `<button onclick="tenantUsbRemove('${esc(c.tenant_id)}','${vp}')" title="Un-approve locally for ${esc(c.tenant_name)}" class="bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 px-2 py-1 rounded text-[11px] font-bold">Un-approve @${esc(c.tenant_name)}</button>`
+            `<button onclick="tenantUsbRemove('${esc(c.tenant_id)}','${vp}')" title="Un-approve locally for ${esc(c.tenant_name)}" class="bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 px-2 py-1 rounded text-xs font-bold">Un-approve @${esc(c.tenant_name)}</button>`
         ).join('');
         return `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border border-slate-200 rounded-md">
             <span class="font-mono text-xs text-slate-700 w-28">${esc(vp)}</span>
             <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">${esc(d.name || '—')}</span>
-            <span class="text-[11px] text-slate-500 flex-1 min-w-[10rem]">${seen}</span>
+            <span class="text-xs text-slate-500 flex-1 min-w-[10rem]">${seen}</span>
             ${badge}
             <span class="flex flex-wrap gap-1">${approveBtn}${ignoreBtn}${localBtns}</span>
         </div>`;
@@ -1966,7 +1966,7 @@ async function loadCacheStatus() {
             <p class="text-xs text-slate-500 mb-2">Every page is served from this cache. Refreshed every ${iv.active_s || 60}s while users are active, ${Math.round((iv.idle_s || 300) / 60)}m otherwise.
                Stored on disk ${d.encrypted ? 'encrypted' : '<span class="text-red-500">unencrypted</span>'} so it survives a restart.</p>
             <table class="w-full text-xs">
-                <thead><tr class="text-slate-500 uppercase tracking-wider">
+                <thead><tr class="text-slate-500">
                     <th class="text-left py-1">Module</th><th>Entries</th><th>Oldest</th><th>Users</th><th>Errors</th><th class="text-right">Disk</th><th></th>
                 </tr></thead>
                 <tbody>${rows || '<tr><td colspan="7" class="py-3 text-center text-slate-500 italic">Nothing cached yet</td></tr>'}</tbody>

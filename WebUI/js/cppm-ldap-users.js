@@ -152,7 +152,7 @@ async function _renderCppmDevices(container, subMenu, th, tableWrap) {
             .sort((a, b) => a[0].localeCompare(b[0]));
         if (!entries.length) return '<span class="text-slate-500">—</span>';
         return `<div class="flex flex-wrap gap-1 max-h-16 overflow-y-auto pr-1">${entries.map(([k, v]) =>
-            `<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-mono whitespace-nowrap" title="${esc(k)}: ${esc(v)}"><span class="text-slate-500">${esc(k)}</span>:${esc(v)}</span>`
+            `<span class="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-mono whitespace-nowrap" title="${esc(k)}: ${esc(v)}"><span class="text-slate-500">${esc(k)}</span>:${esc(v)}</span>`
         ).join('')}</div>`;
     };
     window._cppmDeviceMap = Object.fromEntries(devices.map(d => [d.mac, d]));
@@ -330,7 +330,7 @@ function showOpnsenseAddModal(subMenu) {
     if (existing) existing.remove();
 
     const input = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800';
-    const label = 'text-xs text-slate-500 uppercase font-bold';
+    const label = 'text-xs text-slate-500 font-bold';
 
     // Target firewall: auto-select when only one is configured, otherwise show a
     // picker as the first field. submitOpnsenseAdd reads #add-opn-fw (or falls
@@ -474,7 +474,7 @@ function showOpnsenseEditModal(fwId, subMenu, itemIdx) {
     if (existing) existing.remove();
 
     const input = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800';
-    const label = 'text-xs text-slate-500 uppercase font-bold';
+    const label = 'text-xs text-slate-500 font-bold';
     const v = k => (item[k] !== undefined && item[k] !== null ? String(item[k]) : '').replace(/"/g, '&quot;');
 
     let fields = '';
@@ -709,8 +709,8 @@ async function loadLDAPData(subMenu) {
             const name = escapeHtml(it.name || [it.first_name, it.last_name].filter(Boolean).join(' ') || '');
             const email = escapeHtml(it.email || it.upn || '');
             const badge = isEntra
-                ? '<span title="Authenticates via Entra — no local password" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">Entra</span>'
-                : '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600">Local</span>';
+                ? '<span title="Authenticates via Entra — no local password" class="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700">Entra</span>'
+                : '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-600">Local</span>';
             const actions = canWrite ? `<td class="px-4 py-3 text-right whitespace-nowrap">
                 <button onclick="editLDAPUser('${eUid}')" title="Edit user details" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${LDAP_ICONS.edit}</button>
                 ${isEntra ? '' : `<button onclick="showLDAPPasswordModal('${eUid}')" title="Reset user password" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${LDAP_ICONS.pw}</button>`}
@@ -742,25 +742,25 @@ function showLDAPModal(subMenu, editItem) {
     let title = '';
     if (subMenu === 'Groups') {
         title = 'Add Group';
-        fields = `<div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Group Name (cn)</label><input type="text" id="ldap-group-cn" title="Common Name (cn) for the new group" class="${inp}"></div>`;
+        fields = `<div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Group Name (cn)</label><input type="text" id="ldap-group-cn" title="Common Name (cn) for the new group" class="${inp}"></div>`;
     } else {
         title = editing ? 'Edit User' : 'Add User';
         const curMode = editing ? (editItem.auth_mode === 'entra' ? 'entra' : 'local') : 'local';
         fields = `
             <div class="grid grid-cols-2 gap-4">
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Username (uid)</label><input type="text" id="ldap-user-uid" value="${val(editItem && (editItem.uid || editItem.username))}" ${editing ? 'readonly' : ''} title="Unique directory identifier (uid)" class="${inp} ${editing ? 'bg-slate-100 text-slate-500' : ''}"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Auth Mode</label>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Username (uid)</label><input type="text" id="ldap-user-uid" value="${val(editItem && (editItem.uid || editItem.username))}" ${editing ? 'readonly' : ''} title="Unique directory identifier (uid)" class="${inp} ${editing ? 'bg-slate-100 text-slate-500' : ''}"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Auth Mode</label>
                     <select id="ldap-user-auth" ${editing ? 'disabled' : ''} onchange="_syncLDAPAuthFields()" title="Authentication mode (Local password or Azure AD Entra-backed)" class="${inp} ${editing ? 'bg-slate-100 text-slate-500' : ''}">
                         <option value="local" ${curMode === 'local' ? 'selected' : ''}>Local (password)</option>
                         <option value="entra" ${curMode === 'entra' ? 'selected' : ''}>Entra-backed (UPN)</option>
                     </select>
                 </div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">First Name</label><input type="text" id="ldap-user-first" value="${val(editItem && editItem.first_name)}" title="User given name" class="${inp}"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Last Name</label><input type="text" id="ldap-user-last" value="${val(editItem && editItem.last_name)}" title="User surname / family name" class="${inp}"></div>
-                <div class="space-y-2 col-span-2"><label class="text-xs text-slate-500 uppercase font-bold">Email</label><input type="text" id="ldap-user-email" value="${val(editItem && editItem.email)}" title="User email address" class="${inp}"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">First Name</label><input type="text" id="ldap-user-first" value="${val(editItem && editItem.first_name)}" title="User given name" class="${inp}"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Last Name</label><input type="text" id="ldap-user-last" value="${val(editItem && editItem.last_name)}" title="User surname / family name" class="${inp}"></div>
+                <div class="space-y-2 col-span-2"><label class="text-xs text-slate-500 font-bold">Email</label><input type="text" id="ldap-user-email" value="${val(editItem && editItem.email)}" title="User email address" class="${inp}"></div>
             </div>
-            <div id="ldap-entra-wrap" class="space-y-2 ${curMode === 'entra' ? '' : 'hidden'}"><label class="text-xs text-slate-500 uppercase font-bold">UPN (Entra user principal name)</label><input type="text" id="ldap-user-upn" value="${val(editItem && editItem.upn)}" placeholder="user@tenant.onmicrosoft.com" title="Entra User Principal Name (UPN)" class="${inp}"></div>
-            ${editing ? '' : `<div id="ldap-local-wrap" class="space-y-2 ${curMode === 'local' ? '' : 'hidden'}"><label class="text-xs text-slate-500 uppercase font-bold">Password <span class="text-slate-500 normal-case font-normal">(leave blank to auto-generate)</span></label><input type="password" id="ldap-user-password" title="Initial password (leave blank to auto-generate)" class="${inp}"></div>`}
+            <div id="ldap-entra-wrap" class="space-y-2 ${curMode === 'entra' ? '' : 'hidden'}"><label class="text-xs text-slate-500 font-bold">UPN (Entra user principal name)</label><input type="text" id="ldap-user-upn" value="${val(editItem && editItem.upn)}" placeholder="user@tenant.onmicrosoft.com" title="Entra User Principal Name (UPN)" class="${inp}"></div>
+            ${editing ? '' : `<div id="ldap-local-wrap" class="space-y-2 ${curMode === 'local' ? '' : 'hidden'}"><label class="text-xs text-slate-500 font-bold">Password <span class="text-slate-500 normal-case font-normal">(leave blank to auto-generate)</span></label><input type="password" id="ldap-user-password" title="Initial password (leave blank to auto-generate)" class="${inp}"></div>`}
         `;
     }
 
@@ -898,8 +898,8 @@ function showLDAPPasswordModal(uid) {
             </div>
             <div class="p-6 space-y-4">
                 <p class="text-xs text-slate-500 font-mono">${escapeHtml(uid)}</p>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">New Password</label><input type="password" id="ldap-new-password" title="Enter new user password" class="${inputCls}" autocomplete="new-password"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Confirm Password</label><input type="password" id="ldap-confirm-password" title="Re-enter new user password to confirm" class="${inputCls}" autocomplete="new-password"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">New Password</label><input type="password" id="ldap-new-password" title="Enter new user password" class="${inputCls}" autocomplete="new-password"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Confirm Password</label><input type="password" id="ldap-confirm-password" title="Re-enter new user password to confirm" class="${inputCls}" autocomplete="new-password"></div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="this.closest('.fixed').remove()" title="Cancel and close dialog" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
@@ -1020,7 +1020,7 @@ async function showAddUserModal() {
     const _tenants = tadm ? [] : (window._allTenants || []);
     const _tenantRows = _tenants.length
         ? _tenants.map(t => `<label class="flex items-center gap-2 text-sm text-slate-600 py-1"><input type="checkbox" value="${escapeHtml(t.id)}" class="new-user-tenant w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"> ${escapeHtml(t.name || t.id)}</label>`).join('')
-        : '<span class="text-[11px] text-slate-500 italic">No tenants defined yet.</span>';
+        : '<span class="text-xs text-slate-500 italic">No tenants defined yet.</span>';
     const modal = document.createElement('div');
     modal.id = 'add-user-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
@@ -1032,8 +1032,8 @@ async function showAddUserModal() {
             </div>
             <div class="p-6 space-y-4">
                 <div class="grid grid-cols-2 gap-4">
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">User ID / Username</label><input type="text" id="new-user-id" placeholder="e.g. jsmith" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Auth Type</label>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">User ID / Username</label><input type="text" id="new-user-id" placeholder="e.g. jsmith" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Auth Type</label>
                         <select id="new-user-auth-type" onchange="document.getElementById('new-user-password-wrap').classList.toggle('hidden', this.value==='ldap')" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                             <option value="local">Local</option>
                             <option value="ldap">LDAP</option>
@@ -1041,32 +1041,32 @@ async function showAddUserModal() {
                     </div>
                 </div>
                 <div id="new-user-password-wrap" class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Password <span class="text-slate-500 normal-case font-normal">(leave blank to set later)</span></label>
+                    <label class="text-xs text-slate-500 font-bold">Password <span class="text-slate-500 normal-case font-normal">(leave blank to set later)</span></label>
                     <input type="password" id="new-user-password" placeholder="••••••••" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
                 <div class="grid grid-cols-6 gap-3">
-                    ${tadm ? '' : `<div><label class="text-xs text-slate-500 uppercase font-bold" title="System-wide admin (all tenants + system config)">Global Admin</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-admin" onchange="document.getElementById('perm-tenant_admin').checked = false" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold" title="Tenant-level admin (admin within assigned tenants only)">Admin (tenant)</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-tenant_admin" onchange="document.getElementById('perm-admin').checked = false" class="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold" title="Read-only: can view everything its role allows, but every change is rejected by the hub (for automated UI checks such as the AB walker)">Read-only</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-read_only" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>`}
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">View</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Edit</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-edit" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Hypervisor</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-pxmx" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Firewall</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-firewall" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">DNS</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-dns" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">DHCP</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-dhcp" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">NAC</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-nac" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Network Devices</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-nw" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">IPAM</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-ipam" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Simulations</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-cs" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Console</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Console Write</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console_write" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    ${tadm ? '' : `<div><label class="text-xs text-slate-500 font-bold" title="System-wide admin (all tenants + system config)">Global Admin</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-admin" onchange="document.getElementById('perm-tenant_admin').checked = false" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold" title="Tenant-level admin (admin within assigned tenants only)">Admin (tenant)</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-tenant_admin" onchange="document.getElementById('perm-admin').checked = false" class="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold" title="Read-only: can view everything its role allows, but every change is rejected by the hub (for automated UI checks such as the AB walker)">Read-only</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-read_only" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>`}
+                    <div><label class="text-xs text-slate-500 font-bold">View</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Edit</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-edit" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Hypervisor</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-pxmx" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Firewall</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-firewall" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">DNS</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-dns" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">DHCP</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-dhcp" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">NAC</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-nac" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Network Devices</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-nw" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">IPAM</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-ipam" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Simulations</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-cs" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Console</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 font-bold">Console Write</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console_write" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                 </div>
-                ${tadm ? `<div class="space-y-2 border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Tenant</label><div class="text-sm text-slate-600">User is created in <span class="font-mono font-bold text-green-700">${escapeHtml(currentTenant || 'default')}</span> (your tenant). Module rights only — admin roles are Global-Admin-only.</div></div>` : `<div class="space-y-2 border-t border-slate-200 pt-3">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Assigned Tenants <span class="text-slate-500 normal-case font-normal">(required for Tenant Admin; also confines a regular user)</span></label>
+                ${tadm ? `<div class="space-y-2 border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 font-bold">Tenant</label><div class="text-sm text-slate-600">User is created in <span class="font-mono font-bold text-green-700">${escapeHtml(currentTenant || 'default')}</span> (your tenant). Module rights only — admin roles are Global-Admin-only.</div></div>` : `<div class="space-y-2 border-t border-slate-200 pt-3">
+                    <label class="text-xs text-slate-500 font-bold">Assigned Tenants <span class="text-slate-500 normal-case font-normal">(required for Tenant Admin; also confines a regular user)</span></label>
                     <div id="new-user-tenants" class="grid grid-cols-3 gap-x-4 gap-y-1 mt-1 max-h-36 overflow-y-auto pr-1">${_tenantRows}</div>
                 </div>
                 <div class="space-y-2 border-t border-slate-200 pt-3">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Permission Groups <span class="text-slate-500 normal-case font-normal">(bundle access; unioned with the flags above)</span></label>
+                    <label class="text-xs text-slate-500 font-bold">Permission Groups <span class="text-slate-500 normal-case font-normal">(bundle access; unioned with the flags above)</span></label>
                     <div id="new-user-groups" class="flex flex-wrap gap-2 text-sm text-slate-500 italic">Loading groups…</div>
                 </div>`}
             </div>
@@ -1216,7 +1216,7 @@ async function editUser(userId) {
                     : '';
             return `
             <div class="space-y-2">
-                <label class="text-xs text-slate-500 uppercase font-bold" title="${p.title || ''}">${p.label}</label>
+                <label class="text-xs text-slate-500 font-bold" title="${p.title || ''}">${p.label}</label>
                 <div class="flex items-center gap-2 py-2">
                     <input type="checkbox" id="edit-perm-${p.id}" ${isChecked ? 'checked' : ''} ${onchange} class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
                 </div>
@@ -1234,7 +1234,7 @@ async function editUser(userId) {
         const groupHtml = Object.entries(allGroups).map(([gid, g]) => `
             <div class="flex items-center gap-3 p-2 hover:bg-slate-100 rounded-md transition-colors cursor-pointer">
                 <input type="checkbox" id="edit-grp-${gid}" ${userGroups.includes(gid) ? 'checked' : ''} value="${gid}" class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500">
-                <label for="edit-grp-${gid}" class="text-sm text-slate-700 cursor-pointer flex-1">${g.name || gid}<span class="text-[10px] text-slate-500 ml-1">${Object.keys(g.permissions || {}).filter(k => k !== 'role').join(', ')}</span></label>
+                <label for="edit-grp-${gid}" class="text-sm text-slate-700 cursor-pointer flex-1">${g.name || gid}<span class="text-xs text-slate-500 ml-1">${Object.keys(g.permissions || {}).filter(k => k !== 'role').join(', ')}</span></label>
             </div>
         `).join('');
 
@@ -1245,10 +1245,10 @@ async function editUser(userId) {
                     <button onclick="closeEditUserModal()" class="text-slate-500 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
                 </div>
                 <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-8">
-                    <div class="space-y-6"><div><h4 class="text-xs font-bold text-slate-500 uppercase mb-4">Permissions</h4><div class="grid grid-cols-2 gap-4">${permHtml}</div></div></div>
+                    <div class="space-y-6"><div><h4 class="text-xs font-bold text-slate-500 mb-4">Permissions</h4><div class="grid grid-cols-2 gap-4">${permHtml}</div></div></div>
                     <div class="space-y-6">
-                        ${tadm ? '' : `<div><h4 class="text-xs font-bold text-slate-500 uppercase mb-4">Permission Groups</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-40 overflow-y-auto p-2 space-y-1">${groupHtml || '<div class="text-xs text-slate-500 italic p-2">No groups defined.</div>'}</div></div>`}
-                        <div><h4 class="text-xs font-bold text-slate-500 uppercase mb-4">Tenant Associations</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-40 overflow-y-auto p-2 space-y-1">${tenantHtml || '<div class="text-xs text-slate-500 italic p-2">No tenants available.</div>'}</div></div>
+                        ${tadm ? '' : `<div><h4 class="text-xs font-bold text-slate-500 mb-4">Permission Groups</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-40 overflow-y-auto p-2 space-y-1">${groupHtml || '<div class="text-xs text-slate-500 italic p-2">No groups defined.</div>'}</div></div>`}
+                        <div><h4 class="text-xs font-bold text-slate-500 mb-4">Tenant Associations</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-40 overflow-y-auto p-2 space-y-1">${tenantHtml || '<div class="text-xs text-slate-500 italic p-2">No tenants available.</div>'}</div></div>
                     </div>
                 </div>
                 <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-between items-center gap-3">

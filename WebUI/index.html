@@ -262,8 +262,30 @@
             background-color: #121212 !important;
             border-color: #333 !important;
         }
+        /* HPE Graphik: an installed copy first, then the HPE CDN. The font is
+           licensed, so it is not shipped in this repo; offline hubs use Arial. */
+        @font-face {
+            font-family: 'HPE Graphik'; font-weight: 400; font-display: swap;
+            src: local('HPE Graphik Regular'), local('HPEGraphik-Regular'),
+                 url('https://www.hpe.com/content/dam/hpe/fonts/graphik/HPEGraphik-Regular-Web.woff2') format('woff2');
+        }
+        @font-face {
+            font-family: 'HPE Graphik'; font-weight: 500; font-display: swap;
+            src: local('HPE Graphik Medium'), local('HPEGraphik-Medium'),
+                 url('https://www.hpe.com/content/dam/hpe/fonts/graphik/HPEGraphik-Medium-Web.woff2') format('woff2');
+        }
+        @font-face {
+            font-family: 'HPE Graphik'; font-weight: 600; font-display: swap;
+            src: local('HPE Graphik Semibold'), local('HPEGraphik-Semibold'),
+                 url('https://www.hpe.com/content/dam/hpe/fonts/graphik/HPEGraphik-Semibold-Web.woff2') format('woff2');
+        }
+        @font-face {
+            font-family: 'HPE Graphik'; font-weight: 700; font-display: swap;
+            src: local('HPE Graphik Bold'), local('HPEGraphik-Bold'),
+                 url('https://www.hpe.com/content/dam/hpe/fonts/graphik/HPEGraphik-Bold-Web.woff2') format('woff2');
+        }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, Helvetica, sans-serif;
+            font-family: 'HPE Graphik', Arial, sans-serif;
             font-size: 15px;
             line-height: 1.5;
             background-color: var(--hpe-bg-light);
@@ -280,12 +302,12 @@
             border-bottom: 3px solid var(--hpe-green);
         }
         /* Banner title — matches the solutions-hpe hub webui .topbar h1:
-           1.05rem / weight 400 / +0.01em letter-spacing, HPE system font stack. */
+           1.05rem / weight 400 / +0.01em letter-spacing, HPE Graphik. */
         .hpe-topbar h1 {
             font-size: 1.05rem;
             font-weight: 400;
             letter-spacing: 0.01em;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, Helvetica, sans-serif;
+            font-family: 'HPE Graphik', Arial, sans-serif;
         }
         .hpe-card {
             background: var(--hpe-white);
@@ -351,14 +373,14 @@
             </div>
             <div class="bg-navy rounded-xl shadow-2xl border border-slate-700 p-8 space-y-5">
                 <div>
-                    <label class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">Username</label>
+                    <label class="block text-xs font-bold text-slate-500 mb-1.5">Username</label>
                     <input id="login-username" type="text" autocomplete="username"
                         class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="username"
                         onkeydown="if(event.key==='Enter')document.getElementById('login-password').focus()">
                 </div>
                 <div>
-                    <label class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">Password</label>
+                    <label class="block text-xs font-bold text-slate-500 mb-1.5">Password</label>
                     <input id="login-password" type="password" autocomplete="current-password"
                         class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="••••••••"
@@ -376,7 +398,7 @@
                 <div id="login-oidc-wrap" class="hidden">
                     <div class="flex items-center gap-3 my-1">
                         <div class="flex-1 h-px bg-slate-600"></div>
-                        <span class="text-[10px] text-slate-500 uppercase tracking-wider font-bold">or</span>
+                        <span class="text-xs text-slate-500 font-bold">or</span>
                         <div class="flex-1 h-px bg-slate-600"></div>
                     </div>
                     <button onclick="doOidcLogin()"
@@ -401,31 +423,31 @@
             <div class="bg-navy rounded-xl shadow-2xl border border-brand p-8 space-y-5">
                 <div class="flex items-center gap-2 mb-1">
                     <span class="inline-block w-2 h-2 rounded-full bg-primary"></span>
-                    <span class="text-xs font-bold text-primary-text uppercase tracking-widest">First Run Setup</span>
+                    <span class="text-xs font-bold text-primary-text">First Run Setup</span>
                 </div>
                 <div>
-                    <label class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">Setup Token <span class="font-normal normal-case text-slate-500">(from install log — leave blank if not set)</span></label>
+                    <label class="block text-xs font-bold text-slate-500 mb-1.5">Setup Token <span class="font-normal normal-case text-slate-500">(from install log — leave blank if not set)</span></label>
                     <input id="setup-token" type="password" autocomplete="off"
                         class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="X-Setup-Token"
                         onkeydown="if(event.key==='Enter')document.getElementById('setup-username').focus()">
                 </div>
                 <div>
-                    <label class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">Admin Username</label>
+                    <label class="block text-xs font-bold text-slate-500 mb-1.5">Admin Username</label>
                     <input id="setup-username" type="text" autocomplete="username"
                         class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="admin"
                         onkeydown="if(event.key==='Enter')document.getElementById('setup-password').focus()">
                 </div>
                 <div>
-                    <label class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">Password</label>
+                    <label class="block text-xs font-bold text-slate-500 mb-1.5">Password</label>
                     <input id="setup-password" type="password" autocomplete="new-password"
                         class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="min. 8 characters"
                         onkeydown="if(event.key==='Enter')document.getElementById('setup-password2').focus()">
                 </div>
                 <div>
-                    <label class="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">Confirm Password</label>
+                    <label class="block text-xs font-bold text-slate-500 mb-1.5">Confirm Password</label>
                     <input id="setup-password2" type="password" autocomplete="new-password"
                         class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="••••••••"
@@ -477,7 +499,7 @@
         <div class="flex items-center gap-4">
             <button onclick="helpForCurrentView()" title="Open documentation for this view"
                     class="flex items-center gap-1.5 text-xs text-slate-500 hover:text-white transition-colors font-medium">
-                <span class="inline-flex items-center justify-center w-4 h-4 rounded-full border border-current text-[10px] font-bold">?</span>
+                <span class="inline-flex items-center justify-center w-4 h-4 rounded-full border border-current text-xs font-bold">?</span>
                 Help
             </button>
             <!-- "What's New" — info icon + popover listing recently committed
@@ -487,7 +509,7 @@
                         title="What's New — bug fixes &amp; features from the last 2 weeks"
                         aria-label="Updates — What's New" aria-haspopup="dialog" aria-expanded="false"
                         class="flex items-center gap-1.5 text-xs text-slate-500 hover:text-white transition-colors font-medium">
-                    <span class="inline-flex items-center justify-center w-4 h-4 rounded-full border border-current text-[11px] font-serif italic font-bold leading-none">i</span>
+                    <span class="inline-flex items-center justify-center w-4 h-4 rounded-full border border-current text-xs font-serif italic font-bold leading-none">i</span>
                     Updates
                 </button>
                 <div id="whats-new-panel"
@@ -495,7 +517,7 @@
                      role="dialog" aria-label="What's New">
                     <div class="px-4 py-2.5 border-b border-slate-100 sticky top-0 bg-white rounded-t-xl">
                         <h3 class="text-sm font-bold text-slate-800">What's New</h3>
-                        <p class="text-[10px] text-slate-500">Bug fixes &amp; features merged in the last 2 weeks</p>
+                        <p class="text-xs text-slate-500">Bug fixes &amp; features merged in the last 2 weeks</p>
                     </div>
                     <div id="whats-new-body" class="p-2 space-y-0.5">
                         <p class="text-xs text-slate-500 italic px-2 py-1">Loading…</p>
@@ -506,9 +528,9 @@
                 <span id="user-chip-name" class="font-medium"></span>
                 <!-- Tenant badge / switcher — populated by _initApp() -->
                 <div id="user-chip-tenant-wrap" class="relative">
-                    <span id="user-chip-tenant" class="px-2 py-0.5 rounded-full bg-primary text-white text-[10px] font-bold uppercase tracking-wider"></span>
+                    <span id="user-chip-tenant" class="px-2 py-0.5 rounded-full bg-primary text-white text-xs font-bold"></span>
                 </div>
-                <button onclick="doLogout()" class="ml-1 text-slate-500 hover:text-white transition-colors text-[10px] uppercase tracking-wider font-bold">Sign Out</button>
+                <button onclick="doLogout()" class="ml-1 text-slate-500 hover:text-white transition-colors text-xs font-bold">Sign Out</button>
             </div>
         </div>
     </header>
@@ -551,11 +573,11 @@
             <!-- Secondary child strip — shown only for cs primaries that have
                  children (two-tier horizontal nav). Populated by
                  renderSecondaryNav() in main.js. -->
-            <div id="top-nav-secondary" class="hidden h-9 flex items-center px-6 gap-4 text-[11px] font-medium uppercase tracking-widest text-slate-500 bg-white border-b border-slate-200 shrink-0"></div>
+            <div id="top-nav-secondary" class="hidden h-9 flex items-center px-6 gap-4 text-xs font-medium text-slate-500 bg-white border-b border-slate-200 shrink-0"></div>
             <!-- Tertiary grandchild strip — shown only under a secondary tab that
                  itself has children (three-tier nav, e.g. Settings → Cloud →
                  Azure → SSO/NSG/…). Populated by renderTertiaryNav() in main.js. -->
-            <div id="top-nav-tertiary" class="hidden h-8 flex items-center px-6 gap-4 text-[11px] font-medium text-slate-500 bg-white border-b border-slate-200 shrink-0"></div>
+            <div id="top-nav-tertiary" class="hidden h-8 flex items-center px-6 gap-4 text-xs font-medium text-slate-500 bg-white border-b border-slate-200 shrink-0"></div>
             <div id="viewport" class="flex-1 p-8 overflow-y-auto bg-[#F5F5F5]">
                 <!-- VIEWS INJECTED HERE -->
             </div>
@@ -569,7 +591,7 @@
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="#60a5fa" stroke-width="4"></circle>
             <path class="opacity-75" fill="#60a5fa" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
         </svg>
-        <span id="cache-status-text" class="text-[11px] text-blue-300 font-medium"></span>
+        <span id="cache-status-text" class="text-xs text-blue-300 font-medium"></span>
     </div>
 
     <!-- relative z-[60] keeps the footer -- and specifically the "Bug/Feature
@@ -594,25 +616,25 @@
                      maintenance window while nodes are about to be rebooted. -->
                 <div id="reboot-tray" class="hidden items-center gap-1.5 group relative cursor-pointer" onclick="setView('osupdates')">
                     <div class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></div>
-                    <span class="text-[10px] uppercase tracking-widest text-amber-300">Pending Reboot</span>
-                    <div id="reboot-tray-tooltip" class="absolute bottom-full right-0 mb-2 hidden group-hover:block bg-slate-800 text-white text-[10px] p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[220px]"></div>
+                    <span class="text-xs text-amber-300">Pending Reboot</span>
+                    <div id="reboot-tray-tooltip" class="absolute bottom-full right-0 mb-2 hidden group-hover:block bg-slate-800 text-white text-xs p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[220px]"></div>
                 </div>
                 <div id="system-status-group" class="flex items-center gap-4 group relative" onclick="setView('setup'); setSubView('Spokes & Agents');">
                     <div id="hub-status-container" class="flex items-center gap-2 cursor-pointer">
                         <div id="hub-status-dot" class="w-2 h-2 rounded-full bg-slate-500 shadow-[0_0_5px_rgba(0,0,0,0.6)] transition-all"></div>
-                        <span class="text-[10px] uppercase tracking-widest opacity-60">Hub Status</span>
+                        <span class="text-xs opacity-60">Hub Status</span>
                     </div>
                     <div id="module-status-container" class="flex items-center gap-2 cursor-pointer">
                         <div id="module-status-dot" class="w-2 h-2 rounded-full bg-slate-500 shadow-[0_0_5px_rgba(0,0,0,0.6)] transition-all"></div>
-                        <span class="text-[10px] uppercase tracking-widest opacity-60">Module Status</span>
+                        <span class="text-xs opacity-60">Module Status</span>
                     </div>
-                    <div id="system-status-tooltip" class="absolute bottom-full right-0 mb-2 hidden group-hover:block bg-slate-800 text-white text-[10px] p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[160px]">
+                    <div id="system-status-tooltip" class="absolute bottom-full right-0 mb-2 hidden group-hover:block bg-slate-800 text-white text-xs p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[160px]">
                         <!-- Hub and Module status items injected here -->
                     </div>
                 </div>
-                <span class="text-[10px] uppercase tracking-widest opacity-60 ml-2" id="footer-sys-version">v0.00</span>
+                <span class="text-xs opacity-60 ml-2" id="footer-sys-version">v0.00</span>
                 <button onclick="fileBug()" title="Report a bug or request a feature — captures your console log, page HTML, and a screenshot, then files an issue for ab to triage"
-                    class="ml-2 text-[10px] uppercase tracking-widest opacity-60 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">🐞 Bug/Feature Request</button>
+                    class="ml-2 text-xs opacity-60 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">🐞 Bug/Feature Request</button>
                 <div id="footer-actions" class="flex items-center gap-2 ml-2"></div>
             </div>
         </div>

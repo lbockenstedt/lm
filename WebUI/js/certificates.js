@@ -38,7 +38,7 @@ async function loadLeAcmeInfo() {
             ? `<div class="mt-1 text-red-600 font-bold">⚠ certbot too old (need ≥ 4.0) — the le spoke's certbot auto-upgrade hasn't landed; clientAuth/short-lived profiles will be ignored until it does.</div>`
             : (reqMissing ? `<div class="mt-1 text-red-600 font-bold">⚠ clientAuth profile "${esc(reqProfile)}" is NOT in the CA's list — set LM_LE_CLIENTAUTH_PROFILE to one of the names above.</div>` : '');
         el.innerHTML = `<div class="px-3 py-2 rounded-md bg-slate-50 border border-slate-200 text-slate-600">
-            <span class="font-bold uppercase tracking-wider text-slate-500 mr-2">certbot / ACME</span>
+            <span class="font-bold text-slate-500 mr-2">certbot / ACME</span>
             <span>certbot <span class="font-mono">${esc(a.certbot_version || '?')}</span></span>
             <span class="mx-2 text-slate-500">|</span>
             <span>profiles: <b class="${supp ? 'text-primary-text' : 'text-red-600'}">${supp === null ? 'unknown' : (supp ? 'supported' : 'NOT supported')}</b></span>
@@ -54,9 +54,9 @@ async function loadLeAcmeInfo() {
 
 function _leLegend() {
     const pill = (cls, t) => `<span class="${cls} px-1.5 py-0.5 rounded text-xs font-medium">${t}</span>`;
-    const lbl = t => `<span class="font-bold uppercase tracking-wider text-slate-500 mr-1">${t}</span>`;
-    return `<div class="mt-4 mx-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500 pb-3">
-      <span class="font-bold uppercase tracking-wider text-slate-500">Legend</span>
+    const lbl = t => `<span class="font-bold text-slate-500 mr-1">${t}</span>`;
+    return `<div class="mt-4 mx-4 pt-3 border-t border-slate-100 text-xs text-slate-500 pb-3">
+      <span class="font-bold text-slate-500">Legend</span>
       <div class="mt-2 space-y-1.5">
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Target')}
@@ -267,7 +267,7 @@ async function loadLEData(subMenu) {
             // contention. Surfaces an existing overlap; addLeTarget also confirms.
             const _redund = _leRedundantTargetTypes(tgts);
             const redundNote = _redund.length
-                ? `<div class="mt-1 flex items-start gap-1 text-[11px] text-amber-700" title="${escJsAttr(_LE_TARGET_OVERLAP_HINT)}">
+                ? `<div class="mt-1 flex items-start gap-1 text-xs text-amber-700" title="${escJsAttr(_LE_TARGET_OVERLAP_HINT)}">
                      <span class="leading-4">⚠</span>
                      <span>Both a group (<b>all nodes</b>) and an individual node target are selected for <b>${escapeHtml(_redund.join(', '))}</b> — these deploy the same cert to the same node(s) and cause repeated restarts. Keep one or the other.</span>
                    </div>`
@@ -279,7 +279,7 @@ async function loadLEData(subMenu) {
             const _failed = tgts.filter(t => t.last_status === 'ERROR');
             const errNote = _failed.length
                 ? `<div class="mt-1 space-y-0.5">${_failed.map(t =>
-                    `<div class="text-[11px] text-red-600 flex items-start gap-1"><span class="leading-4">✗</span><span><b>${escapeHtml(t.module_type + (t.identifier ? '/' + t.identifier : ''))}</b>: ${escapeHtml(t.last_message || 'failed')}${t.last_pushed_at ? ` <span class="text-red-400">— ${escapeHtml(_leWhen(t.last_pushed_at))}</span>` : ''}</span></div>`).join('')}</div>`
+                    `<div class="text-xs text-red-600 flex items-start gap-1"><span class="leading-4">✗</span><span><b>${escapeHtml(t.module_type + (t.identifier ? '/' + t.identifier : ''))}</b>: ${escapeHtml(t.last_message || 'failed')}${t.last_pushed_at ? ` <span class="text-red-400">— ${escapeHtml(_leWhen(t.last_pushed_at))}</span>` : ''}</span></div>`).join('')}</div>`
                 : '';
             const tgtCell = `${tgtBadges}${redundNote}${errNote}${leFleetDetail(c.domain, tgts)}`;
             const exp = leExpiry(c.not_after);
@@ -291,17 +291,17 @@ async function loadLEData(subMenu) {
             // page). ★ AppBuilder = pinned mTLS identity; 🔐 clientAuth = has the
             // clientAuth EKU (mTLS-client-capable); a profile chip = non-default
             // ACME profile (e.g. a short-lived cert).
-            const bfBadge = c.ab ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-700 align-middle" title="Pinned as the AppBuilder mTLS identity (Manage → ★ AppBuilder)">★ AppBuilder</span>` : '';
+            const bfBadge = c.ab ? ` <span class="inline-block px-1.5 py-0.5 rounded text-xs font-bold bg-purple-100 text-purple-700 align-middle" title="Pinned as the AppBuilder mTLS identity (Manage → ★ AppBuilder)">★ AppBuilder</span>` : '';
             const caBadge = '';
-            const profBadge = (c.profile && String(c.profile).toLowerCase() !== 'classic') ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700 align-middle" title="ACME profile: ${escapeHtml(String(c.profile))} (lifetime set by the CA profile)">${escapeHtml(String(c.profile))}</span>` : '';
+            const profBadge = (c.profile && String(c.profile).toLowerCase() !== 'classic') ? ` <span class="inline-block px-1.5 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700 align-middle" title="ACME profile: ${escapeHtml(String(c.profile))} (lifetime set by the CA profile)">${escapeHtml(String(c.profile))}</span>` : '';
             // Owner-tenant chips + a shared badge. A cert is owned by one or more
             // tenants (auto-assigned to the issuer's tenant); a "Shared" cert may
             // be deployed by any tenant to their own devices but only changed by
             // an owner/admin. Legacy certs (no owners) show nothing here.
             const _tenChips = (c.tenants || []).map(t =>
-                `<span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-600 align-middle" title="Owner tenant">${escapeHtml(String(t))}</span>`).join(' ');
-            const sharedBadge = c.shared ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-teal-100 text-teal-700 align-middle" title="Shared certificate — any tenant may deploy it to their own devices, but only an owner/admin may change it">Shared</span>` : '';
-            const roBadge = (c.can_edit === false) ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-500 align-middle" title="Read-only — this certificate belongs to another tenant. You can deploy it to your own devices but not change it.">read-only</span>` : '';
+                `<span class="inline-block px-1.5 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600 align-middle" title="Owner tenant">${escapeHtml(String(t))}</span>`).join(' ');
+            const sharedBadge = c.shared ? ` <span class="inline-block px-1.5 py-0.5 rounded text-xs font-bold bg-teal-100 text-teal-700 align-middle" title="Shared certificate — any tenant may deploy it to their own devices, but only an owner/admin may change it">Shared</span>` : '';
+            const roBadge = (c.can_edit === false) ? ` <span class="inline-block px-1.5 py-0.5 rounded text-xs font-bold bg-slate-200 text-slate-500 align-middle" title="Read-only — this certificate belongs to another tenant. You can deploy it to your own devices but not change it.">read-only</span>` : '';
             const tenChips = _tenChips ? ` ${_tenChips}${sharedBadge}${roBadge}` : (sharedBadge + roBadge);
             // Change ops (Renew/Revoke) require ownership; a read-only (shared,
             // not-owned) cert only exposes Manage (→ deploy to your own devices).
@@ -325,7 +325,7 @@ async function loadLEData(subMenu) {
                 <td class="px-4 py-2 text-center text-xs">${c.staging ? 'yes' : 'no'}</td>
                 <td class="px-4 py-2 whitespace-nowrap">
                     <span class="px-2 py-0.5 rounded-full text-xs font-medium ${exp.cls} whitespace-nowrap">${exp.text}</span>
-                    <div class="text-[11px] text-slate-500 mt-0.5" title="Renewal loop triggers this many days before expiry (per-cert override; default 7)">renew @ ${c.renew_window_days_effective ?? 7}d</div>
+                    <div class="text-xs text-slate-500 mt-0.5" title="Renewal loop triggers this many days before expiry (per-cert override; default 7)">renew @ ${c.renew_window_days_effective ?? 7}d</div>
                 </td>
                 <td class="px-4 py-2 whitespace-nowrap">
                     <div class="flex flex-col items-end gap-1.5">
@@ -340,7 +340,7 @@ async function loadLEData(subMenu) {
             <tr class="border-b border-slate-200 hover:bg-slate-50">
                 <td colspan="6" class="px-4 py-2">
                     <div class="flex flex-wrap items-center gap-1.5">
-                        <span class="text-[11px] text-slate-500 uppercase tracking-wide mr-1">Targets</span>
+                        <span class="text-xs text-slate-500 mr-1">Targets</span>
                         ${tgtCell}
                     </div>
                 </td>
@@ -526,12 +526,12 @@ async function showLeWildcardCoverage() {
         <div class="p-5 space-y-5">
           <p class="text-xs text-slate-500">Fan-out is currently <b class="${d.enabled ? 'text-green-600' : 'text-slate-500'}">${d.enabled ? 'ENABLED' : 'OFF'}</b>. A wildcard cert (<code>*.domain</code>) is pushed to every <b>connected, cert-capable</b> spoke below (plus the hub). Ineligible spokes are skipped — connect them or note that their module type can't host a cert.</p>
           <div>
-            <div class="text-[11px] font-bold text-green-700 uppercase tracking-wide mb-1">Eligible <span class="text-slate-500 font-normal">(${elig.length})</span></div>
-            <table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-500">Spoke</th><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-500">Type</th></tr></thead><tbody>${elig.map(rowE).join('') || '<tr><td colspan="2" class="px-3 py-2 text-xs text-slate-500 italic">none</td></tr>'}</tbody></table>
+            <div class="text-xs font-bold text-green-700 mb-1">Eligible <span class="text-slate-500 font-normal">(${elig.length})</span></div>
+            <table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr><th class="px-3 py-1.5 text-left text-xs text-slate-500">Spoke</th><th class="px-3 py-1.5 text-left text-xs text-slate-500">Type</th></tr></thead><tbody>${elig.map(rowE).join('') || '<tr><td colspan="2" class="px-3 py-2 text-xs text-slate-500 italic">none</td></tr>'}</tbody></table>
           </div>
           <div>
-            <div class="text-[11px] font-bold text-amber-700 uppercase tracking-wide mb-1">Ineligible <span class="text-slate-500 font-normal">(${inelig.length})</span></div>
-            <table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-500">Spoke</th><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-500">Type</th><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-500">Why not</th></tr></thead><tbody>${inelig.map(rowI).join('') || '<tr><td colspan="3" class="px-3 py-2 text-xs text-slate-500 italic">none — every known spoke is eligible</td></tr>'}</tbody></table>
+            <div class="text-xs font-bold text-amber-700 mb-1">Ineligible <span class="text-slate-500 font-normal">(${inelig.length})</span></div>
+            <table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr><th class="px-3 py-1.5 text-left text-xs text-slate-500">Spoke</th><th class="px-3 py-1.5 text-left text-xs text-slate-500">Type</th><th class="px-3 py-1.5 text-left text-xs text-slate-500">Why not</th></tr></thead><tbody>${inelig.map(rowI).join('') || '<tr><td colspan="3" class="px-3 py-2 text-xs text-slate-500 italic">none — every known spoke is eligible</td></tr>'}</tbody></table>
           </div>
         </div>
       </div>`;
@@ -788,7 +788,7 @@ async function showLeTargetsModal(domain) {
         <div id="le-tenants-box" class="mb-4"></div>
         ${bfBlock}
         <div class="overflow-x-auto mb-3"><table class="w-full text-sm">
-            <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
+            <thead class="bg-slate-50 text-xs text-slate-500"><tr>
                 <th class="px-3 py-2 text-left font-medium">Target</th>
                 <th class="px-3 py-2 text-left font-medium">Status</th>
                 <th class="px-3 py-2 text-left font-medium">Last push</th>
@@ -819,7 +819,7 @@ async function _leRenderTenantsSection(domain, cert, canEdit) {
         // Read-only viewers just see who owns it + the shared flag.
         const chips = owners.map(t => `<span class="inline-block px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600">${escapeHtml(t)}${sharedId && t === sharedId ? ' (shared)' : ''}</span>`).join(' ');
         box.innerHTML = `<div class="p-3 rounded-md border border-slate-200 bg-white">
-            <div class="text-xs font-semibold text-slate-500 uppercase mb-1.5">Owner tenants</div>
+            <div class="text-xs font-semibold text-slate-500 mb-1.5">Owner tenants</div>
             <div class="flex flex-wrap gap-1.5">${chips || '<span class="text-xs text-slate-500 italic">—</span>'}</div></div>`;
         return;
     }
@@ -858,9 +858,9 @@ function _leRenderTenantChips() {
     let holder = document.getElementById('le-tenant-chips-holder');
     if (!holder) {
         box.innerHTML = `<div class="p-3 rounded-md border border-slate-200 bg-white">
-            <div class="text-xs font-semibold text-slate-500 uppercase mb-1.5">Owner tenants</div>
+            <div class="text-xs font-semibold text-slate-500 mb-1.5">Owner tenants</div>
             <div id="le-tenant-chips-holder" class="flex flex-wrap gap-1.5"></div>
-            <p class="text-[11px] text-slate-500 mt-1.5">Add the shared tenant so any tenant can deploy this cert to their own devices. You cannot remove your own tenant.</p>
+            <p class="text-xs text-slate-500 mt-1.5">Add the shared tenant so any tenant can deploy this cert to their own devices. You cannot remove your own tenant.</p>
         </div>`;
         holder = document.getElementById('le-tenant-chips-holder');
     }
@@ -998,12 +998,12 @@ function _leRenderDeviceTable(d) {
     }).join('');
     return `<div class="text-xs text-slate-500 mb-1.5">${d.message ? `<b>${escapeHtml(d.message)}</b> · ` : ''}last run: ${escapeHtml(when)}. Deploy the cert to individual devices below, or to the whole fleet via the target badge.</div>
         <div class="overflow-x-auto"><table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr>
-        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-500">Device</th>
-        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-500">IP</th>
-        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-500">Type</th>
-        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-500">Cert</th>
-        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-500">Message</th>
-        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-500"></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        <th class="px-3 py-1.5 text-left text-xs text-slate-500">Device</th>
+        <th class="px-3 py-1.5 text-left text-xs text-slate-500">IP</th>
+        <th class="px-3 py-1.5 text-left text-xs text-slate-500">Type</th>
+        <th class="px-3 py-1.5 text-left text-xs text-slate-500">Cert</th>
+        <th class="px-3 py-1.5 text-left text-xs text-slate-500">Message</th>
+        <th class="px-3 py-1.5 text-left text-xs text-slate-500"></th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 async function _leLoadDeviceBox(box, domain, mt, identifier) {
     box.innerHTML = '<p class="text-xs text-slate-500 italic py-1">Loading devices…</p>';
@@ -1331,7 +1331,7 @@ async function showLeIssueModal(prefill) {
                     <label class="text-xs text-slate-500 mb-1">Domain <span class="text-red-500">*</span></label>
                     <input id="le-issue-domain" type="text" list="le-issue-domain-list" placeholder="pick or type a domain" title="Target domain or FQDN to issue certificate for (e.g. example.com or *.example.com)" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
                     <datalist id="le-issue-domain-list"></datalist>
-                    <p class="text-[11px] text-slate-500 mt-1">Your DNS entries (from DNS + firewalls). A cert only shows on your Certificates page if its domain resolves into your subnet.</p>
+                    <p class="text-xs text-slate-500 mt-1">Your DNS entries (from DNS + firewalls). A cert only shows on your Certificates page if its domain resolves into your subnet.</p>
                 </div>
                 <div class="flex flex-col">
                     <label class="text-xs text-slate-500 mb-1">ACME account email <span class="text-red-500">*</span></label>
@@ -1365,7 +1365,7 @@ async function showLeIssueModal(prefill) {
                 <select id="le-issue-dns-credential" onchange="leIssueToggleSavedCred()" title="Select saved tenant DNS credential" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     <option value="">— enter manually below —</option>
                 </select>
-                <p class="text-[11px] text-slate-500 mt-1">Pick one of your tenant's saved credentials (manage via 🔑 DNS Credentials), or enter one manually below.</p>
+                <p class="text-xs text-slate-500 mt-1">Pick one of your tenant's saved credentials (manage via 🔑 DNS Credentials), or enter one manually below.</p>
             </div>
             <div id="le-issue-dns-provider-row" class="flex flex-col hidden">
                 <label class="text-xs text-slate-500 mb-1">DNS provider</label>
@@ -1379,11 +1379,11 @@ async function showLeIssueModal(prefill) {
                 <div id="le-issue-dns-structured" class="space-y-2 hidden">
                     <div class="grid grid-cols-2 gap-3">
                         <div class="flex flex-col">
-                            <label class="text-[11px] text-slate-500 mb-0.5">Key name <span class="text-red-500">*</span></label>
+                            <label class="text-xs text-slate-500 mb-0.5">Key name <span class="text-red-500">*</span></label>
                             <input id="le-issue-dns-keyname" type="text" placeholder="YOUR_KEY_NAME" title="TSIG key name" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
                         </div>
                         <div class="flex flex-col">
-                            <label class="text-[11px] text-slate-500 mb-0.5">Key secret <span class="text-red-500">*</span></label>
+                            <label class="text-xs text-slate-500 mb-0.5">Key secret <span class="text-red-500">*</span></label>
                             <input id="le-issue-dns-keysecret" type="password" placeholder="YOUR_TSIG_SECRET" title="TSIG key secret" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
                         </div>
                     </div>
@@ -1391,15 +1391,15 @@ async function showLeIssueModal(prefill) {
                         <summary class="cursor-pointer text-slate-500 hover:text-slate-700 select-none">Advanced — server / port / algorithm</summary>
                         <div class="grid grid-cols-3 gap-2 mt-2">
                             <div class="flex flex-col">
-                                <label class="text-[11px] text-slate-500 mb-0.5">Server</label>
+                                <label class="text-xs text-slate-500 mb-0.5">Server</label>
                                 <input id="le-issue-dns-server" type="text" placeholder="216.218.130.2 (IP, not a hostname)" title="Primary authoritative DNS server IP address" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
                             </div>
                             <div class="flex flex-col">
-                                <label class="text-[11px] text-slate-500 mb-0.5">Port</label>
+                                <label class="text-xs text-slate-500 mb-0.5">Port</label>
                                 <input id="le-issue-dns-port" type="text" value="53" title="Authoritative DNS server port (default 53)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
                             </div>
                             <div class="flex flex-col">
-                                <label class="text-[11px] text-slate-500 mb-0.5">Algorithm</label>
+                                <label class="text-xs text-slate-500 mb-0.5">Algorithm</label>
                                 <select id="le-issue-dns-algo" title="TSIG HMAC algorithm" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500">
                                     <option value="hmac-sha256">hmac-sha256</option>
                                     <option value="hmac-sha512">hmac-sha512</option>
@@ -1414,14 +1414,14 @@ async function showLeIssueModal(prefill) {
                      TSIG, no IP). Blank fields → use the saved HE account knob
                      (Setup → Certificates). -->
                 <div id="le-issue-he-login" class="space-y-2 hidden">
-                    <p class="text-[11px] text-slate-500">Sets the <span class="font-mono">_acme-challenge</span> TXT via the dns.he.net web panel with your HE account — no per-record TSIG keys. Leave blank to use the saved HE account (Setup → Certificates → Hurricane Electric login).</p>
+                    <p class="text-xs text-slate-500">Sets the <span class="font-mono">_acme-challenge</span> TXT via the dns.he.net web panel with your HE account — no per-record TSIG keys. Leave blank to use the saved HE account (Setup → Certificates → Hurricane Electric login).</p>
                     <div class="grid grid-cols-2 gap-3">
                         <div class="flex flex-col">
-                            <label class="text-[11px] text-slate-500 mb-0.5">HE account email</label>
+                            <label class="text-xs text-slate-500 mb-0.5">HE account email</label>
                             <input id="le-issue-he-user" type="text" placeholder="(use saved account)" autocomplete="off" title="Hurricane Electric account username or email" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
                         </div>
                         <div class="flex flex-col">
-                            <label class="text-[11px] text-slate-500 mb-0.5">HE account password</label>
+                            <label class="text-xs text-slate-500 mb-0.5">HE account password</label>
                             <input id="le-issue-he-pass" type="password" placeholder="(use saved account)" autocomplete="new-password" title="Hurricane Electric account password" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
                         </div>
                     </div>
@@ -1453,11 +1453,11 @@ async function showLeIssueModal(prefill) {
                 <div id="le-issue-targets-list" class="mb-2"></div>
                 <div class="flex flex-wrap items-end gap-2">
                     <div class="flex flex-col">
-                        <label class="text-[11px] text-slate-500 mb-0.5">Module type</label>
+                        <label class="text-xs text-slate-500 mb-0.5">Module type</label>
                         <select id="le-issue-tgt-mt" onchange="leTgtMtChange('le-issue-tgt-mt','le-issue-tgt-id')" title="Select spoke or target module type" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${mtOpts}</select>
                     </div>
                     <div class="flex flex-col flex-1 min-w-[160px]">
-                        <label class="text-[11px] text-slate-500 mb-0.5">Device</label>
+                        <label class="text-xs text-slate-500 mb-0.5">Device</label>
                         <select id="le-issue-tgt-id" title="Select target device or node identifier" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></select>
                     </div>
                     <button onclick="leIssueAddTarget()" type="button" title="Add distribution target" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-md text-sm font-medium">Add</button>
@@ -1801,14 +1801,14 @@ async function showDnsCredentialsModal() {
         ? `<div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 New DNS credentials are managed in the <b>Credential Vault</b> (add a <b>DNS</b> secret there, then pick it in the issue-cert form). Creating raw credentials here is disabled; existing ones below still work and can be deleted.</div>
           <p class="text-xs text-slate-500">Saved DNS credentials for <b>your tenant</b> (stored on the le spoke). A certificate can still pick one of these by name when issuing. Delete any you've migrated to the vault.</p>`
         : `<p class="text-xs text-slate-500">Saved DNS credentials for <b>your tenant</b>. A certificate picks one by name when issuing. Secrets are stored on the le spoke, <b>encrypted at rest</b>, and are never shown again — leave a secret blank when editing to keep it.</p>
-           <p class="text-[11px] text-slate-500">No Credential Vault is configured, so credentials are kept locally. Configure a vault under Setup → Cloud to manage them centrally instead.</p>`;
+           <p class="text-xs text-slate-500">No Credential Vault is configured, so credentials are kept locally. Configure a vault under Setup → Cloud to manage them centrally instead.</p>`;
     const form = vaultOn ? '' : `
           <div class="border-t border-slate-200 pt-4">
             <h4 id="dns-cred-form-title" class="text-sm font-bold text-slate-600 mb-2">Add a credential</h4>
             <div class="grid grid-cols-2 gap-3">
-              <div class="flex flex-col"><label class="text-[11px] text-slate-500 mb-0.5">Name</label>
+              <div class="flex flex-col"><label class="text-xs text-slate-500 mb-0.5">Name</label>
                 <input id="dns-cred-name" type="text" placeholder="e.g. HE - lrbtech" title="Descriptive label for this DNS credential set" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-              <div class="flex flex-col"><label class="text-[11px] text-slate-500 mb-0.5">Provider</label>
+              <div class="flex flex-col"><label class="text-xs text-slate-500 mb-0.5">Provider</label>
                 <select id="dns-cred-provider" onchange="dnsCredRenderFields()" title="Select DNS provider service" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${provOpts}</select></div>
             </div>
             <div id="dns-cred-fields" class="grid grid-cols-2 gap-3 mt-3"></div>
@@ -1844,7 +1844,7 @@ function dnsCredRenderFields(values) {
     const secretsSet = values.__secrets__ || {};
     box.innerHTML = def.fields.map(f => `
       <div class="flex flex-col">
-        <label class="text-[11px] text-slate-500 mb-0.5">${escapeHtml(f.label)}</label>
+        <label class="text-xs text-slate-500 mb-0.5">${escapeHtml(f.label)}</label>
         <input id="dns-cred-f-${f.k}" type="${f.type}" value="${f.secret ? '' : escapeHtml(values[f.k] || '')}"
                placeholder="${f.secret && secretsSet[f.k] ? '(keep stored)' : (f.placeholder ? escapeHtml(f.placeholder) : '')}"
                title="${escapeHtml(f.label)}"
@@ -1919,7 +1919,7 @@ async function dnsCredReloadList() {
             `<button onclick='dnsCredEdit(${escapeHtml(JSON.stringify(c))})' title="Edit this stored DNS provider credential" class="text-xs text-slate-600 hover:text-slate-800 border border-slate-200 rounded px-2 py-1">Edit</button>`;
         return `<div class="flex items-center justify-between border border-slate-200 rounded-md px-3 py-2">
           <div><span class="text-sm font-medium text-slate-700">${escapeHtml(c.name)}</span>
-            <span class="text-[11px] text-slate-500 ml-2">${escapeHtml(label)}</span></div>
+            <span class="text-xs text-slate-500 ml-2">${escapeHtml(label)}</span></div>
           <div class="flex gap-2">
             ${editBtn}
             <button onclick="deleteDnsCredential(${escapeHtml(JSON.stringify(c.name))})" class="text-xs text-red-500 hover:text-red-700 border border-red-200 rounded px-2 py-1" title="Delete this stored DNS provider credential">Delete</button>
@@ -2112,12 +2112,12 @@ function _hubHealthHtml(d) {
       </div>
       <div class="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded p-2">${hint}</div>
       <div class="overflow-x-auto border border-slate-200 rounded-lg">
-        <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+        <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs"><tr>
           <th class="px-3 py-1 text-left">Spoke</th><th class="px-3 py-1 text-left">Remote IP</th>
           <th class="px-3 py-1 text-center">RTT</th><th class="px-3 py-1 text-center">Write buffer</th><th class="px-3 py-1 text-center">msg/s</th>
         </tr></thead><tbody>${rows}</tbody></table>
       </div>
-      <div class="text-[11px] text-slate-500">RTT = WS keepalive round-trip (network latency to the spoke). Write buffer = hub→spoke outbound backlog (growing = that spoke/network isn't draining). <b>High loop lag + low RTT/buffers = hub loop; high RTT or growing buffers = network transport.</b></div>
+      <div class="text-xs text-slate-500">RTT = WS keepalive round-trip (network latency to the spoke). Write buffer = hub→spoke outbound backlog (growing = that spoke/network isn't draining). <b>High loop lag + low RTT/buffers = hub loop; high RTT or growing buffers = network transport.</b></div>
     </div>`;
 }
 
@@ -2166,7 +2166,7 @@ function _spokeRegistryDiagHtml(d) {
     let html = '';
     const bk = Object.keys(brokers).sort();
     if (bk.length) {
-        html += `<div class="mb-4"><p class="text-[10px] uppercase text-slate-500 font-bold tracking-widest mb-2">Client-Sim broker election</p>
+        html += `<div class="mb-4"><p class="text-xs text-slate-500 font-bold mb-2">Client-Sim broker election</p>
             <div class="space-y-1">` + bk.map(t => {
             const b = brokers[t] || {};
             const warn = b.multiple;
@@ -2198,7 +2198,7 @@ function _spokeRegistryDiagHtml(d) {
                 class="px-3 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold" title="Delete selected offline spoke registrations from the registry">Delete selected (<span id="srd-del-count">0</span>)</button>
     </div>`;
     html += `<div class="overflow-x-auto"><table class="w-full text-xs">
-        <thead><tr class="text-left text-slate-500 uppercase tracking-wider text-[10px] border-b border-slate-200">
+        <thead><tr class="text-left text-slate-500 text-xs border-b border-slate-200">
             <th class="py-1 pr-2 w-6"></th>
             <th class="py-1 pr-2">Spoke</th><th class="py-1 pr-2">Type</th><th class="py-1 pr-2">Tenant</th>
             <th class="py-1 pr-2">State</th><th class="py-1 pr-2">Last seen</th><th class="py-1 pr-2 text-right">Action</th>
@@ -2244,11 +2244,11 @@ function _spokeRegistryDiagHtml(d) {
     if (orphans.length) {
         html += `<div class="mt-4 pt-3 border-t border-slate-200">
             <div class="flex items-center justify-between mb-1">
-                <p class="text-[10px] uppercase text-slate-500 font-bold tracking-widest">Orphaned telemetry (no such spoke)</p>
+                <p class="text-xs text-slate-500 font-bold">Orphaned telemetry (no such spoke)</p>
                 <button type="button" id="srd-orph-btn" onclick="srdPurgeTelemetry()" disabled
                         class="text-xs px-3 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold" title="Purge cached telemetry for selected nonexistent spoke IDs">Purge selected (<span id="srd-orph-count">0</span>)</button>
             </div>
-            <p class="text-[10px] text-slate-500 mb-2">Cached telemetry keyed to a spoke id that no longer exists — typically an id that changed under a box. It keeps claiming the Proxmox hosts it last reported, so those hosts render under a spoke that no longer runs them. Deleting a spoke cannot remove these; purge them here.</p>
+            <p class="text-xs text-slate-500 mb-2">Cached telemetry keyed to a spoke id that no longer exists — typically an id that changed under a box. It keeps claiming the Proxmox hosts it last reported, so those hosts render under a spoke that no longer runs them. Deleting a spoke cannot remove these; purge them here.</p>
             <div class="space-y-1">` + orphans.map(o =>
             `<label class="flex items-start gap-2 text-xs p-2 rounded bg-amber-50 border border-amber-200 cursor-pointer">
                 <input type="checkbox" class="srd-orph mt-0.5" value="${escapeHtml(o.spoke_id)}" onchange="srdSyncOrphCount()" title="Select orphaned telemetry entry to purge">
@@ -2261,7 +2261,7 @@ function _spokeRegistryDiagHtml(d) {
 
     if (findings.length) {
         html += `<div class="mt-3 pt-3 border-t border-slate-100 space-y-1">` + findings.map(f =>
-            `<p class="text-[11px] text-slate-500">• ${escapeHtml(f)}</p>`).join('') + `</div>`;
+            `<p class="text-xs text-slate-500">• ${escapeHtml(f)}</p>`).join('') + `</div>`;
     }
     return html;
 }
@@ -2426,14 +2426,14 @@ async function loadModuleDiagnostics() {
                 <td class="px-4 py-2 text-xs font-bold ${tone}">${escapeHtml(a.tier || '')}</td>
                 <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(_durStr(a.duration_s))}</td>
                 <td class="px-4 py-2 text-xs text-slate-600">${escapeHtml(a.detail || '')}</td>
-                <td class="px-4 py-2 text-[11px] text-amber-700">${escapeHtml(forensics.join(' · '))}</td>
+                <td class="px-4 py-2 text-xs text-amber-700">${escapeHtml(forensics.join(' · '))}</td>
             </tr>`;
         }).join('');
         return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-            <p class="text-sm font-bold text-slate-500 uppercase tracking-wider">${escapeHtml(_MD_SOURCE_LABEL[src])} <span class="text-slate-500 normal-case font-normal">(${mine.length})</span></p>
-            <p class="text-[11px] text-slate-500 mb-3">${escapeHtml(_MD_SOURCE_NOTE[src] || '')}</p>
+            <p class="text-sm font-bold text-slate-500">${escapeHtml(_MD_SOURCE_LABEL[src])} <span class="text-slate-500 normal-case font-normal">(${mine.length})</span></p>
+            <p class="text-xs text-slate-500 mb-3">${escapeHtml(_MD_SOURCE_NOTE[src] || '')}</p>
             <div class="overflow-x-auto"><table class="w-full text-sm">
-              <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
+              <thead class="bg-slate-50 text-xs text-slate-500"><tr>
                 <th class="px-4 py-2 text-left font-medium">Module</th>
                 <th class="px-4 py-2 text-left font-medium">Tier</th>
                 <th class="px-4 py-2 text-left font-medium">For</th>
@@ -2444,15 +2444,15 @@ async function loadModuleDiagnostics() {
     }).filter(Boolean).join('');
 
     const findingHtml = findings.length ? `<div class="hpe-card rounded-lg p-5 shadow-sm">
-        <p class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Verdicts</p>
+        <p class="text-sm font-bold text-slate-500 mb-2">Verdicts</p>
         ${findings.map(f => {
             const cls = f.severity === 'error' ? 'border-red-200 bg-red-50 text-red-700'
                       : f.severity === 'warning' ? 'border-amber-200 bg-amber-50 text-amber-700'
                       : 'border-slate-200 bg-slate-50 text-slate-600';
             return `<div class="border rounded-md p-2 mb-1.5 ${cls}">
                 <div class="text-xs font-bold">${escapeHtml(f.code || '')}</div>
-                <p class="text-[11px] opacity-90">${escapeHtml(f.detail || '')}</p>
-                ${(f.ids || []).length ? `<p class="text-[10px] font-mono mt-1 break-all">${escapeHtml((f.ids || []).join(', '))}</p>` : ''}
+                <p class="text-xs opacity-90">${escapeHtml(f.detail || '')}</p>
+                ${(f.ids || []).length ? `<p class="text-xs font-mono mt-1 break-all">${escapeHtml((f.ids || []).join(', '))}</p>` : ''}
             </div>`;
         }).join('')}
       </div>` : '';
@@ -2461,7 +2461,7 @@ async function loadModuleDiagnostics() {
       <div class="hpe-card rounded-lg p-5 shadow-sm flex flex-wrap items-center gap-2">
         ${pill('Errors', nErr, nErr ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500')}
         ${pill('Warnings', nWarn, nWarn ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500')}
-        <span class="text-[11px] text-slate-500 ml-auto">as of ${escapeHtml(d._fetched_at)}</span>
+        <span class="text-xs text-slate-500 ml-auto">as of ${escapeHtml(d._fetched_at)}</span>
       </div>
       ${alerts.length ? groups : `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-slate-500">No active alerts from any producer — the MODULE STATUS dot should be green.</p></div>`}
       ${findingHtml}`;
@@ -2560,9 +2560,9 @@ function _alertDiagHtml(d) {
                                         : 'border-amber-300 bg-amber-50 text-amber-700';
     const findingHtml = findings.length ? findings.map(f => `
         <div class="border ${sevClass(f.severity)} rounded p-2 text-xs">
-            <div class="font-bold uppercase tracking-wide text-[10px] mb-0.5">${esc(f.code.replace(/_/g, ' '))}</div>
+            <div class="font-bold text-xs mb-0.5">${esc(f.code.replace(/_/g, ' '))}</div>
             <div class="mb-1">${esc(f.detail)}</div>
-            <div class="text-[11px] opacity-80">${f.ids.map(named).join(', ')}</div>
+            <div class="text-xs opacity-80">${f.ids.map(named).join(', ')}</div>
         </div>`).join('')
         : `<p class="text-xs text-primary-text">No stale or false alert state detected — every active alert reflects a real condition.</p>`;
 
@@ -2604,15 +2604,15 @@ function _alertDiagHtml(d) {
       </div>
       <div class="space-y-2">${findingHtml}</div>
       <div class="overflow-x-auto border border-slate-200 rounded-lg">
-        <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+        <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs"><tr>
           <th class="px-3 py-1 text-left">Alert</th><th class="px-3 py-1 text-left">Producer</th>
           <th class="px-3 py-1 text-center">Tier</th><th class="px-3 py-1 text-center">Active</th><th class="px-3 py-1 text-left">Detail</th>
         </tr></thead><tbody>${alertRows}</tbody></table>
       </div>
       <div>
-        <p class="text-[10px] uppercase text-slate-500 font-bold tracking-widest mb-1">Out-of-contact lookups (per alerted id)</p>
+        <p class="text-xs text-slate-500 font-bold mb-1">Out-of-contact lookups (per alerted id)</p>
         <div class="overflow-x-auto border border-slate-200 rounded-lg">
-          <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+          <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs"><tr>
             <th class="px-3 py-1 text-left">Spoke</th><th class="px-3 py-1 text-center">Tier</th>
             <th class="px-3 py-1 text-center" title="heartbeat.last_seen[bare_id] — what the alert loop reads">Bare heartbeat</th>
             <th class="px-3 py-1 text-center" title="heartbeat.last_seen['{parent}:{agent_id}'] — where a relayed agent actually reports">Composite heartbeat</th>
@@ -2621,7 +2621,7 @@ function _alertDiagHtml(d) {
           </tr></thead><tbody>${forensicRows}</tbody></table>
         </div>
       </div>
-      <div class="text-[11px] text-slate-500">Thresholds: warn ${dur(cfg.warn_s)} · error ${dur(cfg.error_s)} · alerting ${cfg.enabled ? 'on' : '<b class="text-amber-600">off</b>'}. <b>No bare heartbeat + a fresh composite one = a relayed node-agent that is online but alerting</b> — the loop looks up the bare id, the Agents table reads the composite key, so the two disagree.</div>
+      <div class="text-xs text-slate-500">Thresholds: warn ${dur(cfg.warn_s)} · error ${dur(cfg.error_s)} · alerting ${cfg.enabled ? 'on' : '<b class="text-amber-600">off</b>'}. <b>No bare heartbeat + a fresh composite one = a relayed node-agent that is online but alerting</b> — the loop looks up the bare id, the Agents table reads the composite key, so the two disagree.</div>
     </div>`;
 }
 
@@ -2671,7 +2671,7 @@ async function showMtlsDebug() {
             </div>
             <div class="text-xs text-slate-500">The hub mints each spoke's clientAuth mTLS client cert from its <b>Local CA</b> (public CAs no longer issue clientAuth) — done automatically on connect; use these buttons to (re)issue on demand.</div>
             <div class="overflow-x-auto border border-slate-200 rounded-lg">
-                <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+                <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs"><tr>
                     <th class="px-3 py-2 text-left">Spoke</th><th class="px-3 py-2 text-left">Type</th><th class="px-3 py-2 text-left">mTLS</th><th class="px-3 py-2 text-left">Cert SANs</th><th class="px-3 py-2 text-left">Expires</th><th class="px-3 py-2 text-left"></th>
                 </tr></thead><tbody>${rows}</tbody></table>
             </div>
@@ -2757,7 +2757,7 @@ async function showMtlsDebug() {
                         </td>
                     </tr>`;
                 }).join('') : `<tr><td colspan="5" class="px-3 py-3 text-slate-500 italic">No provisioned mTLS certs.</td></tr>`;
-                rel.innerHTML = `<table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+                rel.innerHTML = `<table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs"><tr>
                     <th class="px-3 py-2 text-left">Spoke / ID</th><th class="px-3 py-2 text-left">SANs</th><th class="px-3 py-2 text-left">Expires</th><th class="px-3 py-2 text-left">Status</th><th class="px-3 py-2 text-left">Actions</th>
                 </tr></thead><tbody>${rrows}</tbody></table>`;
             }
@@ -2838,10 +2838,10 @@ function showDnsRecordModal(editItem) {
     const modal = openModal('dns-record-modal', `
         <h3 class="text-lg font-bold text-navy">${editing ? 'Edit' : 'Add'} DNS Record</h3>
         <div class="space-y-3">
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Name</label><input id="dns-r-name" title="Fully-qualified domain name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" ${editing ? 'readonly' : ''}></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="dns-r-type" title="DNS record type (A, AAAA, CNAME, PTR)" class="${selectCls}" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value</label><input id="dns-r-value" title="Target IP address or canonical name" value="${val(editItem?.value)}" class="${inputCls}" placeholder="10.0.1.5"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="dns-r-ttl" title="Time to Live in seconds (minimum 60s)" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Name</label><input id="dns-r-name" title="Fully-qualified domain name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" ${editing ? 'readonly' : ''}></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Type</label><select id="dns-r-type" title="DNS record type (A, AAAA, CNAME, PTR)" class="${selectCls}" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Value</label><input id="dns-r-value" title="Target IP address or canonical name" value="${val(editItem?.value)}" class="${inputCls}" placeholder="10.0.1.5"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">TTL</label><input id="dns-r-ttl" title="Time to Live in seconds (minimum 60s)" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="saveDnsRecord()" title="Save record changes" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
@@ -2889,12 +2889,12 @@ function showDnsForwarderModal(editItem) {
         <h3 class="text-lg font-bold text-navy">${isEdit ? 'Edit DNS Forwarder' : 'Add DNS Forwarder'}</h3>
         <div class="space-y-3">
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Zone</label>
+                <label class="text-xs text-slate-500 font-bold">Zone</label>
                 <input id="dns-fwd-zone" title="Forwarder zone domain (. for root/default)" value="${escapeHtml(zoneVal)}" ${isEdit ? 'readonly class="' + inputCls + ' bg-slate-50 cursor-not-allowed"' : 'class="' + inputCls + '"'} placeholder=". or example.com">
                 <p class="text-xs text-slate-500">Use <span class="font-mono">.</span> to forward all non-authoritative queries.</p>
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Upstream servers</label>
+                <label class="text-xs text-slate-500 font-bold">Upstream servers</label>
                 <input id="dns-fwd-upstreams" title="Comma-separated upstream DNS server IP addresses" value="${escapeHtml(upstreamsVal)}" class="${inputCls}" placeholder="1.1.1.1, 1.0.0.1">
                 <p class="text-xs text-slate-500">Enter one or more IPv4 or IPv6 addresses separated by commas or spaces.</p>
             </div>
@@ -3152,20 +3152,20 @@ function showDnsOverrideProfileModal(editItem) {
         <h3 class="text-lg font-bold text-navy">${isEdit ? 'Edit Override Profile' : 'Add Override Profile'}</h3>
         <div class="space-y-3">
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Name</label>
+                <label class="text-xs text-slate-500 font-bold">Name</label>
                 <input id="dns-ovp-name" class="${inputCls}" value="${escapeHtml(isEdit ? editItem.name : '')}" placeholder="PAVO-DEVICE" title="Letters, digits, '-', '_' or '.' (max 48)">
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Description</label>
+                <label class="text-xs text-slate-500 font-bold">Description</label>
                 <input id="dns-ovp-desc" class="${inputCls}" value="${escapeHtml(isEdit ? (editItem.description || '') : '')}" placeholder="What clients with this profile see">
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Answers</label>
+                <label class="text-xs text-slate-500 font-bold">Answers</label>
                 <textarea id="dns-ovp-records" rows="6" class="${inputCls} font-mono text-xs" placeholder="api.example.com A 10.1.2.3&#10;*.cdn.example.com A 10.1.2.4 60&#10;portal.example.com CNAME lab.example.net">${escapeHtml(isEdit ? _dnsOverrideRecordLines(editItem) : '')}</textarea>
                 <p class="text-xs text-slate-500">One per line: <span class="font-mono">name TYPE value [ttl]</span>. TYPE is A, AAAA or CNAME. <span class="font-mono">*.zone</span> answers every name under that zone.</p>
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Blocked names</label>
+                <label class="text-xs text-slate-500 font-bold">Blocked names</label>
                 <textarea id="dns-ovp-block" rows="3" class="${inputCls} font-mono text-xs" placeholder="telemetry.example.com&#10;*.ads.example.net">${escapeHtml(isEdit ? (editItem.block || []).join('\n') : '')}</textarea>
                 <p class="text-xs text-slate-500">One per line; these return NXDOMAIN (including every name below them).</p>
             </div>
@@ -3291,7 +3291,7 @@ function showDnsOverrideAssignModal(preset) {
         .concat(profiles.map(x => `<option value="${escapeHtml(x.name)}" ${x.name === currentProfile ? 'selected' : ''}>${escapeHtml(x.name)}${x.description ? ' — ' + escapeHtml(x.description) : ''}</option>`)).join('');
     const scopeHtml = p.lock ? `
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Apply to</label>
+                <label class="text-xs text-slate-500 font-bold">Apply to</label>
                 <select id="dns-ova-scope" onchange="_dnsOverrideScopeChanged()" class="${inputCls}">
                     <option value="device">This device only (${escapeHtml(p.target || '')})</option>
                     <option value="subnet">A subnet</option>
@@ -3301,20 +3301,20 @@ function showDnsOverrideAssignModal(preset) {
         <h3 class="text-lg font-bold text-navy">${p.edit ? 'Edit DNS Override' : 'DNS Override'}</h3>
         <div class="space-y-3">${scopeHtml}
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Client IP or subnet</label>
+                <label class="text-xs text-slate-500 font-bold">Client IP or subnet</label>
                 <input id="dns-ova-target" value="${escapeHtml(p.target || '')}" ${p.lock ? 'readonly' : ''} class="${inputCls}${p.lock ? ' bg-slate-50 cursor-not-allowed' : ''}" placeholder="10.1.2.3 or 10.1.2.0/24" title="A single IP, or a subnet in CIDR form (e.g. 10.1.2.0/24)${isAdmin() ? '' : ' inside your tenant\'s subnets'}">
                 ${current && !current.exact ? `<p class="text-xs text-amber-700">Currently inherits <b>${escapeHtml(current.profile)}</b> from ${escapeHtml(current.target)}. A device assignment takes precedence.</p>` : ''}
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Profile</label>
+                <label class="text-xs text-slate-500 font-bold">Profile</label>
                 <select id="dns-ova-profile" class="${inputCls}">${opts}</select>
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Label</label>
+                <label class="text-xs text-slate-500 font-bold">Label</label>
                 <input id="dns-ova-label" value="${escapeHtml(p.label || '')}" class="${inputCls}" placeholder="Device name (optional)">
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Comment</label>
+                <label class="text-xs text-slate-500 font-bold">Comment</label>
                 <input id="dns-ova-comment" value="${escapeHtml(currentComment)}" maxlength="500" class="${inputCls}" placeholder="Why this override exists (optional)">
             </div>
         </div>

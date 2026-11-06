@@ -218,8 +218,8 @@
             '#lm-help-drawer.open{transform:translateX(0);}',
             '#lm-help-head{display:flex;align-items:center;gap:.75rem;padding:1rem 1.25rem;',
             '  background:#263040;color:#fff;flex-shrink:0;}',
-            '#lm-help-head .lm-help-eyebrow{font-size:.6rem;letter-spacing:.12em;',
-            '  text-transform:uppercase;color:#006750;font-weight:700;}',
+            '#lm-help-head .lm-help-eyebrow{font-size:.75rem;',
+            '  color:#05CC93;font-weight:600;}',
             '#lm-help-title{font-size:1.05rem;font-weight:700;line-height:1.2;}',
             '#lm-help-close{margin-left:auto;background:none;border:none;color:#cbd5e1;',
             '  font-size:1.4rem;line-height:1;cursor:pointer;padding:.1rem .35rem;border-radius:.35rem;}',
@@ -441,7 +441,7 @@
             const cites = data.citations || [];
             if (cites.length) {
                 footer += '<div style="margin-top:1.25rem;padding-top:.75rem;border-top:1px solid #e2e8f0">' +
-                    '<div style="font-size:.65rem;letter-spacing:.1em;text-transform:uppercase;color:#94a3b8;font-weight:700;margin-bottom:.4rem">Sources</div>' +
+                    '<div style="font-size:.75rem;color:#64748b;font-weight:600;margin-bottom:.4rem">Sources</div>' +
                     cites.map(function (n) {
                         // Docs from a sibling repo are namespaced "repo/name".
                         // The /docs endpoint only serves the canonical lm set
@@ -459,7 +459,7 @@
                     }).join('') + '</div>';
             }
             if ((data.used_tools || []).length) {
-                footer += '<div style="margin-top:.6rem;font-size:.72rem;color:#94a3b8">Checked live: ' +
+                footer += '<div style="margin-top:.6rem;font-size:.75rem;color:#64748b">Checked live: ' +
                     esc(data.used_tools.join(', ')) + '</div>';
             }
             // Record only AFTER a successful answer: a failed turn must not
@@ -506,7 +506,7 @@
             btn.className = helpBtn.className;
             btn.title = 'Ask the AI assistant';
             btn.innerHTML = '<span class="inline-flex items-center justify-center w-4 h-4 rounded-full ' +
-                'border border-current text-[10px] font-bold">✨</span> Ask AI';
+                'border border-current text-xs font-bold">✨</span> Ask AI';
             btn.addEventListener('click', openHelpAsk);
             helpBtn.parentNode.insertBefore(btn, helpBtn);
         } catch (e) { /* unavailable — leave the button absent */ }

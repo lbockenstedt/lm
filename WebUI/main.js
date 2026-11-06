@@ -488,12 +488,12 @@ function updateContextActions() {
     const fa = document.getElementById('footer-actions');
     if (!fa) return;
     const parts = [];
-    parts.push(`<button onclick="refreshCurrentView()" title="Refresh this view" class="text-[10px] uppercase tracking-widest opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">↻ Refresh</button>`);
+    parts.push(`<button onclick="refreshCurrentView()" title="Refresh this view" class="text-xs opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">↻ Refresh</button>`);
     if (currentView === 'opnsense') {
-        parts.push(`<button onclick="refreshOpnsenseCache()" class="text-[10px] uppercase tracking-widest opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">↻ Refresh Cache</button>`);
+        parts.push(`<button onclick="refreshOpnsenseCache()" class="text-xs opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">↻ Refresh Cache</button>`);
     }
     if (isAdmin()) {
-        parts.push(`<button onclick="triggerUpdate(event)" id="update-btn" class="text-[10px] uppercase tracking-widest opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">↻ Update</button>`);
+        parts.push(`<button onclick="triggerUpdate(event)" id="update-btn" class="text-xs opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">↻ Update</button>`);
     }
     fa.innerHTML = parts.join('');
 }
@@ -1473,7 +1473,7 @@ async function fileBug(prefill = '') {
             </div>
             <div id="bug-guided" class="hidden p-5 space-y-3 overflow-y-auto">
                 <div class="flex items-center gap-2 text-xs text-slate-600">
-                    <span class="font-bold uppercase text-slate-500">Type</span>
+                    <span class="font-bold text-slate-500">Type</span>
                     <button data-reqtype="bug" onclick="reqAsstSetType('bug')" class="req-asst-type px-3 py-1 rounded-full border">🐞 Bug</button>
                     <button data-reqtype="feature" onclick="reqAsstSetType('feature')" class="req-asst-type px-3 py-1 rounded-full border">💡 Feature</button>
                     <button data-reqtype="" onclick="reqAsstSetType('')" class="req-asst-type px-3 py-1 rounded-full border">Not sure</button>
@@ -1481,13 +1481,13 @@ async function fileBug(prefill = '') {
                 </div>
                 <div id="req-asst-log" class="h-72 overflow-y-auto bg-slate-50 border border-slate-200 rounded-lg p-3"></div>
                 <div id="req-asst-choices" class="flex flex-wrap gap-2"></div>
-                <div id="req-asst-checklist" class="text-[11px] leading-relaxed"></div>
+                <div id="req-asst-checklist" class="text-xs leading-relaxed"></div>
                 <div class="flex gap-2 items-end">
                     <textarea id="req-asst-input" rows="2" placeholder="Describe what went wrong, or what you'd like added…" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></textarea>
                     <button id="req-asst-send" onclick="reqAsstSend()" class="bg-primary hover:bg-primary-hover text-white px-4 py-2 rounded-md text-sm font-bold">Send</button>
                     <button id="req-asst-stop" onclick="reqAsstStop()" class="hidden bg-slate-200 hover:bg-slate-300 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Stop</button>
                 </div>
-                <p class="text-[11px] text-slate-500 leading-relaxed">
+                <p class="text-xs text-slate-500 leading-relaxed">
                     The assistant asks one question at a time and reads the code read-only to point at the likely area — it never changes anything.
                     When the report is complete, <b>File report</b> sends it (with your console log, page HTML and a screenshot) through the normal
                     pipeline: a <b>bug</b> is filed for AppBuilder to fix; a <b>feature request</b> waits for Global Admin approval.
@@ -1499,9 +1499,9 @@ async function fileBug(prefill = '') {
                 </div>
             </div>
             <div id="bug-quick" class="p-6 space-y-4 overflow-y-auto">
-                <div id="bug-guided-note" class="hidden text-[11px] text-slate-500"></div>
+                <div id="bug-guided-note" class="hidden text-xs text-slate-500"></div>
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Describe the bug or request <span class="text-red-500">*</span></label>
+                    <label class="text-xs text-slate-500 font-bold">Describe the bug or request <span class="text-red-500">*</span></label>
                     <textarea id="bug-description" rows="4" placeholder="Describe what went wrong, or what you'd like added — e.g. 'Clicked Save on the firewall rule form and the page went blank.' or 'Add a CSV export button to the device list.'" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></textarea>
                 </div>
                 <div class="flex items-center gap-2">
@@ -1511,14 +1511,14 @@ async function fileBug(prefill = '') {
                     </label>
                 </div>
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Severity (optional)</label>
+                    <label class="text-xs text-slate-500 font-bold">Severity (optional)</label>
                     <select id="bug-severity" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         <option value="low">Low — minor / cosmetic</option>
                         <option value="medium" selected>Medium — broken feature, workaround exists</option>
                         <option value="high">High — feature unusable / data risk</option>
                     </select>
                 </div>
-                <p class="text-[11px] text-slate-500 leading-relaxed">
+                <p class="text-xs text-slate-500 leading-relaxed">
                     Your browser console log, the current page HTML, and a screenshot will be captured and sent to the hub.
                     AppBuilder opens a GitHub issue from your explanation + context. For a <b>bug</b> it will also attempt a fix;
                     a <b>feature request</b> is filed as an enhancement for triage (no auto-fix). The console/HTML/screenshot
@@ -1655,7 +1655,7 @@ function _reqAsstEventHtml(e) {
     const t = String(e.text || '');
     if (e.kind === 'user') return _reqAsstBubble('user', t);
     if (e.kind === 'assistant') return _reqAsstBubble('assistant', t);
-    if (e.kind === 'tool') return '<div class="text-[11px] font-mono text-slate-500 ml-2 mb-1 truncate" title="' + escapeHtml(t) + '">› ' + escapeHtml(t) + '</div>';
+    if (e.kind === 'tool') return '<div class="text-xs font-mono text-slate-500 ml-2 mb-1 truncate" title="' + escapeHtml(t) + '">› ' + escapeHtml(t) + '</div>';
     if (e.kind === 'status') return '<div class="text-xs italic text-slate-500 ml-2 mb-2">' + escapeHtml(t) + '</div>';
     if (e.kind === 'error') return '<div class="text-xs text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2 mb-3">⚠️ ' + escapeHtml(t) + '</div>';
     if (e.kind === 'submit') return '<div class="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2 mb-3">✅ ' + escapeHtml(t) + '</div>';
@@ -2733,11 +2733,11 @@ async function loadTenantConfig() {
             <div class="flex items-center justify-between p-2 rounded-md transition-all ${isActive ? 'bg-green-50 border-l-4 border-green-500' : 'bg-white border border-slate-200'}">
                 <div class="flex items-center gap-2 flex-1 ${canEdit ? 'cursor-pointer group' : ''}" ${canEdit ? `onclick="editTenant('${t.id}')"` : ''}>
                     <span class="text-xs font-medium text-slate-700 ${canEdit ? 'group-hover:text-green-600' : ''}">${t.name}</span>
-                    ${t.description ? `<span class="text-[10px] text-slate-500 hidden sm:inline">${t.description}</span>` : ''}
+                    ${t.description ? `<span class="text-xs text-slate-500 hidden sm:inline">${t.description}</span>` : ''}
                 </div>
                 <div class="flex items-center gap-2">
-                    <span class="text-[10px] font-mono text-slate-500">${t.slug || t.id}</span>
-                    <button ${btnAction} title="${btnLabel}" class="text-[10px] px-2 py-0.5 rounded ${btnCls} transition-colors">
+                    <span class="text-xs font-mono text-slate-500">${t.slug || t.id}</span>
+                    <button ${btnAction} title="${btnLabel}" class="text-xs px-2 py-0.5 rounded ${btnCls} transition-colors">
                         ${btnLabel}
                     </button>
                     ${canDelete ? `<button onclick="deleteTenant('${t.id}','${nameArg}')" title="Delete tenant" class="p-1 rounded text-slate-500 hover:text-red-500 hover:bg-red-50 transition-colors"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>` : ''}
@@ -3159,10 +3159,10 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle,
         ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]'
         : (status === 'pending' ? 'bg-amber-400' : 'bg-slate-400'));
     const badge = status === 'online'
-        ? '<span class="text-[10px] uppercase tracking-widest text-green-600 font-bold">Online</span>'
+        ? '<span class="text-xs text-green-600 font-bold">Online</span>'
         : (status === 'pending'
-            ? '<span class="text-[10px] uppercase tracking-widest text-amber-500 font-bold">Pending</span>'
-            : '<span class="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Offline</span>');
+            ? '<span class="text-xs text-amber-500 font-bold">Pending</span>'
+            : '<span class="text-xs text-slate-500 font-bold">Offline</span>');
     // Revoked badge — surfaces WHY a node lost access (admin action OR an
     // automatic tenant-side threat response) right in the spokes/agents module
     // and the tenant view. The reason + who/when is in the hover title. A
@@ -3178,7 +3178,7 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle,
                 + (revokeInfo.revoke_reason ? ` — ${revokeInfo.revoke_reason}` : '')
                 + (_when ? ` (${_when})` : '')
                 + '. Re-approval required to return.';
-            return `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${_auto ? 'bg-red-600 text-white animate-pulse' : 'bg-red-100 text-red-700'}" title="${escapeHtml(_title)}">${_auto ? '⛔ Auto-Revoked' : '⛔ Revoked'}</span>`;
+            return `<span class="text-xs px-2 py-0.5 rounded-full font-bold ${_auto ? 'bg-red-600 text-white animate-pulse' : 'bg-red-100 text-red-700'}" title="${escapeHtml(_title)}">${_auto ? '⛔ Auto-Revoked' : '⛔ Revoked'}</span>`;
         })()
         : '';
     const container = spokeVariant
@@ -3196,7 +3196,7 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle,
     // private tenant binding (emerald).
     const _isShared = tenant && window._sharedTenantId && tenant === window._sharedTenantId;
     const tenantChip = tenant
-        ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${_isShared ? 'bg-amber-100 text-amber-800' : 'bg-emerald-50 text-emerald-700'}" title="${_isShared ? 'Shared tenant — visible to all tenants: ' : 'Tenant: '}${escapeHtml(String(tenant))}">${_isShared ? 'shared · ' : ''}${escapeHtml(String(tenant))}</span>`
+        ? `<span class="text-xs px-2 py-0.5 rounded-full font-bold ${_isShared ? 'bg-amber-100 text-amber-800' : 'bg-emerald-50 text-emerald-700'}" title="${_isShared ? 'Shared tenant — visible to all tenants: ' : 'Tenant: '}${escapeHtml(String(tenant))}">${_isShared ? 'shared · ' : ''}${escapeHtml(String(tenant))}</span>`
         : '';
     // Live per-spoke/agent metrics (from /status metrics, stashed by
     // _updateMetrics) shown on the SAME line as tenant + online/offline:
@@ -3212,10 +3212,10 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle,
     const _mps = _m.spoke_mps ? _m.spoke_mps[_key] : undefined;
     const _bk = (_m.backlog_stats && _m.backlog_stats.by_spoke) ? _m.backlog_stats.by_spoke[_key] : undefined;
     const mpsChip = (_mps !== undefined && _mps !== null)
-        ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-sky-50 text-sky-700" title="Inbound message rate">${Number(_mps).toFixed(1)}/s</span>`
+        ? `<span class="text-xs px-2 py-0.5 rounded-full font-semibold bg-sky-50 text-sky-700" title="Inbound message rate">${Number(_mps).toFixed(1)}/s</span>`
         : '';
     const backlogChip = (_bk)
-        ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-amber-50 text-amber-700" title="Hub-side backlog (queued/unacked) for this ${spokeVariant ? 'spoke' : 'agent'}">${_bk} queued</span>`
+        ? `<span class="text-xs px-2 py-0.5 rounded-full font-semibold bg-amber-50 text-amber-700" title="Hub-side backlog (queued/unacked) for this ${spokeVariant ? 'spoke' : 'agent'}">${_bk} queued</span>`
         : '';
     // Backpressure badge — the hub throttles a spoke/agent when it's over its
     // rate (level 1, "offending") or when a fleet-wide slow-down is active
@@ -3224,16 +3224,16 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle,
     const _bp = _m.backpressure || {};
     const _lvl = (_bp.spoke_levels && _bp.spoke_levels[_key]) || 0;
     const throttleChip = _lvl === 1
-        ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-red-100 text-red-700 animate-pulse" title="Offending — this ${spokeVariant ? 'spoke' : 'agent'} is over its message rate; the hub asked it to slow down &amp; coalesce updates locally">⚠ Offending</span>`
+        ? `<span class="text-xs px-2 py-0.5 rounded-full font-bold bg-red-100 text-red-700 animate-pulse" title="Offending — this ${spokeVariant ? 'spoke' : 'agent'} is over its message rate; the hub asked it to slow down &amp; coalesce updates locally">⚠ Offending</span>`
         : (_lvl >= 2
-            ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-orange-100 text-orange-700" title="Throttled — fleet-wide slow-down active; this ${spokeVariant ? 'spoke' : 'agent'} is coalescing updates locally">⏳ Throttled</span>`
+            ? `<span class="text-xs px-2 py-0.5 rounded-full font-bold bg-orange-100 text-orange-700" title="Throttled — fleet-wide slow-down active; this ${spokeVariant ? 'spoke' : 'agent'} is coalescing updates locally">⏳ Throttled</span>`
             : '');
     return `
         <div class="${container}">
             <div class="flex items-center gap-3">
                 <div class="w-2 h-2 rounded-full ${dot}"></div>
                 <span class="${nameCls}" title="${escapeHtml(String(idTitle || label))}">${escapeHtml(String(label))}</span>
-                ${(mod && mod !== '—') ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-600">${mod}</span>` : ''}
+                ${(mod && mod !== '—') ? `<span class="text-xs px-2 py-0.5 rounded-full font-bold bg-slate-200 text-slate-600">${mod}</span>` : ''}
                 ${tenantChip}
             </div>
             <div class="flex items-center gap-2">
@@ -3444,15 +3444,15 @@ function _updateMetrics(statusData) {
                 .map(([k,v]) => `<span class="inline-block bg-slate-100 rounded px-2 py-0.5 mr-1 mb-1" title="${esc(k)}">${esc(spokeDisplayName(k))}: <b>${v}</b></span>`).join('')
             : '<span class="text-slate-500 italic">none</span>';
         detEl.innerHTML = `
-            <div><span class="text-slate-500 uppercase text-[10px] font-bold tracking-widest">Backlog</span>
+            <div><span class="text-slate-500 text-xs font-bold">Backlog</span>
                  &nbsp;total <b>${bs.total ?? 0}</b> · unacked <b>${bs.pending_ack ?? 0}</b> · queued <b>${bs.queued ?? 0}</b>
                  ${bs.oldest_age_s ? `· oldest <b>${bs.oldest_age_s}s</b>` : ''}</div>
-            <div><span class="text-slate-500 uppercase text-[10px] font-bold tracking-widest">By type</span><br>${kv(bs.by_type)}</div>
-            <div><span class="text-slate-500 uppercase text-[10px] font-bold tracking-widest">By spoke</span><br>${kvSpokes(bs.by_spoke)}</div>
-            <div class="pt-1 border-t border-slate-100"><span class="text-slate-500 uppercase text-[10px] font-bold tracking-widest">Rate limit</span>
+            <div><span class="text-slate-500 text-xs font-bold">By type</span><br>${kv(bs.by_type)}</div>
+            <div><span class="text-slate-500 text-xs font-bold">By spoke</span><br>${kvSpokes(bs.by_spoke)}</div>
+            <div class="pt-1 border-t border-slate-100"><span class="text-slate-500 text-xs font-bold">Rate limit</span>
                  &nbsp;burst <b>${rl.capacity ?? '—'}</b> · <b>${rl.fill_rate ?? '—'}</b>/s
                  &nbsp;·&nbsp;drops total <b>${m.rate_limit_drops_total ?? 0}</b></div>
-            <div><span class="text-slate-500 uppercase text-[10px] font-bold tracking-widest">Drops by spoke</span><br>${kvSpokes(drops)}</div>
+            <div><span class="text-slate-500 text-xs font-bold">Drops by spoke</span><br>${kvSpokes(drops)}</div>
             ${(() => {
                 // Backpressure ladder status: the graceful-degradation control
                 // loop. level 1 = offenders throttled, 2 = fleet-wide slow-down.
@@ -3464,7 +3464,7 @@ function _updateMetrics(statusData) {
                     : '<b class="text-slate-500">normal</b>';
                 const thr = (bp.spokes_throttled || []);
                 return `<div class="pt-1 border-t border-slate-100">
-                    <span class="text-slate-500 uppercase text-[10px] font-bold tracking-widest">Backpressure</span>
+                    <span class="text-slate-500 text-xs font-bold">Backpressure</span>
                     &nbsp;level <b>${lvl}</b> · ${label}
                     ${thr.length ? `· throttled <b>${thr.length}</b>` : ''}
                     ${bp.coalesce_pending ? `· hub-queue <b>${bp.coalesce_pending}</b>` : ''}
@@ -3653,7 +3653,7 @@ async function loadUpdateGateConfig() {
             : `<span class="text-amber-600">● watchdog not armed</span>`;
         const pill = document.getElementById('ug-watchdog-pill');
         if (pill) {
-            pill.className = 'text-[10px] px-2 py-0.5 rounded-full font-bold uppercase normal-case '
+            pill.className = 'text-xs px-2 py-0.5 rounded-full font-bold normal-case '
                 + (w.armed ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700');
             pill.textContent = w.armed ? 'watchdog ✓' : 'watchdog off';
         }
@@ -4247,7 +4247,7 @@ function renderSpokeIndicators() {
             statusText = hasError ? 'Online (Error)' : 'Online';
         }
 
-        tooltipHtml += `<div class="flex items-center justify-between gap-4 py-0.5"><span class="opacity-80" title="${escapeHtml(id)}">${escapeHtml(health.name || id)}</span><div class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full ${dotColor}"></div><span class="text-[9px]">${statusText}</span></div></div>`;
+        tooltipHtml += `<div class="flex items-center justify-between gap-4 py-0.5"><span class="opacity-80" title="${escapeHtml(id)}">${escapeHtml(health.name || id)}</span><div class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full ${dotColor}"></div><span class="text-xs">${statusText}</span></div></div>`;
     });
 
     let overallColor = 'bg-yellow-500';
@@ -4280,7 +4280,7 @@ function renderSpokeIndicators() {
         if (hasErr) overallColor = 'bg-red-500';
         moduleDot.className = `w-2 h-2 rounded-full ${overallColor} transition-all`;
         const esc = escapeHtml;  // shared escaper (escapes &<>"')
-        const row = a => { const _h = (window.spokeHealth || {})[a.spoke_id]; const _nm = (a.display_name || a.name || (_h && _h.name) || a.spoke_id); return `<div class="flex items-center justify-between gap-4 py-0.5"><span class="opacity-80" title="${esc(a.spoke_id)}">${esc(_nm)}</span><div class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full ${a.tier === 'error' ? 'bg-red-400' : 'bg-amber-400'}"></div><span class="text-[9px]">${a.tier}</span></div></div>`; };
+        const row = a => { const _h = (window.spokeHealth || {})[a.spoke_id]; const _nm = (a.display_name || a.name || (_h && _h.name) || a.spoke_id); return `<div class="flex items-center justify-between gap-4 py-0.5"><span class="opacity-80" title="${esc(a.spoke_id)}">${esc(_nm)}</span><div class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full ${a.tier === 'error' ? 'bg-red-400' : 'bg-amber-400'}"></div><span class="text-xs">${a.tier}</span></div></div>`; };
         // Group by PRODUCER. Only spoke_out_of_contact entries are spokes/agents
         // that stopped talking to the hub; fleet-availability and out-of-dongles
         // are lab-capacity signals keyed on synthetic ids (fleet:<tenant> /
@@ -4296,7 +4296,7 @@ function renderSpokeIndicators() {
             const inGroup = alerts.filter(a => (a.source || 'spoke_out_of_contact') === src);
             if (!inGroup.length) return '';
             return `<div class="mt-2 pt-2 border-t border-white/15">
-            <div class="text-[9px] uppercase opacity-60 mb-1">${esc(label)}</div>
+            <div class="text-xs opacity-60 mb-1">${esc(label)}</div>
             ${inGroup.map(row).join('')}
         </div>`;
         }).join('');
@@ -4540,7 +4540,7 @@ function renderTopNav(viewId) {
     // Uniform sub-nav tab styling across every view (Setup / System / Logs / …)
     // so they all match: tighter horizontal padding + normal letter-spacing so
     // the many-tab views (Logs) fit without a per-view special case.
-    const _tabCls = 'px-1.5 py-1 text-xs uppercase tracking-normal whitespace-nowrap';
+    const _tabCls = 'px-1.5 py-1 text-xs tracking-normal whitespace-nowrap';
     topNav.innerHTML = subMenus.map((menu, i) => {
         const label = SUBMENU_LABELS[menu] || menu;
         return `<div class="sub-nav-item ${i === 0 ? 'active' : ''} ${_tabCls} cursor-pointer select-none" data-submenu="${menu}" onclick="setSubView('${menu}')">${label}</div>`;
@@ -4658,12 +4658,12 @@ function _viewTemplate(viewId) {
             if (isAdmin()) {
                 return `<div class="space-y-6">
   <div class="${card}" id="infra-status-card">
-    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Infrastructure Status</h3>
+    <h3 class="text-sm font-bold text-slate-500 mb-3">Infrastructure Status</h3>
     <div id="infra-status-body"><p class="text-sm text-slate-500 italic">Loading…</p></div>
   </div>
   <div class="${card}" id="all-tenants-card">
     <div class="flex justify-between items-center mb-3">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">All Tenants ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500">All Tenants ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
     </div>
     <div id="all-tenants-overview"><p class="text-sm text-slate-500 italic">Loading tenants…</p></div>
   </div>
@@ -4671,12 +4671,12 @@ function _viewTemplate(viewId) {
             }
             return `<div class="space-y-6">
   <div class="${card}" id="infra-status-card">
-    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Infrastructure Status</h3>
+    <h3 class="text-sm font-bold text-slate-500 mb-3">Infrastructure Status</h3>
     <div id="infra-status-body"><p class="text-sm text-slate-500 italic">Loading…</p></div>
   </div>
   <div class="${card}" id="tenant-summary-card">
     <div class="flex justify-between items-center mb-3">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenant Summary — <span id="dash-tenant-name" class="text-primary-text font-mono normal-case"></span> ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500">Tenant Summary — <span id="dash-tenant-name" class="text-primary-text font-mono normal-case"></span> ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
     </div>
     <div id="tenant-summary-grid" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
       <span><b id="dash-devices" class="text-sm text-slate-700">—</b> Devices</span>
@@ -4722,7 +4722,7 @@ function _viewTemplate(viewId) {
             return `<div class="space-y-6">
   <div class="${card}">
     <div class="flex items-center justify-between mb-4">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">My Devices</h3>
+      <h3 class="text-sm font-bold text-slate-500">My Devices</h3>
       <button onclick="showAddDeviceModal()" class="${btn}">+ Add Device</button>
     </div>
     <p class="text-xs text-slate-500 mb-3">Firewalls, network devices, NAC, IPAM, directory, DNS, and DHCP instances bound to your tenant. Click <strong>Add Device</strong>, choose the module type, and bind it to one of your tenant's spokes.</p>
@@ -4732,7 +4732,7 @@ function _viewTemplate(viewId) {
 
   <div class="${card}">
     <div class="flex items-center justify-between mb-4">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes &amp; Agents</h3>
+      <h3 class="text-sm font-bold text-slate-500">Spokes &amp; Agents</h3>
       <button onclick="loadMyDeviceSpokes()" class="text-xs text-primary-text hover:underline">Refresh</button>
     </div>
     <p class="text-xs text-slate-500 mb-3">Every spoke and agent bound to your tenant — approved or awaiting approval, connected or offline. Your first spoke can onboard itself with an onboarding key below (no admin approval needed).</p>
@@ -4741,7 +4741,7 @@ function _viewTemplate(viewId) {
 
   <div class="${card}">
     <div class="flex items-center justify-between mb-4">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Proxmox Node Agents</h3>
+      <h3 class="text-sm font-bold text-slate-500">Proxmox Node Agents</h3>
       <button onclick="loadMyDeviceAgents()" class="text-xs text-primary-text hover:underline">Refresh</button>
     </div>
     <p class="text-xs text-slate-500 mb-3">Proxmox host agents relayed through one of your tenant's spokes (see Proxmox Host Agent below) — connected, pending, or offline. A pending agent relayed through a spoke already bound to your tenant can be approved right here, no admin needed. An agent relayed through a spoke NOT bound to your tenant (e.g. a shared spoke) still needs an admin — or install it with an onboarding key's <code>--onboarding-psk</code>/<code>--tenant-hint</code> to skip approval entirely. Once approved, use <strong>Enable/Disable CS</strong> to toggle Client-Simulation mode — an agent that connects through a <strong>simulation (cs)</strong> spoke gets this turned on automatically; one on a hypervisor (pxmx) spoke starts off and can be enabled here.</p>
@@ -4750,7 +4750,7 @@ function _viewTemplate(viewId) {
 
   <div class="${card}">
     <div class="flex items-center justify-between mb-4">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Onboarding Keys</h3>
+      <h3 class="text-sm font-bold text-slate-500">Onboarding Keys</h3>
       <button onclick="_myDevGenPsk()" class="${btn}">+ Generate Key</button>
     </div>
     <p class="text-xs text-slate-500 mb-3">A one-time onboarding key lets a new spoke register and bind to your tenant automatically, without an admin. Generate a key, copy the install command shown beneath it (hub address and key are pre-filled — it runs as-is), run it on the new server, then revoke the key once it has connected. The new spoke loads its roles from this page; a copy-paste uninstall command is shown beneath each key too.</p>
@@ -4758,19 +4758,19 @@ function _viewTemplate(viewId) {
   </div>
 
   <div class="${card}">
-    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Proxmox Host Agent</h3>
+    <h3 class="text-sm font-bold text-slate-500 mb-2">Proxmox Host Agent</h3>
     <p class="text-xs text-slate-500 mb-3">Runs on a <b>Proxmox host</b> to report hypervisor telemetry (VM inventory, metrics, host actions) <b>and</b> execute client-sim provisioning on that node. It reports to a spoke's <code>/ws/agent</code> listener, not the hub, so it uses its own installer and does <b>not</b> need an onboarding key. The target listener is hosted by <b>either</b> a <b>pxmx (hypervisor) spoke</b>, <b>or</b> an agent running the <b>simulation role</b> — onboard that box with the key above and add <code>--roles simulation</code>, which makes it host the client-sim listener. <b>Prerequisite:</b> that target must already be running — if the installer reports <em>“no agent listener answered”</em>, no listener is up yet (deploy a pxmx spoke via <code>install_pxmx.sh</code>, or load the <code>simulation</code> role on the target). Run this on the Proxmox node — pick one of your tenant's connected hypervisor spokes below to pin <code>--spoke-ip</code>, or leave it on auto-discover to find a co-located spoke via DNS/mDNS.</p>
-    <p class="text-[11px] font-bold text-slate-500 mb-1">Target spoke:</p>
+    <p class="text-xs font-bold text-slate-500 mb-1">Target spoke:</p>
     <select id="my-pxmx-spoke" onchange="_myDevPxmxUpdateInstall()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-2 focus:ring-green-500 mb-2"><option value="">— auto-discover (omit --spoke-ip) —</option></select>
-    <p class="text-[11px] font-bold text-slate-500 mb-1">Install command:</p>
-    <pre id="my-pxmx-install" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh \\
+    <p class="text-xs font-bold text-slate-500 mb-1">Install command:</p>
+    <pre id="my-pxmx-install" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-xs font-mono overflow-x-auto whitespace-pre-wrap">curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh \\
   | sudo bash</pre>
     <button onclick="_myDevCopyEl('my-pxmx-install')" class="mt-1 text-xs text-primary-text hover:underline">Copy command</button>
-    <p class="text-[11px] font-bold text-slate-500 mt-2 mb-1">Uninstall (removes all LM components from that host):</p>
-    <pre id="my-pxmx-uninstall" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/uninstall.sh \\
+    <p class="text-xs font-bold text-slate-500 mt-2 mb-1">Uninstall (removes all LM components from that host):</p>
+    <pre id="my-pxmx-uninstall" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-xs font-mono overflow-x-auto whitespace-pre-wrap">curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/uninstall.sh \\
   | sudo bash -s -- --yes</pre>
     <button onclick="_myDevCopyEl('my-pxmx-uninstall')" class="mt-1 text-xs text-primary-text hover:underline">Copy uninstall</button>
-    <p class="text-[11px] text-slate-500 mt-2"><code>uninstall.sh</code> has no remote/spoke targeting — always run it locally on the box being removed. Other flags, not included above (add manually if needed): <code>--dry-run</code>/<code>-n</code> preview only, no changes; <code>--ollama</code> also remove the shared Ollama install; <code>--letsencrypt</code> also remove Let's Encrypt/certbot state; <code>--netbox-db</code> also <b>drop the NetBox Postgres database</b> (destructive); <code>--nginx-site</code> also remove the NetBox nginx site config; <code>--keep-ab</code> skip removing AppBuilder (removed by default).</p>
+    <p class="text-xs text-slate-500 mt-2"><code>uninstall.sh</code> has no remote/spoke targeting — always run it locally on the box being removed. Other flags, not included above (add manually if needed): <code>--dry-run</code>/<code>-n</code> preview only, no changes; <code>--ollama</code> also remove the shared Ollama install; <code>--letsencrypt</code> also remove Let's Encrypt/certbot state; <code>--netbox-db</code> also <b>drop the NetBox Postgres database</b> (destructive); <code>--nginx-site</code> also remove the NetBox nginx site config; <code>--keep-ab</code> skip removing AppBuilder (removed by default).</p>
   </div>
 </div>`;
 
@@ -4790,7 +4790,7 @@ function _viewTemplate(viewId) {
             return `<div class="space-y-6">
   <div class="flex items-center justify-between gap-3 mb-2 flex-wrap">
     <div class="flex items-center gap-2">
-      <label class="text-xs text-slate-500 uppercase font-bold">Tenant</label>
+      <label class="text-xs text-slate-500 font-bold">Tenant</label>
       <select id="ldap-tenant-select" onchange="onLDAPTenantChange()" title="Select tenant scope for directory objects" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500"><option>Loading…</option></select>
       <span id="ldap-ou-hint" class="text-xs text-slate-500 font-mono"></span>
     </div>
@@ -4799,18 +4799,18 @@ function _viewTemplate(viewId) {
   <div id="ldap-status-row" class="flex items-center gap-6 flex-wrap text-xs">
     <div class="flex items-center gap-2">
       <span id="ldap-health-dot" class="w-2.5 h-2.5 rounded-full bg-slate-300"></span>
-      <span class="text-slate-500 font-semibold uppercase tracking-wide">LDAP Server</span>
+      <span class="text-slate-500 font-semibold">LDAP Server</span>
       <span id="ldap-health-label" class="text-slate-500">checking…</span>
     </div>
     <div class="flex items-center gap-2">
       <span id="entra-health-dot" class="w-2.5 h-2.5 rounded-full bg-slate-300"></span>
-      <span class="text-slate-500 font-semibold uppercase tracking-wide">Entra ID</span>
+      <span class="text-slate-500 font-semibold">Entra ID</span>
       <span id="entra-health-label" class="text-slate-500">checking…</span>
     </div>
   </div>
   <div class="${card} p-0 overflow-hidden">
     <table class="w-full text-left text-sm">
-      <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr id="ldap-table-head"></tr></thead>
+      <thead class="bg-slate-100 text-slate-600 text-xs"><tr id="ldap-table-head"></tr></thead>
       <tbody id="ldap-table-body" class="divide-y divide-slate-200"><tr><td class="px-4 py-8 text-center text-slate-500 italic">Loading…</td></tr></tbody>
     </table>
   </div>

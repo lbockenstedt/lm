@@ -37,7 +37,7 @@ function _nwSubViewTableHtml(subMenu, items, hideDevice) {
     }).join('');
     return `<div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
         <table class="w-full text-left text-sm">
-            <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}</tr></thead>
+            <thead class="bg-slate-100 text-slate-600 text-xs"><tr>${headers}</tr></thead>
             <tbody class="divide-y divide-slate-200">${rows}</tbody>
         </table>
     </div>`;
@@ -116,10 +116,10 @@ function _nwDetailHtml() {
     const transport = _NW_TRANSPORTS[dev.transport] || dev.transport || 'auto';
     const reachable = dev.reachable;
     const rcell = reachable === true || reachable === 'up'
-        ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">up</span>'
+        ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">up</span>'
         : reachable === false || reachable === 'down'
-            ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
-            : '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-amber-100 text-amber-700" title="Reachability unknown — the Network Devices spoke is offline, so up/down can\'t be probed">unknown</span>';
+            ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">down</span>'
+            : '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700" title="Reachability unknown — the Network Devices spoke is offline, so up/down can\'t be probed">unknown</span>';
     const cat = (window._nwView && window._nwView.category) || 'Devices';
     const tabs = _NW_DETAIL_TABS.map(t =>
         `<button onclick="nwSelectDetailTab('${escJsAttr(t)}')" class="px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${t === st.activeTab ? 'bg-brand/10 text-primary-text border border-brand' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}">${escapeHtml(t)}</button>`
@@ -133,7 +133,7 @@ function _nwDetailHtml() {
                  <button onclick="showNwConfigModal('${escJsAttr(dev.id)}','${escJsAttr(dev.name || dev.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>
                </div>`
             : '';
-        const metaRow = (k, v) => `<div class="flex justify-between py-1.5 border-b border-slate-100 last:border-0"><span class="text-xs text-slate-500 uppercase tracking-wider">${k}</span><span class="text-xs text-slate-700 font-mono">${v}</span></div>`;
+        const metaRow = (k, v) => `<div class="flex justify-between py-1.5 border-b border-slate-100 last:border-0"><span class="text-xs text-slate-500">${k}</span><span class="text-xs text-slate-700 font-mono">${v}</span></div>`;
         // Identity datums captured on poll (surfaced by the list route from the
         // warm per-device cache) — help positively ID the physical box.
         const idRow = (k, val) => val ? metaRow(k, escapeHtml(String(val))) : '';
@@ -263,8 +263,8 @@ function _nwAddressCell(it) {
     if (addrs.length <= 1) return escapeHtml(addrs[0] || '—');
     const others = addrs.filter(a => a !== it.address);
     return `${escapeHtml(it.address || addrs[0])}<details class="mt-0.5" onclick="event.stopPropagation()">
-        <summary class="cursor-pointer text-[10px] text-primary-text font-sans font-semibold select-none" title="This device was discovered at ${addrs.length} addresses — shown once">+${others.length} more</summary>
-        <div class="text-[10px] text-slate-500 leading-4">${others.map(a => escapeHtml(a)).join('<br>')}</div></details>`;
+        <summary class="cursor-pointer text-xs text-primary-text font-sans font-semibold select-none" title="This device was discovered at ${addrs.length} addresses — shown once">+${others.length} more</summary>
+        <div class="text-xs text-slate-500 leading-4">${others.map(a => escapeHtml(a)).join('<br>')}</div></details>`;
 }
 
 function _nwSerialCell(it) {
@@ -377,7 +377,7 @@ function _renderNwOverview(devices, counts) {
     // Reachability stat cards (non-clickable summary).
     const stat = (label, n, valueCls) => `
         <div class="bg-white rounded-xl border border-slate-200 p-5">
-            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">${label}</p>
+            <p class="text-xs font-bold text-slate-500 mb-2">${label}</p>
             <p class="text-3xl font-bold ${valueCls || 'text-navy'}">${n}</p>
         </div>`;
     const statCards = `<div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -391,7 +391,7 @@ function _renderNwOverview(devices, counts) {
     const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'Other'];
     const catCard = c => `
         <div onclick="setSubView('${c}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-brand hover:shadow-md transition-all" title="Filter network devices by ${c}">
-            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">${c}</p>
+            <p class="text-xs font-bold text-slate-500 mb-2">${c}</p>
             <p class="text-3xl font-bold text-navy">${counts[c] || 0}</p>
         </div>`;
     const catCards = `<div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -403,12 +403,12 @@ function _renderNwOverview(devices, counts) {
         const typeLabel = _NW_OBJECT_TYPES[it.object_type] || it.object_type || '—';
         const category  = _nwCategoryOf(it.object_type);
         const rcell = isUp(it)
-            ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">up</span>'
+            ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">up</span>'
             : isDown(it)
-                ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
+                ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">down</span>'
                 : '<span class="text-slate-500 text-xs">—</span>';
         return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer" title="View device details">
-            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${it.mac ? `<div class="text-[10px] font-mono font-normal text-slate-500 mt-0.5">${escapeHtml(String(it.mac))}</div>` : ''}</td>
+            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${it.mac ? `<div class="text-xs font-mono font-normal text-slate-500 mt-0.5">${escapeHtml(String(it.mac))}</div>` : ''}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(category)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${_nwSerialCell(it)}</td>
@@ -429,7 +429,7 @@ function _renderNwOverview(devices, counts) {
             ${catCards}
             <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
                 <table class="w-full text-left text-sm">
-                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}<th class="px-4 py-3"></th></tr></thead>
+                    <thead class="bg-slate-100 text-slate-600 text-xs"><tr>${headers}<th class="px-4 py-3"></th></tr></thead>
                     <tbody class="divide-y divide-slate-200">${rows}</tbody>
                 </table>
             </div>
@@ -893,11 +893,11 @@ async function _renderNwTopologyTab(opts) {
   </div>
   <div id="nw-topo-svg" class="border border-slate-200 rounded bg-white overflow-hidden">${_nwTopoSvg(graph, _nwTopoView())}</div>
   ${trunks ? `<div>
-    <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Trunk / uplink ports</h4>
+    <h4 class="text-xs font-bold text-slate-500 mb-1">Trunk / uplink ports</h4>
     <p class="text-xs text-slate-500 mb-2">These ports carry a whole downstream segment, so what is <em>directly</em> attached can't be inferred. Declare the link below if you know it.</p>
     <table class="w-full text-left"><tbody>${trunks}</tbody></table></div>` : ''}
   ${canEditTopo ? `<div class="border-t border-slate-200 pt-4 space-y-3">
-    <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider">Devices that don't speak LLDP</h4>
+    <h4 class="text-xs font-bold text-slate-500">Devices that don't speak LLDP</h4>
     <p class="text-xs text-slate-500">Declare gear the fleet can't discover (unmanaged switches, media converters, PDUs, cameras). Give a MAC and it will be matched against switch MAC tables automatically — that is what puts it on the map.</p>
     <div id="nw-topo-manual"></div>
   </div>` : ''}
@@ -957,7 +957,7 @@ async function _renderNwTopologyManual() {
     </div>
   </div>
   <div>
-    <h5 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Declared links</h5>
+    <h5 class="text-xs font-bold text-slate-500 mb-1">Declared links</h5>
     <table class="w-full text-left"><tbody>${linkRows || `<tr><td class="py-1 text-xs text-slate-500 italic">None declared</td></tr>`}</tbody></table>
     <datalist id="nw-topo-names">${options}</datalist>
     <div class="flex flex-wrap gap-2 mt-2">
@@ -1077,7 +1077,7 @@ async function _renderNwScanTab() {
         : `<p class="text-xs text-amber-600 italic">No Network Devices agent is deployed in this tenant, and no shared agent is available. Deploy the nw module to scan.</p>`;
 
     const card = 'bg-white rounded-xl border border-slate-200 p-5';
-    const lblCls = 'block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1';
+    const lblCls = 'block text-xs font-bold text-slate-500 mb-1';
     const inCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const selCls = inCls;
 
@@ -1209,12 +1209,12 @@ function _nwScanSchedulesHtml(d) {
     // than letting a blank "last run" read as "it never ran".
     const note = d.runtime_since_restart
         ? ''
-        : `<p class="text-[11px] text-slate-500 italic mb-2">The hub has not completed a scheduled run since it last restarted — last/next run are tracked in memory and each schedule re-defers one full interval after a restart.</p>`;
-    let html = note + '<table class="w-full text-left"><thead><tr class="text-slate-500 uppercase text-[10px]"><th class="py-1">Tenant</th><th>Cadence</th><th>Mode</th><th>Credentials</th><th>Agent</th><th>Last run</th><th>Next due</th></tr></thead><tbody>';
+        : `<p class="text-xs text-slate-500 italic mb-2">The hub has not completed a scheduled run since it last restarted — last/next run are tracked in memory and each schedule re-defers one full interval after a restart.</p>`;
+    let html = note + '<table class="w-full text-left"><thead><tr class="text-slate-500 text-xs"><th class="py-1">Tenant</th><th>Cadence</th><th>Mode</th><th>Credentials</th><th>Agent</th><th>Last run</th><th>Next due</th></tr></thead><tbody>';
     for (const s of rows) {
         const mode = s.dry_run
-            ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-100 text-slate-600" title="Reports discoveries without adding them">preview</span>'
-            : '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-100 text-amber-700" title="Adds identified devices to the fleet automatically">auto-add</span>';
+            ? '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-600" title="Reports discoveries without adding them">preview</span>'
+            : '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700" title="Adds identified devices to the fleet automatically">auto-add</span>';
         const creds = s.discovery_only
             ? '<span class="text-amber-600" title="No credential sets selected — this run probes reachability and open ports only, and can never add a device">discovery only</span>'
             : escapeHtml(s.credential_names.join(', '));
@@ -1226,7 +1226,7 @@ function _nwScanSchedulesHtml(d) {
             : _nwSchedWhen(s.last_run_at);
         html += `<tr class="border-t border-slate-100 text-slate-600"><td class="py-1 font-semibold">${escapeHtml(s.tenant_name)}</td><td>${escapeHtml(_nwSchedEvery(s.interval_seconds))}</td><td>${mode}</td><td class="text-xs">${creds}</td><td class="text-xs">${agent}</td><td class="text-xs">${last}</td><td class="text-xs">${escapeHtml(_nwSchedWhen(s.next_due_at, { future: true }))}</td></tr>`;
         if (s.last_error) {
-            html += `<tr class="text-[11px] text-red-500"><td colspan="7" class="pb-1 pl-2">last error: ${escapeHtml(s.last_error)}</td></tr>`;
+            html += `<tr class="text-xs text-red-500"><td colspan="7" class="pb-1 pl-2">last error: ${escapeHtml(s.last_error)}</td></tr>`;
         }
     }
     return html + '</tbody></table>';
@@ -1463,10 +1463,10 @@ function _renderNwDeviceList(category, devices, counts) {
         const transport = _NW_TRANSPORTS[it.transport] || it.transport || 'auto';
         const reachable = it.reachable;
         const rcell = reachable === true || reachable === 'up'
-            ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">up</span>'
+            ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">up</span>'
             : reachable === false || reachable === 'down'
-                ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
-                : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-amber-100 text-amber-700" title="Reachability unknown — the Network Devices spoke is offline, so up/down can't be probed">unknown</span>`;
+                ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">down</span>'
+                : `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700" title="Reachability unknown — the Network Devices spoke is offline, so up/down can't be probed">unknown</span>`;
         // event.stopPropagation() keeps the Poll/Configure buttons from also
         // triggering the row's drill-into-detail click.
         const cfg = (isAdmin() || isTenantAdmin())
@@ -1474,7 +1474,7 @@ function _renderNwDeviceList(category, devices, counts) {
               `<button onclick="event.stopPropagation();showNwConfigModal('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium" title="Configure device connection parameters">Configure</button>`
             : '';
         return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer" title="View device details">
-            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${it.mac ? `<div class="text-[10px] font-mono font-normal text-slate-500 mt-0.5">${escapeHtml(String(it.mac))}</div>` : ''}</td>
+            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${it.mac ? `<div class="text-xs font-mono font-normal text-slate-500 mt-0.5">${escapeHtml(String(it.mac))}</div>` : ''}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(transport)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${_nwSerialCell(it)}</td>
@@ -1487,7 +1487,7 @@ function _renderNwDeviceList(category, devices, counts) {
         <div class="space-y-4">
             <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
                 <table class="w-full text-left text-sm">
-                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}<th class="px-4 py-3"></th></tr></thead>
+                    <thead class="bg-slate-100 text-slate-600 text-xs"><tr>${headers}<th class="px-4 py-3"></th></tr></thead>
                     <tbody class="divide-y divide-slate-200">${rows}</tbody>
                 </table>
             </div>
@@ -1569,9 +1569,9 @@ async function loadTruenasData(subMenu) {
                 const info = (it.info && typeof it.info === 'object') ? it.info : {};
                 const reachable = it.reachable;
                 const rcell = reachable === true || reachable === 'up'
-                    ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">online</span>'
+                    ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">online</span>'
                     : reachable === false || reachable === 'down'
-                        ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">offline</span>'
+                        ? '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">offline</span>'
                         : `<span class="text-slate-500 text-xs">—</span>`;
                 const poll = isAdmin()
                     ? `<button onclick="pollTruenasAppliance('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3" title="Trigger immediate polling of pools, datasets, and disks">Poll Now</button>`
@@ -1589,7 +1589,7 @@ async function loadTruenasData(subMenu) {
                 <div class="space-y-4">
                     <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
                         <table class="w-full text-left text-sm">
-                            <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}</tr></thead>
+                            <thead class="bg-slate-100 text-slate-600 text-xs"><tr>${headers}</tr></thead>
                             <tbody class="divide-y divide-slate-200">${rows}</tbody>
                         </table>
                     </div>
@@ -1681,7 +1681,7 @@ async function loadTruenasData(subMenu) {
                 ${errBanner}
                 <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
                     <table class="w-full text-left text-sm">
-                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}</tr></thead>
+                        <thead class="bg-slate-100 text-slate-600 text-xs"><tr>${headers}</tr></thead>
                         <tbody class="divide-y divide-slate-200">${rows}</tbody>
                     </table>
                 </div>
@@ -1815,7 +1815,7 @@ async function _renderMonitoring(container) {
     const up = shown.filter(h => h.availability === 'available').length;
     const down = shown.filter(h => h.availability === 'unavailable').length;
     const probs = shown.reduce((n, h) => n + (h.problem_count || (h.problems || []).length), 0);
-    const tile = (label, val, cls) => `<div class="rounded border border-slate-200 px-4 py-3"><div class="text-[10px] uppercase tracking-wider text-slate-500">${label}</div><div class="text-2xl font-semibold ${cls || 'text-slate-700'}">${val}</div></div>`;
+    const tile = (label, val, cls) => `<div class="rounded border border-slate-200 px-4 py-3"><div class="text-xs text-slate-500">${label}</div><div class="text-2xl font-semibold ${cls || 'text-slate-700'}">${val}</div></div>`;
     const hostRows = shown.map(h => `<tr class="border-t border-slate-100">
         <td class="px-3 py-2 text-xs font-medium text-slate-700">${escapeHtml(h.name)}</td>
         <td class="px-3 py-2 text-xs text-slate-500">${escapeHtml(h.tenant)}</td>
@@ -1825,9 +1825,9 @@ async function _renderMonitoring(container) {
         <td class="px-3 py-2 text-xs text-slate-600">${(h.problems || []).map(p => `<div>${escapeHtml(sevName[p.severity] || '')}: ${escapeHtml(p.name)}</div>`).join('') || '<span class="text-slate-500">none</span>'}</td>
     </tr>`).join('');
     const table = shown.length
-        ? `<table class="w-full text-left mt-4"><thead><tr class="text-[10px] uppercase tracking-wider text-slate-500"><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Address</th><th class="px-3 py-2">Method</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Problems</th></tr></thead><tbody>${hostRows}</tbody></table>`
+        ? `<table class="w-full text-left mt-4"><thead><tr class="text-xs text-slate-500"><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Address</th><th class="px-3 py-2">Method</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Problems</th></tr></thead><tbody>${hostRows}</tbody></table>`
         : `<div class="py-8 text-center text-slate-500 italic">No monitored devices${tenant ? ` for tenant "${escapeHtml(tenant)}"` : ''}.</div>`;
-    const info = admin ? `<div class="mt-4 text-[11px] text-slate-500">Zabbix ${escapeHtml(String(res.version || '?'))} · ${escapeHtml(String(res.managed_hosts ?? '?'))} managed hosts</div>` : '';
+    const info = admin ? `<div class="mt-4 text-xs text-slate-500">Zabbix ${escapeHtml(String(res.version || '?'))} · ${escapeHtml(String(res.managed_hosts ?? '?'))} managed hosts</div>` : '';
     const sevCls = ['bg-slate-100 text-slate-600', 'bg-sky-100 text-sky-700', 'bg-yellow-100 text-yellow-800', 'bg-amber-100 text-amber-800', 'bg-orange-100 text-orange-800', 'bg-red-100 text-red-700'];
     const allProbs = shown.flatMap(h => (h.problems || []).map(p => ({...p, host: h.name, tenant: h.tenant})))
         .sort((a, b) => (b.severity - a.severity) || (b.clock - a.clock));
@@ -1839,7 +1839,7 @@ async function _renderMonitoring(container) {
         <td class="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">${p.clock ? new Date(p.clock * 1000).toLocaleString() : ''}</td>
     </tr>`).join('');
     const problemsTable = `<h3 class="mt-6 text-sm font-semibold text-slate-700">Open problems (${allProbs.length})</h3>` + (allProbs.length
-        ? `<div class="max-h-96 overflow-y-auto"><table class="w-full text-left mt-2"><thead class="sticky top-0 bg-white"><tr class="text-[10px] uppercase tracking-wider text-slate-500"><th class="px-3 py-2">Severity</th><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Problem</th><th class="px-3 py-2">Since</th></tr></thead><tbody>${probRows}</tbody></table></div>`
+        ? `<div class="max-h-96 overflow-y-auto"><table class="w-full text-left mt-2"><thead class="sticky top-0 bg-white"><tr class="text-xs text-slate-500"><th class="px-3 py-2">Severity</th><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Problem</th><th class="px-3 py-2">Since</th></tr></thead><tbody>${probRows}</tbody></table></div>`
         : `<div class="py-4 text-slate-500 italic text-sm">No open problems.</div>`);
     const buttons = admin ? `<p class="text-xs text-slate-500 mt-4">Monitoring syncs with the inventory automatically (schedule and Sync now: System → Sync).</p>` : '';
     container.innerHTML = `<div class="grid grid-cols-4 gap-3">${tile('Devices', shown.length)}${tile('Available', up, 'text-emerald-600')}${tile('Unavailable', down, down ? 'text-red-600' : '')}${tile('Open problems', probs, probs ? 'text-amber-600' : '')}</div>${table}${problemsTable}${info}${buttons}`;

@@ -41,8 +41,8 @@ function renderOsUpdatesView(content) {
     const osuFleetCls = isAdmin() ? '' : 'hidden';
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     const sub = 'border border-slate-200 rounded-md p-4 space-y-3';
-    const subTitle = 'text-xs font-bold text-slate-500 uppercase tracking-wider';
-    const h3 = 'text-sm font-bold text-slate-500 uppercase tracking-wider';
+    const subTitle = 'text-xs font-bold text-slate-500';
+    const h3 = 'text-sm font-bold text-slate-500';
     content.innerHTML = safeHtml`
         <div class="${card}">
             <div class="flex items-center justify-between">
@@ -432,7 +432,7 @@ function CveLookup() {
 }
 
 function Badge({ text, color, title }) {
-    return phtml`<span class="text-[10px] font-bold ${_OSU_BADGE_CLS[color]} border rounded-full px-2 py-0.5" title=${title || ''}>${text}</span>`;
+    return phtml`<span class="text-xs font-bold ${_OSU_BADGE_CLS[color]} border rounded-full px-2 py-0.5" title=${title || ''}>${text}</span>`;
 }
 
 function CveNodeRow({ a, patched }) {
@@ -448,7 +448,7 @@ function CveNodeRow({ a, patched }) {
 function CveCard({ r }) {
     const flags = [r.urgency ? `${r.urgency} urgency` : '', r.remote ? 'remote' : ''].filter(Boolean).join(' · ');
     const patched = r.patched || [];
-    return phtml`<div class="border border-slate-200 rounded-md p-2 bg-white text-[11px]">
+    return phtml`<div class="border border-slate-200 rounded-md p-2 bg-white text-xs">
         <div class="flex flex-wrap items-center gap-2">
             <a href=${'https://security-tracker.debian.org/tracker/' + encodeURIComponent(r.cve)} target="_blank" rel="noopener" class="font-bold text-slate-700 underline">${r.cve}</a>
             <span class="text-slate-500">${flags}</span>
@@ -456,7 +456,7 @@ function CveCard({ r }) {
         </div>
         <div class="text-slate-500 mt-0.5">${r.description || ''}</div>
         ${r.affected.map(a => phtml`<${CveNodeRow} a=${a} />`)}
-        ${patched.length ? phtml`<details class="mt-1"><summary class="cursor-pointer text-[11px] text-slate-500">${patched.length} node(s) have the package and are patched</summary>
+        ${patched.length ? phtml`<details class="mt-1"><summary class="cursor-pointer text-xs text-slate-500">${patched.length} node(s) have the package and are patched</summary>
             ${patched.map(a => phtml`<${CveNodeRow} a=${a} patched />`)}</details>` : null}
     </div>`;
 }
@@ -474,7 +474,7 @@ function CveResult({ d }) {
         const fixes = _osuCveFixes(d).length;
         body = phtml`<div class="flex flex-wrap items-center gap-2 text-xs">
                 <b class=${d.affected_nodes ? 'text-red-700' : 'text-emerald-700'}>${d.affected_nodes} of ${d.checked_nodes} checked node(s) affected</b>
-                ${fixes ? phtml`<button type="button" onClick=${() => osuCveSelectFixes(d)} class="text-[10px] font-bold text-emerald-800 border border-emerald-300 rounded px-2 py-0.5 hover:bg-emerald-50" title="Pick the pending updates of the vulnerable packages on affected nodes">Select fixes (${fixes})</button>` : null}
+                ${fixes ? phtml`<button type="button" onClick=${() => osuCveSelectFixes(d)} class="text-xs font-bold text-emerald-800 border border-emerald-300 rounded px-2 py-0.5 hover:bg-emerald-50" title="Pick the pending updates of the vulnerable packages on affected nodes">Select fixes (${fixes})</button>` : null}
                 ${d.truncated ? phtml`<span class="text-slate-500">showing the first 200 CVEs — narrow the search</span>` : null}</div>
             ${d.results.map(r => phtml`<${CveCard} r=${r} />`)}`;
     }
@@ -483,9 +483,9 @@ function CveResult({ d }) {
         `${c}${f.fetched_at ? ' ' + new Date(f.fetched_at * 1000).toLocaleString() : ''}${f.error ? ' (refresh failed: ' + f.error + ')' : ''}`).join(', ');
     return phtml`<div class="space-y-2">
         ${body}
-        ${unknown.length ? phtml`<details><summary class="cursor-pointer text-[11px] text-amber-700">${unknown.length} node(s) could not be assessed</summary>
-            ${unknown.map(u => phtml`<div class="text-[11px] text-slate-500"><b>${u.label}</b> — ${u.reason}</div>`)}</details>` : null}
-        <p class="text-[10px] text-slate-500">Installed packages as of the last check · Debian security tracker data: ${feeds || 'none available'}</p>
+        ${unknown.length ? phtml`<details><summary class="cursor-pointer text-xs text-amber-700">${unknown.length} node(s) could not be assessed</summary>
+            ${unknown.map(u => phtml`<div class="text-xs text-slate-500"><b>${u.label}</b> — ${u.reason}</div>`)}</details>` : null}
+        <p class="text-xs text-slate-500">Installed packages as of the last check · Debian security tracker data: ${feeds || 'none available'}</p>
     </div>`;
 }
 
@@ -565,7 +565,7 @@ const _OSU_BADGE_CLS = {
     amber: 'text-amber-800 bg-amber-50 border-amber-200',
     slate: 'text-slate-500 bg-slate-100 border-slate-300',
 };
-const _osuBadge = (text, color, title) => safeHtml`<span class="text-[10px] font-bold ${_OSU_BADGE_CLS[color]} border rounded-full px-2 py-0.5" title="${title || ''}">${text}</span>`;
+const _osuBadge = (text, color, title) => safeHtml`<span class="text-xs font-bold ${_OSU_BADGE_CLS[color]} border rounded-full px-2 py-0.5" title="${title || ''}">${text}</span>`;
 
 function _osuVmLabel(n) {
     if (n.vm) return safeHtml` · <span title="Snapshotted before patching">VM ${n.vm.name} (${n.vm.vmid}@${n.vm.node})</span>`;
@@ -595,7 +595,7 @@ function _osuRender(d) {
     const apCount = document.getElementById('osu-autopatch-count');
     if (apCount) { const k = (d.nodes || []).filter(n => n.auto_patch).length; apCount.textContent = k ? `${k} node(s) approved` : 'no nodes approved'; }
     const t = d.totals || {};
-    const tile = (label, val, cls) => safeHtml`<div class="rounded border border-slate-200 px-4 py-3"><div class="text-[10px] uppercase tracking-wider text-slate-500">${label}</div><div class="text-2xl font-semibold ${cls || 'text-slate-700'}">${val || 0}</div></div>`;
+    const tile = (label, val, cls) => safeHtml`<div class="rounded border border-slate-200 px-4 py-3"><div class="text-xs text-slate-500">${label}</div><div class="text-2xl font-semibold ${cls || 'text-slate-700'}">${val || 0}</div></div>`;
     const sumEl = document.getElementById('osu-summary');
     if (sumEl) sumEl.innerHTML = safeHtml`${tile('Nodes', t.nodes)}${tile('With updates', t.with_updates, t.with_updates && 'text-amber-600')}${tile('Packages', t.packages)}${tile('Security', t.security, t.security && 'text-red-600')}${tile('Need reboot', t.reboot_required, t.reboot_required && 'text-amber-600')}${tile('Unreachable', t.unreachable, t.unreachable && 'text-red-600')}`;
     const notes = [];
@@ -651,7 +651,7 @@ function _osuBodyHtml({ data: d }) {
         const reboot = scheduled ? _osuBadge('reboot scheduled', 'blue')
             : (n.reboot_required ? _osuBadge('reboot required', 'amber', 'A kernel/PVE update needs a reboot. Nothing reboots automatically — do it deliberately.') : '');
         const canReboot = n.eligible && n.reboot_required && !scheduled && feats.includes('reboot') && !busy;
-        const rebootBtn = canReboot ? safeHtml`<button data-action="reboot" data-node="${key}" class="text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Reboot…</button>` : '';
+        const rebootBtn = canReboot ? safeHtml`<button data-action="reboot" data-node="${key}" class="text-xs font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Reboot…</button>` : '';
         const selectable = n.eligible && n.count && !n.apply_blocker && !busy;
         const nodeBox = selectable
             ? safeHtml`<input type="checkbox" class="w-4 h-4 rounded" ${_osuSel.nodes.has(key) ? 'checked' : ''} data-action="toggleNode" data-node="${key}" title="Upgrade everything pending on this node">`
@@ -665,29 +665,29 @@ function _osuBodyHtml({ data: d }) {
             return safeHtml`<label class="inline-flex items-center gap-1 mr-3 ${cls} cursor-pointer"><input type="checkbox" class="w-3 h-3" ${picked.has(p.package) ? 'checked' : ''} data-action="togglePkg" data-node="${key}" data-pkg="${p.package}">${label}</label>`;
         });
         const pickNote = selectable && !feats.includes('packages')
-            ? safeHtml`<div class="text-[10px] text-slate-500 mt-1">Update LM on this node to pick individual packages — it can only be updated whole.</div>` : '';
-        const pickHint = canPick ? safeHtml`<div class="text-[10px] text-slate-500 mb-1">${picked.size ? `${picked.size} picked — only these will be upgraded on this node.` : 'Pick packages to upgrade only those, or tick the node to upgrade everything.'}</div>` : '';
+            ? safeHtml`<div class="text-xs text-slate-500 mt-1">Update LM on this node to pick individual packages — it can only be updated whole.</div>` : '';
+        const pickHint = canPick ? safeHtml`<div class="text-xs text-slate-500 mb-1">${picked.size ? `${picked.size} picked — only these will be upgraded on this node.` : 'Pick packages to upgrade only those, or tick the node to upgrade everything.'}</div>` : '';
         const detail = n.reason
-            ? safeHtml`<div class="text-[11px] text-slate-500 mt-1">${n.reason}</div>`
-            : (n.count ? safeHtml`<details class="mt-1"><summary class="cursor-pointer text-[11px] text-slate-500">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-[11px] mt-1 leading-relaxed">${pickHint}${pkgs}</div></details>${pickNote}` : '');
+            ? safeHtml`<div class="text-xs text-slate-500 mt-1">${n.reason}</div>`
+            : (n.count ? safeHtml`<details class="mt-1"><summary class="cursor-pointer text-xs text-slate-500">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-xs mt-1 leading-relaxed">${pickHint}${pkgs}</div></details>${pickNote}` : '');
         const fixBtn = n.apply_blocker && feats.includes('fix_access') && !busy
-            ? safeHtml` <button data-action="fixAccess" data-node="${key}" class="ml-1 text-[10px] font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
+            ? safeHtml` <button data-action="fixAccess" data-node="${key}" class="ml-1 text-xs font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
         const autoBox = n.eligible
-            ? safeHtml`<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_patch ? 'text-emerald-700' : 'text-slate-500'} cursor-pointer" title="Install this node's updates automatically in the maintenance window"><input type="checkbox" class="w-3 h-3" ${n.auto_patch ? 'checked' : ''} data-action="toggleAutoPatch" data-node="${key}">Auto-patch</label>` : '';
+            ? safeHtml`<label class="flex items-center gap-1 text-xs font-bold ${n.auto_patch ? 'text-emerald-700' : 'text-slate-500'} cursor-pointer" title="Install this node's updates automatically in the maintenance window"><input type="checkbox" class="w-3 h-3" ${n.auto_patch ? 'checked' : ''} data-action="toggleAutoPatch" data-node="${key}">Auto-patch</label>` : '';
         const rebootBox = n.eligible && n.auto_patch
-            ? safeHtml`<label class="flex items-center gap-1 text-[10px] font-bold ${n.auto_reboot ? 'text-emerald-700' : 'text-slate-500'} cursor-pointer" title="Reboot this node after auto-patch installs something"><input type="checkbox" class="w-3 h-3" ${n.auto_reboot ? 'checked' : ''} data-action="toggleAutoReboot" data-node="${key}">Auto-reboot</label>` : '';
-        const blocker = n.apply_blocker ? safeHtml`<div class="text-[11px] text-amber-700 mt-1">Can't apply: ${n.apply_blocker}${fixBtn}</div>` : '';
+            ? safeHtml`<label class="flex items-center gap-1 text-xs font-bold ${n.auto_reboot ? 'text-emerald-700' : 'text-slate-500'} cursor-pointer" title="Reboot this node after auto-patch installs something"><input type="checkbox" class="w-3 h-3" ${n.auto_reboot ? 'checked' : ''} data-action="toggleAutoReboot" data-node="${key}">Auto-reboot</label>` : '';
+        const blocker = n.apply_blocker ? safeHtml`<div class="text-xs text-amber-700 mt-1">Can't apply: ${n.apply_blocker}${fixBtn}</div>` : '';
         const msg = [];
-        if (item && item.message) msg.push(safeHtml`<div class="text-[11px] ${item.status === 'done' ? 'text-slate-500' : 'text-red-600'} mt-1">${item.message}</div>`);
-        else if (item && item.status === 'done' && item.mode === 'packages') msg.push(safeHtml`<div class="text-[11px] text-slate-500 mt-1">upgraded ${(item.packages || []).join(', ')}</div>`);
-        if (item && item.snapshot) msg.push(safeHtml`<div class="text-[11px] text-slate-500 mt-1">snapshot: ${item.snapshot}</div>`);
-        if (item && item.auto_reboot) msg.push(safeHtml`<div class="text-[11px] ${item.auto_reboot.startsWith('failed') ? 'text-red-600' : 'text-slate-500'} mt-1">reboot: ${item.auto_reboot}</div>`);
+        if (item && item.message) msg.push(safeHtml`<div class="text-xs ${item.status === 'done' ? 'text-slate-500' : 'text-red-600'} mt-1">${item.message}</div>`);
+        else if (item && item.status === 'done' && item.mode === 'packages') msg.push(safeHtml`<div class="text-xs text-slate-500 mt-1">upgraded ${(item.packages || []).join(', ')}</div>`);
+        if (item && item.snapshot) msg.push(safeHtml`<div class="text-xs text-slate-500 mt-1">snapshot: ${item.snapshot}</div>`);
+        if (item && item.auto_reboot) msg.push(safeHtml`<div class="text-xs ${item.auto_reboot.startsWith('failed') ? 'text-red-600' : 'text-slate-500'} mt-1">reboot: ${item.auto_reboot}</div>`);
         const meta = [n.kind, n.flavor, n.pve_cluster && n.pve_cluster.name ? 'PVE cluster ' + n.pve_cluster.name : ''].filter(Boolean).join(' · ');
         return safeHtml`<div id="osu-node-${key}" class="py-3 flex flex-wrap items-start gap-x-4 gap-y-2">
             <div class="w-5 pt-0.5">${nodeBox}</div>
             <div class="flex-1 min-w-[16rem]">
                 <div class="text-sm font-medium text-slate-700">${n.label}</div>
-                <div class="text-[11px] text-slate-500">${meta}${_osuVmLabel(n)}</div>
+                <div class="text-xs text-slate-500">${meta}${_osuVmLabel(n)}</div>
                 ${detail}${blocker}${msg}
             </div>
             <div class="flex flex-wrap items-center justify-end gap-1.5">${state}${reboot}${rebootBtn}</div>

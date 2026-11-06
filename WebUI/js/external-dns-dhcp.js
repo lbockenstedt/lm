@@ -61,10 +61,10 @@ async function loadExternalDNS() {
           <button onclick="openExternalDns('${p.id}')" class="text-left bg-white border border-slate-200 rounded-lg p-4 hover:border-brand hover:shadow-md transition-all" title="Manage ${escapeHtml(p.name)} external DNS records">
             <div class="flex items-center justify-between mb-1">
               <span class="text-sm font-bold text-navy">${escapeHtml(p.name)}</span>
-              <span class="text-[10px] font-mono text-slate-500">${escapeHtml(p.id)}</span>
+              <span class="text-xs font-mono text-slate-500">${escapeHtml(p.id)}</span>
             </div>
             <p class="text-xs text-slate-500 leading-snug">${escapeHtml(p.desc)}</p>
-            <span class="inline-block mt-3 text-[11px] font-bold text-primary-text">Manage records →</span>
+            <span class="inline-block mt-3 text-xs font-bold text-primary-text">Manage records →</span>
           </button>`).join('') + `</div>`;
 }
 
@@ -140,9 +140,9 @@ async function _instanceVaultCredOptions() {
 function _vaultCredSelectHtml(elId) {
     const cls = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     return `<div class="space-y-1">
-        <label class="text-xs text-slate-500 uppercase font-bold" title="Optionally back this connection's secret with a Credential Vault entry instead of typing it inline. The hub resolves the value at push time and never stores the plaintext.">Credential Vault (optional)</label>
+        <label class="text-xs text-slate-500 font-bold" title="Optionally back this connection's secret with a Credential Vault entry instead of typing it inline. The hub resolves the value at push time and never stores the plaintext.">Credential Vault (optional)</label>
         <select id="${elId}" title="Pick a Vault secret to supply this connection's password/secret, or leave as “— none —” to enter it inline." class="${cls}"><option value="">Loading…</option></select>
-        <p class="text-[11px] text-slate-500 leading-snug">When set, the secret field(s) below may be left blank — the hub fills them from the Vault at push time and never stores the plaintext.</p>
+        <p class="text-xs text-slate-500 leading-snug">When set, the secret field(s) below may be left blank — the hub fills them from the Vault at push time and never stores the plaintext.</p>
     </div>`;
 }
 
@@ -404,17 +404,17 @@ async function showHenetRecordModal(editItem) {
         const opts = [`<option value=""${cur === '' ? ' selected' : ''}>Admin (admin-managed / shared)</option>`]
             .concat(tenants.map(t => `<option value="${escapeHtml(t.id)}"${String(t.id) === cur ? ' selected' : ''}>${escapeHtml(t.name || t.id)}</option>`))
             .join('');
-        tenantField = `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Tenant</label><select id="henet-r-tenant" class="${inputCls}" title="Which tenant owns this record. Admin = admin-managed / shared. A tenant only sees and manages its own records — pick a tenant to move this record to that tenant.">${opts}</select></div>`;
+        tenantField = `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Tenant</label><select id="henet-r-tenant" class="${inputCls}" title="Which tenant owns this record. Admin = admin-managed / shared. A tenant only sees and manages its own records — pick a tenant to move this record to that tenant.">${opts}</select></div>`;
     }
     const modal = openModal('henet-record-modal', `
         <h3 class="text-lg font-bold text-navy">${editing ? 'Edit' : 'Add'} HE.NET Record</h3>
         <div class="space-y-3">
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Name</label><input id="henet-r-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" title="Fully-qualified DNS record name to manage at HE.NET (e.g. host.example.com) — must have dynamic DNS enabled at dns.he.net" ${editing ? 'readonly' : ''}></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="henet-r-type" class="${inputCls}" title="Record type: A (IPv4) or AAAA (IPv6) — HE's dyndns endpoint only updates A/AAAA" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value (IP)</label><input id="henet-r-value" value="${val(editItem?.value)}" class="${inputCls}" placeholder="203.0.113.5" title="IP address the record resolves to (A = IPv4, AAAA = IPv6)"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="henet-r-ttl" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}" title="Time-to-live in seconds (minimum 60; default 300)"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Name</label><input id="henet-r-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" title="Fully-qualified DNS record name to manage at HE.NET (e.g. host.example.com) — must have dynamic DNS enabled at dns.he.net" ${editing ? 'readonly' : ''}></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Type</label><select id="henet-r-type" class="${inputCls}" title="Record type: A (IPv4) or AAAA (IPv6) — HE's dyndns endpoint only updates A/AAAA" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Value (IP)</label><input id="henet-r-value" value="${val(editItem?.value)}" class="${inputCls}" placeholder="203.0.113.5" title="IP address the record resolves to (A = IPv4, AAAA = IPv6)"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">TTL</label><input id="henet-r-ttl" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}" title="Time-to-live in seconds (minimum 60; default 300)"></div>
             ${tenantField}
-            <p class="text-[11px] text-slate-500">Records are created/updated directly in your HE.NET zone using the assigned account login${cred ? ` (<span class="font-mono">🔐 ${escapeHtml(cred.name)}</span>)` : ''} — no per-record DDNS key needed.${editing && isAdmin() ? ` To just move this record to another tenant's tab, change <b>Tenant</b> and leave <b>Value</b> unchanged — it's re-homed without touching HE.NET.` : ''}</p>
+            <p class="text-xs text-slate-500">Records are created/updated directly in your HE.NET zone using the assigned account login${cred ? ` (<span class="font-mono">🔐 ${escapeHtml(cred.name)}</span>)` : ''} — no per-record DDNS key needed.${editing && isAdmin() ? ` To just move this record to another tenant's tab, change <b>Tenant</b> and leave <b>Value</b> unchanged — it's re-homed without touching HE.NET.` : ''}</p>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="saveHenetRecord()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to this HE.NET record' : 'Add record to HE.NET management'}">${editing ? 'Save Changes' : 'Add Record'}</button>
@@ -443,7 +443,7 @@ async function showHenetCredModal() {
     openModal('henet-cred-modal', `
         <h3 class="text-lg font-bold text-navy">Assign HE.NET DDNS credential</h3>
         <p class="text-sm text-slate-500">The HE.NET module uses this Credential Vault secret to push records — assign it once and you won't be asked per record. Use the SAME Hurricane Electric credential as certificates: add it under <b>Credential Vault → + Add secret → DNS → Hurricane Electric (account login)</b> (automation mode), or reuse an existing one — the same HE credential works for both certs and DNS.</p>
-        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DDNS credential</label>
+        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">DDNS credential</label>
           ${creds.length
             ? `<select id="henet-assign-cred" class="${inputCls}" title="Credential Vault Hurricane Electric credential (shared with certificate DNS-01 issuance) used to push records unattended">${opts}</select>`
             : `<p class="text-sm text-amber-600 italic">No automation-readable Hurricane Electric credential found in the Credential Vault. Add a <b>DNS → Hurricane Electric (account login)</b> secret first (it serves both certs and DNS).</p>`}
@@ -521,18 +521,18 @@ async function showHenetScheduleModal() {
           Enable scheduled auto-sync
         </label>
         <div class="space-y-1">
-          <label class="text-xs text-slate-500 font-bold uppercase">Schedule</label>
+          <label class="text-xs text-slate-500 font-bold">Schedule</label>
           <select id="henet-sched-mode" class="${inputCls}" title="Select sync schedule type: interval in minutes or daily at a set time">
             <option value="interval" ${isDaily ? '' : 'selected'}>Every N minutes</option>
             <option value="daily" ${isDaily ? 'selected' : ''}>Once daily at a set time</option>
           </select>
         </div>
         <div class="space-y-1" id="henet-sched-interval-wrap" style="${isDaily ? 'display:none' : ''}">
-          <label class="text-xs text-slate-500 font-bold uppercase">Interval (minutes)</label>
+          <label class="text-xs text-slate-500 font-bold">Interval (minutes)</label>
           <input type="number" id="henet-sched-interval" min="5" value="${intMin}" class="${inputCls}" title="Minimum 5 minutes">
         </div>
         <div class="space-y-1" id="henet-sched-daily-wrap" style="${isDaily ? '' : 'display:none'}">
-          <label class="text-xs text-slate-500 font-bold uppercase">Daily time (24h, HH:MM)</label>
+          <label class="text-xs text-slate-500 font-bold">Daily time (24h, HH:MM)</label>
           <input type="time" id="henet-sched-daily" value="${escapeHtml(String(cfg.daily_time || '02:00'))}" class="${inputCls}" title="Time of day (24-hour HH:MM) to run daily HE.NET synchronization">
         </div>
         <div class="flex justify-end gap-2 pt-2">
@@ -696,7 +696,7 @@ async function showHenetMoveAllModal() {
     openModal('henet-moveall-modal', `
         <h3 class="text-lg font-bold text-navy">Move all records → tenant</h3>
         <p class="text-xs text-slate-500">Re-home all ${recs.length} record(s) currently shown (<span class="font-medium">${escapeHtml(_henetCurrentScopeLabel())}</span>) to another tenant. Metadata only — the HE.NET zone at dns.he.net is untouched.</p>
-        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Destination</label><select id="henet-moveall-target" class="${inputCls}" title="Select destination tenant to re-home these records to">${opts}</select></div>
+        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Destination</label><select id="henet-moveall-target" class="${inputCls}" title="Select destination tenant to re-home these records to">${opts}</select></div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="_henetMoveAll()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="Move all records in current view to selected destination tenant">Move all</button>
             <button onclick="document.getElementById('henet-moveall-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel and close dialog">Cancel</button>
@@ -961,12 +961,12 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     </div>
                     <div class="bg-white border border-slate-200 rounded-lg p-4">
                         <div class="text-sm font-semibold text-slate-700 mb-2">Listeners</div>
-                        <pre class="text-[11px] whitespace-pre-wrap break-all text-slate-600">${escapeHtml([...(listeners.dhcp4 || []), ...(listeners.control_agent || [])].join('\n') || listeners.error || 'none')}</pre>
+                        <pre class="text-xs whitespace-pre-wrap break-all text-slate-600">${escapeHtml([...(listeners.dhcp4 || []), ...(listeners.control_agent || [])].join('\n') || listeners.error || 'none')}</pre>
                     </div>
                     ${(caUnit.ActiveState !== 'active') ? `<div class="bg-white border border-slate-200 rounded-lg p-4">
                         <div class="text-sm font-semibold text-slate-700 mb-2">Control Agent log</div>
                         <div class="text-xs text-slate-500 mb-1">${caCfg.ok === false ? `kea-ctrl-agent.conf syntax check: <span class="text-red-600">FAIL</span>` : caCfg.ok === true ? `kea-ctrl-agent.conf syntax check: <span class="text-emerald-600">OK</span>` : 'kea-ctrl-agent.conf syntax check unavailable'}</div>
-                        <pre class="text-[11px] whitespace-pre-wrap break-all text-slate-600">${escapeHtml(caRecentErrors.join('\n') || caCfg.error || caCfg.output || 'no recent log entries')}</pre>
+                        <pre class="text-xs whitespace-pre-wrap break-all text-slate-600">${escapeHtml(caRecentErrors.join('\n') || caCfg.error || caCfg.output || 'no recent log entries')}</pre>
                     </div>` : ''}
                 </div>
                 <div class="bg-white border border-slate-200 rounded-lg overflow-hidden mb-4">
@@ -975,7 +975,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 </div>
                 ${(d.last_errors || []).length ? `<div class="bg-white border border-slate-200 rounded-lg p-4">
                     <div class="text-sm font-semibold text-slate-700 mb-2">Recent service warnings/errors</div>
-                    <pre class="text-[11px] whitespace-pre-wrap break-all text-slate-600">${escapeHtml(d.last_errors.join('\n'))}</pre>
+                    <pre class="text-xs whitespace-pre-wrap break-all text-slate-600">${escapeHtml(d.last_errors.join('\n'))}</pre>
                 </div>` : ''}
                 ${_dhcpPacketTracePanel()}
                 ${_dhcpDnsHookPanel(dnsHook)}`;
@@ -1046,7 +1046,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(ip || '—')}</td>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(mac || '—')}</td>
                     <td class="px-4 py-2 text-xs">${escapeHtml(host || '—')}</td>
-                    <td class="px-4 py-2 text-xs"><span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${stateBadge}">${escapeHtml(stateLabel)}</span></td>
+                    <td class="px-4 py-2 text-xs"><span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${stateBadge}">${escapeHtml(stateLabel)}</span></td>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(validUntil)}</td>
                     <td class="px-4 py-2 whitespace-nowrap text-right">
                         ${ip && mac ? `<button onclick="convertLeaseToReservation('${eIp}', '${eSpoke}')" title="Convert to static reservation" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2.5 py-1 rounded transition-colors font-medium">Reserve</button>` : ''}
@@ -1192,10 +1192,10 @@ function showDhcpReservationModal(editItem, isConvert = false, prefillOnly = fal
     const modal = openModal('dhcp-res-modal', `
         <h3 class="text-lg font-bold text-navy">${title}</h3>
         <div class="space-y-3">
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Subnet</label><select id="dhcp-res-subnet" class="${inputCls}" title="Select target DHCP subnet scope"><option value="">Loading…</option></select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">IP Address</label><input id="dhcp-res-ip" value="${val(editItem?.ip)}" class="${inputCls}" placeholder="10.0.0.50" title="Static IP address to assign"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">MAC Address</label><input id="dhcp-res-mac" value="${val(editItem?.mac)}" class="${inputCls}" placeholder="aa:bb:cc:dd:ee:ff" title="Client hardware MAC address (e.g. aa:bb:cc:dd:ee:ff)"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Hostname (optional)</label><input id="dhcp-res-host" value="${val(editItem?.hostname)}" class="${inputCls}" placeholder="printer-01" title="Optional client hostname"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Subnet</label><select id="dhcp-res-subnet" class="${inputCls}" title="Select target DHCP subnet scope"><option value="">Loading…</option></select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">IP Address</label><input id="dhcp-res-ip" value="${val(editItem?.ip)}" class="${inputCls}" placeholder="10.0.0.50" title="Static IP address to assign"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">MAC Address</label><input id="dhcp-res-mac" value="${val(editItem?.mac)}" class="${inputCls}" placeholder="aa:bb:cc:dd:ee:ff" title="Client hardware MAC address (e.g. aa:bb:cc:dd:ee:ff)"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Hostname (optional)</label><input id="dhcp-res-host" value="${val(editItem?.hostname)}" class="${inputCls}" placeholder="printer-01" title="Optional client hostname"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="saveDhcpReservation()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="${btnText}">${btnText}</button>

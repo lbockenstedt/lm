@@ -31,6 +31,7 @@ module.exports = {
   // See docs/webui-style.md. brand = decorative only (accents, borders, tints);
   // anything behind or as text uses primary / primary.text for AA contrast.
   theme: { extend: {
+    fontFamily: { sans: ['"HPE Graphik"', 'Arial', 'sans-serif'] },
     colors: {
       brand: '#01A982',                                                // decorative.brand
       primary: { DEFAULT: '#068667', hover: '#006750', text: '#006750' }, // background.primary.strong / text.primary

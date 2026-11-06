@@ -34,7 +34,7 @@ async function loadReportsData() {
         <p class="text-xs text-slate-500 max-w-2xl">Emailed reports — each sends a tenant's Dashboard <b>Compliance</b> (week / month / quarter / year, every check) + optional <b>Client Count</b> to its recipients on a schedule (via the provider under Setup → Notifications). A Global Admin can target any tenant; a tenant user sees only its own.</p>
         <button onclick="editReport('')" class="shrink-0 bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-sm font-bold">+ Add report</button>
       </div>
-      <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-[10px] uppercase text-slate-500"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Tenant</th><th class="px-3 py-1 text-left">Sections</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">Schedule</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-xs text-slate-500"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Tenant</th><th class="px-3 py-1 text-left">Sections</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">Schedule</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
     </div>
     <div id="alerts-content" class="hpe-card rounded-lg p-5 shadow-sm mt-4"><p class="text-sm text-slate-500 italic">Loading alert rules…</p></div>
 `;
@@ -79,7 +79,7 @@ async function loadAlertRules() {
         <td class="px-3 py-2">${r.enabled ? '<span class="text-green-600 text-xs font-bold">on</span>' : '<span class="text-slate-500 text-xs">off</span>'}</td>
         <td class="px-3 py-2 text-right whitespace-nowrap"><button onclick="testAlertRule('${escapeHtml(r.id)}', '${kind}')" class="text-xs text-slate-500 hover:text-slate-700 mr-2">Test</button><button onclick="editAlertRule('${escapeHtml(r.id)}', '${kind}')" class="text-xs text-primary-text hover:underline mr-2">Edit</button><button onclick="deleteAlertRule('${escapeHtml(r.id)}', '${kind}')" class="text-xs text-red-500 hover:text-red-700">Delete</button></td></tr>`;
     const rowsArr = (d.rules || []).map(r => row(r, 'sim', escapeHtml(_ALERT_SRCL[r.source] || r.source || '')))
-        .concat(certRules.map(r => row(r, 'certmon', `Cert Monitor — ${escapeHtml(_certMonRuleWhat(r))} <span class="text-[10px] text-slate-500">(hub-wide)</span>`)));
+        .concat(certRules.map(r => row(r, 'certmon', `Cert Monitor — ${escapeHtml(_certMonRuleWhat(r))} <span class="text-xs text-slate-500">(hub-wide)</span>`)));
     const rows = rowsArr.length ? rowsArr.join('') : '<tr><td colspan="6" class="px-3 py-4 text-slate-500 italic">No alert rules — click "Add alert".</td></tr>';
     el.innerHTML = `
       <div class="flex items-center justify-between mb-3">
@@ -87,7 +87,7 @@ async function loadAlertRules() {
         <button onclick="editAlertRule('')" class="shrink-0 bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500 px-3 py-1.5 rounded-md text-sm font-bold">+ Add alert</button>
       </div>
       ${certErr ? `<p class="text-xs text-red-500 mb-2">Could not load Cert Monitor alert rules: ${escapeHtml(certErr)}</p>` : ''}
-      <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-[10px] uppercase text-slate-500"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Source</th><th class="px-3 py-1 text-left">Format</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-xs text-slate-500"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Source</th><th class="px-3 py-1 text-left">Format</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function _certMonRuleWhat(r) {
@@ -157,18 +157,18 @@ function editAlertRule(id, kind) {
       <label class="block text-xs text-slate-500">Name<input id="alr-name" value="${escapeHtml(existing ? existing.name : '')}" placeholder="VM offline → NOC" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
       <label class="block text-xs text-slate-500">Source (what to watch)<select id="alr-source" onchange="_alrSourceChanged()" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm">${srcOpts}</select></label>
       <div id="alr-cert-w" class="space-y-3" style="display:none">
-        <label id="alr-days-w" class="block text-xs text-slate-500">Alert when fewer than N days are left<input id="alr-days" type="number" min="1" max="825" value="${escapeHtml(String(days))}" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"><span class="block text-[11px] text-slate-500 mt-1">Expired certs always match.</span></label>
-        <label class="block text-xs text-slate-500">Repeat every N hours while still bad<input id="alr-repeat" type="number" min="0" max="720" value="${escapeHtml(String(repeatH))}" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"><span class="block text-[11px] text-slate-500 mt-1">0 = one email when it first breaches (plus one on recovery).</span></label>
+        <label id="alr-days-w" class="block text-xs text-slate-500">Alert when fewer than N days are left<input id="alr-days" type="number" min="1" max="825" value="${escapeHtml(String(days))}" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"><span class="block text-xs text-slate-500 mt-1">Expired certs always match.</span></label>
+        <label class="block text-xs text-slate-500">Repeat every N hours while still bad<input id="alr-repeat" type="number" min="0" max="720" value="${escapeHtml(String(repeatH))}" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"><span class="block text-xs text-slate-500 mt-1">0 = one email when it first breaches (plus one on recovery).</span></label>
         <div id="alr-ladder-w" class="text-xs text-slate-500">Escalation <span class="text-slate-500">(overrides the repeat as expiry gets closer)</span>
           <div id="alr-steps" class="space-y-1 mt-1">${steps.map(_alrStepRow).join('')}</div>
           <button type="button" onclick="_alrAddStep()" class="mt-1 text-primary-text hover:underline">+ Add step</button>
-          <span class="block text-[11px] text-slate-500 mt-1">0 days = expired. 0 hours = one email on entering the step. Entering a more urgent step emails right away.</span></div>
+          <span class="block text-xs text-slate-500 mt-1">0 days = expired. 0 hours = one email on entering the step. Entering a more urgent step emails right away.</span></div>
         <div class="text-xs text-slate-500">Services <span class="text-slate-500">(none ticked = all)</span><div class="grid grid-cols-2 gap-1 mt-1 text-slate-600">${svcBoxes}</div></div>
       </div>
       <label class="block text-xs text-slate-500">Format<select id="alr-format" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm">
         <option value="human" ${!existing || existing.format !== 'raw' ? 'selected' : ''}>Human — formatted email</option>
         <option value="raw" ${existing && existing.format === 'raw' ? 'selected' : ''}>Raw — JSON body (for automation to ingest)</option>
-      </select><span class="block text-[11px] text-slate-500 mt-1">Human = a person; Raw = a system/automation mailbox. Add two rules on one source to send both.</span></label>
+      </select><span class="block text-xs text-slate-500 mt-1">Human = a person; Raw = a system/automation mailbox. Add two rules on one source to send both.</span></label>
       <label class="block text-xs text-slate-500">Recipients <span class="text-slate-500">(comma-separated)</span><input id="alr-recips" value="${escapeHtml(existing ? (existing.recipients || []).join(', ') : '')}" placeholder="noc@acme.com" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
       <label class="flex items-center gap-2 text-xs text-slate-600 pt-1"><input type="checkbox" id="alr-enabled" ${!existing || existing.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Enabled</label>
       <div id="alr-result" class="text-xs"></div>
@@ -387,7 +387,7 @@ async function loadCertMonData() {
     const card = 'hpe-card rounded-lg p-5 shadow-sm';
     const c = d.counts || {};
     const th = d.thresholds || { red_days: 30, yellow_days: 90 };
-    const tile = (label, n, cls) => `<div class="rounded-lg border px-4 py-3 ${cls}"><div class="text-2xl font-bold">${n || 0}</div><div class="text-[11px] uppercase tracking-wider font-semibold">${label}</div></div>`;
+    const tile = (label, n, cls) => `<div class="rounded-lg border px-4 py-3 ${cls}"><div class="text-2xl font-bold">${n || 0}</div><div class="text-xs font-semibold">${label}</div></div>`;
     const lastRun = d.last_run ? new Date(d.last_run).toLocaleString() : 'never';
     const nextRun = d.next_run ? new Date(d.next_run).toLocaleString() : (d.config && d.config.enabled ? 'shortly' : '—');
 
@@ -395,30 +395,30 @@ async function loadCertMonData() {
     const pill = (r) => {
         const s = r.status;
         const dl = r.days_left;
-        if (s === 'red') return `<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-red-600 text-white">${dl < 0 ? 'EXPIRED' : dl + ' d'}</span>`;
-        if (s === 'yellow') return `<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-400 text-amber-950">${dl} d</span>`;
-        if (s === 'green') return `<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-green-600 text-white">${dl} d</span>`;
-        return `<span class="px-2 py-0.5 rounded-full text-[11px] font-bold bg-slate-300 text-slate-700">n/a</span>`;
+        if (s === 'red') return `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-600 text-white">${dl < 0 ? 'EXPIRED' : dl + ' d'}</span>`;
+        if (s === 'yellow') return `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-400 text-amber-950">${dl} d</span>`;
+        if (s === 'green') return `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-600 text-white">${dl} d</span>`;
+        return `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-300 text-slate-700">n/a</span>`;
     };
     // Ignored certs keep their real status pill, muted and tagged "(ignored)".
     const statusCell = (r) => r.deprecated
-        ? `<span class="opacity-50">${pill(r)}</span><div class="text-[10px] font-semibold text-slate-500 mt-0.5" title="No longer published by the vendor${r.deprecated_at && r.deprecated_at !== 'manual' ? ' since ' + escapeHtml(String(r.deprecated_at).slice(0, 10)) : ''}; not alerted on and dropped after 30 days">(deprecated)</div>`
+        ? `<span class="opacity-50">${pill(r)}</span><div class="text-xs font-semibold text-slate-500 mt-0.5" title="No longer published by the vendor${r.deprecated_at && r.deprecated_at !== 'manual' ? ' since ' + escapeHtml(String(r.deprecated_at).slice(0, 10)) : ''}; not alerted on and dropped after 30 days">(deprecated)</div>`
         : r.ignored
-        ? `<span class="opacity-50">${pill(r)}</span><div class="text-[10px] font-semibold text-slate-500 mt-0.5" title="${escapeHtml(['Ignored', r.ignored_by && 'by ' + r.ignored_by, r.ignored_at && new Date(r.ignored_at).toLocaleString()].filter(Boolean).join(' '))}">(ignored)</div>`
+        ? `<span class="opacity-50">${pill(r)}</span><div class="text-xs font-semibold text-slate-500 mt-0.5" title="${escapeHtml(['Ignored', r.ignored_by && 'by ' + r.ignored_by, r.ignored_at && new Date(r.ignored_at).toLocaleString()].filter(Boolean).join(' '))}">(ignored)</div>`
         : pill(r);
     const filt = (window._certMonFilter || '').toLowerCase();
     const results = (d.results || []).filter(r => !filt || [r.host, r.service, r.region, r.role, r.provider, r.issuer_cn, r.subject_cn].join(' ').toLowerCase().includes(filt));
     const rows = results.map(r => {
-        const trust = r.trusted ? '' : (r.verify_error ? `<span class="ml-1 text-[10px] text-slate-500" title="${escapeHtml(r.verify_error)}">(private CA / untrusted)</span>` : '');
-        const err = r.error ? `<div class="text-[11px] text-red-600">${escapeHtml(r.error)}</div>` : '';
-        const san = r.san_count ? `<div class="text-[10px] text-slate-500" title="${escapeHtml((r.san || []).join(', '))}">CN ${escapeHtml(r.subject_cn || '')} · ${r.san_count} SAN</div>` : (r.subject_cn ? `<div class="text-[10px] text-slate-500">CN ${escapeHtml(r.subject_cn)}</div>` : '');
-        const ignBtn = `<button onclick="certMonSetIgnored(this, ${escapeHtml(JSON.stringify(r.host || ''))}, ${Number(r.port) || 443}, ${r.ignored ? 'false' : 'true'})" class="text-[11px] px-2 py-0.5 rounded-md border ${r.ignored ? 'border-brand text-primary-text hover:bg-green-50' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}" title="${r.ignored ? 'Count this cert in the status totals and alerts again' : 'Keep listing this cert but leave it out of the status totals and alerts'}">${r.ignored ? 'Un-ignore' : 'Ignore'}</button>`;
+        const trust = r.trusted ? '' : (r.verify_error ? `<span class="ml-1 text-xs text-slate-500" title="${escapeHtml(r.verify_error)}">(private CA / untrusted)</span>` : '');
+        const err = r.error ? `<div class="text-xs text-red-600">${escapeHtml(r.error)}</div>` : '';
+        const san = r.san_count ? `<div class="text-xs text-slate-500" title="${escapeHtml((r.san || []).join(', '))}">CN ${escapeHtml(r.subject_cn || '')} · ${r.san_count} SAN</div>` : (r.subject_cn ? `<div class="text-xs text-slate-500">CN ${escapeHtml(r.subject_cn)}</div>` : '');
+        const ignBtn = `<button onclick="certMonSetIgnored(this, ${escapeHtml(JSON.stringify(r.host || ''))}, ${Number(r.port) || 443}, ${r.ignored ? 'false' : 'true'})" class="text-xs px-2 py-0.5 rounded-md border ${r.ignored ? 'border-brand text-primary-text hover:bg-green-50' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}" title="${r.ignored ? 'Count this cert in the status totals and alerts again' : 'Keep listing this cert but leave it out of the status totals and alerts'}">${r.ignored ? 'Un-ignore' : 'Ignore'}</button>`;
         return `<tr class="${r.ignored ? 'bg-slate-50 text-slate-500' : (rowCls[r.status] || '')}">
             <td class="px-3 py-2 whitespace-nowrap">${statusCell(r)}</td>
             <td class="px-3 py-2 font-mono text-xs">${escapeHtml(r.host)}${r.port && r.port !== 443 ? ':' + r.port : ''}${san}${err}</td>
-            <td class="px-3 py-2 text-xs">${escapeHtml(r.service || '')}<div class="text-[10px] text-slate-500">${escapeHtml([r.region, r.role].filter(Boolean).join(' · '))}</div></td>
-            <td class="px-3 py-2 text-xs">${escapeHtml(r.provider || '')}${trust}<div class="text-[10px] text-slate-500">${escapeHtml(r.issuer_cn || '')}</div></td>
-            <td class="px-3 py-2 text-xs">${escapeHtml(r.cert_type || '')}<div class="text-[10px] text-slate-500">${escapeHtml(r.key_type || '')}${r.signature_algorithm ? ' · ' + escapeHtml(r.signature_algorithm) : ''}</div></td>
+            <td class="px-3 py-2 text-xs">${escapeHtml(r.service || '')}<div class="text-xs text-slate-500">${escapeHtml([r.region, r.role].filter(Boolean).join(' · '))}</div></td>
+            <td class="px-3 py-2 text-xs">${escapeHtml(r.provider || '')}${trust}<div class="text-xs text-slate-500">${escapeHtml(r.issuer_cn || '')}</div></td>
+            <td class="px-3 py-2 text-xs">${escapeHtml(r.cert_type || '')}<div class="text-xs text-slate-500">${escapeHtml(r.key_type || '')}${r.signature_algorithm ? ' · ' + escapeHtml(r.signature_algorithm) : ''}</div></td>
             <td class="px-3 py-2 text-xs whitespace-nowrap">${escapeHtml(_certMonDate(r.not_after))}</td>
             <td class="px-3 py-2 text-right whitespace-nowrap">${ignBtn}</td>
         </tr>`;
@@ -441,23 +441,23 @@ async function loadCertMonData() {
         </div>
         <div class="overflow-x-auto rounded-md border border-slate-200">
           <table class="w-full text-left text-sm">
-            <thead class="bg-slate-100 text-slate-600 uppercase text-[11px]"><tr>
+            <thead class="bg-slate-100 text-slate-600 text-xs"><tr>
               <th class="px-3 py-2 min-w-[7rem] whitespace-nowrap">Expires in</th><th class="px-3 py-2">Host</th><th class="px-3 py-2">Service</th>
               <th class="px-3 py-2">Provider (issuer)</th><th class="px-3 py-2">Type / key</th><th class="px-3 py-2">Expiry date</th><th class="px-3 py-2"></th>
             </tr></thead>
             <tbody class="divide-y divide-slate-200">${rows || `<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500 italic">${d.last_run ? 'No matching hosts' : 'No check has run yet — click <b>Check now</b>.'}</td></tr>`}</tbody>
           </table>
         </div>
-        <p class="text-[10px] text-slate-500 mt-2">Results file: <span class="font-mono">${escapeHtml(d.results_file || '')}</span>. "Private CA / untrusted" = the endpoint presents a device-CA cert (Mist terminators, Aruba device endpoints) — its expiry is still tracked. <b>Ignore</b> keeps a cert listed (with its real status) but leaves it out of the totals above and every cert alert rule.</p>
+        <p class="text-xs text-slate-500 mt-2">Results file: <span class="font-mono">${escapeHtml(d.results_file || '')}</span>. "Private CA / untrusted" = the endpoint presents a device-CA cert (Mist terminators, Aruba device endpoints) — its expiry is still tracked. <b>Ignore</b> keeps a cert listed (with its real status) but leaves it out of the totals above and every cert alert rule.</p>
       </div>
       <div class="${card}">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Custom hosts</h3>
+        <h3 class="text-sm font-bold text-slate-500 mb-1">Custom hosts</h3>
         <p class="text-xs text-slate-500 mb-2">Extra endpoints to monitor, one per line (<span class="font-mono">host</span> or <span class="font-mono">host:port</span>). The ${(d.builtin_hosts || []).length} endpoints from the shipped catalog (kept current by the daily source refresh) are always included${(cfg.disabled_builtin || []).length ? ` (${cfg.disabled_builtin.length} disabled)` : ''}.</p>
         <textarea id="certmon-custom" rows="4" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500">${escapeHtml((cfg.custom_hosts || []).join('\n'))}</textarea>
         <div class="flex justify-end mt-2"><button onclick="certMonSaveCustom(this)" class="text-xs px-3 py-1 rounded-md bg-green-600 text-white hover:bg-green-700">Save</button></div>
       </div>
       <div class="${card}">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Built-in host list</h3>
+        <h3 class="text-sm font-bold text-slate-500 mb-1">Built-in host list</h3>
         <p class="text-xs text-slate-500 mb-2">Refreshed once a day, before the check, from the vendors' published endpoint lists: new endpoints are added and retired ones dropped. A page that can't be read keeps its last list.</p>
         <ul class="text-xs text-slate-600 space-y-1">${(d.host_sources || []).map(_certMonSourceLine).join('')}</ul>
       </div>
@@ -554,7 +554,7 @@ async function loadSecurityData() {
     const cfg = `
       <div class="${card}">
         <div class="flex items-center justify-between mb-3">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Policy</h3>
+          <h3 class="text-sm font-bold text-slate-500">Policy</h3>
           <button onclick="securityReconcile()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Push the trusted allow-list and the blocked-IP set onto the active cloud NSG (Azure or OCI) now">Sync NSG now</button>
         </div>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
@@ -569,7 +569,7 @@ async function loadSecurityData() {
           <label class="text-slate-500">NSG deny priority<input type="number" id="sec-priority" min="100" max="4096" value="${c.block_priority != null ? c.block_priority : 400}" oninput="_secPrioLive()" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
           ${(() => {
             const ar = d.allow_rule || {};
-            return `<div class="col-span-2 md:col-span-4 text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
+            return `<div class="col-span-2 md:col-span-4 text-xs text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
               <b>Allow must be a lower number than Deny; both below 1000 (NSG's default allow on 443).</b> The <b>allow rule</b> (name <b>${escapeHtml(ar.name || 'lm-allowlist')}</b>) is also editable under <b>Settings → Cloud → Azure → NSG</b> — saving here updates <b>both</b> priorities (allow → NSG, deny → threat monitor).
               <span id="sec-prio-check"></span>
             </div>`;
@@ -592,10 +592,10 @@ async function loadSecurityData() {
           <h3 class="text-sm font-bold text-red-700">Blocked IPs <span class="text-slate-500 font-normal">(${allBlocks.length})</span></h3>
           <button onclick="securityBlocksModal('all')" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium">Search / view all →</button>
         </div>
-        <p class="text-[11px] text-slate-500 mb-2">Each entry is tagged <b>Perm</b>, <b>24h&nbsp;TTL</b>, or <b>Manual</b> — the full list is searchable via the button.</p>
+        <p class="text-xs text-slate-500 mb-2">Each entry is tagged <b>Perm</b>, <b>24h&nbsp;TTL</b>, or <b>Manual</b> — the full list is searchable via the button.</p>
         <div class="text-xs">${allBlocks.length
             ? allBlocks.slice(0, _PREVIEW_N).map(_secBlockRowHtml).join('')
-              + (allBlocks.length > _PREVIEW_N ? `<button onclick="securityBlocksModal('all')" class="mt-2 text-[11px] text-blue-500 hover:text-blue-700 font-medium">+ ${allBlocks.length - _PREVIEW_N} more — view all</button>` : '')
+              + (allBlocks.length > _PREVIEW_N ? `<button onclick="securityBlocksModal('all')" class="mt-2 text-xs text-blue-500 hover:text-blue-700 font-medium">+ ${allBlocks.length - _PREVIEW_N} more — view all</button>` : '')
             : '<p class="text-slate-500 italic">none</p>'}</div>
       </div>`;
 
@@ -607,11 +607,11 @@ async function loadSecurityData() {
     const allowOn = (d.allow_rule || {}).enabled;
     const neverRow = e => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
         <div class="min-w-0"><span class="font-mono text-slate-700">${escapeHtml(e.ip)}</span>
-          ${e.description ? `<div class="text-[11px] text-slate-500 truncate" title="${escapeHtml(e.description)}">${escapeHtml(e.description)}</div>` : ''}</div>
-        <button onclick="securityNeverRemove('${escJsAttr(e.ip)}')" class="text-[11px] text-slate-500 hover:text-red-600 font-medium shrink-0">Remove</button></div>`;
+          ${e.description ? `<div class="text-xs text-slate-500 truncate" title="${escapeHtml(e.description)}">${escapeHtml(e.description)}</div>` : ''}</div>
+        <button onclick="securityNeverRemove('${escJsAttr(e.ip)}')" class="text-xs text-slate-500 hover:text-red-600 font-medium shrink-0">Remove</button></div>`;
     const neverTile = `<div class="${card}">
         <h3 class="text-sm font-bold text-green-600 mb-1">Trusted IPs — never auto-blocked <span class="text-slate-500">AND allowed through the Azure NSG</span> <span class="text-slate-500 font-normal">(${trusted.length})</span></h3>
-        <p class="text-[11px] text-slate-500 mb-2">Shared list — the same one edited under <b>Settings → Cloud → Azure → NSG</b>. Adding an entry here also opens an <b>allow rule</b> hole in the NSG when NSG management is enabled${allowOn ? '' : ' (currently disabled — entries still exempt from auto-block)'}.</p>
+        <p class="text-xs text-slate-500 mb-2">Shared list — the same one edited under <b>Settings → Cloud → Azure → NSG</b>. Adding an entry here also opens an <b>allow rule</b> hole in the NSG when NSG management is enabled${allowOn ? '' : ' (currently disabled — entries still exempt from auto-block)'}.</p>
         <div class="flex gap-2 mb-2">
           <input id="sec-never-ip" placeholder="IP or CIDR" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs font-mono">
           <input id="sec-never-desc" placeholder="description (optional)" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs">
@@ -628,16 +628,16 @@ async function loadSecurityData() {
     const strikeRow = r => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
         <div class="min-w-0"><span class="font-mono text-slate-700">${escapeHtml(r.ip)}</span>
           <span class="ml-2 ${r.at_limit ? 'text-red-600 font-bold' : 'text-slate-500'}">${r.strikes} / ${r.permanent_after}</span>
-          ${r.at_limit ? '<div class="text-[11px] text-red-500">at the limit — its next block would be permanent</div>' : ''}</div>
-        <button onclick="securityForgive('${escJsAttr(r.ip)}')" class="text-[11px] text-slate-500 hover:text-green-600 font-medium shrink-0">Forgive</button></div>`;
+          ${r.at_limit ? '<div class="text-xs text-red-500">at the limit — its next block would be permanent</div>' : ''}</div>
+        <button onclick="securityForgive('${escJsAttr(r.ip)}')" class="text-xs text-slate-500 hover:text-green-600 font-medium shrink-0">Forgive</button></div>`;
     const strikeTile = strikes.length ? `<div class="${card}">
         <h3 class="text-sm font-bold text-amber-600 mb-1">Strikes — addresses with a block history <span class="text-slate-500 font-normal">(${strikes.length})</span></h3>
-        <p class="text-[11px] text-slate-500 mb-2">None of these are blocked right now. A strike is recorded per block; at <b>${escapeHtml(String((d.config || {}).permanent_after ?? ''))}</b> the next block becomes <b>permanent</b> — no TTL, no auto-release. Lifting a block now forgives its strike automatically; <b>Forgive</b> clears a backlog left by blocks overturned before that.</p>
+        <p class="text-xs text-slate-500 mb-2">None of these are blocked right now. A strike is recorded per block; at <b>${escapeHtml(String((d.config || {}).permanent_after ?? ''))}</b> the next block becomes <b>permanent</b> — no TTL, no auto-release. Lifting a block now forgives its strike automatically; <b>Forgive</b> clears a backlog left by blocks overturned before that.</p>
         <div class="text-xs max-h-56 overflow-y-auto">${strikes.map(strikeRow).join('')}</div>
       </div>` : '';
 
     const manualBlock = `<div class="${card}">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Manual block</h3>
+        <h3 class="text-sm font-bold text-slate-500 mb-2">Manual block</h3>
         <div class="flex flex-wrap gap-2 items-center text-xs">
           <input id="sec-mb-ip" placeholder="IP" class="border border-slate-300 rounded px-2 py-1 w-40">
           <input id="sec-mb-reason" placeholder="reason (optional)" class="border border-slate-300 rounded px-2 py-1 flex-1">
@@ -650,15 +650,15 @@ async function loadSecurityData() {
     window._secEvents = d.events || [];   // stash for drill-down modals
     const statChip = (label, val, tone, onclick, title) => `<div class="text-center${onclick ? ' cursor-pointer hover:bg-slate-50 rounded-lg py-1 -my-1 transition-colors' : ''}"${onclick ? ` onclick="${onclick}" title="${title || 'Click to drill into these events'}"` : ''}>
         <div class="text-2xl font-bold ${tone || 'text-slate-700'}" title="${Number(val || 0).toLocaleString()}">${fmtCompactNum(val)}</div>
-        <div class="text-[11px] text-slate-500 uppercase tracking-wider">${label}${onclick ? ' <span class="text-slate-500">🔍</span>' : ''}</div></div>`;
+        <div class="text-xs text-slate-500">${label}${onclick ? ' <span class="text-slate-500">🔍</span>' : ''}</div></div>`;
     const kindChips = Object.keys(bk).sort((a, b) => bk[b] - bk[a]).map(k =>
-        `<span onclick="securityEventsModal('kind:${escapeHtml(k)}')" class="inline-block px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 cursor-pointer text-slate-600 text-[11px] mr-1 mb-1" title="${Number(bk[k] || 0).toLocaleString()} ${escapeHtml(k)} events — click to see"><b>${fmtCompactNum(bk[k])}</b> ${escapeHtml(k)}</span>`).join('');
+        `<span onclick="securityEventsModal('kind:${escapeHtml(k)}')" class="inline-block px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 cursor-pointer text-slate-600 text-xs mr-1 mb-1" title="${Number(bk[k] || 0).toLocaleString()} ${escapeHtml(k)} events — click to see"><b>${fmtCompactNum(bk[k])}</b> ${escapeHtml(k)}</span>`).join('');
     const stats = `<div class="${card}">
         <div class="flex items-center justify-between mb-3 flex-wrap gap-1">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Lifetime activity <span class="text-slate-500 normal-case font-normal">— cumulative; survives block expiry / unblock</span></h3>
+          <h3 class="text-sm font-bold text-slate-500">Lifetime activity <span class="text-slate-500 normal-case font-normal">— cumulative; survives block expiry / unblock</span></h3>
           <div class="flex items-center gap-2">
             <button onclick="securitySelfTest()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Record a synthetic detection signal to confirm the pipeline is live (never blocks anyone)">Run self-test</button>
-            <span class="text-[11px] text-slate-500">since ${fmtTs(t.since)}${t.last_ts ? ` · last signal ${fmtTs(t.last_ts)}` : ''}</span>
+            <span class="text-xs text-slate-500">since ${fmtTs(t.since)}${t.last_ts ? ` · last signal ${fmtTs(t.last_ts)}` : ''}</span>
           </div>
         </div>
         <div class="grid grid-cols-3 md:grid-cols-6 gap-3">
@@ -669,23 +669,23 @@ async function loadSecurityData() {
           ${statChip('Perm blocks', t.currently_permanent, 'text-red-700', "securityBlocksModal('perm')", 'Click for the full permanently-blocked IP list')}
           ${statChip('Active now', t.currently_blocked, 'text-slate-700', "securityBlocksModal('all')", 'Click for the full blocked-IP list (searchable)')}
         </div>
-        ${kindChips ? `<div class="pt-3 mt-3 border-t border-slate-100"><span class="text-[11px] text-slate-500 uppercase tracking-wider mr-2">By kind</span>${kindChips}</div>` : ''}
-        ${!t.signals ? '<p class="text-[11px] text-slate-500 italic mt-2">No security signals evaluated yet — the pipeline is armed and will tally every attempt here as it occurs, even after individual blocks expire.</p>' : ''}
+        ${kindChips ? `<div class="pt-3 mt-3 border-t border-slate-100"><span class="text-xs text-slate-500 mr-2">By kind</span>${kindChips}</div>` : ''}
+        ${!t.signals ? '<p class="text-xs text-slate-500 italic mt-2">No security signals evaluated yet — the pipeline is armed and will tally every attempt here as it occurs, even after individual blocks expire.</p>' : ''}
       </div>`;
 
     const evts = d.events || [];
     const evtRows = evts.slice(0, 60).map((e, i) => `<tr class="border-b border-slate-100 cursor-pointer hover:bg-slate-50" onclick="securityEventDetail(${i})" title="Click for full details">
         <td class="px-2 py-1 text-slate-500 whitespace-nowrap">${fmtTs(e.ts)}</td>
-        <td class="px-2 py-1 font-mono">${escapeHtml(e.ip)}${e.ip ? `<div class="text-[10px] font-sans font-normal" data-geo-ip="${escapeHtml(e.ip)}"></div>` : ''}</td>
-        <td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] uppercase">${escapeHtml(e.kind)}</span></td>
+        <td class="px-2 py-1 font-mono">${escapeHtml(e.ip)}${e.ip ? `<div class="text-xs font-sans font-normal" data-geo-ip="${escapeHtml(e.ip)}"></div>` : ''}</td>
+        <td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-xs">${escapeHtml(e.kind)}</span></td>
         <td class="px-2 py-1 text-slate-500">${escapeHtml(e.username || '')}</td>
         <td class="px-2 py-1 text-slate-500 truncate max-w-[180px]" title="${escapeHtml(e.detail || '')}">${e.meta ? '<span class="text-primary-text mr-1" title="has evidence">🔍</span>' : ''}${escapeHtml(e.detail || '')}</td></tr>`).join('');
     const events = `<div class="${card}">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Recent invalid attempts <span class="text-slate-500 font-normal">(${evts.length})</span> <span class="text-[11px] text-slate-500 normal-case font-normal">— click a row to drill in</span></h3>
-        <div class="overflow-x-auto max-h-72 overflow-y-auto"><table class="w-full text-xs"><thead class="text-slate-500 text-[10px] uppercase"><tr><th class="px-2 py-1 text-left">When</th><th class="px-2 py-1 text-left">Source IP</th><th class="px-2 py-1 text-left">Kind</th><th class="px-2 py-1 text-left">User</th><th class="px-2 py-1 text-left">Detail</th></tr></thead><tbody>${evtRows || '<tr><td colspan="5" class="px-2 py-3 text-slate-500 italic">no events yet</td></tr>'}</tbody></table></div></div>`;
+        <h3 class="text-sm font-bold text-slate-500 mb-2">Recent invalid attempts <span class="text-slate-500 font-normal">(${evts.length})</span> <span class="text-xs text-slate-500 normal-case font-normal">— click a row to drill in</span></h3>
+        <div class="overflow-x-auto max-h-72 overflow-y-auto"><table class="w-full text-xs"><thead class="text-slate-500 text-xs"><tr><th class="px-2 py-1 text-left">When</th><th class="px-2 py-1 text-left">Source IP</th><th class="px-2 py-1 text-left">Kind</th><th class="px-2 py-1 text-left">User</th><th class="px-2 py-1 text-left">Detail</th></tr></thead><tbody>${evtRows || '<tr><td colspan="5" class="px-2 py-3 text-slate-500 italic">no events yet</td></tr>'}</tbody></table></div></div>`;
 
     const subCard = `<div class="${card}" id="subscription-card">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Threat Monitor Subscription</h3>
+        <h3 class="text-sm font-bold text-slate-500 mb-2">Threat Monitor Subscription</h3>
         <p class="text-sm text-slate-500 italic">Loading…</p></div>`;
 
     // The subscription sits directly under the Threat Monitor config it
@@ -725,7 +725,7 @@ async function _loadSubscription() {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         d = await r.json();
     } catch (e) {
-        el.innerHTML = `<h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Threat Monitor Subscription</h3>
+        el.innerHTML = `<h3 class="text-sm font-bold text-slate-500 mb-2">Threat Monitor Subscription</h3>
             <p class="text-xs text-red-500">Failed to load: ${escapeHtml(e.message)}</p>`;
         return;
     }
@@ -751,7 +751,7 @@ async function _loadSubscription() {
           ${escapeHtml(c.label)}</label>`).join('');
     el.innerHTML = `
       <div class="flex items-center justify-between mb-3">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Threat Monitor Subscription</h3>
+        <h3 class="text-sm font-bold text-slate-500">Threat Monitor Subscription</h3>
         <div class="flex gap-2">
           ${d.credential_set || d.status !== 'not_enrolled'
             ? '<button onclick="unsubscribeData(event)" class="text-xs bg-slate-100 hover:bg-red-100 text-red-600 px-3 py-1 rounded-md font-medium" title="Stop taking part and forget the stored credential">Unsubscribe</button>'
@@ -770,7 +770,7 @@ async function _loadSubscription() {
         <label class="text-slate-500">Enrollment key (optional)<input type="password" id="sub-psk" autocomplete="new-password" placeholder="${d.psk_set ? '•••••• stored — leave blank to keep' : 'none — approval by a human'}" class="${inp}"></label>
         <label class="text-slate-500 md:col-span-2">Organization ID <span class="text-slate-500 font-normal">— share across your hubs so they count as one participant</span><input type="text" id="sub-tenant" value="${escapeHtml(d.tenant_id || '')}" class="${inp}"></label>
         <div class="md:col-span-2 text-slate-500 pt-4">Install ID <span class="font-mono text-slate-600">${escapeHtml(d.install_uuid || '—')}</span></div>
-        <div class="md:col-span-4 text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
+        <div class="md:col-span-4 text-xs text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
           Status: ${badge}. Credential: ${store}.
           The exchange this install reports to is fixed at build time and not settable from here.
           Publishing is reciprocal on the threat database: an install that takes the feed also contributes to it, and it also receives this install's own decoy routes.
@@ -931,8 +931,8 @@ function securityEventsModal(filter, title) {
         const e = all[i];
         return `<tr class="border-b border-slate-100 cursor-pointer hover:bg-slate-50" onclick="securityEventDetail(${i})" title="Click for full details">
             <td class="px-2 py-1 text-slate-500 whitespace-nowrap">${_secFmtTs(e.ts)}</td>
-            <td class="px-2 py-1 font-mono">${escapeHtml(e.ip || '')}${e.ip ? `<div class="text-[10px] font-sans font-normal" data-geo-ip="${escapeHtml(e.ip)}"></div>` : ''}</td>
-            <td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] uppercase">${escapeHtml(e.kind || '')}</span></td>
+            <td class="px-2 py-1 font-mono">${escapeHtml(e.ip || '')}${e.ip ? `<div class="text-xs font-sans font-normal" data-geo-ip="${escapeHtml(e.ip)}"></div>` : ''}</td>
+            <td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-xs">${escapeHtml(e.kind || '')}</span></td>
             <td class="px-2 py-1 text-slate-500">${escapeHtml(e.username || '')}</td>
             <td class="px-2 py-1 text-slate-500 truncate max-w-[220px]" title="${escapeHtml(e.detail || '')}">${e.meta ? '<span class="text-primary-text mr-1">🔍</span>' : ''}${escapeHtml(e.detail || '')}</td></tr>`;
     }).join('');
@@ -941,8 +941,8 @@ function securityEventsModal(filter, title) {
           <h3 class="text-lg font-bold text-navy">${escapeHtml(title || 'Events')} <span class="text-sm text-slate-500 font-normal">(${idx.length} retained)</span></h3>
           <button onclick="document.getElementById('sec-events-modal')?.remove()" class="text-slate-500 hover:text-slate-600 text-xl leading-none">&times;</button>
         </div>
-        <p class="text-[11px] text-slate-500">Showing the recent-events evidence feed (capped, newest first). Lifetime totals may be higher; click any row for full details.</p>
-        <div class="overflow-x-auto max-h-[60vh] overflow-y-auto"><table class="w-full text-xs"><thead class="text-slate-500 text-[10px] uppercase sticky top-0 bg-white"><tr><th class="px-2 py-1 text-left">When</th><th class="px-2 py-1 text-left">Source IP</th><th class="px-2 py-1 text-left">Kind</th><th class="px-2 py-1 text-left">User</th><th class="px-2 py-1 text-left">Detail</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="px-2 py-3 text-slate-500 italic">no matching events retained</td></tr>'}</tbody></table></div>`;
+        <p class="text-xs text-slate-500">Showing the recent-events evidence feed (capped, newest first). Lifetime totals may be higher; click any row for full details.</p>
+        <div class="overflow-x-auto max-h-[60vh] overflow-y-auto"><table class="w-full text-xs"><thead class="text-slate-500 text-xs sticky top-0 bg-white"><tr><th class="px-2 py-1 text-left">When</th><th class="px-2 py-1 text-left">Source IP</th><th class="px-2 py-1 text-left">Kind</th><th class="px-2 py-1 text-left">User</th><th class="px-2 py-1 text-left">Detail</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="px-2 py-3 text-slate-500 italic">no matching events retained</td></tr>'}</tbody></table></div>`;
     openModal('sec-events-modal', body, { backdropClose: true, card: 'w-full max-w-3xl p-6 space-y-3 max-h-[90vh] overflow-y-auto' });
     _secDecorateGeo(idx.map(i => all[i].ip), document.getElementById('sec-events-modal'));
 }
@@ -951,7 +951,7 @@ function securityEventDetail(i) {
     const e = (window._secEvents || [])[i];
     if (!e) return;
     const row = (k, v) => `<div class="flex gap-3 py-1 border-b border-slate-100 last:border-0">
-        <div class="w-40 shrink-0 text-[11px] uppercase tracking-wider text-slate-500 pt-0.5">${escapeHtml(k)}</div>
+        <div class="w-40 shrink-0 text-xs text-slate-500 pt-0.5">${escapeHtml(k)}</div>
         <div class="text-sm text-slate-700 break-all font-mono">${escapeHtml(String(v))}</div></div>`;
     let core = row('When', _secFmtTs(e.ts))
         + row('Source IP', e.ip || '—')
@@ -979,8 +979,8 @@ function securityEventDetail(i) {
           <button onclick="document.getElementById('sec-event-detail-modal')?.remove()" class="text-slate-500 hover:text-slate-600 text-xl leading-none">&times;</button>
         </div>
         <div>${core}</div>
-        ${metaRows ? `<div class="pt-2 mt-1 border-t border-slate-200"><div class="text-[11px] uppercase tracking-wider text-primary-text font-bold mb-1">Evidence</div>${metaRows}</div>`
-            : '<p class="text-[11px] text-slate-500 italic pt-2 border-t border-slate-200 mt-1">No structured evidence captured for this event.</p>'}
+        ${metaRows ? `<div class="pt-2 mt-1 border-t border-slate-200"><div class="text-xs text-primary-text font-bold mb-1">Evidence</div>${metaRows}</div>`
+            : '<p class="text-xs text-slate-500 italic pt-2 border-t border-slate-200 mt-1">No structured evidence captured for this event.</p>'}
         <div class="flex justify-end pt-2">
           <button onclick="document.getElementById('sec-event-detail-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Close</button>
         </div>`;
@@ -1002,23 +1002,23 @@ function _secExpIn(b) {
 }
 function _secBlockBadges(b) {
     const dur = b.permanent
-        ? '<span class="px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-bold uppercase">Perm</span>'
-        : '<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-bold uppercase">24h&nbsp;TTL</span>';
+        ? '<span class="px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-xs font-bold">Perm</span>'
+        : '<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-xs font-bold">24h&nbsp;TTL</span>';
     const src = String(b.source || '').startsWith('manual')
-        ? ' <span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 text-[10px] font-bold uppercase">Manual</span>'
+        ? ' <span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 text-xs font-bold">Manual</span>'
         : '';
     return dur + src;
 }
 function _secBlockRowHtml(b) {
     return `<div class="flex items-center justify-between gap-3 py-1.5 border-b border-slate-100 last:border-0">
         <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-2 flex-wrap"><span class="font-mono text-slate-700 text-sm">${escapeHtml(b.ip || '')}</span>${_secBlockBadges(b)}${b.permanent ? '' : `<span class="text-[10px] text-slate-500">expires ${_secExpIn(b)}</span>`}</div>
-          <div class="text-[11px]" data-geo-ip="${escapeHtml(b.ip || '')}"></div>
-          <div class="text-[11px] text-slate-500 truncate" title="${escapeHtml(b.reason || '')}">${escapeHtml(b.reason || '')}</div>
+          <div class="flex items-center gap-2 flex-wrap"><span class="font-mono text-slate-700 text-sm">${escapeHtml(b.ip || '')}</span>${_secBlockBadges(b)}${b.permanent ? '' : `<span class="text-xs text-slate-500">expires ${_secExpIn(b)}</span>`}</div>
+          <div class="text-xs" data-geo-ip="${escapeHtml(b.ip || '')}"></div>
+          <div class="text-xs text-slate-500 truncate" title="${escapeHtml(b.reason || '')}">${escapeHtml(b.reason || '')}</div>
         </div>
         <div class="flex items-center gap-2 shrink-0">
-          <button onclick="_secModalUnblock('${escJsAttr(b.ip || '')}')" title="Unblock and clear the strike this block banked (the block was wrong)" class="text-[11px] text-red-500 hover:text-red-700 font-medium">Unblock</button>
-          <button onclick="_secModalUnblock('${escJsAttr(b.ip || '')}', false)" title="Unblock but keep the strike on record (the block was justified)" class="text-[11px] text-slate-500 hover:text-slate-600 font-medium">keep strike</button>
+          <button onclick="_secModalUnblock('${escJsAttr(b.ip || '')}')" title="Unblock and clear the strike this block banked (the block was wrong)" class="text-xs text-red-500 hover:text-red-700 font-medium">Unblock</button>
+          <button onclick="_secModalUnblock('${escJsAttr(b.ip || '')}', false)" title="Unblock but keep the strike on record (the block was justified)" class="text-xs text-slate-500 hover:text-slate-600 font-medium">keep strike</button>
         </div>
       </div>`;
 }
@@ -1052,7 +1052,7 @@ function _secBlocksRender() {
     const fb = document.getElementById('sec-blocks-filters');
     if (fb) {
         const active = 'bg-slate-700 text-white', idle = 'bg-slate-100 text-slate-600 hover:bg-slate-200';
-        const btn = (key, label) => `<button onclick="_secBlocksSetFilter('${key}')" class="px-2.5 py-1 rounded text-[11px] font-bold ${f === key ? active : idle}">${label} <span class="opacity-70">${counts[key]}</span></button>`;
+        const btn = (key, label) => `<button onclick="_secBlocksSetFilter('${key}')" class="px-2.5 py-1 rounded text-xs font-bold ${f === key ? active : idle}">${label} <span class="opacity-70">${counts[key]}</span></button>`;
         fb.innerHTML = btn('all', 'All') + btn('perm', 'Perm') + btn('24h', '24h') + btn('manual', 'Manual');
     }
     const cnt = document.getElementById('sec-blocks-count');
@@ -1401,7 +1401,7 @@ function _cvRenderShell() {
         ${storageHint}
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div class="flex items-center gap-2">
-            <label class="text-xs font-bold text-slate-500 uppercase tracking-wider">Bucket</label>
+            <label class="text-xs font-bold text-slate-500">Bucket</label>
             <select id="cv-bucket-select" onchange="_cvSwitchBucket(this.value)" class="px-3 py-1.5 text-sm border border-slate-300 rounded-md bg-white">${opts}</select>
           </div>
         </div>
@@ -1486,7 +1486,7 @@ function _cvRenderSecretsTable() {
     }
     wrap.innerHTML = `
       <table class="w-full text-sm">
-        <thead><tr class="text-left text-xs text-slate-500 uppercase tracking-wider border-b border-slate-200">
+        <thead><tr class="text-left text-xs text-slate-500 border-b border-slate-200">
           <th class="py-2">Name</th><th>Type</th><th>Mode</th><th>Description</th><th class="text-right">Actions</th>
         </tr></thead>
         <tbody>${list.map(_cvRenderSecretRow).join('')}</tbody>
@@ -1511,7 +1511,7 @@ function _cvRenderSecretRow(s) {
         : '<span class="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600" title="Pass-phrase-only (psk-mode)">pass-phrase</span>';
     return `<tr class="border-b border-slate-100">
       <td class="py-2 font-mono text-slate-800">${escapeHtml(s.name)}</td>
-      <td class="text-slate-600">${escapeHtml(_cvTypeLabel(s.type))}${(Array.isArray(s.fields) && s.fields.includes('client_id')) ? ' <span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 align-middle" title="OAuth2 account — Client ID + Client secret (grant_type=client_credentials)">OAuth2</span>' : ''}</td>
+      <td class="text-slate-600">${escapeHtml(_cvTypeLabel(s.type))}${(Array.isArray(s.fields) && s.fields.includes('client_id')) ? ' <span class="text-xs px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 align-middle" title="OAuth2 account — Client ID + Client secret (grant_type=client_credentials)">OAuth2</span>' : ''}</td>
       <td>${mode}</td>
       <td class="text-slate-500">${escapeHtml(s.description || '')}</td>
       <td class="text-right whitespace-nowrap">
@@ -1739,7 +1739,7 @@ function _cvAddSecretModal(preset) {
         </select>
       </div>
       ${editing ? `<div class="flex items-start gap-2">
-        <p class="text-[11px] text-slate-500 flex-1">Name is fixed. Values are stored encrypted and are never pre-filled. Enter the bucket pass-phrase below, then <b>Reveal current values</b> to load them here for editing — or just type new ones to overwrite. You may also change the type or mode.</p>
+        <p class="text-xs text-slate-500 flex-1">Name is fixed. Values are stored encrypted and are never pre-filled. Enter the bucket pass-phrase below, then <b>Reveal current values</b> to load them here for editing — or just type new ones to overwrite. You may also change the type or mode.</p>
         <button type="button" id="cv-add-reveal-btn" onclick="_cvRevealIntoEdit('${encName}')" title="Load the stored values into this form so you can edit them instead of retyping from scratch" class="shrink-0 px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Reveal current values</button>
       </div>` : ''}
       <div id="cv-add-fields"></div>
@@ -1796,7 +1796,7 @@ function _cvRenderAddFields() {
         // Device API credentials (e.g. an OPNsense firewall) — the hub reads them
         // unattended when it pushes the connection, so automation-readable is forced.
         el.innerHTML = f('cv-f-api-key', 'API key') + f('cv-f-api-secret', 'API secret', 'password')
-            + `<p class="text-[11px] text-slate-500 mt-1">Pick this secret under <b>Credential Vault</b> when adding the firewall.</p>`;
+            + `<p class="text-xs text-slate-500 mt-1">Pick this secret under <b>Credential Vault</b> when adding the firewall.</p>`;
         const modeSel = document.getElementById('cv-add-mode');
         if (modeSel) { modeSel.value = 'hub'; modeSel.disabled = true; }
         return;
@@ -1805,7 +1805,7 @@ function _cvRenderAddFields() {
         // The tenant's SNMPv2c community: the Monitoring module (Zabbix) reads it
         // unattended to poll that tenant's devices, so automation-readable is forced.
         el.innerHTML = f('cv-f-snmp', 'SNMP community string', 'password')
-            + `<p class="text-[11px] text-slate-500 mt-1">Applied to every device in this bucket's tenant that has no community of its own.</p>`;
+            + `<p class="text-xs text-slate-500 mt-1">Applied to every device in this bucket's tenant that has no community of its own.</p>`;
         const modeSel = document.getElementById('cv-add-mode');
         if (modeSel) { modeSel.value = 'hub'; modeSel.disabled = true; }
         return;
@@ -1815,7 +1815,7 @@ function _cvRenderAddFields() {
         // to register the tenant's subnets as ClearPass Network Devices.
         el.innerHTML = f('cv-f-radius', 'RADIUS shared secret', 'password')
             + f('cv-f-tacacs', 'TACACS shared secret (optional)', 'password')
-            + `<p class="text-[11px] text-slate-500 mt-1">Every subnet of this bucket's tenant is added to ClearPass → Network Devices with these secrets (on each endpoint sync).</p>`;
+            + `<p class="text-xs text-slate-500 mt-1">Every subnet of this bucket's tenant is added to ClearPass → Network Devices with these secrets (on each endpoint sync).</p>`;
         const modeSel = document.getElementById('cv-add-mode');
         if (modeSel) { modeSel.value = 'hub'; modeSel.disabled = true; }
         return;
@@ -1829,7 +1829,7 @@ function _cvRenderAddFields() {
         const provOpts = Object.entries(DNS_CRED_PROVIDERS)
             .map(([k, v]) => `<option value="${k}">${escapeHtml(v.label)}</option>`).join('');
         el.innerHTML = `
-          <label class="block text-[11px] text-slate-500 mb-0.5">provider</label>
+          <label class="block text-xs text-slate-500 mb-0.5">provider</label>
           <select id="cv-f-dns-provider" onchange="_cvDnsRenderFields()" class="${_CV_INP}">${provOpts}</select>
           <div id="cv-f-dns-fields" class="mt-2 space-y-2"></div>`;
         const modeSel = document.getElementById('cv-add-mode');
@@ -1842,7 +1842,7 @@ function _cvRenderAddFields() {
         // pushes A/AAAA records to dns.he.net. Automation-readable is required
         // (the hub reads it without a pass-phrase), so force + lock hub mode.
         el.innerHTML = `
-          <label class="block text-[11px] text-slate-500 mb-0.5">HE DDNS key (per-record "dynamic DNS" key from dns.he.net)</label>
+          <label class="block text-xs text-slate-500 mb-0.5">HE DDNS key (per-record "dynamic DNS" key from dns.he.net)</label>
           <input id="cv-f-henet-key" type="password" autocomplete="off" placeholder="HE DDNS key" title="The per-record 'dynamic DNS' key generated in the dns.he.net UI — the hub uses it to push A/AAAA records unattended" class="${_CV_INP}">`;
         const modeSel = document.getElementById('cv-add-mode');
         if (modeSel) { modeSel.value = 'hub'; modeSel.disabled = true; }
@@ -1863,7 +1863,7 @@ function _cvDnsRenderFields() {
     if (!def || !box) return;
     box.innerHTML = def.fields.map(f => `
       <div class="flex flex-col">
-        <label class="text-[11px] text-slate-500 mb-0.5">${escapeHtml(f.label)}</label>
+        <label class="text-xs text-slate-500 mb-0.5">${escapeHtml(f.label)}</label>
         <input id="cv-f-dns-${f.k}" type="${f.type}" autocomplete="off"
                placeholder="${f.placeholder ? escapeHtml(f.placeholder) : ''}" class="${_CV_INP}">
       </div>`).join('');
@@ -1887,7 +1887,7 @@ function _cvRenderLoginFields() {
       <div id="cv-f-login-inputs" class="space-y-2">${oauth
         ? f('cv-f-client-id', 'OAuth2 Client ID') + f('cv-f-client-secret', 'OAuth2 Client secret', 'password')
         : f('cv-f-username', 'username') + f('cv-f-password', 'password', 'password')}</div>
-      <p class="text-[11px] text-slate-500 mt-1">Set the mode to <b>Automation-readable</b> to also use this login for the Console module's device auto-identify.</p>`;
+      <p class="text-xs text-slate-500 mt-1">Set the mode to <b>Automation-readable</b> to also use this login for the Console module's device auto-identify.</p>`;
 }
 
 function _cvLoginToggleOauth(checked) {
@@ -2190,17 +2190,17 @@ function _renderLogsSection(subMenu) {
     // tenant admin who now reaches those tabs).
     const debugToggleBtn = (isBugs || isFeatures) ? '' :
         `<button id="debug-toggle-btn" onclick="toggleDebugLogging()"
-                        class="text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium flex items-center gap-1">
+                        class="text-xs bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium flex items-center gap-1">
                         <span id="debug-mode-text">Debug Logging: OFF</span>
                     </button>`;
     const analysisPanel = (isBugs || isFeatures) ? '' : `
             <div id="lm-log-analysis-panel" class="px-4 py-3 border-b border-slate-200 bg-indigo-50/40">
                 <div class="flex items-center gap-2 mb-1 flex-wrap">
-                    <span class="text-[11px] font-bold uppercase tracking-wider text-indigo-700">✨ Log Analysis</span>
-                    <span id="lm-log-analysis-verdict" class="hidden text-[10px] font-bold px-1.5 py-0.5 rounded"></span>
-                    <span id="lm-log-analysis-meta" class="text-[10px] text-slate-500"></span>
+                    <span class="text-xs font-bold text-indigo-700">✨ Log Analysis</span>
+                    <span id="lm-log-analysis-verdict" class="hidden text-xs font-bold px-1.5 py-0.5 rounded"></span>
+                    <span id="lm-log-analysis-meta" class="text-xs text-slate-500"></span>
                     <span class="flex-1"></span>
-                    <span id="lm-log-analysis-config" class="text-[10px] text-slate-500 flex items-center gap-1"></span>
+                    <span id="lm-log-analysis-config" class="text-xs text-slate-500 flex items-center gap-1"></span>
                 </div>
                 <div id="lm-log-analysis-body" class="text-xs text-slate-700 whitespace-pre-wrap leading-relaxed bg-white rounded border border-slate-200 p-3 max-h-72 overflow-y-auto">—</div>
             </div>`;
@@ -2252,7 +2252,7 @@ function _lmLaRender(la) {
         const v = (la && la.verdict) || '';
         if (_LM_VERDICT[v]) {
             vEl.textContent = _LM_VERDICT[v][0];
-            vEl.className = 'text-[10px] font-bold px-1.5 py-0.5 rounded ' + _LM_VERDICT[v][1];
+            vEl.className = 'text-xs font-bold px-1.5 py-0.5 rounded ' + _LM_VERDICT[v][1];
             vEl.classList.remove('hidden');
         } else { vEl.classList.add('hidden'); }
     }
@@ -2344,7 +2344,7 @@ function _stateResetCardHtml() {
                         class="bg-red-100 hover:bg-red-200 text-red-700 border border-red-300 px-3 py-1.5 rounded-md text-xs font-bold">
                         Wipe ALL cached data</button>
                 </div>
-                <div id="state-reset-status" class="text-[11px]"></div>
+                <div id="state-reset-status" class="text-xs"></div>
             </div>
         </div>`;
 }
@@ -2413,7 +2413,7 @@ async function loadRecoveryLogs() {
             const isGiveUp = log.includes('GAVE_UP');
             const cls = isGiveUp ? 'text-red-700 font-semibold bg-red-50' : 'text-slate-600 hover:bg-slate-50';
             const badge = count && count > 1
-                ? `<span class="ml-2 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-200 text-slate-600 align-middle whitespace-nowrap" title="${count} identical events — click to expand">×${count}</span>`
+                ? `<span class="ml-2 px-1.5 py-0.5 rounded-full text-xs font-bold bg-slate-200 text-slate-600 align-middle whitespace-nowrap" title="${count} identical events — click to expand">×${count}</span>`
                 : '';
             // onclick must be its own attribute, not embedded in the class string.
             const isGroup = count && count > 1;
@@ -2472,8 +2472,8 @@ async function loadBugReports(typeFilter) {
                 : 'bg-amber-100 text-amber-700';
             const isFeat = (r.type || 'bug') === 'feature';
             const typeBadge = isFeat
-                ? `<span class="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-purple-100 text-purple-700" title="Feature request">💡 Feature</span>`
-                : `<span class="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-blue-100 text-blue-700" title="Bug">🐛 Bug</span>`;
+                ? `<span class="shrink-0 px-2 py-0.5 rounded text-xs font-bold bg-purple-100 text-purple-700" title="Feature request">💡 Feature</span>`
+                : `<span class="shrink-0 px-2 py-0.5 rounded text-xs font-bold bg-blue-100 text-blue-700" title="Bug">🐛 Bug</span>`;
             // Feature requests are gated: an admin must Approve before ab
             // may file the GitHub issue and work it. Bugs skip the gate.
             const _st = (r.status || (r.filed ? 'filed' : '')).toLowerCase();
@@ -2499,7 +2499,7 @@ async function loadBugReports(typeFilter) {
                 // Awaiting admin approval — offer the Approve action inline
                 // (Global Admin only; a tenant admin's view is read-only).
                 status = (typeof isAdmin === 'function' && isAdmin())
-                    ? `<button onclick="event.stopPropagation(); approveBugReport('${escapeHtml(r.id)}')" class="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700" title="Approve this feature so AppBuilder can file &amp; work it">Approve</button>`
+                    ? `<button onclick="event.stopPropagation(); approveBugReport('${escapeHtml(r.id)}')" class="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700" title="Approve this feature so AppBuilder can file &amp; work it">Approve</button>`
                     : `<span class="text-amber-600" title="Awaiting a Global Admin's approval">Pending approval</span>`;
             } else if (isFeat && _st === 'approved') {
                 status = `<span class="text-emerald-600 font-medium" title="Approved — AppBuilder will file &amp; work it">Approved</span>`;
@@ -2509,9 +2509,9 @@ async function loadBugReports(typeFilter) {
             return `<div onclick="showBugReport('${escapeHtml(r.id)}')" class="px-4 py-2 border-b border-slate-100 hover:bg-slate-50 cursor-pointer flex items-center gap-3">
                 <span class="text-slate-500 w-44 shrink-0">${escapeHtml(ts)}</span>
                 ${typeBadge}
-                <span class="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold uppercase ${sevColor}">${escapeHtml(sev)}</span>
+                <span class="shrink-0 px-2 py-0.5 rounded text-xs font-bold ${sevColor}">${escapeHtml(sev)}</span>
                 <span class="flex-1 truncate text-slate-700">${escapeHtml(r.summary || '(no summary)')}</span>
-                <span class="shrink-0 text-[10px] text-slate-500 font-mono">${escapeHtml(r.id)}</span>
+                <span class="shrink-0 text-xs text-slate-500 font-mono">${escapeHtml(r.id)}</span>
                 <span class="shrink-0 w-20 text-center text-xs font-medium">${status}</span>
                 ${(typeof isAdmin === 'function' && isAdmin()) ? `<button onclick="event.stopPropagation(); deleteBugReport('${escapeHtml(r.id)}')" title="Delete report" class="shrink-0 p-1 text-slate-500 hover:text-red-500 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>` : ''}
             </div>`;
@@ -2573,7 +2573,7 @@ window.openClientDebugLog = function (host, tenantRaw) {
           class="bg-red-100 hover:bg-red-200 text-red-700 px-3 py-1 rounded text-xs font-bold">Stop Debug</button>
       </div>
       <div id="client-debug-log-body" class="h-[34rem] overflow-y-auto bg-white border border-slate-200 rounded-md text-slate-700"></div>
-      <p class="text-[10px] text-slate-500 mt-2">Live logs from the client's <code>sim.log</code> + debug logs (advanced adds journal/dmesg). Ephemeral — cleared on hub restart. 30-min auto-off. Times are UTC.</p>`;
+      <p class="text-xs text-slate-500 mt-2">Live logs from the client's <code>sim.log</code> + debug logs (advanced adds journal/dmesg). Ephemeral — cleared on hub restart. 30-min auto-off. Times are UTC.</p>`;
     openModal('client-debug-modal', body,
         { card: 'w-full max-w-3xl p-5 max-h-[92vh] flex flex-col', backdropClose: true });
     if (_clientDebugPoller) { pollManager.unregister(_clientDebugPoller); _clientDebugPoller = null; }
@@ -2671,7 +2671,7 @@ async function showBugReport(rid) {
             status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'Filed')}</a>`;
         } else if (isFeat && _dst !== 'approved') {
             const _approveBtn = (typeof isAdmin === 'function' && isAdmin())
-                ? ` <button onclick="approveBugReport('${escapeHtml(rid)}')" class="ml-2 px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700">Approve</button>`
+                ? ` <button onclick="approveBugReport('${escapeHtml(rid)}')" class="ml-2 px-2 py-0.5 rounded text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700">Approve</button>`
                 : '';
             status = `<span class="text-amber-600">Awaiting approval</span>${_approveBtn}`;
         } else if (isFeat && _dst === 'approved') {
@@ -2684,11 +2684,11 @@ async function showBugReport(rid) {
             : `<span class="text-slate-500 italic">No screenshot captured</span>`;
         body.innerHTML = `
             <div>
-                <div class="text-[10px] uppercase text-slate-500 font-bold tracking-widest mb-1">Status</div>
+                <div class="text-xs text-slate-500 font-bold mb-1">Status</div>
                 <div class="text-sm">${status}</div>
             </div>
             <div>
-                <div class="text-[10px] uppercase text-slate-500 font-bold tracking-widest mb-1">Explanation</div>
+                <div class="text-xs text-slate-500 font-bold mb-1">Explanation</div>
                 <div class="text-sm text-slate-700 whitespace-pre-wrap">${escapeHtml(report.explanation || r.summary || '(none)')}</div>
             </div>
             <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
@@ -2701,15 +2701,15 @@ async function showBugReport(rid) {
                 <div><span class="text-slate-500">WebUI:</span> <span class="font-medium">${escapeHtml(ctx.webuiVersion || '—')}</span></div>
             </div>
             <div>
-                <div class="text-[10px] uppercase text-slate-500 font-bold tracking-widest mb-1">Screenshot</div>
+                <div class="text-xs text-slate-500 font-bold mb-1">Screenshot</div>
                 ${shot}
             </div>
             <div>
-                <div class="text-[10px] uppercase text-slate-500 font-bold tracking-widest mb-1">Console</div>
+                <div class="text-xs text-slate-500 font-bold mb-1">Console</div>
                 <pre class="bg-slate-900 text-slate-100 p-3 rounded max-h-64 overflow-auto whitespace-pre-wrap">${escapeHtml(consoleText)}</pre>
             </div>
             <div>
-                <div class="text-[10px] uppercase text-slate-500 font-bold tracking-widest mb-1">DOM (first 4KB)</div>
+                <div class="text-xs text-slate-500 font-bold mb-1">DOM (first 4KB)</div>
                 <pre class="bg-slate-900 text-slate-100 p-3 rounded max-h-64 overflow-auto whitespace-pre-wrap break-all">${escapeHtml(domText)}</pre>
             </div>`;
     } catch (err) {
