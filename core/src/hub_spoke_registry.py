@@ -323,9 +323,17 @@ class SpokeRegistryMixin:
             return next((sid for sid in agents
                          if sid in self.active_connections), None)
         # Other types: honour a specific identifier if it is a connected spoke of that type.
-        if (identifier and self._primary_key(identifier) in self.active_connections
-                and self.spoke_module_types.get(self._primary_key(identifier)) == module_type):
-            return identifier
+        if identifier:
+            pk = self._primary_key(identifier)
+            if pk in self.active_connections and self.spoke_module_types.get(pk) == module_type:
+                return identifier
+            # A registered spoke that is just offline: wait for it. Falling back
+            # would install on ANOTHER spoke (e.g. the other firewall) and mark
+            # this target SUCCESS, so the sweep would never retry it.
+            ss = getattr(getattr(self, "state", None), "system_state", None) or {}
+            registered = pk in (ss.get("approved_modules") or {}) or pk in (ss.get("known_modules") or [])
+            if registered and pk not in self.active_connections:
+                return None
         # Fall back to the first connected spoke of the type (legacy behaviour).
         return self.get_spoke_by_type(module_type)
 
