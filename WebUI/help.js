@@ -526,3 +526,8 @@
         _boot();
     }
 })();
+
+// Last classic script in index.html: tells its error guard that every core
+// file (main.js, js/*.js, sim-views.js, update_handler.js, help.js) loaded and
+// ran. Keep this at the end of whichever script index.html loads last.
+window.lmCoreLoaded = true;
