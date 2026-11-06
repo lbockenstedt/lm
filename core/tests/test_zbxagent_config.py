@@ -1,9 +1,7 @@
 import asyncio
 import os
 import sys
-import tempfile
 
-os.environ.setdefault("LM_MTLS_CLIENT_CA_DIR", tempfile.mkdtemp())
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from routes import agents  # noqa: E402
