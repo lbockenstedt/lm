@@ -28,7 +28,7 @@ except ImportError:
     from core.src.base_spoke import BaseSpoke
 
 # Local Kea Control Agent client.
-from kea_manager import KeaManager
+from kea_manager import KeaManager, set_hold_declined
 # Packet-trace helpers and limits.
 from kea_packet_trace import VERDICT_RANK, clamp_int, MAX_CAPTURE_SECONDS, MAX_LOOKBACK_MINUTES
 
@@ -1151,6 +1151,8 @@ class DHCPSpoke(BaseSpoke):
                 return await self._ha_list("KEAW_LIST_RES6", {}, "reservations")
 
         # ── HA path: both nodes are configured as one transaction ───────────
+        if cmd == "DHCP_SYNC" and "hold_declined" in data:
+            set_hold_declined(bool(data["hold_declined"]))
         if self.cluster.enabled:
             # Push the v4 config to both nodes.
             if cmd == "DHCP_SYNC":

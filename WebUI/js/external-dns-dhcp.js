@@ -929,6 +929,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             const subnetRows = subnets.map(s => `<tr class="border-b border-slate-100">
                 <td class="px-4 py-2 text-xs">${escapeHtml(String(s.id == null ? '—' : s.id))}</td>
                 <td class="px-4 py-2 font-mono text-xs">${escapeHtml(s.subnet || '—')}</td>
+                <td class="px-4 py-2 font-mono text-xs">${s.gateway === undefined ? '—' : (s.gateway ? escapeHtml(s.gateway) : '<span class="text-red-600 font-semibold" title="Clients in this scope get no default gateway">none</span>')}</td>
                 <td class="px-4 py-2 font-mono text-xs">${(s.pools || []).map(escapeHtml).join(', ') || '—'}</td>
             </tr>`).join('');
             // HA pair: the module drives two Kea nodes. The evidence tiles below
@@ -980,7 +981,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 </div>
                 <div class="bg-white border border-slate-200 rounded-lg overflow-hidden mb-4">
                     <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-200">Configured scopes</div>
-                    ${subnetRows ? tw(th(['ID', 'Subnet', 'Pools']) + `<tbody>${subnetRows}</tbody>`) : '<p class="p-4 text-slate-500 italic text-sm">No subnets reported.</p>'}
+                    ${subnetRows ? tw(th(['ID', 'Subnet', 'Gateway', 'Pools']) + `<tbody>${subnetRows}</tbody>`) : '<p class="p-4 text-slate-500 italic text-sm">No subnets reported.</p>'}
                 </div>
                 ${(d.last_errors || []).length ? `<div class="bg-white border border-slate-200 rounded-lg p-4">
                     <div class="text-sm font-semibold text-slate-700 mb-2">Recent service warnings/errors</div>
