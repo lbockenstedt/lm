@@ -136,13 +136,23 @@ def test_non_agent_hosting_type_identifier_of_wrong_module_type_falls_back():
 
 
 def test_non_agent_hosting_type_identifier_disconnected_falls_back():
-    """An identifier for a spoke that's no longer connected falls back to the
-    module_type resolution (another connected spoke of that type, or None)."""
+    """An unknown identifier that isn't connected still falls back to the
+    module_type resolution (legacy behaviour)."""
     hub = _FakeHub(
-        module_types={"fw-1": "firewall", "fw-2": "firewall"},
-        active={"fw-1"},   # fw-2 is registered but not connected
+        module_types={"fw-1": "firewall"},
+        active={"fw-1"},
         agent_info={})
-    assert LabManagerHub._cert_target_spoke(hub, "firewall", "fw-2") == "fw-1"
+    assert LabManagerHub._cert_target_spoke(hub, "firewall", "fw-gone") == "fw-1"
+
+
+def test_registered_but_offline_spoke_is_not_redirected():
+    """fw-2 is a known spoke that is offline: return None (the sweep retries)
+    instead of installing on fw-1 and marking fw-2's target SUCCESS forever."""
+    class _State:
+        system_state = {"approved_modules": {"fw-2": True}}
+    hub = _FakeHub(module_types={"fw-1": "firewall"}, active={"fw-1"}, agent_info={})
+    hub.state = _State()
+    assert LabManagerHub._cert_target_spoke(hub, "firewall", "fw-2") is None
 
 
 def test_unknown_agent_identifier_falls_back_to_all_nodes_resolution():
