@@ -731,6 +731,38 @@ def build_compliance(raw: Dict[str, Dict[str, Any]], now: Optional[float] = None
     }
 
 
+
+def gather_compliance(hub, service, tenant_id: str) -> Dict[str, Any]:
+    """Compliance report for one tenant (used by the Dashboard tabs and the email).
+    Combines Central, Central On-Prem and Mist; distributed spokes contribute
+    their relayed daily history."""
+    sources = (("Central", "central_hub_poller", "central"),
+               ("Central On-Prem", "central_on_prem_hub_poller", "central_on_prem"),
+               ("Mist", "mist_hub_poller", "mist"))
+    relayed = list(service._spokes_for_tenant(tenant_id))
+    raw: Dict[str, Dict[str, Any]] = {}
+    for product, poller_attr, relay_key in sources:
+        health = getattr(getattr(hub, poller_attr, None), "_health", None)
+        hub_rows = health.compliance_raw(tenant_id) if health else {}
+        for check, row in hub_rows.items():
+            raw[f"{product}\x1f{check}"] = {**row, "check": check, "product": product}
+        # Distributed spokes relay daily buckets only (no hourly bar / flaps).
+        for _sid, data in relayed:
+            sp = ((data or {}).get(relay_key) or {}).get("health") or {}
+            for site, checks in sp.items():
+                for check, dlist in (checks or {}).items():
+                    if check in hub_rows:
+                        continue
+                    row = raw.setdefault(f"{product}\x1f{check}", {
+                        "check": check, "product": product, "sites": set(),
+                        "hours": {}, "days": {}, "flaps": None})
+                    row["sites"].add(site)
+                    for d in dlist or []:
+                        cell = row["days"].setdefault(int(d.get("d", 0)), [0, 0, 0, 0])
+                        for i, k in enumerate("owen"):
+                            cell[i] += int(d.get(k, 0) or 0)
+    return build_compliance(raw)
+
 class CheckHealthHistory:
     """Rolling 30-day status history for every dashboard check, in HOURLY buckets.
 

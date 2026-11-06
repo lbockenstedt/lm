@@ -5,7 +5,7 @@
 // earlier files define. Functions may call anything once the page is up.
 
 // ── Reports module (Setup → Reports nav, gated by the ``reports`` right) ──────
-// First report: the Simulations Dashboard → Checks + Client Count, tenant-scoped
+// First report: the Simulations Dashboard → Compliance + Client Count, tenant-scoped
 // (a tenant only ever sees its own sites). A Global Admin can switch tenant in the
 // header and manage/run any tenant's report. Config + send: /api/reports/email-report.
 async function loadReportsData() {
@@ -21,7 +21,7 @@ async function loadReportsData() {
     const rows = reports.length ? reports.map(r => `<tr class="border-b border-slate-100">
         <td class="px-3 py-2"><span class="font-semibold text-slate-700">${escapeHtml(r.name || '')}</span></td>
         <td class="px-3 py-2 text-slate-500">${escapeHtml(r.tenant || '')}</td>
-        <td class="px-3 py-2 text-slate-500 text-xs">${[r.sections && r.sections.checks ? 'Checks' : '', r.sections && r.sections.clients ? 'Client Count' : ''].filter(Boolean).join(', ') || '—'}</td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${[r.sections && r.sections.checks ? 'Compliance' : '', r.sections && r.sections.clients ? 'Client Count' : ''].filter(Boolean).join(', ') || '—'}</td>
         <td class="px-3 py-2 text-slate-500 text-xs">${escapeHtml((r.recipients || []).join(', ')) || '—'}</td>
         <td class="px-3 py-2 text-slate-500 text-xs">${escapeHtml(freqLabel(r.schedule))}</td>
         <td class="px-3 py-2">${r.enabled ? '<span class="text-green-600 text-xs font-bold">on</span>' : '<span class="text-slate-400 text-xs">off</span>'}</td>
@@ -31,7 +31,7 @@ async function loadReportsData() {
           <button onclick="deleteReport('${r.id}')" class="text-xs text-red-500 hover:text-red-700">Delete</button></td></tr>`).join('') : '<tr><td colspan="7" class="px-3 py-4 text-slate-400 italic">No reports yet — click "Add report".</td></tr>';
     el.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex items-center justify-between mb-3">
-        <p class="text-xs text-slate-400 max-w-2xl">Emailed reports — each sends a tenant's Dashboard <b>Checks</b> + <b>Client Count</b> to its recipients on a schedule (via the provider under Setup → Notifications). A Global Admin can target any tenant; a tenant user sees only its own.</p>
+        <p class="text-xs text-slate-400 max-w-2xl">Emailed reports — each sends a tenant's Dashboard <b>Compliance</b> (week / month / quarter / year, every check) + optional <b>Client Count</b> to its recipients on a schedule (via the provider under Setup → Notifications). A Global Admin can target any tenant; a tenant user sees only its own.</p>
         <button onclick="editReport('')" class="shrink-0 bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold">+ Add report</button>
       </div>
       <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-[10px] uppercase text-slate-400"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Tenant</th><th class="px-3 py-1 text-left">Sections</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">Schedule</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
@@ -248,7 +248,7 @@ async function editReport(id) {
       <label class="block text-xs text-slate-500">Name<input id="rpt-name" value="${escapeHtml(existing ? existing.name : '')}" placeholder="Weekly Acme dashboard" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
       <label class="block text-xs text-slate-500">Tenant dashboard to email<select id="rpt-tenant" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm">${tOpts}</select></label>
       <div class="flex gap-4 text-xs text-slate-600 pt-1">
-        <label class="flex items-center gap-2"><input type="checkbox" id="rpt-checks" ${sec.checks !== false ? 'checked' : ''} class="w-4 h-4 rounded"> Dashboard Checks</label>
+        <label class="flex items-center gap-2"><input type="checkbox" id="rpt-checks" ${sec.checks !== false ? 'checked' : ''} class="w-4 h-4 rounded"> Compliance</label>
         <label class="flex items-center gap-2"><input type="checkbox" id="rpt-clients" ${sec.clients !== false ? 'checked' : ''} class="w-4 h-4 rounded"> Client Count</label>
       </div>
       <label class="block text-xs text-slate-500">Recipients <span class="text-slate-400">(comma-separated)</span><input id="rpt-recips" value="${escapeHtml(existing ? (existing.recipients || []).join(', ') : '')}" placeholder="noc@acme.com, ops@acme.com" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
