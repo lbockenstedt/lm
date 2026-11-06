@@ -1856,7 +1856,7 @@ function _renderSetupModuleMgmtTile(content) {
                         <button onclick="showAddDeviceModal()" class="${btnCls}">+ Add Device</button>
                     </div>
                 </div>
-                <p class="text-xs text-slate-500 mb-3">Every managed module device in one place — firewalls, network devices, NAC, IPAM, directory, DNS, and DHCP instances. Click <strong>Add Device</strong> then choose the module type to attach.</p>
+                <p class="text-xs text-slate-500 mb-3">Every managed module device in one place — firewalls, network devices, NAC, IPAM, directory, DNS, and DHCP instances, and TrueNAS storage appliances. Click <strong>Add Device</strong> then choose the module type to attach.</p>
                 <div id="all-devices-tabs" class="mb-3"></div>
                 <div id="all-devices-list" class="space-y-2"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
@@ -2051,14 +2051,6 @@ function _renderSetupModuleMgmtTile(content) {
                 <p class="text-xs text-slate-500 mb-3">Loads the bundled Aruba/HPE/Juniper device-type catalog into NetBox — manufacturers, device types, and their interface (24/48-port + SFP+/QSFP28 uplinks), console, and power templates — so you don't hand-build each model. Idempotent: re-running after editing the catalog upserts types and adds any new templates without error (existing templates are never deleted or re-typed). Global-Admin only. After seeding, instantiate a device from a type and its interfaces are auto-created.</p>
             </div>` : ''}
             <div class="${card}">
-                <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500">TrueNAS Appliances ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                    <button onclick="showAddTruenasApplianceModal()" class="${btnCls}" title="Register a new TrueNAS appliance with Lab Manager">+ Add Appliance</button>
-                </div>
-                <p class="text-xs text-slate-500 mb-3">TrueNAS storage appliances polled over the official WebSocket JSON-RPC client. Each appliance is bound to a tenant + owning storage spoke; the spoke polls on its cycle (pools, datasets, shares, disks, alerts, services, capacity) and warms the hub cache. Use a per-appliance API key (created in TrueNAS → Settings → API Keys); self-signed boxes set Verify SSL off.</p>
-                <div id="truenas-appliances-list" class="space-y-2"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
-            </div>
-            <div class="${card}">
                 <h3 class="text-sm font-bold text-slate-500 mb-1">TrueNAS — Auto-Poll Default</h3>
                 <p class="text-xs text-slate-500 mb-3">Module-level poll cadence applied to every TrueNAS appliance that inherits it. An appliance's own Auto-Poll Interval always overrides this. The storage spoke polls on this cycle to warm the hub cache.</p>
                 <div class="flex items-center gap-3">
@@ -2081,7 +2073,6 @@ function _renderSetupModuleMgmtTile(content) {
     loadNwNetboxImport();
     loadInstances('nwscan');
     loadNwScanConfig();
-    loadTruenasAppliances();
     loadTruenasPollConfig();
 }
 
