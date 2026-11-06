@@ -244,6 +244,36 @@ async def test_sync_dhcp_error_path():
     assert r["status"] == "error"
 
 
+async def test_sync_dhcp_sends_hold_declined_setting():
+    hub = _DdsHub(system_state={"global_config": {"dhcp_kea": {"hold_declined": True}}})
+    await hub.sync_dhcp_from_netbox()
+    pushed = [c for c in hub.request_log if c[1] == "DHCP_SYNC"]
+    assert pushed[0][2]["hold_declined"] is True
+    assert _DdsHub()._dhcp_hold_declined() is False
+
+
+class _KeaRejectsHub(_DdsHub):
+    """DHCP spoke answers, but Kea rejected the config-set."""
+    async def request_response(self, spoke_id, command, payload, timeout=30.0):
+        if command == "DHCP_SYNC":
+            self.request_log.append((spoke_id, command, payload))
+            return {"payload": {"data": {"status": "ERROR", "message": "config-set rejected"}}}
+        return await super().request_response(spoke_id, command, payload, timeout)
+
+
+async def test_sync_dhcp_spoke_error_reply_is_an_error():
+    r = await _KeaRejectsHub().sync_dhcp_from_netbox()
+    assert r["status"] == "error" and "config-set rejected" in r["error"]
+
+
+async def test_loop_retries_dhcp_push_after_spoke_error_reply():
+    hub = _KeaRejectsHub()
+    await hub._sync_dns_dhcp_once()
+    await hub._sync_dns_dhcp_once()
+    assert len([c for c in hub.request_log if c[1] == "DHCP_SYNC"]) == 2
+    assert hub.dns_dhcp_sync_status["dhcp"]["status"] == "error"
+
+
 # ── config defaults ──────────────────────────────────────────────────────────
 
 def test_dds_cfg_defaults_enabled_and_interval():
