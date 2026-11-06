@@ -13,6 +13,9 @@ The middleware (api.py) already gates ``/api/ldap/*``: GET requires the ``ldap``
 right (or admin); writes require the tenant-admin tier (``_can_edit_shared``).
 This module adds the per-tenant slug injection + guard on top.
 """
+import asyncio
+import time
+
 # Shared Hub helpers: HTTP error type, request, session invalidation, tenant access, logger.
 from api import (
     HTTPException, Request, _invalidate_user_sessions, access,
@@ -25,6 +28,10 @@ from warm_cache import CacheJob
 
 # The list commands whose results are cached (users and groups).
 LDAP_LIST_CMDS = ("LDAP_LIST_USERS", "LDAP_LIST_GROUPS")
+
+# Directory health check: reuse a result this long (s); give the spoke this long.
+HEALTH_TTL_S = 15
+HEALTH_TIMEOUT_S = 15
 
 # Server URL used when none is set.
 _DEFAULT_LDAP_SERVER_URL = "ldap://localhost:389"
@@ -296,65 +303,64 @@ def register(app, hub, ctx):
         return sid
 
     # ── Server + Entra health (Directory page status icons) ────────────────
+    # Every open Directory page polls this every 10s. One check is shared by all
+    # pollers and reused for HEALTH_TTL_S, so pages never pile LIST_OUS calls onto
+    # the directory spoke (it runs only a few commands at a time, and a backlog
+    # there delays the user/group lists).
+    health = {"result": None, "at": 0.0, "task": None}
+
+    async def _ldap_server_health():
+        """Is slapd bindable from the directory spoke (a fresh LIST_OUS)?"""
+        spoke_id = hub.get_spoke_by_type("directory")
+        if not spoke_id:
+            return {"status": "down", "detail": "no directory spoke connected"}
+        try:
+            result = await hub.request_response(spoke_id, "LIST_OUS", {},
+                                                timeout=HEALTH_TIMEOUT_S)
+            result = access.unwrap_spoke(result)
+            if isinstance(result, dict) and str(result.get("status", "")).upper() == "ERROR":
+                return {"status": "down",
+                        "detail": (result.get("message") or "LDAP command failed")[:160]}
+            return {"status": "healthy", "detail": "OpenLDAP online"}
+        except Exception as e:  # noqa: BLE001 — spoke unreachable / timeout
+            return {"status": "down", "detail": (str(e) or type(e).__name__)[:160]}
+
+    async def _entra_health():
+        """Are the hub's Entra (OIDC) app creds live-valid?"""
+        from security.oidc import OidcError, fetch_app_graph_token, get_oidc_config
+        try:
+            cfg = get_oidc_config(hub)
+            if not cfg.ready:
+                return {"status": "degraded", "detail": "not configured"}
+            # Reuse a token up to 5 min old: still proves the cert and app
+            # registration work, without minting one every poll.
+            await fetch_app_graph_token(cfg, max_age=300)
+            return {"status": "healthy", "detail": "Entra online"}
+        except OidcError as e:
+            return {"status": "down", "detail": str(e)[:160]}
+        except Exception as e:  # noqa: BLE001 — config / network / crypto
+            return {"status": "down", "detail": str(e)[:160]}
+
+    async def _check_health():
+        """Run both checks together and remember the result."""
+        ldap, entra = await asyncio.gather(_ldap_server_health(), _entra_health())
+        health["result"] = {"ldap": ldap, "entra": entra, "checked_at": time.time()}
+        health["at"] = time.time()
+        return health["result"]
+
     @app.get("/api/ldap/health")
     async def ldap_health(request: Request):
         """Two status dots for the Directory page header: is the LDAP server
         (slapd) bindable from the directory spoke, and are the hub's Entra
         (OIDC) app creds live-valid. Returns ``{"ldap": {...}, "entra": {...}}``
         with each ``status`` ∈ ``healthy`` / ``degraded`` / ``down``.
-
-        LDAP: relays ``LIST_OUS`` (binds + a one-level OU search) to the
-        connected directory spoke — a FRESH bind check each poll, not stale
-        heartbeat state. No spoke connected → ``down`` (not a 503) so the icon
-        still renders and tells the admin the role isn't loaded.
-        Entra: a real client-credentials token mint via the cert
-        ``client_assertion`` (``fetch_app_graph_token``); not-configured →
-        ``degraded`` (yellow), cred/network failure → ``down`` (red)."""
-        # Local imports: the clock and the Entra token helpers.
-        import time
-        from security.oidc import (OidcError, fetch_app_graph_token,
-                                   get_oidc_config)
-
-        # ── LDAP server ──
-        # Assume down; if a directory spoke is connected, ask it to list OUs (a real bind).
-        ldap = {"status": "down", "detail": "no directory spoke connected"}
-        spoke_id = hub.get_spoke_by_type("directory")
-        if spoke_id:
-            try:
-                result = await hub.request_response(spoke_id, "LIST_OUS",
-                                                    {}, timeout=60.0)
-                result = access.unwrap_spoke(result)
-                if isinstance(result, dict) and \
-                        str(result.get("status", "")).upper() == "ERROR":
-                    ldap = {"status": "down",
-                            "detail": (result.get("message")
-                                       or "LDAP command failed")[:160]}
-                else:
-                    ldap = {"status": "healthy", "detail": "OpenLDAP online"}
-            except Exception as e:  # noqa: BLE001 — spoke unreachable / timeout
-                ldap = {"status": "down", "detail": str(e)[:160]}
-
-        # ── Entra ID ──
-        # Not configured is yellow; otherwise mint a token to prove the creds work.
-        entra = {"status": "down", "detail": "OIDC config error"}
-        try:
-            cfg = get_oidc_config(hub)
-            if not cfg.ready:
-                entra = {"status": "degraded", "detail": "not configured"}
-            else:
-                try:
-                    # Reuse a token up to 5 min old: still proves the cert and
-                    # app registration work, without minting one every 10s poll.
-                    await fetch_app_graph_token(cfg, max_age=300)
-                    entra = {"status": "healthy", "detail": "Entra online"}
-                except OidcError as e:
-                    entra = {"status": "down", "detail": str(e)[:160]}
-                except Exception as e:  # noqa: BLE001 — network / crypto
-                    entra = {"status": "down", "detail": str(e)[:160]}
-        except Exception as e:  # noqa: BLE001 — OIDC config unreadable
-            entra = {"status": "down", "detail": f"OIDC config error: {e}"[:160]}
-
-        return {"ldap": ldap, "entra": entra, "checked_at": time.time()}
+        No spoke connected → ``down`` (not a 503) so the icon still renders;
+        Entra not configured → ``degraded``."""
+        if health["result"] and time.time() - health["at"] < HEALTH_TTL_S:
+            return health["result"]
+        if health["task"] is None or health["task"].done():
+            health["task"] = asyncio.ensure_future(_check_health())
+        return await asyncio.shield(health["task"])
 
     # ── Tenant picker (feeds the WebUI Directory tenant dropdown) ─────────────
     # List the tenants the caller may manage.
