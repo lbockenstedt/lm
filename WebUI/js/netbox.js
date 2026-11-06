@@ -311,19 +311,12 @@ async function showCPPMDeviceDetail(mac) {
 }
 
 async function showClaimDeviceModal(mac) {
+    // The onclick passes the MAC URI-encoded; the device map is keyed by the raw MAC.
+    mac = decodeURIComponent(mac);
     const dev = (window._cppmDeviceMap || {})[mac] || {};
     const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const selCls = inputCls;
-
-    // Fetch the NetBox picklists (sites, device types, roles, tenants) so the
-    // user chooses from real NetBox values. Server already filters tenants to
-    // the non-admin's own; admins see all.
-    let opts = { sites: [], device_types: [], device_roles: [], tenants: [] };
-    try {
-        const r = await fetch('/api/netbox/claim-device/options');
-        if (r.ok) opts = await r.json();
-    } catch (e) { console.error('showClaimDeviceModal: netbox claim-device options fetch failed — falling back to empty lists', e); }
 
     const preTenant = currentTenant && currentTenant !== 'default' ? currentTenant : '';
     const tenantLocked = !isAdmin();
@@ -340,12 +333,13 @@ async function showClaimDeviceModal(mac) {
             <div><span class="text-slate-500">Hostname:</span> <span class="text-slate-700">${esc(dev.hostname || '—')}</span></div>
             <div><span class="text-slate-500">Vendor/OS:</span> <span class="text-slate-700">${esc([dev.device_vendor, dev.device_os].filter(Boolean).join(' / ') || '—')}</span></div>
         </div>
+        <p id="cl-opts-status" class="text-xs text-slate-500 italic">Loading NetBox options…</p>
         <div class="grid grid-cols-2 gap-3">
             <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold">Device Name</label><input id="cl-name" value="${esc(nameDefault)}" class="${inputCls}" placeholder="router-01" title="Device name in NetBox"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Site <span class="text-red-400">*</span></label><select id="cl-site" class="${selCls}" title="NetBox site to assign device to"><option value="">Select site…</option>${opt(opts.sites, '', o => o.name)}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Tenant <span class="text-red-400">*</span></label><select id="cl-tenant" class="${selCls}" ${tenantLocked ? 'disabled' : ''} title="Tenant that owns this device"><option value="">Select tenant…</option>${opt(opts.tenants, preTenant, o => o.name)}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Device Type <span class="text-red-400">*</span></label><select id="cl-type" class="${selCls}" title="Hardware model and manufacturer"><option value="">Select type…</option>${opt(opts.device_types, '', o => `${o.model}${o.manufacturer ? ' (' + o.manufacturer + ')' : ''}`)}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Role</label><select id="cl-role" class="${selCls}" title="Functional role in the network"><option value="">Select role…</option>${opt(opts.device_roles, '', o => o.name)}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Site <span class="text-red-400">*</span></label><select id="cl-site" class="${selCls}" title="NetBox site to assign device to"><option value="">Select site…</option></select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Tenant <span class="text-red-400">*</span></label><select id="cl-tenant" class="${selCls}" ${tenantLocked ? 'disabled' : ''} title="Tenant that owns this device"><option value="">Select tenant…</option></select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Device Type <span class="text-red-400">*</span></label><select id="cl-type" class="${selCls}" title="Hardware model and manufacturer"><option value="">Select type…</option></select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Role</label><select id="cl-role" class="${selCls}" title="Functional role in the network"><option value="">Select role…</option></select></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Status</label><select id="cl-status" class="${selCls}" title="Operational status in NetBox"><option value="active">active</option><option value="planned">planned</option><option value="offline">offline</option><option value="failed">failed</option><option value="inventory">inventory</option></select></div>
             <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold">Description</label><input id="cl-desc" class="${inputCls}" placeholder="optional" title="Optional description or notes"></div>
         </div>
@@ -353,6 +347,33 @@ async function showClaimDeviceModal(mac) {
             <button id="cl-submit" onclick="submitClaimDevice('${encodeURIComponent(mac)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="Provision device into NetBox and tag endpoint">Claim Device</button>
             <button onclick="document.getElementById('nb-claim-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Cancel device claim">Cancel</button>
         </div>`, { backdropClose: true });
+
+    // Fill the NetBox picklists (sites, device types, roles, tenants) once they
+    // arrive. The server already trims tenants to a non-admin's own.
+    const status = modal.querySelector('#cl-opts-status');
+    try {
+        const r = await fetch('/api/netbox/claim-device/options');
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || d.message || `HTTP ${r.status}`);
+        const fill = (id, html) => { const el = modal.querySelector(id); if (el) el.insertAdjacentHTML('beforeend', html); };
+        fill('#cl-site', opt(d.sites, '', o => o.name));
+        // One allowed tenant (typical for a tenant admin): pick it.
+        const tenants = d.tenants || [];
+        fill('#cl-tenant', opt(tenants, tenants.length === 1 ? tenants[0].slug : preTenant, o => o.name));
+        fill('#cl-type', opt(d.device_types, '', o => `${o.model}${o.manufacturer ? ' (' + o.manufacturer + ')' : ''}`));
+        fill('#cl-role', opt(d.device_roles, '', o => o.name));
+        const empty = ['sites', 'tenants', 'device_types'].filter(k => !(d[k] || []).length);
+        if (empty.length) {
+            status.textContent = `NetBox returned no ${empty.map(k => k.replace('_', ' ')).join(', ')} — add them in NetBox first.`;
+            status.className = 'text-xs text-amber-600';
+        } else {
+            status.remove();
+        }
+    } catch (e) {
+        console.error('showClaimDeviceModal: claim-device options failed', e);
+        status.textContent = `Could not load NetBox options: ${e.message}`;
+        status.className = 'text-xs text-red-500';
+    }
 }
 
 async function submitClaimDevice(mac) {
@@ -366,6 +387,7 @@ async function submitClaimDevice(mac) {
     if (!site) { showToast('Site is required', 'error'); return; }
     if (!device_type) { showToast('Device type is required', 'error'); return; }
     if (!tenant) { showToast('Tenant is required', 'error'); return; }
+    mac = decodeURIComponent(mac);
     const dev = (window._cppmDeviceMap || {})[mac] || {};
     const payload = {
         name, site, device_type, tenant,
