@@ -7,7 +7,8 @@ on-demand API routes call), and the config defaults that drive the loop cadence.
 
 import pytest
 
-from dns_dhcp_sync import build_dns_records, build_dhcp_payload, DnsDhcpSyncMixin
+from dns_dhcp_sync import (build_dns_records, build_dhcp_payload, apply_kea_leases,
+                           DnsDhcpSyncMixin)
 from _fakes import FakeState
 
 
@@ -272,6 +273,56 @@ async def test_loop_retries_dhcp_push_after_spoke_error_reply():
     await hub._sync_dns_dhcp_once()
     assert len([c for c in hub.request_log if c[1] == "DHCP_SYNC"]) == 2
     assert hub.dns_dhcp_sync_status["dhcp"]["status"] == "error"
+
+
+# ── Kea leases override stale NetBox addresses ──────────────────────────────
+
+def _lease(ip, host, cltt=1000, state=0):
+    return {"ip-address": ip, "hostname": host, "cltt": cltt, "valid-lft": 3600, "state": state}
+
+
+def test_apply_kea_leases_moves_swapped_hosts_to_their_leases():
+    pfx = {"prefixes": [{"prefix": "10.0.0.0/24", "status": "active",
+                         "custom_fields": {"dhcp_enabled": True, "domain_name": "lab"}}]}
+    records = [{"name": "a.lab", "type": "A", "value": "10.0.0.34", "ttl": 300},
+               {"name": "b.lab", "type": "A", "value": "10.0.0.36", "ttl": 300},
+               {"name": "b.lab", "type": "A", "value": "10.0.0.40", "ttl": 300},
+               {"name": "a.lab", "type": "AAAA", "value": "2001:db8::1", "ttl": 300},
+               {"name": "static.lab", "type": "A", "value": "10.0.0.9", "ttl": 300}]
+    leases = [_lease("10.0.0.36", "a"), _lease("10.0.0.34", "B.lab."),
+              _lease("10.0.0.50", "new-host"),          # no NetBox record: left to the hook
+              _lease("10.0.0.9", "static", state=1),    # declined: ignored
+              _lease("10.9.9.9", "a", cltt=5000)]       # outside this scope: ignored
+    out = apply_kea_leases(records, leases, pfx, now=2000)
+    assert out == [{"name": "a.lab", "type": "A", "value": "10.0.0.36", "ttl": 300},
+                   {"name": "b.lab", "type": "A", "value": "10.0.0.34", "ttl": 300},
+                   {"name": "a.lab", "type": "AAAA", "value": "2001:db8::1", "ttl": 300},
+                   {"name": "static.lab", "type": "A", "value": "10.0.0.9", "ttl": 300}]
+    # Expired lease no longer counts.
+    assert apply_kea_leases(records[:1], [_lease("10.0.0.36", "a")], pfx, now=99999) == records[:1]
+
+
+class _LeaseHub(_DdsHub):
+    def __init__(self, leases_reply, **kw):
+        super().__init__(**kw)
+        self.leases_reply = leases_reply
+
+    async def request_response(self, spoke_id, command, payload, timeout=30.0):
+        if command == "DHCP_LIST_LEASES":
+            self.request_log.append((spoke_id, command, payload))
+            return {"payload": {"data": self.leases_reply}}
+        return await super().request_response(spoke_id, command, payload, timeout)
+
+
+async def test_loop_dns_push_uses_kea_lease_address_and_keeps_it_on_read_failure():
+    hub = _LeaseHub({"status": "SUCCESS", "leases": [_lease("10.0.0.77", "host1.lab", cltt=0)]})
+    await hub._sync_dns_dhcp_once()
+    dns = [c[2] for c in hub.request_log if c[1] == "DNS_SYNC"]
+    assert dns[-1]["records"][0]["value"] == "10.0.0.77"
+    # A failed lease read reuses the last list: same payload, so no new push.
+    hub.leases_reply = {"status": "ERROR", "message": "kea down"}
+    await hub._sync_dns_dhcp_once()
+    assert len([c for c in hub.request_log if c[1] == "DNS_SYNC"]) == 1
 
 
 # ── config defaults ──────────────────────────────────────────────────────────
