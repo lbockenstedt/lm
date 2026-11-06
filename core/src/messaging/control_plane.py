@@ -8,6 +8,7 @@ records so they can be relayed to the hub.
 """
 # Standard-library imports used across the control plane.
 import asyncio
+import functools
 import json
 import uuid
 import time
@@ -427,6 +428,13 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # loop so ``_drain_pending_encrypted`` can dispatch replayed frames
         # through the same bounded-concurrency path as live ones.
         self._decrypt_dispatch_ctx = None
+        # Hub-command queue diagnostics, served by SPOKE_GET_QUEUE_STATS.
+        # ``_cmd_tasks`` is the live in-flight set of the current connection;
+        # ``_cmd_stats`` holds the rejection counters and per-command timings.
+        self._cmd_tasks: set = set()
+        self._cmd_stats: Dict[str, Any] = {
+            "rejected_full": 0, "dropped_stale": 0, "last_rejected_at": None,
+            "by_type": {}}
         # Outstanding _drain_pending_encrypted tasks (kept referenced so the
         # GC can't reap a not-yet-awaited fire-and-forget drain).
         self._drain_tasks: set = set()
@@ -1903,6 +1911,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             cmd_send_lock = asyncio.Lock()
             cmd_sem = asyncio.Semaphore(self._max_concurrent_commands())
             cmd_tasks: set = set()
+            self._cmd_tasks = cmd_tasks
             # Capture the dispatch context so _drain_pending_encrypted (fired
             # from the SPOKE_UPDATE_SESSION_KEY handler, which has no local
             # access to these) can replay deferred encrypted frames through the
@@ -1983,8 +1992,19 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 # Backpressure: cap in-flight handlers so a sustained overload
                 # can't grow unbounded. Reject with a fast ERROR ack so the hub
                 # doesn't pile up timed-out requests waiting on a stalled spoke.
+                # Queue diagnostics are answered inline, ahead of the cap, so the
+                # queue can still be inspected while it is full.
+                if cmd_type == "SPOKE_GET_QUEUE_STATS":
+                    await self._send_cmd_result(
+                        websocket, corr_id,
+                        {"status": "SUCCESS", "data": self._command_queue_stats()},
+                        cmd_send_lock)
+                    continue
                 if len(cmd_tasks) >= self._max_inflight_commands():
                     # Too many commands in flight: reject this one with an error ack.
+                    self._cmd_stats["rejected_full"] += 1
+                    self._cmd_stats["last_rejected_at"] = time.time()
+                    self._cmd_type_stats(cmd_type)["rejected"] += 1
                     logger.warning("command queue full (%d in-flight); rejected %s",
                                    len(cmd_tasks), cmd_type)
                     await self._send_cmd_result(
@@ -1999,7 +2019,10 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                     websocket, cmd_type, data, corr_id, cmd_send_lock, cmd_sem,
                     max_wait_s=_hub_wait_s(msg)))
                 cmd_tasks.add(task)
+                self._cmd_type_stats(cmd_type)["inflight"] += 1
                 task.add_done_callback(cmd_tasks.discard)
+                task.add_done_callback(functools.partial(
+                    self._record_command_done, cmd_type, time.monotonic()))
             finally:
                 # Connection ended: clear state, stop the heartbeat and cancel every
                 # per-connection task. First, mark the hub as disconnected.
@@ -2176,6 +2199,40 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         except Exception:
             return 64
 
+    def _cmd_type_stats(self, cmd_type: str) -> Dict[str, Any]:
+        """Per-command-type counters, created on first use."""
+        return self._cmd_stats["by_type"].setdefault(
+            cmd_type, {"inflight": 0, "done": 0, "rejected": 0,
+                       "total_s": 0.0, "max_s": 0.0})
+
+    def _record_command_done(self, cmd_type: str, started: float, _task) -> None:
+        """Done-callback: record queue-wait + run time for one hub command."""
+        stats = self._cmd_type_stats(cmd_type)
+        elapsed = time.monotonic() - started
+        stats["inflight"] -= 1
+        stats["done"] += 1
+        stats["total_s"] += elapsed
+        stats["max_s"] = max(stats["max_s"], elapsed)
+
+    def _command_queue_stats(self) -> Dict[str, Any]:
+        """Snapshot of the hub-command queue for SPOKE_GET_QUEUE_STATS."""
+        by_type = {
+            name: {"inflight": s["inflight"], "done": s["done"],
+                   "rejected": s["rejected"],
+                   "avg_s": round(s["total_s"] / s["done"], 2) if s["done"] else 0.0,
+                   "max_s": round(s["max_s"], 2)}
+            for name, s in self._cmd_stats["by_type"].items()}
+        return {
+            "inflight": len(self._cmd_tasks),
+            "max_inflight": self._max_inflight_commands(),
+            "max_concurrent": self._max_concurrent_commands(),
+            "rejected_full": self._cmd_stats["rejected_full"],
+            "dropped_stale": self._cmd_stats["dropped_stale"],
+            "last_rejected_at": self._cmd_stats["last_rejected_at"],
+            "backpressure_level": getattr(self, "_bp_level", 0),
+            "by_type": by_type,
+        }
+
     async def _send_cmd_result(self, websocket, corr_id, result, send_lock) -> None:
         """Build + send one COMMAND_RESULT ack. Serialized by ``send_lock`` so
         concurrent handlers don't interleave WS frames. A send failure (hub
@@ -2253,6 +2310,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             # fills the queue and turns new saves into "queue full".
             waited = time.monotonic() - queued_at
             if max_wait_s and waited > max_wait_s:
+                self._cmd_stats["dropped_stale"] += 1
                 logger.warning("dropped %s: queued %.0fs, past the hub's %.0fs wait",
                                cmd_type, waited, max_wait_s)
                 await self._send_cmd_result(
@@ -2401,9 +2459,12 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 # Log the heartbeat line with uptime and relay queue size.
                 uptime = int(time.time() - start)
                 logger.info(
-                    "[heartbeat] ok module=%s spoke_id=%s hub=connected uptime_s=%s queue=%d",
+                    "[heartbeat] ok module=%s spoke_id=%s hub=connected uptime_s=%s queue=%d "
+                    "cmd_inflight=%d/%d cmd_rejected=%d cmd_stale=%d",
                     self.module_type or "unknown", self.spoke_id, uptime,
                     self._log_relay_queue.qsize(),
+                    len(self._cmd_tasks), self._max_inflight_commands(),
+                    self._cmd_stats["rejected_full"], self._cmd_stats["dropped_stale"],
                 )
                 # Wait for the next tick.
                 await asyncio.sleep(interval)
