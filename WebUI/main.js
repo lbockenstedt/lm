@@ -63,6 +63,17 @@
 // CRUD/action handlers (delete*, save*, edit* form-save, toggle*, approve*,
 // unapprove*, revoke*, reset*, assign*/remove*, plus auth + search) live in the
 // companion CRUD_ROUTES const immediately below ROUTES — same {m, p, api} shape.
+// HPE Design System: timestamps show the time zone. Date#toLocaleString() and
+// #toLocaleTimeString() called with no arguments (the WebUI's usual form) add
+// the short zone name, e.g. "6/1/2026, 3:04:05 PM EDT". Calls that pass their
+// own locale/options are left alone.
+(function () {
+    const tz = { timeZoneName: 'short' };
+    const dt = Date.prototype.toLocaleString, tm = Date.prototype.toLocaleTimeString;
+    Date.prototype.toLocaleString = function (...a) { return dt.apply(this, a.length ? a : [undefined, tz]); };
+    Date.prototype.toLocaleTimeString = function (...a) { return tm.apply(this, a.length ? a : [undefined, tz]); };
+})();
+
 const ROUTES = {
     // ── Setup / config ──
     loadSetupConfig:        { m: 'GET',  p: '/setup/config',              api: 'get_global_config' },
