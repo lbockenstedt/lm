@@ -255,7 +255,8 @@ def nw_scan_spoke_choices(hub, tenant_id, shared_tenant_id):
             "connected": hub._primary_key(sid) in hub.active_connections,
         })
     # A tenant with its own nw spoke is out of the shared nw environment.
-    if any(c["scope"] == "own" for c in out) or access.tenant_has_own_spoke(hub, tenant_id, "nw"):
+    if access.tenant_left_shared(hub, tenant_id, "nw") or (
+            any(c["scope"] == "own" for c in out) and access.tenant_shared_access(hub, tenant_id) == "auto"):
         out = [c for c in out if c["scope"] == "own"]
     # Own first, then connected, then by name.
     out.sort(key=lambda s: (s["scope"] != "own", not s["connected"], s["name"]))

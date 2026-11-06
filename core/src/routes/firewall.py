@@ -147,7 +147,7 @@ def register(app, hub, ctx):
             return False
         # Hidden if the caller's tenant has its own firewall.
         tid = access.request_effective_tenant(_session_user(request), request)
-        return access.tenant_has_own_firewall(app.state.hub, tid)
+        return access.tenant_left_shared(app.state.hub, tid, "firewall")
 
     async def _authz_fw_write(request, firewall_id, endpoint, payload=None, uuid=None):
         """Write-authorize a firewall mutation and, on a SHARED firewall

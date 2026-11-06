@@ -319,7 +319,7 @@ class SearchIndexMixin:
         if scoped:
             hypervisor = self.get_hypervisor_spoke_for_tenant(resolved)
             directory = (self.get_directory_spoke_for_tenant(resolved)
-                         or (None if access.tenant_has_own_spoke(self, resolved, "directory")
+                         or (None if access.tenant_shared_fallback_blocked(self, resolved, "directory")
                              else self.get_spoke_by_type("directory")))
         else:
             # Unscoped: use the global hypervisor only if it is not bound to a tenant.
