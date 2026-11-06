@@ -1751,6 +1751,7 @@ def register(app, hub, ctx):
                 "enabled":  bool(cfg.get("enabled", True)),
                 "interval": int(cfg.get("interval", 300) or 300),
                 "dhcp_dns_hook": hub._dns_hook_desired(),
+                "dhcp_hold_declined": hub._dhcp_hold_declined(),
             },
         }
 

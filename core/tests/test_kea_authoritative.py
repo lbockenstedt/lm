@@ -1,10 +1,8 @@
 """Kea DHCPv4 ``authoritative`` is coordinator-owned (dhcp/src).
 
-A client that moved VLANs and reboots sends an INIT-REBOOT DHCPREQUEST for its
-OLD address. Kea's default (``authoritative: false``) silently drops that when
-it has no lease for the client, so the client retries the stale address until
-its lease expires. LM pushes ``authoritative: true`` on every v4 sync path so
-Kea NAKs it and the client falls back to DISCOVER.
+LM pins ``authoritative: false`` on every v4 sync path, overriding a node's
+local value. ``true`` NAKs INIT-REBOOT requests from devices that already hold
+their address; they re-DISCOVER, answer their own ARP probe and DECLINE it.
 """
 import os
 import sys
@@ -41,23 +39,23 @@ def _coordinator():
         _Transport(), mode="hot-standby", state_path=paths[0], state_path6=paths[1])
 
 
-def test_standalone_sync_sets_authoritative_and_keeps_node_keys():
+def test_standalone_sync_pins_authoritative_off_and_keeps_node_keys():
     mgr = kea_manager.KeaManager()
     written = {}
-    mgr.get_config = lambda: {"authoritative": False,
+    mgr.get_config = lambda: {"authoritative": True,
                               "interfaces-config": {"interfaces": ["ens18"]}}
     mgr._set_config = lambda cfg: written.update(cfg)
     assert mgr.sync([], [])["status"] == "SUCCESS"
-    assert written["authoritative"] is True
+    assert written["authoritative"] is False
     assert written["interfaces-config"] == {"interfaces": ["ens18"]}
 
 
-def test_ha_render_sets_authoritative_on_every_node():
+def test_ha_render_pins_authoritative_off_on_every_node():
     coord = _coordinator()
-    node = {"authoritative": False, "lease-database": {"type": "memfile"}}
+    node = {"authoritative": True, "lease-database": {"type": "memfile"}}
     plan = coord.render([], [], node_configs={"node-a": node, "node-b": {}})
     for cfg in plan["configs"].values():
-        assert cfg["authoritative"] is True
+        assert cfg["authoritative"] is False
     assert plan["configs"]["node-a"]["lease-database"] == {"type": "memfile"}
     assert "authoritative" in kea_ha.COORDINATOR_OWNED_KEYS
 
